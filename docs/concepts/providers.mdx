@@ -10,6 +10,27 @@ Meerkat is provider-agnostic at the session/config/runtime model level. You can 
 This page is the concept layer for provider abstraction. Use [Auth](/guides/auth) and [Self-hosting models](/guides/self-hosting-models) for setup workflows, and use reference pages for exact capability and contract details.
 </Note>
 
+## Instruction projection
+
+Provider independence does not make unlike wire formats identical. Meerkat
+keeps the exact ordered `System` / `SystemNotice` sequence in the durable
+Session transcript and derives each provider request from it:
+
+- Standard OpenAI Responses and OpenAI-compatible Chat Completions preserve
+  each instruction at its position among user and assistant messages.
+- Anthropic, Gemini, the private ChatGPT Responses backend, and OpenAI
+  Realtime expose top-level-only instruction channels. Their adapters preserve
+  every instruction's exact bytes and transcript order, but cannot preserve
+  its position relative to user turns. They use distinct provider blocks or
+  parts where supported and `"\n\n"` as the stable separator for singular
+  string fields.
+
+Empty, whitespace-only, and duplicate instructions are significant: adapters
+do not trim, deduplicate, replace, or silently drop them. If a backend cannot
+carry the complete byte sequence in order, request construction fails locally.
+Realtime reconnect and refresh use the same transcript-derived projection;
+there is no provider-only `runtime_system_context` sidecar.
+
 ## Provider setup
 
 <Tabs>
@@ -158,11 +179,11 @@ When using Meerkat as a Rust library, enable only the providers you need:
 <CodeGroup>
 
 ```toml Anthropic only (smallest binary)
-meerkat = { version = "0.8.10", features = ["anthropic", "jsonl-store"] }
+meerkat = { version = "0.8.11", features = ["anthropic", "jsonl-store"] }
 ```
 
 ```toml All providers
-meerkat = { version = "0.8.10", features = ["all-providers", "jsonl-store"] }
+meerkat = { version = "0.8.11", features = ["all-providers", "jsonl-store"] }
 ```
 
 </CodeGroup>

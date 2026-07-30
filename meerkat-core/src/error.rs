@@ -50,6 +50,9 @@ pub enum LlmFailureReason {
 #[serde(rename_all = "snake_case")]
 pub enum LlmProviderErrorKind {
     InvalidRequest,
+    /// The provider rejected (or preflight proved) a serialized request body
+    /// that exceeds its request-size cap.
+    RequestTooLarge,
     ContentFiltered,
     ServerError,
     ServerOverloaded,
@@ -376,6 +379,13 @@ pub enum AgentError {
     #[error("Sticky model fallback authority outcome is unknown: {message}")]
     StickyModelFallbackAuthorityUnknown { message: String },
 
+    /// One live session projection advanced but its paired durable/session
+    /// authority did not provably converge. Reusing the actor could duplicate
+    /// or omit an already-observed fact, so the runtime must tear it down and
+    /// reload from durable authority instead of entering failed-batch retry.
+    #[error("Session durable projection authority outcome is unknown: {message}")]
+    SessionDurableProjectionAuthorityUnknown { message: String },
+
     /// Agent construction failed (e.g. missing API key, unknown provider).
     #[error("Build error: {0}")]
     BuildError(String),
@@ -557,7 +567,19 @@ impl AgentError {
     /// Whether this error must survive surface/cleanup wrappers so the runtime
     /// can hand the live executor to canonical teardown.
     pub fn requires_session_teardown(&self) -> bool {
-        matches!(self, Self::StickyModelFallbackAuthorityUnknown { .. })
+        matches!(
+            self,
+            Self::StickyModelFallbackAuthorityUnknown { .. }
+                | Self::SessionDurableProjectionAuthorityUnknown { .. }
+        )
+    }
+
+    /// Mint the general teardown-required failure for a session projection
+    /// whose paired authority can no longer be proved coherent.
+    pub fn session_durable_projection_authority_unknown(message: impl Into<String>) -> Self {
+        Self::SessionDurableProjectionAuthorityUnknown {
+            message: message.into(),
+        }
     }
 
     /// Attach an ancillary cleanup failure without erasing a teardown-required
@@ -567,6 +589,11 @@ impl AgentError {
         match self {
             Self::StickyModelFallbackAuthorityUnknown { message } => {
                 Self::StickyModelFallbackAuthorityUnknown {
+                    message: format!("{message}; additionally {context}: {failure}"),
+                }
+            }
+            Self::SessionDurableProjectionAuthorityUnknown { message } => {
+                Self::SessionDurableProjectionAuthorityUnknown {
                     message: format!("{message}; additionally {context}: {failure}"),
                 }
             }
@@ -615,6 +642,22 @@ mod tests {
             combined,
             AgentError::StickyModelFallbackAuthorityUnknown { ref message }
                 if message.contains("fallback CAS outcome unknown")
+                    && message.contains("synthetic cleanup fault")
+        ));
+    }
+
+    #[test]
+    fn durable_projection_authority_unknown_requires_teardown_and_survives_cleanup() {
+        let combined = AgentError::session_durable_projection_authority_unknown(
+            "durable projection advanced before store commit",
+        )
+        .with_ancillary_failure("failed to clear overlay", "synthetic cleanup fault");
+
+        assert!(combined.requires_session_teardown());
+        assert!(matches!(
+            combined,
+            AgentError::SessionDurableProjectionAuthorityUnknown { ref message }
+                if message.contains("projection advanced before store commit")
                     && message.contains("synthetic cleanup fault")
         ));
     }

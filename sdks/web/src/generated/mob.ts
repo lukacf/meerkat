@@ -176,7 +176,7 @@ export interface MobMemberStatusResult {
 export interface MobAppendSystemContextResult {
   agent_identity: string;
   mob_id: string;
-  status: "applied" | "staged" | "duplicate";
+  status: "applied" | "duplicate";
 }
 
 export interface MobLifecycleResult {

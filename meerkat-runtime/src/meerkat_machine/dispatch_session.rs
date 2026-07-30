@@ -85,6 +85,17 @@ impl meerkat_core::handles::StickyModelFallbackCommitCoordinator
                 result_rx,
             }));
         };
+        if store.session_persistence_profile()
+            != crate::store::RuntimeSessionPersistenceProfile::WholeBlobV1
+        {
+            return Err(
+                meerkat_core::handles::StickyModelFallbackCommitError::Store(
+                    "durable sticky model fallback requires WholeBlobV1; \
+                     HeadCanonicalV1 has no typed control-metadata mutation seam"
+                        .to_string(),
+                ),
+            );
+        }
         let session_id = self.session_id.clone();
         let (result_tx, result_rx) = crate::tokio::sync::watch::channel(None);
         crate::tokio::spawn(async move {
@@ -108,107 +119,143 @@ async fn run_sticky_model_fallback_commit(
     use meerkat_core::handles::StickyModelFallbackCommitError as CommitError;
 
     let runtime_id = crate::identifiers::LogicalRuntimeId::for_session(&session_id);
-    let previous_snapshot = store
-        .load_session_snapshot(&runtime_id)
+    let committed = store
+        .load_committed_whole_blob_snapshot(&runtime_id)
         .await
         .map_err(|error| CommitError::Store(error.to_string()))?
         .ok_or_else(|| CommitError::SnapshotMissing {
             session_id: session_id.clone(),
         })?;
-    let mut target_session: meerkat_core::Session = serde_json::from_slice(&previous_snapshot)
-        .map_err(|error| CommitError::SnapshotInvalid(error.to_string()))?;
-    if target_session.id() != &session_id {
+    if committed.session().id() != &session_id {
         return Err(CommitError::SessionMismatch {
             expected: session_id,
-            actual: target_session.id().clone(),
+            actual: committed.session().id().clone(),
         });
     }
-    let previous_checkpoint = match target_session
-        .try_checkpoint_state()
-        .map_err(|error| CommitError::SnapshotInvalid(error.to_string()))?
-    {
-        meerkat_core::SessionCheckpointState::Verified(stamp) => stamp,
-        meerkat_core::SessionCheckpointState::LegacyUnverified { .. } => {
-            return Err(CommitError::SnapshotInvalid(
-                "durable sticky fallback requires typed checkpoint authority".to_string(),
-            ));
-        }
-    };
+    let previous_session = committed.session_arc();
+    let previous_authority = committed.authority().clone();
+    let mut target_session = previous_session.as_ref().clone();
     control_delta
         .validate_and_apply(&mut target_session)
         .map_err(CommitError::InvalidControlDelta)?;
-    let target_checkpoint = meerkat_core::SessionCheckpointStamp::successor(
-        &target_session,
-        &previous_checkpoint,
-        meerkat_core::SessionCheckpointProvenance::RunBoundaryCommit,
+    let target_commit = meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(
+        Arc::new(target_session),
     )
     .map_err(|error| CommitError::SnapshotInvalid(error.to_string()))?;
-    target_session
-        .install_checkpoint_stamp(target_checkpoint)
-        .map_err(|error| CommitError::SnapshotInvalid(error.to_string()))?;
-    let target_snapshot = serde_json::to_vec(&target_session)
-        .map_err(|error| CommitError::SnapshotInvalid(error.to_string()))?;
+    let target_prepared = crate::store::PreparedWholeBlobSnapshotCas::prepare(
+        previous_authority.clone(),
+        target_commit,
+    )
+    .map_err(|error| CommitError::SnapshotInvalid(error.to_string()))?;
 
-    let cas_result = store
-        .replace_session_snapshot_if_current(
-            &runtime_id,
-            &previous_snapshot,
-            target_snapshot.clone(),
-        )
-        .await;
-    if matches!(&cas_result, Ok(false)) {
-        return Err(CommitError::SnapshotConflict);
-    }
-    if let Err(cas_error) = cas_result {
-        let observed = store
-            .load_session_snapshot(&runtime_id)
-            .await
-            .map_err(|read_error| {
-                CommitError::SnapshotOutcomeUnknown(format!(
-                    "compare-and-swap failed with '{cas_error}' and reconciliation read failed with '{read_error}'"
-                ))
-            })?;
-        match observed {
-            Some(observed) if observed == target_snapshot => {}
-            Some(observed) if observed == previous_snapshot => {
-                return Err(CommitError::Store(cas_error.to_string()));
-            }
-            _ => {
-                return Err(CommitError::SnapshotOutcomeUnknown(cas_error.to_string()));
+    let target_authority = match store
+        .commit_prepared_whole_blob_snapshot_cas(&runtime_id, target_prepared.clone())
+        .await
+    {
+        Ok(crate::store::WholeBlobSnapshotCasOutcome::Committed(authority))
+            if target_prepared.accepts_committed_authority(&authority) =>
+        {
+            authority
+        }
+        Ok(crate::store::WholeBlobSnapshotCasOutcome::Committed(authority)) => {
+            return Err(CommitError::SnapshotOutcomeUnknown(format!(
+                "WholeBlob snapshot CAS acknowledged unexpected authority revision {} token {}",
+                authority.store_revision(),
+                authority.blob_sha256()
+            )));
+        }
+        Ok(crate::store::WholeBlobSnapshotCasOutcome::Conflict) => {
+            return Err(CommitError::SnapshotConflict);
+        }
+        Err(cas_error) => {
+            let observed = store
+                .load_whole_blob_store_authority(&runtime_id)
+                .await
+                .map_err(|read_error| {
+                    CommitError::SnapshotOutcomeUnknown(format!(
+                        "compare-and-swap failed with '{cas_error}' and bounded authority reconciliation failed with '{read_error}'"
+                    ))
+                })?;
+            match observed {
+                Some(observed) if target_prepared.accepts_committed_authority(&observed) => {
+                    observed
+                }
+                Some(observed) if observed == previous_authority => {
+                    return Err(CommitError::Store(cas_error.to_string()));
+                }
+                _ => {
+                    return Err(CommitError::SnapshotOutcomeUnknown(cas_error.to_string()));
+                }
             }
         }
-    }
+    };
 
     if let Err(machine_error) = machine_commit.commit() {
+        let rollback_commit =
+            meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(previous_session)
+                .map_err(|error| {
+                    CommitError::CompensationFailed(format!(
+                        "{machine_error}; failed to seal durable predecessor: {error}"
+                    ))
+                })?;
+        let rollback_prepared = crate::store::PreparedWholeBlobSnapshotCas::prepare(
+            target_authority.clone(),
+            rollback_commit,
+        )
+        .map_err(|error| {
+            CommitError::CompensationFailed(format!(
+                "{machine_error}; failed to prepare durable predecessor: {error}"
+            ))
+        })?;
         let rollback_result = store
-            .replace_session_snapshot_if_current(
-                &runtime_id,
-                &target_snapshot,
-                previous_snapshot.clone(),
-            )
+            .commit_prepared_whole_blob_snapshot_cas(&runtime_id, rollback_prepared.clone())
             .await;
-        if matches!(rollback_result, Ok(true)) {
-            return Err(CommitError::MachineRejected(machine_error));
-        }
-        let observed = store.load_session_snapshot(&runtime_id).await;
-        match observed {
-            Ok(Some(observed)) if observed == previous_snapshot => {
+        match rollback_result {
+            Ok(crate::store::WholeBlobSnapshotCasOutcome::Committed(authority))
+                if rollback_prepared.accepts_committed_authority(&authority) =>
+            {
                 Err(CommitError::MachineRejected(machine_error))
             }
-            Ok(Some(observed)) if observed == target_snapshot => {
-                Err(CommitError::CompensationFailed(format!(
-                    "{machine_error}; durable target snapshot remains committed"
-                )))
+            result => {
+                let observed = store.load_whole_blob_store_authority(&runtime_id).await;
+                match observed {
+                    Ok(Some(observed))
+                        if rollback_prepared.accepts_committed_authority(&observed) =>
+                    {
+                        Err(CommitError::MachineRejected(machine_error))
+                    }
+                    Ok(Some(observed)) if observed == target_authority => {
+                        let detail = match result {
+                            Ok(crate::store::WholeBlobSnapshotCasOutcome::Conflict) => {
+                                "durable target snapshot remains committed after compensation conflict"
+                                    .to_string()
+                            }
+                            Ok(crate::store::WholeBlobSnapshotCasOutcome::Committed(authority)) => {
+                                format!(
+                                    "compensation acknowledged unexpected authority revision {} token {}",
+                                    authority.store_revision(),
+                                    authority.blob_sha256()
+                                )
+                            }
+                            Err(error) => format!(
+                                "durable target snapshot remains committed after compensation error: {error}"
+                            ),
+                        };
+                        Err(CommitError::CompensationFailed(format!(
+                            "{machine_error}; {detail}"
+                        )))
+                    }
+                    Ok(Some(_)) => Err(CommitError::CompensationFailed(format!(
+                        "{machine_error}; a competing durable snapshot replaced the target during compensation"
+                    ))),
+                    Ok(None) => Err(CommitError::CompensationFailed(format!(
+                        "{machine_error}; durable snapshot disappeared during compensation"
+                    ))),
+                    Err(read_error) => Err(CommitError::CompensationFailed(format!(
+                        "{machine_error}; compensation result could not be reconciled from bounded authority: {read_error}"
+                    ))),
+                }
             }
-            Ok(Some(_)) => Err(CommitError::CompensationFailed(format!(
-                "{machine_error}; a competing durable snapshot replaced the target during compensation"
-            ))),
-            Ok(None) => Err(CommitError::CompensationFailed(format!(
-                "{machine_error}; durable snapshot disappeared during compensation"
-            ))),
-            Err(read_error) => Err(CommitError::CompensationFailed(format!(
-                "{machine_error}; compensation result could not be reconciled: {read_error}"
-            ))),
         }
     } else {
         Ok(())
@@ -447,6 +494,7 @@ impl MeerkatMachine {
         tool_visibility_owner: Arc<MachineToolVisibilityOwner>,
         dsl_authority_shared: Arc<std::sync::Mutex<dsl::MeerkatMachineAuthority>>,
         handle_teardown_gate: Arc<crate::handles::HandleTeardownGate>,
+        durability_health: Option<super::DurabilityHealthHandle>,
         compaction_runtime_binding: Option<(
             dsl::AgentRuntimeId,
             Option<dsl::FenceToken>,
@@ -457,9 +505,10 @@ impl MeerkatMachine {
     ) -> Result<meerkat_core::SessionRuntimeBindings, RuntimeDriverError> {
         let compaction_runtime_epoch_id = dsl::RuntimeEpochId::from_domain(&epoch_id);
         let shared_handle_authority = Arc::new(
-            crate::handles::HandleDslAuthority::from_shared_with_teardown_gate(
+            crate::handles::HandleDslAuthority::from_shared_with_runtime_gates(
                 Arc::clone(&dsl_authority_shared),
                 Arc::clone(&handle_teardown_gate),
+                durability_health,
             ),
         );
         let peer_comms_install = crate::handles::RuntimePeerCommsHandle::generated_install_factory(
@@ -547,7 +596,7 @@ impl MeerkatMachine {
         allow_late_compaction_binding: bool,
         runtime_authority: Arc<dyn std::any::Any + Send + Sync>,
     ) -> Result<meerkat_core::SessionRuntimeBindings, RuntimeDriverError> {
-        let cached = {
+        let (cached, durability_health) = {
             let sessions = self.sessions.read().await;
             let entry = sessions
                 .get(&session_id)
@@ -567,7 +616,10 @@ impl MeerkatMachine {
                     ),
                 });
             }
-            entry.canonical_runtime_bindings.clone()
+            (
+                entry.canonical_runtime_bindings.clone(),
+                entry.durability_health.clone(),
+            )
         };
         if let Some(cached) = cached {
             return Ok(cached.__clone_with_runtime_authority(runtime_authority));
@@ -581,6 +633,7 @@ impl MeerkatMachine {
             Arc::clone(&tool_visibility_owner),
             Arc::clone(&dsl_authority_shared),
             Arc::clone(&handle_teardown_gate),
+            durability_health,
             compaction_runtime_binding,
             allow_late_compaction_binding,
             Arc::clone(&runtime_authority),
@@ -979,11 +1032,8 @@ impl MeerkatMachine {
         // executor attachment and teardown. A live idempotent binding remains a
         // valid handle bundle, but it cannot reopen actor materialization.
         let mutation_guard = self
-            .lock_current_session_mutation_gate(&session_id)
-            .await
-            .ok_or(RuntimeDriverError::NotReady {
-                state: RuntimeState::Destroyed,
-            })?;
+            .lock_current_durability_ready_session_mutation_gate(&session_id)
+            .await?;
         let (
             driver_handle,
             epoch_id,
@@ -1648,6 +1698,183 @@ impl MeerkatMachine {
         Ok(witnesses)
     }
 
+    async fn require_durable_runtime_after_input_point_miss(
+        store: &dyn crate::store::RuntimeStore,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<(), RuntimeDriverError> {
+        let lifecycle = store
+            .load_machine_lifecycle_record(runtime_id)
+            .await
+            .map_err(|err| {
+                RuntimeDriverError::Internal(format!(
+                    "terminal-status lifecycle read failed for {runtime_id}: {err}"
+                ))
+            })?;
+        if lifecycle.is_some() {
+            return Ok(());
+        }
+        let has_any_input = !store
+            .load_input_states_strict(runtime_id)
+            .await
+            .map_err(|err| {
+                RuntimeDriverError::Internal(format!(
+                    "terminal-status existence read failed for {runtime_id}: {err}"
+                ))
+            })?
+            .is_empty();
+        if has_any_input {
+            Ok(())
+        } else {
+            Err(RuntimeDriverError::NotFound {
+                runtime_id: runtime_id.clone(),
+            })
+        }
+    }
+
+    fn durable_idempotency_index_error(
+        runtime_id: &LogicalRuntimeId,
+        context: &'static str,
+        error: crate::store::RuntimeStoreError,
+    ) -> RuntimeDriverError {
+        match error {
+            crate::store::RuntimeStoreError::Unsupported(reason) => {
+                RuntimeDriverError::RecoveryRepairBlocked {
+                    evidence_digest: None,
+                    reason: format!(
+                        "{context} requires the exact store-owned idempotency index for \
+                         {runtime_id}: {reason}"
+                    ),
+                }
+            }
+            error @ crate::store::RuntimeStoreError::InputIdempotencyIndexUncertain { .. } => {
+                RuntimeDriverError::RecoveryRepairBlocked {
+                    evidence_digest: None,
+                    reason: format!(
+                        "{context} found durable idempotency-index corruption for {runtime_id}: \
+                         {error}"
+                    ),
+                }
+            }
+            other => {
+                RuntimeDriverError::Internal(format!("{context} failed for {runtime_id}: {other}"))
+            }
+        }
+    }
+
+    /// Resolve one durable input by its exact store-owned idempotency index.
+    ///
+    /// A miss still has to preserve the public distinction between an existing
+    /// session with no such key and a session that was never admitted. The
+    /// lifecycle row is the ordinary existence witness. Only the anomalous
+    /// lifecycle-missing case falls back to an existence-only row read; key
+    /// resolution itself never scans or text-matches input history.
+    pub(super) async fn durable_session_input_witness_by_idempotency_key(
+        &self,
+        session_id: &SessionId,
+        key: &str,
+    ) -> Result<Option<StoredInputState>, RuntimeDriverError> {
+        let Some(store) = self.store.as_ref() else {
+            return Err(RuntimeDriverError::NotReady {
+                state: RuntimeState::Destroyed,
+            });
+        };
+        let runtime_id = Self::logical_runtime_id(session_id);
+        let key = crate::identifiers::IdempotencyKey::new(key);
+        let observation = store
+            .load_input_state_by_idempotency_key(&runtime_id, &key)
+            .await
+            .map_err(|error| {
+                Self::durable_idempotency_index_error(
+                    &runtime_id,
+                    "indexed input witness read",
+                    error,
+                )
+            })?;
+        if let Some(observation) = observation {
+            let (state, _exact_row_digest) = observation.into_parts();
+            return Ok(Some(state));
+        }
+
+        Self::require_durable_runtime_after_input_point_miss(store.as_ref(), &runtime_id).await?;
+        Ok(None)
+    }
+
+    /// Resolve one durable input by exact id while preserving the public
+    /// existing-session versus never-admitted distinction on a miss.
+    ///
+    /// The ordinary selector path is one point read. Only an anomalous runtime
+    /// with input rows but no lifecycle row needs the existence-only fallback.
+    pub(super) async fn durable_session_input_witness_by_id(
+        &self,
+        session_id: &SessionId,
+        input_id: &InputId,
+    ) -> Result<Option<StoredInputState>, RuntimeDriverError> {
+        let Some(store) = self.store.as_ref() else {
+            return Err(RuntimeDriverError::NotReady {
+                state: RuntimeState::Destroyed,
+            });
+        };
+        let runtime_id = Self::logical_runtime_id(session_id);
+        let witness = store
+            .load_input_state(&runtime_id, input_id)
+            .await
+            .map_err(|err| {
+                RuntimeDriverError::Internal(format!(
+                    "durable input witness read failed for {runtime_id}: {err}"
+                ))
+            })?;
+        if witness.is_some() {
+            return Ok(witness);
+        }
+
+        Self::require_durable_runtime_after_input_point_miss(store.as_ref(), &runtime_id).await?;
+        Ok(None)
+    }
+
+    async fn durable_input_witness_by_id(
+        &self,
+        session_id: &SessionId,
+        input_id: &InputId,
+    ) -> Result<Option<StoredInputState>, RuntimeDriverError> {
+        let Some(store) = self.store.as_ref() else {
+            return Ok(None);
+        };
+        let runtime_id = Self::logical_runtime_id(session_id);
+        store
+            .load_input_state(&runtime_id, input_id)
+            .await
+            .map_err(|err| {
+                RuntimeDriverError::Internal(format!(
+                    "durable input witness read failed for {runtime_id}: {err}"
+                ))
+            })
+    }
+
+    async fn durable_input_witness_by_idempotency_key_if_present(
+        &self,
+        session_id: &SessionId,
+        key: &str,
+    ) -> Result<Option<StoredInputState>, RuntimeDriverError> {
+        let Some(store) = self.store.as_ref() else {
+            return Ok(None);
+        };
+        let runtime_id = Self::logical_runtime_id(session_id);
+        store
+            .load_input_state_by_idempotency_key(
+                &runtime_id,
+                &crate::identifiers::IdempotencyKey::new(key),
+            )
+            .await
+            .map_err(|error| {
+                Self::durable_idempotency_index_error(
+                    &runtime_id,
+                    "optional indexed input witness read",
+                    error,
+                )
+            })
+            .map(|observation| observation.map(|observation| observation.into_parts().0))
+    }
+
     /// Input-state witnesses for a session: the live DSL-backed snapshot when
     /// the session is registered, the durable store rows otherwise. Both
     /// sides feed the same pure evaluators in [`crate::terminal_status`].
@@ -1661,10 +1888,27 @@ impl MeerkatMachine {
         };
         if let Some(driver) = driver {
             let driver = driver.lock().await;
-            return Ok((
-                TerminalWitnessSource::LiveRuntime,
-                driver.as_driver().stored_input_states_snapshot()?,
-            ));
+            let live = driver.as_driver().stored_input_states_snapshot()?;
+            drop(driver);
+            let Some(store) = self.store.as_ref() else {
+                return Ok((TerminalWitnessSource::LiveRuntime, live));
+            };
+            let runtime_id = Self::logical_runtime_id(session_id);
+            let mut durable = store
+                .load_input_states_strict(&runtime_id)
+                .await
+                .map_err(|err| {
+                    RuntimeDriverError::Internal(format!(
+                        "terminal-status witness read failed for {runtime_id}: {err}"
+                    ))
+                })?;
+            let live_ids = live
+                .iter()
+                .map(|stored| stored.state.input_id.clone())
+                .collect::<HashSet<_>>();
+            durable.retain(|stored| !live_ids.contains(&stored.state.input_id));
+            durable.extend(live);
+            return Ok((TerminalWitnessSource::LiveRuntime, durable));
         }
         Ok((
             TerminalWitnessSource::DurableStore,
@@ -1732,11 +1976,9 @@ impl MeerkatMachine {
                 session_id,
                 intents,
             } => {
-                let gate = self.session_mutation_gate(&session_id).await;
-                let _gate_guard = match gate {
-                    Some(ref g) => Some(g.lock().await),
-                    None => None,
-                };
+                let _gate_guard = self
+                    .lock_current_durability_ready_session_mutation_gate(&session_id)
+                    .await?;
 
                 // Stage-first: SetSilentIntents is not declared from Destroyed,
                 // so the machine rejects it there and the rejection is
@@ -1779,46 +2021,6 @@ impl MeerkatMachine {
                 // cleanup publishes generated Draining authority.
                 self.stop_runtime_executor_inner(&session_id, reason)
                     .await?;
-                Ok(MeerkatMachineCommandResult::Unit)
-            }
-            MeerkatMachineCommand::CommitServiceTurnTerminalReceipt {
-                session_id,
-                session_snapshot,
-            } => {
-                // Direct SessionService turns share the runtime turn-state
-                // handle, but their durable commit occurs inside
-                // `SessionService::start_turn`, not the runtime loop. After
-                // that call returns successfully, close the run binding here
-                // through the same machine-owned lifecycle authority.
-                let gate = self.session_mutation_gate(&session_id).await;
-                let _gate_guard = match gate {
-                    Some(ref g) => Some(g.lock().await),
-                    None => None,
-                };
-                let driver = {
-                    let sessions = self.sessions.read().await;
-                    sessions
-                        .get(&session_id)
-                        .ok_or(RuntimeDriverError::NotReady {
-                            state: RuntimeState::Destroyed,
-                        })?
-                        .driver
-                        .clone()
-                };
-                let receipt_result = {
-                    let mut driver = driver.lock().await;
-                    machine_commit_service_turn_terminal_receipt(&mut driver, session_snapshot)
-                        .await
-                };
-                // The driver-level receipt requires a Running machine-owned
-                // lifecycle (it rejects every other phase, including
-                // Destroyed); classify a rejection observed on a Destroyed
-                // binding as the terminal `Destroyed` truth.
-                if let Err(err) = receipt_result {
-                    return Err(self
-                        .classify_session_driver_rejection(&session_id, err)
-                        .await);
-                }
                 Ok(MeerkatMachineCommandResult::Unit)
             }
             MeerkatMachineCommand::ContainsSession { session_id } => {
@@ -1882,21 +2084,23 @@ impl MeerkatMachine {
                 match driver {
                     Some(driver) => {
                         let driver = driver.lock().await;
-                        Ok(MeerkatMachineCommandResult::InputState(
-                            driver.as_driver().stored_input_state(&input_id),
-                        ))
+                        let live = driver.as_driver().stored_input_state(&input_id);
+                        drop(driver);
+                        Ok(MeerkatMachineCommandResult::InputState(match live {
+                            Some(live) => Some(live),
+                            None => {
+                                self.durable_input_witness_by_id(&session_id, &input_id)
+                                    .await?
+                            }
+                        }))
                     }
                     // Restart-first-class fallback: an unregistered session on
                     // a persistent machine answers from the durable
-                    // RuntimeStore witnesses without reviving the runtime.
-                    None => {
-                        let witnesses = self.durable_session_input_witnesses(&session_id).await?;
-                        Ok(MeerkatMachineCommandResult::InputState(
-                            witnesses
-                                .into_iter()
-                                .find(|stored| stored.state.input_id == input_id),
-                        ))
-                    }
+                    // RuntimeStore point index without reviving the runtime.
+                    None => Ok(MeerkatMachineCommandResult::InputState(
+                        self.durable_session_input_witness_by_id(&session_id, &input_id)
+                            .await?,
+                    )),
                 }
             }
             MeerkatMachineCommand::InputStateByIdempotencyKey {
@@ -1909,25 +2113,35 @@ impl MeerkatMachine {
                 };
                 match driver {
                     Some(driver) => {
-                        let driver = driver.lock().await;
-                        let driver = driver.as_driver();
-                        Ok(MeerkatMachineCommandResult::InputState(
+                        let live = {
+                            let driver = driver.lock().await;
+                            let driver = driver.as_driver();
                             driver
                                 .input_id_for_idempotency_key(&idempotency_key)
-                                .and_then(|input_id| driver.stored_input_state(&input_id)),
-                        ))
+                                .and_then(|input_id| driver.stored_input_state(&input_id))
+                        };
+                        Ok(MeerkatMachineCommandResult::InputState(match live {
+                            Some(live) => Some(live),
+                            None => {
+                                self.durable_input_witness_by_idempotency_key_if_present(
+                                    &session_id,
+                                    &idempotency_key,
+                                )
+                                .await?
+                            }
+                        }))
                     }
                     // Restart-first-class fallback: the persisted shell key is
                     // the exact fact recovery re-enters as the machine-owned
                     // idempotency binding, so the durable witness and the live
                     // admission map cannot diverge.
-                    None => {
-                        let witnesses = self.durable_session_input_witnesses(&session_id).await?;
-                        Ok(MeerkatMachineCommandResult::InputState(
-                            terminal_status::find_by_idempotency_key(&witnesses, &idempotency_key)
-                                .cloned(),
-                        ))
-                    }
+                    None => Ok(MeerkatMachineCommandResult::InputState(
+                        self.durable_session_input_witness_by_idempotency_key(
+                            &session_id,
+                            &idempotency_key,
+                        )
+                        .await?,
+                    )),
                 }
             }
             MeerkatMachineCommand::InteractionTerminalStatus {
@@ -1940,34 +2154,59 @@ impl MeerkatMachine {
                 };
                 let sourced = match driver {
                     Some(driver) => {
-                        let driver = driver.lock().await;
-                        let driver = driver.as_driver();
-                        let bundle = match &selector {
-                            InteractionSelector::InputId(input_id) => {
-                                driver.stored_input_state(input_id)
+                        let live = {
+                            let driver = driver.lock().await;
+                            let driver = driver.as_driver();
+                            match &selector {
+                                InteractionSelector::InputId(input_id) => {
+                                    driver.stored_input_state(input_id)
+                                }
+                                // Live path: the machine-owned admission map is
+                                // the authority for key -> input resolution.
+                                InteractionSelector::IdempotencyKey(key) => driver
+                                    .input_id_for_idempotency_key(key)
+                                    .and_then(|input_id| driver.stored_input_state(&input_id)),
                             }
-                            // Live path: the machine-owned admission map is
-                            // the authority for key -> input resolution.
-                            InteractionSelector::IdempotencyKey(key) => driver
-                                .input_id_for_idempotency_key(key)
-                                .and_then(|input_id| driver.stored_input_state(&input_id)),
                         };
-                        bundle.map(|bundle| Sourced {
-                            source: TerminalWitnessSource::LiveRuntime,
-                            report: interaction_report(&bundle),
-                        })
+                        match live {
+                            Some(bundle) => Some(Sourced {
+                                source: TerminalWitnessSource::LiveRuntime,
+                                report: interaction_report(&bundle),
+                            }),
+                            None => match &selector {
+                                InteractionSelector::InputId(input_id) => {
+                                    self.durable_input_witness_by_id(&session_id, input_id)
+                                        .await?
+                                }
+                                InteractionSelector::IdempotencyKey(key) => {
+                                    self.durable_input_witness_by_idempotency_key_if_present(
+                                        &session_id,
+                                        key,
+                                    )
+                                    .await?
+                                }
+                            }
+                            .map(|bundle| Sourced {
+                                source: TerminalWitnessSource::DurableStore,
+                                report: interaction_report(&bundle),
+                            }),
+                        }
                     }
                     None => {
-                        let witnesses = self.durable_session_input_witnesses(&session_id).await?;
                         let bundle = match &selector {
-                            InteractionSelector::InputId(input_id) => witnesses
-                                .iter()
-                                .find(|stored| &stored.state.input_id == input_id),
+                            InteractionSelector::InputId(input_id) => {
+                                self.durable_session_input_witness_by_id(&session_id, input_id)
+                                    .await?
+                            }
                             InteractionSelector::IdempotencyKey(key) => {
-                                terminal_status::find_by_idempotency_key(&witnesses, key)
+                                self.durable_session_input_witness_by_idempotency_key(
+                                    &session_id,
+                                    key,
+                                )
+                                .await?
                             }
                         };
-                        bundle.map(|bundle| Sourced {
+                        bundle.as_ref().map(|bundle| Sourced {
                             source: TerminalWitnessSource::DurableStore,
                             report: interaction_report(bundle),
                         })
@@ -2017,11 +2256,9 @@ impl MeerkatMachine {
                 next_active_visibility_revision,
                 tool_visibility_delta,
             } => {
-                let gate = self.session_mutation_gate(&session_id).await;
-                let _gate_guard = match gate {
-                    Some(ref g) => Some(g.lock().await),
-                    None => None,
-                };
+                let _gate_guard = self
+                    .lock_current_durability_ready_session_mutation_gate(&session_id)
+                    .await?;
 
                 use crate::meerkat_machine::dsl as mm_dsl;
                 let dsl_previous_identity =
@@ -2121,11 +2358,9 @@ impl MeerkatMachine {
                     });
                 }
 
-                let gate = self.session_mutation_gate(&session_id).await;
-                let _gate_guard = match gate {
-                    Some(ref g) => Some(g.lock().await),
-                    None => None,
-                };
+                let _gate_guard = self
+                    .lock_current_durability_ready_session_mutation_gate(&session_id)
+                    .await?;
 
                 let owner = {
                     let sessions = self.sessions.read().await;
@@ -2171,11 +2406,9 @@ impl MeerkatMachine {
                     });
                 }
 
-                let gate = self.session_mutation_gate(&session_id).await;
-                let _gate_guard = match gate {
-                    Some(ref g) => Some(g.lock().await),
-                    None => None,
-                };
+                let _gate_guard = self
+                    .lock_current_durability_ready_session_mutation_gate(&session_id)
+                    .await?;
 
                 let owner = {
                     let sessions = self.sessions.read().await;
@@ -2220,11 +2453,9 @@ impl MeerkatMachine {
                 }
                 drop(sessions);
 
-                let gate = self.session_mutation_gate(&session_id).await;
-                let _gate_guard = match gate {
-                    Some(ref g) => Some(g.lock().await),
-                    None => None,
-                };
+                let _gate_guard = self
+                    .lock_current_durability_ready_session_mutation_gate(&session_id)
+                    .await?;
 
                 let owner = {
                     let sessions = self.sessions.read().await;

@@ -33,6 +33,10 @@ pub struct HostRunnableInvocation {
     pub occurrence_id: OccurrenceId,
     /// Schedule the occurrence belongs to.
     pub schedule_id: ScheduleId,
+    /// Stable effect identity durably committed by the schedule driver before
+    /// invoking this callback. Callback implementations must use it to dedupe
+    /// retries after a process crash or expired-lease reclaim.
+    pub delivery_idempotency_key: String,
     /// Name of the runnable being invoked.
     pub runnable: HostRunnableName,
     /// The occurrence's scheduled trigger time (UTC).
@@ -229,6 +233,7 @@ mod tests {
         HostRunnableInvocation {
             occurrence_id: OccurrenceId::new(),
             schedule_id: ScheduleId::new(),
+            delivery_idempotency_key: "schedule:test:occurrence:test".to_string(),
             runnable: name(runnable),
             trigger_time: Utc::now(),
             params: Some(

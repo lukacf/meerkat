@@ -64,9 +64,9 @@ export interface RenderMetadata {
   salience?: RenderSalience;
 }
 
-/** Runtime system-context append request. */
+/** Append one ordinary durable ordered System message. */
 export interface AppendSystemContextOptions {
-  /** Instruction text injected at the next LLM boundary. */
+  /** Exact message text, including empty or whitespace-only content. */
   text: string;
   /** Optional source label for provenance/debugging. */
   source?: string;
@@ -74,19 +74,19 @@ export interface AppendSystemContextOptions {
   idempotencyKey?: string;
 }
 
-/** Result of a runtime system-context append request. */
+/** Result of appending an ordinary durable System message. */
 export interface AppendSystemContextResult {
   handle: number;
-  status: 'staged' | 'duplicate';
+  status: 'applied' | 'duplicate';
 }
 
 export type { SessionState, WireRunResult } from './generated/session.js';
 
-/** Result of appending runtime system context to a mob member session. */
+/** Result of appending an ordinary durable System message to a mob member session. */
 export interface MobAppendSystemContextResult {
   mob_id: string;
   agent_identity: string;
-  status: 'staged' | 'duplicate';
+  status: 'applied' | 'duplicate';
 }
 
 /** Delivery receipt for a direct mob member turn. */

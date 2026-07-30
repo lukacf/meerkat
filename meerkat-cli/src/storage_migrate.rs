@@ -6,13 +6,15 @@
 //! module owns the disk-realm orchestration because only the CLI sits above
 //! every store crate and can run each store's normal constructor.
 //!
-//! The five migration cases:
+//! The migration cases:
 //!
 //! 1. **Ledger baseline (auto-safe):** under the realm's exclusive
 //!    maintenance fence, each store is opened through its NORMAL constructor
 //!    — the guarded schema-ledger migrations ARE the structural
-//!    verification, converging files of any vintage. Dry-run reads versions
-//!    read-only and reports what would be stamped.
+//!    verification, admitting only fresh domains or exact released
+//!    predecessors. Dry-run reads recorded versions only and reports row
+//!    presence; it does not certify a missing row as fresh or promise a
+//!    future stamp.
 //! 2. **State-root adoption (report-only):** the dual-root resolver already
 //!    uses realms where they lie; the report states each realm's root.
 //! 3. **Split-brain reconciliation (manual, fail-closed):** a realm id under
@@ -23,14 +25,7 @@
 //!    where it lies while every other copy is archived read-only under the
 //!    registered backup naming (its released fence lock files ride into the
 //!    archive). No synthesis, no merging.
-//! 4. **Checkpoint-evidence adoption:** for sqlite realms, the persistent
-//!    session service (composed with the agent-refusing
-//!    `MaintenanceAgentBuilder`) runs the machine-owned bulk
-//!    `adopt_legacy_checkpoints` sweep under the fence (holder
-//!    self-admission lets production store paths pass their per-operation
-//!    guards). JSONL realms report "adoption skipped" — their sessions heal
-//!    lazily on first authority touch.
-//! 5. **Deprecated leftovers (report-only):** doctor's artifact findings
+//! 4. **Deprecated leftovers (report-only):** doctor's artifact findings
 //!    plus a legacy `<home>/.rkat/sessions` directory if present.
 //!    Credential stores are never read, moved, or reported.
 
@@ -39,12 +34,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use meerkat_core::storage_diagnostics::{DiagnoseScope, FindingSeverity, StorageFinding};
-#[cfg(feature = "session-store")]
-use meerkat_store::migrate::CheckpointAdoptionRefusal;
 use meerkat_store::migrate::{
-    self as store_migrate, CheckpointAdoptionOutcome, DivergenceStatus, LedgerBaselineAction,
-    LedgerBaselineEntry, MigrateMode, MigrateReport, PruneAction, PruneReport, RealmDirEntry,
-    RealmMigrateReport, SplitBrainReport, SplitBrainResolution,
+    self as store_migrate, DivergenceStatus, LedgerBaselineAction, LedgerBaselineEntry,
+    MigrateMode, MigrateReport, PruneAction, PruneReport, RealmDirEntry, RealmMigrateReport,
+    SplitBrainReport, SplitBrainResolution,
 };
 
 /// Case-5 finding codes copied into the migrate report (deprecated
@@ -373,9 +366,9 @@ async fn resolve_split_brain(
 /// Fold a read-only ledger baseline into the per-realm report: rows become
 /// ledger entries under `action_of`, read failures become per-realm errors
 /// (a corrupt database is never laundered into a missing ledger the report
-/// could call would-stamp), and future-versioned domains become refusals
+/// could call missing-row), and future-versioned domains become refusals
 /// exactly as `--apply`'s guarded constructors would refuse them
-/// (`SchemaFromTheFuture`) — their rows report-only, never would-stamp.
+/// (`SchemaFromTheFuture`) — their rows report-only, never missing-row.
 fn fold_ledger_baseline(
     baseline: &store_migrate::RealmLedgerBaseline,
     entry: &mut RealmMigrateReport,
@@ -448,7 +441,7 @@ fn mob_report_only_entries(realm_dir: &Path, entry: &mut RealmMigrateReport) {
     );
 }
 
-/// Cases 1, 2, and 4 for one realm materialization.
+/// Cases 1 and 2 for one realm materialization.
 async fn migrate_realm(
     realm: &RealmDirEntry,
     apply: bool,
@@ -515,9 +508,9 @@ async fn migrate_realm(
     entry
 }
 
-/// Case 1 + 4 dry-run: read-only ledger baseline and legacy census. The
-/// database bytes are untouched.
-async fn dry_run_realm(realm: &RealmDirEntry, backend: &str, entry: &mut RealmMigrateReport) {
+/// Case 1 dry-run: read-only ledger baseline. The database bytes are
+/// untouched.
+async fn dry_run_realm(realm: &RealmDirEntry, _backend: &str, entry: &mut RealmMigrateReport) {
     let dir = realm.dir.clone();
     match tokio::task::spawn_blocking(move || store_migrate::read_realm_ledger_baseline(&dir)).await
     {
@@ -525,68 +518,21 @@ async fn dry_run_realm(realm: &RealmDirEntry, backend: &str, entry: &mut RealmMi
             if row.version.is_some() {
                 LedgerBaselineAction::Recorded
             } else {
-                LedgerBaselineAction::WouldStamp
+                LedgerBaselineAction::MissingRow
             }
         }),
         Err(join_error) => entry
             .errors
             .push(format!("ledger baseline read failed: {join_error}")),
     }
-
-    match backend {
-        "sqlite" => {
-            let sessions_db = realm.dir.join("sessions.sqlite3");
-            if sessions_db.is_file() {
-                match tokio::task::spawn_blocking(move || {
-                    store_migrate::census_legacy_sessions(&sessions_db)
-                })
-                .await
-                {
-                    Ok(Ok(census)) => {
-                        let mut adoption = CheckpointAdoptionOutcome::default();
-                        adoption.legacy_pending = census.legacy;
-                        adoption.already_verified = census.verified;
-                        adoption.skipped = Some(
-                            "dry-run: census only; --apply runs the bulk adoption sweep"
-                                .to_string(),
-                        );
-                        entry.adoption = Some(adoption);
-                        if census.invalid > 0 {
-                            entry.errors.push(format!(
-                                "{} session document(s) carry malformed checkpoint metadata \
-                                 (present-but-invalid evidence is never laundered into legacy)",
-                                census.invalid
-                            ));
-                        }
-                    }
-                    Ok(Err(error)) => entry
-                        .errors
-                        .push(format!("legacy checkpoint census failed: {error}")),
-                    Err(join_error) => entry
-                        .errors
-                        .push(format!("legacy checkpoint census failed: {join_error}")),
-                }
-            }
-        }
-        "jsonl" => {
-            let mut adoption = CheckpointAdoptionOutcome::default();
-            adoption.skipped = Some(
-                "adoption skipped (jsonl backend): sessions heal lazily on first authority touch"
-                    .to_string(),
-            );
-            entry.adoption = Some(adoption);
-        }
-        _ => {}
-    }
 }
 
-/// Case 1 + 4 apply: fence the realm, run every store's normal constructor
-/// (the guarded ledger migrations are the structural verification), then
-/// run the machine-owned bulk checkpoint adoption for sqlite realms.
+/// Apply: fence the realm and run every store's normal constructor. The
+/// guarded ledger migrations are the structural verification.
 #[cfg(feature = "session-store")]
 async fn apply_realm(
     realm: &RealmDirEntry,
-    backend: &str,
+    _backend: &str,
     fence_wait: Duration,
     entry: &mut RealmMigrateReport,
 ) {
@@ -699,70 +645,7 @@ async fn apply_realm(
             .push(format!("session index open failed: {error}"));
     }
 
-    // Case 4: machine-owned bulk checkpoint adoption (sqlite realms).
-    if backend == "sqlite" {
-        let (session_store, runtime_store, blob_store) = bundle.into_parts();
-        let service = meerkat::PersistentSessionService::new(
-            meerkat::MaintenanceAgentBuilder,
-            1,
-            session_store,
-            runtime_store,
-            blob_store,
-        );
-        match service.adopt_legacy_checkpoints().await {
-            Ok(adoption) => {
-                let refused: Vec<CheckpointAdoptionRefusal> = adoption
-                    .refused
-                    .iter()
-                    .map(|(session_id, reason)| {
-                        CheckpointAdoptionRefusal::new(session_id.to_string(), reason.clone())
-                    })
-                    .collect();
-                if !refused.is_empty() {
-                    entry.errors.push(format!(
-                        "{} session(s) refused checkpoint adoption; see the adoption report",
-                        refused.len()
-                    ));
-                }
-                // Per-session load/decode failures no longer abort the
-                // sweep; each surfaces both as a per-realm error (text/JSON
-                // visibility + exit code) and in the outcome's failure slot.
-                for (session_id, reason) in &adoption.failures {
-                    entry.errors.push(format!(
-                        "checkpoint adoption failed for session {session_id}: {reason}"
-                    ));
-                }
-                for (session_id, reason) in &adoption.skipped_cursor_ambiguous {
-                    entry.notes.push(format!(
-                        "checkpoint adoption skipped for session {session_id} \
-                         (cursor-ambiguous): {reason}"
-                    ));
-                }
-                let mut outcome = CheckpointAdoptionOutcome::default();
-                outcome.scanned = adoption.scanned;
-                outcome.already_verified = adoption.already_verified;
-                outcome.adopted = adoption.adopted;
-                outcome.refused = refused;
-                outcome.failures = adoption
-                    .failures
-                    .iter()
-                    .map(|(session_id, reason)| (session_id.to_string(), reason.clone()))
-                    .collect();
-                entry.adoption = Some(outcome);
-            }
-            Err(error) => entry
-                .errors
-                .push(format!("bulk checkpoint adoption failed: {error}")),
-        }
-    } else {
-        let mut adoption = CheckpointAdoptionOutcome::default();
-        adoption.skipped = Some(
-            "adoption skipped (jsonl backend): sessions heal lazily on first authority touch"
-                .to_string(),
-        );
-        entry.adoption = Some(adoption);
-        drop(bundle);
-    }
+    drop(bundle);
 
     // Ledger entries: before → after per database × domain.
     let after_dir = realm.dir.clone();
@@ -905,7 +788,7 @@ fn describe_status(status: &DivergenceStatus) -> String {
 
 fn describe_ledger_action(action: LedgerBaselineAction) -> &'static str {
     match action {
-        LedgerBaselineAction::WouldStamp => "would-stamp",
+        LedgerBaselineAction::MissingRow => "missing-row",
         LedgerBaselineAction::Recorded => "recorded",
         LedgerBaselineAction::Stamped => "stamped",
         LedgerBaselineAction::AlreadyCurrent => "already-current",
@@ -1004,24 +887,6 @@ pub(crate) fn print_migrate_report_text(report: &MigrateReport) {
                 describe_version(entry.after),
                 describe_ledger_action(entry.action)
             );
-        }
-        if let Some(adoption) = &realm.adoption {
-            match &adoption.skipped {
-                Some(skipped) => println!(
-                    "  adoption: {skipped} (legacy pending: {}, verified: {})",
-                    adoption.legacy_pending, adoption.already_verified
-                ),
-                None => println!(
-                    "  adoption: scanned={} already_verified={} adopted={} refused={}",
-                    adoption.scanned,
-                    adoption.already_verified,
-                    adoption.adopted,
-                    adoption.refused.len()
-                ),
-            }
-            for refusal in &adoption.refused {
-                println!("    refused {}: {}", refusal.session_id, refusal.reason);
-            }
         }
         for note in &realm.notes {
             println!("  note: {note}");

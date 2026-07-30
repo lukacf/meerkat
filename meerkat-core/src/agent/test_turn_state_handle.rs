@@ -106,18 +106,14 @@ fn primitive_kind_variant(kind: TurnPrimitiveKind) -> &'static str {
         TurnPrimitiveKind::None => "None",
         TurnPrimitiveKind::ConversationTurn => "ConversationTurn",
         TurnPrimitiveKind::ImmediateAppend => "ImmediateAppend",
-        TurnPrimitiveKind::ImmediateContextAppend => "ImmediateContextAppend",
     }
 }
 
 fn content_shape_variant(shape: ContentShape) -> &'static str {
     match shape {
         ContentShape::Conversation => "Conversation",
-        ContentShape::ConversationAndContext => "ConversationAndContext",
-        ContentShape::Context => "Context",
         ContentShape::Empty => "Empty",
         ContentShape::ImmediateAppend => "ImmediateAppend",
-        ContentShape::ImmediateContext => "ImmediateContext",
     }
 }
 
@@ -755,9 +751,6 @@ impl TurnStateHandle for TestTurnStateHandle {
             TurnExecutionInput::StartImmediateAppend { run_id } => {
                 input("StartImmediateAppend", [("run_id", run_id_value(&run_id))])
             }
-            TurnExecutionInput::StartImmediateContext { run_id } => {
-                input("StartImmediateContext", [("run_id", run_id_value(&run_id))])
-            }
             TurnExecutionInput::PrimitiveApplied { run_id } => {
                 input("PrimitiveApplied", [("run_id", run_id_value(&run_id))])
             }
@@ -1069,13 +1062,6 @@ impl TurnStateHandle for TestTurnStateHandle {
         self.apply(
             input("StartImmediateAppend", [("run_id", run_id_value(&run_id))]),
             "TestTurnStateHandle::start_immediate_append",
-        )
-    }
-
-    fn start_immediate_context(&self, run_id: RunId) -> Result<(), DslTransitionError> {
-        self.apply(
-            input("StartImmediateContext", [("run_id", run_id_value(&run_id))]),
-            "TestTurnStateHandle::start_immediate_context",
         )
     }
 
@@ -1423,7 +1409,6 @@ fn map_primitive_kind_name(
         "None" => return Ok(None),
         "ConversationTurn" => TurnPrimitiveKind::ConversationTurn,
         "ImmediateAppend" => TurnPrimitiveKind::ImmediateAppend,
-        "ImmediateContextAppend" => TurnPrimitiveKind::ImmediateContextAppend,
         _ => {
             return Err(generated_projection_error(
                 context,
@@ -1439,11 +1424,8 @@ fn map_content_shape_name(
 ) -> Result<ContentShape, DslTransitionError> {
     Ok(match name {
         "Conversation" => ContentShape::Conversation,
-        "ConversationAndContext" => ContentShape::ConversationAndContext,
-        "Context" => ContentShape::Context,
         "Empty" => ContentShape::Empty,
         "ImmediateAppend" => ContentShape::ImmediateAppend,
-        "ImmediateContext" => ContentShape::ImmediateContext,
         _ => {
             return Err(generated_projection_error(
                 context,
@@ -1788,7 +1770,7 @@ mod tests {
             .start_conversation_run(
                 run_id.clone(),
                 TurnPrimitiveKind::ConversationTurn,
-                ContentShape::ConversationAndContext,
+                ContentShape::Conversation,
                 false,
                 false,
                 0,
@@ -1799,7 +1781,7 @@ mod tests {
         let snapshot = handle.snapshot();
         assert_eq!(
             snapshot.admitted_content_shape,
-            Some(ContentShape::ConversationAndContext)
+            Some(ContentShape::Conversation)
         );
     }
 }

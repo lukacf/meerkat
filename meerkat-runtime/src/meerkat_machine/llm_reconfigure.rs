@@ -359,9 +359,13 @@ impl MeerkatMachine {
         session_id: &SessionId,
         request: SessionLlmReconfigureRequest,
     ) -> Result<SessionLlmReconfigureReport, RuntimeDriverError> {
+        let mutation_guard = self
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await?;
         let command = self
             .prepare_reconfigure_session_llm_command(session_id, request)
             .await?;
+        drop(mutation_guard);
         match self
             .execute_meerkat_machine_command(None, command)
             .await

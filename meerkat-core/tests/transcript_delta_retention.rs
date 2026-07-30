@@ -26,7 +26,7 @@ use meerkat_core::lifecycle::RunId;
 use meerkat_core::service::{TranscriptRewriteReason, TranscriptRewriteSelection};
 use meerkat_core::types::{
     AssistantBlock, BlockAssistantMessage, ContentBlock, ImageData, Message, StopReason,
-    SystemMessage, ToolResult, TranscriptMessageIdentity, UserMessage,
+    ToolResult, TranscriptMessageIdentity, UserMessage,
 };
 use meerkat_core::{SESSION_TRANSCRIPT_HISTORY_STATE_KEY, Session, TranscriptHistoryState};
 
@@ -54,7 +54,7 @@ fn assistant(text: &str) -> Message {
 /// A session with `turns` prior conversational turns and a system prompt.
 fn session_with_turns(turns: usize) -> Session {
     let mut session = Session::new();
-    session.set_system_prompt(format!("system prompt {BODY}"));
+    session.append_system_message(format!("system prompt {BODY}"));
     for index in 0..turns {
         session.push(user(&format!("question {index} {BODY}")));
         session.push(assistant(&format!("answer {index} {BODY}")));
@@ -243,12 +243,13 @@ fn single_message_rewrite_retains_the_edit_not_the_document() {
 // 2. Stacked rewrites reconstruct exactly what the full-body form held
 // ---------------------------------------------------------------------------
 
-/// Eight stacked rewrites, each separated by ordinary appends so the graph
-/// carries mechanical heads as well as audited endpoints. The delta chain must
-/// decode to precisely the graph the full-body spelling of the same typed
-/// values decodes to — reconstruction is not "close enough", it is equality —
-/// while costing a small multiple of ONE transcript rather than one per
-/// retained revision.
+/// Eight stacked rewrites, each separated by ordinary appends. Every rewrite
+/// promotes its live parent and new result into audited endpoint bodies; the
+/// intervening appends themselves must leave the graph bytes untouched. The
+/// delta chain must decode to precisely the graph the full-body spelling of
+/// the same typed values decodes to — reconstruction is not "close enough",
+/// it is equality — while costing a small multiple of ONE transcript rather
+/// than one per retained revision.
 #[test]
 fn stacked_rewrites_reconstruct_the_full_body_graph_exactly() {
     let mut session = session_with_turns(120);
@@ -271,8 +272,18 @@ fn stacked_rewrites_reconstruct_the_full_body_graph_exactly() {
             vec![user(&format!("stacked edit {round} {BODY}"))],
             "stacked-edit",
         );
+        let audited_graph = session
+            .metadata()
+            .get(SESSION_TRANSCRIPT_HISTORY_STATE_KEY)
+            .cloned()
+            .expect("rewrite installs audited graph");
         session.push(user(&format!("follow-up {round} {BODY}")));
         session.push(assistant(&format!("reply {round} {BODY}")));
+        assert_eq!(
+            session.metadata().get(SESSION_TRANSCRIPT_HISTORY_STATE_KEY),
+            Some(&audited_graph),
+            "ordinary appends must not manufacture retained graph revisions"
+        );
     }
 
     let state = state_of(&session);
@@ -355,18 +366,6 @@ fn flip_text(value: &mut serde_json::Value) {
     message["content"] = serde_json::Value::String(format!("{text} flipped"));
 }
 
-/// A retained body's `created_at` is storage bookkeeping the transcript digest
-/// deliberately erases — but the decode memo's shape key pins it. Bumping it
-/// alongside a content flip forces the fresh-reader ingress path (a memo miss)
-/// without itself being a validated field, so the refusal below can only come
-/// from the content flip.
-fn rekey_memo(entry: &mut serde_json::Value) {
-    let secs = entry["created_at"]["secs_since_epoch"]
-        .as_u64()
-        .expect("retained body created_at seconds");
-    entry["created_at"]["secs_since_epoch"] = serde_json::Value::from(secs + 1);
-}
-
 /// Both halves of the chain must remain content-addressed. Flipping bytes in
 /// the anchor corrupts every body spliced off it; flipping bytes in a splice
 /// payload corrupts exactly the body that splice reconstructs. Neither may
@@ -395,7 +394,6 @@ fn tampered_retained_bodies_refuse_typed_at_decode() {
         let entry =
             &mut anchor_flip["metadata"][SESSION_TRANSCRIPT_HISTORY_STATE_KEY]["revisions"][0usize];
         flip_text(&mut entry["messages"]);
-        rekey_memo(entry);
     }
     let error = serde_json::from_value::<Session>(anchor_flip)
         .expect_err("a flipped chain anchor must refuse typed at decode");
@@ -415,7 +413,6 @@ fn tampered_retained_bodies_refuse_typed_at_decode() {
             "fixture must carry a non-empty splice payload to flip"
         );
         flip_text(&mut entry["rebase"]["insert"]);
-        rekey_memo(entry);
     }
     let error = serde_json::from_value::<Session>(splice_flip)
         .expect_err("a flipped splice payload must refuse typed at decode");
@@ -458,11 +455,9 @@ fn a_splice_with_an_unresolvable_base_refuses_typed() {
 // 4. The pathological case: an index-0 rewrite shares no prefix
 // ---------------------------------------------------------------------------
 
-/// The rewrite that produced the measured 82.3 MB document was a per-resume
-/// system-prompt refresh — `MessageRange { start: 0, end: 1 }`. It shares NO
-/// prefix with its parent, so a prefix-only delta would degenerate to a full
-/// copy. The splice is prefix AND suffix anchored, so the retained payload is
-/// the one replaced message.
+/// An index-zero rewrite shares no prefix with its parent, so a prefix-only
+/// delta would degenerate to a full copy. The splice is prefix AND suffix
+/// anchored, so the retained payload is the one replaced message.
 #[test]
 fn index_zero_rewrite_retains_one_message() {
     let mut session = session_with_turns(200);
@@ -472,10 +467,10 @@ fn index_zero_rewrite_retains_one_message() {
         &mut session,
         0,
         1,
-        vec![Message::System(SystemMessage::new(format!(
-            "refreshed system prompt {BODY}"
+        vec![Message::User(UserMessage::text(format!(
+            "replaced row {BODY}"
         )))],
-        "system-refresh",
+        "index-zero-replacement",
     );
 
     let history = history_value(&session);
@@ -570,7 +565,7 @@ fn retained_revisions_read_back_their_exact_transcripts() {
 #[test]
 fn splices_are_byte_faithful_over_rich_content() {
     let mut session = Session::new();
-    session.set_system_prompt(format!("system prompt {BODY}"));
+    session.append_system_message(format!("system prompt {BODY}"));
 
     let mut pictured = UserMessage::text(format!("look at this {BODY}"));
     pictured.content.push(ContentBlock::Image {

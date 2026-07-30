@@ -96,6 +96,7 @@ pub use turn_state::RuntimeTurnStateHandle;
 pub struct HandleDslAuthority {
     inner: Arc<Mutex<mm_dsl::MeerkatMachineAuthority>>,
     teardown_gate: Arc<HandleTeardownGate>,
+    durability_health: Option<crate::meerkat_machine::DurabilityHealthHandle>,
 }
 
 /// Mechanical validity witness for a prepared session-owned handle bundle.
@@ -146,6 +147,7 @@ impl HandleDslAuthority {
         Self {
             inner,
             teardown_gate: HandleTeardownGate::open(),
+            durability_health: None,
         }
     }
 
@@ -157,6 +159,23 @@ impl HandleDslAuthority {
         Self {
             inner,
             teardown_gate,
+            durability_health: None,
+        }
+    }
+
+    /// Wrap a session-owned authority with both of its mechanical fail-closed
+    /// gates. Persistent runtime bindings carry the exact durability-health
+    /// handle shared by their runtime entry and driver; storeless bindings
+    /// carry `None`.
+    pub(crate) fn from_shared_with_runtime_gates(
+        inner: Arc<Mutex<mm_dsl::MeerkatMachineAuthority>>,
+        teardown_gate: Arc<HandleTeardownGate>,
+        durability_health: Option<crate::meerkat_machine::DurabilityHealthHandle>,
+    ) -> Self {
+        Self {
+            inner,
+            teardown_gate,
+            durability_health,
         }
     }
 
@@ -171,6 +190,16 @@ impl HandleDslAuthority {
         Self {
             inner: Arc::new(Mutex::new(mm_dsl::MeerkatMachineAuthority::new())),
             teardown_gate: HandleTeardownGate::open(),
+            durability_health: None,
+        }
+    }
+
+    fn ensure_durability_ready(&self, context: &'static str) -> Result<(), DslTransitionError> {
+        match self.durability_health.as_ref() {
+            Some(health) => health.require_ready().map_err(|required| {
+                DslTransitionError::guard_rejected(context, required.to_string())
+            }),
+            None => Ok(()),
         }
     }
 
@@ -219,11 +248,13 @@ impl HandleDslAuthority {
     ) -> Result<mm_dsl::MeerkatMachineTransition, DslTransitionError> {
         MeerkatMachineFieldlessRuntimeInternalInput::reject_raw_dsl_input(&input)
             .map_err(|reason| DslTransitionError::no_matching(context, reason))?;
+        self.ensure_durability_ready(context)?;
         self.teardown_gate.ensure_open(context)?;
         let mut guard = self
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.ensure_durability_ready(context)?;
         self.teardown_gate.ensure_open(context)?;
         mm_dsl::MeerkatMachineMutator::apply(&mut *guard, input)
             .map_err(|err| map_kernel_error(err, context))
@@ -266,11 +297,13 @@ impl HandleDslAuthority {
     ) -> Result<S, DslTransitionError> {
         MeerkatMachineFieldlessRuntimeInternalInput::reject_raw_dsl_input(&input)
             .map_err(|reason| DslTransitionError::no_matching(context, reason))?;
+        self.ensure_durability_ready(context)?;
         self.teardown_gate.ensure_open(context)?;
         let mut guard = self
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.ensure_durability_ready(context)?;
         self.teardown_gate.ensure_open(context)?;
         let effects = mm_dsl::MeerkatMachineMutator::apply(&mut *guard, input)
             .map(|transition| transition.into_effects())
@@ -288,11 +321,13 @@ impl HandleDslAuthority {
     ) -> Result<mm_dsl::MeerkatMachineAuthoritySnapshot, DslTransitionError> {
         MeerkatMachineFieldlessRuntimeInternalInput::reject_raw_dsl_input(input)
             .map_err(|reason| DslTransitionError::no_matching(context, reason))?;
+        self.ensure_durability_ready(context)?;
         self.teardown_gate.ensure_open(context)?;
         let guard = self
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.ensure_durability_ready(context)?;
         self.teardown_gate.ensure_open(context)?;
         let expected = guard.snapshot();
         let mut preview = mm_dsl::MeerkatMachineAuthority::new();
@@ -314,11 +349,13 @@ impl HandleDslAuthority {
     ) -> Result<S, DslTransitionError> {
         MeerkatMachineFieldlessRuntimeInternalInput::reject_raw_dsl_input(&input)
             .map_err(|reason| DslTransitionError::no_matching(context, reason))?;
+        self.ensure_durability_ready(context)?;
         self.teardown_gate.ensure_open(context)?;
         let mut guard = self
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.ensure_durability_ready(context)?;
         self.teardown_gate.ensure_open(context)?;
         if guard.snapshot().state() != expected.state() {
             return Err(DslTransitionError::guard_rejected(
@@ -346,11 +383,13 @@ impl HandleDslAuthority {
         signal: mm_dsl::MeerkatMachineSignal,
         context: &'static str,
     ) -> Result<Vec<mm_dsl::MeerkatMachineEffect>, DslTransitionError> {
+        self.ensure_durability_ready(context)?;
         self.teardown_gate.ensure_open(context)?;
         let mut guard = self
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.ensure_durability_ready(context)?;
         self.teardown_gate.ensure_open(context)?;
         guard
             .apply_signal(signal)
@@ -365,11 +404,13 @@ impl HandleDslAuthority {
         context: &'static str,
         sample: impl FnOnce(&mm_dsl::MeerkatMachineState) -> S,
     ) -> Result<S, DslTransitionError> {
+        self.ensure_durability_ready(context)?;
         self.teardown_gate.ensure_open(context)?;
         let mut guard = self
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.ensure_durability_ready(context)?;
         self.teardown_gate.ensure_open(context)?;
         guard
             .apply_signal(signal)
@@ -406,6 +447,8 @@ impl HandleDslAuthority {
         ),
         String,
     > {
+        self.ensure_durability_ready(context)
+            .map_err(|error| error.to_string())?;
         self.teardown_gate
             .ensure_open(context)
             .map_err(|error| error.to_string())?;
@@ -413,6 +456,8 @@ impl HandleDslAuthority {
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.ensure_durability_ready(context)
+            .map_err(|error| error.to_string())?;
         self.teardown_gate
             .ensure_open(context)
             .map_err(|error| error.to_string())?;

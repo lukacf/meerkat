@@ -70,7 +70,7 @@ derived workspace identity and the default project-local state root.
 | `rkat models` | List built-in models plus configured self-hosted aliases |
 | `rkat capabilities` | Show runtime capabilities |
 | `rkat doctor` | Check local setup, provider keys, and self-hosted server reachability |
-| `rkat storage doctor` | Read-only storage diagnosis (realm inventory, schema ledgers, split-brain twins, checkpoint census) |
+| `rkat storage doctor` | Read-only storage diagnosis (realm inventory, schema ledgers, split-brain twins, structural integrity) |
 | `rkat storage migrate` | Offline, fenced storage migration (dry-run by default) |
 | `rkat storage prune` | Lifecycle for registered storage backup artifacts |
 | `rkat init` | Create project config from the global template |
@@ -246,18 +246,13 @@ rkat session list [--limit <N>] [--offset <N>] [--label <KEY=VALUE>]
 rkat session show <SESSION_ID>
 rkat session delete <SESSION_ID>
 rkat session interrupt <SESSION_ID>
-rkat session migrate [--apply] [--json]
 ```
 
 This is the human/operator session surface. CLI-internal control-plane session APIs are not exposed here.
 
-`session migrate` is a dry-run by default. It recognizes only the exact
-completed-idle SQLite shape emitted by rkat v0.6.34, retains append-only audit
-bytes for rewritten or removed runtime rows, and refuses detected live or
-unreadable lease evidence plus ambiguous/nonterminal state. v0.6.34 one-shot
-CLI runs did not always publish leases, so the probe is best-effort: stop every
-v0.6.34 CLI, RPC, REST, and MCP process using the realm before rerunning with
-`--apply`.
+Meerkat 0.8.11 supports durable state from 0.8.10 onward. Migrate older state
+offline with the older binary before repinning; the current CLI does not
+adopt or rewrite pre-floor session state.
 
 ## config
 
@@ -348,8 +343,8 @@ connections only, creates nothing. Sweeps the project-local
 any explicit root (`--state-root` or repeatable `--root`) restricts the
 sweep to exactly those roots. `--realm` focuses the sweep on one realm.
 Reports per-root realm inventory, schema-ledger state per database,
-dual-root twins, the legacy-vs-verified checkpoint census, dangling
-session→blob references, and orphaned lease/lock/backup artifacts. Exit 0
+dual-root twins, dangling session→blob references, and orphaned
+lease/lock/backup artifacts. Exit 0
 means no error-severity findings; exit 1 means errors were found.
 
 ```bash
@@ -363,10 +358,11 @@ no fence, no store opens, no mutation. `--apply` acquires the realm's
 exclusive maintenance fence (`--fence-wait-secs`, default 10, bounds the
 wait for in-flight store operations to drain), then per realm: stamps
 ledgers by opening every store through its normal constructor under the
-held fence; reports state-root adoption (report-only —
-realms are used where they lie); and runs the machine-owned
-legacy-checkpoint adoption in bulk (sqlite realms; jsonl realms heal
-lazily on first authority touch and report the sweep as skipped). A realm
+held fence and reports state-root adoption (report-only — realms are used
+where they lie). Exact 0.8.10 session-state conversion is owned by each
+backend's activation transaction, which binds the released schema, key, and
+source bytes before installing current store authority; `storage migrate`
+does not bulk-adopt documents or defer conversion to ordinary reads. A realm
 materialized under multiple swept roots is a fail-closed refusal unless
 `--apply --adopt-root <path>` names the swept root whose copy to keep:
 every copy is fenced first, the divergence report is recomputed under the

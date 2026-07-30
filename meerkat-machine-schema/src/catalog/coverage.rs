@@ -266,7 +266,6 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                             "PublishEventStopped",
                             "StartConversationRunInitializing",
                             "StartImmediateAppendInitializing",
-                            "StartImmediateContextInitializing",
                             "PrimitiveAppliedConversation",
                             "PrimitiveAppliedImmediateCompleted",
                             "RegisterPendingOps",
@@ -922,7 +921,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 ),
                 scenario(
                     "occurrence_claim_dispatch_completion",
-                    "plan occurrence from pending, sync target snapshot from pending or claimed materialized bindings, record receipt from pending, claimed, dispatching, awaiting completion, completed, skipped, misfired, superseded, or delivery failed result projection, claim pending occurrence, dispatch started from claimed, await completion, complete from dispatching or awaiting, resolve runtime completion outcome, and record claimed/dispatch/awaiting/completed effects",
+                    "plan occurrence from pending, sync target snapshot from pending or claimed materialized bindings, record receipt from pending, claimed, dispatching, awaiting completion, completed, skipped, misfired, superseded, or delivery failed result projection, claim pending occurrence, persist dispatch intent from claimed, record target admission without rewriting its correlation, await completion, complete from dispatching or awaiting, resolve runtime completion outcome, and record claimed/dispatch/accept/await/completed effects",
                     CoverageClaims::none()
                         .transitions(&[
                             "PlanOccurrenceFromPending",
@@ -939,12 +938,14 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                             "RecordReceiptDeliveryFailed",
                             "ClaimPending",
                             "DispatchStartedFromClaimed",
+                            "DispatchAcceptedFromDispatching",
                             "AwaitCompletionFromDispatching",
                             "RuntimeCompletionCompleted",
                         ])
                         .effects(&[
                             "Claimed",
                             "DispatchStarted",
+                            "DispatchAccepted",
                             "AwaitingCompletion",
                             "Completed",
                             "Skipped",
@@ -1383,7 +1384,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 "session_document_authority",
                 "SessionDocumentMachine",
                 "meerkat-core/src/generated/session_document.rs",
-                "generated SessionDocumentMachine owner for MarkSessionInitialTurnPendingInactiveOrPending, MarkSessionInitialTurnPendingConsumed, StartSessionInitialTurnPending, StartSessionInitialTurnInactive, StartSessionInitialTurnConsumed, ResolveSessionFirstTurnOverridesAllowed, ResolveSessionFirstTurnOverridesDenied, StageSessionInitialPromptStore, StageSessionInitialPromptClear, StageSessionToolResults, ConsumeSessionDeferredInputsPending, ConsumeSessionDeferredInputsInactive, ConsumeSessionDeferredInputsConsumed, RestoreSessionConsumedInputs, RestoreSessionConsumedInputsNoPhaseRollback, RecoverSessionFirstTurnPhase, ResolveSystemContextAppendEmpty, ResolveSystemContextAppendConflict, ResolveSystemContextAppendDuplicate, ResolveSystemContextAppendNew, ResolveSystemContextPendingApplyItemRuntimeSteer, ResolveSystemContextPendingApplyItemNormal, ResolveSystemContextSteerCleanupItemRuntimeSteer, ResolveSystemContextSteerCleanupItemNormal, RestoreSystemContextSnapshot, ResolveRealtimeItemObservedDiscardedAssistant, ResolveRealtimeItemObservedPresent, ResolveRealtimeItemSkipped, ResolveRealtimeUserTranscriptFinalEmpty, ResolveRealtimeUserTranscriptFinalStore, ResolveRealtimeUserTranscriptFinalReplayOrConflict, ResolveRealtimeAssistantDeltaInvalidOrDuplicate, ResolveRealtimeAssistantDeltaDiscarded, ResolveRealtimeAssistantDeltaLaneConflict, ResolveRealtimeAssistantDeltaAccepted, ResolveRealtimeAssistantReplacementInvalid, ResolveRealtimeAssistantReplacementDiscarded, ResolveRealtimeAssistantReplacementLocked, ResolveRealtimeAssistantReplacementLaneConflict, ResolveRealtimeAssistantReplacementAccepted, ResolveRealtimeAssistantTurnCompletedInvalid, ResolveRealtimeAssistantTurnCompletedDiscard, ResolveRealtimeAssistantTurnCompletedToolUse, ResolveRealtimeAssistantTurnCompletedRecord, ResolveRealtimeAssistantTurnInterruptedInvalid, ResolveRealtimeAssistantTurnInterruptedValid, ResolveRealtimeMaterializeAlreadyDone, ResolveRealtimeMaterializeWaitForPredecessor, ResolveRealtimeMaterializeSkipped, ResolveRealtimeMaterializeWaitForReadyText, ResolveRealtimeMaterializeUser, ResolveRealtimeMaterializeAssistant, ResolveRealtimeMaterializeAssistantMissingCompletion, AuthorizeRestoreRealtimeTranscriptState, SessionFirstTurnPhaseResolved, SessionFirstTurnOverridesResolved, SessionInitialPromptStageResolved, SessionToolResultsStageResolved, SessionConsumedInputsRestoreResolved, SessionFirstTurnPhaseRecovered, SystemContextAppendResolved, SystemContextPendingApplyItemResolved, SystemContextSteerCleanupItemResolved, SystemContextSnapshotRestoreAuthorized, RealtimeTranscriptEventResolved, RealtimeMaterializeCandidateResolved, RealtimeTranscriptSnapshotRestoreAuthorized, AuthorizeSessionMetadataPersist, AuthorizeSessionBuildStatePersist, RestoreSessionBuildState, AuthorizeSystemPromptMutation, SessionMetadataPersistAuthorized, SessionBuildStatePersistAuthorized, SessionBuildStateRestoreAuthorized, and SystemPromptMutationAuthorized",
+                "generated SessionDocumentMachine owner for MarkSessionInitialTurnPendingInactiveOrPending, MarkSessionInitialTurnPendingConsumed, StartSessionInitialTurnPending, StartSessionInitialTurnInactive, StartSessionInitialTurnConsumed, ResolveSessionFirstTurnOverridesAllowed, ResolveSessionFirstTurnOverridesDenied, StageSessionInitialPromptStore, StageSessionInitialPromptClear, StageSessionToolResults, ConsumeSessionDeferredInputsPending, ConsumeSessionDeferredInputsInactive, ConsumeSessionDeferredInputsConsumed, RestoreSessionConsumedInputs, RestoreSessionConsumedInputsNoPhaseRollback, RecoverSessionFirstTurnPhase, ResolveRealtimeItemObservedDiscardedAssistant, ResolveRealtimeItemObservedPresent, ResolveRealtimeItemSkipped, ResolveRealtimeUserTranscriptFinalEmpty, ResolveRealtimeUserTranscriptFinalStore, ResolveRealtimeUserTranscriptFinalReplayOrConflict, ResolveRealtimeAssistantDeltaInvalidOrDuplicate, ResolveRealtimeAssistantDeltaDiscarded, ResolveRealtimeAssistantDeltaLaneConflict, ResolveRealtimeAssistantDeltaAccepted, ResolveRealtimeAssistantReplacementInvalid, ResolveRealtimeAssistantReplacementDiscarded, ResolveRealtimeAssistantReplacementLocked, ResolveRealtimeAssistantReplacementLaneConflict, ResolveRealtimeAssistantReplacementAccepted, ResolveRealtimeAssistantTurnCompletedInvalid, ResolveRealtimeAssistantTurnCompletedDiscard, ResolveRealtimeAssistantTurnCompletedToolUse, ResolveRealtimeAssistantTurnCompletedRecord, ResolveRealtimeAssistantTurnInterruptedInvalid, ResolveRealtimeAssistantTurnInterruptedValid, ResolveRealtimeMaterializeAlreadyDone, ResolveRealtimeMaterializeWaitForPredecessor, ResolveRealtimeMaterializeSkipped, ResolveRealtimeMaterializeWaitForReadyText, ResolveRealtimeMaterializeUser, ResolveRealtimeMaterializeAssistant, ResolveRealtimeMaterializeAssistantMissingCompletion, AuthorizeRestoreRealtimeTranscriptState, SessionFirstTurnPhaseResolved, SessionFirstTurnOverridesResolved, SessionInitialPromptStageResolved, SessionToolResultsStageResolved, SessionConsumedInputsRestoreResolved, SessionFirstTurnPhaseRecovered, RealtimeTranscriptEventResolved, RealtimeMaterializeCandidateResolved, RealtimeTranscriptSnapshotRestoreAuthorized, AuthorizeSessionMetadataPersist, AuthorizeSessionBuildStatePersist, RestoreSessionBuildState, SessionMetadataPersistAuthorized, SessionBuildStatePersistAuthorized, and SessionBuildStateRestoreAuthorized",
                 CoverageClaims::none()
                     .transitions(&[
                         "MarkSessionInitialTurnPendingInactiveOrPending",
@@ -1402,15 +1403,6 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                         "RestoreSessionConsumedInputs",
                         "RestoreSessionConsumedInputsNoPhaseRollback",
                         "RecoverSessionFirstTurnPhase",
-                        "ResolveSystemContextAppendEmpty",
-                        "ResolveSystemContextAppendConflict",
-                        "ResolveSystemContextAppendDuplicate",
-                        "ResolveSystemContextAppendNew",
-                        "ResolveSystemContextPendingApplyItemRuntimeSteer",
-                        "ResolveSystemContextPendingApplyItemNormal",
-                        "ResolveSystemContextSteerCleanupItemRuntimeSteer",
-                        "ResolveSystemContextSteerCleanupItemNormal",
-                        "RestoreSystemContextSnapshot",
                         "ResolveRealtimeItemObservedDiscardedAssistant",
                         "ResolveRealtimeItemObservedPresent",
                         "ResolveRealtimeItemSkipped",
@@ -1443,24 +1435,11 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                         "AuthorizeSessionMetadataPersist",
                         "AuthorizeSessionBuildStatePersist",
                         "RestoreSessionBuildState",
-                        "AuthorizeSystemPromptMutation",
                         "ApplyPendingToolResults",
                         "ResolveRuntimeCheckpointProjectionActive",
                         "ResolveRuntimeCheckpointProjectionArchived",
-                        "ResolveLegacyCheckpointMigrationSnapshotIdenticalProjection",
-                        "ResolveLegacyCheckpointMigrationSnapshotAheadOfProjection",
-                        "ResolveLegacyCheckpointMigrationProjectionExtension",
-                        "ResolveLegacyCheckpointMigrationDivergentCopies",
-                        "ResolveLegacyCheckpointMigrationSnapshotOnly",
-                        "ResolveLegacyCheckpointMigrationStoreRowOnly",
-                        "ResolveLegacyCheckpointMigrationTypedSnapshotLegacyProjection",
-                        "ResolveLegacyCheckpointMigrationSnapshotIdenticalTypedProjection",
-                        "ResolveLegacyCheckpointMigrationTypedProjectionExtension",
-                        "ResolveLegacyCheckpointMigrationSnapshotAheadOfTypedProjection",
-                        "ResolveLegacyCheckpointMigrationDivergentFromTypedProjection",
-                        "ResolveLegacyCheckpointMigrationTypedProjectionNotComparable",
-                        "ResolveLegacyCheckpointMigrationLifecycleArchivedAbsorbing",
-                        "ResolveLegacyCheckpointMigrationLifecycleElected",
+                        "ResolveSessionDocumentLifecycleMergeArchivedAbsorbing",
+                        "ResolveSessionDocumentLifecycleMergeAuthority",
                     ])
                     .effects(&[
                         "SessionFirstTurnPhaseResolved",
@@ -1469,20 +1448,14 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                         "SessionToolResultsStageResolved",
                         "SessionConsumedInputsRestoreResolved",
                         "SessionFirstTurnPhaseRecovered",
-                        "SystemContextAppendResolved",
-                        "SystemContextPendingApplyItemResolved",
-                        "SystemContextSteerCleanupItemResolved",
-                        "SystemContextSnapshotRestoreAuthorized",
                         "RealtimeTranscriptEventResolved",
                         "RealtimeMaterializeCandidateResolved",
                         "RealtimeTranscriptSnapshotRestoreAuthorized",
                         "SessionMetadataPersistAuthorized",
                         "SessionBuildStatePersistAuthorized",
                         "SessionBuildStateRestoreAuthorized",
-                        "SystemPromptMutationAuthorized",
                         "RuntimeCheckpointProjectionResolved",
-                        "LegacyCheckpointMigrationResolved",
-                        "LegacyCheckpointMigrationLifecycleResolved",
+                        "SessionDocumentLifecycleMergeResolved",
                     ]),
             )],
             &[
@@ -1536,41 +1509,6 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                         ]),
                 ),
                 scenario(
-                    "session_system_context_append_resolve",
-                    "ResolveSystemContextAppendEmpty, ResolveSystemContextAppendConflict, ResolveSystemContextAppendDuplicate, and ResolveSystemContextAppendNew decide the runtime system-context append disposition from typed key-present/matches/conflicts observations under SystemContextAppendResolved without the shell deciding",
-                    CoverageClaims::none()
-                        .transitions(&[
-                            "ResolveSystemContextAppendEmpty",
-                            "ResolveSystemContextAppendConflict",
-                            "ResolveSystemContextAppendDuplicate",
-                            "ResolveSystemContextAppendNew",
-                        ])
-                        .effects(&["SystemContextAppendResolved"]),
-                ),
-                scenario(
-                    "session_system_context_apply_discard",
-                    "ResolveSystemContextPendingApplyItemRuntimeSteer, ResolveSystemContextPendingApplyItemNormal, ResolveSystemContextSteerCleanupItemRuntimeSteer, and ResolveSystemContextSteerCleanupItemNormal decide per-append apply/discard from the typed SystemContextSource marker (not a runtime:steer string prefix) under SystemContextPendingApplyItemResolved and SystemContextSteerCleanupItemResolved",
-                    CoverageClaims::none()
-                        .transitions(&[
-                            "ResolveSystemContextPendingApplyItemRuntimeSteer",
-                            "ResolveSystemContextPendingApplyItemNormal",
-                            "ResolveSystemContextSteerCleanupItemRuntimeSteer",
-                            "ResolveSystemContextSteerCleanupItemNormal",
-                        ])
-                        .effects(&[
-                            "SystemContextAppendResolved",
-                            "SystemContextPendingApplyItemResolved",
-                            "SystemContextSteerCleanupItemResolved",
-                        ]),
-                ),
-                scenario(
-                    "session_system_context_snapshot_restore",
-                    "RestoreSystemContextSnapshot authorizes a durable system-context snapshot only when key-independent active-turn pending membership and its keyed rollback projection are consistent and seen keys match known appends under SystemContextSnapshotRestoreAuthorized",
-                    CoverageClaims::none()
-                        .transitions(&["RestoreSystemContextSnapshot"])
-                        .effects(&["SystemContextSnapshotRestoreAuthorized"]),
-                ),
-                scenario(
                     "session_realtime_transcript_event_resolve",
                     "ResolveRealtimeItemObservedDiscardedAssistant, ResolveRealtimeItemObservedPresent, ResolveRealtimeItemSkipped, ResolveRealtimeUserTranscriptFinalEmpty, ResolveRealtimeUserTranscriptFinalStore, ResolveRealtimeUserTranscriptFinalReplayOrConflict, ResolveRealtimeAssistantDeltaInvalidOrDuplicate, ResolveRealtimeAssistantDeltaDiscarded, ResolveRealtimeAssistantDeltaLaneConflict, ResolveRealtimeAssistantDeltaAccepted, ResolveRealtimeAssistantReplacementInvalid, ResolveRealtimeAssistantReplacementDiscarded, ResolveRealtimeAssistantReplacementLocked, ResolveRealtimeAssistantReplacementLaneConflict, ResolveRealtimeAssistantReplacementAccepted, ResolveRealtimeAssistantTurnCompletedInvalid, ResolveRealtimeAssistantTurnCompletedDiscard, ResolveRealtimeAssistantTurnCompletedToolUse, ResolveRealtimeAssistantTurnInterruptedInvalid, and ResolveRealtimeAssistantTurnInterruptedValid resolve the realtime-transcript action vector from typed raw observations (set membership, segment concat emptiness, lane, completion) under RealtimeTranscriptEventResolved without the shell deciding; the shell mirrors the emitted action vector onto its bulky SessionRealtimeTranscriptState",
                     CoverageClaims::none()
@@ -1621,19 +1559,17 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 ),
                 scenario(
                     "session_durable_config_authorize_restore",
-                    "AuthorizeSessionMetadataPersist, AuthorizeSessionBuildStatePersist, RestoreSessionBuildState, and AuthorizeSystemPromptMutation decide durable-config persist/restore/system-prompt admission from typed presence/count/kind observations the meerkat-core shell extracts from SessionMetadata and SessionBuildState under SessionMetadataPersistAuthorized, SessionBuildStatePersistAuthorized, SessionBuildStateRestoreAuthorized, and SystemPromptMutationAuthorized; a rejected request matches no transition and surfaces as Err, and the shell mirrors the verdict and passes the original typed value through unchanged",
+                    "AuthorizeSessionMetadataPersist, AuthorizeSessionBuildStatePersist, and RestoreSessionBuildState decide durable-config persist/restore admission from typed presence/count/kind observations the meerkat-core shell extracts from SessionMetadata and SessionBuildState under SessionMetadataPersistAuthorized, SessionBuildStatePersistAuthorized, and SessionBuildStateRestoreAuthorized; a rejected request matches no transition and surfaces as Err, and the shell mirrors the verdict and passes the original typed value through unchanged",
                     CoverageClaims::none()
                         .transitions(&[
                             "AuthorizeSessionMetadataPersist",
                             "AuthorizeSessionBuildStatePersist",
                             "RestoreSessionBuildState",
-                            "AuthorizeSystemPromptMutation",
                         ])
                         .effects(&[
                             "SessionMetadataPersistAuthorized",
                             "SessionBuildStatePersistAuthorized",
                             "SessionBuildStateRestoreAuthorized",
-                            "SystemPromptMutationAuthorized",
                         ]),
                 ),
             ],

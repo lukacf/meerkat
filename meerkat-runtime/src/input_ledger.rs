@@ -4,6 +4,7 @@
 
 use indexmap::IndexMap;
 use meerkat_core::lifecycle::InputId;
+use std::collections::BTreeSet;
 
 use crate::input_state::InputState;
 
@@ -12,6 +13,8 @@ use crate::input_state::InputState;
 pub struct InputLedger {
     /// InputId → InputState (insertion order preserved).
     states: IndexMap<InputId, InputState>,
+    /// Canonical owners of unfinished terminal work, ordered for stable paging.
+    pending_terminal_owners: BTreeSet<uuid::Uuid>,
 }
 
 impl InputLedger {
@@ -22,7 +25,9 @@ impl InputLedger {
 
     /// Accept a new InputState into the ledger.
     pub fn accept(&mut self, state: InputState) {
-        self.states.insert(state.input_id.clone(), state);
+        let input_id = state.input_id.clone();
+        self.states.insert(input_id.clone(), state);
+        self.refresh_pending_terminal_owner(&input_id);
     }
 
     /// Recover an InputState after generated recovery authority retained it.
@@ -31,7 +36,9 @@ impl InputLedger {
     /// MeerkatMachine recovery/admission path, not in the ledger.
     /// Returns `true` if the state was inserted.
     pub fn recover(&mut self, state: InputState) -> bool {
-        self.states.insert(state.input_id.clone(), state);
+        let input_id = state.input_id.clone();
+        self.states.insert(input_id.clone(), state);
+        self.refresh_pending_terminal_owner(&input_id);
         true
     }
 
@@ -42,6 +49,7 @@ impl InputLedger {
 
     /// Remove an input from the ledger.
     pub fn remove(&mut self, input_id: &InputId) -> Option<InputState> {
+        self.pending_terminal_owners.remove(&input_id.0);
         self.states.shift_remove(input_id)
     }
 
@@ -55,6 +63,29 @@ impl InputLedger {
     /// carries only shell metadata.
     pub fn iter(&self) -> impl Iterator<Item = (&InputId, &InputState)> {
         self.states.iter()
+    }
+
+    /// Refresh the secondary pending-terminal owner index after an in-place
+    /// shell mutation of one row.
+    pub(crate) fn refresh_pending_terminal_owner(&mut self, input_id: &InputId) {
+        let pending = self
+            .states
+            .get(input_id)
+            .is_some_and(crate::store::input_state_is_pending_terminal_owner);
+        if pending {
+            self.pending_terminal_owners.insert(input_id.0);
+        } else {
+            self.pending_terminal_owners.remove(&input_id.0);
+        }
+    }
+
+    /// Stable canonical owner ids for unfinished terminal work.
+    pub(crate) fn pending_terminal_owner_ids(&self) -> Vec<InputId> {
+        self.pending_terminal_owners
+            .iter()
+            .copied()
+            .map(InputId::from_uuid)
+            .collect()
     }
 
     /// Number of entries in the ledger.

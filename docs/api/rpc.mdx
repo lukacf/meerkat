@@ -125,7 +125,7 @@ subset.
 | `session/archive` | Session | `ArchiveSessionParams` | `Value` | Remove session from runtime |
 | `session/external_event` | Session | `SessionExternalEventEnvelope` | `RuntimeAcceptResult` | Queue a runtime-backed external event |
 | `session/peer_response_terminal` | Session | `SessionPeerResponseTerminalParams` | `RuntimeAcceptResult` | Admit a correlated terminal peer response through the typed runtime ingress |
-| `session/inject_context` | Session | `InjectSystemContextParams` | `InjectSystemContextResult` | Append runtime-backed system context to the next turn |
+| `session/inject_context` | Session | `InjectSystemContextParams` | `InjectSystemContextResult` | Append one ordinary durable ordered System message at the admitted transcript boundary |
 | `session/input_status` | Session | `SessionInputStateParams` | `SessionInputStateResult` | Read an input's stored runtime state (terminal outcome, run association) by input id or idempotency key |
 | `turn/start` | Turn | `StartTurnParams` | `WireRunResult` | Start a new turn on existing session |
 | `turn/interrupt` | Turn | `InterruptParams` | `InterruptResult` | Cancel in-flight turn |
@@ -157,7 +157,7 @@ subset.
 | `mob/stream_open` | Mob | `MobStreamOpenParams` | `MobStreamOpenResult` | Open mob or member event stream (mob feature) |
 | `mob/stream_close` | Mob | `MobStreamCloseParams` | `MobStreamCloseResult` | Close mob or member event stream (mob feature) |
 | `mob/member_send` | Mob | `MobMemberSendParams` | `MobMemberSendResult` | Deliver ordinary content to a specific mob member via the host control plane (mob feature) |
-| `mob/append_system_context` | Mob | `MobAppendSystemContextParams` | `MobAppendSystemContextResult` | Stage system context for a member session (mob feature) |
+| `mob/append_system_context` | Mob | `MobAppendSystemContextParams` | `MobAppendSystemContextResult` | Append one ordinary durable ordered System message to a member session (mob feature) |
 | `mob/flows` | Mob | `MobIdParams` | `MobFlowsResult` | List mob flows (mob feature) |
 | `mob/run` | Mob | `MobRunParams` | `MobFlowRunResult` | Invoke a mob as a typed callable run (mob feature) |
 | `mob/flow_run` | Mob | `MobFlowRunParams` | `MobFlowRunResult` | Start a mob flow run (mob feature) |
@@ -330,9 +330,9 @@ Handshake. Returns server capabilities.
   "result": {
     "server_info": {
       "name": "meerkat-rpc",
-      "version": "0.8.10"
+      "version": "0.8.11"
     },
-    "contract_version": "0.8.10",
+    "contract_version": "0.8.11",
     "methods": [
       "initialize", "initialized",
       "session/create", "session/list", "session/read",
@@ -454,6 +454,14 @@ Only `prompt` is required. All other fields are optional and fall back to config
   as a separate typed injected-context user-channel message immediately before
   the first turn's user message, in order; injected context is excluded from
   semantic-memory indexing.
+</ParamField>
+
+<ParamField body="transient_turn_context" type="string | null" default="null">
+  Non-empty, exact request-only host facts for the immediate first turn;
+  whitespace is significant. The pending runtime input retains the bytes for
+  crash retry; the Session transcript, compaction summarizer, and extraction
+  phase never receive them. Deferred create rejects this field; provide it on
+  the eventual `turn/start`.
 </ParamField>
 
 <ParamField body="model" type="string | null" default="config/catalog default">
@@ -889,6 +897,12 @@ Returns the same result shape as `session/create`. Fails with error code `-32001
   semantic-memory indexing.
 </ParamField>
 
+<ParamField body="transient_turn_context" type="string | null" default="null">
+  Non-empty, exact request-only host facts for this newly admitted turn;
+  whitespace is significant. Projected before the admitted conversational
+  user message for foreground model calls only; never appended to Session.
+</ParamField>
+
 <ParamField body="model" type="string | null" default="from session">
   Model override for this turn. On pending (deferred) sessions this sets the model before materialization. On materialized sessions this hot-swaps the LLM client for the remainder of the session.
 </ParamField>
@@ -1218,13 +1232,15 @@ Create a session on a realtime-capable model and call `live/open`:
 <ParamField body="seed_max_chars" type="usize | null" default="null">
   Optional positive serialized-character budget for the core-owned seed
   message window. Omitted preserves the complete canonical history. When
-  present, core selects a recent whole-turn suffix. The resolved root prompt
-  is never dropped and must fit; an existing compaction-summary head may also
-  be retained. Any truncation returns degraded continuity. Zero is rejected.
+  present, core selects a recent whole-turn suffix. Every ordered System
+  message is retained and their combined serialized size must fit; an existing
+  compaction-summary head may also be retained. Any truncation returns degraded
+  continuity. Zero is rejected.
 </ParamField>
 
-Runtime system context and the canonical multimodal sidecars remain outside
-the message window. Image identity, tombstones, and aggregate accounting stay
+System messages are ordinary ordered transcript data and are retained by the
+message window rules above. Canonical multimodal sidecars remain outside the
+message window. Image identity, tombstones, and aggregate accounting stay
 complete even when older seed messages are omitted.
 
 ### live/status
@@ -1481,7 +1497,7 @@ Return the curated model catalog with provider profiles, capability metadata, an
   "jsonrpc": "2.0",
   "id": 17,
   "result": {
-    "contract_version": "0.8.10",
+    "contract_version": "0.8.11",
     "providers": [
       {
         "provider": "anthropic",
@@ -1539,7 +1555,7 @@ Return runtime capabilities with status resolved against config. This lists ever
   "jsonrpc": "2.0",
   "id": 8,
   "result": {
-    "contract_version": {"major": 0, "minor": 8, "patch": 10},
+    "contract_version": {"major": 0, "minor": 8, "patch": 11},
     "capabilities": [
       {
         "id": "sessions",

@@ -1049,7 +1049,26 @@ pub struct PreparedSurfaceSession {
 pub async fn prepare_surface_session(
     runtime_adapter: &meerkat_runtime::MeerkatMachine,
 ) -> Result<PreparedSurfaceSession, String> {
-    let session = Session::new();
+    prepare_surface_session_from_seed(runtime_adapter, Session::new()).await
+}
+
+/// Prepare runtime bindings for an exact caller-owned session identity.
+///
+/// Durable workflows must use this form when their external operation already
+/// owns a stable identity. Schedule materialization derives the session id
+/// from the occurrence so a crash before binding can only reopen the same
+/// actor.
+pub async fn prepare_surface_session_with_id(
+    runtime_adapter: &meerkat_runtime::MeerkatMachine,
+    session_id: SessionId,
+) -> Result<PreparedSurfaceSession, String> {
+    prepare_surface_session_from_seed(runtime_adapter, Session::with_id(session_id)).await
+}
+
+async fn prepare_surface_session_from_seed(
+    runtime_adapter: &meerkat_runtime::MeerkatMachine,
+    session: Session,
+) -> Result<PreparedSurfaceSession, String> {
     let session_id = session.id().clone();
     let bindings = runtime_adapter
         .prepare_bindings(session_id.clone())

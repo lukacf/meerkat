@@ -10,12 +10,11 @@ use crate::service::{
 };
 use crate::{
     AgentToolDispatcher, AuthBindingRef, BudgetLimits, ContentInput, HookRunOverrides,
-    OutputSchema, PeerMeta, Provider, Session, SessionBuildState, SessionDeferredTurnState,
-    SessionMetadata, ToolCategoryOverride, ToolDef, checkpoint::SessionCheckpointer,
-    skills::SkillKey,
+    OutputSchema, PeerMeta, Provider, Session, SessionBuildState, SessionCheckpointer,
+    SessionDeferredTurnState, SessionMetadata, ToolCategoryOverride, ToolDef, skills::SkillKey,
 };
 
-pub const BUILD_ONLY_RECOVERY_OVERRIDE_ERROR: &str = "Cannot override max_tokens, system_prompt, output_schema, or structured_output_retries after the deferred session's first turn has started";
+pub const BUILD_ONLY_RECOVERY_OVERRIDE_ERROR: &str = "Cannot override max_tokens, output_schema, or structured_output_retries after the deferred session's first turn has started";
 
 /// Explicit semantic caller intent for a resumed turn.
 ///
@@ -31,7 +30,6 @@ pub struct SurfaceSessionRecoveryOverrides {
         Option<TurnMetadataOverride<crate::lifecycle::run_primitive::ProviderParamsOverride>>,
     pub auth_binding: Option<TurnMetadataOverride<AuthBindingRef>>,
     pub max_tokens: Option<u32>,
-    pub system_prompt: Option<String>,
     pub output_schema: Option<OutputSchema>,
     pub structured_output_retries: Option<u32>,
     pub keep_alive: Option<bool>,
@@ -216,7 +214,6 @@ impl Default for SurfaceSessionRecoveryContext {
 #[derive(Debug)]
 pub struct EffectiveTurnConfig {
     pub model: String,
-    pub system_prompt: crate::config::SystemPromptOverride,
     pub max_tokens: Option<u32>,
     pub keep_alive: bool,
     pub build: SessionBuildOptions,
@@ -226,7 +223,6 @@ pub struct EffectiveTurnConfig {
 #[derive(Debug)]
 pub struct RecoveredSessionBuild {
     pub model: String,
-    pub system_prompt: crate::config::SystemPromptOverride,
     pub max_tokens: Option<u32>,
     pub keep_alive: bool,
     pub build: SessionBuildOptions,
@@ -246,7 +242,7 @@ impl RecoveredSessionBuild {
             model: self.model,
             prompt: ContentInput::Text(String::new()),
             injected_context: Vec::new(),
-            system_prompt: self.system_prompt,
+            system_prompt: crate::config::SystemPromptOverride::Inherit,
             max_tokens: self.max_tokens,
             event_tx: None,
             initial_turn: InitialTurnPolicy::Defer,
@@ -261,7 +257,6 @@ impl From<EffectiveTurnConfig> for RecoveredSessionBuild {
     fn from(config: EffectiveTurnConfig) -> Self {
         Self {
             model: config.model,
-            system_prompt: config.system_prompt,
             max_tokens: config.max_tokens,
             keep_alive: config.keep_alive,
             build: config.build,
@@ -282,7 +277,6 @@ pub enum SurfaceSessionRecoveryError {
 
 pub fn has_build_only_turn_overrides(overrides: &SurfaceSessionRecoveryOverrides) -> bool {
     overrides.max_tokens.is_some()
-        || overrides.system_prompt.is_some()
         || overrides.output_schema.is_some()
         || overrides.structured_output_retries.is_some()
 }
@@ -459,7 +453,7 @@ pub fn resolve_effective_turn_config(
     let SessionDefaults {
         metadata,
         build_state,
-        allows_first_turn_build_overrides,
+        allows_first_turn_build_overrides: _,
     } = SessionDefaults::from_session(&session)?;
 
     // The resume-override admission verdict (provider-requires-model,
@@ -511,14 +505,6 @@ pub fn resolve_effective_turn_config(
         .model
         .clone()
         .unwrap_or_else(|| metadata.model.clone());
-    let system_prompt = if allows_first_turn_build_overrides {
-        match overrides.system_prompt.clone() {
-            Some(prompt) => crate::config::SystemPromptOverride::Set(prompt),
-            None => build_state.system_prompt.clone(),
-        }
-    } else {
-        crate::config::SystemPromptOverride::Inherit
-    };
     let max_tokens = overrides.max_tokens.or(Some(metadata.max_tokens));
     let keep_alive = overrides.keep_alive.unwrap_or(metadata.keep_alive);
     let recoverable_tool_defs = overrides
@@ -693,7 +679,6 @@ pub fn resolve_effective_turn_config(
 
     Ok(EffectiveTurnConfig {
         model,
-        system_prompt,
         max_tokens,
         keep_alive,
         build,
@@ -775,9 +760,6 @@ mod tests {
             .expect("session metadata");
         session
             .set_build_state(SessionBuildState {
-                system_prompt: crate::config::SystemPromptOverride::Set(
-                    "persisted system prompt".to_string(),
-                ),
                 output_schema: Some(
                     OutputSchema::from_json_value(
                         json!({"type":"object","properties":{"ok":{"type":"boolean"}}}),
@@ -820,7 +802,6 @@ mod tests {
                     ),
                 ),
                 call_timeout_override: CallTimeoutOverride::Value(Duration::from_secs(42)),
-                assembled_system_prompt: None,
             })
             .expect("session build state");
         let mut deferred = SessionDeferredTurnState::default();
@@ -920,7 +901,6 @@ mod tests {
                     },
                 )),
                 max_tokens: Some(2048),
-                system_prompt: Some("override system prompt".to_string()),
                 output_schema: Some(override_schema.clone()),
                 structured_output_retries: Some(9),
                 keep_alive: Some(true),
@@ -931,10 +911,6 @@ mod tests {
         .expect("recovered session");
 
         assert_eq!(recovered.model, "test-openai-other");
-        assert_eq!(
-            recovered.system_prompt.as_set_prompt(),
-            Some("override system prompt")
-        );
         assert_eq!(recovered.max_tokens, Some(2048));
         assert!(recovered.keep_alive);
         assert_eq!(recovered.recoverable_tool_defs.len(), 1);
@@ -1491,15 +1467,12 @@ mod tests {
     }
 
     #[test]
-    fn build_recovered_session_rejects_build_only_overrides_after_first_turn_started() {
+    fn build_recovered_session_still_rejects_genuine_build_only_overrides_after_first_turn() {
         let mut session = sample_session();
         let mut deferred = session
             .deferred_turn_state()
             .expect("deferred turn state should exist");
-        assert!(
-            deferred.mark_initial_turn_started(),
-            "pending deferred phase should transition to consumed"
-        );
+        assert!(deferred.mark_initial_turn_started());
         session
             .set_deferred_turn_state(deferred)
             .expect("updated deferred turn state");
@@ -1507,22 +1480,18 @@ mod tests {
         let error = build_recovered_session(
             session,
             &SurfaceSessionRecoveryOverrides {
-                system_prompt: Some("late override".to_string()),
+                max_tokens: Some(17),
                 ..Default::default()
             },
             SurfaceSessionRecoveryContext::default(),
         )
-        .expect_err("late build-only override should be rejected");
+        .expect_err("late max_tokens override remains build-only");
 
-        assert!(
-            matches!(error, SurfaceSessionRecoveryError::InvalidOverride(_)),
-            "late build-only override should be treated as InvalidOverride"
-        );
         assert_eq!(error.to_string(), BUILD_ONLY_RECOVERY_OVERRIDE_ERROR);
     }
 
     #[test]
-    fn build_recovered_session_preserves_existing_system_prompt_after_first_turn_started() {
+    fn recovered_create_request_never_reemits_system_configuration() {
         let mut session = sample_session();
         let mut deferred = session
             .deferred_turn_state()
@@ -1543,8 +1512,11 @@ mod tests {
         .expect("recovered session without rewriting prompt");
 
         assert!(
-            recovered.system_prompt.is_inherit(),
-            "consumed sessions must not re-emit a create-time system_prompt override"
+            recovered
+                .into_deferred_create_request()
+                .system_prompt
+                .is_inherit(),
+            "recovery must not synthesize a System outside turn admission"
         );
     }
 

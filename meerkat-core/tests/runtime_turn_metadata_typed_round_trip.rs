@@ -39,6 +39,10 @@ fn sample_metadata() -> RuntimeTurnMetadata {
                 body: "host-authored steering".into(),
             },
         ]),
+        system_prompts: vec![
+            "first ordered system message".into(),
+            "second ordered system message".into(),
+        ],
         model: Some(ModelId::new("claude-opus-4-8")),
         provider: Some(Provider::Anthropic),
         self_hosted_server_id: None,
@@ -70,7 +74,7 @@ fn sample_metadata() -> RuntimeTurnMetadata {
         }),
         execution_kind: Some(RuntimeExecutionKind::ContentTurn),
         peer_response_terminal_apply_intent: Some(
-            PeerResponseTerminalApplyIntent::AppendContextAndRun,
+            PeerResponseTerminalApplyIntent::AppendContentAndRun,
         ),
         directed_interaction_ids: vec![meerkat_core::interaction::InteractionId(
             uuid::Uuid::new_v4(),
@@ -302,6 +306,7 @@ fn merge_collection_fields_accumulate() {
             kind: TurnInstructionKind::User,
             body: "left".into(),
         }]),
+        system_prompts: vec!["left system".into()],
         ..Default::default()
     };
     let right = RuntimeTurnMetadata {
@@ -313,11 +318,16 @@ fn merge_collection_fields_accumulate() {
             kind: TurnInstructionKind::Host,
             body: "right".into(),
         }]),
+        system_prompts: vec!["right system one".into(), "right system two".into()],
         ..Default::default()
     };
     left.merge(right).expect("collection merge never conflicts");
     assert_eq!(left.skill_references.as_ref().map(Vec::len), Some(2));
     assert_eq!(left.additional_instructions.as_ref().map(Vec::len), Some(2));
+    assert_eq!(
+        left.system_prompts,
+        ["left system", "right system one", "right system two"]
+    );
 }
 
 #[test]

@@ -321,7 +321,7 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
         "Always include the marker [TS-SDK-CTX] in your replies.",
         { source: "typescript-smoke" },
       );
-      assert.ok(["Staged", "staged", "Duplicate", "duplicate"].includes(String(injected.status)));
+      assert.ok(["Applied", "applied", "Duplicate", "duplicate"].includes(String(injected.status)));
 
       const first = await deferred.startTurn(
         "What is the codeword? Include any markers you were told about.",
@@ -454,7 +454,7 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
         "Remember the swarm marker SWARM_MARKER_7F3X2A.",
         { source: "typescript-sdk", idempotencyKey: "ts-swarm-marker" },
       ));
-      assert.ok(["Staged", "staged", "Duplicate", "duplicate"].includes(String(append.status)));
+      assert.ok(["Applied", "applied", "Duplicate", "duplicate"].includes(String(append.status)));
       if (append.agent_identity != null) {
         assert.equal(append.agent_identity, "reviewer-1");
       }

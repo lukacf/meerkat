@@ -27,60 +27,6 @@ pub fn schema() -> meerkat_machine_schema::MachineSchema {
     serde::Serialize,
     serde::Deserialize,
 )]
-pub enum CheckpointProvenanceClass {
-    #[default]
-    #[serde(rename = "Unstamped")]
-    Unstamped,
-    #[serde(rename = "Committed")]
-    Committed,
-    #[serde(rename = "IntraTurn")]
-    IntraTurn,
-}
-impl CheckpointProvenanceClass {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Unstamped => "Unstamped",
-            Self::Committed => "Committed",
-            Self::IntraTurn => "IntraTurn",
-        }
-    }
-}
-impl std::convert::TryFrom<&str> for CheckpointProvenanceClass {
-    type Error = String;
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        match value {
-            "Unstamped" => Ok(Self::Unstamped),
-            "Committed" => Ok(Self::Committed),
-            "IntraTurn" => Ok(Self::IntraTurn),
-            other => Err(format!("invalid CheckpointProvenanceClass value `{other}`")),
-        }
-    }
-}
-impl std::convert::TryFrom<String> for CheckpointProvenanceClass {
-    type Error = String;
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_str())
-    }
-}
-impl std::fmt::Display for CheckpointProvenanceClass {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
 pub enum DurableHeadRelation {
     #[default]
     #[serde(rename = "AbsentOrExact")]
@@ -143,120 +89,12 @@ impl std::fmt::Display for DurableHeadRelation {
     serde::Serialize,
     serde::Deserialize,
 )]
-pub enum DurableHeadStampEra {
-    #[default]
-    #[serde(rename = "WitnessV3OrNewer")]
-    WitnessV3OrNewer,
-    #[serde(rename = "PreWitnessV3")]
-    PreWitnessV3,
-}
-impl DurableHeadStampEra {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::WitnessV3OrNewer => "WitnessV3OrNewer",
-            Self::PreWitnessV3 => "PreWitnessV3",
-        }
-    }
-}
-impl std::convert::TryFrom<&str> for DurableHeadStampEra {
-    type Error = String;
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        match value {
-            "WitnessV3OrNewer" => Ok(Self::WitnessV3OrNewer),
-            "PreWitnessV3" => Ok(Self::PreWitnessV3),
-            other => Err(format!("invalid DurableHeadStampEra value `{other}`")),
-        }
-    }
-}
-impl std::convert::TryFrom<String> for DurableHeadStampEra {
-    type Error = String;
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_str())
-    }
-}
-impl std::fmt::Display for DurableHeadStampEra {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum DurableTailExecutionEvidence {
-    #[default]
-    #[serde(rename = "NoExecutionContent")]
-    NoExecutionContent,
-    #[serde(rename = "BoundExecution")]
-    BoundExecution,
-    #[serde(rename = "UnboundExecution")]
-    UnboundExecution,
-}
-impl DurableTailExecutionEvidence {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::NoExecutionContent => "NoExecutionContent",
-            Self::BoundExecution => "BoundExecution",
-            Self::UnboundExecution => "UnboundExecution",
-        }
-    }
-}
-impl std::convert::TryFrom<&str> for DurableTailExecutionEvidence {
-    type Error = String;
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        match value {
-            "NoExecutionContent" => Ok(Self::NoExecutionContent),
-            "BoundExecution" => Ok(Self::BoundExecution),
-            "UnboundExecution" => Ok(Self::UnboundExecution),
-            other => Err(format!(
-                "invalid DurableTailExecutionEvidence value `{other}`"
-            )),
-        }
-    }
-}
-impl std::convert::TryFrom<String> for DurableTailExecutionEvidence {
-    type Error = String;
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_str())
-    }
-}
-impl std::fmt::Display for DurableTailExecutionEvidence {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
 pub enum DurableTailRecoveryClass {
     #[default]
     #[serde(rename = "CompletedCandidate")]
     CompletedCandidate,
     #[serde(rename = "InterruptedRepairableCandidate")]
     InterruptedRepairableCandidate,
-    #[serde(rename = "LegacyCompletedCandidate")]
-    LegacyCompletedCandidate,
     #[serde(rename = "Ambiguous")]
     Ambiguous,
 }
@@ -265,7 +103,6 @@ impl DurableTailRecoveryClass {
         match self {
             Self::CompletedCandidate => "CompletedCandidate",
             Self::InterruptedRepairableCandidate => "InterruptedRepairableCandidate",
-            Self::LegacyCompletedCandidate => "LegacyCompletedCandidate",
             Self::Ambiguous => "Ambiguous",
         }
     }
@@ -276,7 +113,6 @@ impl std::convert::TryFrom<&str> for DurableTailRecoveryClass {
         match value {
             "CompletedCandidate" => Ok(Self::CompletedCandidate),
             "InterruptedRepairableCandidate" => Ok(Self::InterruptedRepairableCandidate),
-            "LegacyCompletedCandidate" => Ok(Self::LegacyCompletedCandidate),
             "Ambiguous" => Ok(Self::Ambiguous),
             other => Err(format!("invalid DurableTailRecoveryClass value `{other}`")),
         }
@@ -365,190 +201,6 @@ impl std::fmt::Display for DurableTailStopReason {
     serde::Serialize,
     serde::Deserialize,
 )]
-pub enum LegacyCheckpointLifecycleMerge {
-    #[default]
-    #[serde(rename = "CarryArchived")]
-    CarryArchived,
-    #[serde(rename = "CarryElected")]
-    CarryElected,
-}
-impl LegacyCheckpointLifecycleMerge {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::CarryArchived => "CarryArchived",
-            Self::CarryElected => "CarryElected",
-        }
-    }
-}
-impl std::convert::TryFrom<&str> for LegacyCheckpointLifecycleMerge {
-    type Error = String;
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        match value {
-            "CarryArchived" => Ok(Self::CarryArchived),
-            "CarryElected" => Ok(Self::CarryElected),
-            other => Err(format!(
-                "invalid LegacyCheckpointLifecycleMerge value `{other}`"
-            )),
-        }
-    }
-}
-impl std::convert::TryFrom<String> for LegacyCheckpointLifecycleMerge {
-    type Error = String;
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_str())
-    }
-}
-impl std::fmt::Display for LegacyCheckpointLifecycleMerge {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum LegacyCheckpointMigrationDisposition {
-    #[default]
-    #[serde(rename = "RefuseDivergent")]
-    RefuseDivergent,
-    #[serde(rename = "MigrateCanonicalSnapshot")]
-    MigrateCanonicalSnapshot,
-    #[serde(rename = "AdoptProjectionExtension")]
-    AdoptProjectionExtension,
-    #[serde(rename = "MigrateStoreProjection")]
-    MigrateStoreProjection,
-    #[serde(rename = "RebuildProjectionFromTypedSnapshot")]
-    RebuildProjectionFromTypedSnapshot,
-    #[serde(rename = "ConvergeSnapshotOntoTypedProjection")]
-    ConvergeSnapshotOntoTypedProjection,
-}
-impl LegacyCheckpointMigrationDisposition {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::RefuseDivergent => "RefuseDivergent",
-            Self::MigrateCanonicalSnapshot => "MigrateCanonicalSnapshot",
-            Self::AdoptProjectionExtension => "AdoptProjectionExtension",
-            Self::MigrateStoreProjection => "MigrateStoreProjection",
-            Self::RebuildProjectionFromTypedSnapshot => "RebuildProjectionFromTypedSnapshot",
-            Self::ConvergeSnapshotOntoTypedProjection => "ConvergeSnapshotOntoTypedProjection",
-        }
-    }
-}
-impl std::convert::TryFrom<&str> for LegacyCheckpointMigrationDisposition {
-    type Error = String;
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        match value {
-            "RefuseDivergent" => Ok(Self::RefuseDivergent),
-            "MigrateCanonicalSnapshot" => Ok(Self::MigrateCanonicalSnapshot),
-            "AdoptProjectionExtension" => Ok(Self::AdoptProjectionExtension),
-            "MigrateStoreProjection" => Ok(Self::MigrateStoreProjection),
-            "RebuildProjectionFromTypedSnapshot" => Ok(Self::RebuildProjectionFromTypedSnapshot),
-            "ConvergeSnapshotOntoTypedProjection" => Ok(Self::ConvergeSnapshotOntoTypedProjection),
-            other => Err(format!(
-                "invalid LegacyCheckpointMigrationDisposition value `{other}`"
-            )),
-        }
-    }
-}
-impl std::convert::TryFrom<String> for LegacyCheckpointMigrationDisposition {
-    type Error = String;
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_str())
-    }
-}
-impl std::fmt::Display for LegacyCheckpointMigrationDisposition {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum LegacyCheckpointTranscriptRelation {
-    #[default]
-    #[serde(rename = "Divergent")]
-    Divergent,
-    #[serde(rename = "Identical")]
-    Identical,
-    #[serde(rename = "ProjectionExtendsSnapshot")]
-    ProjectionExtendsSnapshot,
-    #[serde(rename = "SnapshotExtendsProjection")]
-    SnapshotExtendsProjection,
-    #[serde(rename = "NotComparable")]
-    NotComparable,
-}
-impl LegacyCheckpointTranscriptRelation {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Divergent => "Divergent",
-            Self::Identical => "Identical",
-            Self::ProjectionExtendsSnapshot => "ProjectionExtendsSnapshot",
-            Self::SnapshotExtendsProjection => "SnapshotExtendsProjection",
-            Self::NotComparable => "NotComparable",
-        }
-    }
-}
-impl std::convert::TryFrom<&str> for LegacyCheckpointTranscriptRelation {
-    type Error = String;
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        match value {
-            "Divergent" => Ok(Self::Divergent),
-            "Identical" => Ok(Self::Identical),
-            "ProjectionExtendsSnapshot" => Ok(Self::ProjectionExtendsSnapshot),
-            "SnapshotExtendsProjection" => Ok(Self::SnapshotExtendsProjection),
-            "NotComparable" => Ok(Self::NotComparable),
-            other => Err(format!(
-                "invalid LegacyCheckpointTranscriptRelation value `{other}`"
-            )),
-        }
-    }
-}
-impl std::convert::TryFrom<String> for LegacyCheckpointTranscriptRelation {
-    type Error = String;
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_str())
-    }
-}
-impl std::fmt::Display for LegacyCheckpointTranscriptRelation {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
 pub enum LiveSessionAuthorityKind {
     #[default]
     #[serde(rename = "LiveAuthoritative")]
@@ -605,8 +257,6 @@ pub enum LiveSessionAuthorityReason {
     StoredArchived,
     #[serde(rename = "LiveUncommittedTranscript")]
     LiveUncommittedTranscript,
-    #[serde(rename = "RuntimeSystemContextDiverged")]
-    RuntimeSystemContextDiverged,
     #[serde(rename = "StoredTranscriptRevisionDiverged")]
     StoredTranscriptRevisionDiverged,
 }
@@ -615,7 +265,6 @@ impl LiveSessionAuthorityReason {
         match self {
             Self::StoredArchived => "StoredArchived",
             Self::LiveUncommittedTranscript => "LiveUncommittedTranscript",
-            Self::RuntimeSystemContextDiverged => "RuntimeSystemContextDiverged",
             Self::StoredTranscriptRevisionDiverged => "StoredTranscriptRevisionDiverged",
         }
     }
@@ -626,7 +275,6 @@ impl std::convert::TryFrom<&str> for LiveSessionAuthorityReason {
         match value {
             "StoredArchived" => Ok(Self::StoredArchived),
             "LiveUncommittedTranscript" => Ok(Self::LiveUncommittedTranscript),
-            "RuntimeSystemContextDiverged" => Ok(Self::RuntimeSystemContextDiverged),
             "StoredTranscriptRevisionDiverged" => Ok(Self::StoredTranscriptRevisionDiverged),
             other => Err(format!(
                 "invalid LiveSessionAuthorityReason value `{other}`"
@@ -1573,122 +1221,6 @@ impl std::fmt::Display for RuntimeCheckpointProjectionDisposition {
     serde::Serialize,
     serde::Deserialize,
 )]
-pub enum RuntimeProjectionConflictDisposition {
-    #[default]
-    #[serde(rename = "RejectDivergent")]
-    RejectDivergent,
-    #[serde(rename = "ConvergeSupersededProjection")]
-    ConvergeSupersededProjection,
-    #[serde(rename = "RetainForRecovery")]
-    RetainForRecovery,
-}
-impl RuntimeProjectionConflictDisposition {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::RejectDivergent => "RejectDivergent",
-            Self::ConvergeSupersededProjection => "ConvergeSupersededProjection",
-            Self::RetainForRecovery => "RetainForRecovery",
-        }
-    }
-}
-impl std::convert::TryFrom<&str> for RuntimeProjectionConflictDisposition {
-    type Error = String;
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        match value {
-            "RejectDivergent" => Ok(Self::RejectDivergent),
-            "ConvergeSupersededProjection" => Ok(Self::ConvergeSupersededProjection),
-            "RetainForRecovery" => Ok(Self::RetainForRecovery),
-            other => Err(format!(
-                "invalid RuntimeProjectionConflictDisposition value `{other}`"
-            )),
-        }
-    }
-}
-impl std::convert::TryFrom<String> for RuntimeProjectionConflictDisposition {
-    type Error = String;
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_str())
-    }
-}
-impl std::fmt::Display for RuntimeProjectionConflictDisposition {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum RuntimeSnapshotReadDisposition {
-    #[default]
-    #[serde(rename = "UseRuntimeSnapshot")]
-    UseRuntimeSnapshot,
-    #[serde(rename = "UseCommittedStoreHead")]
-    UseCommittedStoreHead,
-    #[serde(rename = "RecoveryRequired")]
-    RecoveryRequired,
-    #[serde(rename = "Quarantine")]
-    Quarantine,
-}
-impl RuntimeSnapshotReadDisposition {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::UseRuntimeSnapshot => "UseRuntimeSnapshot",
-            Self::UseCommittedStoreHead => "UseCommittedStoreHead",
-            Self::RecoveryRequired => "RecoveryRequired",
-            Self::Quarantine => "Quarantine",
-        }
-    }
-}
-impl std::convert::TryFrom<&str> for RuntimeSnapshotReadDisposition {
-    type Error = String;
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        match value {
-            "UseRuntimeSnapshot" => Ok(Self::UseRuntimeSnapshot),
-            "UseCommittedStoreHead" => Ok(Self::UseCommittedStoreHead),
-            "RecoveryRequired" => Ok(Self::RecoveryRequired),
-            "Quarantine" => Ok(Self::Quarantine),
-            other => Err(format!(
-                "invalid RuntimeSnapshotReadDisposition value `{other}`"
-            )),
-        }
-    }
-}
-impl std::convert::TryFrom<String> for RuntimeSnapshotReadDisposition {
-    type Error = String;
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_str())
-    }
-}
-impl std::fmt::Display for RuntimeSnapshotReadDisposition {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
 pub enum SessionArchiveDisposition {
     #[default]
     #[serde(rename = "Archive")]
@@ -1845,6 +1377,58 @@ impl std::fmt::Display for SessionDocumentLifecycle {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum SessionDocumentLifecycleMerge {
+    #[default]
+    #[serde(rename = "CarryArchived")]
+    CarryArchived,
+    #[serde(rename = "CarryAuthority")]
+    CarryAuthority,
+}
+impl SessionDocumentLifecycleMerge {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::CarryArchived => "CarryArchived",
+            Self::CarryAuthority => "CarryAuthority",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for SessionDocumentLifecycleMerge {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "CarryArchived" => Ok(Self::CarryArchived),
+            "CarryAuthority" => Ok(Self::CarryAuthority),
+            other => Err(format!(
+                "invalid SessionDocumentLifecycleMerge value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for SessionDocumentLifecycleMerge {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for SessionDocumentLifecycleMerge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum SessionFirstTurnPhase {
     #[default]
     #[serde(rename = "Inactive")]
@@ -1979,234 +1563,6 @@ impl std::fmt::Display for SessionInitialPromptStageDecision {
     serde::Serialize,
     serde::Deserialize,
 )]
-pub enum SessionSystemPromptSource {
-    #[default]
-    #[serde(rename = "DirectMutation")]
-    DirectMutation,
-    #[serde(rename = "ExplicitBuild")]
-    ExplicitBuild,
-    #[serde(rename = "DefaultBuild")]
-    DefaultBuild,
-    #[serde(rename = "WasmDefaultBuild")]
-    WasmDefaultBuild,
-    #[serde(rename = "RuntimeContextAppend")]
-    RuntimeContextAppend,
-    #[serde(rename = "RuntimeSteerCleanup")]
-    RuntimeSteerCleanup,
-}
-impl SessionSystemPromptSource {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::DirectMutation => "DirectMutation",
-            Self::ExplicitBuild => "ExplicitBuild",
-            Self::DefaultBuild => "DefaultBuild",
-            Self::WasmDefaultBuild => "WasmDefaultBuild",
-            Self::RuntimeContextAppend => "RuntimeContextAppend",
-            Self::RuntimeSteerCleanup => "RuntimeSteerCleanup",
-        }
-    }
-}
-impl std::convert::TryFrom<&str> for SessionSystemPromptSource {
-    type Error = String;
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        match value {
-            "DirectMutation" => Ok(Self::DirectMutation),
-            "ExplicitBuild" => Ok(Self::ExplicitBuild),
-            "DefaultBuild" => Ok(Self::DefaultBuild),
-            "WasmDefaultBuild" => Ok(Self::WasmDefaultBuild),
-            "RuntimeContextAppend" => Ok(Self::RuntimeContextAppend),
-            "RuntimeSteerCleanup" => Ok(Self::RuntimeSteerCleanup),
-            other => Err(format!("invalid SessionSystemPromptSource value `{other}`")),
-        }
-    }
-}
-impl std::convert::TryFrom<String> for SessionSystemPromptSource {
-    type Error = String;
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_str())
-    }
-}
-impl std::fmt::Display for SessionSystemPromptSource {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum SystemContextAppendDecision {
-    #[default]
-    #[serde(rename = "Staged")]
-    Staged,
-    #[serde(rename = "Duplicate")]
-    Duplicate,
-    #[serde(rename = "RejectEmpty")]
-    RejectEmpty,
-    #[serde(rename = "RejectConflict")]
-    RejectConflict,
-}
-impl SystemContextAppendDecision {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Staged => "Staged",
-            Self::Duplicate => "Duplicate",
-            Self::RejectEmpty => "RejectEmpty",
-            Self::RejectConflict => "RejectConflict",
-        }
-    }
-}
-impl std::convert::TryFrom<&str> for SystemContextAppendDecision {
-    type Error = String;
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        match value {
-            "Staged" => Ok(Self::Staged),
-            "Duplicate" => Ok(Self::Duplicate),
-            "RejectEmpty" => Ok(Self::RejectEmpty),
-            "RejectConflict" => Ok(Self::RejectConflict),
-            other => Err(format!(
-                "invalid SystemContextAppendDecision value `{other}`"
-            )),
-        }
-    }
-}
-impl std::convert::TryFrom<String> for SystemContextAppendDecision {
-    type Error = String;
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_str())
-    }
-}
-impl std::fmt::Display for SystemContextAppendDecision {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum SystemContextPersistAppendAdmission {
-    #[default]
-    #[serde(rename = "Reject")]
-    Reject,
-    #[serde(rename = "Admit")]
-    Admit,
-}
-impl SystemContextPersistAppendAdmission {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Reject => "Reject",
-            Self::Admit => "Admit",
-        }
-    }
-}
-impl std::convert::TryFrom<&str> for SystemContextPersistAppendAdmission {
-    type Error = String;
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        match value {
-            "Reject" => Ok(Self::Reject),
-            "Admit" => Ok(Self::Admit),
-            other => Err(format!(
-                "invalid SystemContextPersistAppendAdmission value `{other}`"
-            )),
-        }
-    }
-}
-impl std::convert::TryFrom<String> for SystemContextPersistAppendAdmission {
-    type Error = String;
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_str())
-    }
-}
-impl std::fmt::Display for SystemContextPersistAppendAdmission {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum SystemContextSource {
-    #[default]
-    #[serde(rename = "Normal")]
-    Normal,
-    #[serde(rename = "RuntimeSteer")]
-    RuntimeSteer,
-}
-impl SystemContextSource {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Normal => "Normal",
-            Self::RuntimeSteer => "RuntimeSteer",
-        }
-    }
-}
-impl std::convert::TryFrom<&str> for SystemContextSource {
-    type Error = String;
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        match value {
-            "Normal" => Ok(Self::Normal),
-            "RuntimeSteer" => Ok(Self::RuntimeSteer),
-            other => Err(format!("invalid SystemContextSource value `{other}`")),
-        }
-    }
-}
-impl std::convert::TryFrom<String> for SystemContextSource {
-    type Error = String;
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_str())
-    }
-}
-impl std::fmt::Display for SystemContextSource {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
 pub enum TranscriptEditKind {
     #[default]
     #[serde(rename = "Fork")]
@@ -2310,35 +1666,6 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveSessionFirstTurnOverridesAllowed {
         pub session_id: SessionId,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct ResolveSystemContextAppend {
-        pub trimmed_text_byte_count: u64,
-        pub idempotency_key_present: bool,
-        pub existing_key_matches: bool,
-        pub existing_key_conflicts: bool,
-        pub active_turn_scoped: bool,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct ResolveSystemContextPendingApplyItem {
-        pub source_kind: SystemContextSource,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct ResolveSystemContextSteerCleanupItem {
-        pub source_kind: SystemContextSource,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct RestoreSystemContextSnapshot {
-        pub active_turn_membership_is_consistent: bool,
-        pub seen_keys_match_known_appends: bool,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct ResolveSystemContextPersistAppendAdmission {
-        pub has_previous: bool,
-        pub content_identical: bool,
-        pub content_extends_previous: bool,
-        pub appended_starts_with_separator: bool,
-        pub incoming_is_runtime_context_append: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveRealtimeItemObserved {
@@ -2474,13 +1801,6 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RestoreSessionBuildState {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct AuthorizeSystemPromptMutation {
-        pub source: SessionSystemPromptSource,
-        pub prompt_present: bool,
-        pub prompt_byte_count: u64,
-        pub replacing_existing: bool,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolvePendingContinuation {
         pub session_tail: ObservedSessionTailKind,
         pub staged_tool_result_count: u64,
@@ -2497,7 +1817,6 @@ pub mod inputs {
     pub struct ClassifyLiveSessionAuthority {
         pub stored_transcript_diverged: bool,
         pub live_has_uncommitted_transcript: bool,
-        pub runtime_system_context_diverged: bool,
         pub stored_is_archived: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -2508,39 +1827,14 @@ pub mod inputs {
         pub runtime_projection_quarantined: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct ResolveRuntimeProjectionConflict {
-        pub session_id: SessionId,
-        pub relation: DurableHeadRelation,
-        pub row_provenance: CheckpointProvenanceClass,
-        pub authority_supersedes_row: bool,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveRuntimeCheckpointProjection {
         pub session_id: SessionId,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct ResolveLegacyCheckpointMigration {
+    pub struct ResolveSessionDocumentLifecycleMerge {
         pub session_id: SessionId,
-        pub runtime_snapshot_present: bool,
-        pub runtime_snapshot_legacy: bool,
-        pub store_row_present: bool,
-        pub store_row_legacy: bool,
-        pub transcript_relation: LegacyCheckpointTranscriptRelation,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct ResolveLegacyCheckpointMigrationLifecycle {
-        pub session_id: SessionId,
-        pub runtime_copy_archived: bool,
-        pub store_row_archived: bool,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct ResolveRuntimeSnapshotReadSource {
-        pub session_id: SessionId,
-        pub relation: DurableHeadRelation,
-        pub store_provenance: CheckpointProvenanceClass,
-        pub session_is_live: bool,
-        pub tail_execution: DurableTailExecutionEvidence,
-        pub head_stamp_era: DurableHeadStampEra,
+        pub authority_archived: bool,
+        pub candidate_archived: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ClassifyDurableTail {
@@ -2552,7 +1846,6 @@ pub mod inputs {
         pub dangling_tool_use_count: u64,
         pub orphan_tool_result_count: u64,
         pub messages_after_terminal: bool,
-        pub head_stamp_era: DurableHeadStampEra,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ApplyPendingToolResults {
@@ -2592,11 +1885,6 @@ pub enum Input {
     RestoreSessionConsumedInputs(inputs::RestoreSessionConsumedInputs),
     RecoverSessionFirstTurnPhase(inputs::RecoverSessionFirstTurnPhase),
     ResolveSessionFirstTurnOverridesAllowed(inputs::ResolveSessionFirstTurnOverridesAllowed),
-    ResolveSystemContextAppend(inputs::ResolveSystemContextAppend),
-    ResolveSystemContextPendingApplyItem(inputs::ResolveSystemContextPendingApplyItem),
-    ResolveSystemContextSteerCleanupItem(inputs::ResolveSystemContextSteerCleanupItem),
-    RestoreSystemContextSnapshot(inputs::RestoreSystemContextSnapshot),
-    ResolveSystemContextPersistAppendAdmission(inputs::ResolveSystemContextPersistAppendAdmission),
     ResolveRealtimeItemObserved(inputs::ResolveRealtimeItemObserved),
     ResolveRealtimeItemSkipped(inputs::ResolveRealtimeItemSkipped),
     ResolveRealtimeUserTranscriptFinal(inputs::ResolveRealtimeUserTranscriptFinal),
@@ -2614,16 +1902,12 @@ pub enum Input {
     AuthorizeSessionMetadataPersist(inputs::AuthorizeSessionMetadataPersist),
     AuthorizeSessionBuildStatePersist(inputs::AuthorizeSessionBuildStatePersist),
     RestoreSessionBuildState(inputs::RestoreSessionBuildState),
-    AuthorizeSystemPromptMutation(inputs::AuthorizeSystemPromptMutation),
     ResolvePendingContinuation(inputs::ResolvePendingContinuation),
     AuthorizeSessionResumeOverrides(inputs::AuthorizeSessionResumeOverrides),
     ClassifyLiveSessionAuthority(inputs::ClassifyLiveSessionAuthority),
     RecoverSessionFromStore(inputs::RecoverSessionFromStore),
-    ResolveRuntimeProjectionConflict(inputs::ResolveRuntimeProjectionConflict),
     ResolveRuntimeCheckpointProjection(inputs::ResolveRuntimeCheckpointProjection),
-    ResolveLegacyCheckpointMigration(inputs::ResolveLegacyCheckpointMigration),
-    ResolveLegacyCheckpointMigrationLifecycle(inputs::ResolveLegacyCheckpointMigrationLifecycle),
-    ResolveRuntimeSnapshotReadSource(inputs::ResolveRuntimeSnapshotReadSource),
+    ResolveSessionDocumentLifecycleMerge(inputs::ResolveSessionDocumentLifecycleMerge),
     ClassifyDurableTail(inputs::ClassifyDurableTail),
     ApplyPendingToolResults(inputs::ApplyPendingToolResults),
     TranscriptEdit(inputs::TranscriptEdit),
@@ -2643,17 +1927,6 @@ impl Input {
             Self::RecoverSessionFirstTurnPhase(_) => InputKind::RecoverSessionFirstTurnPhase,
             Self::ResolveSessionFirstTurnOverridesAllowed(_) => {
                 InputKind::ResolveSessionFirstTurnOverridesAllowed
-            }
-            Self::ResolveSystemContextAppend(_) => InputKind::ResolveSystemContextAppend,
-            Self::ResolveSystemContextPendingApplyItem(_) => {
-                InputKind::ResolveSystemContextPendingApplyItem
-            }
-            Self::ResolveSystemContextSteerCleanupItem(_) => {
-                InputKind::ResolveSystemContextSteerCleanupItem
-            }
-            Self::RestoreSystemContextSnapshot(_) => InputKind::RestoreSystemContextSnapshot,
-            Self::ResolveSystemContextPersistAppendAdmission(_) => {
-                InputKind::ResolveSystemContextPersistAppendAdmission
             }
             Self::ResolveRealtimeItemObserved(_) => InputKind::ResolveRealtimeItemObserved,
             Self::ResolveRealtimeItemSkipped(_) => InputKind::ResolveRealtimeItemSkipped,
@@ -2692,25 +1965,15 @@ impl Input {
                 InputKind::AuthorizeSessionBuildStatePersist
             }
             Self::RestoreSessionBuildState(_) => InputKind::RestoreSessionBuildState,
-            Self::AuthorizeSystemPromptMutation(_) => InputKind::AuthorizeSystemPromptMutation,
             Self::ResolvePendingContinuation(_) => InputKind::ResolvePendingContinuation,
             Self::AuthorizeSessionResumeOverrides(_) => InputKind::AuthorizeSessionResumeOverrides,
             Self::ClassifyLiveSessionAuthority(_) => InputKind::ClassifyLiveSessionAuthority,
             Self::RecoverSessionFromStore(_) => InputKind::RecoverSessionFromStore,
-            Self::ResolveRuntimeProjectionConflict(_) => {
-                InputKind::ResolveRuntimeProjectionConflict
-            }
             Self::ResolveRuntimeCheckpointProjection(_) => {
                 InputKind::ResolveRuntimeCheckpointProjection
             }
-            Self::ResolveLegacyCheckpointMigration(_) => {
-                InputKind::ResolveLegacyCheckpointMigration
-            }
-            Self::ResolveLegacyCheckpointMigrationLifecycle(_) => {
-                InputKind::ResolveLegacyCheckpointMigrationLifecycle
-            }
-            Self::ResolveRuntimeSnapshotReadSource(_) => {
-                InputKind::ResolveRuntimeSnapshotReadSource
+            Self::ResolveSessionDocumentLifecycleMerge(_) => {
+                InputKind::ResolveSessionDocumentLifecycleMerge
             }
             Self::ClassifyDurableTail(_) => InputKind::ClassifyDurableTail,
             Self::ApplyPendingToolResults(_) => InputKind::ApplyPendingToolResults,
@@ -2731,11 +1994,6 @@ pub enum InputKind {
     RestoreSessionConsumedInputs,
     RecoverSessionFirstTurnPhase,
     ResolveSessionFirstTurnOverridesAllowed,
-    ResolveSystemContextAppend,
-    ResolveSystemContextPendingApplyItem,
-    ResolveSystemContextSteerCleanupItem,
-    RestoreSystemContextSnapshot,
-    ResolveSystemContextPersistAppendAdmission,
     ResolveRealtimeItemObserved,
     ResolveRealtimeItemSkipped,
     ResolveRealtimeUserTranscriptFinal,
@@ -2753,16 +2011,12 @@ pub enum InputKind {
     AuthorizeSessionMetadataPersist,
     AuthorizeSessionBuildStatePersist,
     RestoreSessionBuildState,
-    AuthorizeSystemPromptMutation,
     ResolvePendingContinuation,
     AuthorizeSessionResumeOverrides,
     ClassifyLiveSessionAuthority,
     RecoverSessionFromStore,
-    ResolveRuntimeProjectionConflict,
     ResolveRuntimeCheckpointProjection,
-    ResolveLegacyCheckpointMigration,
-    ResolveLegacyCheckpointMigrationLifecycle,
-    ResolveRuntimeSnapshotReadSource,
+    ResolveSessionDocumentLifecycleMerge,
     ClassifyDurableTail,
     ApplyPendingToolResults,
     TranscriptEdit,
@@ -2799,27 +2053,6 @@ pub mod effects {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SessionFirstTurnPhaseRecovered {}
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct SystemContextAppendResolved {
-        pub decision: SystemContextAppendDecision,
-        pub active_turn_scoped: bool,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct SystemContextPendingApplyItemResolved {
-        pub promote_to_applied: bool,
-        pub mark_seen_applied: bool,
-        pub remove_seen: bool,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct SystemContextSteerCleanupItemResolved {
-        pub discard: bool,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct SystemContextSnapshotRestoreAuthorized {}
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct SystemContextPersistAppendAdmissionResolved {
-        pub admission: SystemContextPersistAppendAdmission,
-    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RealtimeTranscriptEventResolved {
         pub observe_item: bool,
@@ -2867,8 +2100,6 @@ pub mod effects {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SessionBuildStateRestoreAuthorized {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct SystemPromptMutationAuthorized {}
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PendingContinuationResolved {
         pub disposition: PendingContinuationDisposition,
     }
@@ -2896,24 +2127,12 @@ pub mod effects {
         pub recoverable: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct RuntimeProjectionConflictResolved {
-        pub disposition: RuntimeProjectionConflictDisposition,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RuntimeCheckpointProjectionResolved {
         pub disposition: RuntimeCheckpointProjectionDisposition,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct LegacyCheckpointMigrationResolved {
-        pub disposition: LegacyCheckpointMigrationDisposition,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct LegacyCheckpointMigrationLifecycleResolved {
-        pub merge: LegacyCheckpointLifecycleMerge,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct RuntimeSnapshotReadSourceResolved {
-        pub disposition: RuntimeSnapshotReadDisposition,
+    pub struct SessionDocumentLifecycleMergeResolved {
+        pub merge: SessionDocumentLifecycleMerge,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct DurableTailClassified {
@@ -2950,13 +2169,6 @@ pub enum Effect {
     SessionToolResultsStageResolved(effects::SessionToolResultsStageResolved),
     SessionConsumedInputsRestoreResolved(effects::SessionConsumedInputsRestoreResolved),
     SessionFirstTurnPhaseRecovered(effects::SessionFirstTurnPhaseRecovered),
-    SystemContextAppendResolved(effects::SystemContextAppendResolved),
-    SystemContextPendingApplyItemResolved(effects::SystemContextPendingApplyItemResolved),
-    SystemContextSteerCleanupItemResolved(effects::SystemContextSteerCleanupItemResolved),
-    SystemContextSnapshotRestoreAuthorized(effects::SystemContextSnapshotRestoreAuthorized),
-    SystemContextPersistAppendAdmissionResolved(
-        effects::SystemContextPersistAppendAdmissionResolved,
-    ),
     RealtimeTranscriptEventResolved(effects::RealtimeTranscriptEventResolved),
     RealtimeMaterializeCandidateResolved(effects::RealtimeMaterializeCandidateResolved),
     RealtimeUserContentIdentityResolved(effects::RealtimeUserContentIdentityResolved),
@@ -2969,18 +2181,14 @@ pub enum Effect {
     SessionMetadataPersistAuthorized(effects::SessionMetadataPersistAuthorized),
     SessionBuildStatePersistAuthorized(effects::SessionBuildStatePersistAuthorized),
     SessionBuildStateRestoreAuthorized(effects::SessionBuildStateRestoreAuthorized),
-    SystemPromptMutationAuthorized(effects::SystemPromptMutationAuthorized),
     PendingContinuationResolved(effects::PendingContinuationResolved),
     PendingContinuationPublicTerminalResolved(effects::PendingContinuationPublicTerminalResolved),
     SessionResumeOverridesAuthorized(effects::SessionResumeOverridesAuthorized),
     SessionResumeOverridesRejected(effects::SessionResumeOverridesRejected),
     LiveSessionAuthorityClassified(effects::LiveSessionAuthorityClassified),
     SessionStoreRecoverySourceResolved(effects::SessionStoreRecoverySourceResolved),
-    RuntimeProjectionConflictResolved(effects::RuntimeProjectionConflictResolved),
     RuntimeCheckpointProjectionResolved(effects::RuntimeCheckpointProjectionResolved),
-    LegacyCheckpointMigrationResolved(effects::LegacyCheckpointMigrationResolved),
-    LegacyCheckpointMigrationLifecycleResolved(effects::LegacyCheckpointMigrationLifecycleResolved),
-    RuntimeSnapshotReadSourceResolved(effects::RuntimeSnapshotReadSourceResolved),
+    SessionDocumentLifecycleMergeResolved(effects::SessionDocumentLifecycleMergeResolved),
     DurableTailClassified(effects::DurableTailClassified),
     SessionToolResultsApplied(effects::SessionToolResultsApplied),
     TranscriptRewriteCommitted(effects::TranscriptRewriteCommitted),
@@ -2996,11 +2204,6 @@ pub enum EffectKind {
     SessionToolResultsStageResolved,
     SessionConsumedInputsRestoreResolved,
     SessionFirstTurnPhaseRecovered,
-    SystemContextAppendResolved,
-    SystemContextPendingApplyItemResolved,
-    SystemContextSteerCleanupItemResolved,
-    SystemContextSnapshotRestoreAuthorized,
-    SystemContextPersistAppendAdmissionResolved,
     RealtimeTranscriptEventResolved,
     RealtimeMaterializeCandidateResolved,
     RealtimeUserContentIdentityResolved,
@@ -3011,18 +2214,14 @@ pub enum EffectKind {
     SessionMetadataPersistAuthorized,
     SessionBuildStatePersistAuthorized,
     SessionBuildStateRestoreAuthorized,
-    SystemPromptMutationAuthorized,
     PendingContinuationResolved,
     PendingContinuationPublicTerminalResolved,
     SessionResumeOverridesAuthorized,
     SessionResumeOverridesRejected,
     LiveSessionAuthorityClassified,
     SessionStoreRecoverySourceResolved,
-    RuntimeProjectionConflictResolved,
     RuntimeCheckpointProjectionResolved,
-    LegacyCheckpointMigrationResolved,
-    LegacyCheckpointMigrationLifecycleResolved,
-    RuntimeSnapshotReadSourceResolved,
+    SessionDocumentLifecycleMergeResolved,
     DurableTailClassified,
     SessionToolResultsApplied,
     TranscriptRewriteCommitted,
@@ -3050,17 +2249,6 @@ pub enum TransitionId {
     RestoreSessionConsumedInputs,
     RestoreSessionConsumedInputsNoPhaseRollback,
     RecoverSessionFirstTurnPhase,
-    ResolveSystemContextAppendEmpty,
-    ResolveSystemContextAppendConflict,
-    ResolveSystemContextAppendDuplicate,
-    ResolveSystemContextAppendNew,
-    ResolveSystemContextPersistAppendAdmissionAdmit,
-    ResolveSystemContextPersistAppendAdmissionReject,
-    ResolveSystemContextPendingApplyItemRuntimeSteer,
-    ResolveSystemContextPendingApplyItemNormal,
-    ResolveSystemContextSteerCleanupItemRuntimeSteer,
-    ResolveSystemContextSteerCleanupItemNormal,
-    RestoreSystemContextSnapshot,
     ResolveRealtimeItemObservedDiscardedAssistant,
     ResolveRealtimeItemObservedPresent,
     ResolveRealtimeItemSkipped,
@@ -3111,7 +2299,6 @@ pub enum TransitionId {
     AuthorizeSessionMetadataPersist,
     AuthorizeSessionBuildStatePersist,
     RestoreSessionBuildState,
-    AuthorizeSystemPromptMutation,
     ResolvePendingContinuationWithBoundary,
     ResolvePendingContinuationWithoutBoundary,
     AuthorizeSessionResumeOverridesRejectProviderRequiresModel,
@@ -3125,38 +2312,16 @@ pub enum TransitionId {
     ClassifyLiveSessionAuthorityLive,
     ClassifyLiveSessionAuthorityDurableArchived,
     ClassifyLiveSessionAuthorityDurableUncommitted,
-    ClassifyLiveSessionAuthorityDurableSystemContext,
     ClassifyLiveSessionAuthorityDurableRevision,
     RecoverSessionFromStoreAuthorized,
     RecoverSessionFromStoreUnrecoverable,
-    ResolveRuntimeSnapshotReadSourceCommittedHead,
-    ResolveRuntimeSnapshotReadSourceRecoveryRequired,
-    ResolveRuntimeSnapshotReadSourceLegacyRecoveryRequired,
-    ResolveRuntimeSnapshotReadSourceQuarantine,
-    ResolveRuntimeSnapshotReadSourceSnapshot,
     ClassifyDurableTailCompleted,
-    ClassifyDurableTailLegacyCompleted,
     ClassifyDurableTailRepairable,
     ClassifyDurableTailAmbiguous,
-    ResolveRuntimeProjectionConflictRetain,
-    ResolveRuntimeProjectionConflictConverge,
-    ResolveRuntimeProjectionConflictReject,
     ResolveRuntimeCheckpointProjectionActive,
     ResolveRuntimeCheckpointProjectionArchived,
-    ResolveLegacyCheckpointMigrationSnapshotIdenticalProjection,
-    ResolveLegacyCheckpointMigrationSnapshotAheadOfProjection,
-    ResolveLegacyCheckpointMigrationProjectionExtension,
-    ResolveLegacyCheckpointMigrationDivergentCopies,
-    ResolveLegacyCheckpointMigrationSnapshotOnly,
-    ResolveLegacyCheckpointMigrationStoreRowOnly,
-    ResolveLegacyCheckpointMigrationTypedSnapshotLegacyProjection,
-    ResolveLegacyCheckpointMigrationSnapshotIdenticalTypedProjection,
-    ResolveLegacyCheckpointMigrationTypedProjectionExtension,
-    ResolveLegacyCheckpointMigrationSnapshotAheadOfTypedProjection,
-    ResolveLegacyCheckpointMigrationDivergentFromTypedProjection,
-    ResolveLegacyCheckpointMigrationTypedProjectionNotComparable,
-    ResolveLegacyCheckpointMigrationLifecycleArchivedAbsorbing,
-    ResolveLegacyCheckpointMigrationLifecycleElected,
+    ResolveSessionDocumentLifecycleMergeArchivedAbsorbing,
+    ResolveSessionDocumentLifecycleMergeAuthority,
     ApplyPendingToolResults,
     TranscriptEditFork,
     TranscriptEditRewrite,

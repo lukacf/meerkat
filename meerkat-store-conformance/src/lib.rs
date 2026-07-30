@@ -13,8 +13,8 @@
 //!
 //! - [`chapters::baseline`] — every `SessionStore`: save/load round-trips,
 //!   list/delete, `delete_if_current_revision` guard semantics,
-//!   checkpoint-stamp preservation, append-only save-guard enforcement,
-//!   concurrent-writer contention, multi-MB payloads.
+//!   append-only save-guard enforcement, concurrent-writer contention,
+//!   multi-MB payloads.
 //! - [`chapters::incremental`] — stores whose `as_incremental` returns
 //!   `Some`: O(delta) `append_messages`, `commit_rewrite` CAS vs the head
 //!   token, `save_head` `Create`/`IfToken` semantics,
@@ -33,9 +33,8 @@
 //!   `delete_if_current_revision`).
 //! - [`chapters::append_only`] — every `SessionStore`: pins what a revision
 //!   guard MEANS for emulated-CAS backends (superseded-sibling-row
-//!   deduplication ownership; checkpoint monotonicity across generation
-//!   rebinds). The in-crate [`EmulatedCasSessionStore`] passes this chapter
-//!   and documents the contract.
+//!   deduplication ownership). The in-crate [`EmulatedCasSessionStore`]
+//!   passes this chapter and documents the contract.
 //! - [`chapters::assert_forwards_incremental`] — `SessionStore` →
 //!   `SessionStore` delegating wrappers: fails loudly when a wrapper
 //!   swallows a `Some(as_incremental)` from its inner store, and proves the
@@ -43,12 +42,6 @@
 //!   (writes through either side are served by the other). Reference
 //!   wrappers: [`ForwardingSessionStore`] (correct) and
 //!   [`SwallowingSessionStore`] (the bug class).
-//! - [`chapters::legacy_data`] — every `SessionStore`: byte-literal 0.7.x
-//!   fixture documents (current-envelope, unstamped, legacy string-content
-//!   form) installed via
-//!   [`SessionStoreFactory::install_session_document`] load and report
-//!   `LegacyUnverified`, documents round-trip preserved against the fixture
-//!   bytes, adopted (stamped) sessions stay `Verified`.
 //! - [`chapters::blobs`] / [`chapters::dangling_blob_reference`] /
 //!   [`chapters::artifacts`] — `BlobStore` and `ArtifactStore`: content
 //!   round-trips, restart survival when `is_persistent()`, delete/exists
@@ -141,13 +134,6 @@ mod tests {
         chapters::append_only(&SharedEmulatedCas::correct())
             .await
             .expect("reference emulated-CAS store must satisfy the append-only chapter");
-    }
-
-    #[tokio::test]
-    async fn emulated_cas_reference_store_passes_legacy_data() {
-        chapters::legacy_data(&SharedEmulatedCas::correct())
-            .await
-            .expect("reference emulated-CAS store must satisfy the legacy-data chapter");
     }
 
     #[tokio::test]

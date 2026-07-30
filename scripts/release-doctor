@@ -130,6 +130,25 @@ else
   bad "Release workflow does not publish @rkat/web from a prebuilt package artifact"
 fi
 
+web_release_ref_jobs="$(
+  awk '
+    /^  build_web_sdk_package:/ { job = "build"; next }
+    /^  publish_web_sdk:/ { job = "publish"; next }
+    /^  [[:alnum:]_-]+:/ { job = "" }
+    job != "" &&
+      /github\.event\.inputs\.release_tag !=/ &&
+      /github\.event\.inputs\.release_tag \|\| github\.ref/ {
+        pinned[job] = 1
+      }
+    END { print pinned["build"] + pinned["publish"] }
+  ' .github/workflows/release.yml
+)"
+if [[ "${web_release_ref_jobs}" == "2" ]]; then
+  pass "Web SDK build and publish recovery jobs are pinned to the selected release tag"
+else
+  bad "Web SDK recovery must check out release_tag in both build and publish jobs"
+fi
+
 if awk '
     /^  build_binaries_buildbuddy:/ { in_job = 1; next }
     in_job && /^  [[:alnum:]_-]+:/ { in_job = 0 }

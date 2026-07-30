@@ -72,7 +72,6 @@ pub enum TurnPrimitiveKind {
     None,
     ConversationTurn,
     ImmediateAppend,
-    ImmediateContextAppend,
 }
 
 /// Terminal outcome of a turn.
@@ -216,7 +215,8 @@ impl TurnFailureSourceKind {
             // This variant normally bypasses ordinary turn terminalization and
             // becomes CoreExecutor teardown. Keep this total classifier
             // fail-closed if a diagnostic caller asks for a turn source.
-            AgentError::StickyModelFallbackAuthorityUnknown { .. } => Self::InternalError,
+            AgentError::StickyModelFallbackAuthorityUnknown { .. }
+            | AgentError::SessionDurableProjectionAuthorityUnknown { .. } => Self::InternalError,
             AgentError::BuildError(_) | AgentError::SessionIdentityInUse(_) => Self::BuildError,
             AgentError::AuthReauthRequired { .. } => Self::AuthReauthRequired,
             AgentError::CallbackPending { .. } | AgentError::CallbackBatchPending { .. } => {
@@ -296,62 +296,34 @@ impl TurnFailureReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ContentShape {
     Conversation,
-    ConversationAndContext,
-    Context,
     Empty,
     ImmediateAppend,
-    ImmediateContext,
 }
 
 impl ContentShape {
     pub const SCHEMA_TYPE_NAME: &'static str = "ContentShape";
 
-    pub const ALL: [Self; 6] = [
-        Self::Conversation,
-        Self::ConversationAndContext,
-        Self::Context,
-        Self::Empty,
-        Self::ImmediateAppend,
-        Self::ImmediateContext,
-    ];
+    pub const ALL: [Self; 3] = [Self::Conversation, Self::Empty, Self::ImmediateAppend];
 
-    pub const SCHEMA_VARIANTS: [&'static str; 6] = [
+    pub const SCHEMA_VARIANTS: [&'static str; 3] = [
         Self::Conversation.schema_variant(),
-        Self::ConversationAndContext.schema_variant(),
-        Self::Context.schema_variant(),
         Self::Empty.schema_variant(),
         Self::ImmediateAppend.schema_variant(),
-        Self::ImmediateContext.schema_variant(),
     ];
-
-    pub const fn from_staged_presence(has_conversation: bool, has_context: bool) -> Self {
-        match (has_conversation, has_context) {
-            (true, true) => Self::ConversationAndContext,
-            (true, false) => Self::Conversation,
-            (false, true) => Self::Context,
-            (false, false) => Self::Empty,
-        }
-    }
 
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Conversation => "conversation",
-            Self::ConversationAndContext => "conversation+context",
-            Self::Context => "context",
             Self::Empty => "empty",
             Self::ImmediateAppend => "immediate_append",
-            Self::ImmediateContext => "immediate_context",
         }
     }
 
     pub const fn schema_variant(self) -> &'static str {
         match self {
             Self::Conversation => "Conversation",
-            Self::ConversationAndContext => "ConversationAndContext",
-            Self::Context => "Context",
             Self::Empty => "Empty",
             Self::ImmediateAppend => "ImmediateAppend",
-            Self::ImmediateContext => "ImmediateContext",
         }
     }
 
@@ -394,9 +366,6 @@ pub enum TurnExecutionInput {
         max_extraction_retries: u64,
     },
     StartImmediateAppend {
-        run_id: RunId,
-    },
-    StartImmediateContext {
         run_id: RunId,
     },
     PrimitiveApplied {
@@ -657,11 +626,8 @@ mod tests {
     fn content_shape_is_closed_contract_with_stable_wire_labels() {
         let shapes = [
             (ContentShape::Conversation, "conversation"),
-            (ContentShape::ConversationAndContext, "conversation+context"),
-            (ContentShape::Context, "context"),
             (ContentShape::Empty, "empty"),
             (ContentShape::ImmediateAppend, "immediate_append"),
-            (ContentShape::ImmediateContext, "immediate_context"),
         ];
 
         for (shape, label) in shapes {
@@ -675,14 +641,7 @@ mod tests {
 
         assert_eq!(
             ContentShape::SCHEMA_VARIANTS,
-            [
-                "Conversation",
-                "ConversationAndContext",
-                "Context",
-                "Empty",
-                "ImmediateAppend",
-                "ImmediateContext"
-            ]
+            ["Conversation", "Empty", "ImmediateAppend"]
         );
     }
 
@@ -712,5 +671,17 @@ mod tests {
         );
         assert_ne!(failure.source_kind, TurnFailureSourceKind::Llm);
         assert_eq!(failure.message, error.to_string());
+    }
+
+    #[test]
+    fn durable_projection_authority_unknown_is_not_a_retryable_turn_source() {
+        let error = AgentError::session_durable_projection_authority_unknown(
+            "paired session projections diverged",
+        );
+
+        assert_eq!(
+            TurnFailureSourceKind::from_agent_error(&error),
+            TurnFailureSourceKind::InternalError
+        );
     }
 }

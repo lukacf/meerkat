@@ -58,7 +58,8 @@ use crate::identifiers::IdempotencyKey;
 #[cfg(test)]
 use crate::identifiers::LogicalRuntimeId;
 use crate::input::{
-    Input, InputDurability, InputHeader, InputOrigin, InputVisibility, PeerConvention, PeerInput,
+    FlowStepInput, Input, InputDurability, InputHeader, InputOrigin, InputVisibility,
+    PeerConvention, PeerInput,
 };
 use crate::member_live::{MemberLiveError, MemberLiveHost};
 use crate::member_observation::{
@@ -1116,32 +1117,58 @@ fn peer_input_from_delivery_payload(
     let is_placed = payload.expected_member.is_some();
     let directed_interaction_id = delivery_requests_tracked_interaction(&payload)
         .then_some(meerkat_core::interaction::InteractionId(stable_uuid));
+    let correlation_id = transcript_uuid
+        .or_else(|| (!is_placed).then_some(stable_uuid))
+        .map(crate::identifiers::CorrelationId::from_uuid);
+    let header = InputHeader {
+        id: meerkat_core::lifecycle::InputId::from_uuid(stable_uuid),
+        timestamp: chrono::Utc::now(),
+        source: InputOrigin::Peer {
+            peer_id: sender_peer_id.as_str(),
+            display_identity: Some(sender_peer_id.as_str()),
+            runtime_id: Some(MeerkatMachine::logical_runtime_id(session_id)),
+        },
+        durability: InputDurability::Durable,
+        visibility: InputVisibility {
+            transcript_eligible: true,
+            operator_eligible: true,
+        },
+        idempotency_key: Some(IdempotencyKey::new(payload.input_id.clone())),
+        supersession_key: None,
+        // Placed ingress separates the retry-stable transport key from
+        // transcript identity. Absence stays absent so the ordinary runtime
+        // lane retains its own minting semantics.
+        correlation_id,
+    };
+    if let Some(context) = payload.transient_turn_context {
+        if !payload.injected_context.is_empty() {
+            return Err(
+                "transient_turn_context cannot be combined with injected_context on a plain bridge delivery"
+                    .to_string(),
+            );
+        }
+        return Ok(Input::FlowStep(FlowStepInput {
+            header,
+            step_id: format!("bridge-delivery:{}", payload.input_id),
+            content: payload.content,
+            directed_interaction_id,
+            turn_metadata: Some(
+                meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                    handling_mode: Some(payload.handling_mode),
+                    transient_turn_context: Some(context),
+                    transcript_identity: meerkat_core::types::TranscriptMessageIdentity {
+                        objective_id: payload.objective_id,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            ),
+        }));
+    }
     Ok(Input::Peer(PeerInput {
         directed_interaction_id,
         objective_id: payload.objective_id,
-        header: InputHeader {
-            id: meerkat_core::lifecycle::InputId::from_uuid(stable_uuid),
-            timestamp: chrono::Utc::now(),
-            source: InputOrigin::Peer {
-                peer_id: sender_peer_id.as_str(),
-                display_identity: Some(sender_peer_id.as_str()),
-                runtime_id: Some(MeerkatMachine::logical_runtime_id(session_id)),
-            },
-            durability: InputDurability::Durable,
-            visibility: InputVisibility {
-                transcript_eligible: true,
-                operator_eligible: true,
-            },
-            idempotency_key: Some(IdempotencyKey::new(payload.input_id)),
-            supersession_key: None,
-            // Placed ingress separates the retry-stable transport key from
-            // transcript identity. Absence stays absent so the ordinary
-            // runtime lane retains its own minting semantics. Legacy
-            // peer-only delivery preserves its pre-field input-id carrier.
-            correlation_id: transcript_uuid
-                .or_else(|| (!is_placed).then_some(stable_uuid))
-                .map(crate::identifiers::CorrelationId::from_uuid),
-        },
+        header,
         convention: Some(PeerConvention::Message),
         content: payload.content,
         payload: None,
@@ -6162,10 +6189,11 @@ async fn serve_tracked_member_delivery(
             .await;
             return;
         }
-        let turn_metadata = crate::runtime_loop::for_bridge_turn_directive(
+        let mut turn_metadata = crate::runtime_loop::for_bridge_turn_directive(
             payload.handling_mode,
             directive.tool_overlay.clone().map(Into::into),
         );
+        turn_metadata.transient_turn_context = payload.transient_turn_context.clone();
         match crate::mob_adapter::create_tracked_flow_step_input(
             &directive.correlation.step_id,
             payload.content.clone(),
@@ -10577,6 +10605,7 @@ mod tests {
             BridgeDeliveryPayload {
                 objective_id: None,
                 injected_context: Vec::new(),
+                transient_turn_context: None,
                 supervisor: supervisor_bridge_spec(),
                 epoch: 1,
                 protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
@@ -10635,6 +10664,7 @@ mod tests {
             injected_context: vec![meerkat_core::types::ContentInput::Text(
                 "tracked ambient context".to_string(),
             )],
+            transient_turn_context: None,
             supervisor: supervisor_bridge_spec(),
             epoch: 1,
             protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
@@ -10696,6 +10726,7 @@ mod tests {
         let payload = BridgeDeliveryPayload {
             objective_id: None,
             injected_context: Vec::new(),
+            transient_turn_context: None,
             supervisor: supervisor_bridge_spec(),
             epoch: 1,
             protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
@@ -10772,6 +10803,7 @@ mod tests {
             BridgeDeliveryPayload {
                 objective_id: None,
                 injected_context: Vec::new(),
+                transient_turn_context: None,
                 supervisor: supervisor_bridge_spec(),
                 epoch: 1,
                 protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
@@ -10814,6 +10846,7 @@ mod tests {
         let mut payload = BridgeDeliveryPayload {
             objective_id: None,
             injected_context: Vec::new(),
+            transient_turn_context: None,
             supervisor: supervisor_bridge_spec(),
             epoch: 1,
             protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
@@ -10928,6 +10961,7 @@ mod tests {
             BridgeDeliveryPayload {
                 objective_id: None,
                 injected_context: Vec::new(),
+                transient_turn_context: None,
                 supervisor: supervisor_bridge_spec(),
                 epoch: 1,
                 protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
@@ -10966,6 +11000,7 @@ mod tests {
             BridgeDeliveryPayload {
                 objective_id: None,
                 injected_context: Vec::new(),
+                transient_turn_context: None,
                 supervisor: supervisor_bridge_spec(),
                 epoch: 1,
                 protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
@@ -10997,6 +11032,7 @@ mod tests {
                     meerkat_core::types::ContentInput::Text("ambient alpha".to_string()),
                     meerkat_core::types::ContentInput::Text("ambient beta".to_string()),
                 ],
+                transient_turn_context: None,
                 supervisor: supervisor_bridge_spec(),
                 epoch: 1,
                 protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,

@@ -180,6 +180,17 @@ fn map_agent_error_to_llm_error(err: meerkat_core::AgentError) -> LlmError {
             }
             LlmFailureReason::ProviderError(provider_error) => match provider_error.kind {
                 LlmProviderErrorKind::InvalidRequest => LlmError::InvalidRequest { message },
+                LlmProviderErrorKind::RequestTooLarge => LlmError::RequestTooLarge {
+                    message,
+                    encoded_bytes: provider_error
+                        .details
+                        .get("encoded_bytes")
+                        .and_then(serde_json::Value::as_u64),
+                    max_bytes: provider_error
+                        .details
+                        .get("max_bytes")
+                        .and_then(serde_json::Value::as_u64),
+                },
                 LlmProviderErrorKind::ContentFiltered => {
                     LlmError::ContentFiltered { reason: message }
                 }

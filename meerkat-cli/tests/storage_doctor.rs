@@ -49,14 +49,16 @@ fn create_healthy_realm(state_root: &Path, realm_id: &str) {
     meerkat_store::SqliteSessionStore::open(&paths.sessions_sqlite_path).unwrap();
 }
 
-/// A legacy-shaped realm: raw `sessions` table, one unstamped
+/// An unledgered realm: raw `sessions` table, one structurally valid
 /// current-envelope session row, and no `meerkat_schema` ledger.
-fn create_legacy_realm(state_root: &Path, realm_id: &str) -> PathBuf {
+fn create_unledgered_realm(state_root: &Path, realm_id: &str) -> PathBuf {
     let paths = write_manifest(state_root, realm_id);
     let conn = Connection::open(&paths.sessions_sqlite_path).unwrap();
     conn.execute_batch(SESSIONS_DDL).unwrap();
     let mut session = Session::new();
-    session.push(Message::User(UserMessage::text("hello from 0.7.x")));
+    session.push(Message::User(UserMessage::text(
+        "hello from an unledgered fixture",
+    )));
     insert_session(&conn, &session);
     paths.sessions_sqlite_path
 }
@@ -143,9 +145,9 @@ fn healthy_sqlite_realm_is_clean_and_exits_zero() {
     assert!(
         domains
             .iter()
-            .any(|pair| pair[0] == "session-store" && pair[1] == 2),
-        "session-store domain must be ledger-stamped at v2 (v2 adds \
-         strand-supersession-links): {domains:?}"
+            .any(|pair| pair[0] == "session-store" && pair[1] == 3),
+        "session-store domain must be ledger-stamped at v3 (v3 adds the first \
+         published authenticated head sidecars): {domains:?}"
     );
     let errors: Vec<_> = report["findings"]
         .as_array()
@@ -174,10 +176,10 @@ fn healthy_sqlite_realm_is_clean_and_exits_zero() {
 }
 
 #[test]
-fn legacy_realm_reports_no_ledger_and_census_without_mutating() {
+fn unledgered_realm_reports_structural_inventory_without_mutating() {
     let temp = TempDir::new().unwrap();
     let state_root = temp.path().join("realms");
-    let database = create_legacy_realm(&state_root, "legacy-shape");
+    let database = create_unledgered_realm(&state_root, "unledgered-shape");
     let before = std::fs::read(&database).unwrap();
 
     let output = run_doctor(
@@ -192,7 +194,8 @@ fn legacy_realm_reports_no_ledger_and_census_without_mutating() {
     );
     assert!(
         output.status.success(),
-        "info/warning findings must exit 0\nstderr:\n{}",
+        "a structurally valid unledgered realm has no error-severity finding\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
     let report = parse_json(&output);
@@ -201,16 +204,16 @@ fn legacy_realm_reports_no_ledger_and_census_without_mutating() {
     assert_eq!(no_ledger.len(), 1, "{report:#}");
     assert_eq!(no_ledger[0]["severity"], "info");
 
-    let census = findings_with_code(&report, "legacy-unverified-sessions");
-    assert_eq!(census.len(), 1, "{report:#}");
-    assert_eq!(census[0]["severity"], "warning");
-    assert_eq!(census[0]["realm"], "legacy-shape");
+    assert_eq!(no_ledger[0]["realm"], "unledgered-shape");
+    let errors: Vec<_> = report["findings"]
+        .as_array()
+        .expect("findings array")
+        .iter()
+        .filter(|finding| finding["severity"] == "error")
+        .collect();
     assert!(
-        census[0]["message"]
-            .as_str()
-            .unwrap()
-            .starts_with("1 legacy-unverified"),
-        "{census:?}"
+        errors.is_empty(),
+        "structurally valid current session rows must not produce errors: {errors:#?}"
     );
 
     // Read-only proof: the database bytes are untouched (no ledger was

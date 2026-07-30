@@ -24,7 +24,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AuthorizeStartTurnDispatch`
 - `AuthorizeCancelAfterBoundary`
 - `ResolveLastStartTurnPublicTerminal`
-- `AuthorizeRuntimeSystemContextApplication`
 - `ResolvePendingAdmissionDrained`
 - `AuthorizeSessionTeardown`
 - `ResolveRuntimeKeepAlive`(keep_alive_request: RuntimeKeepAliveRequest)
@@ -41,7 +40,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `StartTurnPublicTerminalResolved`(terminal: StartTurnPublicTerminal)
 - `RuntimeKeepAliveResolved`(decision: RuntimeKeepAlivePersistenceDecision)
 - `PendingAdmissionDrainRequested`
-- `RuntimeSystemContextApplicationResolved`(authorization: RuntimeSystemContextApplicationAuthorization)
 - `TurnAdmissionShutdownTerminalResolved`(terminal: TurnAdmissionShutdownTerminal)
 - `SessionTeardownAuthorized`
 
@@ -236,36 +234,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `ShuttingDown`
 - On: `AuthorizeStartTurnDispatch`()
 - Emits: `StartTurnDispatchResolved`
-- To: `ShuttingDown`
-
-### `AuthorizeRuntimeSystemContextApplicationActiveIdle`
-- From: `Idle`
-- On: `AuthorizeRuntimeSystemContextApplication`()
-- Emits: `RuntimeSystemContextApplicationResolved`
-- To: `Idle`
-
-### `AuthorizeRuntimeSystemContextApplicationActiveAdmitted`
-- From: `Admitted`
-- On: `AuthorizeRuntimeSystemContextApplication`()
-- Emits: `RuntimeSystemContextApplicationResolved`
-- To: `Admitted`
-
-### `AuthorizeRuntimeSystemContextApplicationActiveRunning`
-- From: `Running`
-- On: `AuthorizeRuntimeSystemContextApplication`()
-- Emits: `RuntimeSystemContextApplicationResolved`
-- To: `Running`
-
-### `AuthorizeRuntimeSystemContextApplicationActiveCompleting`
-- From: `Completing`
-- On: `AuthorizeRuntimeSystemContextApplication`()
-- Emits: `RuntimeSystemContextApplicationResolved`
-- To: `Completing`
-
-### `AuthorizeRuntimeSystemContextApplicationShuttingDown`
-- From: `ShuttingDown`
-- On: `AuthorizeRuntimeSystemContextApplication`()
-- Emits: `RuntimeSystemContextApplicationResolved`
 - To: `ShuttingDown`
 
 ### `AuthorizeCancelAfterBoundaryRunning`

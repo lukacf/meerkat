@@ -1,5 +1,6 @@
-//! Panic capture at actor task boundaries: recover the payload, log it once
-//! per distinct payload per member, and feed the typed [`MobError`] channel.
+//! Panic capture at actor task boundaries: recover and sanitize the payload,
+//! log it on change plus bounded repeat checkpoints, and feed the typed
+//! [`MobError`] channel.
 //!
 //! WHY THIS MODULE EXISTS (field incident, 2026-07-29): a panic inside the
 //! member-provisioning transaction (`PreparedServiceActorTransaction`, armed
@@ -16,10 +17,10 @@
 //! symbolication is the fuel.
 //!
 //! Every `catch_unwind` at an actor task boundary must therefore:
-//! (a) recover the panic payload and `tracing::error!` it — once per distinct
-//!     payload per member, never per iteration (that would trade the silent
-//!     furnace for a log flood) — so the underlying bug names itself in the
-//!     field within one boot; and
+//! (a) recover the panic payload and `tracing::error!` it — immediately on
+//!     change and at power-of-two repeat checkpoints, never per iteration
+//!     (that would trade the silent furnace for a log flood) — so the
+//!     underlying bug names itself and remains visibly active; and
 //! (b) convert the caught panic into the typed [`MobError`] channel so it
 //!     flows through the ordinary failure/disposition path (the same
 //!     classification provisioning build failures take), instead of enabling
@@ -34,7 +35,7 @@ use crate::MobId;
 use crate::error::MobError;
 use crate::ids::AgentIdentity;
 use futures::FutureExt;
-use meerkat_core::panic_payload::PanicPayloadLogGate;
+use meerkat_core::panic_payload::{PanicPayloadLogDecision, PanicPayloadLogGate};
 use std::future::Future;
 
 /// Best-effort human-readable panic payload; thin delegation to the shared
@@ -44,36 +45,44 @@ pub(super) fn panic_payload_detail(payload: &(dyn std::any::Any + Send)) -> Stri
     meerkat_core::panic_payload::panic_payload_detail(payload)
 }
 
-/// Once-per-distinct-payload panic log gate, keyed by member identity.
+/// Bounded panic log gate keyed by provisioning stage and member identity.
 ///
 /// The identity-reconcile requeue can legally re-run a panicking provision
 /// transaction indefinitely; the incident above showed the payload must be
-/// logged, and a per-iteration `error!` would be its own flood. Mirroring the
-/// `identity_reconcile_failures` last-detail map, this logs on transition
-/// (first sighting for an identity, or a changed payload) and stays quiet
-/// while the same payload repeats. A successful provision clears the entry so
-/// the next distinct incident logs fresh.
+/// logged, and a per-iteration `error!` would be its own flood. It logs on
+/// transition and at bounded repeat checkpoints. A successful provision
+/// clears the entry so the next incident logs fresh.
 #[derive(Debug, Default)]
 pub(super) struct SpawnPanicLogLedger {
     gate: PanicPayloadLogGate,
 }
 
 impl SpawnPanicLogLedger {
-    /// Record the payload for this identity; `true` when it differs from the
-    /// previously recorded one (i.e. this transition should be logged).
-    fn first_sighting(&self, identity: &AgentIdentity, detail: &str) -> bool {
-        self.gate.first_sighting(identity.as_str(), detail)
+    fn key(stage: &str, identity: &AgentIdentity) -> String {
+        format!("{stage}:{}", identity.as_str())
+    }
+
+    /// Record the payload for this exact stage+identity boundary. New payloads
+    /// log immediately; long-running repeats report at bounded checkpoints.
+    fn observe(
+        &self,
+        stage: &str,
+        identity: &AgentIdentity,
+        detail: &str,
+    ) -> PanicPayloadLogDecision {
+        self.gate.observe(&Self::key(stage, identity), detail)
     }
 
     /// Forget the identity's recorded payload (called on provision success)
     /// so a later recurrence of the same panic logs again as a new incident.
-    fn clear(&self, identity: &AgentIdentity) {
-        self.gate.clear(identity.as_str());
+    fn clear(&self, stage: &str, identity: &AgentIdentity) {
+        self.gate.clear(&Self::key(stage, identity));
     }
 }
 
 /// Convert a caught provisioning panic into the typed spawn-failure error,
-/// logging the recovered payload once per distinct payload per member.
+/// logging the recovered payload immediately and at bounded repeat checkpoints
+/// per member.
 pub(super) fn spawn_provision_panic_to_error(
     ledger: &SpawnPanicLogLedger,
     mob_id: &MobId,
@@ -82,13 +91,15 @@ pub(super) fn spawn_provision_panic_to_error(
     payload: Box<dyn std::any::Any + Send>,
 ) -> MobError {
     let detail = panic_payload_detail(payload.as_ref());
-    if ledger.first_sighting(identity, &detail) {
+    let log_decision = ledger.observe(stage, identity, &detail);
+    if log_decision.should_log {
         tracing::error!(
             mob_id = %mob_id,
             agent_identity = %identity,
             stage,
             panic = %detail,
-            "member provisioning panicked; payload recovered and converted to a typed spawn failure (logged once per distinct payload)"
+            repeated_sightings = log_decision.repeated_sightings,
+            "member provisioning panicked; payload recovered, sanitized, and converted to a typed spawn failure"
         );
     }
     MobError::Internal(format!("{stage} panicked for '{identity}': {detail}"))
@@ -113,7 +124,7 @@ where
     match std::panic::AssertUnwindSafe(provision).catch_unwind().await {
         Ok(result) => {
             if result.is_ok() {
-                ledger.clear(identity);
+                ledger.clear(stage, identity);
             }
             result
         }
@@ -263,6 +274,36 @@ mod tests {
         .await;
         let logs = captured(&buf);
         assert_eq!(logs.matches("different furnace payload").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn long_running_identical_panic_reports_repeat_count_without_flooding() {
+        let (buf, _guard) = capture_error_logs();
+        let ledger = SpawnPanicLogLedger::default();
+        let mob_id = MobId::from("panic-capture-mob");
+        let identity = AgentIdentity::from("member-child");
+
+        for _ in 0..9 {
+            let _: Result<(), MobError> = run_spawn_provision_guarded(
+                &ledger,
+                &mob_id,
+                "spawn provisioning task",
+                &identity,
+                async { panic!("persistent furnace payload") },
+            )
+            .await;
+        }
+
+        let logs = captured(&buf);
+        assert_eq!(
+            logs.matches("persistent furnace payload").count(),
+            2,
+            "first sighting plus the eighth repeat should log, got: {logs}"
+        );
+        assert!(
+            logs.contains("repeated_sightings=8"),
+            "periodic report must expose its cumulative repeat count: {logs}"
+        );
     }
 
     #[tokio::test]

@@ -85,7 +85,7 @@ async fn rewrite_without_proof_refused(
     store: &dyn SessionStore,
 ) -> Result<(), ConformanceFailure> {
     const STEP: &str = "rewrite_without_proof_refused";
-    let session = fixtures::session_with_texts(&["one", "two", "three"]);
+    let session = fixtures::session_with_texts(&["one", "two", "three"])?;
     steps.wrap(STEP, store.save(&session).await)?;
     let committed_digest = served_digest(steps, STEP, store, &session).await?;
 
@@ -131,7 +131,7 @@ async fn rewrite_with_proof_round_trip(
     store: &dyn SessionStore,
 ) -> Result<(), ConformanceFailure> {
     const STEP: &str = "rewrite_with_proof_round_trip";
-    let session = fixtures::session_with_texts(&["one", "two", "three"]);
+    let session = fixtures::session_with_texts(&["one", "two", "three"])?;
     steps.wrap(STEP, store.save(&session).await)?;
 
     let (rewritten, commit) = compacted(steps, STEP, &session)?;
@@ -159,7 +159,7 @@ async fn rewrite_with_proof_round_trip(
 
     // The rewritten head takes ordinary appends.
     let mut continued = served;
-    fixtures::push_text(&mut continued, "post-rewrite continuation");
+    fixtures::push_text(&mut continued, "post-rewrite continuation")?;
     steps.wrap(STEP, store.save(&continued).await)?;
     let continued_digest = steps.wrap(STEP, transcript_messages_digest(continued.messages()))?;
     steps.ensure(
@@ -187,13 +187,13 @@ async fn stale_proof_refused(
     store: &dyn SessionStore,
 ) -> Result<(), ConformanceFailure> {
     const STEP: &str = "stale_proof_refused";
-    let mut session = fixtures::session_with_texts(&["one", "two", "three"]);
+    let mut session = fixtures::session_with_texts(&["one", "two", "three"])?;
     steps.wrap(STEP, store.save(&session).await)?;
     let (rewritten, commit) = compacted(steps, STEP, &session)?;
 
     // An intervening append advances the persisted head past the commit's
     // parent revision.
-    fixtures::push_text(&mut session, "four");
+    fixtures::push_text(&mut session, "four")?;
     steps.wrap(STEP, store.save(&session).await)?;
     let committed_digest = served_digest(steps, STEP, store, &session).await?;
 

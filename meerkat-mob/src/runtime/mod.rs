@@ -346,7 +346,9 @@ pub use reconcile::{
 };
 pub use recovery::RestoreIncompatible;
 use roster_authority::{RosterAuthority, RosterMutator};
-pub use session_service::{MobSessionService, ResumeSessionLoad};
+pub use session_service::{
+    MobSessionService, PersistedSessionAuthorityReadCost, ResumeSessionLoad,
+};
 pub use spawn_policy::{SpawnPolicy, SpawnSpec};
 use spawn_profile_authority::{
     AuthorizedSpawnProfileMaterial, authorize_spawn_profile_input,

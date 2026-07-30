@@ -6,13 +6,23 @@
 pub mod memory;
 #[cfg(feature = "sqlite-store")]
 pub mod sqlite;
+mod whole_blob_rewrite;
 
-use std::collections::{HashMap, HashSet};
+pub use meerkat_core::{HeadCanonicalProvisionalTailAuthority, WholeBlobProvisionalTailAuthority};
+pub use whole_blob_rewrite::{
+    PreparedWholeBlobRewriteBoundary, PreparedWholeBlobRewriteStoreParts,
+    VerifiedCommittedWholeBlobPayload, prepared_whole_blob_successor_document_hashes,
+    prepared_whole_blob_successor_semantic_mints,
+};
 
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
+
+use meerkat_core::lifecycle::core_executor::BoundSessionCommit;
 use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunId};
 use sha2::{Digest, Sha256};
 
-use crate::identifiers::LogicalRuntimeId;
+use crate::identifiers::{IdempotencyKey, LogicalRuntimeId};
 use crate::input_state::{InputStatePersistenceRecord, StoredInputState};
 use crate::runtime_state::RuntimeState;
 
@@ -26,6 +36,205 @@ pub(crate) const MACHINE_LIFECYCLE_STORE_RECORD_VERSION: u16 = 4;
 /// their publication seam.
 pub const MAX_INPUT_STATE_BATCH_CAS: usize = 256;
 
+/// Maximum number of canonical pending-terminal owner ids returned by one
+/// discovery page.
+pub const MAX_PENDING_TERMINAL_OWNER_PAGE: usize = 256;
+
+pub(crate) fn input_state_is_pending_terminal_owner(
+    state: &crate::input_state::InputState,
+) -> bool {
+    let owns_pending_completion = state
+        .terminal_completion
+        .as_ref()
+        .is_some_and(|completion| {
+            completion.owner_input_id == state.input_id
+                && matches!(
+                    &completion.phase,
+                    crate::input_state::InputTerminalCompletionPhase::Pending
+                )
+        });
+    let owns_unpublished_interaction =
+        state
+            .interaction_terminal_outbox
+            .as_ref()
+            .is_some_and(|outbox| {
+                outbox.candidate_owner_input_id == state.input_id
+                    && !matches!(
+                        &outbox.phase,
+                        crate::input_state::InteractionTerminalOutboxPhase::Published { .. }
+                    )
+            });
+    owns_pending_completion || owns_unpublished_interaction
+}
+
+pub(crate) fn input_state_is_recovery_nonterminal(state: &StoredInputState) -> bool {
+    !matches!(
+        state.seed.phase,
+        crate::input_state::InputLifecycleState::Consumed
+            | crate::input_state::InputLifecycleState::Superseded
+            | crate::input_state::InputLifecycleState::Coalesced
+            | crate::input_state::InputLifecycleState::Abandoned
+    )
+}
+
+/// Whether an input row has enough durable terminal evidence to retire its
+/// original ingress payload.
+///
+/// The payload is crash-redelivery and durable-tail-attribution material, not
+/// terminal history. Keep it until the generated lifecycle is terminal and
+/// every row-local completion/publication saga is closed. Callers must apply
+/// the resulting omission in the same transaction that commits the closing
+/// evidence (or in a later exact-CAS compaction); serialize-time projection
+/// alone would leave the live shell and durable row divergent.
+pub(crate) fn input_state_payload_is_retirable(state: &StoredInputState) -> bool {
+    let lifecycle_terminal = matches!(
+        state.seed.phase,
+        crate::input_state::InputLifecycleState::Consumed
+            | crate::input_state::InputLifecycleState::Superseded
+            | crate::input_state::InputLifecycleState::Coalesced
+            | crate::input_state::InputLifecycleState::Abandoned
+    ) && state.seed.terminal_outcome.is_some();
+    let completion_closed = state
+        .state
+        .terminal_completion
+        .as_ref()
+        .is_none_or(|completion| {
+            matches!(
+                completion.phase,
+                crate::input_state::InputTerminalCompletionPhase::Finalized { .. }
+            )
+        });
+    let publication_closed =
+        state
+            .state
+            .interaction_terminal_outbox
+            .as_ref()
+            .is_none_or(|outbox| {
+                matches!(
+                    outbox.phase,
+                    crate::input_state::InteractionTerminalOutboxPhase::Published { .. }
+                )
+            });
+    // A directed input's payload is itself the only pre-outbox carrier of
+    // the Interaction identity. A terminal row without an outbox therefore
+    // has an unmaterialized publication obligation and must retain content.
+    // Malformed payloads also fail closed here; their validation error must
+    // remain observable rather than being erased as if they were ordinary
+    // terminal inputs.
+    let has_unmaterialized_directed_terminal =
+        state.state.persisted_input.as_ref().is_some_and(|input| {
+            crate::input::validated_directed_interaction_id(input)
+                .map(|interaction_id| {
+                    interaction_id.is_some() && state.state.interaction_terminal_outbox.is_none()
+                })
+                .unwrap_or(true)
+        });
+    lifecycle_terminal
+        && completion_closed
+        && publication_closed
+        && !has_unmaterialized_directed_terminal
+}
+
+#[cfg(test)]
+mod terminal_payload_retirement_tests {
+    use super::*;
+    use crate::input::{Input, PromptInput};
+    use crate::input_state::{InputLifecycleState, InputTerminalOutcome, StoredInputState};
+
+    fn prompt_payload() -> Input {
+        Input::Prompt(PromptInput::new("large durable prompt", None))
+    }
+
+    fn with_terminal_seed(mut stored: StoredInputState) -> StoredInputState {
+        stored.seed.phase = InputLifecycleState::Consumed;
+        stored.seed.terminal_outcome = Some(InputTerminalOutcome::Consumed);
+        stored.seed.recovery_lane = None;
+        stored
+    }
+
+    #[test]
+    fn payload_retirement_requires_terminal_lifecycle_and_closed_obligations() {
+        let input_id = InputId::new();
+        let mut accepted = StoredInputState::new_accepted(input_id.clone());
+        accepted.state.persisted_input = Some(prompt_payload());
+        assert!(!input_state_payload_is_retirable(&accepted));
+
+        let mut staged = accepted.clone();
+        staged.seed.phase = InputLifecycleState::Staged;
+        assert!(!input_state_payload_is_retirable(&staged));
+
+        let terminal = with_terminal_seed(accepted);
+        assert!(input_state_payload_is_retirable(&terminal));
+
+        let (mut pending, _) = pending_terminal_owner_fixture(input_id.clone(), false);
+        pending.state.persisted_input = Some(prompt_payload());
+        pending = with_terminal_seed(pending);
+        assert!(!input_state_payload_is_retirable(&pending));
+
+        let (mut published, _) = pending_terminal_owner_fixture(input_id, true);
+        published.state.persisted_input = Some(prompt_payload());
+        published = with_terminal_seed(published);
+        assert!(input_state_payload_is_retirable(&published));
+    }
+
+    #[test]
+    fn retired_terminal_wire_image_omits_only_the_payload() {
+        let mut terminal = StoredInputState::new_accepted(InputId::new());
+        terminal.state.persisted_input = Some(prompt_payload());
+        terminal = with_terminal_seed(terminal);
+        let before_seed = terminal.seed.clone();
+
+        assert!(input_state_payload_is_retirable(&terminal));
+        terminal.state.persisted_input = None;
+        let encoded = serde_json::to_value(&terminal).unwrap();
+        let decoded: StoredInputState = serde_json::from_value(encoded.clone()).unwrap();
+
+        assert!(encoded.get("persisted_input").is_none());
+        assert_eq!(decoded.seed, before_seed);
+        assert_eq!(decoded.seed.phase, InputLifecycleState::Consumed);
+        assert_eq!(
+            decoded.seed.terminal_outcome,
+            Some(InputTerminalOutcome::Consumed)
+        );
+    }
+}
+
+pub(crate) fn validate_pending_terminal_owner_page(
+    after: Option<&InputId>,
+    limit: usize,
+    owner_input_ids: &[InputId],
+) -> Result<(), RuntimeStoreError> {
+    if limit == 0 || limit > MAX_PENDING_TERMINAL_OWNER_PAGE {
+        return Err(RuntimeStoreError::InvalidInputStateBatchCas {
+            reason: format!(
+                "pending-terminal owner page limit {limit} is outside 1..={MAX_PENDING_TERMINAL_OWNER_PAGE}"
+            ),
+        });
+    }
+    if owner_input_ids.len() > limit {
+        return Err(RuntimeStoreError::ReadFailed(format!(
+            "pending-terminal owner page returned {} ids for limit {limit}",
+            owner_input_ids.len()
+        )));
+    }
+    if owner_input_ids
+        .windows(2)
+        .any(|window| window[0].0 >= window[1].0)
+    {
+        return Err(RuntimeStoreError::ReadFailed(
+            "pending-terminal owner page is not strictly ordered".to_string(),
+        ));
+    }
+    if let (Some(after), Some(first)) = (after, owner_input_ids.first())
+        && first.0 <= after.0
+    {
+        return Err(RuntimeStoreError::ReadFailed(
+            "pending-terminal owner page did not advance its stable cursor".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Result of an exact input-state batch compare-and-swap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputStateBatchCasOutcome {
@@ -36,6 +245,25 @@ pub enum InputStateBatchCasOutcome {
     /// At least one expected row was missing or no longer byte-identical; no
     /// replacement was written.
     Stale,
+}
+
+/// Backend realization profile for logical exact-batch input-state CAS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputStateBatchCasImplementationProfile {
+    /// The store does not provide the exact atomic batch contract.
+    Unsupported,
+    /// Per-row comparison and the complete replacement set commit in one
+    /// durable multi-writer transaction.
+    MultiWriter,
+    /// A whole-batch backend write is safe only while every write validates a
+    /// durable exclusive-writer fence epoch.
+    ///
+    /// A process-local mutex alone never satisfies this profile. The epoch
+    /// token must be conditionally checked by the backing store, the complete
+    /// batch must persist in one conditional write, and publication must wait
+    /// for that durable success. A crash leaves the receipt Pending for cold
+    /// deterministic retry.
+    ExclusiveWriterFenced,
 }
 
 /// Result of an exact input-state batch compare-and-swap performed under an
@@ -138,6 +366,1746 @@ fn prepare_input_state_batch_cas(
     Ok(prepared)
 }
 
+pub(crate) fn validate_input_state_batch_read_ids(
+    input_ids: &[InputId],
+) -> Result<(), RuntimeStoreError> {
+    if input_ids.len() > MAX_INPUT_STATE_BATCH_CAS {
+        return Err(RuntimeStoreError::InvalidInputStateBatchCas {
+            reason: format!(
+                "batch read contains {} rows, exceeding the maximum of {MAX_INPUT_STATE_BATCH_CAS}",
+                input_ids.len()
+            ),
+        });
+    }
+    let mut unique = HashSet::with_capacity(input_ids.len());
+    for input_id in input_ids {
+        if !unique.insert(input_id.clone()) {
+            return Err(RuntimeStoreError::InvalidInputStateBatchCas {
+                reason: format!("batch read repeats input {input_id}"),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Durable representation selected for runtime-owned session authority.
+///
+/// The profile is explicit because the physical commit is materially
+/// different: a whole-blob store owns one lazy body encoding plus its exact
+/// row authority, while a head-canonical store owns delta rows and the small
+/// head inside the runtime transaction itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum RuntimeSessionPersistenceProfile {
+    /// RuntimeStore retains an authoritative serialized Session document.
+    WholeBlobV1,
+    /// RuntimeStore atomically commits canonical strand rows and a small head.
+    HeadCanonicalV1,
+}
+
+/// Small RuntimeStore-owned catalog projection for session listing and
+/// lifecycle discovery.
+///
+/// This is intentionally incapable of carrying transcript, graph, component,
+/// or serialized Session body data. WholeBlob and HeadCanonical stores update
+/// it in the same atomic commit as their physical session authority.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RuntimeSessionCatalogEntry {
+    session_id: meerkat_core::types::SessionId,
+    persistence_profile: RuntimeSessionPersistenceProfile,
+    created_at: std::time::SystemTime,
+    updated_at: std::time::SystemTime,
+    message_count: usize,
+    total_tokens: u64,
+    labels: BTreeMap<String, String>,
+    lifecycle_terminal: Option<meerkat_core::SessionLifecycleTerminal>,
+    runtime_state: Option<RuntimeState>,
+}
+
+impl RuntimeSessionCatalogEntry {
+    const SESSION_LABELS_KEY: &'static str = "session_labels";
+
+    /// Derive a validated, body-free catalog projection from a typed Session.
+    ///
+    /// This value is listing metadata only. It does not certify the Session,
+    /// issue store authority, authorize adoption, or prove that any physical
+    /// row is current. A custom [`RuntimeStore`] must commit the returned entry
+    /// atomically with the physical body and its own store-issued authority.
+    ///
+    /// Malformed catalog-owned metadata is rejected rather than omitted.
+    pub fn from_session(
+        session: &meerkat_core::Session,
+        persistence_profile: RuntimeSessionPersistenceProfile,
+        runtime_state: Option<RuntimeState>,
+    ) -> Result<Self, RuntimeStoreError> {
+        let labels = session
+            .metadata()
+            .get(Self::SESSION_LABELS_KEY)
+            .map(|value| {
+                serde_json::from_value::<BTreeMap<String, String>>(value.clone()).map_err(|error| {
+                    RuntimeStoreError::WriteFailed(format!(
+                        "session {} has malformed catalog labels: {error}",
+                        session.id()
+                    ))
+                })
+            })
+            .transpose()?
+            .unwrap_or_default();
+        let lifecycle_terminal = session.try_lifecycle_terminal().map_err(|error| {
+            RuntimeStoreError::WriteFailed(format!(
+                "session {} has malformed lifecycle-terminal metadata: {error}",
+                session.id()
+            ))
+        })?;
+        Ok(Self {
+            session_id: session.id().clone(),
+            persistence_profile,
+            created_at: session.created_at(),
+            updated_at: session.updated_at(),
+            message_count: session.messages().len(),
+            total_tokens: session.total_tokens(),
+            labels,
+            lifecycle_terminal,
+            runtime_state,
+        })
+    }
+
+    /// Derive a validated, body-free catalog projection from a canonical head.
+    ///
+    /// This is the HeadCanonical counterpart of [`Self::from_session`]. It
+    /// materializes only the head's bounded catalog metadata projection and
+    /// does not mint CAS authority or authorize a store transition. The custom
+    /// backend remains responsible for atomically committing this projection
+    /// with its exact physical head and store-issued authority.
+    pub fn from_head(
+        head: &meerkat_core::session_store::SessionHead,
+        persistence_profile: RuntimeSessionPersistenceProfile,
+        runtime_state: Option<RuntimeState>,
+    ) -> Result<Self, RuntimeStoreError> {
+        let metadata = head.materialized_metadata().map_err(|error| {
+            RuntimeStoreError::WriteFailed(format!(
+                "session {} head has no exact catalog metadata projection: {error}",
+                head.id
+            ))
+        })?;
+        let labels = metadata
+            .get(Self::SESSION_LABELS_KEY)
+            .map(|value| {
+                serde_json::from_value::<BTreeMap<String, String>>(value.clone()).map_err(|error| {
+                    RuntimeStoreError::WriteFailed(format!(
+                        "session {} head has malformed catalog labels: {error}",
+                        head.id
+                    ))
+                })
+            })
+            .transpose()?
+            .unwrap_or_default();
+        let lifecycle_terminal =
+            meerkat_core::try_lifecycle_terminal_from_map(&metadata).map_err(|error| {
+                RuntimeStoreError::WriteFailed(format!(
+                    "session {} head has malformed lifecycle-terminal metadata: {error}",
+                    head.id
+                ))
+            })?;
+        Self::from_head_facts(
+            head,
+            labels,
+            lifecycle_terminal,
+            persistence_profile,
+            runtime_state,
+        )
+    }
+
+    pub(crate) fn from_head_facts(
+        head: &meerkat_core::session_store::SessionHead,
+        labels: BTreeMap<String, String>,
+        lifecycle_terminal: Option<meerkat_core::SessionLifecycleTerminal>,
+        persistence_profile: RuntimeSessionPersistenceProfile,
+        runtime_state: Option<RuntimeState>,
+    ) -> Result<Self, RuntimeStoreError> {
+        Ok(Self {
+            session_id: head.id.clone(),
+            persistence_profile,
+            created_at: head.created_at,
+            updated_at: head.updated_at,
+            message_count: usize::try_from(head.message_count).map_err(|_| {
+                RuntimeStoreError::WriteFailed(format!(
+                    "session {} head message count exceeds host range",
+                    head.id
+                ))
+            })?,
+            total_tokens: head.usage.total_tokens(),
+            labels,
+            lifecycle_terminal,
+            runtime_state,
+        })
+    }
+
+    #[must_use]
+    pub fn session_id(&self) -> &meerkat_core::types::SessionId {
+        &self.session_id
+    }
+
+    #[must_use]
+    pub const fn persistence_profile(&self) -> RuntimeSessionPersistenceProfile {
+        self.persistence_profile
+    }
+
+    #[must_use]
+    pub const fn created_at(&self) -> std::time::SystemTime {
+        self.created_at
+    }
+
+    #[must_use]
+    pub const fn updated_at(&self) -> std::time::SystemTime {
+        self.updated_at
+    }
+
+    #[must_use]
+    pub const fn message_count(&self) -> usize {
+        self.message_count
+    }
+
+    #[must_use]
+    pub const fn total_tokens(&self) -> u64 {
+        self.total_tokens
+    }
+
+    #[must_use]
+    pub fn labels(&self) -> &BTreeMap<String, String> {
+        &self.labels
+    }
+
+    #[must_use]
+    pub const fn lifecycle_terminal(&self) -> Option<meerkat_core::SessionLifecycleTerminal> {
+        self.lifecycle_terminal
+    }
+
+    #[must_use]
+    pub const fn runtime_state(&self) -> Option<RuntimeState> {
+        self.runtime_state
+    }
+
+    pub(crate) fn set_runtime_state(&mut self, runtime_state: Option<RuntimeState>) {
+        self.runtime_state = runtime_state;
+    }
+}
+
+/// Upper bound for observing the currently committed session authority.
+///
+/// Reconciliation and health probes may poll this seam. A store must therefore
+/// state whether the observation is a bounded metadata read; silently parsing
+/// an accumulated WholeBlob document here recreates an O(document) hot loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeSessionAuthorityReadCost {
+    /// Reads only a fixed-size authority row or in-memory authority value.
+    Bounded,
+    /// This implementation has no bounded authority observation.
+    Unsupported,
+}
+
+/// Store-issued physical identity of one committed WholeBlob row.
+///
+/// The Session is ordinary domain payload. Currentness is owned only by the
+/// store revision and digest of the exact bytes in the row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WholeBlobStoreAuthority {
+    authority_version: u16,
+    session_id: meerkat_core::types::SessionId,
+    store_revision: u64,
+    blob_sha256: String,
+}
+
+fn is_canonical_row_sha256_token(token: &str) -> bool {
+    let Some(hex) = token.strip_prefix("row-sha256:") else {
+        return false;
+    };
+    hex.len() == 64
+        && hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+impl WholeBlobStoreAuthority {
+    /// Current fixed-size ledger format.
+    pub const VERSION: u16 = 1;
+
+    /// Validate the fixed-size fields decoded from one backend store record.
+    ///
+    /// This constructs a value carrier only. Calling it does not make the
+    /// record current and does not mint authority for a caller. The value is
+    /// authoritative only when an honest [`RuntimeStore`] returns it from the
+    /// same atomic observation or commit that proved the named physical row.
+    pub fn from_store_record(
+        authority_version: u16,
+        session_id: meerkat_core::types::SessionId,
+        store_revision: u64,
+        blob_sha256: String,
+    ) -> Result<Self, RuntimeStoreError> {
+        if authority_version != Self::VERSION
+            || store_revision == 0
+            || !is_canonical_row_sha256_token(&blob_sha256)
+        {
+            return Err(RuntimeStoreError::SessionPersistenceAuthorityConflict {
+                runtime_id: session_id.to_string(),
+                detail: "WholeBlob store authority requires the current version, nonzero \
+                         revision, and canonical physical row digest"
+                    .to_string(),
+            });
+        }
+        Ok(Self {
+            authority_version,
+            session_id,
+            store_revision,
+            blob_sha256,
+        })
+    }
+
+    pub(crate) fn issued(
+        session_id: meerkat_core::types::SessionId,
+        store_revision: u64,
+        blob_sha256: String,
+    ) -> Result<Self, RuntimeStoreError> {
+        Self::from_store_record(Self::VERSION, session_id, store_revision, blob_sha256)
+    }
+
+    #[must_use]
+    pub const fn authority_version(&self) -> u16 {
+        self.authority_version
+    }
+
+    #[must_use]
+    pub fn session_id(&self) -> &meerkat_core::types::SessionId {
+        &self.session_id
+    }
+
+    #[must_use]
+    pub const fn store_revision(&self) -> u64 {
+        self.store_revision
+    }
+
+    #[must_use]
+    pub fn blob_sha256(&self) -> &str {
+        &self.blob_sha256
+    }
+}
+
+/// One atomically observed WholeBlob row and its store-issued identity.
+///
+/// Backends construct this under one lock/transaction so rewrite preparation
+/// cannot accidentally pair bytes from one revision with another revision's
+/// digest.
+#[derive(Debug, Clone)]
+pub struct CommittedWholeBlobSnapshot {
+    session: Arc<meerkat_core::Session>,
+    bytes: Arc<Vec<u8>>,
+    authority: WholeBlobStoreAuthority,
+}
+
+/// One typed whole-document successor bound to an exact store-issued
+/// predecessor.
+///
+/// This carrier is intentionally free of Session checkpoint facts. The
+/// predecessor is identified only by the store revision and exact physical
+/// digest, while the successor is encoded and hashed once inside this
+/// WholeBlob preparation boundary.
+#[derive(Debug, Clone)]
+pub struct PreparedWholeBlobSnapshotCas {
+    expected_authority: WholeBlobStoreAuthority,
+    candidate_session: Arc<meerkat_core::Session>,
+    candidate_bytes: Arc<Vec<u8>>,
+    candidate_blob_sha256: String,
+}
+
+/// Result of one exact-authority WholeBlob snapshot compare-and-swap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WholeBlobSnapshotCasOutcome {
+    /// The candidate is current, either after this write or as an exact
+    /// idempotent observation.
+    Committed(WholeBlobStoreAuthority),
+    /// The expected store-issued predecessor is no longer current.
+    Conflict,
+}
+
+impl PreparedWholeBlobSnapshotCas {
+    pub fn prepare(
+        expected_authority: WholeBlobStoreAuthority,
+        candidate: BoundSessionCommit,
+    ) -> Result<Self, RuntimeStoreError> {
+        let candidate_session = candidate.into_session_arc().ok_or_else(|| {
+            RuntimeStoreError::SessionPersistenceAuthorityConflict {
+                runtime_id: expected_authority.session_id().to_string(),
+                detail: "WholeBlob snapshot CAS requires a sealed typed Session".to_string(),
+            }
+        })?;
+        if candidate_session.id() != expected_authority.session_id() {
+            return Err(RuntimeStoreError::SessionKeyMismatch {
+                expected: expected_authority.session_id().clone(),
+                actual: candidate_session.id().clone(),
+            });
+        }
+        let (candidate_bytes, candidate_blob_sha256) =
+            encode_whole_blob_session(candidate_session.as_ref())?;
+        Ok(Self {
+            expected_authority,
+            candidate_session,
+            candidate_bytes,
+            candidate_blob_sha256,
+        })
+    }
+
+    #[must_use]
+    pub fn expected_authority(&self) -> &WholeBlobStoreAuthority {
+        &self.expected_authority
+    }
+
+    #[must_use]
+    pub fn candidate_blob_sha256(&self) -> &str {
+        &self.candidate_blob_sha256
+    }
+
+    /// Whether a bounded store observation proves this candidate current.
+    #[must_use]
+    pub fn accepts_committed_authority(&self, observed: &WholeBlobStoreAuthority) -> bool {
+        if observed.session_id() != self.expected_authority.session_id()
+            || observed.blob_sha256() != self.candidate_blob_sha256
+        {
+            return false;
+        }
+        (observed.store_revision() == self.expected_authority.store_revision()
+            && self.candidate_blob_sha256 == self.expected_authority.blob_sha256())
+            || self
+                .expected_authority
+                .store_revision()
+                .checked_add(1)
+                .is_some_and(|successor| observed.store_revision() == successor)
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        WholeBlobStoreAuthority,
+        Arc<meerkat_core::Session>,
+        Arc<Vec<u8>>,
+        String,
+    ) {
+        (
+            self.expected_authority,
+            self.candidate_session,
+            self.candidate_bytes,
+            self.candidate_blob_sha256,
+        )
+    }
+}
+
+struct WholeBlobSessionWriter {
+    bytes: Vec<u8>,
+    hasher: Sha256,
+}
+
+impl std::io::Write for WholeBlobSessionWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.bytes.extend_from_slice(buffer);
+        self.hasher.update(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn encode_whole_blob_session(
+    session: &meerkat_core::Session,
+) -> Result<(Arc<Vec<u8>>, String), RuntimeStoreError> {
+    let mut writer = WholeBlobSessionWriter {
+        bytes: Vec::new(),
+        hasher: Sha256::new(),
+    };
+    serde_json::to_writer(&mut writer, session)
+        .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+    let blob_sha256 = format!("row-sha256:{:x}", writer.hasher.finalize());
+    Ok((Arc::new(writer.bytes), blob_sha256))
+}
+
+/// Opaque typed candidate prepared for one provisional WholeBlob body write.
+#[derive(Debug, Clone)]
+pub struct PreparedWholeBlobProvisionalTail {
+    authority: WholeBlobProvisionalTailAuthority,
+    candidate_artifact: meerkat_core::SerializedSessionArtifact,
+    conversation_digest: String,
+    message_count: u64,
+    catalog_entry: RuntimeSessionCatalogEntry,
+    compaction_projection_intents: Vec<meerkat_core::CompactionProjectionIntent>,
+    #[cfg(test)]
+    whole_blob_encode_count: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl PreparedWholeBlobProvisionalTail {
+    /// Prepare from an existing sealed boundary.
+    ///
+    /// Compatibility callers may already own a `BoundSessionCommit`; the
+    /// artifact's single-assignment cache is reused without retaining the
+    /// candidate `Session` in this carrier.
+    pub fn prepare(
+        base: WholeBlobStoreAuthority,
+        run_id: RunId,
+        candidate_sequence: u64,
+        candidate: &BoundSessionCommit,
+    ) -> Result<Self, RuntimeStoreError> {
+        let candidate_session = candidate.session_arc_cloned().ok_or_else(|| {
+            RuntimeStoreError::SessionPersistenceAuthorityConflict {
+                runtime_id: base.session_id().to_string(),
+                detail: "WholeBlob provisional candidate requires a sealed typed Session"
+                    .to_string(),
+            }
+        })?;
+        let artifact = candidate
+            .whole_blob_artifact()
+            .map_err(|error| {
+                RuntimeStoreError::WriteFailed(format!(
+                    "failed to materialize WholeBlob provisional candidate: {error}"
+                ))
+            })?
+            .clone();
+        Self::prepare_from_artifact(
+            base,
+            run_id,
+            candidate_sequence,
+            candidate_session.as_ref(),
+            artifact,
+            #[cfg(test)]
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        )
+    }
+
+    /// Borrow one live candidate while deriving the exact persisted artifact
+    /// and every bounded projection.
+    ///
+    /// JSON bytes and SHA-256 are produced in one streaming pass. The returned
+    /// carrier owns only the sealed artifact and bounded metadata; it does not
+    /// clone or retain the accumulated `Session`.
+    pub fn prepare_from_session(
+        base: WholeBlobStoreAuthority,
+        run_id: RunId,
+        candidate_sequence: u64,
+        candidate: &meerkat_core::Session,
+    ) -> Result<Self, RuntimeStoreError> {
+        #[cfg(test)]
+        let whole_blob_encode_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let artifact = candidate.to_persisted_artifact().map_err(|error| {
+            RuntimeStoreError::WriteFailed(format!(
+                "failed to materialize WholeBlob provisional candidate: {error}"
+            ))
+        })?;
+        #[cfg(test)]
+        whole_blob_encode_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Self::prepare_from_artifact(
+            base,
+            run_id,
+            candidate_sequence,
+            candidate,
+            artifact,
+            #[cfg(test)]
+            whole_blob_encode_count,
+        )
+    }
+
+    fn prepare_from_artifact(
+        base: WholeBlobStoreAuthority,
+        run_id: RunId,
+        candidate_sequence: u64,
+        candidate_session: &meerkat_core::Session,
+        candidate_artifact: meerkat_core::SerializedSessionArtifact,
+        #[cfg(test)] whole_blob_encode_count: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Result<Self, RuntimeStoreError> {
+        if candidate_session.id() != base.session_id() {
+            return Err(RuntimeStoreError::SessionKeyMismatch {
+                expected: base.session_id().clone(),
+                actual: candidate_session.id().clone(),
+            });
+        }
+        let authority = WholeBlobProvisionalTailAuthority::issued(
+            base.session_id().clone(),
+            base.store_revision(),
+            base.blob_sha256().to_string(),
+            run_id,
+            candidate_artifact.row_sha256_token().to_string(),
+            candidate_sequence,
+        )
+        .map_err(
+            |error| RuntimeStoreError::SessionPersistenceAuthorityConflict {
+                runtime_id: base.session_id().to_string(),
+                detail: error.to_string(),
+            },
+        )?;
+        let catalog_entry = RuntimeSessionCatalogEntry::from_session(
+            candidate_session,
+            RuntimeSessionPersistenceProfile::WholeBlobV1,
+            None,
+        )?;
+        let conversation_digest =
+            candidate_session
+                .transcript_content_digest()
+                .map_err(
+                    |error| RuntimeStoreError::SessionPersistenceAuthorityConflict {
+                        runtime_id: base.session_id().to_string(),
+                        detail: format!(
+                            "failed to derive WholeBlob provisional conversation digest: {error}"
+                        ),
+                    },
+                )?;
+        let message_count = u64::try_from(candidate_session.messages().len()).map_err(|_| {
+            RuntimeStoreError::SessionPersistenceAuthorityConflict {
+                runtime_id: base.session_id().to_string(),
+                detail: "WholeBlob provisional message count exceeds the durable range".to_string(),
+            }
+        })?;
+        let compaction_projection_intents =
+            validated_compaction_projection_intents(candidate_session)?;
+        Ok(Self {
+            authority,
+            candidate_artifact,
+            conversation_digest,
+            message_count,
+            catalog_entry,
+            compaction_projection_intents,
+            #[cfg(test)]
+            whole_blob_encode_count,
+        })
+    }
+
+    #[must_use]
+    pub fn authority(&self) -> &WholeBlobProvisionalTailAuthority {
+        &self.authority
+    }
+
+    #[must_use]
+    pub fn conversation_digest(&self) -> &str {
+        &self.conversation_digest
+    }
+
+    #[must_use]
+    pub const fn message_count(&self) -> u64 {
+        self.message_count
+    }
+
+    #[cfg(test)]
+    fn whole_blob_encode_count(&self) -> usize {
+        self.whole_blob_encode_count
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        WholeBlobProvisionalTailAuthority,
+        meerkat_core::SerializedSessionArtifact,
+        String,
+        u64,
+        RuntimeSessionCatalogEntry,
+        Vec<meerkat_core::CompactionProjectionIntent>,
+    ) {
+        (
+            self.authority,
+            self.candidate_artifact,
+            self.conversation_digest,
+            self.message_count,
+            self.catalog_entry,
+            self.compaction_projection_intents,
+        )
+    }
+}
+
+/// One atomically observed provisional authority and its exact candidate body.
+#[derive(Debug, Clone)]
+pub struct CommittedWholeBlobProvisionalTail {
+    authority: WholeBlobProvisionalTailAuthority,
+    candidate_bytes: Arc<Vec<u8>>,
+}
+
+/// Exact metadata-only request to promote one store-owned WholeBlob candidate.
+///
+/// The candidate body, digest, catalog facts, and compaction intents were
+/// already committed by [`PreparedWholeBlobProvisionalTail`]. This carrier
+/// deliberately has no `Session` or serialized artifact, so the final boundary
+/// cannot encode or hash the accumulated document a second time.
+#[derive(Debug, Clone)]
+pub struct PreparedWholeBlobProvisionalPromotion {
+    authority: WholeBlobProvisionalTailAuthority,
+    conversation_digest: String,
+    message_count: u64,
+}
+
+impl PreparedWholeBlobProvisionalPromotion {
+    pub fn prepare(
+        checkpoint: meerkat_core::RunCheckpointReceipt,
+        run_id: &RunId,
+    ) -> Result<Self, RuntimeStoreError> {
+        let authority = checkpoint.whole_blob().cloned().ok_or_else(|| {
+            RuntimeStoreError::SessionPersistenceAuthorityConflict {
+                runtime_id: checkpoint.session_id().to_string(),
+                detail: "HeadCanonical checkpoint cannot authorize WholeBlob promotion".to_string(),
+            }
+        })?;
+        if authority.run_id() != run_id {
+            return Err(RuntimeStoreError::SessionPersistenceAuthorityConflict {
+                runtime_id: authority.session_id().to_string(),
+                detail: "WholeBlob promotion run differs from store-issued candidate run"
+                    .to_string(),
+            });
+        }
+        Ok(Self {
+            authority,
+            conversation_digest: checkpoint.conversation_digest().to_string(),
+            message_count: checkpoint.message_count(),
+        })
+    }
+
+    #[must_use]
+    pub fn authority(&self) -> &WholeBlobProvisionalTailAuthority {
+        &self.authority
+    }
+
+    #[must_use]
+    pub(crate) fn into_parts(self) -> (WholeBlobProvisionalTailAuthority, String, u64) {
+        (self.authority, self.conversation_digest, self.message_count)
+    }
+}
+
+/// Exact WholeBlob recovery action bound to one store-owned provisional row.
+///
+/// A completed candidate carries no body: the store promotes its existing
+/// candidate allocation with metadata-only writes. An interrupted repair
+/// carries the one sealed successor artifact produced during classification;
+/// the backend installs those exact bytes without encoding or hashing again.
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedWholeBlobRecoveryPromotion {
+    authority: WholeBlobProvisionalTailAuthority,
+    repaired_snapshot: Option<PreparedWholeBlobSnapshot>,
+}
+
+impl PreparedWholeBlobRecoveryPromotion {
+    fn prepare(
+        repaired_document: Option<&BoundSessionCommit>,
+        evidence: &PreparedRecoveryEvidence,
+    ) -> Result<Self, RuntimeStoreError> {
+        let (
+            base_store_revision,
+            base_blob_sha256,
+            candidate_blob_sha256,
+            candidate_sequence,
+            recovered_blob_sha256,
+        ) = evidence.whole_blob_authority_transition().ok_or_else(|| {
+            RuntimeStoreError::SessionPersistenceAuthorityConflict {
+                runtime_id: evidence.session_id().to_string(),
+                detail: "HeadCanonical recovery evidence cannot authorize WholeBlob promotion"
+                    .to_string(),
+            }
+        })?;
+        let authority = WholeBlobProvisionalTailAuthority::issued(
+            evidence.session_id().clone(),
+            base_store_revision,
+            base_blob_sha256.to_string(),
+            evidence.candidate_run_id().clone(),
+            candidate_blob_sha256.to_string(),
+            candidate_sequence,
+        )
+        .map_err(
+            |error| RuntimeStoreError::SessionPersistenceAuthorityConflict {
+                runtime_id: evidence.session_id().to_string(),
+                detail: error.to_string(),
+            },
+        )?;
+        let repaired_snapshot = if recovered_blob_sha256 == candidate_blob_sha256 {
+            if repaired_document.is_some() {
+                return Err(RuntimeStoreError::SessionPersistenceAuthorityConflict {
+                    runtime_id: evidence.session_id().to_string(),
+                    detail: "completed WholeBlob recovery must not carry a materialized body"
+                        .to_string(),
+                });
+            }
+            None
+        } else {
+            let document = repaired_document.ok_or_else(|| {
+                RuntimeStoreError::SessionPersistenceAuthorityConflict {
+                    runtime_id: evidence.session_id().to_string(),
+                    detail: "WholeBlob repair has no sealed successor artifact".to_string(),
+                }
+            })?;
+            let prepared = prepared_whole_blob_snapshot(document)?;
+            if prepared.session().id() != evidence.session_id()
+                || prepared.blob_sha256() != recovered_blob_sha256
+            {
+                return Err(RuntimeStoreError::SessionPersistenceAuthorityConflict {
+                    runtime_id: evidence.session_id().to_string(),
+                    detail: "WholeBlob repaired artifact differs from sealed recovery authority"
+                        .to_string(),
+                });
+            }
+            Some(prepared)
+        };
+        Ok(Self {
+            authority,
+            repaired_snapshot,
+        })
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        WholeBlobProvisionalTailAuthority,
+        Option<PreparedWholeBlobSnapshot>,
+    ) {
+        (self.authority, self.repaired_snapshot)
+    }
+}
+
+/// Opaque metadata-only promotion of an already-applied HeadCanonical tail.
+///
+/// The physical rows were committed by the checkpoint CAS named by
+/// `authority`; final runtime commit consumes only this fixed-size receipt.
+#[derive(Debug, Clone)]
+pub struct PreparedHeadCanonicalProvisionalPromotion {
+    checkpoint: meerkat_core::RunCheckpointReceipt,
+}
+
+impl PreparedHeadCanonicalProvisionalPromotion {
+    pub fn prepare(
+        checkpoint: meerkat_core::RunCheckpointReceipt,
+        run_id: &RunId,
+    ) -> Result<Self, RuntimeStoreError> {
+        let authority = checkpoint.head_canonical().ok_or_else(|| {
+            RuntimeStoreError::SessionPersistenceAuthorityConflict {
+                runtime_id: checkpoint.session_id().to_string(),
+                detail: "HeadCanonical promotion received a WholeBlob checkpoint".to_string(),
+            }
+        })?;
+        if authority.run_id() != run_id {
+            return Err(RuntimeStoreError::SessionPersistenceAuthorityConflict {
+                runtime_id: authority.session_id().to_string(),
+                detail: "HeadCanonical promotion run differs from store-issued physical tail"
+                    .to_string(),
+            });
+        }
+        Ok(Self { checkpoint })
+    }
+
+    #[must_use]
+    pub fn authority(&self) -> &HeadCanonicalProvisionalTailAuthority {
+        self.checkpoint
+            .head_canonical()
+            .expect("HeadCanonical promotion constructor seals the profile")
+    }
+
+    #[must_use]
+    pub fn checkpoint(&self) -> &meerkat_core::RunCheckpointReceipt {
+        &self.checkpoint
+    }
+
+    #[must_use]
+    pub(crate) fn into_checkpoint(self) -> meerkat_core::RunCheckpointReceipt {
+        self.checkpoint
+    }
+}
+
+impl CommittedWholeBlobProvisionalTail {
+    pub(crate) fn new(
+        authority: WholeBlobProvisionalTailAuthority,
+        candidate_bytes: Arc<Vec<u8>>,
+    ) -> Self {
+        Self {
+            authority,
+            candidate_bytes,
+        }
+    }
+
+    #[must_use]
+    pub fn authority(&self) -> &WholeBlobProvisionalTailAuthority {
+        &self.authority
+    }
+
+    #[must_use]
+    pub fn candidate_bytes(&self) -> &[u8] {
+        self.candidate_bytes.as_ref()
+    }
+
+    #[must_use]
+    pub fn candidate_bytes_arc(&self) -> Arc<Vec<u8>> {
+        Arc::clone(&self.candidate_bytes)
+    }
+}
+
+impl CommittedWholeBlobSnapshot {
+    pub(crate) fn new(
+        bytes: Arc<Vec<u8>>,
+        authority: WholeBlobStoreAuthority,
+    ) -> Result<Self, RuntimeStoreError> {
+        let observed_blob_sha256 = format!("row-sha256:{:x}", Sha256::digest(bytes.as_ref()));
+        if observed_blob_sha256 != authority.blob_sha256() {
+            return Err(RuntimeStoreError::SessionPersistenceAuthorityConflict {
+                runtime_id: authority.session_id().to_string(),
+                detail: "WholeBlob body digest differs from store authority".to_string(),
+            });
+        }
+        let session = Arc::new(
+            meerkat_core::Session::from_persisted_bytes(bytes.as_ref()).map_err(|error| {
+                RuntimeStoreError::ReadFailed(format!(
+                    "WholeBlob body is not a valid current Session: {error}"
+                ))
+            })?,
+        );
+        if session.id() != authority.session_id() {
+            return Err(RuntimeStoreError::SessionPersistenceAuthorityConflict {
+                runtime_id: authority.session_id().to_string(),
+                detail: "WholeBlob body session differs from store authority".to_string(),
+            });
+        }
+        Ok(Self {
+            session,
+            bytes,
+            authority,
+        })
+    }
+
+    /// Typed domain document decoded from these exact committed bytes.
+    #[must_use]
+    pub fn session(&self) -> &meerkat_core::Session {
+        self.session.as_ref()
+    }
+
+    /// Shared typed domain document decoded from these exact committed bytes.
+    #[must_use]
+    pub fn session_arc(&self) -> Arc<meerkat_core::Session> {
+        Arc::clone(&self.session)
+    }
+
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        self.bytes.as_ref()
+    }
+
+    #[must_use]
+    pub fn bytes_arc(&self) -> Arc<Vec<u8>> {
+        Arc::clone(&self.bytes)
+    }
+
+    #[must_use]
+    pub fn authority(&self) -> &WholeBlobStoreAuthority {
+        &self.authority
+    }
+
+    #[must_use]
+    pub fn into_parts(
+        self,
+    ) -> (
+        Arc<meerkat_core::Session>,
+        Arc<Vec<u8>>,
+        WholeBlobStoreAuthority,
+    ) {
+        (self.session, self.bytes, self.authority)
+    }
+}
+
+impl std::fmt::Display for RuntimeSessionPersistenceProfile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::WholeBlobV1 => f.write_str("whole_blob_v1"),
+            Self::HeadCanonicalV1 => f.write_str("head_canonical_v1"),
+        }
+    }
+}
+
+/// Store-issued identity of one committed HeadCanonical boundary.
+///
+/// The small head carries the exact row, rewrite, graph, component, and
+/// metadata-prefix facts. Currentness is the store revision plus the exact
+/// committed head token; no fact inside a materialized `Session` participates
+/// in authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeadCanonicalStoreAuthority {
+    authority_version: u16,
+    session_id: meerkat_core::types::SessionId,
+    store_revision: u64,
+    boundary_head: meerkat_core::session_store::SessionHead,
+    committed_head_token: String,
+}
+
+impl HeadCanonicalStoreAuthority {
+    pub const VERSION: u16 = 1;
+
+    /// Validate one fixed-size authority record and its exact canonical head.
+    ///
+    /// Construction validates representation and identity only; it does not
+    /// certify that the record is current or authorize a transition. The value
+    /// becomes authority only when an honest [`RuntimeStore`] returns it from
+    /// the atomic observation or commit that proved the matching physical
+    /// head and store revision.
+    pub fn from_store_record(
+        authority_version: u16,
+        session_id: meerkat_core::types::SessionId,
+        store_revision: u64,
+        boundary_head: meerkat_core::session_store::SessionHead,
+        committed_head_token: String,
+    ) -> Result<Self, RuntimeStoreError> {
+        let conflict = |detail: String| RuntimeStoreError::SessionPersistenceAuthorityConflict {
+            runtime_id: session_id.to_string(),
+            detail,
+        };
+        if authority_version != Self::VERSION
+            || store_revision == 0
+            || committed_head_token.is_empty()
+        {
+            return Err(conflict(
+                "HeadCanonical authority requires the current version, nonzero store revision, \
+                 and head token"
+                    .to_string(),
+            ));
+        }
+        if boundary_head.id != session_id {
+            return Err(conflict(format!(
+                "HeadCanonical boundary belongs to {}, not {session_id}",
+                boundary_head.id
+            )));
+        }
+        let row_prefix = boundary_head.message_row_prefix.as_ref().ok_or_else(|| {
+            conflict("HeadCanonical boundary has no exact message-row prefix".to_string())
+        })?;
+        if row_prefix.row_count() != boundary_head.message_count {
+            return Err(conflict(
+                "HeadCanonical boundary message count and row prefix differ".to_string(),
+            ));
+        }
+        if boundary_head.rewrite_prefix.occurrence_count() != boundary_head.rewrite_count {
+            return Err(conflict(
+                "HeadCanonical boundary rewrite count and prefix differ".to_string(),
+            ));
+        }
+        let derived = meerkat_core::session_head_cas_token(&boundary_head)
+            .map_err(|error| conflict(format!("HeadCanonical head token is invalid: {error}")))?;
+        if derived != committed_head_token {
+            return Err(conflict(
+                "store-issued HeadCanonical token differs from the exact boundary head".to_string(),
+            ));
+        }
+        Ok(Self {
+            authority_version,
+            session_id,
+            store_revision,
+            boundary_head,
+            committed_head_token,
+        })
+    }
+
+    pub(crate) fn issued(
+        session_id: meerkat_core::types::SessionId,
+        store_revision: u64,
+        boundary_head: meerkat_core::session_store::SessionHead,
+        committed_head_token: String,
+    ) -> Result<Self, RuntimeStoreError> {
+        Self::from_store_record(
+            Self::VERSION,
+            session_id,
+            store_revision,
+            boundary_head,
+            committed_head_token,
+        )
+    }
+
+    #[must_use]
+    pub const fn authority_version(&self) -> u16 {
+        self.authority_version
+    }
+
+    #[must_use]
+    pub fn session_id(&self) -> &meerkat_core::types::SessionId {
+        &self.session_id
+    }
+
+    #[must_use]
+    pub const fn store_revision(&self) -> u64 {
+        self.store_revision
+    }
+
+    #[must_use]
+    pub fn boundary_head(&self) -> &meerkat_core::session_store::SessionHead {
+        &self.boundary_head
+    }
+
+    #[must_use]
+    pub fn committed_head_token(&self) -> &str {
+        &self.committed_head_token
+    }
+}
+
+/// Opaque intent written before a HeadCanonical physical-head CAS.
+///
+/// The carrier binds the exact committed parent, explicit run identity, and
+/// exact successor head/token. It also captures the bounded catalog,
+/// compaction, conversation-digest, and message-count projections from that
+/// same live successor. Backends persist those facts with the fixed-size
+/// authority; the physical SessionStore CAS realizes the already-bound head
+/// separately.
+#[derive(Debug, Clone)]
+pub struct PreparedHeadCanonicalProvisionalTail {
+    committed: HeadCanonicalStoreAuthority,
+    run_id: RunId,
+    successor_head: meerkat_core::session_store::SessionHead,
+    successor_head_token: String,
+    candidate_message_count: usize,
+    candidate_conversation_digest: String,
+    catalog_entry: RuntimeSessionCatalogEntry,
+    compaction_projection_intents: Vec<meerkat_core::CompactionProjectionIntent>,
+}
+
+impl PreparedHeadCanonicalProvisionalTail {
+    pub fn prepare(
+        committed: HeadCanonicalStoreAuthority,
+        run_id: RunId,
+        successor_head: &meerkat_core::session_store::SessionHead,
+        successor_head_token: &str,
+        candidate_session: &meerkat_core::Session,
+    ) -> Result<Self, RuntimeStoreError> {
+        let session_id = committed.session_id().clone();
+        let conflict = |detail: String| RuntimeStoreError::SessionPersistenceAuthorityConflict {
+            runtime_id: session_id.to_string(),
+            detail,
+        };
+        if successor_head.id != session_id || successor_head_token.is_empty() {
+            return Err(conflict(
+                "HeadCanonical provisional intent names the wrong session or an empty successor"
+                    .to_string(),
+            ));
+        }
+        let derived = meerkat_core::session_head_cas_token(successor_head).map_err(|error| {
+            conflict(format!(
+                "HeadCanonical provisional successor is invalid: {error}"
+            ))
+        })?;
+        if derived != successor_head_token
+            || successor_head_token == committed.committed_head_token()
+        {
+            return Err(conflict(
+                "HeadCanonical provisional successor token is not the exact distinct target head"
+                    .to_string(),
+            ));
+        }
+        if candidate_session.id() != &session_id
+            || candidate_session.messages().len() as u64 != successor_head.message_count
+            || candidate_session.version() != successor_head.version
+            || candidate_session.created_at() != successor_head.created_at
+            || candidate_session.updated_at() != successor_head.updated_at
+            || candidate_session.total_usage() != successor_head.usage
+            || !successor_head
+                .matches_session_metadata(candidate_session)
+                .map_err(|error| {
+                    conflict(format!(
+                        "HeadCanonical provisional candidate metadata is invalid: {error}"
+                    ))
+                })?
+        {
+            return Err(conflict(
+                "HeadCanonical provisional successor does not describe the exact candidate Session"
+                    .to_string(),
+            ));
+        }
+        let candidate_conversation_digest =
+            candidate_session
+                .transcript_content_digest()
+                .map_err(|error| {
+                    conflict(format!(
+                        "HeadCanonical provisional candidate transcript is invalid: {error}"
+                    ))
+                })?;
+        if candidate_conversation_digest != successor_head.head_revision {
+            return Err(conflict(
+                "HeadCanonical provisional candidate digest differs from its successor head"
+                    .to_string(),
+            ));
+        }
+        let catalog_entry = RuntimeSessionCatalogEntry::from_session(
+            candidate_session,
+            RuntimeSessionPersistenceProfile::HeadCanonicalV1,
+            None,
+        )?;
+        let compaction_projection_intents =
+            validated_compaction_projection_intents(candidate_session)?;
+        Ok(Self {
+            committed,
+            run_id,
+            successor_head: successor_head.clone(),
+            successor_head_token: successor_head_token.to_string(),
+            candidate_message_count: candidate_session.messages().len(),
+            candidate_conversation_digest,
+            catalog_entry,
+            compaction_projection_intents,
+        })
+    }
+
+    #[must_use]
+    pub(crate) fn committed(&self) -> &HeadCanonicalStoreAuthority {
+        &self.committed
+    }
+
+    #[must_use]
+    pub(crate) fn run_id(&self) -> &RunId {
+        &self.run_id
+    }
+
+    #[must_use]
+    pub(crate) fn successor_head(&self) -> &meerkat_core::session_store::SessionHead {
+        &self.successor_head
+    }
+
+    #[must_use]
+    pub(crate) fn successor_head_token(&self) -> &str {
+        &self.successor_head_token
+    }
+
+    #[must_use]
+    pub(crate) const fn candidate_message_count(&self) -> usize {
+        self.candidate_message_count
+    }
+
+    #[must_use]
+    pub(crate) fn candidate_conversation_digest(&self) -> &str {
+        &self.candidate_conversation_digest
+    }
+
+    #[must_use]
+    pub(crate) fn catalog_entry(&self) -> &RuntimeSessionCatalogEntry {
+        &self.catalog_entry
+    }
+
+    #[must_use]
+    pub(crate) fn compaction_projection_intents(
+        &self,
+    ) -> &[meerkat_core::CompactionProjectionIntent] {
+        &self.compaction_projection_intents
+    }
+}
+
+/// Singular store-issued committed authority for a runtime session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeSessionAuthority {
+    WholeBlob(WholeBlobStoreAuthority),
+    HeadCanonical(HeadCanonicalStoreAuthority),
+}
+
+impl RuntimeSessionAuthority {
+    #[must_use]
+    pub const fn profile(&self) -> RuntimeSessionPersistenceProfile {
+        match self {
+            Self::WholeBlob(_) => RuntimeSessionPersistenceProfile::WholeBlobV1,
+            Self::HeadCanonical(_) => RuntimeSessionPersistenceProfile::HeadCanonicalV1,
+        }
+    }
+
+    #[must_use]
+    pub fn session_id(&self) -> &meerkat_core::types::SessionId {
+        match self {
+            Self::WholeBlob(authority) => authority.session_id(),
+            Self::HeadCanonical(authority) => authority.session_id(),
+        }
+    }
+
+    #[must_use]
+    pub fn whole_blob(&self) -> Option<&WholeBlobStoreAuthority> {
+        match self {
+            Self::WholeBlob(authority) => Some(authority),
+            Self::HeadCanonical(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub fn head_canonical(&self) -> Option<&HeadCanonicalStoreAuthority> {
+        match self {
+            Self::WholeBlob(_) => None,
+            Self::HeadCanonical(authority) => Some(authority),
+        }
+    }
+}
+
+/// Store-owned source for one durable-tail recovery pass.
+///
+/// The public recovery API accepts only a session identity. A backend that
+/// owns both runtime authority and canonical session rows constructs this
+/// opaque carrier from one transactional snapshot after checking the exact
+/// retained boundary head, current physical head, and both complete
+/// materializations. Callers cannot substitute a hand-authored Session or
+/// head row.
+#[derive(Debug, Clone)]
+pub struct PreparedDurableTailRecoverySource {
+    runtime_authority: RuntimeSessionAuthority,
+    provisional_authority: Option<HeadCanonicalProvisionalTailAuthority>,
+    provisional_target_applied: bool,
+    committed_session: Arc<meerkat_core::Session>,
+    physical_head: meerkat_core::session_store::SessionHead,
+    physical_head_cas_token: String,
+    physical_session: Arc<meerkat_core::Session>,
+}
+
+impl PreparedDurableTailRecoverySource {
+    pub(crate) fn new(
+        runtime_authority: RuntimeSessionAuthority,
+        provisional_authority: Option<HeadCanonicalProvisionalTailAuthority>,
+        committed_materialization: meerkat_core::VerifiedSessionHeadMaterialization,
+        physical_materialization: meerkat_core::VerifiedSessionHeadMaterialization,
+    ) -> Result<Self, RuntimeStoreError> {
+        let committed_session = Arc::clone(committed_materialization.session());
+        let physical_head = physical_materialization.head().clone();
+        let physical_session = Arc::clone(physical_materialization.session());
+        let runtime_id = runtime_authority.session_id().to_string();
+        let conflict = |detail: String| RuntimeStoreError::SessionPersistenceAuthorityConflict {
+            runtime_id: runtime_id.clone(),
+            detail,
+        };
+        if runtime_authority.profile() != RuntimeSessionPersistenceProfile::HeadCanonicalV1 {
+            return Err(conflict(
+                "durable-tail source requires head-canonical session ownership".to_string(),
+            ));
+        }
+        let committed_authority = runtime_authority
+            .head_canonical()
+            .ok_or_else(|| conflict("runtime authority is not HeadCanonical".to_string()))?;
+        let boundary_head = committed_authority.boundary_head();
+        if committed_materialization.head() != boundary_head {
+            return Err(conflict(
+                "verified committed materialization belongs to a different retained boundary head"
+                    .to_string(),
+            ));
+        }
+        let boundary_row_prefix = boundary_head.message_row_prefix.as_ref().ok_or_else(|| {
+            conflict("runtime boundary has no exact message-row prefix authority".to_string())
+        })?;
+        if physical_materialization
+            .exact_row_prefix_at(boundary_head.message_count)
+            .as_ref()
+            != Some(boundary_row_prefix)
+        {
+            return Err(conflict(
+                "physical recovery materialization does not retain the runtime boundary's exact row prefix"
+                    .to_string(),
+            ));
+        }
+        if committed_session.id() != runtime_authority.session_id()
+            || physical_session.id() != runtime_authority.session_id()
+            || &physical_head.id != runtime_authority.session_id()
+        {
+            return Err(conflict(
+                "durable-tail source identities do not all match runtime authority".to_string(),
+            ));
+        }
+        let committed_revision = committed_session
+            .transcript_content_digest()
+            .map_err(|error| conflict(format!("committed transcript is invalid: {error}")))?;
+        let committed_metadata_matches = boundary_head
+            .matches_session_metadata(&committed_session)
+            .map_err(|error| {
+                conflict(format!(
+                    "committed recovery metadata identity is invalid: {error}"
+                ))
+            })?;
+        if committed_session.messages().len() as u64 != boundary_head.message_count
+            || committed_revision != boundary_head.head_revision
+            || committed_session.version() != boundary_head.version
+            || committed_session.created_at() != boundary_head.created_at
+            || committed_session.updated_at() != boundary_head.updated_at
+            || committed_session.total_usage() != boundary_head.usage
+            || !committed_metadata_matches
+        {
+            return Err(conflict(
+                "committed recovery materialization differs from the exact retained boundary envelope"
+                    .to_string(),
+            ));
+        }
+        let physical_revision = physical_session
+            .transcript_content_digest()
+            .map_err(|error| conflict(format!("physical transcript is invalid: {error}")))?;
+        let physical_metadata_matches = physical_head
+            .matches_session_metadata(&physical_session)
+            .map_err(|error| {
+            conflict(format!(
+                "physical recovery metadata identity is invalid: {error}"
+            ))
+        })?;
+        if physical_session.messages().len() as u64 != physical_head.message_count
+            || physical_revision != physical_head.head_revision
+            || physical_session.version() != physical_head.version
+            || physical_session.created_at() != physical_head.created_at
+            || physical_session.updated_at() != physical_head.updated_at
+            || physical_session.total_usage() != physical_head.usage
+            || !physical_metadata_matches
+        {
+            return Err(conflict(
+                "physical recovery materialization differs from the exact current canonical envelope"
+                    .to_string(),
+            ));
+        }
+        let Some(physical_row_prefix) = physical_head.message_row_prefix.as_ref() else {
+            return Err(conflict(
+                "physical recovery head has no exact message-row prefix authority".to_string(),
+            ));
+        };
+        if physical_row_prefix.row_count() != physical_head.message_count {
+            return Err(conflict(
+                "physical recovery head message count and exact row prefix differ".to_string(),
+            ));
+        }
+        let physical_head_cas_token = meerkat_core::session_head_cas_token(&physical_head)
+            .map_err(|error| {
+                conflict(format!("physical recovery head token is invalid: {error}"))
+            })?;
+        if committed_authority.committed_head_token()
+            != meerkat_core::session_head_cas_token(boundary_head)
+                .map_err(|error| conflict(format!("committed head token is invalid: {error}")))?
+        {
+            return Err(conflict(
+                "committed runtime authority token differs from its retained boundary head"
+                    .to_string(),
+            ));
+        }
+        let provisional_target_applied = match (
+            &provisional_authority,
+            physical_head == *boundary_head,
+        ) {
+            (None, true) => false,
+            (None, false) => {
+                return Err(conflict(
+                    "newer physical head has no store-issued provisional authority".to_string(),
+                ));
+            }
+            (Some(provisional), aligned) => {
+                let first_provisional_revision = committed_authority
+                    .store_revision()
+                    .checked_add(1)
+                    .ok_or_else(|| {
+                        conflict("HeadCanonical store revision exhausted".to_string())
+                    })?;
+                let target_applied = provisional.physical_head_token() == physical_head_cas_token;
+                if provisional.authority_version() != HeadCanonicalProvisionalTailAuthority::VERSION
+                    || provisional.session_id() != runtime_authority.session_id()
+                    || provisional.base_store_revision() != committed_authority.store_revision()
+                    || provisional.base_committed_head_token()
+                        != committed_authority.committed_head_token()
+                    || (aligned
+                        && (physical_head_cas_token != committed_authority.committed_head_token()
+                            || provisional.physical_store_revision() != first_provisional_revision))
+                    || (!aligned
+                        && !target_applied
+                        && provisional.physical_store_revision() <= first_provisional_revision)
+                {
+                    return Err(conflict(
+                        "provisional authority does not bind the exact committed parent and physical head"
+                        .to_string(),
+                    ));
+                }
+                target_applied
+            }
+        };
+        Ok(Self {
+            runtime_authority,
+            provisional_authority,
+            provisional_target_applied,
+            committed_session,
+            physical_head,
+            physical_head_cas_token,
+            physical_session,
+        })
+    }
+
+    pub(crate) fn runtime_authority(&self) -> &RuntimeSessionAuthority {
+        &self.runtime_authority
+    }
+
+    pub(crate) fn committed_session(&self) -> &Arc<meerkat_core::Session> {
+        &self.committed_session
+    }
+
+    pub(crate) fn provisional_authority(&self) -> Option<&HeadCanonicalProvisionalTailAuthority> {
+        self.provisional_authority.as_ref()
+    }
+
+    pub(crate) const fn provisional_target_applied(&self) -> bool {
+        self.provisional_target_applied
+    }
+
+    pub(crate) fn physical_head(&self) -> &meerkat_core::session_store::SessionHead {
+        &self.physical_head
+    }
+
+    pub(crate) fn physical_head_cas_token(&self) -> &str {
+        &self.physical_head_cas_token
+    }
+
+    pub(crate) fn physical_session(&self) -> &Arc<meerkat_core::Session> {
+        &self.physical_session
+    }
+
+    /// Verify every exact receipt row for `candidate_run_id` against the
+    /// already-proved physical transcript and seal only the supported-floor
+    /// rows whose missing digest must be enriched atomically with recovery.
+    pub(crate) fn prepare_receipt_digest_enrichments(
+        &self,
+        candidate_run_id: &RunId,
+        receipts: &[PreparedRecoveryReceiptSource],
+    ) -> Result<Vec<PreparedRecoveryReceiptDigestEnrichment>, RuntimeStoreError> {
+        let conflict = |detail: String| RuntimeStoreError::SessionPersistenceAuthorityConflict {
+            runtime_id: self.runtime_authority.session_id().to_string(),
+            detail,
+        };
+        let mut expected_sequence = 1_u64;
+        let mut previous_message_count = 0_usize;
+        let mut enrichments = Vec::new();
+        for source in receipts {
+            let receipt = source.receipt();
+            if &receipt.run_id != candidate_run_id {
+                return Err(conflict(
+                    "recovery receipt source contains a different run identity".to_string(),
+                ));
+            }
+            if receipt.sequence != expected_sequence {
+                return Err(conflict(format!(
+                    "recovery receipt sequence {} is not the required dense sequence {expected_sequence}",
+                    receipt.sequence
+                )));
+            }
+            if receipt.message_count < previous_message_count
+                || receipt.message_count > self.physical_session.messages().len()
+            {
+                return Err(conflict(
+                    "recovery receipt message counts are not monotonic within the verified physical transcript"
+                        .to_string(),
+                ));
+            }
+            let derived_digest = self
+                .physical_session
+                .transcript_prefix_digest(receipt.message_count)
+                .map_err(|error| {
+                    conflict(format!(
+                        "failed to derive verified receipt transcript prefix: {error}"
+                    ))
+                })?;
+            match receipt.conversation_digest.as_deref() {
+                Some(existing) if existing != derived_digest => {
+                    return Err(conflict(format!(
+                        "receipt sequence {} digest differs from the verified physical transcript prefix",
+                        receipt.sequence
+                    )));
+                }
+                Some(_) => {}
+                None => enrichments.push(PreparedRecoveryReceiptDigestEnrichment::new(
+                    source,
+                    derived_digest,
+                )?),
+            }
+            expected_sequence = expected_sequence
+                .checked_add(1)
+                .ok_or_else(|| conflict("recovery receipt sequence overflow".to_string()))?;
+            previous_message_count = receipt.message_count;
+        }
+        Ok(enrichments)
+    }
+}
+
+/// One exact durable receipt row admitted to recovery classification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedRecoveryReceiptSource {
+    receipt: RunBoundaryReceipt,
+    exact_row_token: String,
+}
+
+impl PreparedRecoveryReceiptSource {
+    pub(crate) fn from_serialized_row(bytes: &[u8]) -> Result<Self, RuntimeStoreError> {
+        let receipt = serde_json::from_slice(bytes).map_err(|error| {
+            RuntimeStoreError::ReadFailed(format!("invalid durable recovery receipt row: {error}"))
+        })?;
+        Ok(Self {
+            receipt,
+            exact_row_token: format!("receipt-row-sha256:{:x}", Sha256::digest(bytes)),
+        })
+    }
+
+    pub(crate) fn receipt(&self) -> &RunBoundaryReceipt {
+        &self.receipt
+    }
+
+    pub(crate) fn exact_row_token(&self) -> &str {
+        &self.exact_row_token
+    }
+}
+
+/// Sealed one-time enrichment of a supported-floor digestless receipt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedRecoveryReceiptDigestEnrichment {
+    original_receipt: RunBoundaryReceipt,
+    original_exact_row_token: String,
+    derived_conversation_digest: String,
+}
+
+impl PreparedRecoveryReceiptDigestEnrichment {
+    fn new(
+        source: &PreparedRecoveryReceiptSource,
+        derived_conversation_digest: String,
+    ) -> Result<Self, RuntimeStoreError> {
+        if source.receipt.conversation_digest.is_some() || derived_conversation_digest.is_empty() {
+            return Err(RuntimeStoreError::SessionPersistenceAuthorityConflict {
+                runtime_id: source.receipt.run_id.to_string(),
+                detail: "receipt enrichment must replace exactly one missing digest".to_string(),
+            });
+        }
+        Ok(Self {
+            original_receipt: source.receipt.clone(),
+            original_exact_row_token: source.exact_row_token.clone(),
+            derived_conversation_digest,
+        })
+    }
+
+    pub(crate) fn original_receipt(&self) -> &RunBoundaryReceipt {
+        &self.original_receipt
+    }
+
+    pub(crate) fn original_exact_row_token(&self) -> &str {
+        &self.original_exact_row_token
+    }
+
+    pub(crate) fn derived_conversation_digest(&self) -> &str {
+        &self.derived_conversation_digest
+    }
+
+    pub(crate) fn enriched_receipt(&self) -> RunBoundaryReceipt {
+        let mut receipt = self.original_receipt.clone();
+        receipt.conversation_digest = Some(self.derived_conversation_digest.clone());
+        receipt
+    }
+}
+
+/// Whether a prepared boundary was newly written or proven from durable store
+/// authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreparedRuntimeSessionCommitOutcome {
+    /// This call installed the boundary.
+    Applied,
+    /// All durable authority and receipt witnesses already matched exactly.
+    AlreadyAppliedExact,
+    /// The exact released 0.8.10 receipt and every still-observable committed
+    /// effect matched, and the v1 -> v2 migration marker authorized minting the
+    /// first current request witness. The released schema did not retain prior
+    /// CAS preconditions, so this is deliberately not reported as an exact
+    /// retry of the original request.
+    AlreadyAppliedReleasedEquivalent,
+}
+
+/// Exact convergence result for a machine-authorized recovery boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryCommitStatus {
+    /// This invocation installed the recovery boundary.
+    Committed,
+    /// A prior invocation installed byte-exact evidence and receipt state.
+    AlreadyCommittedExact,
+}
+
+/// Result of an atomic prepared session-boundary commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedRuntimeSessionCommitResult {
+    profile: RuntimeSessionPersistenceProfile,
+    outcome: PreparedRuntimeSessionCommitOutcome,
+    recovery_status: Option<RecoveryCommitStatus>,
+    downstream_projection_required: bool,
+    authority: Option<RuntimeSessionAuthority>,
+}
+
+impl PreparedRuntimeSessionCommitResult {
+    /// Construct the result of a boundary that committed session authority.
+    #[must_use]
+    pub fn committed(authority: RuntimeSessionAuthority) -> Self {
+        let profile = authority.profile();
+        Self {
+            profile,
+            outcome: PreparedRuntimeSessionCommitOutcome::Applied,
+            recovery_status: None,
+            // RuntimeStore is the sole full-body authority for WholeBlob and
+            // owns the small catalog projection for both profiles. No boundary
+            // requires a downstream SessionStore body mirror.
+            downstream_projection_required: false,
+            authority: Some(authority),
+        }
+    }
+
+    /// Construct the result of a receipt/input-only boundary.
+    #[must_use]
+    pub const fn receipt_only(profile: RuntimeSessionPersistenceProfile) -> Self {
+        Self {
+            profile,
+            outcome: PreparedRuntimeSessionCommitOutcome::Applied,
+            recovery_status: None,
+            downstream_projection_required: false,
+            authority: None,
+        }
+    }
+
+    /// Construct the exact result of an atomic recovery boundary.
+    #[must_use]
+    pub fn recovery(authority: RuntimeSessionAuthority, status: RecoveryCommitStatus) -> Self {
+        let mut result = Self::committed(authority);
+        result.recovery_status = Some(status);
+        if status == RecoveryCommitStatus::AlreadyCommittedExact {
+            result.outcome = PreparedRuntimeSessionCommitOutcome::AlreadyAppliedExact;
+        }
+        result
+    }
+
+    /// Reclassify a result after the store proved an exact durable retry.
+    #[must_use]
+    pub fn already_applied_exact(mut self) -> Self {
+        self.outcome = PreparedRuntimeSessionCommitOutcome::AlreadyAppliedExact;
+        self
+    }
+
+    /// Reclassify a result after one migration-authorized released-boundary
+    /// adoption. Subsequent retries of the newly witnessed request are exact.
+    #[must_use]
+    pub fn already_applied_released_equivalent(mut self) -> Self {
+        self.outcome = PreparedRuntimeSessionCommitOutcome::AlreadyAppliedReleasedEquivalent;
+        self
+    }
+
+    /// Representation that became authoritative in the atomic boundary.
+    #[must_use]
+    pub const fn profile(&self) -> RuntimeSessionPersistenceProfile {
+        self.profile
+    }
+
+    /// Whether this invocation installed the boundary, proved an exact retry,
+    /// or adopted an effect-equivalent released boundary.
+    #[must_use]
+    pub const fn outcome(&self) -> PreparedRuntimeSessionCommitOutcome {
+        self.outcome
+    }
+
+    /// Exact recovery convergence, when this was a recovery boundary.
+    #[must_use]
+    pub const fn recovery_status(&self) -> Option<RecoveryCommitStatus> {
+        self.recovery_status
+    }
+
+    /// Whether the caller must publish a separate compatibility projection
+    /// after this commit.
+    #[must_use]
+    pub const fn downstream_projection_required(&self) -> bool {
+        self.downstream_projection_required
+    }
+
+    /// Exact session authority committed in this boundary, or `None` when the
+    /// successful boundary carried receipt/input state only.
+    #[must_use]
+    pub fn authority(&self) -> Option<&RuntimeSessionAuthority> {
+        self.authority.as_ref()
+    }
+}
+
 /// Errors from RuntimeStore operations.
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
@@ -160,6 +2128,41 @@ pub enum RuntimeStoreError {
     /// Operation is not supported by this store implementation.
     #[error("Unsupported store operation: {0}")]
     Unsupported(String),
+    /// A non-whole-blob store declared a profile but did not implement the
+    /// prepared boundary method required to commit that representation.
+    #[error("runtime store profile '{profile}' must override commit_prepared_session_boundary")]
+    PreparedSessionBoundaryRequiresOverride {
+        profile: RuntimeSessionPersistenceProfile,
+    },
+    /// Recovery needs a backend that can CAS both runtime authority and the
+    /// independently observed physical session head in one transaction.
+    #[error(
+        "runtime store profile '{profile}' cannot atomically CAS the physical session head for prepared recovery"
+    )]
+    PreparedRecoveryRequiresAtomicPhysicalHeadCas {
+        profile: RuntimeSessionPersistenceProfile,
+    },
+    /// A head-canonical store encountered durable whole-blob state that has
+    /// not completed its explicit, observable profile-activation conversion.
+    ///
+    /// Ordinary boundary application must never perform this conversion
+    /// implicitly: it can be O(document) and may take long enough to require
+    /// deploy-facing progress reporting. Open the store through its explicit
+    /// activation seam and retry only after that seam reports completion.
+    #[error(
+        "head-canonical profile activation is required for runtime '{runtime_id}' (state: {state})"
+    )]
+    HeadCanonicalActivationRequired {
+        /// Logical runtime whose frozen predecessor is not activated.
+        runtime_id: String,
+        /// Durable activation state (`not_started`, `in_progress`, or a
+        /// backend-specific refusal detail).
+        state: String,
+    },
+    /// Persisted session authority conflicts with the configured profile,
+    /// checkpoint, canonical head, frozen legacy BLOB, or mutation shape.
+    #[error("session persistence authority conflict for runtime '{runtime_id}': {detail}")]
+    SessionPersistenceAuthorityConflict { runtime_id: String, detail: String },
     /// A detached producer attempted to persist an ops snapshot after the
     /// matching epoch was atomically retired by unregister.
     #[error("Ops lifecycle epoch {epoch_id} for runtime {runtime_id} is retired")]
@@ -185,6 +2188,22 @@ pub enum RuntimeStoreError {
     /// The requested exact input-state batch CAS has an invalid row/key shape.
     #[error("Invalid input-state batch compare-and-swap: {reason}")]
     InvalidInputStateBatchCas { reason: String },
+    /// The maintained idempotency-key index cannot prove a unique answer while
+    /// a source input row's key identity is unindexable.
+    ///
+    /// This is durable corruption evidence, not an authoritative miss and not
+    /// a transient read failure. Callers must fail closed until the named row
+    /// is repaired or quarantined through an operator-authorized workflow.
+    #[error(
+        "input idempotency index for runtime '{runtime_id}' cannot prove key '{key}' while \
+         input row '{evidence_input_id}' is unindexable: {reason}"
+    )]
+    InputIdempotencyIndexUncertain {
+        runtime_id: String,
+        key: String,
+        evidence_input_id: String,
+        reason: String,
+    },
     /// A lifecycle record was observed exactly, but replacing it would risk
     /// lowering or fabricating durable runtime fencing authority.
     ///
@@ -219,6 +2238,13 @@ pub enum RuntimeStoreError {
         "Input row version conflict for input '{input_id}': the stored row changed since it was observed"
     )]
     InputRowVersionConflict { input_id: String },
+    /// The complete set of nonterminal input rows changed after recovery
+    /// classified it. The whole recovery boundary fails stale; nothing is
+    /// written.
+    #[error(
+        "Recovery input-set conflict for runtime '{runtime_id}': the nonterminal input set changed since it was observed"
+    )]
+    RecoveryInputSetConflict { runtime_id: String },
     /// A machine-lifecycle commit carried an expected prior row version that
     /// no longer matches the stored row. The whole atomic boundary fails
     /// stale; nothing is written.
@@ -237,9 +2263,2476 @@ pub type AuthOAuthFlowSnapshotUpdate<'a> =
 
 /// Describes a serialized session snapshot for boundary and snapshot-only commits.
 #[derive(Debug, Clone)]
-pub struct SessionDelta {
-    /// Serialized session snapshot (opaque to RuntimeStore).
-    pub session_snapshot: Vec<u8>,
+pub struct SerializedSessionSnapshot {
+    /// Immutable serialized session snapshot (opaque to RuntimeStore).
+    ///
+    /// The shared owner is part of the WholeBlob cost contract: a prepared
+    /// boundary must carry the one materialized document through the atomic
+    /// store verb without allocating and copying a second full buffer.
+    pub session_snapshot: std::sync::Arc<Vec<u8>>,
+}
+
+fn recovery_class_name(
+    class: crate::meerkat_machine::dsl::DurableTailRecoveryClass,
+) -> &'static str {
+    use crate::meerkat_machine::dsl::DurableTailRecoveryClass;
+    match class {
+        DurableTailRecoveryClass::CompletedCandidate => "completed_candidate",
+        DurableTailRecoveryClass::InterruptedRepairableCandidate => {
+            "interrupted_repairable_candidate"
+        }
+        DurableTailRecoveryClass::Ambiguous => "ambiguous",
+    }
+}
+
+fn recovery_class_from_name(
+    name: &str,
+) -> Result<crate::meerkat_machine::dsl::DurableTailRecoveryClass, RuntimeStoreError> {
+    use crate::meerkat_machine::dsl::DurableTailRecoveryClass;
+    match name {
+        "completed_candidate" => Ok(DurableTailRecoveryClass::CompletedCandidate),
+        "interrupted_repairable_candidate" => {
+            Ok(DurableTailRecoveryClass::InterruptedRepairableCandidate)
+        }
+        "ambiguous" => Ok(DurableTailRecoveryClass::Ambiguous),
+        other => Err(RuntimeStoreError::ReadFailed(format!(
+            "unknown committed recovery class '{other}'"
+        ))),
+    }
+}
+
+fn recovery_disposition_name(
+    disposition: crate::meerkat_machine::dsl::DurableTailRecoveryDisposition,
+) -> &'static str {
+    use crate::meerkat_machine::dsl::DurableTailRecoveryDisposition;
+    match disposition {
+        DurableTailRecoveryDisposition::RefuseRecovery => "refuse_recovery",
+        DurableTailRecoveryDisposition::CommitCompleted => "commit_completed",
+        DurableTailRecoveryDisposition::RepairAndCommitInterrupted => {
+            "repair_and_commit_interrupted"
+        }
+        DurableTailRecoveryDisposition::CommitCompletedRetainInputs => {
+            "commit_completed_retain_inputs"
+        }
+        DurableTailRecoveryDisposition::HoldIntact => "hold_intact",
+    }
+}
+
+fn recovery_disposition_from_name(
+    name: &str,
+) -> Result<crate::meerkat_machine::dsl::DurableTailRecoveryDisposition, RuntimeStoreError> {
+    use crate::meerkat_machine::dsl::DurableTailRecoveryDisposition;
+    match name {
+        "refuse_recovery" => Ok(DurableTailRecoveryDisposition::RefuseRecovery),
+        "commit_completed" => Ok(DurableTailRecoveryDisposition::CommitCompleted),
+        "repair_and_commit_interrupted" => {
+            Ok(DurableTailRecoveryDisposition::RepairAndCommitInterrupted)
+        }
+        "commit_completed_retain_inputs" => {
+            Ok(DurableTailRecoveryDisposition::CommitCompletedRetainInputs)
+        }
+        "hold_intact" => Ok(DurableTailRecoveryDisposition::HoldIntact),
+        other => Err(RuntimeStoreError::ReadFailed(format!(
+            "unknown committed recovery disposition '{other}'"
+        ))),
+    }
+}
+
+fn recovery_hash_part(hasher: &mut Sha256, label: &str, bytes: &[u8]) {
+    hasher.update((label.len() as u64).to_be_bytes());
+    hasher.update(label.as_bytes());
+    hasher.update((bytes.len() as u64).to_be_bytes());
+    hasher.update(bytes);
+}
+
+fn lifecycle_expected_version_token(
+    lifecycle: &MachineLifecycleCommit,
+) -> Result<String, RuntimeStoreError> {
+    match lifecycle.expected_version() {
+        Some(MachineLifecycleExpectedVersion::Missing) => Ok("missing".to_string()),
+        Some(MachineLifecycleExpectedVersion::Version(version)) => {
+            Ok(format!("version:{}", version.as_str()))
+        }
+        None => Err(RuntimeStoreError::SessionPersistenceAuthorityConflict {
+            runtime_id: "prepared-recovery".to_string(),
+            detail: "recovery lifecycle commit is not fenced on an exact observed row".to_string(),
+        }),
+    }
+}
+
+fn recovery_sha256_token(bytes: &[u8]) -> String {
+    format!("sha256:{:x}", Sha256::digest(bytes))
+}
+
+fn is_canonical_sha256_token(token: &str) -> bool {
+    let Some(hex) = token.strip_prefix("sha256:") else {
+        return false;
+    };
+    hex.len() == 64
+        && hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// Exact stored input row resolved through the durable idempotency-key index.
+#[derive(Debug, Clone)]
+pub struct ExactInputStateObservation {
+    state: StoredInputState,
+    exact_row_digest: String,
+}
+
+impl ExactInputStateObservation {
+    /// Bind a decoded state to the exact bytes the store resolved.
+    pub fn from_exact_stored_row(
+        state: StoredInputState,
+        exact_row_digest: String,
+    ) -> Result<Self, RuntimeStoreError> {
+        if !is_canonical_sha256_token(&exact_row_digest) {
+            return Err(RuntimeStoreError::ReadFailed(format!(
+                "input {} has a malformed exact-row digest",
+                state.state.input_id
+            )));
+        }
+        Ok(Self {
+            state,
+            exact_row_digest,
+        })
+    }
+
+    /// Decoded stored input state.
+    #[must_use]
+    pub fn state(&self) -> &StoredInputState {
+        &self.state
+    }
+
+    /// Exact digest of the backend row bytes observed with the lookup.
+    #[must_use]
+    pub fn exact_row_digest(&self) -> &str {
+        &self.exact_row_digest
+    }
+
+    /// Consume the observation into decoded state and exact row digest.
+    #[must_use]
+    pub fn into_parts(self) -> (StoredInputState, String) {
+        (self.state, self.exact_row_digest)
+    }
+}
+
+/// Store-owned monotonic revision of one logical runtime's input-row set.
+///
+/// The value is opaque to recovery callers. A store mints it from its own
+/// transactionally maintained generation and MUST advance that generation for
+/// every insert, update, or delete of an input row for the runtime. Revision
+/// zero is the canonical generation for a runtime that has never owned an
+/// input row; it is still a real absence fence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RecoveryInputSetRevision(u64);
+
+impl RecoveryInputSetRevision {
+    /// Mint a revision from a store-owned monotonic generation.
+    #[must_use]
+    pub fn from_store_generation(generation: u64) -> Self {
+        Self(generation)
+    }
+
+    /// Return the opaque generation for an exact store-side comparison.
+    #[must_use]
+    pub fn store_generation(self) -> u64 {
+        self.0
+    }
+}
+
+/// Exact, store-owned observation of every nonterminal input row that can
+/// affect durable-tail recovery for one logical runtime.
+///
+/// Runtime-store implementations construct this value from an authoritative,
+/// complete read of their persisted nonterminal-input set. Every row token
+/// must be the canonical `sha256:<lowercase hex>` digest of the exact stored
+/// row representation that the backend will compare in its atomic recovery
+/// commit. An empty row vector is not an unproved absence: it produces a
+/// domain-separated absence token scoped to `runtime_id`.
+///
+/// The exact set token is durable evidence of what was classified. A
+/// recovery-capable backend MUST also compare [`Self::input_set_revision`]
+/// against its current store-owned generation inside the transaction that
+/// applies recovery. A row inserted, removed, terminalized, reopened, or
+/// byte-modified after this observation must make that transaction fail with
+/// [`RuntimeStoreError::RecoveryInputSetConflict`] without rescanning the set.
+#[derive(Debug, Clone)]
+pub struct PreparedRecoveryInputSnapshot {
+    runtime_id: LogicalRuntimeId,
+    input_set_revision: RecoveryInputSetRevision,
+    rows: Vec<(StoredInputState, String)>,
+    exact_set_token: String,
+}
+
+impl PreparedRecoveryInputSnapshot {
+    /// Seal an authoritative complete set of exact nonterminal input rows.
+    ///
+    /// The constructor canonicalizes row order by [`InputId`], rejects
+    /// duplicates, terminal rows, and non-canonical exact-row tokens, then
+    /// hashes the runtime id, row count, and every `(input_id, row_token)`
+    /// pair with length framing under `meerkat.recovery-input-set.v1`.
+    ///
+    /// This constructor validates representation, not completeness. The
+    /// [`RuntimeStore`] implementation owns the obligation to select all and
+    /// only persisted nonterminal rows for the supplied runtime and to observe
+    /// `input_set_revision` in the same backend snapshot as those rows.
+    pub fn from_exact_nonterminal_rows(
+        runtime_id: LogicalRuntimeId,
+        input_set_revision: RecoveryInputSetRevision,
+        mut rows: Vec<(StoredInputState, String)>,
+    ) -> Result<Self, RuntimeStoreError> {
+        if runtime_id.0.is_empty() {
+            return Err(RuntimeStoreError::ReadFailed(
+                "recovery input snapshot has an empty logical runtime id".to_string(),
+            ));
+        }
+        rows.sort_by(|(left, _), (right, _)| {
+            left.state
+                .input_id
+                .to_string()
+                .cmp(&right.state.input_id.to_string())
+        });
+        for (index, (state, row_token)) in rows.iter().enumerate() {
+            if !input_state_is_recovery_nonterminal(state) {
+                return Err(RuntimeStoreError::ReadFailed(format!(
+                    "recovery input snapshot includes terminal input {}",
+                    state.state.input_id
+                )));
+            }
+            if !is_canonical_sha256_token(row_token) {
+                return Err(RuntimeStoreError::ReadFailed(format!(
+                    "recovery input snapshot row {} has a malformed exact-row token",
+                    state.state.input_id
+                )));
+            }
+            if index > 0 && rows[index - 1].0.state.input_id == state.state.input_id {
+                return Err(RuntimeStoreError::ReadFailed(format!(
+                    "recovery input snapshot repeats input {}",
+                    state.state.input_id
+                )));
+            }
+        }
+
+        let mut hasher = Sha256::new();
+        recovery_hash_part(&mut hasher, "domain", b"meerkat.recovery-input-set.v1");
+        recovery_hash_part(&mut hasher, "runtime_id", runtime_id.0.as_bytes());
+        recovery_hash_part(
+            &mut hasher,
+            "nonterminal_row_count",
+            &(rows.len() as u64).to_be_bytes(),
+        );
+        for (state, row_token) in &rows {
+            recovery_hash_part(
+                &mut hasher,
+                "input_id",
+                state.state.input_id.to_string().as_bytes(),
+            );
+            recovery_hash_part(&mut hasher, "exact_row_token", row_token.as_bytes());
+        }
+        let exact_set_token = format!("sha256:{:x}", hasher.finalize());
+        Ok(Self {
+            runtime_id,
+            input_set_revision,
+            rows,
+            exact_set_token,
+        })
+    }
+
+    /// Logical runtime whose complete nonterminal set was observed.
+    #[must_use]
+    pub fn runtime_id(&self) -> &LogicalRuntimeId {
+        &self.runtime_id
+    }
+
+    /// Store-owned input-set revision observed with the exact rows.
+    #[must_use]
+    pub fn input_set_revision(&self) -> RecoveryInputSetRevision {
+        self.input_set_revision
+    }
+
+    /// Exact set/absence token sealed into prepared recovery evidence.
+    #[must_use]
+    pub fn exact_set_token(&self) -> &str {
+        &self.exact_set_token
+    }
+
+    /// Consume the snapshot into canonical rows, store revision, and exact
+    /// set/absence token.
+    #[must_use]
+    pub fn into_parts(
+        self,
+    ) -> (
+        Vec<(StoredInputState, String)>,
+        RecoveryInputSetRevision,
+        String,
+    ) {
+        (self.rows, self.input_set_revision, self.exact_set_token)
+    }
+}
+
+/// Exact predecessor authority for deleting one recovery-discarded input row.
+///
+/// Construction is crate-owned by the generated recovery path. Public store
+/// implementations can inspect the values but callers cannot turn omission
+/// from a target image into delete authority.
+#[derive(Debug, Clone)]
+pub struct PreparedRecoveryInputDelete {
+    input_id: InputId,
+    expected_row_digest: String,
+}
+
+impl PreparedRecoveryInputDelete {
+    pub(crate) fn from_exact_observation(
+        input_id: InputId,
+        expected_row_digest: String,
+    ) -> Result<Self, RuntimeStoreError> {
+        if !is_canonical_sha256_token(&expected_row_digest) {
+            return Err(RuntimeStoreError::InvalidInputStateBatchCas {
+                reason: format!(
+                    "recovery delete for input {input_id} has a malformed predecessor digest"
+                ),
+            });
+        }
+        Ok(Self {
+            input_id,
+            expected_row_digest,
+        })
+    }
+
+    /// Input row removed by the machine-authorized recovery disposition.
+    #[must_use]
+    pub fn input_id(&self) -> &InputId {
+        &self.input_id
+    }
+
+    /// Exact digest of the predecessor bytes the delete must match.
+    #[must_use]
+    pub fn expected_row_digest(&self) -> &str {
+        &self.expected_row_digest
+    }
+}
+
+/// One machine-authorized mutation in a cold-recovery input boundary.
+#[derive(Debug, Clone)]
+pub enum RecoveryInputStateMutation {
+    /// Retained input row normalized to its recovered machine image.
+    Upsert(InputStatePersistenceRecord),
+    /// Ephemeral/discarded input row removed under exact predecessor authority.
+    Delete(PreparedRecoveryInputDelete),
+}
+
+impl RecoveryInputStateMutation {
+    /// Prepare an exact delete from the row digest returned by the recovery
+    /// snapshot. Crate-owned because only the generated recovery classifier
+    /// can authorize the discard disposition.
+    pub(crate) fn delete(
+        input_id: InputId,
+        expected_row_digest: String,
+    ) -> Result<Self, RuntimeStoreError> {
+        PreparedRecoveryInputDelete::from_exact_observation(input_id, expected_row_digest)
+            .map(Self::Delete)
+    }
+}
+
+/// One recovery input mutation paired with the exact serialized target and
+/// predecessor digest that authorize it.
+///
+/// `InputStatePersistenceRecord` intentionally does not implement equality:
+/// equality here is defined by the exact durable bytes and CAS predecessor
+/// sealed into the recovery witness.
+#[derive(Debug, Clone)]
+struct PreparedRecoveryInputUpdate {
+    record: InputStatePersistenceRecord,
+    input_id: InputId,
+    expected_row_digest: String,
+    target_bytes: Vec<u8>,
+}
+
+impl PartialEq for PreparedRecoveryInputUpdate {
+    fn eq(&self, other: &Self) -> bool {
+        self.input_id == other.input_id
+            && self.expected_row_digest == other.expected_row_digest
+            && self.target_bytes == other.target_bytes
+    }
+}
+
+impl Eq for PreparedRecoveryInputUpdate {}
+
+impl PreparedRecoveryInputUpdate {
+    fn seal(record: InputStatePersistenceRecord) -> Result<Self, String> {
+        let input_id = record.as_stored().state.input_id.clone();
+        let expected_row_digest = record
+            .expected_row_digest()
+            .ok_or_else(|| {
+                format!("recovery input {input_id} is not fenced on an exact predecessor row")
+            })?
+            .to_string();
+        if !is_canonical_sha256_token(&expected_row_digest) {
+            return Err(format!(
+                "recovery input {input_id} has a malformed predecessor digest"
+            ));
+        }
+        let target_bytes = serde_json::to_vec(record.as_stored()).map_err(|error| {
+            format!("failed to encode exact recovery input target {input_id}: {error}")
+        })?;
+        Ok(Self {
+            record,
+            input_id,
+            expected_row_digest,
+            target_bytes,
+        })
+    }
+
+    fn decode(
+        input_id: InputId,
+        expected_row_digest: String,
+        target_bytes: Vec<u8>,
+    ) -> Result<Self, String> {
+        if !is_canonical_sha256_token(&expected_row_digest) {
+            return Err(format!(
+                "recovery input {input_id} has a malformed predecessor digest"
+            ));
+        }
+        if target_bytes.is_empty() {
+            return Err(format!(
+                "recovery input {input_id} has an empty serialized target"
+            ));
+        }
+        let bundle: StoredInputState = serde_json::from_slice(&target_bytes)
+            .map_err(|error| format!("recovery input {input_id} target is invalid: {error}"))?;
+        if bundle.state.input_id != input_id {
+            return Err(format!(
+                "recovery input target {} differs from sealed input {input_id}",
+                bundle.state.input_id
+            ));
+        }
+        let canonical_target_bytes = serde_json::to_vec(&bundle).map_err(|error| {
+            format!("failed to canonicalize recovery input target {input_id}: {error}")
+        })?;
+        if canonical_target_bytes != target_bytes {
+            return Err(format!(
+                "recovery input {input_id} target is not in its canonical serialized form"
+            ));
+        }
+        let record = InputStatePersistenceRecord::from_machine_snapshot(bundle)
+            .map_err(|error| {
+                format!("recovery input {input_id} target is not machine-authorized: {error}")
+            })?
+            .with_expected_row_digest(expected_row_digest.clone());
+        Ok(Self {
+            record,
+            input_id,
+            expected_row_digest,
+            target_bytes,
+        })
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum PreparedRecoveryInputStateMutation {
+    Upsert {
+        replacement: StoredInputState,
+        expected_row_digest: String,
+    },
+    Delete {
+        input_id: InputId,
+        expected_row_digest: String,
+    },
+}
+
+impl PreparedRecoveryInputStateMutation {
+    pub(crate) fn input_id(&self) -> &InputId {
+        match self {
+            Self::Upsert { replacement, .. } => &replacement.state.input_id,
+            Self::Delete { input_id, .. } => input_id,
+        }
+    }
+
+    pub(crate) fn expected_row_digest(&self) -> &str {
+        match self {
+            Self::Upsert {
+                expected_row_digest,
+                ..
+            }
+            | Self::Delete {
+                expected_row_digest,
+                ..
+            } => expected_row_digest,
+        }
+    }
+}
+
+/// Prepare an unbounded recovery input mutation set in canonical key order.
+///
+/// Recovery is scoped by the store-owned input-set revision rather than the
+/// ordinary directed-terminal batch limit. Every target still carries an
+/// exact predecessor-row digest, and duplicate identities are rejected.
+pub(crate) fn prepare_recovery_input_state_mutations(
+    mutations: &[RecoveryInputStateMutation],
+) -> Result<Vec<PreparedRecoveryInputStateMutation>, RuntimeStoreError> {
+    let mut prepared = mutations
+        .iter()
+        .cloned()
+        .map(|mutation| match mutation {
+            RecoveryInputStateMutation::Upsert(record) => {
+                let update = PreparedRecoveryInputUpdate::seal(record)
+                    .map_err(|reason| RuntimeStoreError::InvalidInputStateBatchCas { reason })?;
+                Ok(PreparedRecoveryInputStateMutation::Upsert {
+                    replacement: update.record.clone_stored(),
+                    expected_row_digest: update.expected_row_digest,
+                })
+            }
+            RecoveryInputStateMutation::Delete(delete) => {
+                if !is_canonical_sha256_token(&delete.expected_row_digest) {
+                    return Err(RuntimeStoreError::InvalidInputStateBatchCas {
+                        reason: format!(
+                            "recovery delete for input {} has a malformed predecessor digest",
+                            delete.input_id
+                        ),
+                    });
+                }
+                Ok(PreparedRecoveryInputStateMutation::Delete {
+                    input_id: delete.input_id,
+                    expected_row_digest: delete.expected_row_digest,
+                })
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    prepared.sort_by(|left, right| {
+        left.input_id()
+            .to_string()
+            .cmp(&right.input_id().to_string())
+    });
+    if prepared
+        .windows(2)
+        .any(|pair| pair[0].input_id() == pair[1].input_id())
+    {
+        return Err(RuntimeStoreError::InvalidInputStateBatchCas {
+            reason: "recovery input mutations must have unique input ids".to_string(),
+        });
+    }
+    Ok(prepared)
+}
+
+fn validate_recovery_input_update_order(
+    input_updates: &[PreparedRecoveryInputUpdate],
+) -> Result<(), String> {
+    if input_updates
+        .windows(2)
+        .any(|window| window[0].input_id.0 >= window[1].input_id.0)
+    {
+        return Err(
+            "recovery input updates must have unique input ids in canonical order".to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// Exact store-issued authority transition sealed into one recovery witness.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PreparedRecoverySessionAuthority {
+    WholeBlob {
+        base_store_revision: u64,
+        base_blob_sha256: String,
+        provisional_candidate_blob_sha256: String,
+        provisional_candidate_sequence: u64,
+        recovered_blob_sha256: String,
+    },
+    HeadCanonical {
+        committed_store_revision: u64,
+        committed_head_token: String,
+        physical_store_revision: u64,
+        physical_head_token: String,
+        recovered_head_token: String,
+    },
+}
+
+/// Machine-authorized recovery evidence sealed to one exact recovered
+/// document, receipt, lifecycle target, complete predecessor nonterminal
+/// input-set/absence token, and canonically ordered input-update set.
+///
+/// Fields are private and construction is crate-only. Store implementations
+/// may inspect the paired values but cannot mint a recovery classification or
+/// replace any one proof independently.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedRecoveryEvidence {
+    session_id: meerkat_core::types::SessionId,
+    candidate_id: String,
+    candidate_run_id: RunId,
+    class: crate::meerkat_machine::dsl::DurableTailRecoveryClass,
+    disposition: crate::meerkat_machine::dsl::DurableTailRecoveryDisposition,
+    session_authority: PreparedRecoverySessionAuthority,
+    receipt_digest_enrichments: Vec<PreparedRecoveryReceiptDigestEnrichment>,
+    predecessor_nonterminal_input_set_revision: RecoveryInputSetRevision,
+    predecessor_nonterminal_input_set_token: String,
+    input_updates: Vec<PreparedRecoveryInputUpdate>,
+    lifecycle_target_token: String,
+    lifecycle_target_bytes: Vec<u8>,
+    exact_witness: String,
+}
+
+impl PreparedRecoveryEvidence {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn seal_head_canonical(
+        recovered: &meerkat_core::Session,
+        document: &BoundSessionCommit,
+        session_id: meerkat_core::types::SessionId,
+        candidate_id: String,
+        candidate_run_id: RunId,
+        class: crate::meerkat_machine::dsl::DurableTailRecoveryClass,
+        disposition: crate::meerkat_machine::dsl::DurableTailRecoveryDisposition,
+        committed_store_revision: u64,
+        committed_head_token: String,
+        physical_store_revision: u64,
+        physical_head_token: String,
+        recovered_head_token: String,
+        receipt_digest_enrichments: Vec<PreparedRecoveryReceiptDigestEnrichment>,
+        predecessor_nonterminal_input_set_revision: RecoveryInputSetRevision,
+        predecessor_nonterminal_input_set_token: String,
+        input_updates: Vec<InputStatePersistenceRecord>,
+        receipt: &RunBoundaryReceipt,
+        lifecycle: &MachineLifecycleCommit,
+    ) -> Result<Self, RuntimeStoreError> {
+        let conflict = |detail: String| RuntimeStoreError::SessionPersistenceAuthorityConflict {
+            runtime_id: session_id.to_string(),
+            detail,
+        };
+        if candidate_id.is_empty()
+            || committed_store_revision == 0
+            || physical_store_revision <= committed_store_revision
+            || committed_head_token.is_empty()
+            || physical_head_token.is_empty()
+            || recovered_head_token.is_empty()
+            || committed_head_token == physical_head_token
+            || !is_canonical_sha256_token(&predecessor_nonterminal_input_set_token)
+        {
+            return Err(conflict(
+                "prepared recovery contains an invalid store-issued authority transition"
+                    .to_string(),
+            ));
+        }
+        let valid_disposition = matches!(
+            (class, disposition),
+            (
+                crate::meerkat_machine::dsl::DurableTailRecoveryClass::CompletedCandidate,
+                crate::meerkat_machine::dsl::DurableTailRecoveryDisposition::CommitCompleted
+                    | crate::meerkat_machine::dsl::DurableTailRecoveryDisposition::CommitCompletedRetainInputs
+            ) | (
+                crate::meerkat_machine::dsl::DurableTailRecoveryClass::InterruptedRepairableCandidate,
+                crate::meerkat_machine::dsl::DurableTailRecoveryDisposition::RepairAndCommitInterrupted
+            )
+        );
+        if !valid_disposition {
+            return Err(conflict(format!(
+                "recovery class {} cannot realize disposition {}",
+                recovery_class_name(class),
+                recovery_disposition_name(disposition)
+            )));
+        }
+
+        if recovered.id() != &session_id {
+            return Err(conflict(format!(
+                "prepared recovery document belongs to {}, not {session_id}",
+                recovered.id()
+            )));
+        }
+        let head_boundary = document.head_canonical().ok_or_else(|| {
+            conflict("prepared recovery has no sealed head-canonical mutation".to_string())
+        })?;
+        let successor_head = head_boundary.mutation().successor_head();
+        let successor_row_prefix = successor_head.message_row_prefix.clone().ok_or_else(|| {
+            conflict(
+                "prepared recovered head has no exact message-row prefix authority".to_string(),
+            )
+        })?;
+        let recovered_head =
+            meerkat_core::session_store::SessionHead::from_session_with_proved_storage_authority(
+                recovered,
+                successor_head.strand.clone(),
+                successor_head.rewrite_prefix.clone(),
+                successor_row_prefix,
+            )
+            .map_err(|error| {
+                conflict(format!(
+                    "failed to bind recovered document to prepared head authority: {error}"
+                ))
+            })?;
+        if &recovered_head != successor_head {
+            return Err(conflict(
+                "prepared recovered head differs from the exact recovered document".to_string(),
+            ));
+        }
+        let derived_recovered_head_token = meerkat_core::session_head_cas_token(successor_head)
+            .map_err(|error| {
+                conflict(format!(
+                    "failed to derive recovered HeadCanonical token: {error}"
+                ))
+            })?;
+        if derived_recovered_head_token != recovered_head_token {
+            return Err(conflict(
+                "prepared recovered head differs from the sealed successor token".to_string(),
+            ));
+        }
+        if receipt.run_id != candidate_run_id || receipt.message_count != recovered.messages().len()
+        {
+            return Err(conflict(
+                "recovery receipt does not bind the candidate run and exact message count"
+                    .to_string(),
+            ));
+        }
+        let conversation_digest = recovered.transcript_content_digest().map_err(|error| {
+            conflict(format!(
+                "failed to derive recovered conversation digest: {error}"
+            ))
+        })?;
+        if receipt.conversation_digest.as_deref() != Some(conversation_digest.as_str()) {
+            return Err(conflict(
+                "recovery receipt does not bind the exact recovered conversation".to_string(),
+            ));
+        }
+        let mut previous_enrichment_sequence = None;
+        for enrichment in &receipt_digest_enrichments {
+            let original = enrichment.original_receipt();
+            if original.run_id != candidate_run_id
+                || original.conversation_digest.is_some()
+                || previous_enrichment_sequence
+                    .is_some_and(|previous| original.sequence <= previous)
+                || original.message_count > recovered.messages().len()
+            {
+                return Err(conflict(
+                    "prepared recovery receipt enrichment has an invalid run, sequence, count, or pre-migration shape"
+                        .to_string(),
+                ));
+            }
+            let derived = recovered
+                .transcript_prefix_digest(original.message_count)
+                .map_err(|error| {
+                    conflict(format!(
+                        "failed to verify recovery receipt enrichment prefix: {error}"
+                    ))
+                })?;
+            if derived != enrichment.derived_conversation_digest()
+                || enrichment.original_exact_row_token().is_empty()
+            {
+                return Err(conflict(
+                    "prepared recovery receipt enrichment differs from the exact recovered transcript prefix"
+                        .to_string(),
+                ));
+            }
+            previous_enrichment_sequence = Some(original.sequence);
+        }
+
+        let input_updates = input_updates
+            .into_iter()
+            .map(PreparedRecoveryInputUpdate::seal)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|detail| conflict(detail))?;
+        validate_recovery_input_update_order(&input_updates).map_err(|detail| conflict(detail))?;
+        let lifecycle_target_bytes = lifecycle.store_record().encode()?;
+        let lifecycle_target_token = recovery_sha256_token(&lifecycle_target_bytes);
+        // The expected version is a first-apply fence, not outcome identity:
+        // after a successful commit the exact lifecycle target has a new row
+        // version. Require the fence to exist, but do not bake that transient
+        // predecessor token into the durable retry witness.
+        let _ = lifecycle_expected_version_token(lifecycle)?;
+        let session_authority = PreparedRecoverySessionAuthority::HeadCanonical {
+            committed_store_revision,
+            committed_head_token,
+            physical_store_revision,
+            physical_head_token,
+            recovered_head_token,
+        };
+
+        let mut evidence = Self {
+            session_id,
+            candidate_id,
+            candidate_run_id,
+            class,
+            disposition,
+            session_authority,
+            receipt_digest_enrichments,
+            predecessor_nonterminal_input_set_revision,
+            predecessor_nonterminal_input_set_token,
+            input_updates,
+            lifecycle_target_token,
+            lifecycle_target_bytes,
+            exact_witness: String::new(),
+        };
+        evidence.exact_witness = evidence.compute_exact_witness(receipt).map_err(|error| {
+            RuntimeStoreError::WriteFailed(format!(
+                "failed to encode exact recovery witness: {error}"
+            ))
+        })?;
+        evidence.verify_head_canonical_boundary(document, receipt)?;
+        Ok(evidence)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn seal_whole_blob(
+        recovered: &meerkat_core::Session,
+        repaired_document: Option<&BoundSessionCommit>,
+        session_id: meerkat_core::types::SessionId,
+        candidate_id: String,
+        candidate_run_id: RunId,
+        class: crate::meerkat_machine::dsl::DurableTailRecoveryClass,
+        disposition: crate::meerkat_machine::dsl::DurableTailRecoveryDisposition,
+        base_store_revision: u64,
+        base_blob_sha256: String,
+        provisional_candidate_blob_sha256: String,
+        provisional_candidate_sequence: u64,
+        recovered_blob_sha256: String,
+        receipt_digest_enrichments: Vec<PreparedRecoveryReceiptDigestEnrichment>,
+        predecessor_nonterminal_input_set_revision: RecoveryInputSetRevision,
+        predecessor_nonterminal_input_set_token: String,
+        input_updates: Vec<InputStatePersistenceRecord>,
+        receipt: &RunBoundaryReceipt,
+        lifecycle: &MachineLifecycleCommit,
+    ) -> Result<Self, RuntimeStoreError> {
+        let conflict = |detail: String| RuntimeStoreError::SessionPersistenceAuthorityConflict {
+            runtime_id: session_id.to_string(),
+            detail,
+        };
+        if candidate_id.is_empty()
+            || base_store_revision == 0
+            || base_blob_sha256.is_empty()
+            || provisional_candidate_blob_sha256.is_empty()
+            || provisional_candidate_sequence == 0
+            || recovered_blob_sha256.is_empty()
+            || !is_canonical_sha256_token(&predecessor_nonterminal_input_set_token)
+        {
+            return Err(conflict(
+                "prepared WholeBlob recovery contains an invalid store-issued authority transition"
+                    .to_string(),
+            ));
+        }
+        if recovered.id() != &session_id {
+            return Err(conflict(format!(
+                "prepared recovery document belongs to {}, not {session_id}",
+                recovered.id()
+            )));
+        }
+        let valid_disposition = matches!(
+            (class, disposition),
+            (
+                crate::meerkat_machine::dsl::DurableTailRecoveryClass::CompletedCandidate,
+                crate::meerkat_machine::dsl::DurableTailRecoveryDisposition::CommitCompleted
+                    | crate::meerkat_machine::dsl::DurableTailRecoveryDisposition::CommitCompletedRetainInputs
+            ) | (
+                crate::meerkat_machine::dsl::DurableTailRecoveryClass::InterruptedRepairableCandidate,
+                crate::meerkat_machine::dsl::DurableTailRecoveryDisposition::RepairAndCommitInterrupted
+            )
+        );
+        if !valid_disposition {
+            return Err(conflict(format!(
+                "recovery class {} cannot realize disposition {}",
+                recovery_class_name(class),
+                recovery_disposition_name(disposition)
+            )));
+        }
+        match class {
+            crate::meerkat_machine::dsl::DurableTailRecoveryClass::CompletedCandidate => {
+                if recovered_blob_sha256 != provisional_candidate_blob_sha256
+                    || repaired_document.is_some()
+                {
+                    return Err(conflict(
+                        "completed WholeBlob recovery must promote the exact provisional candidate without a repaired artifact"
+                            .to_string(),
+                    ));
+                }
+            }
+            crate::meerkat_machine::dsl::DurableTailRecoveryClass::InterruptedRepairableCandidate => {
+                if recovered_blob_sha256 == provisional_candidate_blob_sha256 {
+                    return Err(conflict(
+                        "interrupted WholeBlob recovery must install a distinct repaired artifact"
+                            .to_string(),
+                    ));
+                }
+                let document = repaired_document.ok_or_else(|| {
+                    conflict(
+                        "interrupted WholeBlob recovery has no sealed repaired artifact"
+                            .to_string(),
+                    )
+                })?;
+                if document.head_canonical().is_some() {
+                    return Err(conflict(
+                        "WholeBlob recovery unexpectedly carries a HeadCanonical mutation"
+                            .to_string(),
+                    ));
+                }
+                let artifact = document.whole_blob_artifact().map_err(|error| {
+                    conflict(format!(
+                        "failed to materialize recovered WholeBlob artifact: {error}"
+                    ))
+                })?;
+                if artifact.row_sha256_token() != recovered_blob_sha256 {
+                    return Err(conflict(
+                        "recovered WholeBlob bytes differ from the sealed successor digest"
+                            .to_string(),
+                    ));
+                }
+            }
+            crate::meerkat_machine::dsl::DurableTailRecoveryClass::Ambiguous => {
+                return Err(conflict(
+                    "ambiguous WholeBlob recovery cannot be sealed".to_string(),
+                ));
+            }
+        }
+        if receipt.run_id != candidate_run_id || receipt.message_count != recovered.messages().len()
+        {
+            return Err(conflict(
+                "recovery receipt does not bind the candidate run and exact message count"
+                    .to_string(),
+            ));
+        }
+        let conversation_digest = recovered.transcript_content_digest().map_err(|error| {
+            conflict(format!(
+                "failed to derive recovered conversation digest: {error}"
+            ))
+        })?;
+        if receipt.conversation_digest.as_deref() != Some(conversation_digest.as_str()) {
+            return Err(conflict(
+                "recovery receipt does not bind the exact recovered conversation".to_string(),
+            ));
+        }
+        let mut previous_enrichment_sequence = None;
+        for enrichment in &receipt_digest_enrichments {
+            let original = enrichment.original_receipt();
+            if original.run_id != candidate_run_id
+                || original.conversation_digest.is_some()
+                || previous_enrichment_sequence
+                    .is_some_and(|previous| original.sequence <= previous)
+                || original.message_count > recovered.messages().len()
+            {
+                return Err(conflict(
+                    "prepared recovery receipt enrichment has an invalid run, sequence, count, or pre-migration shape"
+                        .to_string(),
+                ));
+            }
+            let derived = recovered
+                .transcript_prefix_digest(original.message_count)
+                .map_err(|error| {
+                    conflict(format!(
+                        "failed to verify recovery receipt enrichment prefix: {error}"
+                    ))
+                })?;
+            if derived != enrichment.derived_conversation_digest()
+                || enrichment.original_exact_row_token().is_empty()
+            {
+                return Err(conflict(
+                    "prepared recovery receipt enrichment differs from the exact recovered transcript prefix"
+                        .to_string(),
+                ));
+            }
+            previous_enrichment_sequence = Some(original.sequence);
+        }
+        let input_updates = input_updates
+            .into_iter()
+            .map(PreparedRecoveryInputUpdate::seal)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|detail| conflict(detail))?;
+        validate_recovery_input_update_order(&input_updates).map_err(|detail| conflict(detail))?;
+        let lifecycle_target_bytes = lifecycle.store_record().encode()?;
+        let lifecycle_target_token = recovery_sha256_token(&lifecycle_target_bytes);
+        let _ = lifecycle_expected_version_token(lifecycle)?;
+        let mut evidence = Self {
+            session_id,
+            candidate_id,
+            candidate_run_id,
+            class,
+            disposition,
+            session_authority: PreparedRecoverySessionAuthority::WholeBlob {
+                base_store_revision,
+                base_blob_sha256,
+                provisional_candidate_blob_sha256,
+                provisional_candidate_sequence,
+                recovered_blob_sha256,
+            },
+            receipt_digest_enrichments,
+            predecessor_nonterminal_input_set_revision,
+            predecessor_nonterminal_input_set_token,
+            input_updates,
+            lifecycle_target_token,
+            lifecycle_target_bytes,
+            exact_witness: String::new(),
+        };
+        evidence.exact_witness = evidence.compute_exact_witness(receipt).map_err(|error| {
+            RuntimeStoreError::WriteFailed(format!(
+                "failed to encode exact recovery witness: {error}"
+            ))
+        })?;
+        Ok(evidence)
+    }
+
+    fn compute_exact_witness(
+        &self,
+        receipt: &RunBoundaryReceipt,
+    ) -> Result<String, serde_json::Error> {
+        let receipt_json = serde_json::to_vec(receipt)?;
+        let mut hasher = Sha256::new();
+        recovery_hash_part(
+            &mut hasher,
+            "domain",
+            b"meerkat.prepared-recovery-evidence.v6",
+        );
+        recovery_hash_part(
+            &mut hasher,
+            "session_id",
+            self.session_id.to_string().as_bytes(),
+        );
+        recovery_hash_part(&mut hasher, "candidate_id", self.candidate_id.as_bytes());
+        recovery_hash_part(
+            &mut hasher,
+            "candidate_run_id",
+            self.candidate_run_id.to_string().as_bytes(),
+        );
+        recovery_hash_part(
+            &mut hasher,
+            "class",
+            recovery_class_name(self.class).as_bytes(),
+        );
+        recovery_hash_part(
+            &mut hasher,
+            "disposition",
+            recovery_disposition_name(self.disposition).as_bytes(),
+        );
+        match &self.session_authority {
+            PreparedRecoverySessionAuthority::WholeBlob {
+                base_store_revision,
+                base_blob_sha256,
+                provisional_candidate_blob_sha256,
+                provisional_candidate_sequence,
+                recovered_blob_sha256,
+            } => {
+                recovery_hash_part(&mut hasher, "profile", b"whole_blob_v1");
+                recovery_hash_part(
+                    &mut hasher,
+                    "base_store_revision",
+                    &base_store_revision.to_be_bytes(),
+                );
+                recovery_hash_part(&mut hasher, "base_blob_sha256", base_blob_sha256.as_bytes());
+                recovery_hash_part(
+                    &mut hasher,
+                    "provisional_candidate_blob_sha256",
+                    provisional_candidate_blob_sha256.as_bytes(),
+                );
+                recovery_hash_part(
+                    &mut hasher,
+                    "provisional_candidate_sequence",
+                    &provisional_candidate_sequence.to_be_bytes(),
+                );
+                recovery_hash_part(
+                    &mut hasher,
+                    "recovered_blob_sha256",
+                    recovered_blob_sha256.as_bytes(),
+                );
+            }
+            PreparedRecoverySessionAuthority::HeadCanonical {
+                committed_store_revision,
+                committed_head_token,
+                physical_store_revision,
+                physical_head_token,
+                recovered_head_token,
+            } => {
+                recovery_hash_part(&mut hasher, "profile", b"head_canonical_v1");
+                recovery_hash_part(
+                    &mut hasher,
+                    "committed_store_revision",
+                    &committed_store_revision.to_be_bytes(),
+                );
+                recovery_hash_part(
+                    &mut hasher,
+                    "committed_head_token",
+                    committed_head_token.as_bytes(),
+                );
+                recovery_hash_part(
+                    &mut hasher,
+                    "physical_store_revision",
+                    &physical_store_revision.to_be_bytes(),
+                );
+                recovery_hash_part(
+                    &mut hasher,
+                    "physical_head_token",
+                    physical_head_token.as_bytes(),
+                );
+                recovery_hash_part(
+                    &mut hasher,
+                    "recovered_head_token",
+                    recovered_head_token.as_bytes(),
+                );
+            }
+        }
+        recovery_hash_part(
+            &mut hasher,
+            "receipt_digest_enrichment_count",
+            &(self.receipt_digest_enrichments.len() as u64).to_be_bytes(),
+        );
+        for enrichment in &self.receipt_digest_enrichments {
+            let original_json = serde_json::to_vec(enrichment.original_receipt())?;
+            recovery_hash_part(
+                &mut hasher,
+                "receipt_digest_enrichment_original",
+                &original_json,
+            );
+            recovery_hash_part(
+                &mut hasher,
+                "receipt_digest_enrichment_original_token",
+                enrichment.original_exact_row_token().as_bytes(),
+            );
+            recovery_hash_part(
+                &mut hasher,
+                "receipt_digest_enrichment_derived_digest",
+                enrichment.derived_conversation_digest().as_bytes(),
+            );
+        }
+        recovery_hash_part(
+            &mut hasher,
+            "predecessor_nonterminal_input_set_revision",
+            &self
+                .predecessor_nonterminal_input_set_revision
+                .store_generation()
+                .to_be_bytes(),
+        );
+        recovery_hash_part(
+            &mut hasher,
+            "predecessor_nonterminal_input_set_token",
+            self.predecessor_nonterminal_input_set_token.as_bytes(),
+        );
+        recovery_hash_part(
+            &mut hasher,
+            "input_update_count",
+            &(self.input_updates.len() as u64).to_be_bytes(),
+        );
+        for input_update in &self.input_updates {
+            recovery_hash_part(
+                &mut hasher,
+                "input_update_id",
+                input_update.input_id.to_string().as_bytes(),
+            );
+            recovery_hash_part(
+                &mut hasher,
+                "input_update_expected_row_digest",
+                input_update.expected_row_digest.as_bytes(),
+            );
+            recovery_hash_part(
+                &mut hasher,
+                "input_update_target",
+                &input_update.target_bytes,
+            );
+        }
+        recovery_hash_part(&mut hasher, "receipt", &receipt_json);
+        recovery_hash_part(
+            &mut hasher,
+            "lifecycle_target_token",
+            self.lifecycle_target_token.as_bytes(),
+        );
+        recovery_hash_part(
+            &mut hasher,
+            "lifecycle_target",
+            &self.lifecycle_target_bytes,
+        );
+        Ok(format!("sha256:{:x}", hasher.finalize()))
+    }
+
+    pub(crate) fn verify_head_canonical_boundary(
+        &self,
+        document: &BoundSessionCommit,
+        receipt: &RunBoundaryReceipt,
+    ) -> Result<(), RuntimeStoreError> {
+        let conflict = |detail: String| RuntimeStoreError::SessionPersistenceAuthorityConflict {
+            runtime_id: self.session_id.to_string(),
+            detail,
+        };
+        let boundary = document.head_canonical().ok_or_else(|| {
+            conflict("prepared recovery has no sealed head-canonical mutation".to_string())
+        })?;
+        let PreparedRecoverySessionAuthority::HeadCanonical {
+            physical_head_token,
+            recovered_head_token,
+            ..
+        } = &self.session_authority
+        else {
+            return Err(conflict(
+                "WholeBlob recovery evidence cannot authorize a HeadCanonical mutation".to_string(),
+            ));
+        };
+        let mutation = boundary.mutation();
+        if mutation.session_id() != &self.session_id
+            || mutation.predecessor_head_token() != Some(physical_head_token.as_str())
+        {
+            return Err(conflict(
+                "prepared recovery head mutation differs from sealed source/successor authority"
+                    .to_string(),
+            ));
+        }
+        let successor = mutation.successor_head();
+        let successor_token = meerkat_core::session_head_cas_token(successor).map_err(|error| {
+            conflict(format!(
+                "prepared recovery successor token is invalid: {error}"
+            ))
+        })?;
+        let receipt_count = u64::try_from(receipt.message_count).map_err(|_| {
+            conflict("recovery receipt message count does not fit head authority".to_string())
+        })?;
+        if successor_token != *recovered_head_token
+            || successor.message_count != receipt_count
+            || receipt.conversation_digest.as_deref() != Some(successor.head_revision.as_str())
+        {
+            return Err(conflict(
+                "prepared recovery head does not bind the receipt's exact transcript".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn verify_input_updates(
+        &self,
+        input_updates: &[InputStatePersistenceRecord],
+    ) -> Result<(), RuntimeStoreError> {
+        let conflict = |detail: String| RuntimeStoreError::SessionPersistenceAuthorityConflict {
+            runtime_id: self.session_id.to_string(),
+            detail,
+        };
+        let input_updates = input_updates
+            .iter()
+            .cloned()
+            .map(PreparedRecoveryInputUpdate::seal)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|detail| conflict(detail))?;
+        validate_recovery_input_update_order(&input_updates).map_err(|detail| conflict(detail))?;
+        if input_updates != self.input_updates {
+            return Err(conflict(
+                "recovery input effects differ from sealed evidence".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn verify_request_effects(
+        &self,
+        receipt: &RunBoundaryReceipt,
+        lifecycle: &MachineLifecycleCommit,
+    ) -> Result<(), RuntimeStoreError> {
+        let conflict = |detail: String| RuntimeStoreError::SessionPersistenceAuthorityConflict {
+            runtime_id: self.session_id.to_string(),
+            detail,
+        };
+        // The predecessor version remains a first-apply fence. The target
+        // bytes, not that transient predecessor token, define retry identity.
+        let _ = lifecycle_expected_version_token(lifecycle)?;
+        let lifecycle_target_bytes = lifecycle.store_record().encode()?;
+        let lifecycle_target_token = recovery_sha256_token(&lifecycle_target_bytes);
+        if lifecycle_target_token != self.lifecycle_target_token
+            || lifecycle_target_bytes != self.lifecycle_target_bytes
+        {
+            return Err(conflict(
+                "recovery lifecycle target differs from sealed evidence".to_string(),
+            ));
+        }
+        let exact_witness = self.compute_exact_witness(receipt).map_err(|error| {
+            RuntimeStoreError::WriteFailed(format!(
+                "failed to re-encode exact recovery witness: {error}"
+            ))
+        })?;
+        if exact_witness != self.exact_witness {
+            return Err(conflict(
+                "recovery receipt or sealed effects differ from exact evidence".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn cloned_input_updates(&self) -> Vec<InputStatePersistenceRecord> {
+        self.input_updates
+            .iter()
+            .map(|input_update| input_update.record.clone())
+            .collect()
+    }
+
+    pub(crate) fn session_id(&self) -> &meerkat_core::types::SessionId {
+        &self.session_id
+    }
+
+    pub(crate) fn candidate_id(&self) -> &str {
+        &self.candidate_id
+    }
+
+    pub(crate) fn candidate_run_id(&self) -> &RunId {
+        &self.candidate_run_id
+    }
+
+    pub(crate) fn class(&self) -> crate::meerkat_machine::dsl::DurableTailRecoveryClass {
+        self.class
+    }
+
+    pub(crate) fn disposition(
+        &self,
+    ) -> crate::meerkat_machine::dsl::DurableTailRecoveryDisposition {
+        self.disposition
+    }
+
+    pub(crate) fn head_canonical_authority_transition(
+        &self,
+    ) -> Option<(u64, &str, u64, &str, &str)> {
+        match &self.session_authority {
+            PreparedRecoverySessionAuthority::HeadCanonical {
+                committed_store_revision,
+                committed_head_token,
+                physical_store_revision,
+                physical_head_token,
+                recovered_head_token,
+            } => Some((
+                *committed_store_revision,
+                committed_head_token,
+                *physical_store_revision,
+                physical_head_token,
+                recovered_head_token,
+            )),
+            PreparedRecoverySessionAuthority::WholeBlob { .. } => None,
+        }
+    }
+
+    pub(crate) fn whole_blob_authority_transition(&self) -> Option<(u64, &str, &str, u64, &str)> {
+        match &self.session_authority {
+            PreparedRecoverySessionAuthority::WholeBlob {
+                base_store_revision,
+                base_blob_sha256,
+                provisional_candidate_blob_sha256,
+                provisional_candidate_sequence,
+                recovered_blob_sha256,
+            } => Some((
+                *base_store_revision,
+                base_blob_sha256,
+                provisional_candidate_blob_sha256,
+                *provisional_candidate_sequence,
+                recovered_blob_sha256,
+            )),
+            PreparedRecoverySessionAuthority::HeadCanonical { .. } => None,
+        }
+    }
+
+    pub(crate) fn receipt_digest_enrichments(&self) -> &[PreparedRecoveryReceiptDigestEnrichment] {
+        &self.receipt_digest_enrichments
+    }
+
+    pub(crate) fn predecessor_nonterminal_input_set_token(&self) -> &str {
+        &self.predecessor_nonterminal_input_set_token
+    }
+
+    pub(crate) fn predecessor_nonterminal_input_set_revision(&self) -> RecoveryInputSetRevision {
+        self.predecessor_nonterminal_input_set_revision
+    }
+
+    pub(crate) fn exact_witness(&self) -> &str {
+        &self.exact_witness
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommittedRecoveryReceiptDigestEnrichmentWire {
+    original_receipt: RunBoundaryReceipt,
+    original_exact_row_token: String,
+    derived_conversation_digest: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommittedRecoveryInputUpdateWire {
+    input_id: InputId,
+    expected_row_digest: String,
+    target_bytes: Vec<u8>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(tag = "profile", rename_all = "snake_case", deny_unknown_fields)]
+enum CommittedRecoverySessionAuthorityWire {
+    WholeBlobV1 {
+        base_store_revision: u64,
+        base_blob_sha256: String,
+        provisional_candidate_blob_sha256: String,
+        provisional_candidate_sequence: u64,
+        recovered_blob_sha256: String,
+    },
+    HeadCanonicalV1 {
+        committed_store_revision: u64,
+        committed_head_token: String,
+        physical_store_revision: u64,
+        physical_head_token: String,
+        recovered_head_token: String,
+    },
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommittedRecoveryBoundaryWire {
+    version: u16,
+    session_id: meerkat_core::types::SessionId,
+    candidate_id: String,
+    candidate_run_id: RunId,
+    class: String,
+    disposition: String,
+    session_authority: CommittedRecoverySessionAuthorityWire,
+    receipt_digest_enrichments: Vec<CommittedRecoveryReceiptDigestEnrichmentWire>,
+    predecessor_nonterminal_input_set_revision: u64,
+    predecessor_nonterminal_input_set_token: String,
+    input_updates: Vec<CommittedRecoveryInputUpdateWire>,
+    lifecycle_target_token: String,
+    lifecycle_target_bytes: Vec<u8>,
+    exact_witness: String,
+    receipt: RunBoundaryReceipt,
+}
+
+/// Durable exact-retry witness for one recovery candidate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommittedRecoveryBoundary {
+    evidence: PreparedRecoveryEvidence,
+    receipt: RunBoundaryReceipt,
+}
+
+impl CommittedRecoveryBoundary {
+    const VERSION: u16 = 6;
+
+    pub(crate) fn from_prepared(
+        evidence: &PreparedRecoveryEvidence,
+        receipt: &RunBoundaryReceipt,
+    ) -> Self {
+        Self {
+            evidence: evidence.clone(),
+            receipt: receipt.clone(),
+        }
+    }
+
+    pub(crate) fn evidence(&self) -> &PreparedRecoveryEvidence {
+        &self.evidence
+    }
+
+    pub(crate) fn receipt(&self) -> &RunBoundaryReceipt {
+        &self.receipt
+    }
+
+    pub(crate) fn encode(&self) -> Result<Vec<u8>, RuntimeStoreError> {
+        serde_json::to_vec(&CommittedRecoveryBoundaryWire {
+            version: Self::VERSION,
+            session_id: self.evidence.session_id.clone(),
+            candidate_id: self.evidence.candidate_id.clone(),
+            candidate_run_id: self.evidence.candidate_run_id.clone(),
+            class: recovery_class_name(self.evidence.class).to_string(),
+            disposition: recovery_disposition_name(self.evidence.disposition).to_string(),
+            session_authority: match &self.evidence.session_authority {
+                PreparedRecoverySessionAuthority::WholeBlob {
+                    base_store_revision,
+                    base_blob_sha256,
+                    provisional_candidate_blob_sha256,
+                    provisional_candidate_sequence,
+                    recovered_blob_sha256,
+                } => CommittedRecoverySessionAuthorityWire::WholeBlobV1 {
+                    base_store_revision: *base_store_revision,
+                    base_blob_sha256: base_blob_sha256.clone(),
+                    provisional_candidate_blob_sha256: provisional_candidate_blob_sha256.clone(),
+                    provisional_candidate_sequence: *provisional_candidate_sequence,
+                    recovered_blob_sha256: recovered_blob_sha256.clone(),
+                },
+                PreparedRecoverySessionAuthority::HeadCanonical {
+                    committed_store_revision,
+                    committed_head_token,
+                    physical_store_revision,
+                    physical_head_token,
+                    recovered_head_token,
+                } => CommittedRecoverySessionAuthorityWire::HeadCanonicalV1 {
+                    committed_store_revision: *committed_store_revision,
+                    committed_head_token: committed_head_token.clone(),
+                    physical_store_revision: *physical_store_revision,
+                    physical_head_token: physical_head_token.clone(),
+                    recovered_head_token: recovered_head_token.clone(),
+                },
+            },
+            receipt_digest_enrichments: self
+                .evidence
+                .receipt_digest_enrichments
+                .iter()
+                .map(|enrichment| CommittedRecoveryReceiptDigestEnrichmentWire {
+                    original_receipt: enrichment.original_receipt.clone(),
+                    original_exact_row_token: enrichment.original_exact_row_token.clone(),
+                    derived_conversation_digest: enrichment.derived_conversation_digest.clone(),
+                })
+                .collect(),
+            predecessor_nonterminal_input_set_revision: self
+                .evidence
+                .predecessor_nonterminal_input_set_revision
+                .store_generation(),
+            predecessor_nonterminal_input_set_token: self
+                .evidence
+                .predecessor_nonterminal_input_set_token
+                .clone(),
+            input_updates: self
+                .evidence
+                .input_updates
+                .iter()
+                .map(|input_update| CommittedRecoveryInputUpdateWire {
+                    input_id: input_update.input_id.clone(),
+                    expected_row_digest: input_update.expected_row_digest.clone(),
+                    target_bytes: input_update.target_bytes.clone(),
+                })
+                .collect(),
+            lifecycle_target_token: self.evidence.lifecycle_target_token.clone(),
+            lifecycle_target_bytes: self.evidence.lifecycle_target_bytes.clone(),
+            exact_witness: self.evidence.exact_witness.clone(),
+            receipt: self.receipt.clone(),
+        })
+        .map_err(|error| {
+            RuntimeStoreError::WriteFailed(format!(
+                "failed to encode committed recovery boundary: {error}"
+            ))
+        })
+    }
+
+    pub(crate) fn decode(bytes: &[u8]) -> Result<Self, RuntimeStoreError> {
+        let wire: CommittedRecoveryBoundaryWire =
+            serde_json::from_slice(bytes).map_err(|error| {
+                RuntimeStoreError::ReadFailed(format!(
+                    "invalid committed recovery boundary: {error}"
+                ))
+            })?;
+        if wire.version != Self::VERSION {
+            return Err(RuntimeStoreError::ReadFailed(format!(
+                "unsupported committed recovery boundary version {}",
+                wire.version
+            )));
+        }
+        let CommittedRecoveryBoundaryWire {
+            version: _,
+            session_id,
+            candidate_id,
+            candidate_run_id,
+            class,
+            disposition,
+            session_authority: session_authority_wire,
+            receipt_digest_enrichments: receipt_digest_enrichment_wires,
+            predecessor_nonterminal_input_set_revision,
+            predecessor_nonterminal_input_set_token,
+            input_updates: input_update_wires,
+            lifecycle_target_token,
+            lifecycle_target_bytes,
+            exact_witness,
+            receipt,
+        } = wire;
+        let session_authority = match session_authority_wire {
+            CommittedRecoverySessionAuthorityWire::WholeBlobV1 {
+                base_store_revision,
+                base_blob_sha256,
+                provisional_candidate_blob_sha256,
+                provisional_candidate_sequence,
+                recovered_blob_sha256,
+            } if base_store_revision != 0
+                && !base_blob_sha256.is_empty()
+                && !provisional_candidate_blob_sha256.is_empty()
+                && provisional_candidate_sequence != 0
+                && !recovered_blob_sha256.is_empty() =>
+            {
+                PreparedRecoverySessionAuthority::WholeBlob {
+                    base_store_revision,
+                    base_blob_sha256,
+                    provisional_candidate_blob_sha256,
+                    provisional_candidate_sequence,
+                    recovered_blob_sha256,
+                }
+            }
+            CommittedRecoverySessionAuthorityWire::HeadCanonicalV1 {
+                committed_store_revision,
+                committed_head_token,
+                physical_store_revision,
+                physical_head_token,
+                recovered_head_token,
+            } if committed_store_revision != 0
+                && physical_store_revision > committed_store_revision
+                && !committed_head_token.is_empty()
+                && !physical_head_token.is_empty()
+                && !recovered_head_token.is_empty()
+                && committed_head_token != physical_head_token =>
+            {
+                PreparedRecoverySessionAuthority::HeadCanonical {
+                    committed_store_revision,
+                    committed_head_token,
+                    physical_store_revision,
+                    physical_head_token,
+                    recovered_head_token,
+                }
+            }
+            _ => {
+                return Err(RuntimeStoreError::ReadFailed(
+                    "committed recovery boundary contains an invalid store authority transition"
+                        .to_string(),
+                ));
+            }
+        };
+        if candidate_id.is_empty()
+            || !is_canonical_sha256_token(&predecessor_nonterminal_input_set_token)
+            || lifecycle_target_bytes.is_empty()
+            || !is_canonical_sha256_token(&lifecycle_target_token)
+            || !is_canonical_sha256_token(&exact_witness)
+        {
+            return Err(RuntimeStoreError::ReadFailed(
+                "committed recovery boundary contains an empty exact identity".to_string(),
+            ));
+        }
+        if recovery_sha256_token(&lifecycle_target_bytes) != lifecycle_target_token {
+            return Err(RuntimeStoreError::ReadFailed(
+                "committed recovery lifecycle target token does not match its exact bytes"
+                    .to_string(),
+            ));
+        }
+        let lifecycle_target_snapshot =
+            decode_machine_lifecycle_store_record(&lifecycle_target_bytes).map_err(|error| {
+                RuntimeStoreError::ReadFailed(format!(
+                    "committed recovery lifecycle target is invalid: {error}"
+                ))
+            })?;
+        let canonical_lifecycle_target_bytes =
+            MachineLifecycleStoreRecord::from_snapshot(&lifecycle_target_snapshot)
+                .encode()
+                .map_err(|error| {
+                    RuntimeStoreError::ReadFailed(format!(
+                        "failed to canonicalize committed recovery lifecycle target: {error}"
+                    ))
+                })?;
+        if canonical_lifecycle_target_bytes != lifecycle_target_bytes {
+            return Err(RuntimeStoreError::ReadFailed(
+                "committed recovery lifecycle target is not in canonical serialized form"
+                    .to_string(),
+            ));
+        }
+        if receipt.run_id != candidate_run_id {
+            return Err(RuntimeStoreError::ReadFailed(
+                "committed recovery receipt run differs from candidate run".to_string(),
+            ));
+        }
+        let mut previous_enrichment_sequence = None;
+        let mut receipt_digest_enrichments =
+            Vec::with_capacity(receipt_digest_enrichment_wires.len());
+        for enrichment in receipt_digest_enrichment_wires {
+            if enrichment.original_receipt.run_id != candidate_run_id
+                || enrichment.original_receipt.conversation_digest.is_some()
+                || previous_enrichment_sequence
+                    .is_some_and(|previous| enrichment.original_receipt.sequence <= previous)
+                || enrichment.original_exact_row_token.is_empty()
+                || enrichment.derived_conversation_digest.is_empty()
+            {
+                return Err(RuntimeStoreError::ReadFailed(
+                    "committed recovery receipt enrichment is malformed".to_string(),
+                ));
+            }
+            previous_enrichment_sequence = Some(enrichment.original_receipt.sequence);
+            receipt_digest_enrichments.push(PreparedRecoveryReceiptDigestEnrichment {
+                original_receipt: enrichment.original_receipt,
+                original_exact_row_token: enrichment.original_exact_row_token,
+                derived_conversation_digest: enrichment.derived_conversation_digest,
+            });
+        }
+        let input_updates = input_update_wires
+            .into_iter()
+            .map(|input_update| {
+                PreparedRecoveryInputUpdate::decode(
+                    input_update.input_id,
+                    input_update.expected_row_digest,
+                    input_update.target_bytes,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|detail| {
+                RuntimeStoreError::ReadFailed(format!(
+                    "committed recovery input update is malformed: {detail}"
+                ))
+            })?;
+        validate_recovery_input_update_order(&input_updates).map_err(|detail| {
+            RuntimeStoreError::ReadFailed(format!(
+                "committed recovery input update order is malformed: {detail}"
+            ))
+        })?;
+        let class = recovery_class_from_name(&class)?;
+        let disposition = recovery_disposition_from_name(&disposition)?;
+        let mut evidence = PreparedRecoveryEvidence {
+            session_id,
+            candidate_id,
+            candidate_run_id,
+            class,
+            disposition,
+            session_authority,
+            receipt_digest_enrichments,
+            predecessor_nonterminal_input_set_revision:
+                RecoveryInputSetRevision::from_store_generation(
+                    predecessor_nonterminal_input_set_revision,
+                ),
+            predecessor_nonterminal_input_set_token,
+            input_updates,
+            lifecycle_target_token,
+            lifecycle_target_bytes,
+            exact_witness: String::new(),
+        };
+        let derived_exact_witness = evidence.compute_exact_witness(&receipt).map_err(|error| {
+            RuntimeStoreError::ReadFailed(format!(
+                "failed to verify committed recovery exact witness: {error}"
+            ))
+        })?;
+        if derived_exact_witness != exact_witness {
+            return Err(RuntimeStoreError::ReadFailed(
+                "committed recovery exact witness does not match its serialized effects"
+                    .to_string(),
+            ));
+        }
+        evidence.exact_witness = exact_witness;
+        Ok(Self { evidence, receipt })
+    }
+}
+
+/// Kind of atomic boundary carried by [`PreparedRuntimeSessionCommit`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreparedRuntimeSessionCommitKind {
+    /// Session-control snapshot without a run receipt.
+    SnapshotOnly,
+    /// Successfully applied run boundary.
+    Success,
+    /// Direct service-turn terminal with machine lifecycle authority.
+    ServiceTurnTerminal,
+    /// Failed-but-applied run boundary with machine lifecycle authority.
+    MachineTerminal,
+    /// Machine-authorized durable-tail recovery with exact physical-head CAS.
+    Recovery,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum PreparedRuntimeSessionCommitPayload {
+    SnapshotOnly {
+        session: BoundSessionCommit,
+    },
+    Success {
+        session: Option<BoundSessionCommit>,
+        receipt: RunBoundaryReceipt,
+        input_updates: Vec<InputStatePersistenceRecord>,
+        session_store_key: Option<meerkat_core::types::SessionId>,
+    },
+    PromoteWholeBlobSuccess {
+        promotion: PreparedWholeBlobProvisionalPromotion,
+        receipt: RunBoundaryReceipt,
+        input_updates: Vec<InputStatePersistenceRecord>,
+        session_store_key: meerkat_core::types::SessionId,
+    },
+    PromoteHeadCanonicalSuccess {
+        promotion: PreparedHeadCanonicalProvisionalPromotion,
+        receipt: RunBoundaryReceipt,
+        input_updates: Vec<InputStatePersistenceRecord>,
+        session_store_key: meerkat_core::types::SessionId,
+    },
+    ServiceTurnTerminal {
+        session: BoundSessionCommit,
+        receipt: RunBoundaryReceipt,
+        machine_lifecycle: MachineLifecycleCommit,
+        session_store_key: meerkat_core::types::SessionId,
+    },
+    PromoteWholeBlobServiceTurnTerminal {
+        promotion: PreparedWholeBlobProvisionalPromotion,
+        receipt: RunBoundaryReceipt,
+        machine_lifecycle: MachineLifecycleCommit,
+        session_store_key: meerkat_core::types::SessionId,
+    },
+    PromoteHeadCanonicalServiceTurnTerminal {
+        promotion: PreparedHeadCanonicalProvisionalPromotion,
+        receipt: RunBoundaryReceipt,
+        machine_lifecycle: MachineLifecycleCommit,
+        session_store_key: meerkat_core::types::SessionId,
+    },
+    MachineTerminal {
+        session: BoundSessionCommit,
+        receipt: RunBoundaryReceipt,
+        machine_lifecycle: MachineLifecycleCommit,
+        input_updates: Vec<InputStatePersistenceRecord>,
+        session_store_key: meerkat_core::types::SessionId,
+    },
+    PromoteWholeBlobMachineTerminal {
+        promotion: PreparedWholeBlobProvisionalPromotion,
+        receipt: RunBoundaryReceipt,
+        machine_lifecycle: MachineLifecycleCommit,
+        input_updates: Vec<InputStatePersistenceRecord>,
+        session_store_key: meerkat_core::types::SessionId,
+    },
+    PromoteHeadCanonicalMachineTerminal {
+        promotion: PreparedHeadCanonicalProvisionalPromotion,
+        receipt: RunBoundaryReceipt,
+        machine_lifecycle: MachineLifecycleCommit,
+        input_updates: Vec<InputStatePersistenceRecord>,
+        session_store_key: meerkat_core::types::SessionId,
+    },
+    Recovery {
+        session: BoundSessionCommit,
+        evidence: PreparedRecoveryEvidence,
+        receipt: RunBoundaryReceipt,
+        machine_lifecycle: MachineLifecycleCommit,
+        input_updates: Vec<InputStatePersistenceRecord>,
+        session_store_key: meerkat_core::types::SessionId,
+    },
+    PromoteWholeBlobRecovery {
+        promotion: PreparedWholeBlobRecoveryPromotion,
+        evidence: PreparedRecoveryEvidence,
+        receipt: RunBoundaryReceipt,
+        machine_lifecycle: MachineLifecycleCommit,
+        input_updates: Vec<InputStatePersistenceRecord>,
+        session_store_key: meerkat_core::types::SessionId,
+    },
+}
+
+/// Opaque, valid-by-construction request for one runtime-owned session
+/// boundary.
+///
+/// The constructors prevent receipt, lifecycle, and session-key values from
+/// being combined into a boundary shape that no
+/// [`RuntimeStore`] verb can commit. The sealed session remains typed and lazy
+/// until the selected persistence profile consumes it.
+#[derive(Debug, Clone)]
+pub struct PreparedRuntimeSessionCommit {
+    payload: PreparedRuntimeSessionCommitPayload,
+}
+
+impl PreparedRuntimeSessionCommit {
+    fn validate_whole_blob_promotion_binding(
+        promotion: &PreparedWholeBlobProvisionalPromotion,
+        receipt: &RunBoundaryReceipt,
+        session_store_key: &meerkat_core::types::SessionId,
+    ) -> Result<(), RuntimeStoreError> {
+        if promotion.authority().run_id() != &receipt.run_id {
+            return Err(RuntimeStoreError::SessionPersistenceAuthorityConflict {
+                runtime_id: promotion.authority().session_id().to_string(),
+                detail: "WholeBlob promotion receipt run differs from provisional authority"
+                    .to_string(),
+            });
+        }
+        if receipt.conversation_digest.as_deref() != Some(promotion.conversation_digest.as_str())
+            || u64::try_from(receipt.message_count).ok() != Some(promotion.message_count)
+        {
+            return Err(RuntimeStoreError::SessionPersistenceAuthorityConflict {
+                runtime_id: promotion.authority().session_id().to_string(),
+                detail: "WholeBlob final receipt differs from checkpoint candidate count/digest"
+                    .to_string(),
+            });
+        }
+        if promotion.authority().session_id() != session_store_key {
+            return Err(RuntimeStoreError::SessionKeyMismatch {
+                expected: promotion.authority().session_id().clone(),
+                actual: session_store_key.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_head_canonical_promotion_binding(
+        promotion: &PreparedHeadCanonicalProvisionalPromotion,
+        receipt: &RunBoundaryReceipt,
+        session_store_key: &meerkat_core::types::SessionId,
+    ) -> Result<(), RuntimeStoreError> {
+        if promotion.authority().run_id() != &receipt.run_id {
+            return Err(RuntimeStoreError::SessionPersistenceAuthorityConflict {
+                runtime_id: promotion.authority().session_id().to_string(),
+                detail: "HeadCanonical promotion receipt run differs from provisional authority"
+                    .to_string(),
+            });
+        }
+        if promotion.authority().session_id() != session_store_key {
+            return Err(RuntimeStoreError::SessionKeyMismatch {
+                expected: promotion.authority().session_id().clone(),
+                actual: session_store_key.clone(),
+            });
+        }
+        if receipt.conversation_digest.as_deref()
+            != Some(promotion.checkpoint().conversation_digest())
+            || u64::try_from(receipt.message_count).ok()
+                != Some(promotion.checkpoint().message_count())
+        {
+            return Err(RuntimeStoreError::SessionPersistenceAuthorityConflict {
+                runtime_id: promotion.authority().session_id().to_string(),
+                detail:
+                    "HeadCanonical promotion terminal receipt differs from checkpoint digest/count"
+                        .to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Prepare a session-control snapshot without a run receipt.
+    #[must_use]
+    pub fn snapshot_only(session: BoundSessionCommit) -> Self {
+        Self {
+            payload: PreparedRuntimeSessionCommitPayload::SnapshotOnly { session },
+        }
+    }
+
+    /// Prepare a successful run boundary.
+    #[must_use]
+    pub fn success(
+        session: Option<BoundSessionCommit>,
+        receipt: RunBoundaryReceipt,
+        input_updates: Vec<InputStatePersistenceRecord>,
+        session_store_key: Option<meerkat_core::types::SessionId>,
+    ) -> Self {
+        Self {
+            payload: PreparedRuntimeSessionCommitPayload::Success {
+                session,
+                receipt,
+                input_updates,
+                session_store_key,
+            },
+        }
+    }
+
+    /// Prepare a successful final boundary that promotes an already-written
+    /// WholeBlob candidate without carrying or materializing its Session body.
+    pub fn promote_whole_blob_success(
+        promotion: PreparedWholeBlobProvisionalPromotion,
+        receipt: RunBoundaryReceipt,
+        input_updates: Vec<InputStatePersistenceRecord>,
+        session_store_key: meerkat_core::types::SessionId,
+    ) -> Result<Self, RuntimeStoreError> {
+        Self::validate_whole_blob_promotion_binding(&promotion, &receipt, &session_store_key)?;
+        Ok(Self {
+            payload: PreparedRuntimeSessionCommitPayload::PromoteWholeBlobSuccess {
+                promotion,
+                receipt,
+                input_updates,
+                session_store_key,
+            },
+        })
+    }
+
+    /// Prepare a successful final boundary that promotes an already-applied
+    /// HeadCanonical physical checkpoint without reapplying its rows.
+    pub fn promote_head_canonical_success(
+        promotion: PreparedHeadCanonicalProvisionalPromotion,
+        receipt: RunBoundaryReceipt,
+        input_updates: Vec<InputStatePersistenceRecord>,
+        session_store_key: meerkat_core::types::SessionId,
+    ) -> Result<Self, RuntimeStoreError> {
+        Self::validate_head_canonical_promotion_binding(&promotion, &receipt, &session_store_key)?;
+        Ok(Self {
+            payload: PreparedRuntimeSessionCommitPayload::PromoteHeadCanonicalSuccess {
+                promotion,
+                receipt,
+                input_updates,
+                session_store_key,
+            },
+        })
+    }
+
+    /// Prepare a failed-but-applied run boundary.
+    #[must_use]
+    pub fn machine_terminal(
+        session: BoundSessionCommit,
+        receipt: RunBoundaryReceipt,
+        machine_lifecycle: MachineLifecycleCommit,
+        input_updates: Vec<InputStatePersistenceRecord>,
+        session_store_key: meerkat_core::types::SessionId,
+    ) -> Self {
+        Self {
+            payload: PreparedRuntimeSessionCommitPayload::MachineTerminal {
+                session,
+                receipt,
+                machine_lifecycle,
+                input_updates,
+                session_store_key,
+            },
+        }
+    }
+
+    /// Prepare a failed-but-applied final boundary that promotes the exact
+    /// store-owned WholeBlob candidate.
+    pub fn promote_whole_blob_machine_terminal(
+        promotion: PreparedWholeBlobProvisionalPromotion,
+        receipt: RunBoundaryReceipt,
+        machine_lifecycle: MachineLifecycleCommit,
+        input_updates: Vec<InputStatePersistenceRecord>,
+        session_store_key: meerkat_core::types::SessionId,
+    ) -> Result<Self, RuntimeStoreError> {
+        Self::validate_whole_blob_promotion_binding(&promotion, &receipt, &session_store_key)?;
+        Ok(Self {
+            payload: PreparedRuntimeSessionCommitPayload::PromoteWholeBlobMachineTerminal {
+                promotion,
+                receipt,
+                machine_lifecycle,
+                input_updates,
+                session_store_key,
+            },
+        })
+    }
+
+    /// Prepare a failed-but-applied boundary that promotes the exact applied
+    /// HeadCanonical provisional checkpoint.
+    pub fn promote_head_canonical_machine_terminal(
+        promotion: PreparedHeadCanonicalProvisionalPromotion,
+        receipt: RunBoundaryReceipt,
+        machine_lifecycle: MachineLifecycleCommit,
+        input_updates: Vec<InputStatePersistenceRecord>,
+        session_store_key: meerkat_core::types::SessionId,
+    ) -> Result<Self, RuntimeStoreError> {
+        Self::validate_head_canonical_promotion_binding(&promotion, &receipt, &session_store_key)?;
+        Ok(Self {
+            payload: PreparedRuntimeSessionCommitPayload::PromoteHeadCanonicalMachineTerminal {
+                promotion,
+                receipt,
+                machine_lifecycle,
+                input_updates,
+                session_store_key,
+            },
+        })
+    }
+
+    /// Prepare a direct service-turn terminal boundary.
+    #[must_use]
+    pub fn service_turn_terminal(
+        session: BoundSessionCommit,
+        receipt: RunBoundaryReceipt,
+        machine_lifecycle: MachineLifecycleCommit,
+        session_store_key: meerkat_core::types::SessionId,
+    ) -> Self {
+        Self {
+            payload: PreparedRuntimeSessionCommitPayload::ServiceTurnTerminal {
+                session,
+                receipt,
+                machine_lifecycle,
+                session_store_key,
+            },
+        }
+    }
+
+    /// Prepare a direct service-turn terminal boundary that promotes the exact
+    /// store-owned WholeBlob candidate.
+    pub fn promote_whole_blob_service_turn_terminal(
+        promotion: PreparedWholeBlobProvisionalPromotion,
+        receipt: RunBoundaryReceipt,
+        machine_lifecycle: MachineLifecycleCommit,
+        session_store_key: meerkat_core::types::SessionId,
+    ) -> Result<Self, RuntimeStoreError> {
+        Self::validate_whole_blob_promotion_binding(&promotion, &receipt, &session_store_key)?;
+        Ok(Self {
+            payload: PreparedRuntimeSessionCommitPayload::PromoteWholeBlobServiceTurnTerminal {
+                promotion,
+                receipt,
+                machine_lifecycle,
+                session_store_key,
+            },
+        })
+    }
+
+    /// Prepare a service-turn terminal boundary that promotes the exact
+    /// applied HeadCanonical provisional checkpoint.
+    pub fn promote_head_canonical_service_turn_terminal(
+        promotion: PreparedHeadCanonicalProvisionalPromotion,
+        receipt: RunBoundaryReceipt,
+        machine_lifecycle: MachineLifecycleCommit,
+        session_store_key: meerkat_core::types::SessionId,
+    ) -> Result<Self, RuntimeStoreError> {
+        Self::validate_head_canonical_promotion_binding(&promotion, &receipt, &session_store_key)?;
+        Ok(Self {
+            payload: PreparedRuntimeSessionCommitPayload::PromoteHeadCanonicalServiceTurnTerminal {
+                promotion,
+                receipt,
+                machine_lifecycle,
+                session_store_key,
+            },
+        })
+    }
+
+    /// Prepare the only boundary allowed to realize machine-authorized
+    /// durable-tail recovery.
+    ///
+    /// Crate-only because the recovery classifier and generated machine must
+    /// seal [`PreparedRecoveryEvidence`]; a caller cannot select a recovery
+    /// disposition or physical-head proof.
+    pub(crate) fn machine_terminal_recovery(
+        session: BoundSessionCommit,
+        evidence: PreparedRecoveryEvidence,
+        receipt: RunBoundaryReceipt,
+        machine_lifecycle: MachineLifecycleCommit,
+        session_store_key: meerkat_core::types::SessionId,
+    ) -> Result<Self, RuntimeStoreError> {
+        if &session_store_key != evidence.session_id() {
+            return Err(RuntimeStoreError::SessionKeyMismatch {
+                expected: evidence.session_id().clone(),
+                actual: session_store_key,
+            });
+        }
+        if &receipt.run_id != evidence.candidate_run_id() {
+            return Err(RuntimeStoreError::SessionPersistenceAuthorityConflict {
+                runtime_id: evidence.session_id().to_string(),
+                detail: "recovery receipt run differs from sealed candidate run".to_string(),
+            });
+        }
+        evidence.verify_head_canonical_boundary(&session, &receipt)?;
+        evidence.verify_request_effects(&receipt, &machine_lifecycle)?;
+        let input_updates = evidence.cloned_input_updates();
+        Ok(Self {
+            payload: PreparedRuntimeSessionCommitPayload::Recovery {
+                session,
+                evidence,
+                receipt,
+                machine_lifecycle,
+                input_updates,
+                session_store_key,
+            },
+        })
+    }
+
+    /// Prepare a WholeBlob recovery without routing the recovered document
+    /// through the ordinary whole-document boundary.
+    ///
+    /// Completed candidates become metadata-only promotions. Interrupted
+    /// candidates retain the one already-materialized repaired artifact.
+    pub(crate) fn machine_terminal_whole_blob_recovery(
+        repaired_document: Option<BoundSessionCommit>,
+        evidence: PreparedRecoveryEvidence,
+        receipt: RunBoundaryReceipt,
+        machine_lifecycle: MachineLifecycleCommit,
+        session_store_key: meerkat_core::types::SessionId,
+    ) -> Result<Self, RuntimeStoreError> {
+        if &session_store_key != evidence.session_id() {
+            return Err(RuntimeStoreError::SessionKeyMismatch {
+                expected: evidence.session_id().clone(),
+                actual: session_store_key,
+            });
+        }
+        if &receipt.run_id != evidence.candidate_run_id() {
+            return Err(RuntimeStoreError::SessionPersistenceAuthorityConflict {
+                runtime_id: evidence.session_id().to_string(),
+                detail: "recovery receipt run differs from sealed candidate run".to_string(),
+            });
+        }
+        evidence.verify_request_effects(&receipt, &machine_lifecycle)?;
+        let input_updates = evidence.cloned_input_updates();
+        evidence.verify_input_updates(&input_updates)?;
+        let promotion =
+            PreparedWholeBlobRecoveryPromotion::prepare(repaired_document.as_ref(), &evidence)?;
+        Ok(Self {
+            payload: PreparedRuntimeSessionCommitPayload::PromoteWholeBlobRecovery {
+                promotion,
+                evidence,
+                receipt,
+                machine_lifecycle,
+                input_updates,
+                session_store_key,
+            },
+        })
+    }
+
+    /// Boundary shape selected by the constructor.
+    #[must_use]
+    pub fn kind(&self) -> PreparedRuntimeSessionCommitKind {
+        match &self.payload {
+            PreparedRuntimeSessionCommitPayload::SnapshotOnly { .. } => {
+                PreparedRuntimeSessionCommitKind::SnapshotOnly
+            }
+            PreparedRuntimeSessionCommitPayload::Success { .. }
+            | PreparedRuntimeSessionCommitPayload::PromoteWholeBlobSuccess { .. }
+            | PreparedRuntimeSessionCommitPayload::PromoteHeadCanonicalSuccess { .. } => {
+                PreparedRuntimeSessionCommitKind::Success
+            }
+            PreparedRuntimeSessionCommitPayload::ServiceTurnTerminal { .. }
+            | PreparedRuntimeSessionCommitPayload::PromoteWholeBlobServiceTurnTerminal { .. }
+            | PreparedRuntimeSessionCommitPayload::PromoteHeadCanonicalServiceTurnTerminal {
+                ..
+            } => PreparedRuntimeSessionCommitKind::ServiceTurnTerminal,
+            PreparedRuntimeSessionCommitPayload::MachineTerminal { .. }
+            | PreparedRuntimeSessionCommitPayload::PromoteWholeBlobMachineTerminal { .. }
+            | PreparedRuntimeSessionCommitPayload::PromoteHeadCanonicalMachineTerminal { .. } => {
+                PreparedRuntimeSessionCommitKind::MachineTerminal
+            }
+            PreparedRuntimeSessionCommitPayload::Recovery { .. }
+            | PreparedRuntimeSessionCommitPayload::PromoteWholeBlobRecovery { .. } => {
+                PreparedRuntimeSessionCommitKind::Recovery
+            }
+        }
+    }
+
+    /// Prepared session document, when this boundary carries one.
+    #[must_use]
+    pub fn session(&self) -> Option<&BoundSessionCommit> {
+        match &self.payload {
+            PreparedRuntimeSessionCommitPayload::SnapshotOnly { session, .. }
+            | PreparedRuntimeSessionCommitPayload::ServiceTurnTerminal { session, .. }
+            | PreparedRuntimeSessionCommitPayload::MachineTerminal { session, .. }
+            | PreparedRuntimeSessionCommitPayload::Recovery { session, .. } => Some(session),
+            PreparedRuntimeSessionCommitPayload::Success { session, .. } => session.as_ref(),
+            PreparedRuntimeSessionCommitPayload::PromoteWholeBlobSuccess { .. }
+            | PreparedRuntimeSessionCommitPayload::PromoteWholeBlobServiceTurnTerminal { .. }
+            | PreparedRuntimeSessionCommitPayload::PromoteWholeBlobMachineTerminal { .. }
+            | PreparedRuntimeSessionCommitPayload::PromoteHeadCanonicalSuccess { .. }
+            | PreparedRuntimeSessionCommitPayload::PromoteHeadCanonicalServiceTurnTerminal {
+                ..
+            }
+            | PreparedRuntimeSessionCommitPayload::PromoteHeadCanonicalMachineTerminal { .. } => {
+                None
+            }
+            PreparedRuntimeSessionCommitPayload::PromoteWholeBlobRecovery { .. } => None,
+        }
+    }
+
+    /// Boundary receipt, absent only for snapshot-only commits.
+    #[must_use]
+    pub fn receipt(&self) -> Option<&RunBoundaryReceipt> {
+        match &self.payload {
+            PreparedRuntimeSessionCommitPayload::SnapshotOnly { .. } => None,
+            PreparedRuntimeSessionCommitPayload::Success { receipt, .. }
+            | PreparedRuntimeSessionCommitPayload::PromoteWholeBlobSuccess { receipt, .. }
+            | PreparedRuntimeSessionCommitPayload::PromoteHeadCanonicalSuccess {
+                receipt, ..
+            }
+            | PreparedRuntimeSessionCommitPayload::ServiceTurnTerminal { receipt, .. }
+            | PreparedRuntimeSessionCommitPayload::PromoteWholeBlobServiceTurnTerminal {
+                receipt,
+                ..
+            }
+            | PreparedRuntimeSessionCommitPayload::PromoteHeadCanonicalServiceTurnTerminal {
+                receipt,
+                ..
+            }
+            | PreparedRuntimeSessionCommitPayload::MachineTerminal { receipt, .. }
+            | PreparedRuntimeSessionCommitPayload::PromoteWholeBlobMachineTerminal {
+                receipt,
+                ..
+            }
+            | PreparedRuntimeSessionCommitPayload::PromoteHeadCanonicalMachineTerminal {
+                receipt,
+                ..
+            }
+            | PreparedRuntimeSessionCommitPayload::Recovery { receipt, .. }
+            | PreparedRuntimeSessionCommitPayload::PromoteWholeBlobRecovery { receipt, .. } => {
+                Some(receipt)
+            }
+        }
+    }
+
+    /// Input-state mutations committed with a run boundary.
+    #[must_use]
+    pub fn input_updates(&self) -> Option<&[InputStatePersistenceRecord]> {
+        match &self.payload {
+            PreparedRuntimeSessionCommitPayload::SnapshotOnly { .. } => None,
+            PreparedRuntimeSessionCommitPayload::ServiceTurnTerminal { .. }
+            | PreparedRuntimeSessionCommitPayload::PromoteWholeBlobServiceTurnTerminal { .. }
+            | PreparedRuntimeSessionCommitPayload::PromoteHeadCanonicalServiceTurnTerminal {
+                ..
+            } => Some(&[]),
+            PreparedRuntimeSessionCommitPayload::Success { input_updates, .. }
+            | PreparedRuntimeSessionCommitPayload::PromoteWholeBlobSuccess {
+                input_updates, ..
+            }
+            | PreparedRuntimeSessionCommitPayload::PromoteHeadCanonicalSuccess {
+                input_updates,
+                ..
+            }
+            | PreparedRuntimeSessionCommitPayload::MachineTerminal { input_updates, .. }
+            | PreparedRuntimeSessionCommitPayload::PromoteWholeBlobMachineTerminal {
+                input_updates,
+                ..
+            }
+            | PreparedRuntimeSessionCommitPayload::PromoteHeadCanonicalMachineTerminal {
+                input_updates,
+                ..
+            }
+            | PreparedRuntimeSessionCommitPayload::Recovery { input_updates, .. }
+            | PreparedRuntimeSessionCommitPayload::PromoteWholeBlobRecovery {
+                input_updates, ..
+            } => Some(input_updates),
+        }
+    }
+
+    /// Explicit SessionStore identity carried by a run boundary.
+    #[must_use]
+    pub fn session_store_key(&self) -> Option<&meerkat_core::types::SessionId> {
+        match &self.payload {
+            PreparedRuntimeSessionCommitPayload::SnapshotOnly { .. } => None,
+            PreparedRuntimeSessionCommitPayload::Success {
+                session_store_key, ..
+            } => session_store_key.as_ref(),
+            PreparedRuntimeSessionCommitPayload::PromoteWholeBlobSuccess {
+                session_store_key,
+                ..
+            }
+            | PreparedRuntimeSessionCommitPayload::PromoteHeadCanonicalSuccess {
+                session_store_key,
+                ..
+            }
+            | PreparedRuntimeSessionCommitPayload::ServiceTurnTerminal {
+                session_store_key, ..
+            }
+            | PreparedRuntimeSessionCommitPayload::PromoteWholeBlobServiceTurnTerminal {
+                session_store_key,
+                ..
+            }
+            | PreparedRuntimeSessionCommitPayload::PromoteHeadCanonicalServiceTurnTerminal {
+                session_store_key,
+                ..
+            }
+            | PreparedRuntimeSessionCommitPayload::MachineTerminal {
+                session_store_key, ..
+            }
+            | PreparedRuntimeSessionCommitPayload::PromoteWholeBlobMachineTerminal {
+                session_store_key,
+                ..
+            }
+            | PreparedRuntimeSessionCommitPayload::PromoteHeadCanonicalMachineTerminal {
+                session_store_key,
+                ..
+            }
+            | PreparedRuntimeSessionCommitPayload::Recovery {
+                session_store_key, ..
+            }
+            | PreparedRuntimeSessionCommitPayload::PromoteWholeBlobRecovery {
+                session_store_key,
+                ..
+            } => Some(session_store_key),
+        }
+    }
+
+    /// Machine lifecycle authority, present only for a machine-terminal commit.
+    #[must_use]
+    pub fn machine_lifecycle(&self) -> Option<&MachineLifecycleCommit> {
+        match &self.payload {
+            PreparedRuntimeSessionCommitPayload::ServiceTurnTerminal {
+                machine_lifecycle, ..
+            }
+            | PreparedRuntimeSessionCommitPayload::PromoteWholeBlobServiceTurnTerminal {
+                machine_lifecycle,
+                ..
+            }
+            | PreparedRuntimeSessionCommitPayload::PromoteHeadCanonicalServiceTurnTerminal {
+                machine_lifecycle,
+                ..
+            }
+            | PreparedRuntimeSessionCommitPayload::MachineTerminal {
+                machine_lifecycle, ..
+            }
+            | PreparedRuntimeSessionCommitPayload::PromoteWholeBlobMachineTerminal {
+                machine_lifecycle,
+                ..
+            }
+            | PreparedRuntimeSessionCommitPayload::PromoteHeadCanonicalMachineTerminal {
+                machine_lifecycle,
+                ..
+            }
+            | PreparedRuntimeSessionCommitPayload::Recovery {
+                machine_lifecycle, ..
+            }
+            | PreparedRuntimeSessionCommitPayload::PromoteWholeBlobRecovery {
+                machine_lifecycle,
+                ..
+            } => Some(machine_lifecycle),
+            PreparedRuntimeSessionCommitPayload::SnapshotOnly { .. }
+            | PreparedRuntimeSessionCommitPayload::Success { .. }
+            | PreparedRuntimeSessionCommitPayload::PromoteWholeBlobSuccess { .. }
+            | PreparedRuntimeSessionCommitPayload::PromoteHeadCanonicalSuccess { .. } => None,
+        }
+    }
+
+    /// Sealed recovery evidence, present only for a recovery boundary.
+    #[must_use]
+    pub(crate) fn recovery_evidence(&self) -> Option<&PreparedRecoveryEvidence> {
+        match &self.payload {
+            PreparedRuntimeSessionCommitPayload::Recovery { evidence, .. }
+            | PreparedRuntimeSessionCommitPayload::PromoteWholeBlobRecovery { evidence, .. } => {
+                Some(evidence)
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn into_payload(self) -> PreparedRuntimeSessionCommitPayload {
+        self.payload
+    }
+}
+
+/// Store-internal exact pairing produced only from a sealed typed WholeBlob
+/// boundary. Backends consume the typed Session for guards and compaction
+/// intents while writing the already-materialized shared bytes and authority.
+/// This prevents a prepared boundary from reparsing its own JSON.
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedWholeBlobSnapshot {
+    session: std::sync::Arc<meerkat_core::Session>,
+    serialized: SerializedSessionSnapshot,
+    blob_sha256: String,
+}
+
+impl PreparedWholeBlobSnapshot {
+    #[must_use]
+    pub(crate) fn session(&self) -> &meerkat_core::Session {
+        self.session.as_ref()
+    }
+
+    #[must_use]
+    pub(crate) fn serialized(&self) -> &SerializedSessionSnapshot {
+        &self.serialized
+    }
+
+    #[must_use]
+    pub(crate) fn blob_sha256(&self) -> &str {
+        &self.blob_sha256
+    }
+
+    #[must_use]
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        std::sync::Arc<meerkat_core::Session>,
+        SerializedSessionSnapshot,
+        String,
+    ) {
+        (self.session, self.serialized, self.blob_sha256)
+    }
+}
+
+fn prepared_whole_blob_snapshot(
+    session: &BoundSessionCommit,
+) -> Result<PreparedWholeBlobSnapshot, RuntimeStoreError> {
+    let typed_session = session.session_arc_cloned().ok_or_else(|| {
+        RuntimeStoreError::SessionPersistenceAuthorityConflict {
+            runtime_id: "<untyped-whole-blob-boundary>".to_string(),
+            detail: "prepared WholeBlob boundary requires a sealed typed Session".to_string(),
+        }
+    })?;
+    let artifact = session.whole_blob_artifact().map_err(|error| {
+        RuntimeStoreError::WriteFailed(format!(
+            "failed to materialize whole-blob session boundary: {error}"
+        ))
+    })?;
+    Ok(PreparedWholeBlobSnapshot {
+        session: typed_session,
+        serialized: whole_blob_serialized_snapshot(artifact.bytes_arc()),
+        blob_sha256: artifact.row_sha256_token().to_string(),
+    })
+}
+
+fn parsed_whole_blob_snapshot(
+    serialized: SerializedSessionSnapshot,
+) -> Result<PreparedWholeBlobSnapshot, RuntimeStoreError> {
+    let session = std::sync::Arc::new(
+        meerkat_core::Session::from_persisted_bytes(serialized.session_snapshot.as_ref()).map_err(
+            |error| {
+                RuntimeStoreError::WriteFailed(format!(
+                    "whole-blob snapshot is not a valid Session payload: {error}"
+                ))
+            },
+        )?,
+    );
+    let blob_sha256 = format!(
+        "row-sha256:{:x}",
+        sha2::Sha256::digest(serialized.session_snapshot.as_ref())
+    );
+    Ok(PreparedWholeBlobSnapshot {
+        session,
+        serialized,
+        blob_sha256,
+    })
+}
+
+fn whole_blob_serialized_snapshot(
+    session_snapshot: std::sync::Arc<Vec<u8>>,
+) -> SerializedSessionSnapshot {
+    SerializedSessionSnapshot { session_snapshot }
 }
 
 /// Opaque generated runtime-delivery authority persisted by a
@@ -322,45 +4815,17 @@ fn validated_compaction_projection_intents(
         .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))
 }
 
-/// Clear one finalized compaction intent while preserving typed checkpoint
-/// custody for the exact replacement document.
+/// Clear one finalized compaction intent from the ordinary session document.
 ///
-/// Legacy snapshots retain their legacy-unverified classification; callers do
-/// not gain typed authority merely by finalizing an outbox row. A verified
-/// snapshot advances by one exact run-boundary successor so the persisted
-/// document can never carry its predecessor's now-stale digest.
-pub(crate) fn complete_compaction_projection_checkpoint(
+/// Physical currentness remains store-owned; mutating this domain payload
+/// neither consumes nor mints persistence authority.
+pub(crate) fn complete_compaction_projection_intent(
     session: &mut meerkat_core::Session,
     projection: &meerkat_core::CompactionProjectionId,
 ) -> Result<(), RuntimeStoreError> {
-    let predecessor = match session
-        .try_checkpoint_state()
-        .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?
-    {
-        meerkat_core::SessionCheckpointState::Verified(stamp) => Some(stamp),
-        meerkat_core::SessionCheckpointState::LegacyUnverified { .. } => None,
-    };
-
-    let completed = session
+    session
         .complete_compaction_projection_intent(projection)
         .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
-
-    if completed.is_none() {
-        return Ok(());
-    }
-
-    if let Some(predecessor) = predecessor {
-        let successor = meerkat_core::SessionCheckpointStamp::successor(
-            session,
-            &predecessor,
-            meerkat_core::SessionCheckpointProvenance::RunBoundaryCommit,
-        )
-        .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
-        session
-            .install_checkpoint_stamp(successor)
-            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
-    }
-
     Ok(())
 }
 
@@ -2163,6 +6628,176 @@ fn classify_machine_lifecycle_record(bytes: &[u8]) -> MachineLifecycleObservatio
     }
 }
 
+#[cfg(test)]
+pub(crate) async fn assert_input_idempotency_final_image_contract(store: &dyn RuntimeStore) {
+    fn state_with_key(input_id: InputId, key: &str) -> StoredInputState {
+        let mut state = StoredInputState::new_accepted(input_id);
+        state.state.idempotency_key = Some(IdempotencyKey::new(key));
+        state
+    }
+
+    fn record(state: StoredInputState) -> InputStatePersistenceRecord {
+        InputStatePersistenceRecord::from_machine_snapshot(state).unwrap()
+    }
+
+    let runtime_id =
+        LogicalRuntimeId::new(format!("idempotency-final-image-{}", uuid::Uuid::now_v7()));
+    let left_id = InputId::new();
+    let right_id = InputId::new();
+    let left = state_with_key(left_id.clone(), "left-key");
+    let right = state_with_key(right_id.clone(), "right-key");
+    store
+        .persist_input_states_atomically(
+            &runtime_id,
+            &[record(left.clone()), record(right.clone())],
+        )
+        .await
+        .unwrap();
+
+    let swapped_left = state_with_key(left_id.clone(), "right-key");
+    let swapped_right = state_with_key(right_id.clone(), "left-key");
+    store
+        .persist_input_states_atomically(
+            &runtime_id,
+            &[record(swapped_left.clone()), record(swapped_right.clone())],
+        )
+        .await
+        .expect("complete-final-image persistence must permit a key swap");
+    let left_key_owner = store
+        .load_input_state_by_idempotency_key(&runtime_id, &IdempotencyKey::new("left-key"))
+        .await
+        .unwrap()
+        .expect("left key after swap");
+    let right_key_owner = store
+        .load_input_state_by_idempotency_key(&runtime_id, &IdempotencyKey::new("right-key"))
+        .await
+        .unwrap()
+        .expect("right key after swap");
+    assert_eq!(left_key_owner.state().state.input_id, right_id);
+    assert_eq!(right_key_owner.state().state.input_id, left_id);
+
+    assert_eq!(
+        store
+            .compare_and_swap_input_states_atomically(
+                &runtime_id,
+                &[swapped_left, swapped_right],
+                &[record(left), record(right)],
+            )
+            .await
+            .unwrap(),
+        InputStateBatchCasOutcome::Swapped,
+        "complete-final-image CAS must permit the reverse key swap"
+    );
+}
+
+#[cfg(test)]
+pub(crate) fn pending_terminal_owner_fixture(
+    input_id: InputId,
+    published: bool,
+) -> (StoredInputState, InputStatePersistenceRecord) {
+    use crate::input_state::{
+        InputState, InputStateSeed, InteractionTerminalBatchKey, InteractionTerminalCandidate,
+        InteractionTerminalOutbox, InteractionTerminalOutboxPhase, InteractionTerminalPublication,
+        interaction_terminal_payload_digest,
+    };
+
+    let candidate = InteractionTerminalCandidate::RuntimeTerminated {
+        reason: "indexed terminal recovery fixture".to_string(),
+    };
+    let recipients = vec![input_id.clone()];
+    let candidate_digest = interaction_terminal_payload_digest(&candidate).unwrap();
+    let completion_input_ids_digest = interaction_terminal_payload_digest(&recipients).unwrap();
+    let phase = if published {
+        InteractionTerminalOutboxPhase::Published {
+            finalization_failed: false,
+            publication: InteractionTerminalPublication {
+                terminal_seq: 1,
+                payload_digest: "published-payload".to_string(),
+            },
+        }
+    } else {
+        InteractionTerminalOutboxPhase::Candidate
+    };
+    let outbox = InteractionTerminalOutbox {
+        interaction_id: meerkat_core::interaction::InteractionId(input_id.0),
+        input_id: input_id.clone(),
+        batch_ordinal: 0,
+        batch_key: InteractionTerminalBatchKey::RuntimeTermination {
+            candidate_owner_input_id: input_id.clone(),
+        },
+        owner_session_id: meerkat_core::types::SessionId::new(),
+        owner_agent_runtime_id: Some("indexed-runtime".to_string()),
+        owner_fence_token: Some(1),
+        owner_runtime_generation: Some(1),
+        owner_runtime_epoch_id: Some("indexed-epoch".to_string()),
+        candidate_owner_input_id: input_id.clone(),
+        candidate: (!published).then_some(candidate),
+        candidate_digest,
+        completion_input_ids: (!published).then_some(recipients),
+        completion_input_ids_digest,
+        phase,
+    };
+    outbox.validate().unwrap();
+    let mut state = InputState::new_accepted(input_id);
+    state.interaction_terminal_outbox = Some(outbox);
+    let stored = StoredInputState {
+        state,
+        seed: InputStateSeed::new_accepted(),
+    };
+    let record = InputStatePersistenceRecord::from_machine_snapshot(stored.clone()).unwrap();
+    (stored, record)
+}
+
+#[cfg(test)]
+pub(crate) async fn assert_pending_terminal_owner_index_contract(store: &dyn RuntimeStore) {
+    let runtime_id =
+        LogicalRuntimeId::new(format!("pending-terminal-index-{}", uuid::Uuid::now_v7()));
+    let mut ids = vec![InputId::new(), InputId::new(), InputId::new()];
+    ids.sort_by_key(|input_id| input_id.0);
+    let fixtures = ids
+        .iter()
+        .cloned()
+        .map(|input_id| pending_terminal_owner_fixture(input_id, false))
+        .collect::<Vec<_>>();
+    for (_, record) in &fixtures {
+        store
+            .persist_input_state(&runtime_id, record)
+            .await
+            .unwrap();
+    }
+
+    let first_page = store
+        .load_pending_terminal_owner_ids_page(&runtime_id, None, 2)
+        .await
+        .unwrap();
+    assert_eq!(first_page, ids[..2]);
+    let second_page = store
+        .load_pending_terminal_owner_ids_page(&runtime_id, first_page.last(), 2)
+        .await
+        .unwrap();
+    assert_eq!(second_page, ids[2..]);
+
+    let (_, published) = pending_terminal_owner_fixture(ids[1].clone(), true);
+    assert_eq!(
+        store
+            .compare_and_swap_input_states_atomically(
+                &runtime_id,
+                std::slice::from_ref(&fixtures[1].0),
+                std::slice::from_ref(&published),
+            )
+            .await
+            .unwrap(),
+        InputStateBatchCasOutcome::Swapped
+    );
+    assert_eq!(
+        store
+            .load_pending_terminal_owner_ids_page(&runtime_id, None, 3)
+            .await
+            .unwrap(),
+        vec![ids[0].clone(), ids[2].clone()]
+    );
+}
+
 fn replacement_repair_blocked(
     evidence_digest: Option<String>,
     detail: impl Into<String>,
@@ -2528,9 +7163,253 @@ pub async fn load_input_states_for_recovery(
 /// one live `MeerkatMachine` authority. Store transactions provide durable
 /// atomicity; they are not a distributed lease for two machines concurrently
 /// controlling the same logical runtime.
+///
+/// Every operation that mutates more than one input row evaluates the unique
+/// idempotency-key constraint against the batch's complete final image. Target
+/// rows relinquish their old keys as one logical set before any target claims
+/// its successor key, so a valid key swap is accepted regardless of mutation
+/// order. A duplicate final claim or a claim held by a row outside the mutation
+/// set rejects the entire operation without exposing any sibling effect.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait RuntimeStore: Send + Sync {
+    /// Durable session representation owned by this store.
+    ///
+    /// Every implementation must choose explicitly. `WholeBlobV1`
+    /// materializes and writes the accumulated session document at each
+    /// boundary, so its ordinary persistence cost is O(document).
+    /// `HeadCanonicalV1` commits the prepared head/suffix mutation and small
+    /// runtime authority incrementally. Every profile must implement
+    /// [`Self::commit_prepared_session_boundary`] directly; there is no
+    /// checkpoint-derived or whole-blob compatibility bridge.
+    fn session_persistence_profile(&self) -> RuntimeSessionPersistenceProfile;
+
+    /// Declared cost of [`Self::load_session_boundary_authority`].
+    ///
+    /// The default is deliberately unsupported. Implementations must opt in
+    /// only after maintaining authority separately from the document body.
+    fn session_boundary_authority_read_cost(&self) -> RuntimeSessionAuthorityReadCost {
+        RuntimeSessionAuthorityReadCost::Unsupported
+    }
+
+    /// Commit one valid-by-construction prepared session boundary.
+    ///
+    /// Every store must override this method. Only the backend can allocate the
+    /// next physical revision and atomically bind it to the exact body/head,
+    /// catalog projection, receipts, input rows, and lifecycle effects. A
+    /// generic default cannot honestly mint store-issued authority.
+    async fn commit_prepared_session_boundary(
+        &self,
+        _runtime_id: &LogicalRuntimeId,
+        _request: PreparedRuntimeSessionCommit,
+    ) -> Result<PreparedRuntimeSessionCommitResult, RuntimeStoreError> {
+        let profile = self.session_persistence_profile();
+        Err(RuntimeStoreError::PreparedSessionBoundaryRequiresOverride { profile })
+    }
+
+    /// Load the versioned session authority for a runtime.
+    ///
+    /// Implementations may expose this only as a bounded authority-row read.
+    /// There is intentionally no default fallback through
+    /// [`Self::load_session_snapshot`]: callers poll this seam during
+    /// reconciliation, so parsing a WholeBlob body here would turn degraded
+    /// operation into an invisible O(document) loop.
+    async fn load_session_boundary_authority(
+        &self,
+        _runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<RuntimeSessionAuthority>, RuntimeStoreError> {
+        Err(RuntimeStoreError::Unsupported(
+            "bounded session-boundary authority observation".to_string(),
+        ))
+    }
+
+    /// Observe only the fixed-size store-issued WholeBlob identity.
+    async fn load_whole_blob_store_authority(
+        &self,
+        _runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<WholeBlobStoreAuthority>, RuntimeStoreError> {
+        Err(RuntimeStoreError::Unsupported(
+            "bounded WholeBlob store authority observation".to_string(),
+        ))
+    }
+
+    /// Atomically pair the WholeBlob body with its store-issued identity.
+    ///
+    /// This is the source for resume/rewrite payload verification. Polling
+    /// callers must use [`Self::load_whole_blob_store_authority`] instead.
+    async fn load_committed_whole_blob_snapshot(
+        &self,
+        _runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<CommittedWholeBlobSnapshot>, RuntimeStoreError> {
+        Err(RuntimeStoreError::Unsupported(
+            "atomic WholeBlob snapshot/authority observation".to_string(),
+        ))
+    }
+
+    /// Commit one typed WholeBlob successor only while its exact store-issued
+    /// predecessor remains current.
+    ///
+    /// Implementations compare only [`WholeBlobStoreAuthority`]. They must not
+    /// derive currentness from Session checkpoint metadata or reread/compare a
+    /// whole document.
+    async fn commit_prepared_whole_blob_snapshot_cas(
+        &self,
+        _runtime_id: &LogicalRuntimeId,
+        _prepared: PreparedWholeBlobSnapshotCas,
+    ) -> Result<WholeBlobSnapshotCasOutcome, RuntimeStoreError> {
+        Err(RuntimeStoreError::Unsupported(
+            "typed WholeBlob snapshot compare-and-swap".to_string(),
+        ))
+    }
+
+    /// Delete one exact runtime's catalog projection.
+    async fn delete_runtime_session_catalog_entry(
+        &self,
+        _runtime_id: &LogicalRuntimeId,
+    ) -> Result<(), RuntimeStoreError> {
+        Err(RuntimeStoreError::Unsupported(
+            "runtime session catalog delete".to_string(),
+        ))
+    }
+
+    /// Load one bounded, body-free runtime session catalog entry.
+    async fn load_runtime_session_catalog_entry(
+        &self,
+        _runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<RuntimeSessionCatalogEntry>, RuntimeStoreError> {
+        Err(RuntimeStoreError::Unsupported(
+            "runtime session catalog load".to_string(),
+        ))
+    }
+
+    /// List body-free catalog entries in deterministic updated-descending,
+    /// session-id-ascending order.
+    async fn list_runtime_session_catalog_entries(
+        &self,
+        _filter: meerkat_core::SessionFilter,
+    ) -> Result<Vec<RuntimeSessionCatalogEntry>, RuntimeStoreError> {
+        Err(RuntimeStoreError::Unsupported(
+            "runtime session catalog list".to_string(),
+        ))
+    }
+
+    /// Write one typed provisional WholeBlob candidate exactly once.
+    async fn write_prepared_whole_blob_provisional_tail(
+        &self,
+        _runtime_id: &LogicalRuntimeId,
+        _prepared: PreparedWholeBlobProvisionalTail,
+    ) -> Result<WholeBlobProvisionalTailAuthority, RuntimeStoreError> {
+        Err(RuntimeStoreError::Unsupported(
+            "WholeBlob provisional-tail writes".to_string(),
+        ))
+    }
+
+    /// Atomically load one provisional authority and its candidate body.
+    async fn load_whole_blob_provisional_tail(
+        &self,
+        _runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<CommittedWholeBlobProvisionalTail>, RuntimeStoreError> {
+        Err(RuntimeStoreError::Unsupported(
+            "WholeBlob provisional-tail observation".to_string(),
+        ))
+    }
+
+    /// Discard only the exact provisional candidate named by `expected`.
+    async fn discard_whole_blob_provisional_tail(
+        &self,
+        _runtime_id: &LogicalRuntimeId,
+        _expected: &WholeBlobProvisionalTailAuthority,
+    ) -> Result<bool, RuntimeStoreError> {
+        Err(RuntimeStoreError::Unsupported(
+            "WholeBlob provisional-tail discard".to_string(),
+        ))
+    }
+
+    /// Persist one exact HeadCanonical provisional intent before the physical
+    /// SessionStore CAS it authorizes.
+    async fn write_prepared_head_canonical_provisional_tail(
+        &self,
+        _runtime_id: &LogicalRuntimeId,
+        _prepared: PreparedHeadCanonicalProvisionalTail,
+    ) -> Result<HeadCanonicalProvisionalTailAuthority, RuntimeStoreError> {
+        Err(RuntimeStoreError::Unsupported(
+            "HeadCanonical provisional-tail writes".to_string(),
+        ))
+    }
+
+    /// Load only the fixed-size HeadCanonical provisional authority.
+    async fn load_head_canonical_provisional_tail(
+        &self,
+        _runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<HeadCanonicalProvisionalTailAuthority>, RuntimeStoreError> {
+        Err(RuntimeStoreError::Unsupported(
+            "HeadCanonical provisional-tail observation".to_string(),
+        ))
+    }
+
+    /// Discard only the exact HeadCanonical provisional authority supplied.
+    async fn discard_head_canonical_provisional_tail(
+        &self,
+        _runtime_id: &LogicalRuntimeId,
+        _expected: &HeadCanonicalProvisionalTailAuthority,
+    ) -> Result<bool, RuntimeStoreError> {
+        Err(RuntimeStoreError::Unsupported(
+            "HeadCanonical provisional-tail discard".to_string(),
+        ))
+    }
+
+    /// Load one store-owned durable-tail source from a single verified
+    /// authority/physical-head snapshot.
+    ///
+    /// Only a backend that atomically owns runtime authority and canonical
+    /// session rows can implement this. The default refuses instead of
+    /// accepting caller-supplied session/head facts.
+    async fn load_durable_tail_recovery_source(
+        &self,
+        _runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<PreparedDurableTailRecoverySource>, RuntimeStoreError> {
+        Err(
+            RuntimeStoreError::PreparedRecoveryRequiresAtomicPhysicalHeadCas {
+                profile: self.session_persistence_profile(),
+            },
+        )
+    }
+
+    /// Load every exact original receipt row for one store-derived recovery
+    /// candidate run, ordered by boundary sequence.
+    ///
+    /// The row token in each opaque result lets a supported-floor missing
+    /// conversation digest be enriched in the same transaction as recovery.
+    async fn load_durable_tail_recovery_receipts(
+        &self,
+        _runtime_id: &LogicalRuntimeId,
+        _run_id: &RunId,
+    ) -> Result<Vec<PreparedRecoveryReceiptSource>, RuntimeStoreError> {
+        Err(
+            RuntimeStoreError::PreparedRecoveryRequiresAtomicPhysicalHeadCas {
+                profile: self.session_persistence_profile(),
+            },
+        )
+    }
+
+    /// Load the durable exact-retry witness for one recovery candidate.
+    ///
+    /// Only a backend that owns runtime authority and the physical session
+    /// head in one atomic resource may implement this. The generic WholeBlob
+    /// profile has no way to recheck an external SessionStore row and therefore
+    /// refuses rather than presenting a partial commit as converged recovery.
+    async fn load_committed_recovery_boundary(
+        &self,
+        _runtime_id: &LogicalRuntimeId,
+        _candidate_id: &str,
+    ) -> Result<Option<CommittedRecoveryBoundary>, RuntimeStoreError> {
+        Err(
+            RuntimeStoreError::PreparedRecoveryRequiresAtomicPhysicalHeadCas {
+                profile: self.session_persistence_profile(),
+            },
+        )
+    }
+
     /// Whether [`RuntimeStore::atomic_apply`] durably records typed compaction
     /// projection intents in the same boundary as the session rewrite.
     /// Unknown/custom stores fail closed by default.
@@ -2647,57 +7526,25 @@ pub trait RuntimeStore: Send + Sync {
     async fn commit_session_snapshot(
         &self,
         runtime_id: &LogicalRuntimeId,
-        session_delta: SessionDelta,
+        session_delta: SerializedSessionSnapshot,
     ) -> Result<(), RuntimeStoreError>;
 
-    /// [`commit_session_snapshot`] carrying caller-threaded transcript-history
-    /// evidence for the one-time legacy upgrade boundary.
+    /// Commit one valid-by-construction WholeBlob transcript-rewrite boundary.
     ///
-    /// A pre-0.8.9 snapshot row carries the transcript graph inline; a 0.8.9
-    /// boundary snapshot is slim. When the graph evolved between the two, the
-    /// erase guard refuses the slim write unless the caller threads the
-    /// evolved graph so the store can verify ancestry
-    /// (`run_boundary_snapshot_save_guard_with_legacy_history_evidence`). The
-    /// accepted write replaces the row with the slim representation, so the
-    /// verification runs at most once per session.
-    ///
-    /// Default: ignore the evidence and run the plain boundary commit —
-    /// fail-closed, a store that predates this seam keeps refusing unproven
-    /// history evolution instead of trusting it.
-    ///
-    /// [`commit_session_snapshot`]: RuntimeStore::commit_session_snapshot
-    async fn commit_session_snapshot_with_legacy_history_evidence(
+    /// Implementations compare the exact current authority with
+    /// `boundary.expected_authority()` and write the already-materialized
+    /// successor bytes once. If the exact successor authority is already
+    /// current, return it without another physical write. Any other current
+    /// authority conflicts. Stores must not decode the Session or reconstruct
+    /// rewrite semantics; those proofs are sealed before this mechanical CAS.
+    /// Exact successor compaction intents must match already-committed,
+    /// non-finalized outbox rows inside the same lock or transaction.
+    async fn commit_prepared_whole_blob_rewrite_boundary(
         &self,
         runtime_id: &LogicalRuntimeId,
-        session_delta: SessionDelta,
-        evidence: meerkat_core::TranscriptHistoryState,
-    ) -> Result<(), RuntimeStoreError> {
-        let _ = evidence;
-        self.commit_session_snapshot(runtime_id, session_delta)
-            .await
-    }
+        boundary: PreparedWholeBlobRewriteStoreParts,
+    ) -> Result<WholeBlobStoreAuthority, RuntimeStoreError>;
 
-    /// Atomically persist a same-session transcript rewrite snapshot.
-    ///
-    /// Store implementations that support transcript edits must compare the
-    /// currently persisted session transcript revision with `commit.parent_revision`
-    /// inside the same lock or transaction that writes `session_delta`.
-    async fn commit_session_transcript_rewrite_snapshot(
-        &self,
-        runtime_id: &LogicalRuntimeId,
-        session_delta: SessionDelta,
-        commit: &meerkat_core::TranscriptRewriteCommit,
-    ) -> Result<(), RuntimeStoreError> {
-        let _ = (runtime_id, session_delta, commit);
-        Err(RuntimeStoreError::Unsupported(
-            "commit_session_transcript_rewrite_snapshot".into(),
-        ))
-    }
-
-    /// Atomically persist session delta + receipt + input state updates.
-    ///
-    /// All three writes MUST commit in a single atomic operation.
-    /// If any write fails, none should be visible.
     /// Atomically persist session delta + receipt + input state updates.
     ///
     /// All writes MUST commit in a single atomic operation.
@@ -2713,41 +7560,11 @@ pub trait RuntimeStore: Send + Sync {
     async fn atomic_apply(
         &self,
         runtime_id: &LogicalRuntimeId,
-        session_delta: Option<SessionDelta>,
+        session_delta: Option<SerializedSessionSnapshot>,
         receipt: RunBoundaryReceipt,
         input_updates: Vec<InputStatePersistenceRecord>,
         session_store_key: Option<meerkat_core::types::SessionId>,
     ) -> Result<(), RuntimeStoreError>;
-
-    /// [`atomic_apply`] carrying caller-threaded transcript-history evidence
-    /// for the one-time legacy upgrade boundary, verified inside the same
-    /// atomic transaction (see
-    /// [`commit_session_snapshot_with_legacy_history_evidence`] for the
-    /// evidence contract). Default: ignore the evidence and run the plain
-    /// boundary commit — fail-closed, a store that predates this seam keeps
-    /// refusing unproven history evolution.
-    ///
-    /// [`atomic_apply`]: RuntimeStore::atomic_apply
-    /// [`commit_session_snapshot_with_legacy_history_evidence`]: RuntimeStore::commit_session_snapshot_with_legacy_history_evidence
-    async fn atomic_apply_with_legacy_history_evidence(
-        &self,
-        runtime_id: &LogicalRuntimeId,
-        session_delta: Option<SessionDelta>,
-        receipt: RunBoundaryReceipt,
-        input_updates: Vec<InputStatePersistenceRecord>,
-        session_store_key: Option<meerkat_core::types::SessionId>,
-        evidence: Option<meerkat_core::TranscriptHistoryState>,
-    ) -> Result<(), RuntimeStoreError> {
-        let _ = evidence;
-        self.atomic_apply(
-            runtime_id,
-            session_delta,
-            receipt,
-            input_updates,
-            session_store_key,
-        )
-        .await
-    }
 
     /// Load exact compaction projection intents committed by atomic_apply but
     /// not yet acknowledged as finalized by the memory store.
@@ -2788,7 +7605,7 @@ pub trait RuntimeStore: Send + Sync {
     async fn atomic_apply_with_machine_lifecycle(
         &self,
         runtime_id: &LogicalRuntimeId,
-        session_delta: SessionDelta,
+        session_delta: SerializedSessionSnapshot,
         receipt: RunBoundaryReceipt,
         machine_lifecycle: MachineLifecycleCommit,
         input_updates: Vec<InputStatePersistenceRecord>,
@@ -2805,38 +7622,6 @@ pub trait RuntimeStore: Send + Sync {
         Err(RuntimeStoreError::Unsupported(
             "atomic_apply_with_machine_lifecycle".to_string(),
         ))
-    }
-
-    /// [`atomic_apply_with_machine_lifecycle`] carrying caller-threaded
-    /// transcript-history evidence for the one-time legacy upgrade boundary,
-    /// verified inside the same atomic transaction (see
-    /// [`commit_session_snapshot_with_legacy_history_evidence`] for the
-    /// evidence contract). Default: ignore the evidence and run the plain
-    /// machine-terminal commit — fail-closed.
-    ///
-    /// [`atomic_apply_with_machine_lifecycle`]: RuntimeStore::atomic_apply_with_machine_lifecycle
-    /// [`commit_session_snapshot_with_legacy_history_evidence`]: RuntimeStore::commit_session_snapshot_with_legacy_history_evidence
-    #[allow(clippy::too_many_arguments)]
-    async fn atomic_apply_with_machine_lifecycle_and_legacy_history_evidence(
-        &self,
-        runtime_id: &LogicalRuntimeId,
-        session_delta: SessionDelta,
-        receipt: RunBoundaryReceipt,
-        machine_lifecycle: MachineLifecycleCommit,
-        input_updates: Vec<InputStatePersistenceRecord>,
-        session_store_key: meerkat_core::types::SessionId,
-        evidence: Option<meerkat_core::TranscriptHistoryState>,
-    ) -> Result<(), RuntimeStoreError> {
-        let _ = evidence;
-        self.atomic_apply_with_machine_lifecycle(
-            runtime_id,
-            session_delta,
-            receipt,
-            machine_lifecycle,
-            input_updates,
-            session_store_key,
-        )
-        .await
     }
 
     /// Load all input states for a runtime, one row outcome per stored row.
@@ -2916,51 +7701,51 @@ pub trait RuntimeStore: Send + Sync {
         )))
     }
 
-    /// Load all decodable input-state rows together with the exact
-    /// domain-prefixed SHA-256 digest of each row's stored bytes.
+    /// Load one authoritative snapshot of all and only nonterminal input-state
+    /// rows, with the exact domain-prefixed SHA-256 digest of each row's
+    /// stored bytes and a set/absence token over the complete ordered set.
     ///
-    /// The digest is a target-local compare token: recovery carries it back
-    /// on fenced [`InputStatePersistenceRecord`]s so the atomic commit can
-    /// fail stale instead of blindly overwriting a row another process
-    /// advanced in the meantime.
+    /// Each row digest is a target-local compare token: recovery carries it
+    /// back on fenced [`InputStatePersistenceRecord`]s. The snapshot's set
+    /// token additionally fences inserts, removals, and terminality changes,
+    /// including the empty-set case where there are no per-row tokens to CAS.
     ///
-    /// Implementations that apply fenced records MUST enforce
-    /// [`InputStatePersistenceRecord::expected_row_digest`] inside the same
-    /// transaction that writes them, failing the whole boundary with
+    /// Implementations that apply recovery MUST recompute the snapshot from
+    /// the same complete, runtime-scoped nonterminal index/set inside the
+    /// transaction that writes the boundary. A different set token fails the
+    /// whole boundary with [`RuntimeStoreError::RecoveryInputSetConflict`];
+    /// implementations MUST also enforce every
+    /// [`InputStatePersistenceRecord::expected_row_digest`] in that
+    /// transaction, failing with
     /// [`RuntimeStoreError::InputRowVersionConflict`] on mismatch.
     ///
-    /// The default derives each token from the canonical serialization of
-    /// the strictly-loaded bundle, which is exactly what the built-in
-    /// backends persist. Deriving rather than refusing matters: a wrapping
-    /// store that forwards the rest of the trait would otherwise opt itself
-    /// out of fenced reads and turn every durable-tail recovery into a
-    /// permanent hold.
+    /// There is deliberately no compatibility derivation from decoded rows:
+    /// reserializing a bundle proves only the current serializer's canonical
+    /// representation, not the exact bytes the backend observed and will CAS.
+    /// A backend must override this method only when it can return and enforce
+    /// tokens for its actual stored-row representation. Wrappers and custom
+    /// stores that cannot do so fail closed, and durable-tail recovery maps
+    /// this typed absence of fencing capability to `Unfenceable`.
     async fn load_input_states_with_versions(
         &self,
-        runtime_id: &LogicalRuntimeId,
-    ) -> Result<Vec<(StoredInputState, String)>, RuntimeStoreError> {
-        use sha2::Digest as _;
-        self.load_input_states_strict(runtime_id)
-            .await?
-            .into_iter()
-            .map(|bundle| {
-                let bytes = serde_json::to_vec(&bundle).map_err(|error| {
-                    RuntimeStoreError::ReadFailed(format!(
-                        "input state row `{}` could not be canonicalized for versioning: {error}",
-                        bundle.state.input_id
-                    ))
-                })?;
-                let digest = format!("sha256:{:x}", Sha256::digest(&bytes));
-                Ok((bundle, digest))
-            })
-            .collect()
+        _runtime_id: &LogicalRuntimeId,
+    ) -> Result<PreparedRecoveryInputSnapshot, RuntimeStoreError> {
+        Err(RuntimeStoreError::Unsupported(
+            "load_input_states_with_versions requires exact stored-row and complete-set tokens"
+                .to_string(),
+        ))
     }
 
-    /// Load the latest committed session snapshot for a runtime, if any.
+    /// Load the latest committed whole-blob session snapshot for a runtime.
+    ///
+    /// Compatibility-only. A head-canonical implementation must return
+    /// [`RuntimeStoreError::SessionPersistenceAuthorityConflict`] once a
+    /// canonical authority row exists; returning a frozen migration BLOB would
+    /// resurrect its predecessor as current truth.
     async fn load_session_snapshot(
         &self,
         runtime_id: &LogicalRuntimeId,
-    ) -> Result<Option<Vec<u8>>, RuntimeStoreError>;
+    ) -> Result<Option<std::sync::Arc<Vec<u8>>>, RuntimeStoreError>;
 
     /// Remove the latest committed session snapshot for a runtime.
     ///
@@ -2969,6 +7754,7 @@ pub trait RuntimeStore: Send + Sync {
     /// authority and the service cannot restore the previous snapshot. An
     /// ordinary downstream compatibility-projection failure must retain the
     /// already-committed runtime snapshot for retry.
+    /// Head-canonical stores must refuse this whole-document mutation.
     async fn clear_session_snapshot(
         &self,
         runtime_id: &LogicalRuntimeId,
@@ -2980,6 +7766,7 @@ pub trait RuntimeStore: Send + Sync {
     /// Used by fail-closed recovery when a rejected transcript-rewrite snapshot
     /// must be restored to its prior audited value. Implementations must compare
     /// and write atomically so recovery cannot overwrite newer runtime authority.
+    /// Head-canonical stores must refuse this whole-document mutation.
     async fn replace_session_snapshot_if_current(
         &self,
         runtime_id: &LogicalRuntimeId,
@@ -2991,6 +7778,7 @@ pub trait RuntimeStore: Send + Sync {
     /// `expected_current`.
     ///
     /// This is the conditional variant of the fail-closed quarantine path.
+    /// Head-canonical stores must refuse this whole-document mutation.
     async fn clear_session_snapshot_if_current(
         &self,
         runtime_id: &LogicalRuntimeId,
@@ -3026,6 +7814,8 @@ pub trait RuntimeStore: Send + Sync {
     /// Atomically persist a batch of machine-authorized input shell updates.
     /// Used by per-input terminal outboxes so an N-input batch can never
     /// expose a mixed provisional/finalized or finalized/published phase.
+    /// Idempotency-key ownership follows the trait's complete-final-image
+    /// contract, including valid swaps between rows in this batch.
     async fn persist_input_states_atomically(
         &self,
         _runtime_id: &LogicalRuntimeId,
@@ -3037,6 +7827,14 @@ pub trait RuntimeStore: Send + Sync {
         Err(RuntimeStoreError::Unsupported(
             "persist_input_states_atomically".to_string(),
         ))
+    }
+
+    /// Durable realization profile for
+    /// [`Self::compare_and_swap_input_states_atomically`].
+    fn input_state_batch_cas_implementation_profile(
+        &self,
+    ) -> InputStateBatchCasImplementationProfile {
+        InputStateBatchCasImplementationProfile::Unsupported
     }
 
     /// Atomically replace an exact set of input-state rows only when every
@@ -3052,7 +7850,9 @@ pub trait RuntimeStore: Send + Sync {
     /// expected/replacement images, and any other changed durable rows return
     /// [`InputStateBatchCasOutcome::Stale`] without writing a replacement.
     /// Implementations must hold one lock/transaction across the complete
-    /// comparison and write set.
+    /// comparison and write set. Replacement idempotency-key ownership follows
+    /// the trait's complete-final-image contract, including valid swaps between
+    /// rows in this batch.
     async fn compare_and_swap_input_states_atomically(
         &self,
         _runtime_id: &LogicalRuntimeId,
@@ -3093,12 +7893,124 @@ pub trait RuntimeStore: Send + Sync {
         ))
     }
 
+    /// Atomically publish machine-normalized recovery input rows only while
+    /// the exact store-owned input-set revision observed with the source rows
+    /// remains current.
+    ///
+    /// Unlike ordinary bounded input CAS, this seam has no total-row cap and
+    /// MUST compare `expected_revision` even when `replacements` is empty. The
+    /// empty case is the absence-fence path: a concurrent first insert must
+    /// make it stale. Each replacement additionally carries the exact
+    /// predecessor-row digest returned in
+    /// [`Self::load_input_states_with_versions`].
+    async fn compare_and_swap_recovery_input_states_atomically(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        expected_revision: RecoveryInputSetRevision,
+        mutations: &[RecoveryInputStateMutation],
+    ) -> Result<InputStateBatchCasOutcome, RuntimeStoreError> {
+        let _ = prepare_recovery_input_state_mutations(mutations)?;
+        let _ = (runtime_id, expected_revision);
+        Err(RuntimeStoreError::Unsupported(
+            "compare_and_swap_recovery_input_states_atomically".to_string(),
+        ))
+    }
+
+    /// Revision-fenced recovery input publication while an external runtime
+    /// authority fence is held across the target transaction.
+    ///
+    /// Implementations MUST execute the external fence even for an empty
+    /// replacement set, after comparing the store-owned revision and before
+    /// committing. This prevents a zero-row bootstrap from bypassing either
+    /// the absence witness or its runtime-authority lease.
+    async fn compare_and_swap_recovery_input_states_atomically_with_fence(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        expected_revision: RecoveryInputSetRevision,
+        mutations: &[RecoveryInputStateMutation],
+        write_fence: std::sync::Arc<dyn RuntimeStoreWriteFence>,
+    ) -> Result<FencedInputStateBatchCasOutcome, RuntimeStoreError> {
+        let _ = prepare_recovery_input_state_mutations(mutations)?;
+        let _ = (runtime_id, expected_revision, write_fence);
+        Err(RuntimeStoreError::Unsupported(
+            "compare_and_swap_recovery_input_states_atomically_with_fence".to_string(),
+        ))
+    }
+
     /// Load a single input state.
     async fn load_input_state(
         &self,
         runtime_id: &LogicalRuntimeId,
         input_id: &InputId,
     ) -> Result<Option<StoredInputState>, RuntimeStoreError>;
+
+    /// Resolve one historical or live input through the store-owned
+    /// idempotency-key index.
+    ///
+    /// Implementations MUST maintain a unique `(runtime_id, key) -> input_id`
+    /// mapping atomically with every input-row insert, update, and delete.
+    /// Presence and absence are authoritative only when the store proves, in
+    /// the same backend snapshot as the keyed lookup, that every source row for
+    /// the runtime has an unambiguous indexable key identity. A corrupt or
+    /// otherwise unindexable row must return
+    /// [`RuntimeStoreError::InputIdempotencyIndexUncertain`] for both hits and
+    /// misses; it must never be treated as absence or ignored behind another
+    /// indexed owner. A full input-history scan is not a conforming
+    /// implementation. The returned digest binds the exact stored row bytes
+    /// observed with the index lookup.
+    async fn load_input_state_by_idempotency_key(
+        &self,
+        _runtime_id: &LogicalRuntimeId,
+        _key: &IdempotencyKey,
+    ) -> Result<Option<ExactInputStateObservation>, RuntimeStoreError> {
+        Err(RuntimeStoreError::Unsupported(
+            "load_input_state_by_idempotency_key requires an exact maintained index".to_string(),
+        ))
+    }
+
+    /// Load an exact bounded set of input rows from one backend snapshot.
+    ///
+    /// Results have exactly the request's cardinality and order; a missing key
+    /// occupies its corresponding `None` slot. Duplicate keys and batches
+    /// larger than [`MAX_INPUT_STATE_BATCH_CAS`] are rejected. Implementations
+    /// must perform one bounded backend read rather than repeatedly
+    /// materializing a whole-blob ledger.
+    async fn load_input_states_by_ids(
+        &self,
+        _runtime_id: &LogicalRuntimeId,
+        input_ids: &[InputId],
+    ) -> Result<Vec<Option<StoredInputState>>, RuntimeStoreError> {
+        validate_input_state_batch_read_ids(input_ids)?;
+        if input_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        Err(RuntimeStoreError::Unsupported(
+            "load_input_states_by_ids".to_string(),
+        ))
+    }
+
+    /// Discover canonical owner ids for unfinished terminal work.
+    ///
+    /// Results are strictly ordered by [`InputId`], contain only ids greater
+    /// than the stable exclusive `after` cursor, and contain at most `limit`
+    /// entries. Implementations must maintain a store-owned index
+    /// transactionally with input-state writes; scanning or decoding the
+    /// accumulated input ledger inside this method violates the contract.
+    ///
+    /// The result is discovery only. Callers must hydrate and validate each
+    /// owner's exact declared recipient batch through
+    /// [`Self::load_input_states_by_ids`].
+    async fn load_pending_terminal_owner_ids_page(
+        &self,
+        _runtime_id: &LogicalRuntimeId,
+        after: Option<&InputId>,
+        limit: usize,
+    ) -> Result<Vec<InputId>, RuntimeStoreError> {
+        validate_pending_terminal_owner_page(after, limit, &[])?;
+        Err(RuntimeStoreError::Unsupported(
+            "load_pending_terminal_owner_ids_page".to_string(),
+        ))
+    }
 
     /// Observe one physical machine-lifecycle row without collapsing corrupt
     /// or future-version bytes into absence.
@@ -3408,6 +8320,341 @@ pub trait RuntimeStore: Send + Sync {
 pub use memory::InMemoryRuntimeStore;
 #[cfg(feature = "sqlite-store")]
 pub use sqlite::SqliteRuntimeStore;
+
+#[cfg(test)]
+mod store_authority_record_tests {
+    use super::*;
+    use meerkat_core::session_store::PreparedHeadCanonicalMutation;
+    use meerkat_core::types::{Message, UserMessage};
+
+    fn row_digest(byte: char) -> String {
+        format!("row-sha256:{}", byte.to_string().repeat(64))
+    }
+
+    fn head_record() -> (
+        meerkat_core::types::SessionId,
+        meerkat_core::session_store::SessionHead,
+        String,
+    ) {
+        let mut session = meerkat_core::Session::new();
+        session.push(Message::User(UserMessage::text("canonical head")));
+        let session_id = session.id().clone();
+        let mutation =
+            PreparedHeadCanonicalMutation::prepare(&session, None).expect("prepare canonical head");
+        (
+            session_id,
+            mutation.successor_head().clone(),
+            mutation.successor_head_token().to_string(),
+        )
+    }
+
+    #[test]
+    fn borrowed_whole_blob_provisional_prepare_encodes_once_and_retains_no_session() {
+        let mut session = meerkat_core::Session::new();
+        session.push(Message::User(UserMessage::text("candidate")));
+        let session_id = session.id().clone();
+        let base = WholeBlobStoreAuthority::issued(session_id.clone(), 7, row_digest('b'))
+            .expect("valid base authority");
+        let prepared =
+            PreparedWholeBlobProvisionalTail::prepare_from_session(base, RunId::new(), 1, &session)
+                .expect("prepare borrowed WholeBlob candidate");
+        assert_eq!(
+            prepared.whole_blob_encode_count(),
+            1,
+            "borrowed preparation must stream the Session exactly once"
+        );
+        let retained = prepared.clone();
+        drop(prepared);
+        drop(session);
+        assert_eq!(
+            retained.whole_blob_encode_count(),
+            1,
+            "cloning the bounded carrier must share bytes, not re-encode"
+        );
+
+        let (authority, artifact, digest, message_count, catalog, intents) = retained.into_parts();
+        assert_eq!(authority.session_id(), &session_id);
+        assert_eq!(
+            authority.candidate_blob_sha256(),
+            artifact.row_sha256_token()
+        );
+        assert_eq!(catalog.session_id(), &session_id);
+        assert_eq!(catalog.message_count(), 1);
+        assert_eq!(message_count, 1);
+        assert!(!digest.is_empty());
+        assert!(intents.is_empty());
+        let decoded = meerkat_core::Session::from_persisted_bytes(artifact.bytes())
+            .expect("carrier bytes remain independently usable after the Session is dropped");
+        assert_eq!(decoded.id(), &session_id);
+        assert_eq!(decoded.messages().len(), 1);
+    }
+
+    #[test]
+    fn whole_blob_store_record_constructor_validates_every_fixed_field() {
+        let session_id = meerkat_core::types::SessionId::new();
+        let valid = WholeBlobStoreAuthority::from_store_record(
+            WholeBlobStoreAuthority::VERSION,
+            session_id.clone(),
+            7,
+            row_digest('a'),
+        )
+        .expect("valid WholeBlob record");
+        assert_eq!(valid.authority_version(), WholeBlobStoreAuthority::VERSION);
+        assert_eq!(valid.session_id(), &session_id);
+        assert_eq!(valid.store_revision(), 7);
+        assert_eq!(valid.blob_sha256(), row_digest('a'));
+
+        for (version, revision, digest) in [
+            (WholeBlobStoreAuthority::VERSION + 1, 7, row_digest('a')),
+            (WholeBlobStoreAuthority::VERSION, 0, row_digest('a')),
+            (WholeBlobStoreAuthority::VERSION, 7, String::new()),
+            (
+                WholeBlobStoreAuthority::VERSION,
+                7,
+                format!("sha256:{}", "a".repeat(64)),
+            ),
+            (WholeBlobStoreAuthority::VERSION, 7, row_digest('A')),
+            (
+                WholeBlobStoreAuthority::VERSION,
+                7,
+                format!("row-sha256:{}", "a".repeat(63)),
+            ),
+        ] {
+            assert!(
+                WholeBlobStoreAuthority::from_store_record(
+                    version,
+                    session_id.clone(),
+                    revision,
+                    digest,
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn head_canonical_store_record_constructor_validates_every_bound_fact() {
+        let (session_id, head, token) = head_record();
+        let valid = HeadCanonicalStoreAuthority::from_store_record(
+            HeadCanonicalStoreAuthority::VERSION,
+            session_id.clone(),
+            11,
+            head.clone(),
+            token.clone(),
+        )
+        .expect("valid HeadCanonical record");
+        assert_eq!(
+            valid.authority_version(),
+            HeadCanonicalStoreAuthority::VERSION
+        );
+        assert_eq!(valid.session_id(), &session_id);
+        assert_eq!(valid.store_revision(), 11);
+        assert_eq!(valid.boundary_head(), &head);
+        assert_eq!(valid.committed_head_token(), token);
+
+        assert!(
+            HeadCanonicalStoreAuthority::from_store_record(
+                HeadCanonicalStoreAuthority::VERSION + 1,
+                session_id.clone(),
+                11,
+                head.clone(),
+                token.clone(),
+            )
+            .is_err()
+        );
+        assert!(
+            HeadCanonicalStoreAuthority::from_store_record(
+                HeadCanonicalStoreAuthority::VERSION,
+                session_id.clone(),
+                0,
+                head.clone(),
+                token.clone(),
+            )
+            .is_err()
+        );
+        assert!(
+            HeadCanonicalStoreAuthority::from_store_record(
+                HeadCanonicalStoreAuthority::VERSION,
+                session_id.clone(),
+                11,
+                head.clone(),
+                String::new(),
+            )
+            .is_err()
+        );
+        assert!(
+            HeadCanonicalStoreAuthority::from_store_record(
+                HeadCanonicalStoreAuthority::VERSION,
+                session_id.clone(),
+                11,
+                head.clone(),
+                "head-cas:different".to_string(),
+            )
+            .is_err()
+        );
+
+        let mut wrong_session = head.clone();
+        wrong_session.id = meerkat_core::types::SessionId::new();
+        assert!(
+            HeadCanonicalStoreAuthority::from_store_record(
+                HeadCanonicalStoreAuthority::VERSION,
+                session_id.clone(),
+                11,
+                wrong_session,
+                token.clone(),
+            )
+            .is_err()
+        );
+
+        let mut missing_row_prefix = head.clone();
+        missing_row_prefix.message_row_prefix = None;
+        assert!(
+            HeadCanonicalStoreAuthority::from_store_record(
+                HeadCanonicalStoreAuthority::VERSION,
+                session_id.clone(),
+                11,
+                missing_row_prefix,
+                token.clone(),
+            )
+            .is_err()
+        );
+
+        let mut wrong_row_count = head.clone();
+        wrong_row_count.message_count = wrong_row_count.message_count.saturating_add(1);
+        assert!(
+            HeadCanonicalStoreAuthority::from_store_record(
+                HeadCanonicalStoreAuthority::VERSION,
+                session_id.clone(),
+                11,
+                wrong_row_count,
+                token.clone(),
+            )
+            .is_err()
+        );
+
+        let mut wrong_rewrite_count = head;
+        wrong_rewrite_count.rewrite_count = wrong_rewrite_count.rewrite_count.saturating_add(1);
+        assert!(
+            HeadCanonicalStoreAuthority::from_store_record(
+                HeadCanonicalStoreAuthority::VERSION,
+                session_id,
+                11,
+                wrong_rewrite_count,
+                token,
+            )
+            .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod runtime_session_catalog_entry_tests {
+    use super::*;
+    use meerkat_core::session_store::PreparedHeadCanonicalMutation;
+    use meerkat_core::types::{Message, UserMessage};
+
+    fn labeled_session() -> meerkat_core::Session {
+        let mut session = meerkat_core::Session::new();
+        session.push(Message::User(UserMessage::text(
+            "transcript body must not enter the catalog",
+        )));
+        session.set_metadata(
+            RuntimeSessionCatalogEntry::SESSION_LABELS_KEY,
+            serde_json::json!({
+                "owner": "operations",
+                "tier": "production"
+            }),
+        );
+        session
+    }
+
+    #[test]
+    fn public_session_projection_is_validated_and_body_free() {
+        let session = labeled_session();
+        let entry = RuntimeSessionCatalogEntry::from_session(
+            &session,
+            RuntimeSessionPersistenceProfile::WholeBlobV1,
+            Some(RuntimeState::Idle),
+        )
+        .expect("typed Session projects to bounded catalog metadata");
+
+        assert_eq!(entry.session_id(), session.id());
+        assert_eq!(
+            entry.persistence_profile(),
+            RuntimeSessionPersistenceProfile::WholeBlobV1
+        );
+        assert_eq!(entry.created_at(), session.created_at());
+        assert_eq!(entry.updated_at(), session.updated_at());
+        assert_eq!(entry.message_count(), session.messages().len());
+        assert_eq!(entry.total_tokens(), session.total_tokens());
+        assert_eq!(
+            entry.labels(),
+            &BTreeMap::from([
+                ("owner".to_string(), "operations".to_string()),
+                ("tier".to_string(), "production".to_string()),
+            ])
+        );
+        assert_eq!(entry.runtime_state(), Some(RuntimeState::Idle));
+
+        let encoded = serde_json::to_string(&entry).expect("catalog entry serializes");
+        assert!(
+            !encoded.contains("transcript body must not enter the catalog"),
+            "catalog projection must never carry transcript body data"
+        );
+    }
+
+    #[test]
+    fn public_head_projection_matches_session_catalog_facts() {
+        let session = labeled_session();
+        let mutation =
+            PreparedHeadCanonicalMutation::prepare(&session, None).expect("prepare canonical head");
+        let from_session = RuntimeSessionCatalogEntry::from_session(
+            &session,
+            RuntimeSessionPersistenceProfile::HeadCanonicalV1,
+            None,
+        )
+        .expect("Session catalog projection");
+        let from_head = RuntimeSessionCatalogEntry::from_head(
+            mutation.successor_head(),
+            RuntimeSessionPersistenceProfile::HeadCanonicalV1,
+            None,
+        )
+        .expect("SessionHead catalog projection");
+
+        assert_eq!(from_head, from_session);
+    }
+
+    #[test]
+    fn public_catalog_projections_reject_malformed_labels() {
+        let mut session = labeled_session();
+        session.set_metadata(
+            RuntimeSessionCatalogEntry::SESSION_LABELS_KEY,
+            serde_json::json!(["not", "a", "label", "map"]),
+        );
+
+        assert!(matches!(
+            RuntimeSessionCatalogEntry::from_session(
+                &session,
+                RuntimeSessionPersistenceProfile::WholeBlobV1,
+                None,
+            ),
+            Err(RuntimeStoreError::WriteFailed(detail))
+                if detail.contains("malformed catalog labels")
+        ));
+
+        let mutation =
+            PreparedHeadCanonicalMutation::prepare(&session, None).expect("prepare canonical head");
+        assert!(matches!(
+            RuntimeSessionCatalogEntry::from_head(
+                mutation.successor_head(),
+                RuntimeSessionPersistenceProfile::HeadCanonicalV1,
+                None,
+            ),
+            Err(RuntimeStoreError::WriteFailed(detail))
+                if detail.contains("malformed catalog labels")
+        ));
+    }
+}
 
 #[cfg(test)]
 mod lifecycle_record_compatibility_tests {

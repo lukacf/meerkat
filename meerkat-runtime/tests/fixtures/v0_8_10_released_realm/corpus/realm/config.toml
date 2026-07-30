@@ -1,0 +1,152 @@
+[agent]
+model = ""
+budget_warning_threshold = 0.8
+structured_output_retries = 2
+
+[storage]
+
+[budget]
+
+[retry]
+max_retries = 3
+initial_delay = "500ms"
+max_delay = "30s"
+multiplier = 2.0
+
+[tools]
+mcp_servers = []
+default_timeout = "10m"
+max_concurrent = 10
+builtins_enabled = false
+shell_enabled = false
+comms_enabled = false
+mob_enabled = false
+schedule_enabled = false
+workgraph_enabled = false
+
+[tools.tool_timeouts]
+
+[models]
+anthropic = ""
+openai = ""
+gemini = ""
+
+[shell]
+program = "nu"
+timeout_secs = 30
+security_mode = "unrestricted"
+security_patterns = []
+
+[store]
+
+[comms]
+mode = "inproc"
+auth = "none"
+require_peer_auth = true
+
+[mob_host]
+
+[compaction]
+recent_turn_budget = 4
+max_summary_tokens = 4096
+min_turns_between_compactions = 3
+
+[limits]
+
+[rest]
+host = "127.0.0.1"
+port = 8080
+
+[hooks]
+default_timeout_ms = 5000
+payload_max_bytes = 131072
+background_max_concurrency = 32
+entries = []
+
+[skills]
+enabled = true
+max_injection_bytes = 32768
+inventory_threshold = 12
+repositories = []
+
+[skills.health_thresholds]
+degraded_invalid_ratio = 0.05
+unhealthy_invalid_ratio = 0.4
+degraded_failure_streak = 3
+unhealthy_failure_streak = 10
+
+[skills.identity]
+lineage = []
+remaps = []
+aliases = []
+
+[self_hosted.servers.fixture]
+transport = "open_ai_compatible"
+base_url = "http://127.0.0.1:18081"
+api_style = "chat_completions"
+
+[self_hosted.models.fixture-model]
+server = "fixture"
+remote_model = "fixture-model"
+display_name = "Fixture Model"
+family = "fixture"
+tier = "supported"
+context_window = 8192
+max_output_tokens = 1024
+vision = false
+image_tool_results = false
+inline_video = false
+supports_temperature = true
+supports_thinking = false
+supports_reasoning = false
+supports_web_search = false
+call_timeout_secs = 10
+
+[provider_tools.anthropic]
+web_search = true
+
+[provider_tools.openai]
+web_search = true
+
+[provider_tools.gemini]
+google_search = true
+
+[model_fallback]
+enabled = true
+
+[presentation.html]
+default_template = "polished"
+
+[presentation.html.templates]
+
+[realm.fixture-realm]
+default_binding = "fixture"
+
+[realm.fixture-realm.backend.fixture]
+provider = "self_hosted"
+backend_kind = "self_hosted"
+
+[realm.fixture-realm.auth.fixture_auth]
+provider = "self_hosted"
+auth_method = "none"
+
+[realm.fixture-realm.auth.fixture_auth.source]
+kind = "platform_default"
+
+[realm.fixture-realm.auth.fixture_auth.constraints]
+require_workspace_id = false
+require_account_id = false
+allow_interactive_login = false
+allow_refresh = true
+
+[realm.fixture-realm.auth.fixture_auth.metadata_defaults.route_hints]
+provider = "none"
+
+[realm.fixture-realm.binding.fixture]
+backend_profile = "fixture"
+auth_profile = "fixture_auth"
+
+[realm.fixture-realm.binding.fixture.policy]
+allow_auth_override = false
+require_metadata_account = false
+require_metadata_workspace = false

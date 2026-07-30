@@ -128,6 +128,13 @@ impl SessionProjector {
                 summary_updated = true;
                 last_assistant_text =
                     last_assistant_text_from_messages(&record.revision_body.messages);
+            } else if let AgentEvent::TranscriptRewriteAuditReceiptCommitted {
+                final_assistant_text,
+                ..
+            } = &stored.event
+            {
+                summary_updated = true;
+                last_assistant_text = final_assistant_text.clone();
             }
         }
 
@@ -472,6 +479,37 @@ mod tests {
             session_id: &SessionId,
             envelopes: &[meerkat_core::event::EventEnvelope<AgentEvent>],
         ) -> Result<u64, EventStoreError> {
+            let receipts: Vec<_> = envelopes
+                .iter()
+                .filter_map(|envelope| match &envelope.payload {
+                    AgentEvent::TranscriptRewriteAuditReceiptCommitted {
+                        session_id,
+                        receipt,
+                        final_assistant_text,
+                    } => Some((session_id, receipt, final_assistant_text)),
+                    _ => None,
+                })
+                .collect();
+            if let [(receipt_session_id, receipt, final_assistant_text)] = receipts.as_slice() {
+                if envelopes.len() != 1 || *receipt_session_id != session_id {
+                    return Err(EventStoreError::Store(
+                        "generic transcript rewrite receipt batches are forbidden".to_string(),
+                    ));
+                }
+                return self
+                    .append_transcript_rewrite_receipt_exact(
+                        session_id,
+                        receipt,
+                        final_assistant_text.as_deref(),
+                    )
+                    .await
+                    .map(|result| result.stored_event().seq);
+            }
+            if !receipts.is_empty() {
+                return Err(EventStoreError::Store(
+                    "generic transcript rewrite receipt batches are forbidden".to_string(),
+                ));
+            }
             let mut interaction_related = envelopes.iter().filter_map(|envelope| {
                 crate::event_store::interaction_related_envelope_id(envelope)
                     .map(|interaction_id| (interaction_id, envelope))
@@ -566,6 +604,79 @@ mod tests {
                     interaction_id,
                     existing_count: duplicates.len(),
                     reason: "multiple exact interaction rows".to_string(),
+                }),
+            }
+        }
+
+        async fn append_transcript_rewrite_receipt_exact(
+            &self,
+            session_id: &SessionId,
+            receipt: &meerkat_core::TranscriptRewriteAuditReceiptBatch,
+            final_assistant_text: Option<&str>,
+        ) -> Result<crate::event_store::ExactTranscriptRewriteReceiptAppend, EventStoreError>
+        {
+            let incoming_summary = final_assistant_text.map(ToOwned::to_owned);
+            let mut map = self.events.lock().unwrap();
+            let entry = map.entry(session_id.to_string()).or_default();
+            let exact: Vec<_> = entry
+                .iter()
+                .filter(|stored| match &stored.event {
+                    AgentEvent::TranscriptRewriteAuditReceiptCommitted {
+                        session_id: stored_session_id,
+                        receipt: stored_receipt,
+                        ..
+                    } => stored_session_id == session_id && stored_receipt == receipt,
+                    _ => false,
+                })
+                .cloned()
+                .collect();
+            match exact.as_slice() {
+                [] => {
+                    let stored = StoredEvent {
+                        seq: entry.len() as u64 + 1,
+                        schema_version: EVENT_SCHEMA_VERSION,
+                        timestamp: SystemTime::now(),
+                        source: EventSourceIdentity::session(session_id.clone()),
+                        mob_id: None,
+                        stream_seq: 0,
+                        event: AgentEvent::TranscriptRewriteAuditReceiptCommitted {
+                            session_id: session_id.clone(),
+                            receipt: receipt.clone(),
+                            final_assistant_text: incoming_summary,
+                        },
+                    };
+                    entry.push(stored.clone());
+                    Ok(crate::event_store::ExactTranscriptRewriteReceiptAppend::Inserted(stored))
+                }
+                [stored] => {
+                    let stored_summary = match &stored.event {
+                        AgentEvent::TranscriptRewriteAuditReceiptCommitted {
+                            final_assistant_text,
+                            ..
+                        } => final_assistant_text,
+                        _ => unreachable!("exact receipt filter changed event variant"),
+                    };
+                    if stored_summary.as_deref() == incoming_summary.as_deref() {
+                        Ok(
+                            crate::event_store::ExactTranscriptRewriteReceiptAppend::Replayed(
+                                stored.clone(),
+                            ),
+                        )
+                    } else {
+                        Err(EventStoreError::ExactTranscriptRewriteReceiptConflict {
+                            session_id: session_id.clone(),
+                            existing_count: 1,
+                            reason: format!(
+                                "row {} carries a different terminal assistant-text projection",
+                                stored.seq
+                            ),
+                        })
+                    }
+                }
+                duplicates => Err(EventStoreError::ExactTranscriptRewriteReceiptConflict {
+                    session_id: session_id.clone(),
+                    existing_count: duplicates.len(),
+                    reason: "multiple exact receipt rows".to_string(),
                 }),
             }
         }
@@ -763,7 +874,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_projector_rewrite_event_refreshes_summary() {
+    async fn test_projector_rewrite_receipt_none_removes_stale_summary() {
         let dir = TempDir::new().unwrap();
         let projector = SessionProjector::new(dir.path().join(".rkat"));
         let store = MemEventStore::new();
@@ -790,16 +901,14 @@ mod tests {
                 Some(parent_revision.clone()),
             )
             .unwrap();
-        let parent_body = session
-            .transcript_revision_body(&parent_revision)
-            .unwrap()
-            .unwrap();
-        let revision_body = session
-            .transcript_revision_body(&commit.revision)
-            .unwrap()
-            .unwrap();
-        let record =
-            meerkat_core::TranscriptRewriteRecord::new(commit, parent_body, revision_body).unwrap();
+        let start_prefix = meerkat_core::TranscriptRewritePrefixAccumulator::empty();
+        let end_prefix = start_prefix.extend(&commit).unwrap();
+        let receipt = meerkat_core::TranscriptRewriteAuditReceiptBatch::new(
+            start_prefix,
+            vec![commit],
+            end_prefix,
+        )
+        .unwrap();
 
         store.add_events(
             &sid,
@@ -807,9 +916,10 @@ mod tests {
                 AgentEvent::TextComplete {
                     content: "old summary".to_string(),
                 },
-                AgentEvent::TranscriptRewriteCommitted {
+                AgentEvent::TranscriptRewriteAuditReceiptCommitted {
                     session_id: sid.clone(),
-                    record,
+                    receipt,
+                    final_assistant_text: None,
                 },
             ],
         );

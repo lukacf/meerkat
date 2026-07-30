@@ -376,7 +376,7 @@
       "result_type": "RuntimeAcceptResult"
     },
     {
-      "description": "Stage runtime system context for application at the next LLM boundary",
+      "description": "Append one ordinary durable ordered System message at the admitted transcript boundary",
       "name": "session/inject_context",
       "params_type": "InjectSystemContextParams",
       "result_type": "InjectSystemContextResult"
@@ -685,7 +685,7 @@
       "result_type": "MobIngressInteractionResult"
     },
     {
-      "description": "Append system context for a mob member",
+      "description": "Append one ordinary durable ordered System message to a mob member session",
       "name": "mob/append_system_context",
       "params_type": "MobAppendSystemContextParams",
       "result_type": "MobAppendSystemContextResult"

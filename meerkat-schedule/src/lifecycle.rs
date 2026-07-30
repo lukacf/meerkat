@@ -385,6 +385,13 @@ pub enum OccurrenceLifecycleInput {
         correlation_id: Option<String>,
         at_utc: DateTime<Utc>,
     },
+    /// Target admission succeeded after the stable dispatch identity was
+    /// durably committed. The correlation id is intentionally absent: the
+    /// occurrence authority retains the pre-effect identity and refuses any
+    /// shell-side rewrite.
+    DispatchAccepted {
+        at_utc: DateTime<Utc>,
+    },
     AwaitCompletion {
         at_utc: DateTime<Utc>,
     },
@@ -477,6 +484,7 @@ pub enum LateCompletionResolutionClass {
 pub enum OccurrenceLifecycleEffect {
     Claimed,
     DispatchStarted,
+    DispatchAccepted,
     AwaitingCompletion,
     Completed,
     Skipped,
@@ -1253,6 +1261,11 @@ fn convert_occurrence_input(
             correlation_id: correlation_id.clone().map(Into::into),
             at_utc_ms: occurrence_datetime_to_millis(*at_utc, "at_utc")?,
         },
+        OccurrenceLifecycleInput::DispatchAccepted { at_utc } => {
+            occ_dsl::OccurrenceLifecycleInput::DispatchAccepted {
+                at_utc_ms: occurrence_datetime_to_millis(*at_utc, "at_utc")?,
+            }
+        }
         OccurrenceLifecycleInput::AwaitCompletion { at_utc } => {
             occ_dsl::OccurrenceLifecycleInput::AwaitCompletion {
                 at_utc_ms: occurrence_datetime_to_millis(*at_utc, "at_utc")?,
@@ -1801,6 +1814,9 @@ fn map_occurrence_effect(
         occ_dsl::OccurrenceLifecycleEffect::Claimed => OccurrenceLifecycleEffect::Claimed,
         occ_dsl::OccurrenceLifecycleEffect::DispatchStarted => {
             OccurrenceLifecycleEffect::DispatchStarted
+        }
+        occ_dsl::OccurrenceLifecycleEffect::DispatchAccepted => {
+            OccurrenceLifecycleEffect::DispatchAccepted
         }
         occ_dsl::OccurrenceLifecycleEffect::AwaitingCompletion => {
             OccurrenceLifecycleEffect::AwaitingCompletion
@@ -3268,6 +3284,11 @@ mod tests {
             ),
             (
                 &pending,
+                OccurrenceLifecycleInput::DispatchAccepted { at_utc: now },
+                occ_dsl::OccurrenceTransitionFailureClassKind::NotDispatching,
+            ),
+            (
+                &pending,
                 OccurrenceLifecycleInput::AwaitCompletion { at_utc: now },
                 occ_dsl::OccurrenceTransitionFailureClassKind::NotDispatching,
             ),
@@ -3585,6 +3606,59 @@ mod tests {
             }),
             Err(OccurrenceLifecycleError::ReceiptRecordMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn dispatch_acceptance_retains_precommitted_identity_and_records_admission_outcome() {
+        let now = Utc::now();
+        let dispatching = sample_claimed_occurrence()
+            .apply(OccurrenceLifecycleInput::DispatchStarted {
+                correlation_id: Some("stable-occurrence-correlation".into()),
+                at_utc: now,
+            })
+            .expect("dispatch start should pass generated authority")
+            .into_occurrence();
+        let started_receipt = dispatching
+            .delivery_receipt_from_authority(None)
+            .expect("started receipt authority");
+        let dispatching = dispatching
+            .apply(OccurrenceLifecycleInput::RecordReceipt {
+                receipt: started_receipt,
+                runtime_outcome: None,
+            })
+            .expect("record dispatch start")
+            .into_occurrence();
+        let accepted = dispatching
+            .apply(OccurrenceLifecycleInput::DispatchAccepted {
+                at_utc: now + Duration::milliseconds(1),
+            })
+            .expect("dispatch acceptance should pass generated authority")
+            .into_occurrence();
+        let admission = RuntimeDeliveryOutcome::AdmissionDeduplicated;
+        let accepted_receipt = accepted
+            .delivery_receipt_from_authority(Some(admission.clone()))
+            .expect("accepted receipt authority");
+        assert_eq!(
+            accepted_receipt.stage,
+            DeliveryReceiptStage::DispatchAccepted
+        );
+        assert_eq!(
+            accepted_receipt.correlation_id.as_deref(),
+            Some("stable-occurrence-correlation"),
+            "post-effect transition cannot rewrite the pre-effect identity"
+        );
+        let recorded = accepted
+            .apply(OccurrenceLifecycleInput::RecordReceipt {
+                receipt: accepted_receipt,
+                runtime_outcome: Some(admission.clone()),
+            })
+            .expect("record dispatch acceptance")
+            .into_occurrence();
+        assert_eq!(recorded.runtime_outcome, Some(admission));
+        assert_eq!(
+            recorded.last_receipt.as_ref().map(|receipt| receipt.stage),
+            Some(DeliveryReceiptStage::DispatchAccepted)
+        );
     }
 
     #[test]

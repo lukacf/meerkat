@@ -12360,6 +12360,14 @@
         },
         "type": "array"
       },
+      "transient_turn_context": {
+        "description": "Host-regenerated request-only context for this delivery's logical turn.",
+        "minLength": 1,
+        "type": [
+          "string",
+          "null"
+        ]
+      },
       "input_id": {
         "description": "Canonical non-nil transport/idempotency UUID. For tracked completion\nthis is also the retained sidecar key; it is not implicitly the\ntranscript identity for untracked placed admission.",
         "type": "string"
@@ -22635,6 +22643,16 @@
               "role": {
                 "const": "system",
                 "type": "string"
+              },
+              "identity": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireSystemMessageIdentity"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -22871,6 +22889,25 @@
             "type": "object"
           }
         ]
+      },
+      "WireSystemMessageIdentity": {
+        "description": "Public wire projection of one ordinary System message optional control-ingress identity.",
+        "properties": {
+          "idempotency_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "title": "WireSystemMessageIdentity",
+        "type": "object"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -32219,6 +32256,16 @@
               "role": {
                 "const": "system",
                 "type": "string"
+              },
+              "identity": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireSystemMessageIdentity"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -32455,6 +32502,25 @@
             "type": "object"
           }
         ]
+      },
+      "WireSystemMessageIdentity": {
+        "description": "Public wire projection of one ordinary System message optional control-ingress identity.",
+        "properties": {
+          "idempotency_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "title": "WireSystemMessageIdentity",
+        "type": "object"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -46308,6 +46374,16 @@
               "role": {
                 "const": "system",
                 "type": "string"
+              },
+              "identity": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireSystemMessageIdentity"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -46577,6 +46653,25 @@
             "type": "object"
           }
         ]
+      },
+      "WireSystemMessageIdentity": {
+        "description": "Public wire projection of one ordinary System message optional control-ingress identity.",
+        "properties": {
+          "idempotency_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "title": "WireSystemMessageIdentity",
+        "type": "object"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -58452,6 +58547,16 @@
               "role": {
                 "const": "system",
                 "type": "string"
+              },
+              "identity": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireSystemMessageIdentity"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -58688,6 +58793,25 @@
             "type": "object"
           }
         ]
+      },
+      "WireSystemMessageIdentity": {
+        "description": "Public wire projection of one ordinary System message optional control-ingress identity.",
+        "properties": {
+          "idempotency_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "title": "WireSystemMessageIdentity",
+        "type": "object"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -67731,7 +67855,6 @@
         "description": "Outcome of an append-system-context request.",
         "enum": [
           "applied",
-          "staged",
           "duplicate"
         ],
         "type": "string"
@@ -70399,7 +70522,7 @@
     "description": "Request payload for `live/open`.\n\nR3-1 (P1): `turning_mode` lets callers pick between the provider-managed\n(server-VAD) flow and the explicit-commit flow. The G9 typed text-only\n`live/commit_input { response_modality: text }` path requires\n`ExplicitCommit` because the OpenAI realtime API rejects\n`input_audio_buffer.commit` unless the session was opened with explicit\ncommit semantics (server VAD owns commits otherwise). Pre-R3-1 the\nhandler hard-coded `ProviderManaged`, which made the typed text-only\npath unreachable on a public channel — calling it killed the channel\ninstead of producing sideband text.\n\nDefault (`None`) preserves the prior wire shape: callers that omit the\nfield get `ProviderManaged`, matching the legacy behavior.",
     "properties": {
       "seed_max_chars": {
-        "description": "Optional serialized-character budget for the history seed messages\nsent to the realtime provider when the channel opens.\n\nOmitted means full-seed compatibility: project the complete canonical\nhistory. A positive value requests a core-owned, whole-turn suffix\nwindow. The resolved root prompt must fit and is never dropped; an\nexisting compaction-summary head may be retained. If any history is\nomitted, the open result reports degraded continuity rather than\npretending the bounded replay was complete.\n\nRuntime system context and canonical multimodal identity, tombstone,\nand accounting state remain full sidecars outside this message window.\n`0` is valid at this serde-only wire layer so it can round-trip, but the\n`live/open` server validation rejects it; callers must send a positive\nvalue when the field is present.",
+        "description": "Optional serialized-character budget for the history seed messages\nsent to the realtime provider when the channel opens.\n\nOmitted means full-seed compatibility: project the complete canonical\nhistory. A positive value requests a core-owned, whole-turn suffix\nwindow. The resolved root prompt must fit and is never dropped; an\nexisting compaction-summary head may be retained. If any history is\nomitted, the open result reports degraded continuity rather than\npretending the bounded replay was complete.\n\nOptional System message identity is never provider-projected. Canonical multimodal identity, tombstone, and accounting state remain outside this dialogue window.\n`0` is valid at this serde-only wire layer so it can round-trip, but the\n`live/open` server validation rejects it; callers must send a positive\nvalue when the field is present.",
         "format": "uint",
         "minimum": 1,
         "type": [
@@ -74826,10 +74949,9 @@
   "MobAppendSystemContextResult": {
     "$defs": {
       "WireAppendSystemContextStatus": {
-        "description": "Outcome of a `mob/append_system_context` call on the wire. Mirrors\n`meerkat_core::AppendSystemContextStatus` so consumers reason about the\napplied/staged/duplicate distinction through a closed type rather than a\nfree-form status string.",
+        "description": "Outcome of a `mob/append_system_context` call on the wire. Mirrors\n`meerkat_core::AppendSystemContextStatus` so consumers reason about the\napplied/duplicate distinction through a closed type rather than a free-form\nstatus string.",
         "enum": [
           "applied",
-          "staged",
           "duplicate"
         ],
         "type": "string"
@@ -80339,6 +80461,16 @@
               "role": {
                 "const": "system",
                 "type": "string"
+              },
+              "identity": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireSystemMessageIdentity"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -80575,6 +80707,25 @@
             "type": "object"
           }
         ]
+      },
+      "WireSystemMessageIdentity": {
+        "description": "Public wire projection of one ordinary System message optional control-ingress identity.",
+        "properties": {
+          "idempotency_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "title": "WireSystemMessageIdentity",
+        "type": "object"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -109800,6 +109951,16 @@
               "role": {
                 "const": "system",
                 "type": "string"
+              },
+              "identity": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireSystemMessageIdentity"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -110036,6 +110197,25 @@
             "type": "object"
           }
         ]
+      },
+      "WireSystemMessageIdentity": {
+        "description": "Public wire projection of one ordinary System message optional control-ingress identity.",
+        "properties": {
+          "idempotency_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "title": "WireSystemMessageIdentity",
+        "type": "object"
       }
     },
     "$ref": "#/$defs/WireSessionMessage",
@@ -116605,6 +116785,16 @@
               "role": {
                 "const": "system",
                 "type": "string"
+              },
+              "identity": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireSystemMessageIdentity"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -116841,6 +117031,25 @@
             "type": "object"
           }
         ]
+      },
+      "WireSystemMessageIdentity": {
+        "description": "Public wire projection of one ordinary System message optional control-ingress identity.",
+        "properties": {
+          "idempotency_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "title": "WireSystemMessageIdentity",
+        "type": "object"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -121945,6 +122154,16 @@
               "role": {
                 "const": "system",
                 "type": "string"
+              },
+              "identity": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireSystemMessageIdentity"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -122181,6 +122400,25 @@
             "type": "object"
           }
         ]
+      },
+      "WireSystemMessageIdentity": {
+        "description": "Public wire projection of one ordinary System message optional control-ingress identity.",
+        "properties": {
+          "idempotency_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "title": "WireSystemMessageIdentity",
+        "type": "object"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -124059,6 +124297,16 @@
           "role": {
             "const": "system",
             "type": "string"
+          },
+          "identity": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireSystemMessageIdentity"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -126476,6 +126724,16 @@
               "role": {
                 "const": "system",
                 "type": "string"
+              },
+              "identity": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireSystemMessageIdentity"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -126712,6 +126970,25 @@
             "type": "object"
           }
         ]
+      },
+      "WireSystemMessageIdentity": {
+        "description": "Public wire projection of one ordinary System message optional control-ingress identity.",
+        "properties": {
+          "idempotency_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "title": "WireSystemMessageIdentity",
+        "type": "object"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -130634,6 +130911,25 @@
       "items"
     ],
     "title": "WorkItemsResult",
+    "type": "object"
+  },
+  "WireSystemMessageIdentity": {
+    "description": "Public wire projection of one ordinary System message optional control-ingress identity.",
+    "properties": {
+      "idempotency_key": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "source": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "title": "WireSystemMessageIdentity",
     "type": "object"
   }
 }

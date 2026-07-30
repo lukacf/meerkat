@@ -86,6 +86,19 @@ impl AgentLlmClient for ModelFallbackClient {
             .await
     }
 
+    fn request_pressure(
+        &self,
+        messages: &[meerkat_core::Message],
+        tools: &[Arc<ToolDef>],
+        max_tokens: u32,
+        temperature: Option<f32>,
+        provider_params: Option<&ProviderParamsOverride>,
+    ) -> Result<Option<meerkat_core::ProviderRequestPressure>, AgentError> {
+        self.candidates[self.active_index()]
+            .client
+            .request_pressure(messages, tools, max_tokens, temperature, provider_params)
+    }
+
     fn provider(&self) -> Provider {
         self.candidates[self.active_index()].identity.provider
     }
@@ -229,6 +242,20 @@ mod tests {
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
     #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     impl AgentLlmClient for ScriptedClient {
+        fn request_pressure(
+            &self,
+            _messages: &[meerkat_core::Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&ProviderParamsOverride>,
+        ) -> Result<Option<meerkat_core::ProviderRequestPressure>, AgentError> {
+            Ok(Some(meerkat_core::ProviderRequestPressure::new(
+                123,
+                meerkat_models::approximate_request_byte_cap(self.provider),
+            )))
+        }
+
         async fn stream_response(
             &self,
             _messages: &[meerkat_core::Message],
@@ -361,11 +388,28 @@ mod tests {
         assert_eq!(switch.target_profile.max_output_tokens(), Some(2048));
         assert_eq!(client.provider(), Provider::OpenAI);
         assert_eq!(client.model(), "primary");
+        assert_eq!(
+            client
+                .request_pressure(&[], &[], 1, None, None)
+                .expect("primary pressure")
+                .expect("primary witness")
+                .max_bytes,
+            meerkat_models::approximate_request_byte_cap(Provider::OpenAI)
+        );
         client
             .commit_model_fallback(&switch.previous_identity, &switch.new_identity)
             .expect("exact fallback candidate activation");
         assert_eq!(client.provider(), Provider::Anthropic);
         assert_eq!(client.model(), "backup");
+        assert_eq!(
+            client
+                .request_pressure(&[], &[], 1, None, None)
+                .expect("fallback pressure")
+                .expect("fallback witness")
+                .max_bytes,
+            meerkat_models::approximate_request_byte_cap(Provider::Anthropic),
+            "request pressure must follow the active fallback candidate"
+        );
     }
 
     #[test]

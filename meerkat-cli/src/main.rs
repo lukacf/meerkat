@@ -28,10 +28,11 @@ use chrono::Utc;
 #[cfg(not(feature = "mob"))]
 use meerkat::surface::NoopScheduleMobHost;
 use meerkat::surface::{
-    AcceptedScheduledInput, ScheduledPromptDispatch, SharedScheduleTargetAdapter,
-    SurfaceScheduleMobHost, SurfaceScheduleSessionHost, build_dispatch_from_accepted,
-    immediate_delivery_failure, recover_mob_member_identity_from_session_target,
-    schedule_delivery_idempotency_key, schedule_host_supported, spawn_schedule_host,
+    ScheduledPromptDispatch, SharedScheduleTargetAdapter, SurfaceScheduleMobHost,
+    SurfaceScheduleSessionHost, recover_mob_member_identity_from_session_target,
+    runtime_delivery_dispatch_from_admission, schedule_host_supported,
+    schedule_runtime_correlation_id, schedule_runtime_delivery_idempotency_key,
+    spawn_schedule_host,
 };
 use meerkat::{
     AgentFactory, EphemeralSessionService, FactoryAgentBuilder, PersistenceBundle, ScheduleService,
@@ -70,7 +71,7 @@ use meerkat_mob_pack::targz::extract_targz_safe;
 #[cfg(feature = "mob")]
 use meerkat_mob_pack::trust::{TrustPolicy, load_trusted_signers};
 use meerkat_runtime::input::{InputDurability, InputHeader, InputVisibility};
-use meerkat_runtime::{CorrelationId, IdempotencyKey, Input, InputOrigin, PromptInput};
+use meerkat_runtime::{IdempotencyKey, Input, InputOrigin, PromptInput};
 use meerkat_tools::find_project_root;
 #[cfg(all(feature = "mob", feature = "rpc-surface"))]
 use tokio::io::{AsyncBufRead, AsyncWrite, BufReader};
@@ -2087,8 +2088,8 @@ enum StorageCommands {
     /// Safe against live realms: takes no leases, opens databases
     /// read-only, and creates nothing. Reports per-root realm inventory,
     /// manifest state, schema-ledger versions per database, dual-root
-    /// split-brain twins, a checkpoint-evidence census (verified vs
-    /// legacy-unverified sessions), dangling session→blob references, and
+    /// split-brain twins, persisted-session structural decode failures,
+    /// transcript-history footprint, dangling session→blob references, and
     /// orphaned lock/lease/backup artifacts.
     ///
     /// By default the sweep covers the project-local root
@@ -2120,7 +2121,8 @@ enum StorageCommands {
     /// Sweeps the same candidate roots as `storage doctor` and, per realm:
     /// (1) ledger baseline — under the realm's exclusive maintenance fence,
     /// every store is opened through its normal constructor so the guarded
-    /// schema-ledger migrations converge files of any vintage (dry-run
+    /// schema-ledger migrations admit fresh domains or exact released
+    /// predecessors (dry-run
     /// reports what would be stamped, read-only); (2) state-root adoption —
     /// report-only, realms are used where they lie; (3) split-brain
     /// reconciliation — a realm id under 2+ swept roots produces a
@@ -2128,10 +2130,7 @@ enum StorageCommands {
     /// `--apply --adopt-root <path>` names the root to keep, in which case
     /// every other copy is archived read-only under the registered
     /// `*.pre-<version>-<timestamp>` backup naming (no merging, no
-    /// synthesis); (4) checkpoint-evidence adoption — the machine-owned
-    /// bulk sweep stamps legacy pre-typed session checkpoints (sqlite
-    /// realms; jsonl realms heal lazily and are reported as skipped);
-    /// (5) deprecated leftovers — report-only. Per-mob databases under
+    /// synthesis); (4) deprecated leftovers — report-only. Per-mob databases under
     /// `mobs/` are report-only in v1.
     ///
     /// Credential stores are never read, moved, or reported by this
@@ -2403,16 +2402,6 @@ enum SessionCommands {
     Interrupt {
         /// Session ID to interrupt
         session_id: String,
-    },
-
-    /// Inspect or migrate exact v0.6.34 completed-idle session state
-    Migrate {
-        /// Atomically apply eligible migrations (dry-run is the default)
-        #[arg(long)]
-        apply: bool,
-        /// Emit the migration report as JSON
-        #[arg(long)]
-        json: bool,
     },
 }
 
@@ -3651,9 +3640,6 @@ async fn main() -> anyhow::Result<ExitCode> {
             SessionCommands::Delete { session_id } => delete_session(&session_id, &cli_scope).await,
             SessionCommands::Interrupt { session_id } => {
                 interrupt_session(&session_id, &cli_scope).await
-            }
-            SessionCommands::Migrate { apply, json } => {
-                migrate_legacy_sessions(apply, json, &cli_scope).await
             }
         },
         Commands::Blob { command } => handle_blob_command(command, &cli_scope).await,
@@ -9083,32 +9069,6 @@ struct CliRuntimeExecutor {
     event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
 }
 
-fn cli_terminal_pre_turn_context_appends(
-    primitive: &meerkat_core::lifecycle::run_primitive::RunPrimitive,
-) -> Vec<meerkat_core::PendingSystemContextAppend> {
-    use meerkat_core::lifecycle::run_primitive::RunPrimitive;
-
-    let RunPrimitive::StagedInput(staged) = primitive else {
-        return Vec::new();
-    };
-    if !primitive.is_peer_response_terminal_context_and_run() {
-        return Vec::new();
-    }
-    let accepted_at = meerkat_core::time_compat::SystemTime::now();
-    staged
-        .context_appends
-        .iter()
-        .map(|append| meerkat_core::PendingSystemContextAppend {
-            content: append.content.clone(),
-            source: Some(append.key.clone()),
-            idempotency_key: Some(append.key.clone()),
-            accepted_at,
-            source_kind: meerkat_core::session::SystemContextSource::Normal,
-            peer_response_terminal: None,
-        })
-        .collect()
-}
-
 async fn validate_cli_workgraph_attention_overlay(
     workgraph_service: Option<&meerkat::WorkGraphService>,
     overlay: Option<&meerkat_core::service::TurnToolOverlay>,
@@ -9183,18 +9143,22 @@ impl meerkat_core::lifecycle::CoreExecutorBoundaryHandle for CliRuntimeBoundaryH
             })
     }
 
-    async fn prepare_system_context_at_boundary(
+    async fn prepare_transient_turn_context_at_boundary(
         &self,
         expected_run_id: &meerkat_core::RunId,
-        appends: Vec<meerkat_core::PendingSystemContextAppend>,
+        contexts: Vec<meerkat_core::lifecycle::run_primitive::TurnRequestContext>,
     ) -> Result<meerkat_core::CoreBoundaryStageOutput, meerkat_core::CoreBoundaryStageError> {
         #[cfg(feature = "session-store")]
         if let Some(persistent) = self.persistent_service.as_ref() {
             return persistent
-                .prepare_live_system_context_boundary(&self.session_id, expected_run_id, appends)
+                .prepare_live_transient_turn_context_boundary(
+                    &self.session_id,
+                    expected_run_id,
+                    contexts,
+                )
                 .await;
         }
-        let _ = (expected_run_id, appends);
+        let _ = (expected_run_id, contexts);
         Err(meerkat_core::CoreBoundaryStageError::unavailable(
             "CLI session service has no persistent exact-boundary authority",
         ))
@@ -9344,7 +9308,6 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
     > {
         // Forward the primitive metadata carrier as the single runtime-authored
         // source for per-turn policy.
-        let pre_turn_context_appends = cli_terminal_pre_turn_context_appends(&primitive);
         let mut turn_req = StartTurnRequest {
             injected_context: Vec::new(),
             prompt: primitive.extract_content_input(),
@@ -9355,7 +9318,6 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
                 primitive
                     .turn_metadata()
                     .and_then(|meta| meta.turn_tool_overlay.clone()),
-                pre_turn_context_appends,
                 primitive.turn_metadata().cloned(),
             )
             .with_typed_turn_appends(primitive.typed_turn_appends()),
@@ -9476,7 +9438,7 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
     #[cfg(feature = "session-store")]
     async fn checkpoint_committed_session_snapshot(
         &mut self,
-        session_snapshot: &[u8],
+        session_snapshot: Arc<Vec<u8>>,
     ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
         let Some(persistent) = self.persistent_service.as_ref() else {
             return Ok(());
@@ -9485,6 +9447,27 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
             .checkpoint_committed_runtime_session_snapshot_under_runtime_turn_boundary(
                 &self.session_id,
                 session_snapshot,
+            )
+            .await
+            .map_err(
+                meerkat_core::lifecycle::core_executor::CoreExecutorError::apply_failed_from_session_error,
+            )
+    }
+
+    #[cfg(feature = "session-store")]
+    async fn acknowledge_whole_blob_session_boundary(
+        &mut self,
+        committed_store_revision: u64,
+        committed_blob_sha256: &str,
+    ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+        let Some(persistent) = self.persistent_service.as_ref() else {
+            return Ok(());
+        };
+        persistent
+            .acknowledge_whole_blob_runtime_session_boundary_under_runtime_turn_boundary(
+                &self.session_id,
+                committed_store_revision,
+                committed_blob_sha256,
             )
             .await
             .map_err(
@@ -9952,59 +9935,16 @@ impl meerkat_mob::MobSessionService for RunMobSessionService {
         .await
     }
 
-    async fn apply_runtime_context_appends(
+    async fn prepare_transient_turn_context_for_active_turn(
         &self,
         session_id: &SessionId,
-        run_id: meerkat_core::RunId,
-        appends: Vec<meerkat_core::PendingSystemContextAppend>,
-        contributing_input_ids: Vec<meerkat_core::InputId>,
-    ) -> Result<
-        meerkat_core::lifecycle::core_executor::CoreApplyOutput,
-        meerkat_core::service::SessionError,
-    > {
-        <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::apply_runtime_context_appends(
-            &self.inner,
-            session_id,
-            run_id,
-            appends,
-            contributing_input_ids,
-        )
-        .await
-    }
-
-    async fn apply_runtime_context_appends_with_boundary(
-        &self,
-        session_id: &SessionId,
-        run_id: meerkat_core::RunId,
-        appends: Vec<meerkat_core::PendingSystemContextAppend>,
-        boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary,
-        contributing_input_ids: Vec<meerkat_core::InputId>,
-    ) -> Result<
-        meerkat_core::lifecycle::core_executor::CoreApplyOutput,
-        meerkat_core::service::SessionError,
-    > {
-        <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::apply_runtime_context_appends_with_boundary(
-            &self.inner,
-            session_id,
-            run_id,
-            appends,
-            boundary,
-            contributing_input_ids,
-        )
-        .await
-    }
-
-    async fn apply_runtime_system_context_for_turn(
-        &self,
-        session_id: &SessionId,
-        appends: Vec<meerkat_core::PendingSystemContextAppend>,
-    ) -> Result<(), meerkat_core::service::SessionError> {
-        <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::apply_runtime_system_context_for_turn(
-            &self.inner,
-            session_id,
-            appends,
-        )
-        .await
+        expected_run_id: &meerkat_core::RunId,
+        contexts: Vec<meerkat_core::lifecycle::run_primitive::TurnRequestContext>,
+    ) -> Result<meerkat_core::CoreBoundaryStageOutput, meerkat_core::CoreBoundaryStageError> {
+        self.inner
+            .prepare_transient_turn_context_for_active_turn(session_id, expected_run_id, contexts)
+            .await
+            .map(|prepared| prepared.into_stage_output(None))
     }
 
     async fn acquire_runtime_turn_finalization_guard(
@@ -10024,7 +9964,7 @@ impl meerkat_mob::MobSessionService for RunMobSessionService {
     async fn checkpoint_committed_runtime_session_snapshot(
         &self,
         session_id: &SessionId,
-        session_snapshot: &[u8],
+        session_snapshot: Arc<Vec<u8>>,
     ) -> Result<(), meerkat_core::service::SessionError> {
         <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::checkpoint_committed_runtime_session_snapshot(
             &self.inner,
@@ -10037,7 +9977,7 @@ impl meerkat_mob::MobSessionService for RunMobSessionService {
     async fn checkpoint_committed_runtime_session_snapshot_under_turn_finalization_boundary(
         &self,
         session_id: &SessionId,
-        session_snapshot: &[u8],
+        session_snapshot: Arc<Vec<u8>>,
     ) -> Result<(), meerkat_core::service::SessionError> {
         <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::checkpoint_committed_runtime_session_snapshot_under_turn_finalization_boundary(
             &self.inner,
@@ -11460,13 +11400,16 @@ async fn resume_session_with_llm_override(
         } else {
             None
         };
+        // A resume-time CLI system prompt is turn input, not recovered session
+        // configuration. Keep it outside the recovery/build identity ledger and
+        // admit it exactly once with the runtime prompt below.
+        let turn_system_prompt = system_prompt;
         let recovery_overrides = meerkat_core::session_recovery::SurfaceSessionRecoveryOverrides {
             model: model_override,
             provider: provider.map(Provider::as_core),
             provider_params: merged_provider_params
                 .map(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set),
             max_tokens,
-            system_prompt,
             output_schema: parsed_output_schema,
             keep_alive: keep_alive_override,
             comms_name: comms_name_override,
@@ -11496,7 +11439,6 @@ async fn resume_session_with_llm_override(
         )
         .map_err(|e| anyhow::anyhow!("{e}"))?;
         let model = recovered.model;
-        let system_prompt = recovered.system_prompt;
         let max_tokens = recovered.max_tokens;
         let keep_alive = resolve_keep_alive(recovered.keep_alive)?;
         let mut build = recovered.build;
@@ -11538,7 +11480,7 @@ async fn resume_session_with_llm_override(
                     injected_context: Vec::new(),
                     model,
                     prompt: prompt.clone().into(),
-                    system_prompt,
+                    system_prompt: meerkat_core::SystemPromptOverride::Inherit,
                     max_tokens,
                     event_tx: output_pipeline.event_sender(),
 
@@ -11612,6 +11554,7 @@ async fn resume_session_with_llm_override(
                         skill_references: None,
                         turn_tool_overlay,
                         additional_instructions,
+                        system_prompts: turn_system_prompt.into_iter().collect(),
                         ..Default::default()
                     },
                 ),
@@ -11990,6 +11933,7 @@ impl SurfaceScheduleMobHost for CliScheduleMobHost {
     async fn deliver_mob_target(
         &self,
         occurrence: &meerkat::Occurrence,
+        identity: &meerkat::ScheduleDeliveryIdentity,
         binding: &meerkat::MobTargetBinding,
     ) -> Result<meerkat::DeliveryDispatch, meerkat::ScheduleDomainError> {
         let state = get_or_hydrate_cli_mob_state(
@@ -12001,7 +11945,7 @@ impl SurfaceScheduleMobHost for CliScheduleMobHost {
         .await
         .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
         meerkat_mob_mcp::MobMcpScheduleHost::new(state)
-            .deliver_mob_target(occurrence, binding)
+            .deliver_mob_target(occurrence, identity, binding)
             .await
     }
 
@@ -12025,6 +11969,7 @@ impl SurfaceScheduleMobHost for CliScheduleMobHost {
     async fn deliver_identity_target(
         &self,
         occurrence: &meerkat::Occurrence,
+        identity: &meerkat::ScheduleDeliveryIdentity,
         binding: &meerkat::IdentityTargetBinding,
     ) -> Result<Option<meerkat::DeliveryDispatch>, meerkat::ScheduleDomainError> {
         let state = get_or_hydrate_cli_mob_state(
@@ -12036,7 +11981,7 @@ impl SurfaceScheduleMobHost for CliScheduleMobHost {
         .await
         .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
         meerkat_mob_mcp::MobMcpScheduleHost::new(state)
-            .deliver_identity_target(occurrence, binding)
+            .deliver_identity_target(occurrence, identity, binding)
             .await
     }
 }
@@ -12128,19 +12073,6 @@ impl CliScheduleSessionHost {
             .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
         Ok(())
     }
-
-    fn accepted_scheduled_input_from_runtime_handle(
-        correlation_id: Option<String>,
-        handle: Option<meerkat_runtime::CompletionHandle>,
-    ) -> AcceptedScheduledInput {
-        match handle {
-            Some(handle) => AcceptedScheduledInput::with_runtime_handle(correlation_id, handle),
-            None => AcceptedScheduledInput::with_authority_unavailable(
-                correlation_id,
-                "runtime completion handle missing after accepted dispatch",
-            ),
-        }
-    }
 }
 
 fn scheduled_skill_keys(
@@ -12228,7 +12160,6 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
         &self,
         occurrence: &meerkat::Occurrence,
         create: &meerkat::SessionMaterializationSpec,
-        prompt_system_prompt: Option<&str>,
     ) -> Result<SessionId, meerkat::ScheduleDomainError> {
         // Deterministic per-occurrence id so a reclaim/redrive reuses the same
         // session instead of orphaning a fresh random one in the
@@ -12282,10 +12213,7 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
                 injected_context: Vec::new(),
                 model: create.model.clone(),
                 prompt: "".into(),
-                system_prompt: match prompt_system_prompt
-                    .map(str::to_owned)
-                    .or_else(|| create.system_prompt.clone())
-                {
+                system_prompt: match create.system_prompt.clone() {
                     Some(prompt) => meerkat::SystemPromptOverride::Set(prompt),
                     None => meerkat::SystemPromptOverride::Inherit,
                 },
@@ -12314,6 +12242,7 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
         &self,
         session_id: &SessionId,
         occurrence: &meerkat::Occurrence,
+        identity: &meerkat::ScheduleDeliveryIdentity,
         dispatch: ScheduledPromptDispatch,
     ) -> Result<meerkat::DeliveryDispatch, meerkat::ScheduleDomainError> {
         self.ensure_runtime_session_registered(session_id).await?;
@@ -12344,6 +12273,9 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
                     )
                     .collect::<Vec<_>>(),
             ),
+            system_prompts: dispatch.system_prompt.into_iter().collect(),
+            transient_turn_context: dispatch.transient_turn_context,
+            transient_turn_context_appends: Vec::new(),
             model: None,
             provider: None,
             self_hosted_server_id: None,
@@ -12363,68 +12295,38 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
             PromptInput::from_content_input(dispatch.prompt, Some(turn_metadata));
         prompt_input.header.source = InputOrigin::System;
         prompt_input.header.idempotency_key = Some(IdempotencyKey::new(
-            schedule_delivery_idempotency_key(occurrence),
+            schedule_runtime_delivery_idempotency_key(
+                self.runtime_adapter.as_ref(),
+                session_id,
+                occurrence,
+                &identity.idempotency_key,
+            )
+            .await?,
         ));
-        prompt_input.header.correlation_id =
-            Some(CorrelationId::from_uuid(occurrence.occurrence_id.0));
+        prompt_input.header.correlation_id = Some(schedule_runtime_correlation_id(identity)?);
 
-        let correlation_id = prompt_input
-            .header
-            .correlation_id
-            .as_ref()
-            .map(ToString::to_string);
         let (outcome, handle) = self
             .runtime_adapter
             .accept_input_with_completion(session_id, Input::Prompt(prompt_input))
             .await
             .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
-        let accepted = match outcome {
-            meerkat_runtime::accept::AcceptOutcome::Accepted { .. } => {
-                Self::accepted_scheduled_input_from_runtime_handle(correlation_id.clone(), handle)
-            }
-            meerkat_runtime::accept::AcceptOutcome::Deduplicated { existing_id, .. } => {
-                match handle {
-                    Some(handle) => {
-                        AcceptedScheduledInput::with_runtime_handle(correlation_id.clone(), handle)
-                    }
-                    None => AcceptedScheduledInput::with_authority_unavailable(
-                        correlation_id.clone(),
-                        format!(
-                            "runtime completion authority unavailable for terminal deduplicated input {existing_id}"
-                        ),
-                    ),
-                }
-            }
-            meerkat_runtime::accept::AcceptOutcome::Rejected { reason } => {
-                return Ok(immediate_delivery_failure(
-                    occurrence,
-                    reason.to_string(),
-                    meerkat::DeliveryFailureReason::RuntimeRejected,
-                    correlation_id,
-                    dispatch.materialized_session_id,
-                ));
-            }
-            _ => {
-                return Ok(immediate_delivery_failure(
-                    occurrence,
-                    "runtime returned an unknown admission outcome".to_string(),
-                    meerkat::DeliveryFailureReason::RuntimeRejected,
-                    correlation_id,
-                    dispatch.materialized_session_id,
-                ));
-            }
-        };
-        Ok(build_dispatch_from_accepted(
+        runtime_delivery_dispatch_from_admission(
+            self.runtime_adapter.as_ref(),
+            session_id,
             occurrence,
-            accepted,
+            identity,
+            outcome,
+            handle,
             dispatch.materialized_session_id,
-        ))
+        )
+        .await
     }
 
     async fn deliver_event(
         &self,
         session_id: &SessionId,
         occurrence: &meerkat::Occurrence,
+        identity: &meerkat::ScheduleDeliveryIdentity,
         event_type: String,
         payload: serde_json::Value,
         render_metadata: Option<meerkat_core::types::RenderMetadata>,
@@ -12442,11 +12344,17 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
                 },
                 durability: InputDurability::Durable,
                 visibility: InputVisibility::default(),
-                idempotency_key: Some(IdempotencyKey::new(schedule_delivery_idempotency_key(
-                    occurrence,
-                ))),
+                idempotency_key: Some(IdempotencyKey::new(
+                    schedule_runtime_delivery_idempotency_key(
+                        self.runtime_adapter.as_ref(),
+                        session_id,
+                        occurrence,
+                        &identity.idempotency_key,
+                    )
+                    .await?,
+                )),
                 supersession_key: None,
-                correlation_id: Some(CorrelationId::from_uuid(occurrence.occurrence_id.0)),
+                correlation_id: Some(schedule_runtime_correlation_id(identity)?),
             },
             event_type,
             payload,
@@ -12454,57 +12362,21 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             render_metadata,
         });
-        let correlation_id = input
-            .header()
-            .correlation_id
-            .as_ref()
-            .map(ToString::to_string);
         let (outcome, handle) = self
             .runtime_adapter
             .accept_input_with_completion(session_id, input)
             .await
             .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
-        let accepted = match outcome {
-            meerkat_runtime::accept::AcceptOutcome::Accepted { .. } => {
-                Self::accepted_scheduled_input_from_runtime_handle(correlation_id.clone(), handle)
-            }
-            meerkat_runtime::accept::AcceptOutcome::Deduplicated { existing_id, .. } => {
-                match handle {
-                    Some(handle) => {
-                        AcceptedScheduledInput::with_runtime_handle(correlation_id.clone(), handle)
-                    }
-                    None => AcceptedScheduledInput::with_authority_unavailable(
-                        correlation_id.clone(),
-                        format!(
-                            "runtime completion authority unavailable for terminal deduplicated input {existing_id}"
-                        ),
-                    ),
-                }
-            }
-            meerkat_runtime::accept::AcceptOutcome::Rejected { reason } => {
-                return Ok(immediate_delivery_failure(
-                    occurrence,
-                    reason.to_string(),
-                    meerkat::DeliveryFailureReason::RuntimeRejected,
-                    correlation_id,
-                    materialized_session_id,
-                ));
-            }
-            _ => {
-                return Ok(immediate_delivery_failure(
-                    occurrence,
-                    "runtime returned an unknown admission outcome".to_string(),
-                    meerkat::DeliveryFailureReason::RuntimeRejected,
-                    correlation_id,
-                    materialized_session_id,
-                ));
-            }
-        };
-        Ok(build_dispatch_from_accepted(
+        runtime_delivery_dispatch_from_admission(
+            self.runtime_adapter.as_ref(),
+            session_id,
             occurrence,
-            accepted,
+            identity,
+            outcome,
+            handle,
             materialized_session_id,
-        ))
+        )
+        .await
     }
 }
 
@@ -13024,59 +12896,15 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
         .await
     }
 
-    async fn apply_runtime_context_appends(
+    async fn prepare_transient_turn_context_for_active_turn(
         &self,
         session_id: &SessionId,
-        run_id: meerkat_core::RunId,
-        appends: Vec<meerkat_core::PendingSystemContextAppend>,
-        contributing_input_ids: Vec<meerkat_core::InputId>,
-    ) -> Result<
-        meerkat_core::lifecycle::core_executor::CoreApplyOutput,
-        meerkat_core::service::SessionError,
-    > {
-        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::apply_runtime_context_appends(
-            &self.inner,
-            session_id,
-            run_id,
-            appends,
-            contributing_input_ids,
-        )
-        .await
-    }
-
-    async fn apply_runtime_context_appends_with_boundary(
-        &self,
-        session_id: &SessionId,
-        run_id: meerkat_core::RunId,
-        appends: Vec<meerkat_core::PendingSystemContextAppend>,
-        boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary,
-        contributing_input_ids: Vec<meerkat_core::InputId>,
-    ) -> Result<
-        meerkat_core::lifecycle::core_executor::CoreApplyOutput,
-        meerkat_core::service::SessionError,
-    > {
-        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::apply_runtime_context_appends_with_boundary(
-            &self.inner,
-            session_id,
-            run_id,
-            appends,
-            boundary,
-            contributing_input_ids,
-        )
-        .await
-    }
-
-    async fn apply_runtime_system_context_for_turn(
-        &self,
-        session_id: &SessionId,
-        appends: Vec<meerkat_core::PendingSystemContextAppend>,
-    ) -> Result<(), meerkat_core::service::SessionError> {
-        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::apply_runtime_system_context_for_turn(
-            &self.inner,
-            session_id,
-            appends,
-        )
-        .await
+        expected_run_id: &meerkat_core::RunId,
+        contexts: Vec<meerkat_core::lifecycle::run_primitive::TurnRequestContext>,
+    ) -> Result<meerkat_core::CoreBoundaryStageOutput, meerkat_core::CoreBoundaryStageError> {
+        self.inner
+            .prepare_live_transient_turn_context_boundary(session_id, expected_run_id, contexts)
+            .await
     }
 
     async fn acquire_runtime_turn_finalization_guard(
@@ -13096,7 +12924,7 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
     async fn checkpoint_committed_runtime_session_snapshot(
         &self,
         session_id: &SessionId,
-        session_snapshot: &[u8],
+        session_snapshot: Arc<Vec<u8>>,
     ) -> Result<(), meerkat_core::service::SessionError> {
         <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::checkpoint_committed_runtime_session_snapshot(
             &self.inner,
@@ -13109,7 +12937,7 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
     async fn checkpoint_committed_runtime_session_snapshot_under_turn_finalization_boundary(
         &self,
         session_id: &SessionId,
-        session_snapshot: &[u8],
+        session_snapshot: Arc<Vec<u8>>,
     ) -> Result<(), meerkat_core::service::SessionError> {
         <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::checkpoint_committed_runtime_session_snapshot_under_turn_finalization_boundary(
             &self.inner,
@@ -13201,107 +13029,6 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
             mob_id,
         )
         .await
-    }
-}
-
-/// Inspect or explicitly migrate the exact completed-idle persistence shape
-/// emitted by rkat v0.6.34. Ordinary session loading deliberately remains
-/// fail-closed; compatibility is available only through this command.
-async fn migrate_legacy_sessions(
-    apply: bool,
-    json: bool,
-    scope: &RuntimeScope,
-) -> anyhow::Result<()> {
-    #[cfg(not(feature = "session-store"))]
-    {
-        let _ = (apply, json, scope);
-        anyhow::bail!("session migration requires rkat built with session-store support");
-    }
-    #[cfg(feature = "session-store")]
-    {
-        let paths =
-            meerkat_store::realm_paths_in(&scope.locator.state_root, scope.locator.realm.as_str());
-        let manifest_bytes = tokio::fs::read(&paths.manifest_path)
-            .await
-            .map_err(|error| {
-                anyhow::anyhow!(
-                    "Failed to read realm manifest {}: {error}",
-                    paths.manifest_path.display()
-                )
-            })?;
-        let manifest: meerkat_store::RealmManifest = serde_json::from_slice(&manifest_bytes)
-            .map_err(|error| anyhow::anyhow!("Failed to parse realm manifest: {error}"))?;
-        if manifest.realm != scope.locator.realm {
-            anyhow::bail!(
-                "Realm manifest identity '{}' does not match requested realm '{}'",
-                manifest.realm,
-                scope.locator.realm
-            );
-        }
-
-        if apply {
-            let leases = meerkat_store::inspect_realm_leases_in(
-                &scope.locator.state_root,
-                scope.locator.realm.as_str(),
-                true,
-            )
-            .await
-            .map_err(|error| anyhow::anyhow!("Failed to inspect realm leases: {error}"))?;
-            if leases.blocks_destructive_prune() {
-                anyhow::bail!(
-                    "Realm '{}' may still be in use ({} active lease(s), {} unreadable lease file(s)); stop every process using it before applying migration",
-                    scope.locator.realm,
-                    leases.active.len(),
-                    leases.unparseable.len()
-                );
-            }
-        }
-
-        let database_path = match manifest.backend.as_str() {
-            "sqlite" => paths.sessions_sqlite_path,
-            "jsonl" => paths.runtime_sqlite_path,
-            backend => anyhow::bail!(
-                "Realm '{}' uses backend '{backend}', which has no durable SQLite runtime state to migrate",
-                scope.locator.realm
-            ),
-        };
-        let report = tokio::task::spawn_blocking(move || {
-            meerkat_runtime::store::SqliteRuntimeStore::migrate_v0_6_34_completed_idle(
-                database_path,
-                apply,
-            )
-        })
-        .await
-        .map_err(|error| anyhow::anyhow!("Session migration task failed: {error}"))?
-        .map_err(|error| anyhow::anyhow!("Session migration failed: {error}"))?;
-
-        if json {
-            println!("{}", serde_json::to_string_pretty(&report)?);
-        } else {
-            let migration_count = report.migration_count();
-            let blocked_count = report.blocked_count();
-            let action = if report.applied {
-                "migrated"
-            } else {
-                "would migrate"
-            };
-            println!("{migration_count} session runtime(s) {action}; {blocked_count} blocked");
-            for item in report.items {
-                println!(
-                    "  {}: {:?}{}",
-                    item.runtime_id,
-                    item.disposition,
-                    item.detail
-                        .as_deref()
-                        .map(|detail| format!(" ({detail})"))
-                        .unwrap_or_default()
-                );
-            }
-            if !apply && migration_count > 0 {
-                println!("Run again with --apply after stopping every process using this realm.");
-            }
-        }
-        Ok(())
     }
 }
 
@@ -19511,15 +19238,6 @@ default_model = "gemma"
                 .as_ref()
                 .and_then(|build| build.comms_name.clone())
                 .unwrap_or_else(|| format!("test-session-{n}"));
-            let system_context_state = meerkat_core::SystemContextStateHandle::new(
-                meerkat_core::SessionSystemContextState::default(),
-            )
-            .map_err(|error| {
-                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                    "test mob actor system-context restore failed: {error}"
-                )))
-            })?;
-
             let actor_witness = {
                 let mut sessions = self.sessions.write().await;
                 if sessions.contains_key(&sid) {
@@ -19532,7 +19250,7 @@ default_model = "gemma"
                 let witness = self.actor_registry.insert_and_publish(
                     actor_witness_slot,
                     sid.clone(),
-                    system_context_state,
+                    meerkat_core::TransientTurnContextStateHandle::new(),
                 )?;
                 sessions.insert(
                     sid.clone(),
@@ -19835,7 +19553,7 @@ default_model = "gemma"
     struct CapturingEventTurnService {
         session_id: SessionId,
         saw_event_tx: std::sync::atomic::AtomicBool,
-        pre_turn_context_appends: Mutex<Vec<meerkat_core::PendingSystemContextAppend>>,
+        typed_turn_appends: Mutex<Vec<meerkat_core::lifecycle::run_primitive::ConversationAppend>>,
         captured_turn_tool_overlay: Mutex<Option<meerkat_core::service::TurnToolOverlay>>,
     }
 
@@ -19844,7 +19562,7 @@ default_model = "gemma"
             Self {
                 session_id,
                 saw_event_tx: std::sync::atomic::AtomicBool::new(false),
-                pre_turn_context_appends: Mutex::new(Vec::new()),
+                typed_turn_appends: Mutex::new(Vec::new()),
                 captured_turn_tool_overlay: Mutex::new(None),
             }
         }
@@ -19879,10 +19597,9 @@ default_model = "gemma"
                 return Err(SessionError::NotFound { id: id.clone() });
             }
             *self
-                .pre_turn_context_appends
+                .typed_turn_appends
                 .lock()
-                .expect("pre-turn context appends lock poisoned") =
-                req.runtime.pre_turn_context_appends;
+                .expect("pre-turn context appends lock poisoned") = req.runtime.typed_turn_appends;
             *self
                 .captured_turn_tool_overlay
                 .lock()
@@ -20460,8 +20177,9 @@ default_model = "gemma"
     async fn test_cli_runtime_executor_forwards_terminal_peer_response_context() {
         use meerkat_core::lifecycle::InputId;
         use meerkat_core::lifecycle::run_primitive::{
-            ConversationContextAppend, CoreRenderable, PeerResponseTerminalApplyIntent,
-            RunApplyBoundary, RuntimeExecutionKind, RuntimeTurnMetadata, StagedRunInput,
+            ConversationAppend, ConversationAppendRole, CoreRenderable,
+            PeerResponseTerminalApplyIntent, RunApplyBoundary, RuntimeExecutionKind,
+            RuntimeTurnMetadata, StagedRunInput,
         };
 
         let session_id = SessionId::new();
@@ -20476,22 +20194,21 @@ default_model = "gemma"
             workgraph_service: None,
             event_tx: None,
         };
-        let append_key = "peer_response_terminal:cli-peer:req-1";
         let primitive =
             meerkat_core::lifecycle::run_primitive::RunPrimitive::StagedInput(StagedRunInput {
                 boundary: RunApplyBoundary::RunStart,
-                appends: Vec::new(),
-                context_appends: vec![ConversationContextAppend {
-                    key: append_key.to_string(),
+                appends: vec![ConversationAppend {
+                    role: ConversationAppendRole::SystemNotice,
                     content: CoreRenderable::Text {
                         text: "terminal peer response token: ash twelve".to_string(),
                     },
+                    identity: None,
                 }],
                 contributing_input_ids: vec![InputId::new()],
                 turn_metadata: Some(RuntimeTurnMetadata {
                     execution_kind: Some(RuntimeExecutionKind::ContentTurn),
                     peer_response_terminal_apply_intent: Some(
-                        PeerResponseTerminalApplyIntent::AppendContextAndRun,
+                        PeerResponseTerminalApplyIntent::AppendContentAndRun,
                     ),
                     ..Default::default()
                 }),
@@ -20506,14 +20223,17 @@ default_model = "gemma"
         .expect("terminal peer-response CLI turn should succeed");
 
         let appends = service
-            .pre_turn_context_appends
+            .typed_turn_appends
             .lock()
-            .expect("pre-turn context appends lock poisoned");
+            .expect("typed turn appends lock poisoned");
         assert_eq!(appends.len(), 1);
-        assert_eq!(appends[0].source.as_deref(), Some(append_key));
+        assert_eq!(
+            appends[0].role,
+            meerkat_core::lifecycle::run_primitive::ConversationAppendRole::SystemNotice
+        );
         assert!(
             appends[0].content.render_text().contains("ash twelve"),
-            "terminal peer-response context must reach the CLI start_turn request"
+            "terminal peer-response notice must reach the CLI start_turn request"
         );
     }
 
@@ -20893,6 +20613,8 @@ default_model = "gemma"
             "--line-format",
             "text",
             "--stream",
+            "--system",
+            "append this system role on the resumed turn",
             "--allow-tool",
             "search",
             "--skill",
@@ -20906,6 +20628,7 @@ default_model = "gemma"
                 stdin,
                 line_format,
                 stream,
+                system_prompt,
                 allow_tools,
                 skills,
                 ..
@@ -20915,6 +20638,10 @@ default_model = "gemma"
                 assert!(matches!(stdin, StdinMode::Blob));
                 assert!(matches!(line_format, LineFormat::Text));
                 assert!(stream);
+                assert_eq!(
+                    system_prompt.as_deref(),
+                    Some("append this system role on the resumed turn")
+                );
                 assert_eq!(allow_tools, vec!["search"]);
                 assert_eq!(skills, vec!["legacy/skill"]);
             }
@@ -24243,7 +23970,6 @@ default_model = "gpt-5.4"
                     meerkat_core::service::StartTurnRuntimeSemantics::new(
                         handling_mode,
                         None,
-                        Vec::new(),
                         Some(turn_metadata),
                     )
                 },
@@ -24365,7 +24091,6 @@ default_model = "gpt-5.4"
                     meerkat_core::service::StartTurnRuntimeSemantics::new(
                         handling_mode,
                         None,
-                        Vec::new(),
                         Some(turn_metadata),
                     )
                 },
@@ -24471,8 +24196,9 @@ default_model = "gpt-5.4"
             chrono::Utc::now(),
         )
         .expect("identity target occurrence should plan");
+        let delivery_identity = meerkat::ScheduleDeliveryIdentity::for_occurrence(&occurrence);
         let dispatch = host
-            .deliver_identity_target(&occurrence, &binding)
+            .deliver_identity_target(&occurrence, &delivery_identity, &binding)
             .await
             .expect("identity delivery should delegate to mob adapter")
             .expect("mob identity should be handled by mob adapter");

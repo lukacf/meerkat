@@ -246,6 +246,7 @@ async fn runtime_ingress_control_closed_taxonomy_uses_explicit_continuation_and_
             content: CoreRenderable::Text {
                 text: "attention turn".to_string(),
             },
+            identity: None,
         });
         continuation.turn_tool_overlay = Some(TurnToolOverlay {
             dispatch_context: [(

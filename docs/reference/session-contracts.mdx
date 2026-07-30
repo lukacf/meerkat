@@ -89,14 +89,22 @@ Committed create failure must not be silently rewritten to “cancelled” or cl
 - Committed success must not be rewritten to cancellation.
 - Runtime-backed surfaces may hot-swap supported live settings on an existing session where the surface contract says that is allowed.
 
-### Deferred first-turn system prompt override
+### Ordered System messages
 
-Rust supports `system_prompt` on `StartTurnRequest` only for a deferred session's first turn.
+`system_prompt` on `StartTurnRequest` appends one ordinary `System` message at
+that turn boundary. System messages are repeatable and may appear anywhere in
+the transcript; an update never replaces row zero or rewrites an earlier
+message.
 
-- deferred + first turn: allowed
-- existing history/messages: rejected
+There is no separate prompt identity or host-injection ledger. Materialization
+and resume preserve the transcript byte-for-byte and never infer a System
+message from current host configuration. A host that wants to add an
+instruction supplies it on the admitted turn, where it becomes one new ordered
+System event.
 
-This keeps Rust aligned with the current runtime contract instead of implying arbitrary mid-session prompt replacement.
+Compaction retains every System message in relative order. Provider adapters
+preserve all of them; APIs with a separate system-instruction field lift the
+ordered set deterministically instead of dropping all but one.
 
 ### interrupt
 
@@ -204,25 +212,67 @@ restart.
 
 - Completed turns are persisted.
 - Crash during an in-flight turn loses at most the work the intra-turn
-  checkpointer had not yet projected; any durable tail it did write is
+  persistence hook had not yet written; any durable tail it did write is
   preserved and recovered (see below), never discarded.
 - SQLite-backed realms are the default persistent mode and support normal same-realm multi-process workflows.
 
 Persistent session metadata is the source of truth for resumed durable session behavior unless an interactive surface supplies an explicit typed override.
 
+### Domain document and store authority
+
+The current Session envelope is version 3 and contains domain state only. It
+does not authenticate itself and does not carry a persistence token. A
+deserialized `Session` cannot authorize a write, migration, or recovery
+operation.
+
+The selected store profile issues the physical authority:
+
+- **WholeBlob** — `session_id`, monotonic store revision, and SHA-256 of the
+  exact serialized row.
+- **HeadCanonical** — `session_id`, monotonic store revision, the committed
+  boundary head, and its exact head token. The boundary head binds the
+  message-row, rewrite, graph, component, and metadata prefixes.
+
+RuntimeStore also maintains a small catalog entry in the same atomic boundary
+as physical authority. The catalog can answer listing and lifecycle discovery,
+but cannot carry a transcript, graph, component body, or serialized Session.
+It is not a second session document.
+
+Meerkat 0.8.11 accepts durable state from 0.8.10 only through the one-time
+released-state importer. An exact released v2 document with the historical
+embedded proof is checked once by the frozen 0.8.10 verifier. An unstamped
+released document is accepted only when the same store transaction proves the
+released physical schema and exact source row or blob identity. Either path
+strips the historical proof fields and installs current store-issued authority;
+ordinary v3 reads never enter the importer, and no current write emits the old
+fields. State older than 0.8.10 must first be upgraded with an older binary.
+
 ### Durable-tail recovery
 
-The intra-turn checkpointer writes best-effort projections to the canonical
-session store outside the boundary transaction, so a crash or shutdown race
-can leave a durable transcript tail — up to and including a fully completed
-turn — whose runtime boundary commit never landed. Durable is not the same as
-runtime-committed, and neither copy is silently preferred: a cold read drives
-a typed, machine-owned read-source decision (serve the committed runtime
-snapshot, serve the committed store head, recovery required, or quarantine)
-instead of a shell comparison.
+The intra-turn persistence hook writes a provisional physical successor
+outside the runtime boundary transaction. Every successful write returns an
+explicit `RunCheckpointReceipt`. Receipts are scoped to one session, committed
+base, and run; `candidate_sequence` starts at one and advances contiguously.
+An exact retry may return the same receipt, while the next candidate must
+present and succeed the preceding receipt. A stale, divergent, or
+out-of-sequence candidate fails closed.
 
-The recovery rule is never-discard: every verified durable descendant of the
-committed authority is preserved.
+WholeBlob encodes, hashes, and writes each candidate once. HeadCanonical
+applies one sealed prepared delta and returns the exact resulting physical
+revision and head token. The actor retains only the latest successful receipt;
+an uncertain outcome or failed acknowledgement terminates the actor and
+requires durable reload. At the final boundary the store promotes that exact
+candidate. It does not construct a second document or replay the delta.
+
+A crash or shutdown race can still leave a durable transcript tail — up to and
+including a fully completed turn — whose runtime boundary commit never landed.
+Durable is not the same as runtime-committed, and neither view is silently
+preferred: a cold read drives a typed, machine-owned read-source decision
+(serve the committed runtime snapshot, serve the committed store head,
+recovery required, or quarantine) instead of a shell comparison.
+
+The recovery rule is never-discard: every store-proven durable descendant of
+the committed authority is preserved.
 
 - A completed tail (single run, `EndTurn` terminal, structurally coherent) is
   committed as a recovered run boundary in one atomic store transaction:
@@ -296,10 +346,10 @@ carries the canonical metadata, message count, and CAS token. Saving a long
 session appends O(delta) rows instead of rewriting a monolithic document.
 
 The canonical-representation rule, per session: **if a `session_heads` row
-exists, the head representation is canonical** and the legacy
-`sessions.session_json` blob (if any) is a frozen one-time migration archive
-— never read or written again. Sessions created by 0.7.25+ binaries may have
-no meaningful `sessions` blob row at all.
+exists, the head representation is canonical**. A released 0.8.10 blob, if
+present, is consumed only by the one-time activation importer and is never a
+fallback authority for a current head. Sessions created in HeadCanonical mode
+may have no meaningful `sessions` blob row at all.
 
 <Warning>
 Downstream tooling that reads `sessions.session_json` via direct SQL sees
@@ -326,11 +376,10 @@ head-canonical representation to future O(page) history reads:
 
 - **`load_canonical_head`** returns the persisted head row ONLY when
   head+rows are the session's canonical durable representation. Unlike
-  `load_head` (which may synthesize a deterministic head from a legacy blob —
-  an O(document) parse), it answers `None` for absent AND blob-only sessions
-  and never reads the blob. `Some` promises the row is the persisted head
-  itself and that `load_messages` over `head.strand` page-serves exactly the
-  rows the head covers.
+  a full materializing load, it answers `None` for absent and non-canonical
+  rows and never reads a WholeBlob body. `Some` promises the row is the
+  persisted head itself and that `load_messages` over `head.strand`
+  page-serves exactly the rows the head covers.
 - **`load_rewrite_commits`** returns the ADOPTED rewrite commits
   (`idx < head.rewrite_count`), oldest first, without materializing retained
   revision bodies. It must always equal `load_rewrites`' commits, in order —
@@ -344,12 +393,10 @@ canonical-head probe is fully conformant; a store answering `Some` must serve
 the persisted row and page-exact strand reads, and delegating wrappers must
 forward both verbs (`capability_discovery` chapter).
 
-**The service read path is unchanged in this release**: `read_history`,
-`read_transcript_revision`, and `list_transcript_revisions` still perform the
-full authoritative load (with its arbitration, stamp verification, and
-rewrite-log replay/audit backfill) on every read. These verbs are the store
-substrate for the head-trusted range-read fast paths scheduled for the next
-release; nothing consumes them on the read path yet.
+Service reads trust only the store-selected profile and its issued authority.
+`read_history`, `read_transcript_revision`, and
+`list_transcript_revisions` may materialize the required domain view from the
+canonical rows, but a materialized `Session` never becomes write authority.
 
 ### Durable runtime lifecycle vocabulary (`runtime_states`)
 
@@ -390,6 +437,22 @@ Config runtime uses generation CAS.
 No automatic sensitive-data redaction is applied to session content or tool payloads.
 Encrypt storage at rest externally if required by your environment.
 </Warning>
+
+## Request-only turn context
+
+`transient_turn_context` is non-empty runtime-input text, not Session state.
+Whitespace is significant and its exact text bytes remain on a pending input
+so cold recovery can retry the same turn, then retire with that terminal input
+payload. During the active logical turn, Meerkat projects the caller context
+first and any runtime-admitted steers after it, each as a distinct temporary
+user-channel injected-context message immediately before the exact admitted
+conversational user message in each foreground provider request. They are never
+System messages, transcript appends, rewrite records, compaction input, or
+extraction input.
+
+Deferred creation cannot carry this context because no runtime input exists
+yet; attach it to the eventual turn instead. The browser/WASM standalone live
+surface does not expose this durable runtime-input feature.
 
 ## See also
 

@@ -172,6 +172,8 @@ impl OpsLifecyclePersistenceRequest {
 struct FeedBufferInner {
     entries: VecDeque<CompletionEntry>,
     watermark: CompletionSeq,
+    dropped_through: CompletionSeq,
+    dropped_count: u64,
     max_retained: usize,
 }
 
@@ -194,6 +196,8 @@ impl FeedBuffer {
             inner: RwLock::new(FeedBufferInner {
                 entries: VecDeque::new(),
                 watermark: 0,
+                dropped_through: 0,
+                dropped_count: 0,
                 max_retained,
             }),
             watermark_atomic: AtomicU64::new(0),
@@ -212,7 +216,10 @@ impl FeedBuffer {
 
         // Evict oldest if over capacity.
         while inner.entries.len() > inner.max_retained {
-            inner.entries.pop_front();
+            if let Some(dropped) = inner.entries.pop_front() {
+                inner.dropped_through = inner.dropped_through.max(dropped.seq);
+                inner.dropped_count = inner.dropped_count.saturating_add(1);
+            }
         }
 
         drop(inner);
@@ -229,6 +236,10 @@ impl FeedBuffer {
 #[derive(Debug, Clone)]
 pub struct RuntimeCompletionFeed {
     buffer: Arc<FeedBuffer>,
+    /// Generated completion-feed authority used only to reconstruct a suffix
+    /// that rolled out of the bounded public projection. Weak avoids a
+    /// registry/feed cycle; if the owner is gone the typed gap remains.
+    authority: std::sync::Weak<RwLock<ShellState>>,
 }
 
 impl CompletionFeed for RuntimeCompletionFeed {
@@ -249,7 +260,81 @@ impl CompletionFeed for RuntimeCompletionFeed {
             .cloned()
             .collect();
         let watermark = inner.watermark;
-        CompletionBatch { entries, watermark }
+        let dropped_count = inner.dropped_count;
+        let batch = CompletionBatch {
+            entries,
+            watermark,
+            dropped_through: inner.dropped_through,
+        };
+        drop(inner);
+
+        if batch.gap_after(after_seq).is_none() {
+            return batch;
+        }
+
+        let Some(authority) = self.authority.upgrade() else {
+            return batch;
+        };
+        let state = authority
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Ok(authority_entries) = state.completion_feed_authority_entries() else {
+            // Keep the typed gap visible. A consumer must fail closed rather
+            // than accepting a suffix that generated authority could not
+            // reconstruct.
+            return batch;
+        };
+        let reconstructed_dropped_count = authority_entries
+            .values()
+            .filter(|entry| entry.seq <= batch.dropped_through)
+            .count() as u64;
+        if reconstructed_dropped_count != dropped_count {
+            // The public projection says more feed entries were evicted than
+            // generated authority can reproduce. Keep the gap typed rather
+            // than treating a partial reconstruction as complete custody.
+            return batch;
+        }
+        let buffered_projection_by_id: HashMap<OperationId, CompletionEntry> = batch
+            .entries
+            .iter()
+            .cloned()
+            .map(|entry| (entry.operation_id.clone(), entry))
+            .collect();
+        let mut entries = authority_entries
+            .into_iter()
+            .filter(|(_, entry)| entry.seq > after_seq && entry.seq <= batch.watermark)
+            .map(|(operation_id, entry)| {
+                if let Some(buffered) = buffered_projection_by_id.get(&operation_id) {
+                    return buffered.clone();
+                }
+                let display_name = state
+                    .records
+                    .get(&operation_id)
+                    .map(|record| record.spec.display_name.clone())
+                    .unwrap_or_default();
+                let completed_at_ms = state.records.get(&operation_id).and_then(|record| {
+                    record
+                        .completed_at
+                        .map(|completed_at| record.epoch_millis_for_instant(completed_at))
+                });
+                CompletionEntry {
+                    seq: entry.seq,
+                    operation_id,
+                    kind: entry.kind,
+                    display_name,
+                    terminal_outcome: entry.terminal_outcome,
+                    completed_at_ms,
+                }
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|entry| entry.seq);
+        CompletionBatch {
+            entries,
+            watermark: batch.watermark,
+            // Generated authority reconstructed the complete semantic suffix,
+            // so bounded projection eviction is no longer a consumer gap.
+            dropped_through: 0,
+        }
     }
 
     fn wait_for_advance(
@@ -457,7 +542,15 @@ impl ShellState {
         tracing::info!("RuntimeOpsLifecycleRegistry::ShellState creating dsl");
         let dsl = new_ops_dsl_authority();
         tracing::info!("RuntimeOpsLifecycleRegistry::ShellState created dsl");
-        let feed_capacity = max_completed.saturating_mul(4).max(1024);
+        // Zero retention cannot preserve even the completion that just
+        // advanced the cursor watermark. Normalize it to the smallest sound
+        // bounded feed instead of publishing an immediately unauthorized row.
+        let max_completed = max_completed.max(1);
+        // The projection and generated completion authority must share one
+        // retention boundary. A larger shell buffer can retain entries after
+        // `EvictCompletedOp` removes their generated classifier, turning a
+        // legitimate lagging cursor into an untyped stale-authority exit.
+        let feed_capacity = max_completed.max(1);
         tracing::info!(
             feed_capacity,
             "RuntimeOpsLifecycleRegistry::ShellState creating feed buffer"
@@ -472,10 +565,10 @@ impl ShellState {
             max_completed,
             max_concurrent,
             wait_request_id: None,
-            // Feed buffer is larger than max_completed to absorb bursts.
-            // Entries are only evicted by buffer capacity, not by consumer cursor,
-            // so the buffer must be large enough that consumers drain before
-            // the oldest entry is evicted.
+            // Entries are evicted by the same completed-operation bound as
+            // generated authority. FeedBuffer records the exact lost prefix;
+            // a lagging consumer therefore receives a typed gap rather than a
+            // projection row whose classifier has already disappeared.
             feed_buffer,
             persist_tx: None,
             persistence_sealed: false,
@@ -1992,6 +2085,7 @@ impl Default for ShellState {
 #[derive(Debug, Clone)]
 pub struct OpsLifecycleConfig {
     /// Maximum number of completed operations to retain (default: 256).
+    /// Values below one are normalized to one.
     pub max_completed: usize,
     /// Maximum concurrent non-terminal operations (None = unlimited).
     pub max_concurrent: Option<usize>,
@@ -2014,7 +2108,7 @@ impl Default for OpsLifecycleConfig {
 /// and the completion feed buffer.
 #[derive(Debug)]
 pub struct RuntimeOpsLifecycleRegistry {
-    state: RwLock<ShellState>,
+    state: Arc<RwLock<ShellState>>,
 }
 
 #[derive(Debug, Clone)]
@@ -2031,7 +2125,7 @@ pub(crate) struct RuntimeOpsDiagnosticSnapshot {
 impl Default for RuntimeOpsLifecycleRegistry {
     fn default() -> Self {
         Self {
-            state: RwLock::new(ShellState::default()),
+            state: Arc::new(RwLock::new(ShellState::default())),
         }
     }
 }
@@ -2039,10 +2133,10 @@ impl Default for RuntimeOpsLifecycleRegistry {
 impl RuntimeOpsLifecycleRegistry {
     pub fn new() -> Self {
         let dsl = new_ops_dsl_authority();
-        let feed_capacity = DEFAULT_MAX_COMPLETED.saturating_mul(4).max(1024);
+        let feed_capacity = DEFAULT_MAX_COMPLETED.max(1);
         let feed_buffer = Arc::new(FeedBuffer::new(feed_capacity));
         Self {
-            state: RwLock::new(ShellState {
+            state: Arc::new(RwLock::new(ShellState {
                 dsl,
                 records: HashMap::new(),
                 pending_wait: None,
@@ -2056,13 +2150,16 @@ impl RuntimeOpsLifecycleRegistry {
                 persist_epoch_id: None,
                 persist_cursor_state: None,
                 owner_retired: false,
-            }),
+            })),
         }
     }
 
     pub fn with_config(config: OpsLifecycleConfig) -> Self {
         Self {
-            state: RwLock::new(ShellState::new(config.max_completed, config.max_concurrent)),
+            state: Arc::new(RwLock::new(ShellState::new(
+                config.max_completed,
+                config.max_concurrent,
+            ))),
         }
     }
 
@@ -2362,7 +2459,7 @@ impl RuntimeOpsLifecycleRegistry {
         }
 
         Ok(Self {
-            state: RwLock::new(shell),
+            state: Arc::new(RwLock::new(shell)),
         })
     }
 
@@ -2399,6 +2496,7 @@ impl RuntimeOpsLifecycleRegistry {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         Arc::new(RuntimeCompletionFeed {
             buffer: Arc::clone(&state.feed_buffer),
+            authority: Arc::downgrade(&self.state),
         })
     }
 
@@ -3977,6 +4075,149 @@ mod tests {
         let batch = feed.list_since(0);
         assert_eq!(batch.entries.len(), 1);
         assert_eq!(batch.entries[0].operation_id, op_id);
+    }
+
+    #[test]
+    fn bounded_completion_feed_reports_exact_evicted_cursor_gap() {
+        let buffer = Arc::new(FeedBuffer::new(1));
+        for seq in 1..=2 {
+            let operation_id = OperationId::new();
+            buffer.push(CompletionEntry {
+                seq,
+                operation_id: operation_id.clone(),
+                kind: OperationKind::BackgroundToolOp,
+                display_name: format!("completion-{seq}"),
+                terminal_outcome: OperationTerminalOutcome::Completed(OperationResult {
+                    id: operation_id,
+                    content: "done".into(),
+                    is_error: false,
+                    duration_ms: 1,
+                    tokens_used: 0,
+                }),
+                completed_at_ms: None,
+            });
+        }
+        let feed = RuntimeCompletionFeed {
+            buffer,
+            authority: std::sync::Weak::new(),
+        };
+
+        let batch = feed.list_since(0);
+        assert_eq!(
+            batch
+                .entries
+                .iter()
+                .map(|entry| entry.seq)
+                .collect::<Vec<_>>(),
+            vec![2]
+        );
+        assert_eq!(
+            batch.gap_after(0),
+            Some(meerkat_core::completion_feed::CompletionFeedGap {
+                requested_after_seq: 0,
+                dropped_through: 1,
+                watermark: 2,
+            })
+        );
+        assert_eq!(
+            batch.gap_after(1),
+            None,
+            "a cursor at the exact eviction boundary can read the retained suffix"
+        );
+    }
+
+    #[test]
+    fn runtime_completion_feed_rehydrates_evicted_obligation_from_generated_authority() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+        {
+            let state = registry.read_state().unwrap();
+            let mut buffer = state
+                .feed_buffer
+                .inner
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            buffer.max_retained = 1;
+        }
+
+        for label in ["first", "second"] {
+            let spec = background_spec(label);
+            let operation_id = spec.id.clone();
+            registry.register_operation(spec).unwrap();
+            registry.provisioning_succeeded(&operation_id).unwrap();
+            registry
+                .complete_operation(
+                    &operation_id,
+                    OperationResult {
+                        id: operation_id,
+                        content: "done".into(),
+                        is_error: false,
+                        duration_ms: 1,
+                        tokens_used: 0,
+                    },
+                )
+                .unwrap();
+        }
+
+        let batch = registry.completion_feed_handle().list_since(0);
+        assert_eq!(
+            batch
+                .entries
+                .iter()
+                .map(|entry| entry.seq)
+                .collect::<Vec<_>>(),
+            vec![1, 2],
+            "the generated authority must reconstruct the evicted completion"
+        );
+        assert_eq!(
+            batch.gap_after(0),
+            None,
+            "successful authority reconstruction closes the bounded projection gap"
+        );
+    }
+
+    #[test]
+    fn generated_and_projection_retention_expose_one_typed_gap() {
+        let registry = RuntimeOpsLifecycleRegistry::with_config(OpsLifecycleConfig {
+            max_completed: 1,
+            max_concurrent: None,
+        });
+        for label in ["first", "second"] {
+            let spec = background_spec(label);
+            let operation_id = spec.id.clone();
+            registry.register_operation(spec).unwrap();
+            registry.provisioning_succeeded(&operation_id).unwrap();
+            registry
+                .complete_operation(
+                    &operation_id,
+                    OperationResult {
+                        id: operation_id,
+                        content: "done".into(),
+                        is_error: false,
+                        duration_ms: 1,
+                        tokens_used: 0,
+                    },
+                )
+                .unwrap();
+        }
+
+        let batch = registry.completion_feed_handle().list_since(0);
+        assert_eq!(
+            batch
+                .entries
+                .iter()
+                .map(|entry| entry.seq)
+                .collect::<Vec<_>>(),
+            vec![2]
+        );
+        assert_eq!(
+            batch.gap_after(0),
+            Some(meerkat_core::completion_feed::CompletionFeedGap {
+                requested_after_seq: 0,
+                dropped_through: 1,
+                watermark: 2,
+            }),
+            "authority and projection eviction must meet at one typed retention boundary"
+        );
     }
 
     #[tokio::test]

@@ -6,7 +6,7 @@ use meerkat_core::lifecycle::core_executor::{
     CoreExecutorTurnFinalizationBoundaryHandle, CoreExecutorTurnFinalizationGuard,
 };
 use meerkat_core::lifecycle::run_primitive::{
-    ConversationContextAppend, RunPrimitive, RuntimeTurnMetadata,
+    RunPrimitive, RuntimeTurnMetadata, TurnRequestContext,
 };
 use meerkat_core::service::{
     DeferredPromptPolicy, InitialTurnPolicy, StartTurnRequest, StartTurnRuntimeSemantics,
@@ -188,7 +188,6 @@ fn start_turn_request_from_initial_turn(
                 .handling_mode
                 .unwrap_or(HandlingMode::Queue),
             None,
-            Vec::new(),
             Some(initial_turn.turn_metadata),
         ),
     }
@@ -862,16 +861,20 @@ impl<B: SessionAgentBuilder + 'static> CoreExecutorBoundaryHandle
             .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()))
     }
 
-    async fn prepare_system_context_at_boundary(
+    async fn prepare_transient_turn_context_at_boundary(
         &self,
         expected_run_id: &meerkat_core::RunId,
-        appends: Vec<meerkat_core::PendingSystemContextAppend>,
+        contexts: Vec<TurnRequestContext>,
     ) -> Result<
         meerkat_core::lifecycle::CoreBoundaryStageOutput,
         meerkat_core::lifecycle::CoreBoundaryStageError,
     > {
         self.service
-            .prepare_live_system_context_boundary(&self.session_id, expected_run_id, appends)
+            .prepare_live_transient_turn_context_boundary(
+                &self.session_id,
+                expected_run_id,
+                contexts,
+            )
             .await
     }
 }
@@ -1155,48 +1158,18 @@ async fn validate_workgraph_attention_primitive(
         .map_err(|error| CoreExecutorError::apply_failed_primitive_rejected(error.to_string()))
 }
 
-fn pending_system_context_appends(
-    appends: &[ConversationContextAppend],
-) -> Vec<meerkat_core::PendingSystemContextAppend> {
-    appends
-        .iter()
-        .map(|append| meerkat_core::PendingSystemContextAppend {
-            content: append.content.clone(),
-            source: Some(append.key.clone()),
-            idempotency_key: Some(append.key.clone()),
-            // Durable keyed conversation context append — not a transient steer.
-            source_kind: meerkat_core::session::SystemContextSource::Normal,
-            accepted_at: meerkat_core::time_compat::SystemTime::now(),
-            peer_response_terminal: None,
-        })
-        .collect()
-}
-
 fn start_turn_request_from_primitive(
     primitive: &RunPrimitive,
 ) -> Result<meerkat_core::service::StartTurnRequest, CoreExecutorError> {
     let metadata = primitive.turn_metadata();
-    let pre_turn_context_appends = match primitive {
-        RunPrimitive::StagedInput(staged)
-            if primitive.is_peer_response_terminal_context_and_run() =>
-        {
-            pending_system_context_appends(&staged.context_appends)
-        }
-        _ => Vec::new(),
-    };
 
     Ok(meerkat_core::service::StartTurnRequest {
         injected_context: Vec::new(),
         prompt: primitive.extract_content_input(),
         system_prompt: None,
         event_tx: None,
-        runtime: StartTurnRuntimeSemantics::new(
-            HandlingMode::Queue,
-            None,
-            pre_turn_context_appends,
-            metadata.cloned(),
-        )
-        .with_typed_turn_appends(primitive.typed_turn_appends()),
+        runtime: StartTurnRuntimeSemantics::new(HandlingMode::Queue, None, metadata.cloned())
+            .with_typed_turn_appends(primitive.typed_turn_appends()),
     })
 }
 
@@ -1257,134 +1230,6 @@ impl<B: SessionAgentBuilder + 'static> CoreExecutor for PersistentRuntimeExecuto
             ));
         }
 
-        if primitive.is_context_only_apply_without_turn() {
-            let RunPrimitive::StagedInput(staged) = &primitive else {
-                unreachable!("context-only apply without turn only matches staged primitives");
-            };
-            let appends = pending_system_context_appends(&staged.context_appends);
-            let boundary = staged.boundary;
-            let contributing_input_ids = staged.contributing_input_ids.clone();
-            match self
-                .service
-                .apply_runtime_context_appends_with_boundary(
-                    &self.session_id,
-                    run_id.clone(),
-                    appends.clone(),
-                    boundary,
-                    contributing_input_ids.clone(),
-                )
-                .await
-            {
-                Ok(output) => return Ok(output),
-                Err(error @ SessionError::NotFound { .. }) => {
-                    let session = self
-                        .authoritative_non_archived_session_after_not_found(
-                            &error,
-                            CoreExecutorError::apply_failed_runtime_context,
-                        )
-                        .await?;
-                    let recovered = build_recovered_session(
-                        session.clone(),
-                        &SurfaceSessionRecoveryOverrides::default(),
-                        SurfaceSessionRecoveryContext::default(),
-                    )
-                    .map_err(|error| {
-                        CoreExecutorError::apply_failed_runtime_context(error.to_string())
-                    })?;
-                    let service = Arc::clone(&self.service);
-                    let adapter = Arc::clone(&self.adapter);
-                    let workgraph_service = self.workgraph_service.clone();
-                    match Box::pin(materialize_session_under_runtime_turn_boundary(
-                        &self.service,
-                        &self.adapter,
-                        session,
-                        recovered.into_deferred_create_request(),
-                        move |session_id| match workgraph_service {
-                            Some(workgraph_service) => {
-                                default_persistent_executor_with_workgraph_service(
-                                    Arc::clone(&service),
-                                    Arc::clone(&adapter),
-                                    session_id,
-                                    workgraph_service,
-                                )
-                            }
-                            None => default_persistent_executor(
-                                Arc::clone(&service),
-                                Arc::clone(&adapter),
-                                session_id,
-                            ),
-                        },
-                    ))
-                    .await
-                    {
-                        Ok(_) => {}
-                        Err(SurfaceRuntimeMaterializeError::Session(
-                            error @ SessionError::NotFound { .. },
-                        )) => {
-                            return Err(
-                                match self
-                                    .authoritative_non_archived_session_after_not_found(
-                                        &error,
-                                        CoreExecutorError::apply_failed_runtime_context,
-                                    )
-                                    .await
-                                {
-                                    Err(teardown) => teardown,
-                                    Ok(_) => {
-                                        CoreExecutorError::session_unavailable_requires_teardown(
-                                            error.to_string(),
-                                        )
-                                    }
-                                },
-                            );
-                        }
-                        Err(error) => {
-                            return Err(CoreExecutorError::apply_failed_runtime_context(
-                                error.to_string(),
-                            ));
-                        }
-                    }
-                    return match self
-                        .service
-                        .apply_runtime_context_appends_with_boundary(
-                            &self.session_id,
-                            run_id,
-                            appends,
-                            boundary,
-                            contributing_input_ids,
-                        )
-                        .await
-                    {
-                        Ok(output) => Ok(output),
-                        Err(error @ SessionError::NotFound { .. }) => {
-                            match self
-                                .authoritative_non_archived_session_after_not_found(
-                                    &error,
-                                    CoreExecutorError::apply_failed_runtime_context,
-                                )
-                                .await
-                            {
-                                Err(teardown) => Err(teardown),
-                                Ok(_) => {
-                                    Err(CoreExecutorError::session_unavailable_requires_teardown(
-                                        error.to_string(),
-                                    ))
-                                }
-                            }
-                        }
-                        Err(error) => Err(CoreExecutorError::apply_failed_runtime_context(
-                            error.to_string(),
-                        )),
-                    };
-                }
-                Err(error) => {
-                    return Err(CoreExecutorError::apply_failed_runtime_context(
-                        error.to_string(),
-                    ));
-                }
-            }
-        }
-
         let boundary = primitive.apply_boundary();
         let contributing_input_ids = primitive.contributing_input_ids().to_vec();
         let mut req = start_turn_request_from_primitive(&primitive)?;
@@ -1428,12 +1273,55 @@ impl<B: SessionAgentBuilder + 'static> CoreExecutor for PersistentRuntimeExecuto
 
     async fn checkpoint_committed_session_snapshot(
         &mut self,
-        session_snapshot: &[u8],
+        session_snapshot: Arc<Vec<u8>>,
     ) -> Result<(), CoreExecutorError> {
         self.service
             .checkpoint_committed_runtime_session_snapshot_under_runtime_turn_boundary(
                 &self.session_id,
                 session_snapshot,
+            )
+            .await
+            .map_err(CoreExecutorError::apply_failed_from_session_error)
+    }
+
+    async fn acknowledge_whole_blob_session_boundary(
+        &mut self,
+        committed_store_revision: u64,
+        committed_blob_sha256: &str,
+    ) -> Result<(), CoreExecutorError> {
+        self.service
+            .acknowledge_whole_blob_runtime_session_boundary_under_runtime_turn_boundary(
+                &self.session_id,
+                committed_store_revision,
+                committed_blob_sha256,
+            )
+            .await
+            .map_err(CoreExecutorError::apply_failed_from_session_error)
+    }
+
+    async fn acknowledge_head_canonical_session_boundary(
+        &mut self,
+        boundary_head_cas_token: &str,
+    ) -> Result<(), CoreExecutorError> {
+        self.service
+            .acknowledge_head_canonical_runtime_session_boundary_under_runtime_turn_boundary(
+                &self.session_id,
+                boundary_head_cas_token,
+            )
+            .await
+            .map_err(CoreExecutorError::apply_failed_from_session_error)
+    }
+
+    async fn acknowledge_provisional_session_boundary(
+        &mut self,
+        committed_store_revision: u64,
+        committed_authority_token: &str,
+    ) -> Result<(), CoreExecutorError> {
+        self.service
+            .acknowledge_provisional_runtime_session_boundary_under_runtime_turn_boundary(
+                &self.session_id,
+                committed_store_revision,
+                committed_authority_token,
             )
             .await
             .map_err(CoreExecutorError::apply_failed_from_session_error)
@@ -1540,8 +1428,8 @@ mod typed_transcript_contract_tests {
                         body: Some("typed notice".to_string()),
                         blocks: Vec::new(),
                     },
+                    identity: None,
                 }],
-                context_appends: Vec::new(),
                 contributing_input_ids: vec![meerkat_core::lifecycle::InputId::new()],
                 turn_metadata: None,
             },
@@ -1651,8 +1539,8 @@ mod tests {
                     content: CoreRenderable::Text {
                         text: "hello".to_string(),
                     },
+                    identity: None,
                 }],
-                context_appends: Vec::new(),
                 contributing_input_ids: vec![meerkat_core::lifecycle::InputId::new()],
                 turn_metadata: Some(metadata.clone()),
             });
@@ -1696,22 +1584,11 @@ mod tests {
         }
     }
 
-    fn has_applied_runtime_context(session: &Session, source: &str, text: &str) -> bool {
-        session
-            .system_context_state()
-            .unwrap_or_default()
-            .applied()
-            .iter()
-            .any(|append| {
-                append.source.as_deref() == Some(source)
-                    && append.content.render_text().contains(text)
-            })
-    }
-
     fn runtime_output_session_snapshot(output: &CoreApplyOutput) -> Session {
         serde_json::from_slice(
             output
-                .snapshot_bytes()
+                .whole_blob_bytes()
+                .expect("runtime output snapshot should encode")
                 .expect("runtime output should carry a machine-owned session snapshot"),
         )
         .expect("runtime session snapshot should deserialize")
@@ -2812,8 +2689,8 @@ mod tests {
                         content: CoreRenderable::Text {
                             text: "trigger terminal LLM failure".to_string(),
                         },
+                        identity: None,
                     }],
-                    context_appends: Vec::new(),
                     contributing_input_ids: vec![InputId::new()],
                     turn_metadata: Some(RuntimeTurnMetadata {
                         execution_kind: Some(RuntimeExecutionKind::ContentTurn),
@@ -2826,7 +2703,10 @@ mod tests {
 
         assert_eq!(output.receipt.boundary, RunApplyBoundary::RunStart);
         assert!(
-            output.snapshot_bytes().is_some(),
+            output
+                .whole_blob_bytes()
+                .expect("failed-but-applied snapshot should encode")
+                .is_some(),
             "failed-but-applied carrier must preserve the mutated session snapshot"
         );
         match output.terminal {
@@ -2956,347 +2836,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persistent_runtime_executor_routes_context_only_staged_input_through_runtime_context_appends()
-     {
-        use futures::StreamExt;
-        use meerkat_core::event::AgentEvent;
-        use meerkat_core::lifecycle::InputId;
-        use meerkat_core::lifecycle::RunId;
-        use meerkat_core::lifecycle::run_primitive::{
-            ConversationContextAppend, RunApplyBoundary, RuntimeExecutionKind, RuntimeTurnMetadata,
-            StagedRunInput,
-        };
-
-        let temp = tempfile::tempdir().expect("tempdir");
-        let (service, adapter) = build_test_service(&temp).await;
-        let result = Box::pin(materialize_session(
-            &service,
-            &adapter,
-            Session::new(),
-            make_request(SessionBuildOptions::default()),
-            {
-                let service = Arc::clone(&service);
-                let adapter = Arc::clone(&adapter);
-                move |session_id| default_persistent_executor(service, adapter, session_id)
-            },
-        ))
-        .await
-        .expect("materialize session");
-
-        let mut events = service
-            .subscribe_session_events(&result.session_id)
-            .await
-            .expect("subscribe_session_events");
-
-        let mut executor = PersistentRuntimeExecutor::new(
-            Arc::clone(&service),
-            Arc::clone(&adapter),
-            result.session_id.clone(),
-        );
-        let output = executor
-            .apply(
-                RunId::new(),
-                RunPrimitive::StagedInput(StagedRunInput {
-                    boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
-                    appends: Vec::new(),
-                    context_appends: vec![ConversationContextAppend {
-                        key: "peer_response_terminal:analyst-rt:req-123".to_string(),
-                        content: CoreRenderable::Text {
-                            text: "Peer terminal response from analyst-rt\nRequest ID: req-123\nStatus: completed\nPayload: {\"request_intent\":\"checksum_token\",\"request_subject\":\"alpha beta gamma\",\"token\":\"birch seventeen\"}".to_string(),
-                        },
-                    }],
-                    contributing_input_ids: vec![InputId::new()],
-                    turn_metadata: Some(RuntimeTurnMetadata {
-                        execution_kind: Some(RuntimeExecutionKind::ContentTurn),
-                        ..Default::default()
-                    }),
-                }),
-            )
-            .await
-            .expect("context-only staged input should apply");
-
-        assert_eq!(
-            output.receipt.boundary,
-            meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart
-        );
-
-        assert!(
-            tokio::time::timeout(Duration::from_millis(50), events.next())
-                .await
-                .is_err(),
-            "context lifecycle events must remain hidden until the exact runtime snapshot commits"
-        );
-        let session_snapshot = output
-            .snapshot_bytes()
-            .expect("context-only output should carry a session snapshot");
-        service
-            .runtime_store()
-            .commit_session_snapshot(
-                &meerkat_runtime::LogicalRuntimeId::for_session(&result.session_id),
-                meerkat_runtime::SessionDelta {
-                    session_snapshot: session_snapshot.to_vec(),
-                },
-            )
-            .await
-            .expect("commit context-only runtime snapshot");
-        executor
-            .checkpoint_committed_session_snapshot(session_snapshot)
-            .await
-            .expect("checkpoint committed context-only snapshot");
-
-        let started = tokio::time::timeout(std::time::Duration::from_secs(2), events.next())
-            .await
-            .expect("run_started timeout")
-            .expect("run_started event should exist");
-        assert!(matches!(started.payload, AgentEvent::RunStarted { .. }));
-
-        let completed = tokio::time::timeout(std::time::Duration::from_secs(2), events.next())
-            .await
-            .expect("run_completed timeout")
-            .expect("run_completed event should exist");
-        match completed.payload {
-            AgentEvent::RunCompleted { result, usage, .. } => {
-                assert!(
-                    result.is_empty(),
-                    "context-only runtime apply should not synthesize assistant output"
-                );
-                assert_eq!(usage, meerkat_core::types::Usage::default());
-            }
-            other => panic!("expected run_completed, got {other:?}"),
-        }
-
-        let second_output = executor
-            .apply(
-                RunId::new(),
-                RunPrimitive::StagedInput(StagedRunInput {
-                    boundary: RunApplyBoundary::RunStart,
-                    appends: Vec::new(),
-                    context_appends: vec![ConversationContextAppend {
-                        key: "peer_response_terminal:analyst-rt:req-124".to_string(),
-                        content: CoreRenderable::Text {
-                            text: "Peer terminal response from analyst-rt\nRequest ID: req-124\nStatus: completed\ndone"
-                                .to_string(),
-                        },
-                    }],
-                    contributing_input_ids: vec![InputId::new()],
-                    turn_metadata: Some(RuntimeTurnMetadata {
-                        execution_kind: Some(RuntimeExecutionKind::ContentTurn),
-                        ..Default::default()
-                    }),
-                }),
-            )
-            .await
-            .expect("checkpoint must clear the prior pending context-event commit");
-        let second_snapshot = second_output
-            .snapshot_bytes()
-            .expect("second context-only output should carry a session snapshot");
-        service
-            .runtime_store()
-            .commit_session_snapshot(
-                &meerkat_runtime::LogicalRuntimeId::for_session(&result.session_id),
-                meerkat_runtime::SessionDelta {
-                    session_snapshot: second_snapshot.to_vec(),
-                },
-            )
-            .await
-            .expect("commit second context-only runtime snapshot");
-        executor
-            .checkpoint_committed_session_snapshot(second_snapshot)
-            .await
-            .expect("checkpoint second committed context-only snapshot");
-        for expected in ["run_started", "run_completed"] {
-            tokio::time::timeout(Duration::from_secs(2), events.next())
-                .await
-                .unwrap_or_else(|_| panic!("second {expected} timeout"))
-                .unwrap_or_else(|| panic!("second {expected} event should exist"));
-        }
-
-        expect_unregister_completion(&adapter, &result.session_id).await;
-    }
-
-    #[tokio::test]
-    async fn persistent_runtime_executor_recovers_missing_actor_for_context_only_apply_under_exact_attachment()
-     {
-        use meerkat_core::lifecycle::InputId;
-        use meerkat_core::lifecycle::RunId;
-        use meerkat_core::lifecycle::run_primitive::{
-            ConversationContextAppend, RuntimeExecutionKind, RuntimeTurnMetadata, StagedRunInput,
-        };
-
-        let temp = tempfile::tempdir().expect("tempdir");
-        let (service, adapter) = build_test_service(&temp).await;
-        let result = Box::pin(materialize_session(
-            &service,
-            &adapter,
-            Session::new(),
-            make_request(SessionBuildOptions::default()),
-            {
-                let service = Arc::clone(&service);
-                let adapter = Arc::clone(&adapter);
-                move |session_id| default_persistent_executor(service, adapter, session_id)
-            },
-        ))
-        .await
-        .expect("materialize session");
-
-        let attachment_witness = adapter
-            .current_executor_attachment_witness(&result.session_id)
-            .await
-            .expect("materialized session should retain an exact executor attachment");
-        let actor_lease = service
-            .acquire_live_session_actor_turn_boundary_lease(&result.session_id)
-            .await
-            .expect("capture exact live actor before actor-only recovery");
-        assert!(
-            service
-                .discard_live_session_actor(&actor_lease)
-                .await
-                .expect("discard exact live actor before actor-only recovery"),
-            "exact actor discard should remove the captured actor"
-        );
-        drop(actor_lease);
-        assert_eq!(
-            adapter
-                .current_executor_attachment_witness(&result.session_id)
-                .await
-                .as_ref(),
-            Some(&attachment_witness),
-            "actor loss must not replace or remove the serving executor attachment"
-        );
-
-        let mut executor = PersistentRuntimeExecutor::new(
-            Arc::clone(&service),
-            Arc::clone(&adapter),
-            result.session_id.clone(),
-        );
-        let turn_boundary = executor
-            .turn_finalization_boundary_handle()
-            .expect("persistent executor should expose its stable turn boundary")
-            .acquire()
-            .await
-            .expect("acquire the runtime-owned turn boundary before apply");
-        let output = executor
-            .apply(
-                RunId::new(),
-                RunPrimitive::StagedInput(StagedRunInput {
-                    boundary:
-                        meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunCheckpoint,
-                    appends: Vec::new(),
-                    context_appends: vec![ConversationContextAppend {
-                        key: "runtime-backed-context-recovery".to_string(),
-                        content: CoreRenderable::Text {
-                            text: "runtime-backed recovered context".to_string(),
-                        },
-                    }],
-                    contributing_input_ids: vec![InputId::new()],
-                    turn_metadata: Some(RuntimeTurnMetadata {
-                        execution_kind: Some(RuntimeExecutionKind::ContentTurn),
-                        ..Default::default()
-                    }),
-                }),
-            )
-            .await
-            .expect("context-only apply should recover the missing actor");
-        drop(turn_boundary);
-
-        assert_eq!(
-            output.receipt.boundary,
-            meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunCheckpoint
-        );
-        assert!(adapter.contains_session(&result.session_id).await);
-
-        let staged_snapshot = runtime_output_session_snapshot(&output);
-        assert!(
-            has_applied_runtime_context(
-                &staged_snapshot,
-                "runtime-backed-context-recovery",
-                "runtime-backed recovered context"
-            ),
-            "context-only recovery should persist runtime context append: {:?}",
-            staged_snapshot.system_context_state()
-        );
-
-        expect_unregister_completion(&adapter, &result.session_id).await;
-    }
-
-    #[tokio::test]
-    async fn persistent_runtime_executor_archived_context_only_apply_requests_post_handoff_teardown()
-     {
-        use meerkat_core::lifecycle::InputId;
-        use meerkat_core::lifecycle::RunId;
-        use meerkat_core::lifecycle::run_primitive::{
-            ConversationContextAppend, RuntimeExecutionKind, RuntimeTurnMetadata, StagedRunInput,
-        };
-
-        let temp = tempfile::tempdir().expect("tempdir");
-        let (service, adapter) = build_test_service(&temp).await;
-        let result = Box::pin(materialize_session(
-            &service,
-            &adapter,
-            Session::new(),
-            make_request(SessionBuildOptions::default()),
-            {
-                let service = Arc::clone(&service);
-                let adapter = Arc::clone(&adapter);
-                move |session_id| default_persistent_executor(service, adapter, session_id)
-            },
-        ))
-        .await
-        .expect("materialize session");
-
-        service
-            .archive_with_machine_protocol(
-                &result.session_id,
-                MachineSessionArchiveProtocol::from_machine(adapter.as_ref()),
-            )
-            .await
-            .expect("archive session through machine authority");
-        assert!(
-            adapter.contains_session(&result.session_id).await,
-            "machine archive leaves a retired runtime registration for this regression"
-        );
-
-        let mut executor = PersistentRuntimeExecutor::new(
-            Arc::clone(&service),
-            Arc::clone(&adapter),
-            result.session_id.clone(),
-        );
-        let rejected = executor
-            .apply(
-                RunId::new(),
-                RunPrimitive::StagedInput(StagedRunInput {
-                    boundary:
-                        meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunCheckpoint,
-                    appends: Vec::new(),
-                    context_appends: vec![ConversationContextAppend {
-                        key: "runtime-backed-archived-context".to_string(),
-                        content: CoreRenderable::Text {
-                            text: "archived runtime-backed context".to_string(),
-                        },
-                    }],
-                    contributing_input_ids: vec![InputId::new()],
-                    turn_metadata: Some(RuntimeTurnMetadata {
-                        execution_kind: Some(RuntimeExecutionKind::ContentTurn),
-                        ..Default::default()
-                    }),
-                }),
-            )
-            .await;
-
-        assert!(matches!(
-            rejected,
-            Err(CoreExecutorError::TeardownRequired {
-                reason: meerkat_core::lifecycle::core_executor::CoreExecutorTeardownReason::ArchivedSession,
-                ..
-            })
-        ));
-        assert!(
-            adapter.contains_session(&result.session_id).await,
-            "CoreExecutor::apply must retain runtime authority until the loop hands the exact executor to the canonical unregister saga"
-        );
-    }
-
-    #[tokio::test]
     async fn persistent_runtime_executor_archived_normal_turn_requests_post_handoff_teardown() {
         use meerkat_core::lifecycle::run_primitive::{
             ConversationAppend, ConversationAppendRole, RunApplyBoundary, RuntimeExecutionKind,
@@ -3342,8 +2881,8 @@ mod tests {
                         content: CoreRenderable::Text {
                             text: "normal turn after archive".to_string(),
                         },
+                        identity: None,
                     }],
-                    context_appends: Vec::new(),
                     contributing_input_ids: vec![InputId::new()],
                     turn_metadata: Some(RuntimeTurnMetadata {
                         execution_kind: Some(RuntimeExecutionKind::ContentTurn),
@@ -3396,8 +2935,8 @@ mod tests {
                         content: CoreRenderable::Text {
                             text: "normal turn for missing session".to_string(),
                         },
+                        identity: None,
                     }],
-                    context_appends: Vec::new(),
                     contributing_input_ids: vec![InputId::new()],
                     turn_metadata: Some(RuntimeTurnMetadata {
                         execution_kind: Some(RuntimeExecutionKind::ContentTurn),
@@ -3426,8 +2965,8 @@ mod tests {
         use meerkat_core::lifecycle::RunId;
         use meerkat_core::lifecycle::core_executor::CoreApplyTerminal;
         use meerkat_core::lifecycle::run_primitive::{
-            ConversationContextAppend, PeerResponseTerminalApplyIntent, RuntimeExecutionKind,
-            RuntimeTurnMetadata, StagedRunInput,
+            ConversationAppend, ConversationAppendRole, PeerResponseTerminalApplyIntent,
+            RuntimeExecutionKind, RuntimeTurnMetadata, StagedRunInput,
         };
 
         let temp = tempfile::tempdir().expect("tempdir");
@@ -3456,18 +2995,18 @@ mod tests {
                 RunId::new(),
                 RunPrimitive::StagedInput(StagedRunInput {
                     boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
-                    appends: Vec::new(),
-                    context_appends: vec![ConversationContextAppend {
-                        key: "peer_response_terminal:analyst-rt:req-456".to_string(),
+                    appends: vec![ConversationAppend {
+                        role: ConversationAppendRole::SystemNotice,
                         content: CoreRenderable::Text {
                             text: "Peer terminal response from analyst-rt\nRequest ID: req-456\nStatus: completed\ndone".to_string(),
                         },
+                        identity: None,
                     }],
                     contributing_input_ids: vec![InputId::new()],
                     turn_metadata: Some(RuntimeTurnMetadata {
                         execution_kind: Some(RuntimeExecutionKind::ContentTurn),
                         peer_response_terminal_apply_intent: Some(
-                            PeerResponseTerminalApplyIntent::AppendContextAndRun,
+                            PeerResponseTerminalApplyIntent::AppendContentAndRun,
                         ),
                         ..Default::default()
                     }),
@@ -3484,17 +3023,6 @@ mod tests {
             other => panic!("expected terminal peer response run result, got {other:?}"),
         }
 
-        let staged_snapshot = runtime_output_session_snapshot(&output);
-        assert!(
-            has_applied_runtime_context(
-                &staged_snapshot,
-                "peer_response_terminal:analyst-rt:req-456",
-                "Peer terminal response from analyst-rt"
-            ),
-            "terminal peer response context must be applied before reaction turn: {:?}",
-            staged_snapshot.system_context_state()
-        );
-
         expect_unregister_completion(&adapter, &result.session_id).await;
     }
 
@@ -3503,8 +3031,8 @@ mod tests {
         use meerkat_core::lifecycle::InputId;
         use meerkat_core::lifecycle::RunId;
         use meerkat_core::lifecycle::run_primitive::{
-            ConversationContextAppend, PeerResponseTerminalApplyIntent, RunApplyBoundary,
-            RuntimeExecutionKind, RuntimeTurnMetadata, StagedRunInput,
+            ConversationAppend, ConversationAppendRole, PeerResponseTerminalApplyIntent,
+            RunApplyBoundary, RuntimeExecutionKind, RuntimeTurnMetadata, StagedRunInput,
         };
 
         let temp = tempfile::tempdir().expect("tempdir");
@@ -3533,18 +3061,18 @@ mod tests {
                 RunId::new(),
                 RunPrimitive::StagedInput(StagedRunInput {
                     boundary: RunApplyBoundary::Immediate,
-                    appends: Vec::new(),
-                    context_appends: vec![ConversationContextAppend {
-                        key: "peer_response_terminal:analyst-rt:req-invalid".to_string(),
+                    appends: vec![ConversationAppend {
+                        role: ConversationAppendRole::SystemNotice,
                         content: CoreRenderable::Text {
                             text: "Peer terminal response from analyst-rt\nRequest ID: req-invalid\nStatus: completed\ninvalid".to_string(),
                         },
+                        identity: None,
                     }],
                     contributing_input_ids: vec![InputId::new()],
                     turn_metadata: Some(RuntimeTurnMetadata {
                         execution_kind: Some(RuntimeExecutionKind::ContentTurn),
                         peer_response_terminal_apply_intent: Some(
-                            PeerResponseTerminalApplyIntent::AppendContextAndRun,
+                            PeerResponseTerminalApplyIntent::AppendContentAndRun,
                         ),
                         ..Default::default()
                     }),

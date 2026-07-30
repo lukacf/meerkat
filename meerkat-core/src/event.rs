@@ -9,13 +9,13 @@ use crate::hooks::{HookFailureReason, HookId, HookPoint, HookReasonCode};
 use crate::interaction::InteractionId;
 use crate::ops_lifecycle::OperationTerminalOutcome;
 use crate::retry::LlmRetrySchedule;
-use crate::session::TranscriptRewriteRecord;
+use crate::session::{TranscriptRewriteAuditReceiptBatch, TranscriptRewriteRecord};
 use crate::skills::{CapabilityId, SkillError, SkillKey};
 use crate::time_compat::SystemTime;
 use crate::turn_execution_authority::{TurnTerminalCauseKind, TurnTerminalOutcome};
 use crate::types::{ContentBlock, RunInput, ServerToolKind, SessionId, StopReason, Usage};
 use serde::de::{self, DeserializeOwned};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use serde_json::value::RawValue;
 use std::cmp::Ordering;
@@ -463,7 +463,8 @@ impl From<&AgentError> for AgentErrorClass {
             // for teardown. Generic event taxonomies have no teardown class,
             // so they must treat an unprovable authority outcome as internal
             // rather than misclassifying it as a provider/config failure.
-            AgentError::StickyModelFallbackAuthorityUnknown { .. } => Self::Internal,
+            AgentError::StickyModelFallbackAuthorityUnknown { .. }
+            | AgentError::SessionDurableProjectionAuthorityUnknown { .. } => Self::Internal,
             AgentError::BuildError(_) | AgentError::SessionIdentityInUse(_) => Self::Build,
             AgentError::AuthReauthRequired { .. } => Self::Auth,
             AgentError::CallbackPending { .. } | AgentError::CallbackBatchPending { .. } => {
@@ -1011,19 +1012,28 @@ pub fn agent_event_type(event: &AgentEvent) -> &'static str {
         AgentEvent::ToolConfigChanged { .. } => "tool_config_changed",
         AgentEvent::BackgroundJobCompleted { .. } => "background_job_completed",
         AgentEvent::TranscriptRewriteCommitted { .. } => TRANSCRIPT_REWRITE_COMMITTED_EVENT_TYPE,
+        AgentEvent::TranscriptRewriteAuditReceiptCommitted { .. } => {
+            TRANSCRIPT_REWRITE_AUDIT_RECEIPT_COMMITTED_EVENT_TYPE
+        }
         AgentEvent::PeerContentIngested { .. } => "peer_content_ingested",
     }
 }
 
 /// Wire discriminator of [`AgentEvent::TranscriptRewriteCommitted`].
 ///
-/// Named because [`transcript_rewrite_commit_from_payload`] matches on it
+/// Named because [`transcript_rewrite_commits_from_payload`] matches on it
 /// without going through the typed enum; one spelling means the partial
 /// decoder cannot drift from [`agent_event_type`].
 pub const TRANSCRIPT_REWRITE_COMMITTED_EVENT_TYPE: &str = "transcript_rewrite_committed";
 
-/// The rewrite commit carried by one durable event payload, read WITHOUT
-/// materializing the two full transcript bodies its record carries.
+/// Wire discriminator of
+/// [`AgentEvent::TranscriptRewriteAuditReceiptCommitted`].
+pub const TRANSCRIPT_REWRITE_AUDIT_RECEIPT_COMMITTED_EVENT_TYPE: &str =
+    "transcript_rewrite_audit_receipt_committed";
+
+/// The rewrite commits carried by one durable event payload, read WITHOUT
+/// materializing the full transcript bodies carried by a released 0.8.10
+/// singleton record.
 ///
 /// A replay's coverage decision — which commits does the log hold that this
 /// session's graph does not — reads commit identity and nothing else, and the
@@ -1034,16 +1044,18 @@ pub const TRANSCRIPT_REWRITE_COMMITTED_EVENT_TYPE: &str = "transcript_rewrite_co
 /// decoded; every other field, both bodies included, is lexed past and
 /// discarded.
 ///
-/// `Ok(None)` means the payload is some other event kind. A payload that IS
-/// this kind but does not carry a well-formed commit is an error, never a
-/// silent skip.
+/// New receipt rows yield every ordered commit in the batch under the row's
+/// one log sequence. Released 0.8.10 rows yield their singleton commit.
+/// `Ok(None)` means the payload is some other event kind. A payload that is
+/// either rewrite kind but does not carry a well-formed commit/receipt is an
+/// error, never a silent skip.
 ///
 /// This reads a commit; it does not verify a record. Bodies that no
 /// authoritative load materializes are also bodies no authoritative load
 /// checks — see the caller's own account of what that costs.
-pub fn transcript_rewrite_commit_from_payload(
+pub fn transcript_rewrite_commits_from_payload(
     payload: &serde_json::value::RawValue,
-) -> Result<Option<(SessionId, crate::TranscriptRewriteCommit)>, serde_json::Error> {
+) -> Result<Option<(SessionId, Vec<crate::TranscriptRewriteCommit>)>, serde_json::Error> {
     #[derive(Deserialize)]
     struct TypeOnly<'a> {
         #[serde(rename = "type", borrow)]
@@ -1060,22 +1072,92 @@ pub fn transcript_rewrite_commit_from_payload(
     #[derive(Deserialize)]
     #[serde(rename_all = "snake_case")]
     struct RecordCommitOnly {
+        #[serde(deserialize_with = "deserialize_released_rewrite_commit")]
         commit: crate::TranscriptRewriteCommit,
     }
 
+    fn deserialize_released_rewrite_commit<'de, D>(
+        deserializer: D,
+    ) -> Result<crate::TranscriptRewriteCommit, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let commit = crate::TranscriptRewriteCommit::deserialize(deserializer)?;
+        if commit.rewrite_generation != 0 {
+            return Err(serde::de::Error::custom(format!(
+                "full-body transcript rewrite rows are accepted only as released 0.8.10 generation-0 compatibility evidence, found generation {}",
+                commit.rewrite_generation
+            )));
+        }
+        Ok(commit)
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    struct ReceiptOnly {
+        session_id: SessionId,
+        receipt: TranscriptRewriteAuditReceiptBatch,
+    }
+
     let tagged: TypeOnly<'_> = serde_json::from_str(payload.get())?;
-    if tagged.event_type != TRANSCRIPT_REWRITE_COMMITTED_EVENT_TYPE {
+    match tagged.event_type.as_ref() {
+        TRANSCRIPT_REWRITE_COMMITTED_EVENT_TYPE => {
+            let decoded: CommitOnly = serde_json::from_str(payload.get())?;
+            Ok(Some((decoded.session_id, vec![decoded.record.commit])))
+        }
+        TRANSCRIPT_REWRITE_AUDIT_RECEIPT_COMMITTED_EVENT_TYPE => {
+            let decoded: ReceiptOnly = serde_json::from_str(payload.get())?;
+            Ok(Some((decoded.session_id, decoded.receipt.into_commits())))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Decode only a receipt-only rewrite event's compact fields.
+///
+/// Released singleton body rows return `Ok(None)` and their bodies are never
+/// materialized by this helper.
+pub fn transcript_rewrite_audit_receipt_from_payload(
+    payload: &serde_json::value::RawValue,
+) -> Result<
+    Option<(
+        SessionId,
+        TranscriptRewriteAuditReceiptBatch,
+        Option<String>,
+    )>,
+    serde_json::Error,
+> {
+    #[derive(Deserialize)]
+    struct TypeOnly<'a> {
+        #[serde(rename = "type", borrow)]
+        event_type: std::borrow::Cow<'a, str>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    struct ReceiptOnly {
+        session_id: SessionId,
+        receipt: TranscriptRewriteAuditReceiptBatch,
+        final_assistant_text: Option<String>,
+    }
+
+    let tagged: TypeOnly<'_> = serde_json::from_str(payload.get())?;
+    if tagged.event_type != TRANSCRIPT_REWRITE_AUDIT_RECEIPT_COMMITTED_EVENT_TYPE {
         return Ok(None);
     }
-    let decoded: CommitOnly = serde_json::from_str(payload.get())?;
-    Ok(Some((decoded.session_id, decoded.record.commit)))
+    let decoded: ReceiptOnly = serde_json::from_str(payload.get())?;
+    Ok(Some((
+        decoded.session_id,
+        decoded.receipt,
+        decoded.final_assistant_text,
+    )))
 }
 
 /// Project a committed renderable into [`AgentEvent::PeerContentIngested`]
 /// events — one per incoming comms block.
 ///
 /// This is the single projection owner for the peer-ingestion observe fact:
-/// both transcript-append (queued delivery) and boundary system-context
+/// both transcript-append (queued delivery) and request-local User injection
 /// (steer delivery) commit sites call it on the typed renderable they commit,
 /// so the event is structurally incapable of diverging from the transcript
 /// carrier. Outgoing-direction blocks project nothing — the observe fact is
@@ -1980,10 +2062,26 @@ pub enum AgentEvent {
         detail: String,
     },
 
-    /// A typed same-session transcript rewrite was durably committed.
+    /// Released 0.8.10 generation-zero full-body compatibility row.
+    ///
+    /// Current writers must never emit this variant. It is decoded only by the
+    /// one-time compatibility reconciliation path; receipt batches supersede
+    /// the redundant body copy.
     TranscriptRewriteCommitted {
         session_id: SessionId,
         record: TranscriptRewriteRecord,
+    },
+
+    /// Receipt-only evidence for one non-empty ordered rewrite suffix.
+    ///
+    /// The sealed Session graph remains the singular body authority. The
+    /// optional terminal assistant text is a delta-sized derived projection
+    /// used to rebuild `summary.txt`; `None` explicitly removes a stale
+    /// summary when the retained successor has no assistant text.
+    TranscriptRewriteAuditReceiptCommitted {
+        session_id: SessionId,
+        receipt: TranscriptRewriteAuditReceiptBatch,
+        final_assistant_text: Option<String>,
     },
 
     /// Inbound peer content was committed into this session's context.
@@ -1991,8 +2089,8 @@ pub enum AgentEvent {
     /// Emitted as a pure projection of the typed transcript carrier
     /// ([`crate::types::SystemNoticeBlock::Comms`] with incoming direction)
     /// at the moment the agent commits it — a queued delivery appended to the
-    /// transcript at run assembly, or a steer delivery applied as runtime
-    /// system context at the model boundary. One event per committed comms
+    /// transcript at run assembly, or a steer delivery injected as a
+    /// request-local User message at the model boundary. One event per committed comms
     /// block, so a host taint tracker classifies peer ingestion from typed
     /// facts (canonical peer identity + the sender's signed content-taint
     /// declaration) instead of parsing rendered projection text.
@@ -2251,6 +2349,14 @@ pub fn format_verbose_event_with_config(
             "  transcript rewrite committed for {session_id}: {} -> {} ({})",
             record.commit.parent_revision, record.commit.revision, record.commit.reason.kind
         )),
+        AgentEvent::TranscriptRewriteAuditReceiptCommitted {
+            session_id,
+            receipt,
+            ..
+        } => Some(format!(
+            "  transcript rewrite receipt committed for {session_id}: {} ordered occurrence(s)",
+            receipt.commits().len()
+        )),
         AgentEvent::InteractionCallbackPending {
             tool_name, args, ..
         } => Some(format!(
@@ -2448,6 +2554,7 @@ mod tests {
         let revision = crate::transcript_messages_digest(&revision_messages).expect("digest");
         crate::TranscriptRewriteRecord::new(
             crate::TranscriptRewriteCommit {
+                rewrite_generation: 1,
                 parent_revision: parent_revision.clone(),
                 revision: revision.clone(),
                 selection: crate::TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
@@ -2491,7 +2598,7 @@ mod tests {
         let payload = serde_json::value::RawValue::from_string(payload).expect("payload is json");
 
         let before = crate::rewrite_record_body_decodes();
-        let decoded = transcript_rewrite_commit_from_payload(&payload)
+        let decoded = transcript_rewrite_commits_from_payload(&payload)
             .expect("payload decodes")
             .expect("payload is a transcript rewrite");
         assert_eq!(
@@ -2509,7 +2616,7 @@ mod tests {
             .expect("payload serializes");
         let payload = serde_json::value::RawValue::from_string(payload).expect("payload is json");
         assert!(
-            transcript_rewrite_commit_from_payload(&payload)
+            transcript_rewrite_commits_from_payload(&payload)
                 .expect("payload decodes")
                 .is_none(),
             "only the rewrite variant carries a commit"
@@ -2529,7 +2636,7 @@ mod tests {
         })
         .to_string();
         let payload = serde_json::value::RawValue::from_string(payload).expect("payload is json");
-        transcript_rewrite_commit_from_payload(&payload)
+        transcript_rewrite_commits_from_payload(&payload)
             .expect_err("a rewrite payload with an unreadable commit must not read as absent");
     }
 
@@ -3358,6 +3465,19 @@ mod tests {
         assert_eq!(report.class, AgentErrorClass::Internal);
         assert_eq!(report.reason, None);
         assert_eq!(report.message, error.to_string());
+    }
+
+    #[test]
+    fn durable_projection_authority_unknown_reports_internal_without_turn_terminal_cause() {
+        let error = crate::error::AgentError::session_durable_projection_authority_unknown(
+            "durable transcript and live projection diverged",
+        );
+
+        let report = AgentErrorReport::from_agent_error(&error);
+
+        assert_eq!(report.class, AgentErrorClass::Internal);
+        assert_eq!(report.reason, None);
+        assert_eq!(TurnErrorMetadata::from_agent_error(&error), None);
     }
 
     #[test]

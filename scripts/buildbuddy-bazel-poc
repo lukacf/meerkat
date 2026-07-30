@@ -115,6 +115,7 @@ config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy}"
 command="${BUILDBUDDY_BAZEL_COMMAND:-build}"
 requested_command="${command}"
 extra_args=()
+enforced_args=()
 fast_test_tag_filters="-local,-e2e,-system,-live,-integration,-slow,-required-feature,-trybuild,-snapshot,-fixture"
 e2e_test_env=(
   --test_env=ANTHROPIC_API_KEY
@@ -361,6 +362,15 @@ case "${command}" in
       --test_summary=terse
       --color=no
       --curses=no
+    )
+    # Turbo-S is a Bazel sh_test cohort, not a Nextest run. Serialize the
+    # actual remote test actions and retry a failed shard once at the Bazel
+    # boundary where the aggregate-load flakes occur. Keep these arguments
+    # enforced after caller arguments so a generic --jobs=64 from CI/dev
+    # cannot silently undo the lane's stabilization contract.
+    enforced_args+=(
+      --jobs=1
+      --flaky_test_attempts=2
     )
     ;;
   machine-authority-rbe)
@@ -968,6 +978,9 @@ if [[ -n "${target}" ]]; then
   fi
 fi
 bb_args+=("$@")
+if [[ "${#enforced_args[@]}" -gt 0 ]]; then
+  bb_args+=("${enforced_args[@]}")
+fi
 
 # --- Corrupt external-repo state detection and auto-repair -------------------
 # Bazel 9's shared repo contents cache (now disabled above) used to symlink

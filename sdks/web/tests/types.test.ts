@@ -281,7 +281,7 @@ const sourceIdOnlyEventEnvelope: EventEnvelope = {
 
 const appendSystemContextResult: AppendSystemContextResult = {
   handle: 1,
-  status: 'staged',
+  status: 'applied',
 };
 
 const sessionState: SessionState = {
@@ -298,7 +298,7 @@ const sessionState: SessionState = {
 const mobAppendSystemContextResult: MobAppendSystemContextResult = {
   mob_id: 'mob-1',
   agent_identity: 'worker-1',
-  status: 'staged',
+  status: 'applied',
 };
 
 // ─── MobDefinition (matches Rust MobDefinition) ────────────────

@@ -577,6 +577,47 @@ pub async fn externalize_messages_from(
         .map(|_| ())
 }
 
+fn content_blocks_have_inline_media(blocks: &[ContentBlock]) -> bool {
+    blocks
+        .iter()
+        .any(|block| block.image_inline_data().is_some() || block.video_inline_data().is_some())
+}
+
+fn system_notice_block_has_inline_media(block: &crate::types::SystemNoticeBlock) -> bool {
+    match block {
+        crate::types::SystemNoticeBlock::Comms { content, .. }
+        | crate::types::SystemNoticeBlock::ExternalEvent { content, .. } => {
+            content_blocks_have_inline_media(content)
+        }
+        crate::types::SystemNoticeBlock::ToolConfig { .. }
+        | crate::types::SystemNoticeBlock::Mcp { .. }
+        | crate::types::SystemNoticeBlock::BackgroundJob { .. }
+        | crate::types::SystemNoticeBlock::Auth { .. }
+        | crate::types::SystemNoticeBlock::RuntimeNotice { .. }
+        | crate::types::SystemNoticeBlock::Unknown { .. } => false,
+    }
+}
+
+/// Whether a row delta still contains media bytes that must cross the blob
+/// boundary before it can become a HeadCanonical durable row.
+///
+/// This is intentionally a pure classifier. A rewrite carrier cannot mutate
+/// retained graph bodies without invalidating their content-addressed
+/// revisions, so it must reject rather than silently externalize such a body.
+pub(crate) fn messages_have_inline_media(messages: &[Message]) -> bool {
+    messages.iter().any(|message| match message {
+        Message::User(user) => content_blocks_have_inline_media(&user.content),
+        Message::ToolResults { results, .. } => results
+            .iter()
+            .any(|result| content_blocks_have_inline_media(&result.content)),
+        Message::SystemNotice(notice) => notice
+            .blocks
+            .iter()
+            .any(system_notice_block_has_inline_media),
+        Message::System(_) | Message::BlockAssistant(_) => false,
+    })
+}
+
 /// [`externalize_messages_from`] that reports the lowest message index it
 /// actually rewrote (`None` = the buffer is unchanged).
 ///

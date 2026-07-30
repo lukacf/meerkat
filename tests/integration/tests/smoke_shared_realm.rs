@@ -3558,21 +3558,27 @@ async fn wait_for_session_context(
             .load(&session_id)
             .await?
             .ok_or_else(|| format!("session {session_id} disappeared"))?;
-        let context = serde_json::to_value(session.system_context_state())?;
-        let pending = context["pending"].as_array().cloned().unwrap_or_default();
+        let systems = session
+            .messages()
+            .iter()
+            .filter_map(|message| match message {
+                meerkat_core::Message::System(system) => Some(system.content.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
         if expected_fragments.iter().all(|fragment| {
-            pending
+            systems
                 .iter()
-                .filter(|append| append.to_string().contains(fragment))
+                .filter(|content| content.contains(fragment))
                 .count()
                 == 1
         }) {
-            return Ok(context);
+            return Ok(serde_json::to_value(systems)?);
         }
         if Instant::now() >= deadline {
             return Err(format!(
-                "timed out waiting for exact durable session context fragments \
-                 {expected_fragments:?}; context={context}"
+                "timed out waiting for exact durable System-message fragments \
+                 {expected_fragments:?}; systems={systems:?}"
             )
             .into());
         }

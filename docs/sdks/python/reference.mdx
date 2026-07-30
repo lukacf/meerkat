@@ -8,7 +8,7 @@ icon: "book"
 
 ```python
 from meerkat import CONTRACT_VERSION
-print(CONTRACT_VERSION)  # "0.8.10"
+print(CONTRACT_VERSION)  # "0.8.11"
 ```
 
 ## Primary handles
@@ -243,7 +243,7 @@ return value proves queue acceptance only; durable success is the later
 
 Pass a positive `seed_max_chars` to bound serialized seed messages and request
 a core-owned whole-turn suffix at open time. Omission preserves the complete
-seed; zero is rejected. The resolved root must fit; an existing compaction
+seed; zero is rejected. Every ordered System message must fit; an existing compaction
 summary may be retained, and any truncation reports degraded continuity.
 Canonical image identity, tombstone, and accounting sidecars remain complete.
 

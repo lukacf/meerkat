@@ -1197,7 +1197,7 @@ impl std::fmt::Display for SessionId {
 /// A message in the conversation history
 #[derive(Debug, Clone, PartialEq)]
 pub enum Message {
-    /// System prompt (injected at start)
+    /// Ordinary ordered System instruction, legal at any transcript position.
     System(SystemMessage),
     /// Typed synthetic/runtime system notice.
     SystemNotice(SystemNoticeMessage),
@@ -1397,90 +1397,68 @@ impl<'de> Deserialize<'de> for Message {
 #[serde(rename_all = "snake_case")]
 pub struct SystemMessage {
     pub content: String,
-    /// Typed provenance of the mutation that last produced this system message.
-    ///
-    /// This is the canonical replacement for `[Runtime System Context]`
-    /// string-prefix folklore in the transcript-continuity save-guard: a system
-    /// prompt produced by a runtime system-context append carries
-    /// [`SystemPromptMutationKind::RuntimeContextAppend`], so the guard admits the
-    /// append-shaped divergence from a typed field instead of classifying the
-    /// rendered prompt suffix by content.
-    #[serde(
-        default,
-        skip_serializing_if = "SystemPromptMutationKind::is_unspecified"
-    )]
-    pub mutation_kind: SystemPromptMutationKind,
     #[serde(default = "message_timestamp_now")]
     pub created_at: MessageTimestamp,
+    /// Optional control-ingress identity for an explicitly appended System
+    /// message.
+    ///
+    /// This metadata belongs to the message itself: it exists only to make an
+    /// append request exactly idempotent and is never projected to providers.
+    /// Ordinary System messages omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<SystemMessageIdentity>,
 }
 
 impl SystemMessage {
     pub fn new(content: impl Into<String>) -> Self {
         Self {
             content: content.into(),
-            mutation_kind: SystemPromptMutationKind::Unspecified,
             created_at: message_timestamp_now(),
+            identity: None,
         }
     }
 
-    /// Construct a system message tagging the typed provenance of the mutation
-    /// that produced it.
-    pub fn with_mutation_kind(
+    /// Construct one ordinary System message owned by a control append.
+    pub fn with_identity(
         content: impl Into<String>,
-        mutation_kind: SystemPromptMutationKind,
+        source: Option<String>,
+        idempotency_key: Option<String>,
+    ) -> Self {
+        Self::with_identity_at(content, source, idempotency_key, message_timestamp_now())
+    }
+
+    /// Construct an identity-bearing System message with an exact timestamp.
+    ///
+    /// The explicit timestamp is used only when a frozen persisted append is
+    /// adopted into the ordered transcript.
+    pub fn with_identity_at(
+        content: impl Into<String>,
+        source: Option<String>,
+        idempotency_key: Option<String>,
+        created_at: MessageTimestamp,
     ) -> Self {
         Self {
             content: content.into(),
-            mutation_kind,
-            created_at: message_timestamp_now(),
+            created_at,
+            identity: Some(SystemMessageIdentity {
+                source,
+                idempotency_key,
+            }),
         }
     }
 }
 
-/// Typed provenance class for the mutation that last produced a system prompt.
+/// Transport identity attached to one ordinary System transcript message.
 ///
-/// Carried on [`SystemMessage`] so the transcript-continuity save-guard reads a
-/// typed fact instead of classifying the rendered prompt by the
-/// `[Runtime System Context]` label. The default `Unspecified` covers system
-/// prompts seeded outside the durable-config mutation path (wire reconstruction,
-/// direct construction); the runtime context-append path stamps
-/// [`Self::RuntimeContextAppend`].
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+/// Keeping the identity on the message makes the transcript the singular
+/// durable owner: there is no parallel applied/pending prompt authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SystemPromptMutationKind {
-    /// No typed provenance was recorded for this system prompt.
-    #[default]
-    Unspecified,
-    /// A direct system-prompt mutation (caller-supplied prompt).
-    DirectMutation,
-    /// A build-time explicit system prompt.
-    ExplicitBuild,
-    /// A build-time default system prompt.
-    DefaultBuild,
-    /// A WASM build-time default system prompt.
-    WasmDefaultBuild,
-    /// A runtime system-context append (appends a `[Runtime System Context]`
-    /// block to the existing prompt).
-    RuntimeContextAppend,
-    /// A runtime-steer cleanup mutation (removes transient steer blocks).
-    RuntimeSteerCleanup,
-}
-
-impl SystemPromptMutationKind {
-    /// Whether this is the default (`Unspecified`) provenance. Used by
-    /// `skip_serializing_if` so untagged system prompts serialize without the
-    /// field.
-    #[must_use]
-    pub fn is_unspecified(&self) -> bool {
-        matches!(self, Self::Unspecified)
-    }
-
-    /// Whether this system prompt was produced by a runtime context append.
-    #[must_use]
-    pub fn is_runtime_context_append(&self) -> bool {
-        matches!(self, Self::RuntimeContextAppend)
-    }
+pub struct SystemMessageIdentity {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
 }
 
 /// Typed system notice content carried in the transcript.

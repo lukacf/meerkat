@@ -39,6 +39,20 @@ const TOOLS_TASKS_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::SchemaD
         name: "base-schema",
         apply: migration_0001_tasks_schema,
     }],
+    initialize_current: migration_0001_tasks_schema,
+    allowed_existing_versions: &[1],
+    released_predecessors: &[],
+    owned_objects: &[
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "tasks",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Index,
+            name: "tasks_session_idx",
+        },
+    ],
+    retired_objects: &[],
 };
 
 /// Per-operation connection: fence guard lives exactly as long as the
@@ -71,7 +85,7 @@ fn open_connection(path: &Path) -> Result<TaskConn, TaskError> {
         path,
         meerkat_sqlite::ConnectionProfile::PRIMARY,
         meerkat_sqlite::OpenOptions {
-            // Future-schema refusal precedes the Primary profile's WAL
+            // Schema-eligibility refusal precedes the Primary profile's WAL
             // conversion.
             schema_preflight: &[&TOOLS_TASKS_DOMAIN],
             ..meerkat_sqlite::OpenOptions::default()

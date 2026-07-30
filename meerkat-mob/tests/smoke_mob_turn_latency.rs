@@ -1,8 +1,8 @@
 #![cfg(all(feature = "integration-real-tests", not(target_arch = "wasm32")))]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //!
-//! Turn-latency size-independence gate for the mob runtime (turbo-s smoke
-//! lane), sibling to `smoke_mob_idle_burn`.
+//! Ordinary-turn HeadCanonical storage-cost gate for the mob runtime
+//! (turbo-s smoke lane), sibling to `smoke_mob_idle_burn`.
 //!
 //! The production defect this pins (measured 2026-07-25 on a live 0.8.6
 //! fleet): identical one-word-ACK turns took 60 seconds at a 14 MB session
@@ -11,31 +11,21 @@
 //! reloads that re-decode the full snapshot, and whole-blob persistence —
 //! is O(document) regardless of how small the turn's actual delta is.
 //!
-//! The asserted contract is SIZE INDEPENDENCE, not "faster than before":
-//! a threshold calibrated against today's cost rots, and "2x faster" still
-//! scales. Two members are grown to very different transcript sizes in the
-//! SAME process on the SAME machine, both are driven through N identical
-//! tiny turns, and the per-turn digest-preimage byte count of the large
-//! member must stay within a small constant factor of the small member's.
-//! An O(document) pass left on the turn boundary trips the ratio if (and
-//! only if) it feeds the canonical content-digest hasher; the gate doc on
-//! `e2e_smoke_mob_turn_digest_preimage_flatness_gate` lists the work this
-//! lane deliberately does NOT measure.
+//! The asserted contract is structural O(delta), not a calibrated large/small
+//! ratio. `SqliteSessionStore` and `SqliteRuntimeStore` share one database and
+//! the runtime explicitly selects `HeadCanonicalV1`. After both a ~256 KB and
+//! a ~10 MB fixture are durable, identical tiny ordinary turns must:
 //!
-//! The ASSERTED signal is canonical bytes hashed per turn
-//! (`meerkat_core::global_session_content_digest_bytes`, a process-wide
-//! atomic, so tokio workers and `spawn_blocking` threads are all counted):
-//! deterministic, content-driven, and immune to the false-green modes a
-//! time ratio permits — scheduler contention inflating the small side
-//! "improves" a wall/CPU ratio with zero real gain (observed live:
-//! 58.1x -> 17.2x from contention alone). Bytes are asserted BOTH
-//! absolutely (a small-side band pins the denominator against inflation)
-//! and relatively (the large side must stay within a small factor of the
-//! small side). Process CPU time and wall time per turn — the thing users
-//! actually feel — are printed as diagnostics but never asserted. The
-//! per-thread `session_content_digest_computations` counter is NOT used:
-//! it is `thread_local!` and under-counts from the test thread under the
-//! multi-threaded runtime.
+//! - perform zero whole-session encodes and only fixed delta-bounded content
+//!   hashing;
+//! - leave the whole-BLOB runtime snapshot table empty and retain only
+//!   head-canonical runtime authority;
+//! - append a fixed, tiny number and byte volume of canonical message rows;
+//! - grow the co-tenant database plus WAL by a fixed delta-sized envelope.
+//!
+//! These are absolute assertions with no ratio, denominator floor, or
+//! document-sized allowance. Process CPU and wall time are printed only as
+//! diagnostics.
 //!
 //! This test must stay ALONE in its test binary so no sibling test's CPU
 //! pollutes the measurement. No live provider is involved: members run
@@ -54,9 +44,10 @@ use meerkat_mob::{
 };
 use meerkat_session::PersistentSessionService;
 use meerkat_store::{MemoryBlobStore, SqliteSessionStore, StoreAdapter};
+use rusqlite::Connection;
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::TempDir;
@@ -86,37 +77,17 @@ const LARGE_SESSION_TURNS: usize = 4;
 /// nothing).
 const MIN_LARGE_GROWTH_BYTES: u64 = 8 * 1024 * 1024;
 
-/// Flatness tolerance: canonical bytes hashed per turn at ~10 MB must stay
-/// within K× the bytes per turn at ~256 KB, plus a fixed allowance. With
-/// turn cost truly independent of document size the ratio is ~1 (same fixed
-/// path, delta-only content), so K = 3 leaves headroom for legitimate
-/// O(delta) variance — while any O(document) boundary pass at a ~40× size
-/// ratio measures far above it. The fixed allowance exists because the
-/// flat-curve work drove the small-side denominator to ~0 hashed bytes per
-/// ordinary turn (recalibrated 2026-07-27, was ~6 MB/turn at calibration
-/// 2026-07-26): a pure ratio over a zero denominator rejects even one stray
-/// kilobyte, while the defect class this gate pins is whole-document passes
-/// — the allowance is far below one ~9 MB document pass, so a single
-/// O(document) regression still trips it. Bytes are deterministic, so
-/// unlike the retired CPU-ratio form this needs no scheduler-noise
-/// allowance.
-const MAX_LARGE_TO_SMALL_BYTES_RATIO: u64 = 3;
-const LARGE_DIGEST_FIXED_ALLOWANCE_BYTES: u64 = 4 * 1024 * 1024;
+/// Each scripted turn appends one tiny user row and one tiny assistant row.
+/// Fixed headroom admits typed notices without making the bound depend on the
+/// accumulated document.
+const MAX_COMMITTED_SUFFIX_ROWS_PER_TURN: u64 = 8;
+const MAX_COMMITTED_SUFFIX_BYTES_PER_TURN: u64 = 128 * 1024;
+const MAX_DIGEST_BYTES_PER_TURN: u64 = 128 * 1024;
 
-/// Sanity bounds that keep the flatness assertion honest (recalibrated
-/// 2026-07-27 for the flat-curve work; the former 1 MiB digest FLOOR is
-/// deliberately retired — ordinary turns now hash ~0 canonical bytes, which
-/// is the contract, not a broken instrument).
-///
-/// Instrument honesty moves to the ENCODE counter: the boundary contract
-/// still serializes the whole document once per boundary commit, so a
-/// fixture whose measured turns produced fewer serialized bytes than one
-/// small document per turn is not driving real boundary commits (hollow
-/// fixture / dead counters), and no digest conclusion drawn from it means
-/// anything. The digest CEILING still catches a small-side baseline that
-/// regressed or was inflated to launder the ratio.
-const SMALL_DIGEST_BYTES_PER_TURN_MAX: u64 = 4 * 1024 * 1024;
-const SMALL_ENCODE_BYTES_PER_TURN_MIN: u64 = 64 * 1024;
+/// Absolute co-tenant SQLite growth envelope. This is intentionally far below
+/// one copy of the ~10 MB fixture while leaving ample room for fixed-size
+/// runtime receipt/lifecycle rows and SQLite page framing.
+const MAX_DB_WAL_GROWTH_BYTES_PER_TURN: u64 = 2 * 1024 * 1024;
 
 const MEMBER_IDS: [&str; 3] = ["lead-1", "w-small", "w-large"];
 const SMALL_MEMBER_ID: &str = "w-small";
@@ -246,6 +217,118 @@ fn dir_size_bytes(root: &Path) -> u64 {
         .sum()
 }
 
+fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push(suffix);
+    PathBuf::from(value)
+}
+
+fn file_size_bytes(path: &Path) -> u64 {
+    fs::metadata(path).map_or(0, |metadata| metadata.len())
+}
+
+/// Main database plus WAL high-water. The SHM file is a fixed coordination
+/// artifact, not durable payload, and is deliberately excluded.
+fn sqlite_db_and_wal_bytes(path: &Path) -> u64 {
+    file_size_bytes(path).saturating_add(file_size_bytes(&sqlite_sidecar_path(path, "-wal")))
+}
+
+/// Start each measurement from a zero-length WAL so its final size is a useful
+/// absolute write-growth witness instead of a high-water inherited from
+/// fixture seeding or the previous member.
+fn truncate_sqlite_wal(path: &Path) {
+    let connection = Connection::open(path).expect("open co-tenant SQLite for WAL checkpoint");
+    connection
+        .busy_timeout(Duration::from_secs(30))
+        .expect("configure checkpoint busy timeout");
+    let journal_mode: String = connection
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .expect("read co-tenant SQLite journal mode");
+    assert!(
+        journal_mode.eq_ignore_ascii_case("wal"),
+        "DB+WAL growth probe requires WAL journal mode, found {journal_mode}"
+    );
+    let (busy, log_frames, checkpointed_frames): (i64, i64, i64) = connection
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .expect("truncate co-tenant SQLite WAL before measurement");
+    assert_eq!(
+        busy, 0,
+        "co-tenant SQLite WAL checkpoint was blocked: \
+         {log_frames} log frames / {checkpointed_frames} checkpointed"
+    );
+    drop(connection);
+    assert_eq!(
+        file_size_bytes(&sqlite_sidecar_path(path, "-wal")),
+        0,
+        "co-tenant SQLite WAL did not start the measurement at zero bytes"
+    );
+}
+
+/// Hold a read snapshot across the window so SQLite cannot recycle/checkpoint
+/// away frames before their high-water is observed. Ordinary writers remain
+/// unblocked in WAL mode.
+fn hold_sqlite_wal_snapshot(path: &Path) -> Connection {
+    let connection = Connection::open(path).expect("open co-tenant SQLite WAL probe");
+    connection
+        .busy_timeout(Duration::from_secs(30))
+        .expect("configure WAL probe busy timeout");
+    connection
+        .execute_batch("BEGIN DEFERRED;")
+        .expect("begin WAL probe read transaction");
+    let _: i64 = connection
+        .query_row("SELECT COUNT(*) FROM sqlite_schema", [], |row| row.get(0))
+        .expect("establish WAL probe read snapshot");
+    connection
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DurableStorageFacts {
+    canonical_message_rows: u64,
+    canonical_message_bytes: u64,
+    whole_blob_snapshot_rows: u64,
+    head_canonical_authority_rows: u64,
+    session_head_rows: u64,
+}
+
+fn query_u64(connection: &Connection, sql: &str) -> u64 {
+    let value: i64 = connection
+        .query_row(sql, [], |row| row.get(0))
+        .expect("read co-tenant SQLite storage-cost fact");
+    u64::try_from(value).expect("SQLite storage-cost fact must be non-negative")
+}
+
+fn durable_storage_facts(path: &Path) -> DurableStorageFacts {
+    let connection = Connection::open(path).expect("open co-tenant SQLite for storage facts");
+    DurableStorageFacts {
+        canonical_message_rows: query_u64(
+            &connection,
+            "SELECT COUNT(*) FROM session_strand_messages",
+        ),
+        canonical_message_bytes: query_u64(
+            &connection,
+            "SELECT COALESCE(SUM(length(message_json)), 0) FROM session_strand_messages",
+        ),
+        whole_blob_snapshot_rows: query_u64(
+            &connection,
+            "SELECT COUNT(*) FROM runtime_session_snapshots",
+        ),
+        head_canonical_authority_rows: query_u64(
+            &connection,
+            "SELECT COUNT(*) FROM runtime_session_authority \
+             WHERE persistence_profile = 'head_canonical_v1'",
+        ),
+        session_head_rows: query_u64(&connection, "SELECT COUNT(*) FROM session_heads"),
+    }
+}
+
+fn checked_fact_delta(after: u64, before: u64, label: &str) -> u64 {
+    after
+        .checked_sub(before)
+        .unwrap_or_else(|| panic!("co-tenant SQLite {label} retracted: {before} -> {after}"))
+}
+
 async fn wait_for_requests(capture: &CaptureClient, at_least: usize, what: &str) {
     let deadline = Instant::now() + Duration::from_secs(240);
     while capture.count() < at_least {
@@ -289,13 +372,22 @@ async fn quiesce(what: &str) {
 struct TurnCost {
     cpu_per_turn: Duration,
     wall_per_turn: Duration,
-    /// Canonical bytes hashed per turn (process-wide counter delta). The
-    /// asserted signal; CPU and wall are diagnostics.
-    digest_bytes_per_turn: u64,
-    /// Whole-session boundary-serialization output bytes per turn
-    /// (process-wide counter delta). A digest-flat turn can still hide an
-    /// O(document) reserialize that hashes nothing; this counter sees it.
-    encode_bytes_per_turn: u64,
+    /// Whole-document digest preimage bytes across the measurement window.
+    digest_bytes: u64,
+    /// Whole-session encode bytes across the measurement window.
+    encode_bytes: u64,
+    /// Newly committed canonical suffix rows across the window.
+    committed_suffix_rows: u64,
+    /// Serialized durable bytes in those suffix rows.
+    committed_suffix_bytes: u64,
+    /// Main co-tenant database + WAL size growth from a truncated-WAL start.
+    db_wal_growth_bytes: u64,
+    /// Runtime whole-BLOB snapshot rows after the window.
+    whole_blob_snapshot_rows: u64,
+    /// Runtime head-canonical authority rows after the window.
+    head_canonical_authority_rows: u64,
+    /// Canonical session-head rows after the window.
+    session_head_rows: u64,
 }
 
 /// Drive `MEASURED_TURNS` identical tiny turns at one member and return the
@@ -306,6 +398,7 @@ async fn measure_member_turns(
     handle: &MobHandle,
     capture: &CaptureClient,
     member_id: &str,
+    realm_db_path: &Path,
 ) -> TurnCost {
     quiesce(&format!("before measuring {member_id}")).await;
     let member = handle
@@ -313,6 +406,10 @@ async fn measure_member_turns(
         .await
         .expect("measured member handle");
 
+    truncate_sqlite_wal(realm_db_path);
+    let durable_start = durable_storage_facts(realm_db_path);
+    let db_wal_start = sqlite_db_and_wal_bytes(realm_db_path);
+    let wal_growth_probe = hold_sqlite_wal_snapshot(realm_db_path);
     let cpu_start = process_cpu_time();
     let digest_bytes_start = meerkat_core::global_session_content_digest_bytes();
     let encode_bytes_start = meerkat_core::global_session_encode_bytes();
@@ -334,42 +431,61 @@ async fn measure_member_turns(
     quiesce(&format!("after measuring {member_id}")).await;
     let cpu = process_cpu_time().saturating_sub(cpu_start);
     let wall = wall_start.elapsed();
-    let digest_bytes = meerkat_core::global_session_content_digest_bytes()
-        .saturating_sub(digest_bytes_start)
-        / MEASURED_TURNS as u64;
-    let encode_bytes = meerkat_core::global_session_encode_bytes()
-        .saturating_sub(encode_bytes_start)
-        / MEASURED_TURNS as u64;
+    let digest_bytes =
+        meerkat_core::global_session_content_digest_bytes().saturating_sub(digest_bytes_start);
+    let encode_bytes =
+        meerkat_core::global_session_encode_bytes().saturating_sub(encode_bytes_start);
+    let durable_end = durable_storage_facts(realm_db_path);
+    let db_wal_end = sqlite_db_and_wal_bytes(realm_db_path);
+    drop(wal_growth_probe);
+    let committed_suffix_rows = checked_fact_delta(
+        durable_end.canonical_message_rows,
+        durable_start.canonical_message_rows,
+        "canonical message-row count",
+    );
+    let committed_suffix_bytes = checked_fact_delta(
+        durable_end.canonical_message_bytes,
+        durable_start.canonical_message_bytes,
+        "canonical message-row bytes",
+    );
+    let db_wal_growth_bytes =
+        checked_fact_delta(db_wal_end, db_wal_start, "main database + WAL bytes");
     eprintln!(
-        "[turn-latency gate] {member_id}: {} MB canonicalized-and-hashed per turn",
-        digest_bytes / (1024 * 1024)
+        "[turn-storage gate] {member_id}: {} whole-document digest bytes, \
+         {} whole-session encode bytes over {MEASURED_TURNS} turns",
+        digest_bytes, encode_bytes,
     );
     let digest_sites_end = meerkat_core::digest_site_bytes();
     for (index, label) in meerkat_core::DIGEST_SITE_LABELS.iter().enumerate() {
         let site_bytes = digest_sites_end[index].saturating_sub(digest_sites_start[index])
             / MEASURED_TURNS as u64;
         eprintln!(
-            "[turn-latency gate]   {member_id} site {label}: {} MB per turn",
-            site_bytes / (1024 * 1024)
+            "[turn-storage gate]   {member_id} digest site {label}: {site_bytes} bytes per turn",
         );
     }
 
     eprintln!(
-        "[turn-latency gate] {member_id}: {} MB boundary-serialized per turn",
-        encode_bytes / (1024 * 1024)
+        "[turn-storage gate] {member_id}: {committed_suffix_rows} suffix rows / \
+         {committed_suffix_bytes} suffix bytes / {db_wal_growth_bytes} DB+WAL \
+         growth bytes over {MEASURED_TURNS} turns",
     );
 
     TurnCost {
         cpu_per_turn: cpu / MEASURED_TURNS as u32,
         wall_per_turn: wall / MEASURED_TURNS as u32,
-        digest_bytes_per_turn: digest_bytes,
-        encode_bytes_per_turn: encode_bytes,
+        digest_bytes,
+        encode_bytes,
+        committed_suffix_rows,
+        committed_suffix_bytes,
+        db_wal_growth_bytes,
+        whole_blob_snapshot_rows: durable_end.whole_blob_snapshot_rows,
+        head_canonical_authority_rows: durable_end.head_canonical_authority_rows,
+        session_head_rows: durable_end.session_head_rows,
     }
 }
 
-/// Shared harness: boots the 3-member mob, grows the fixtures, measures
-/// both members, asserts fixture validity and the small-side band, and
-/// returns the two measurements for the caller's own assertions.
+/// Shared harness: boots the 3-member mob, grows the fixtures, and asserts the
+/// same absolute HeadCanonical O(delta) contract at both document sizes.
 async fn run_turn_latency_harness() -> (TurnCost, TurnCost) {
     let temp = TempDir::new().expect("temp dir");
     let root = temp.path();
@@ -378,6 +494,7 @@ async fn run_turn_latency_harness() -> (TurnCost, TurnCost) {
     let project_root = root.join("project-root");
     let context_root = root.join("context-root");
     let stores_root = root.join("stores");
+    let realm_db_path = stores_root.join("realm.db");
     let mob_db_path = root.join("mob.db");
     for dir in [&project_root, &context_root, &stores_root] {
         fs::create_dir_all(dir).expect("create turn-gate roots");
@@ -398,8 +515,8 @@ async fn run_turn_latency_harness() -> (TurnCost, TurnCost) {
     // turn while the ~256 KB member never does, so the two windows measure
     // different operations. A compaction turn is inherently O(document) at
     // least once — the rebuilt transcript must be hashed and persisted — so
-    // "flat compaction" is not a coherent contract; the flatness contract is
-    // the ORDINARY turn (exactly the production defect shape: the live
+    // this gate targets the ORDINARY turn (exactly the production defect
+    // shape: the live
     // 60 s/180 s one-word turns were not compacting). Raising the threshold
     // far above both fixtures makes both windows measure the identical
     // append-boundary operation. The compaction path's own ~6x redundancy
@@ -407,18 +524,18 @@ async fn run_turn_latency_harness() -> (TurnCost, TurnCost) {
     // rewrite-commit tests.
     config.compaction.auto_compact_threshold = 50_000_000;
     let mut builder = FactoryAgentBuilder::new(factory, config);
-    // Production shape: an INCREMENTAL SQLite session store (so boundary
-    // saves take the O(delta)-rows projection branch — the path the fix
-    // must make flat) and a SQLite runtime store (whole-blob snapshot
-    // commits with their decode + save-guard costs).
+    // Production HomeCore shape: session rows and runtime authority share one
+    // SQLite transaction domain, and the runtime profile is explicitly
+    // HeadCanonical. Separate files would make an atomic O(delta) boundary
+    // impossible and silently exercise the WholeBlob compatibility path.
     let store =
-        Arc::new(SqliteSessionStore::open(stores_root.join("sessions.db")).expect("session store"));
+        Arc::new(SqliteSessionStore::open(&realm_db_path).expect("co-tenant SQLite session store"));
     builder.default_session_store = Some(Arc::new(StoreAdapter::new(store.clone())));
 
     let store_dyn: Arc<dyn meerkat::SessionStore> = store;
     let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> = Arc::new(
-        meerkat_runtime::SqliteRuntimeStore::new(stores_root.join("runtime.db"))
-            .expect("runtime store"),
+        meerkat_runtime::SqliteRuntimeStore::new_head_canonical(&realm_db_path)
+            .expect("co-tenant HeadCanonical runtime store"),
     );
     let blob_store: Arc<dyn meerkat_core::BlobStore> = Arc::new(MemoryBlobStore::default());
     let service = Arc::new(PersistentSessionService::new(
@@ -531,7 +648,7 @@ async fn run_turn_latency_harness() -> (TurnCost, TurnCost) {
         sleep(Duration::from_millis(250)).await;
     };
     eprintln!(
-        "[turn-latency gate] durable stores: {:.2} MB after small seed, {:.2} MB after large growth",
+        "[turn-storage gate] durable stores: {:.2} MB after small seed, {:.2} MB after large growth",
         baseline_store_bytes as f64 / (1024.0 * 1024.0),
         grown_store_bytes as f64 / (1024.0 * 1024.0),
     );
@@ -539,16 +656,16 @@ async fn run_turn_latency_harness() -> (TurnCost, TurnCost) {
     // Measure both fixtures in the same process, back to back: small first,
     // then large. Each window is quiesce-bracketed so trailing boundary
     // persistence is attributed to its own fixture.
-    let small = measure_member_turns(&handle, &capture, SMALL_MEMBER_ID).await;
+    let small = measure_member_turns(&handle, &capture, SMALL_MEMBER_ID, &realm_db_path).await;
     eprintln!(
-        "[turn-latency gate] small (~{} KB doc): {:?} CPU / {:?} wall per turn over {MEASURED_TURNS} turns",
+        "[turn-storage gate] small (~{} KB doc): {:?} CPU / {:?} wall per turn over {MEASURED_TURNS} turns",
         SMALL_SEED_INPUT_BYTES / 1024,
         small.cpu_per_turn,
         small.wall_per_turn,
     );
-    let large = measure_member_turns(&handle, &capture, LARGE_MEMBER_ID).await;
+    let large = measure_member_turns(&handle, &capture, LARGE_MEMBER_ID, &realm_db_path).await;
     eprintln!(
-        "[turn-latency gate] large (~{} MB doc): {:?} CPU / {:?} wall per turn over {MEASURED_TURNS} turns",
+        "[turn-storage gate] large (~{} MB doc): {:?} CPU / {:?} wall per turn over {MEASURED_TURNS} turns",
         (LARGE_TURN_INPUT_BYTES * LARGE_SESSION_TURNS) / (1024 * 1024),
         large.cpu_per_turn,
         large.wall_per_turn,
@@ -557,131 +674,106 @@ async fn run_turn_latency_harness() -> (TurnCost, TurnCost) {
     let cpu_ratio = large.cpu_per_turn.as_secs_f64() / small.cpu_per_turn.as_secs_f64().max(1e-9);
     let wall_ratio =
         large.wall_per_turn.as_secs_f64() / small.wall_per_turn.as_secs_f64().max(1e-9);
-    let bytes_ratio =
-        large.digest_bytes_per_turn as f64 / (small.digest_bytes_per_turn.max(1)) as f64;
     eprintln!(
-        "[turn-latency gate] per-turn large/small: {bytes_ratio:.1}x bytes (ASSERTED), \
-         {cpu_ratio:.1}x CPU (diagnostic), {wall_ratio:.1}x wall (diagnostic)",
+        "[turn-storage gate] per-turn large/small: {cpu_ratio:.1}x CPU / \
+         {wall_ratio:.1}x wall (diagnostic only)",
     );
 
-    // Denominator honesty (recalibrated 2026-07-27): the small-side digest
-    // baseline may be ~0 (that IS the flat contract) but must stay under its
-    // ceiling — a regressed or deliberately inflated baseline launders the
-    // ratio. Instrument honesty rides the encode counter: each measured turn
-    // must have produced at least one small document's worth of boundary
-    // serialization, or the fixture drove no real boundary commits and no
-    // digest conclusion means anything.
-    assert!(
-        small.digest_bytes_per_turn <= SMALL_DIGEST_BYTES_PER_TURN_MAX,
-        "small-side digest baseline regressed: {} bytes hashed per turn at \
-         the ~256 KB member (ceiling {SMALL_DIGEST_BYTES_PER_TURN_MAX}; large side \
-         measured {} bytes per turn). Fix the baseline first, or recalibrate \
-         deliberately with a comment",
-        small.digest_bytes_per_turn,
-        large.digest_bytes_per_turn,
-    );
-    assert!(
-        small.encode_bytes_per_turn >= SMALL_ENCODE_BYTES_PER_TURN_MIN,
-        "instrument honesty: the small member serialized only {} bytes per \
-         measured turn (floor {SMALL_ENCODE_BYTES_PER_TURN_MIN}). The boundary \
-         contract serializes the whole document once per commit, so this \
-         fixture is not driving real boundary work and the flatness ratio \
-         proves nothing",
-        small.encode_bytes_per_turn,
-    );
-
-    // Boundary-serialization envelope backstop (per fixture, NOT a flatness
-    // claim): the boundary contract still legitimately serializes the whole
-    // document once per boundary commit, so encode bytes per turn are
-    // O(document) by design — the one deliberately retained O(document)
-    // axis (SessionDelta-style incremental persistence is tracked
-    // separately). The envelope catches the pathological class on top of
-    // that — per-message reserialize loops, repeated whole-document
-    // persists. DIGEST-PREIMAGE flatness is asserted by the ratio gate in
-    // `e2e_smoke_mob_turn_digest_preimage_flatness_gate`.
-    let small_doc_bytes = SMALL_SEED_INPUT_BYTES as u64;
-    let large_doc_bytes = (LARGE_TURN_INPUT_BYTES * LARGE_SESSION_TURNS) as u64;
-    for (label, cost, doc_bytes) in [
-        ("small", &small, small_doc_bytes),
-        ("large", &large, large_doc_bytes),
-    ] {
-        // 6x headroom over the document: one boundary serialize plus JSON
-        // expansion plus incidental snapshot writes (and an 8 MB floor so
-        // the tiny fixture's fixed overheads never trip it). A
-        // per-message-reserialize regression blows far past it.
-        let envelope = doc_bytes.saturating_mul(6).max(8 * 1024 * 1024);
+    for (label, cost) in [("small", &small), ("large", &large)] {
+        let maximum_digest_bytes =
+            (MEASURED_TURNS as u64).saturating_mul(MAX_DIGEST_BYTES_PER_TURN);
         assert!(
-            cost.encode_bytes_per_turn <= envelope,
-            "boundary serialization at the {label} member wrote {} bytes per \
-             turn, above its per-fixture envelope of {envelope} (document \
-             ~{doc_bytes} bytes). This is the repeated-reserialize backstop, \
-             not a flatness gate — investigate what serializes the document \
-             more than once per boundary",
-            cost.encode_bytes_per_turn,
+            cost.digest_bytes <= maximum_digest_bytes,
+            "ordinary HeadCanonical turns at the {label} member hashed {} \
+             content-digest bytes, above the fixed {maximum_digest_bytes}-byte \
+             delta envelope; this path must use retained digest/row-prefix \
+             authority without a document-sized verification pass",
+            cost.digest_bytes,
+        );
+        assert_eq!(
+            cost.encode_bytes, 0,
+            "ordinary HeadCanonical turns at the {label} member encoded {} \
+             whole-session bytes; the typed prepared boundary must have no \
+             WholeBlob representation or fallback",
+            cost.encode_bytes,
+        );
+        assert_eq!(
+            cost.whole_blob_snapshot_rows, 0,
+            "ordinary HeadCanonical turns at the {label} member left {} \
+             runtime whole-BLOB snapshot rows in the fresh co-tenant realm",
+            cost.whole_blob_snapshot_rows,
+        );
+        assert!(
+            cost.head_canonical_authority_rows >= MEMBER_IDS.len() as u64,
+            "ordinary HeadCanonical turns at the {label} member expose only {} \
+             head-canonical runtime authorities for {} active members",
+            cost.head_canonical_authority_rows,
+            MEMBER_IDS.len(),
+        );
+        assert!(
+            cost.session_head_rows >= MEMBER_IDS.len() as u64,
+            "ordinary HeadCanonical turns at the {label} member expose only {} \
+             canonical session heads for {} active members",
+            cost.session_head_rows,
+            MEMBER_IDS.len(),
+        );
+
+        let minimum_suffix_rows = (MEASURED_TURNS as u64).saturating_mul(2);
+        let maximum_suffix_rows =
+            (MEASURED_TURNS as u64).saturating_mul(MAX_COMMITTED_SUFFIX_ROWS_PER_TURN);
+        assert!(
+            cost.committed_suffix_rows >= minimum_suffix_rows,
+            "instrument honesty: {MEASURED_TURNS} completed turns at the {label} \
+             member committed only {} canonical suffix rows (expected at least \
+             one user + one assistant row per turn)",
+            cost.committed_suffix_rows,
+        );
+        assert!(
+            cost.committed_suffix_rows <= maximum_suffix_rows,
+            "ordinary HeadCanonical turns at the {label} member committed {} \
+             canonical suffix rows, above the fixed {maximum_suffix_rows}-row \
+             envelope",
+            cost.committed_suffix_rows,
+        );
+        let maximum_suffix_bytes =
+            (MEASURED_TURNS as u64).saturating_mul(MAX_COMMITTED_SUFFIX_BYTES_PER_TURN);
+        assert!(
+            cost.committed_suffix_bytes > 0 && cost.committed_suffix_bytes <= maximum_suffix_bytes,
+            "ordinary HeadCanonical turns at the {label} member committed {} \
+             canonical suffix bytes; expected a non-empty delta no larger than \
+             the fixed {maximum_suffix_bytes}-byte envelope",
+            cost.committed_suffix_bytes,
+        );
+        let maximum_db_wal_growth =
+            (MEASURED_TURNS as u64).saturating_mul(MAX_DB_WAL_GROWTH_BYTES_PER_TURN);
+        assert!(
+            cost.db_wal_growth_bytes <= maximum_db_wal_growth,
+            "ordinary HeadCanonical turns at the {label} member grew the \
+             co-tenant database + WAL by {} bytes, above the fixed \
+             {maximum_db_wal_growth}-byte delta envelope",
+            cost.db_wal_growth_bytes,
         );
     }
 
-    handle.shutdown().await.expect("shutdown turn-latency mob");
+    handle.shutdown().await.expect("shutdown turn-storage mob");
     (small, large)
 }
 
-/// Smoke-lane gate: fixture validity, instrument honesty (small-side band),
-/// the repeated-reserialize envelope, AND digest-preimage flatness — an
-/// identical tiny turn must feed the canonical content-digest hasher
-/// (`global_session_content_digest_bytes`) a document-size-independent byte
-/// volume whether the accumulated document is ~256 KB or ~10 MB. Only
-/// O(document) passes that reach that hasher (whole-document canonical
-/// serialize-and-digest on the turn boundary) trip the ratio.
+/// Smoke-lane gate for the real shared-file HeadCanonical boundary.
 ///
-/// Deliberately NOT measured — a regression confined to any of these does
-/// not trip this gate:
-/// - non-canonical hashing (e.g. raw byte-bound memo keys over serialized
-///   bytes) and plain buffer copies/clones;
-/// - snapshot/graph decodes served by the process-global validated-graph
-///   decode memo (a true cross-process cold decode re-validates and WOULD
-///   hash; this same-process harness may memo-hit instead);
-/// - session/runtime store READ volume and BLOB equality comparisons;
-/// - WAL/disk write bytes;
-/// - boundary ENCODE bytes: whole-document serialization per boundary
-///   commit is explicitly permitted O(document) and only bounded by the
-///   per-fixture repeated-reserialize envelope in the shared harness;
-/// - CPU and wall time (printed as diagnostics, never asserted).
+/// At both fixture sizes it asserts fixed delta-bounded digest bytes, zero
+/// whole-session encode bytes, zero durable whole-BLOB snapshots,
+/// head-canonical authority presence, bounded committed suffix rows/bytes,
+/// and bounded main-DB + WAL growth. CPU and wall remain diagnostic only.
 ///
-/// Armed in-lane with the 0.8.9 flat-curve work (witness-v3
-/// revision-identity witness, producer-seeded decode memo, seal-retyped
-/// save guards, framed checkpoint midstate, compaction-commit digest
-/// reuse); the former `mob_turn_flatness_red_by_design` out-of-lane split
-/// is retired.
+/// Two dynamic blind spots remain explicit because production exposes no
+/// process-wide probe for them: a read-only attempt to consult a whole-BLOB
+/// fallback, and full `Session`/history clone or materialization counts. The
+/// disjoint HeadCanonical boundary carrier makes the former a typed error;
+/// this gate additionally proves that no fallback document is encoded or
+/// durably written.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "lane:e2e-smoke"]
-async fn e2e_smoke_mob_turn_digest_preimage_flatness_gate() {
-    let (small, large) = run_turn_latency_harness().await;
-    let bytes_ratio =
-        large.digest_bytes_per_turn as f64 / (small.digest_bytes_per_turn.max(1)) as f64;
-    let digest_preimage_flatness_budget = small
-        .digest_bytes_per_turn
-        .saturating_mul(MAX_LARGE_TO_SMALL_BYTES_RATIO)
-        .saturating_add(LARGE_DIGEST_FIXED_ALLOWANCE_BYTES);
-    assert!(
-        large.digest_bytes_per_turn <= digest_preimage_flatness_budget,
-        "canonical digest-preimage bytes per turn scale with document size: \
-         {} bytes hashed per turn at the ~10 MB member vs {} bytes at the \
-         ~256 KB member ({bytes_ratio:.1}x; budget \
-         {MAX_LARGE_TO_SMALL_BYTES_RATIO}x + \
-         {LARGE_DIGEST_FIXED_ALLOWANCE_BYTES} = \
-         {digest_preimage_flatness_budget}; diagnostics: CPU {:?} vs {:?}, \
-         wall {:?} vs {:?}). The pinned contract is exactly this: an \
-         identical tiny turn must feed the canonical content-digest hasher \
-         a document-size-independent byte volume — some O(document) \
-         serialize-and-digest pass is back on the turn boundary (use the \
-         per-site split printed above to name it). This gate observes ONLY \
-         digest-preimage bytes; work it deliberately does not measure is \
-         listed in the gate doc comment",
-        large.digest_bytes_per_turn,
-        small.digest_bytes_per_turn,
-        large.cpu_per_turn,
-        small.cpu_per_turn,
-        large.wall_per_turn,
-        small.wall_per_turn,
-    );
+async fn e2e_smoke_mob_turn_head_canonical_storage_cost_gate() {
+    let _ = run_turn_latency_harness().await;
 }

@@ -987,6 +987,7 @@ class MeerkatClient:
         prompt: str | list[ContentBlock],
         *,
         injected_context: list[str | list[ContentBlock]] | None = None,
+        transient_turn_context: str | None = None,
         model: str | None = None,
         provider: str | None = None,
         auth_binding: dict[str, str] | None = None,
@@ -1029,6 +1030,7 @@ class MeerkatClient:
         params = self._build_create_params(
             prompt,
             injected_context=injected_context,
+            transient_turn_context=transient_turn_context,
             model=model,
             provider=provider,
             auth_binding=auth_binding,
@@ -1066,6 +1068,7 @@ class MeerkatClient:
         prompt: str | list[ContentBlock],
         *,
         injected_context: list[str | list[ContentBlock]] | None = None,
+        transient_turn_context: str | None = None,
         model: str | None = None,
         provider: str | None = None,
         auth_binding: dict[str, str] | None = None,
@@ -1112,6 +1115,7 @@ class MeerkatClient:
         params = self._build_create_params(
             prompt,
             injected_context=injected_context,
+            transient_turn_context=transient_turn_context,
             model=model,
             provider=provider,
             auth_binding=auth_binding,
@@ -1364,7 +1368,7 @@ class MeerkatClient:
         source: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Inject system context into a session."""
+        """Append one ordinary durable System message to a session."""
         _rpc_signature: RpcInjectSystemContextParams | RpcInjectSystemContextResult
         params = {
             "session_id": session_id,
@@ -3068,6 +3072,7 @@ class MeerkatClient:
         turn_tool_overlay: PublicTurnToolOverlay | None = None,
         additional_instructions: list[str] | None = None,
         injected_context: list[WireContentInput] | None = None,
+        transient_turn_context: str | None = None,
         keep_alive: bool | None = None,
         model: str | None = None,
         provider: str | None = None,
@@ -3103,6 +3108,7 @@ class MeerkatClient:
             turn_tool_overlay=turn_tool_overlay,
             additional_instructions=additional_instructions,
             injected_context=injected_context,
+            transient_turn_context=transient_turn_context,
             keep_alive=keep_alive,
             model=model,
             provider=provider,
@@ -3590,6 +3596,7 @@ class MeerkatClient:
         work_ref: str | None = None,
         origin: WorkOrigin = "external",
         injected_context: list[WireContentInput] | None = None,
+        transient_turn_context: str | None = None,
         objective_id: str | None = None,
     ) -> dict[str, Any]:
         """Submit a unit of work to a mob member through the work lane.
@@ -3615,6 +3622,8 @@ class MeerkatClient:
             params["work_ref"] = work_ref
         if injected_context:
             params["injected_context"] = injected_context
+        if transient_turn_context is not None:
+            params["transient_turn_context"] = transient_turn_context
         if objective_id is not None:
             params["objective_id"] = objective_id
         return await self._request("mob/submit_work", params)
@@ -3864,6 +3873,7 @@ class MeerkatClient:
         prompt: str | list[ContentBlock],
         *,
         injected_context: list[str | list[ContentBlock]] | None = None,
+        transient_turn_context: str | None = None,
         skill_refs: list[SkillRef] | None = None,
         turn_tool_overlay: PublicTurnToolOverlay | None = None,
         additional_instructions: list[str] | None = None,
@@ -3880,6 +3890,8 @@ class MeerkatClient:
         params: dict[str, Any] = {"session_id": session_id, "prompt": prompt}
         if injected_context is not None:
             params["injected_context"] = injected_context
+        if transient_turn_context is not None:
+            params["transient_turn_context"] = transient_turn_context
         wire_refs = _skill_refs_to_wire(skill_refs)
         if wire_refs is not None:
             params["skill_refs"] = wire_refs
@@ -3914,6 +3926,7 @@ class MeerkatClient:
         prompt: str | list[ContentBlock],
         *,
         injected_context: list[str | list[ContentBlock]] | None = None,
+        transient_turn_context: str | None = None,
         skill_refs: list[SkillRef] | None = None,
         turn_tool_overlay: PublicTurnToolOverlay | None = None,
         additional_instructions: list[str] | None = None,
@@ -3937,6 +3950,8 @@ class MeerkatClient:
         params: dict[str, Any] = {"session_id": session_id, "prompt": prompt}
         if injected_context is not None:
             params["injected_context"] = injected_context
+        if transient_turn_context is not None:
+            params["transient_turn_context"] = transient_turn_context
         wire_refs = _skill_refs_to_wire(skill_refs)
         if wire_refs is not None:
             params["skill_refs"] = wire_refs
@@ -4736,6 +4751,7 @@ class MeerkatClient:
         prompt: str | list[ContentBlock],
         *,
         injected_context: list[str | list[ContentBlock]] | None = None,
+        transient_turn_context: str | None = None,
         model: str | None = None,
         provider: str | None = None,
         auth_binding: dict[str, str] | None = None,
@@ -4767,6 +4783,8 @@ class MeerkatClient:
         params: dict[str, Any] = {"prompt": prompt}
         if injected_context is not None:
             params["injected_context"] = injected_context
+        if transient_turn_context is not None:
+            params["transient_turn_context"] = transient_turn_context
         if model:
             params["model"] = model
         if provider:
@@ -4858,7 +4876,7 @@ class MeerkatClient:
 
     @staticmethod
     def _parse_wire_append_system_context_status(raw: Any, context: str) -> str:
-        if isinstance(raw, str) and raw in {"staged", "duplicate"}:
+        if isinstance(raw, str) and raw in {"applied", "duplicate"}:
             return raw
         raise MeerkatError("INVALID_RESPONSE", context)
 

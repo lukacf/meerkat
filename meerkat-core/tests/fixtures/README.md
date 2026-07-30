@@ -1,10 +1,16 @@
-# N-1 evidence corpus — scope and honest limits
+# Historical digest vectors — not an upgrade-compatibility corpus
 
-## What this corpus IS
+## Supported release boundary
 
-Three files capturing **one tiny session document, in two projections, as
-serialized by real meerkat-core 0.8.8 code** (never minted by the code under
-test):
+The 0.8.11 release supports upgrades from **Meerkat 0.8.10**. There are no
+supported deployments on older Meerkat releases, so these files are not a
+backward-compatibility promise and must not gate preservation of pre-0.8.10
+storage shapes.
+
+## What these vectors are
+
+Three historical files capture **one tiny session document, in two
+projections, serialized by meerkat-core 0.8.8 code**:
 
 | File | Contents |
 |------|----------|
@@ -12,17 +18,15 @@ test):
 | `v0_8_8_slim_session.json` | Head-canonical slim row of the SAME session (out-of-line witness carrier) |
 | `v0_8_8_manifest.json` | The 0.8.8-recorded `checkpoint_digest` + `history_witness` values and session id |
 
-Consumed by `meerkat-core/tests/witness_v3_migration.rs`
-(`v2_evidence_keeps_verifying_under_the_v3_binary` and the downgrade-door
-tests): it pins exactly one contract — **0.8.8-minted v2 digest evidence
-keeps verifying, byte-for-byte, under the current (v3-writing) binary**, with
-no flag day for mixed stores.
+They are retained only as forensic reference. No current test or ordinary
+Session loader consumes them, because 0.8.11 does not support a 0.8.8 upgrade
+boundary. Production release evidence starts from the exact 0.8.10 importer
+and complete-realm fixtures described below.
 
-## What this corpus is NOT
+## What these vectors do not prove
 
-This is **not** an upgrade-boundary corpus, and green tests over it must not
-be read as upgrade-boundary coverage. It contains **none** of what a real N-1
-realm carries on disk:
+Green tests over this directory do not establish any release upgrade
+boundary. The vectors contain:
 
 - **No SQLite files at all** — no `sessions.db` / `runtime.db` /
   `runtime.sqlite3`, no `meerkat_schema` migration-ledger rows, no table
@@ -40,48 +44,57 @@ realm carries on disk:
   resume-refresh rewrite chains, no provider `ProviderMeta`, none of the
   multi-MB revision graphs where the 0.8.x defects actually lived.
 
-Concretely: both 0.8.8→0.8.9 upgrade-boundary defects shipped in a release
-whose fixture-level suites were green, and were caught only by restoring a
-**full production realm dump** (the HomeCore dump gate — legacy-tail
-adoption and the verified-evolution erase-guard refusal; see task history
-for 0.8.10). This corpus could not have caught either.
+The historical filenames remain because they describe where the known-answer
+bytes came from. They do not declare that release supported.
 
-## What a full N-1 realm fixture needs
+## OB3 0.8.10 recovery-migration stamp
 
-A corpus that actually covers the upgrade boundary is a **complete realm
-state root** captured by the previous release's binaries:
+`v0_8_10_ob3_recovery_migration_session.json` is an exact, immutable
+52,693-byte session document minted by Meerkat 0.8.10 and explicitly
+authorized by OB3 for this corpus. It contains system content only. Its
+SHA-256 is
+`43e49a7b216cf61f6ba8f289824c9d6e24a64a81d873f9eb4a09c5b3f6f0cd98`;
+the adjacent `.provenance.json` binds the producer, classification, session
+identity, and expected checkpoint facts.
 
-1. session store (SQLite) with several sessions, at least one carrying a
-   compaction rewrite and a chain of resume-system-prompt-refresh commits;
+This artifact pins the production-relevant
+`RecoveryMigration` + `authority_base.kind = legacy` stamp shape. It carries
+neither a transcript-history graph nor an out-of-line witness, so it cannot
+serve as evidence for the separate v2/v3 witness-before-transcode ordering.
+That axis still requires a released graph-bearing artifact or another
+proof-observable acceptance seam; this fixture must not be stretched to
+certify facts absent from its bytes.
+
+The shape is accepted only by the explicit one-time 0.8.10 importer. The
+frozen verifier runs before the importer strips the stamp and returns ordinary
+domain state plus a single-use store-adoption receipt. Current Session decode
+and current writers do not interpret or mint this checkpoint vocabulary.
+
+## 0.8.10 → 0.8.11 release evidence
+
+Upgrade evidence for this release must use a **complete realm state root
+captured by the 0.8.10 binaries**:
+
+1. session store (SQLite) with several sessions, binding any compaction and
+   resume-system-prompt-refresh rewrite commits the released realm contains;
 2. runtime store rows for live and idle sessions (snapshots, lifecycle
    records, receipts, input states — including an accepted-but-unconsumed
    input);
 3. the event log with rewrite-audit envelopes matching (2);
 4. blob store content referenced by the sessions;
-5. realm manifest + `meerkat_schema` ledger rows exactly as the N-1 binary
+5. realm manifest + `meerkat_schema` ledger rows exactly as 0.8.10
    left them;
 6. a manifest of expected post-upgrade invariants (session ids, digests,
    message counts) to assert after the current binary opens the realm.
 
-## Capture sketch (cheap path)
+## Released-realm corpus
 
-No dedicated capture script exists yet. The cheap version, using only
-shipping tools:
+The capture/import contract and consuming recovery test live under
+`meerkat-runtime/tests/fixtures/v0_8_10_released_realm`. That harness refuses
+current-source generated or production-redacted bytes, binds the released
+producer by version and SHA-256, verifies the raw 0.8.10 ledger/invariants
+before import, and opens only a temporary copy with the current stores.
 
-```bash
-# with the N-1 release binary (e.g. cargo install rkat --version =0.8.8):
-export REALM_ROOT=$(mktemp -d)
-rkat --state-root "$REALM_ROOT" --realm fixture-realm run "seed turn one"
-rkat --state-root "$REALM_ROOT" --realm fixture-realm resume last "seed turn two"
-# ... drive enough turns/resumes to mint refresh rewrites and a compaction ...
-rkat --state-root "$REALM_ROOT" storage doctor   # read-only: record the diagnosis
-tar -C "$REALM_ROOT" -cf v0_8_x_realm.tar .      # the fixture is the whole state root
-```
-
-plus a small generator that records the expected invariants (ids, digests,
-counts) into a manifest the consuming test asserts. `rkat storage doctor` is
-read-only and safe to run on the capture both before and after upgrade;
-`rkat session list`/`rkat blob` can enumerate expected contents for the
-manifest.
-
-Until that exists, treat this directory as digest-evidence coverage only.
+Until its real `corpus/` directory is populated from the HomeCore released
+artifact, this directory remains historical digest-vector coverage only and
+the released-realm recovery test fails as an explicit release blocker.

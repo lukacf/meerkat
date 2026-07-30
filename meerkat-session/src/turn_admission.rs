@@ -16,8 +16,7 @@ use meerkat_core::lifecycle::RuntimeExecutionKind;
 
 mod authority {
     pub(crate) use crate::generated::session_turn_admission::{
-        RuntimeKeepAlivePersistenceDecision, RuntimeKeepAliveRequest,
-        RuntimeSystemContextApplicationAuthorization, SessionTurnAdmissionEffect,
+        RuntimeKeepAlivePersistenceDecision, RuntimeKeepAliveRequest, SessionTurnAdmissionEffect,
         SessionTurnAdmissionMachineAuthority, StartTurnDispatchAuthorization, StartTurnDisposition,
         StartTurnExecutionKind, StartTurnPublicTerminal, TurnAdmissionPhase,
         TurnAdmissionShutdownTerminal,
@@ -26,7 +25,6 @@ mod authority {
 
 pub(crate) use authority::RuntimeKeepAlivePersistenceDecision;
 pub(crate) use authority::RuntimeKeepAliveRequest;
-pub(crate) use authority::RuntimeSystemContextApplicationAuthorization;
 pub(crate) use authority::StartTurnDispatchAuthorization;
 pub(crate) use authority::StartTurnDisposition;
 pub(crate) use authority::StartTurnPublicTerminal;
@@ -504,36 +502,6 @@ impl TurnAdmissionSlot {
         Ok(RuntimeKeepAliveOutcome::Decided(decision))
     }
 
-    /// Ask the machine whether a runtime system-context application is
-    /// authorized in the current phase. Returns `Authorized` in all live
-    /// phases and `SessionArchived` in `ShuttingDown`.
-    pub(crate) fn authorize_runtime_system_context_application(
-        &mut self,
-    ) -> Result<RuntimeSystemContextApplicationAuthorization, TurnAdmissionError> {
-        let from = self.phase();
-        let effects = self
-            .authority
-            .authorize_runtime_system_context_application()
-            .map_err(|_| TurnAdmissionError {
-                from,
-                op: "authorize_runtime_system_context_application",
-            })?;
-        effects
-            .iter()
-            .find_map(|effect| {
-                match effect {
-                authority::SessionTurnAdmissionEffect::RuntimeSystemContextApplicationResolved {
-                    authorization,
-                } => Some(*authorization),
-                _ => None,
-            }
-            })
-            .ok_or(TurnAdmissionError {
-                from,
-                op: "authorize_runtime_system_context_application",
-            })
-    }
-
     /// Signal to the machine that the shell has finished draining queued
     /// admission work. Closes the `admission_drain_pending` obligation minted
     /// when the machine entered `ShuttingDown`.
@@ -910,9 +878,8 @@ mod tests {
 mod shutdown_drain_machine_tests {
     use crate::generated::session_turn_admission::{
         PendingContinuationDisposition, RuntimeKeepAlivePersistenceDecision,
-        RuntimeKeepAliveRequest, RuntimeSystemContextApplicationAuthorization,
-        SessionTurnAdmissionEffect, SessionTurnAdmissionMachineAuthority, StartTurnExecutionKind,
-        TurnAdmissionPhase, TurnAdmissionShutdownTerminal,
+        RuntimeKeepAliveRequest, SessionTurnAdmissionEffect, SessionTurnAdmissionMachineAuthority,
+        StartTurnExecutionKind, TurnAdmissionPhase, TurnAdmissionShutdownTerminal,
     };
 
     fn drain_requested(effects: &[SessionTurnAdmissionEffect]) -> bool {
@@ -938,17 +905,6 @@ mod shutdown_drain_machine_tests {
     fn projected_phase(effects: &[SessionTurnAdmissionEffect]) -> Option<TurnAdmissionPhase> {
         effects.iter().find_map(|effect| match effect {
             SessionTurnAdmissionEffect::TurnAdmissionProjected { phase, .. } => Some(*phase),
-            _ => None,
-        })
-    }
-
-    fn context_application_authorization(
-        effects: &[SessionTurnAdmissionEffect],
-    ) -> Option<RuntimeSystemContextApplicationAuthorization> {
-        effects.iter().find_map(|effect| match effect {
-            SessionTurnAdmissionEffect::RuntimeSystemContextApplicationResolved {
-                authorization,
-            } => Some(*authorization),
             _ => None,
         })
     }
@@ -1205,61 +1161,6 @@ mod shutdown_drain_machine_tests {
                 "nothing may be persisted for a session whose teardown committed"
             );
         }
-    }
-
-    // ------------------------------------------------------------------
-    // Runtime system-context application authorization
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn runtime_system_context_application_authorized_in_all_live_phases() {
-        let mut authority = SessionTurnAdmissionMachineAuthority::new();
-        for expected_phase in [
-            TurnAdmissionPhase::Idle,
-            TurnAdmissionPhase::Admitted,
-            TurnAdmissionPhase::Running,
-            TurnAdmissionPhase::Completing,
-        ] {
-            match expected_phase {
-                TurnAdmissionPhase::Idle => {}
-                TurnAdmissionPhase::Admitted => {
-                    authority.claim_turn().expect("idle claims");
-                }
-                TurnAdmissionPhase::Running => {
-                    authority.begin_turn().expect("admitted begins");
-                }
-                TurnAdmissionPhase::Completing => {
-                    authority.resolve_turn().expect("running resolves");
-                }
-                TurnAdmissionPhase::ShuttingDown => unreachable!("not a live phase"),
-            }
-            assert_eq!(authority.state().phase(), expected_phase);
-            let effects = authority
-                .authorize_runtime_system_context_application()
-                .expect("live session accepts context application");
-            assert_eq!(
-                context_application_authorization(&effects),
-                Some(RuntimeSystemContextApplicationAuthorization::Authorized)
-            );
-            assert_eq!(
-                authority.state().phase(),
-                expected_phase,
-                "authorization must not move the phase"
-            );
-        }
-    }
-
-    #[test]
-    fn runtime_system_context_application_resolves_archived_in_shutdown() {
-        let mut authority = shutting_down_authority();
-        let effects = authority
-            .authorize_runtime_system_context_application()
-            .expect("context application racing teardown is a legitimate arrival");
-        assert_eq!(
-            context_application_authorization(&effects),
-            Some(RuntimeSystemContextApplicationAuthorization::SessionArchived)
-        );
-        assert_eq!(authority.state().phase(), TurnAdmissionPhase::ShuttingDown);
     }
 
     // ------------------------------------------------------------------

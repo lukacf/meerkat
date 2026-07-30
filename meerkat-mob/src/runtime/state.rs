@@ -385,6 +385,7 @@ pub(super) struct SubmitWorkPayload {
     /// Durable objective causality riding with this work item.
     pub objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     pub handling_mode: meerkat_core::types::HandlingMode,
+    pub external_delivery_identity: Option<crate::store::MobExternalDeliveryIdentity>,
     /// Typed runtime/session semantics for this turn. The actor merges the
     /// WorkSpec-owned transcript identity into this carrier before dispatch.
     pub turn_metadata: Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
@@ -583,6 +584,7 @@ pub(super) enum MobCommand {
         ack_tx: oneshot::Sender<()>,
     },
     RunFlow {
+        run_id: Option<RunId>,
         flow_id: FlowId,
         activation_params: serde_json::Value,
         scoped_event_tx: Option<tokio::sync::mpsc::Sender<meerkat_core::ScopedAgentEvent>>,
@@ -819,29 +821,11 @@ pub(super) enum MobCommand {
         agent_identity: crate::ids::AgentIdentity,
         reply_tx: oneshot::Sender<Result<super::MobMemberSnapshot, crate::MobError>>,
     },
-    ApplyIdentityDeclarationManifest {
-        manifest: Box<crate::identity::IdentityDeclarationManifest>,
-        reply_tx: oneshot::Sender<
-            Result<crate::identity::IdentityDeclarationManifestApplyOutcome, crate::MobError>,
-        >,
-    },
     GetIdentityIntent {
         agent_identity: crate::ids::AgentIdentity,
         reply_tx: oneshot::Sender<
             Result<
                 crate::identity::IdentityStoredObservation<crate::identity::IdentityIntentRecord>,
-                crate::MobError,
-            >,
-        >,
-    },
-    GetIdentityDeclarationReceipt {
-        scope_id: crate::identity::IdentityDeclarationScopeId,
-        operation_id: meerkat_core::ops::OperationId,
-        reply_tx: oneshot::Sender<
-            Result<
-                crate::identity::IdentityStoredObservation<
-                    crate::identity::IdentityOperationReceipt,
-                >,
                 crate::MobError,
             >,
         >,
@@ -1176,9 +1160,7 @@ impl MobCommand {
             Self::StartupKickoffSnapshot { .. } => "StartupKickoffSnapshot",
             Self::ProjectMemberList { .. } => "ProjectMemberList",
             Self::ProjectMemberStatus { .. } => "ProjectMemberStatus",
-            Self::ApplyIdentityDeclarationManifest { .. } => "ApplyIdentityDeclarationManifest",
             Self::GetIdentityIntent { .. } => "GetIdentityIntent",
-            Self::GetIdentityDeclarationReceipt { .. } => "GetIdentityDeclarationReceipt",
             Self::GetIdentityConvergenceStatus { .. } => "GetIdentityConvergenceStatus",
             Self::ConcludeObjective { .. } => "ConcludeObjective",
             Self::BindObjectiveOwner { .. } => "BindObjectiveOwner",

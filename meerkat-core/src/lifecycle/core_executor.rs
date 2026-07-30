@@ -8,8 +8,8 @@ use super::RunId;
 use super::run_primitive::RunPrimitive;
 use super::run_receipt::RunBoundaryReceiptDraft;
 use crate::error::AgentError;
+use crate::lifecycle::run_primitive::TurnRequestContext;
 use crate::service::SessionError;
-use crate::session::PendingSystemContextAppend;
 use crate::turn_execution_authority::{TurnTerminalCauseKind, TurnTerminalOutcome};
 use crate::types::RunResult;
 use crate::{TurnErrorMetadata, event::AgentEvent, interaction::InteractionId};
@@ -172,6 +172,7 @@ pub struct CoreControlFailureCause {
 pub enum CoreExecutorTeardownReason {
     ArchivedSession,
     SessionUnavailable,
+    DurableProjectionAuthorityUnknown,
 }
 
 impl CoreExecutorTeardownReason {
@@ -179,6 +180,7 @@ impl CoreExecutorTeardownReason {
         match self {
             Self::ArchivedSession => "ArchivedSession",
             Self::SessionUnavailable => "SessionUnavailable",
+            Self::DurableProjectionAuthorityUnknown => "DurableProjectionAuthorityUnknown",
         }
     }
 
@@ -186,6 +188,7 @@ impl CoreExecutorTeardownReason {
         match value {
             "ArchivedSession" => Some(Self::ArchivedSession),
             "SessionUnavailable" => Some(Self::SessionUnavailable),
+            "DurableProjectionAuthorityUnknown" => Some(Self::DurableProjectionAuthorityUnknown),
             _ => None,
         }
     }
@@ -310,6 +313,15 @@ impl CoreExecutorError {
         Self::teardown_required(CoreExecutorTeardownReason::SessionUnavailable, message)
     }
 
+    pub fn durable_projection_authority_unknown_requires_teardown(
+        message: impl Into<String>,
+    ) -> Self {
+        Self::teardown_required(
+            CoreExecutorTeardownReason::DurableProjectionAuthorityUnknown,
+            message,
+        )
+    }
+
     pub fn apply_failed_from_session_error(error: SessionError) -> Self {
         if error.requests_runtime_executor_stop() {
             return Self::Stopped;
@@ -319,6 +331,9 @@ impl CoreExecutorError {
             SessionError::Agent(AgentError::StickyModelFallbackAuthorityUnknown { message }) => {
                 Self::session_unavailable_requires_teardown(message)
             }
+            SessionError::Agent(AgentError::SessionDurableProjectionAuthorityUnknown {
+                message,
+            }) => Self::durable_projection_authority_unknown_requires_teardown(message),
             SessionError::Agent(AgentError::TerminalFailure {
                 outcome,
                 cause_kind,
@@ -405,47 +420,246 @@ pub enum CoreApplyTerminal {
     },
 }
 
-/// The session document a boundary commits: snapshot bytes, optionally sealed
-/// to the typed session they were serialized from.
+/// Failure to materialize the whole-blob representation of a prepared session
+/// boundary.
 ///
-/// The two halves are one value with private fields and are only ever
-/// installed together. [`BoundSessionCommit::sealed`] performs the
-/// serialization itself, so a certified pair cannot be disassembled and
-/// re-paired with foreign bytes; a producer holding only bytes must say so by
-/// name via [`BoundSessionCommit::untyped`], which certifies nothing and
-/// leaves the bytes as the sole source of truth for consumers. Certifying one
-/// transcript to the witness validator while different bytes get committed is
-/// therefore unrepresentable rather than merely discouraged — including for
-/// out-of-crate `CoreExecutor` implementations.
+/// `serde_json::Error` is not cloneable, while the single-assignment lazy cell
+/// must publish the same terminal result to every racing reader. Preserve its
+/// diagnostic text in a cloneable typed error instead of retrying serialization
+/// after a failure.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("failed to encode prepared session boundary: {message}")]
+pub struct SessionBoundaryEncodeError {
+    message: std::sync::Arc<str>,
+}
+
+impl SessionBoundaryEncodeError {
+    fn from_serde(error: serde_json::Error) -> Self {
+        Self {
+            message: std::sync::Arc::from(error.to_string()),
+        }
+    }
+
+    /// The serializer diagnostic retained by the prepared boundary.
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+/// One sealed physical mutation admitted at a HeadCanonical boundary.
+///
+/// Ordinary appends and same-session rewrites remain disjoint carriers. The
+/// shared accessors expose only the exact authority facts needed by runtime
+/// adoption; stores must match the variant before consuming physical rows.
+#[derive(Debug, Clone)]
+pub enum PreparedHeadCanonicalPhysicalMutation {
+    Ordinary(crate::session_store::PreparedHeadCanonicalMutation),
+    Rewrite(crate::session_store::PreparedHeadCanonicalRewriteMutation),
+}
+
+impl PreparedHeadCanonicalPhysicalMutation {
+    #[must_use]
+    pub fn session_id(&self) -> &crate::types::SessionId {
+        match self {
+            Self::Ordinary(mutation) => mutation.session_id(),
+            Self::Rewrite(mutation) => mutation.session_id(),
+        }
+    }
+
+    #[must_use]
+    pub fn predecessor_head(&self) -> Option<&crate::session_store::SessionHead> {
+        match self {
+            Self::Ordinary(mutation) => mutation.predecessor_head(),
+            Self::Rewrite(mutation) => Some(mutation.predecessor_head()),
+        }
+    }
+
+    #[must_use]
+    pub fn predecessor_head_token(&self) -> Option<&str> {
+        match self {
+            Self::Ordinary(mutation) => mutation.predecessor_head_token(),
+            Self::Rewrite(mutation) => Some(mutation.predecessor_head_token()),
+        }
+    }
+
+    #[must_use]
+    pub fn successor_head(&self) -> &crate::session_store::SessionHead {
+        match self {
+            Self::Ordinary(mutation) => mutation.successor_head(),
+            Self::Rewrite(mutation) => mutation.successor_head(),
+        }
+    }
+
+    #[must_use]
+    pub fn successor_head_token(&self) -> &str {
+        match self {
+            Self::Ordinary(mutation) => mutation.successor_head_token(),
+            Self::Rewrite(mutation) => mutation.successor_head_token(),
+        }
+    }
+
+    #[must_use]
+    pub fn ordinary(&self) -> Option<&crate::session_store::PreparedHeadCanonicalMutation> {
+        match self {
+            Self::Ordinary(mutation) => Some(mutation),
+            Self::Rewrite(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub fn rewrite(&self) -> Option<&crate::session_store::PreparedHeadCanonicalRewriteMutation> {
+        match self {
+            Self::Ordinary(_) => None,
+            Self::Rewrite(mutation) => Some(mutation),
+        }
+    }
+
+    pub(crate) fn validate_live_successor(
+        &self,
+        session: &crate::Session,
+    ) -> Result<(), crate::SessionStoreError> {
+        match self {
+            Self::Ordinary(mutation) => mutation.validate_live_successor(session),
+            Self::Rewrite(mutation) => mutation.validate_live_successor(session),
+        }
+    }
+
+    pub fn acknowledge_session(
+        &self,
+        session: &mut crate::Session,
+        committed_head_token: &str,
+    ) -> Result<(), crate::SessionStoreError> {
+        match self {
+            Self::Ordinary(mutation) => mutation.acknowledge_session(session, committed_head_token),
+            Self::Rewrite(mutation) => mutation.acknowledge_session(session, committed_head_token),
+        }
+    }
+}
+
+impl From<crate::session_store::PreparedHeadCanonicalMutation>
+    for PreparedHeadCanonicalPhysicalMutation
+{
+    fn from(mutation: crate::session_store::PreparedHeadCanonicalMutation) -> Self {
+        Self::Ordinary(mutation)
+    }
+}
+
+impl From<crate::session_store::PreparedHeadCanonicalRewriteMutation>
+    for PreparedHeadCanonicalPhysicalMutation
+{
+    fn from(mutation: crate::session_store::PreparedHeadCanonicalRewriteMutation) -> Self {
+        Self::Rewrite(mutation)
+    }
+}
+
+/// A bounded store-prepared HeadCanonical mutation.
+///
+/// Runtime/store authority is deliberately absent. The store transaction owns
+/// predecessor observation, fencing, and the committed receipt; this carrier
+/// binds only the already-prepared physical delta to its live domain Session.
+#[derive(Debug, Clone)]
+pub struct PreparedHeadCanonicalBoundary {
+    mutation: PreparedHeadCanonicalPhysicalMutation,
+    compaction_projection_intents: std::sync::Arc<[crate::CompactionProjectionIntent]>,
+    catalog_labels: std::collections::BTreeMap<String, String>,
+    catalog_lifecycle_terminal: Option<crate::SessionLifecycleTerminal>,
+}
+
+impl PreparedHeadCanonicalBoundary {
+    #[must_use]
+    pub fn mutation(&self) -> &PreparedHeadCanonicalPhysicalMutation {
+        &self.mutation
+    }
+
+    /// Validated small outbox facts carried by the prepared successor.
+    #[must_use]
+    pub fn compaction_projection_intents(&self) -> &[crate::CompactionProjectionIntent] {
+        self.compaction_projection_intents.as_ref()
+    }
+
+    /// Exact bounded label projection captured from the same live successor.
+    #[must_use]
+    pub fn catalog_labels(&self) -> &std::collections::BTreeMap<String, String> {
+        &self.catalog_labels
+    }
+
+    /// Exact bounded lifecycle projection captured from the same live successor.
+    #[must_use]
+    pub const fn catalog_lifecycle_terminal(&self) -> Option<crate::SessionLifecycleTerminal> {
+        self.catalog_lifecycle_terminal
+    }
+}
+
+/// One disjoint session-persistence boundary.
+///
+/// Whole-blob backends receive either a typed document with lazy single-encode
+/// bytes or explicitly untyped compatibility bytes. Head-canonical backends
+/// receive only a sealed prepared suffix and small successor authority; that
+/// variant cannot expose a `Session` or materialize whole-document bytes.
+/// Keeping the variants disjoint makes an accidental O(document) fallback on
+/// the ordinary O(delta) path a typed error rather than a performance
+/// convention.
+#[derive(Debug, Clone)]
+enum BoundSessionCommitKind {
+    WholeBlobTyped {
+        session: std::sync::Arc<crate::Session>,
+        whole_blob: std::sync::Arc<
+            std::sync::OnceLock<
+                Result<
+                    std::sync::Arc<crate::SerializedSessionArtifact>,
+                    SessionBoundaryEncodeError,
+                >,
+            >,
+        >,
+    },
+    WholeBlobUntyped {
+        whole_blob: std::sync::Arc<
+            std::sync::OnceLock<
+                Result<
+                    std::sync::Arc<crate::SerializedSessionArtifact>,
+                    SessionBoundaryEncodeError,
+                >,
+            >,
+        >,
+    },
+    HeadCanonical {
+        boundary: std::sync::Arc<PreparedHeadCanonicalBoundary>,
+    },
+    /// Final promotion of a provisional physical tail already written by the
+    /// exact active run. This variant deliberately carries neither a Session
+    /// nor a lazy WholeBlob artifact nor a HeadCanonical delta.
+    ProvisionalPromotion {
+        receipt: crate::RunCheckpointReceipt,
+    },
+}
+
 #[derive(Debug, Clone)]
 pub struct BoundSessionCommit {
-    snapshot: Vec<u8>,
-    session: Option<std::sync::Arc<crate::Session>>,
+    kind: BoundSessionCommitKind,
+    #[cfg(test)]
+    whole_blob_encode_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl BoundSessionCommit {
-    /// Seal a typed session to the bytes it serializes into.
+    /// Seal a typed session as the exact document this boundary will commit.
     ///
-    /// This is the only mint that pairs a typed session with bytes, and the
-    /// single serialization happens here, so the halves cannot diverge.
+    /// This mint intentionally does not serialize. Head-canonical stores can
+    /// consume the typed document without ever constructing a whole blob;
+    /// whole-blob stores materialize it exactly once through
+    /// [`Self::whole_blob_bytes`].
+    ///
+    /// The fallible return is retained for source compatibility with callers
+    /// that previously observed eager JSON serialization here. Construction no
+    /// longer has a serialization failure mode.
     pub fn sealed(session: std::sync::Arc<crate::Session>) -> Result<Self, serde_json::Error> {
-        let snapshot = serde_json::to_vec(session.as_ref())?;
-        crate::checkpoint::record_session_encode_bytes(snapshot.len() as u64);
-        // Downstream copies of this snapshot mint and verify checkpoint
-        // stamps; seed the framed checkpoint midstate on the producer (a
-        // one-time pass per session lifetime — appends extend it, so every
-        // later seal carries it warm) so those copies inherit it instead of
-        // each paying an O(document) reseed.
-        crate::checkpoint::warm_framed_checkpoint_midstate(&session);
-        // The warm digest midstates this session retains are pure functions
-        // of the exact bytes just produced; record them under those bytes so
-        // an in-process decode of this snapshot (guards, checkpoint copies,
-        // the row read back next boundary) adopts them instead of reseeding
-        // with O(document) canonicalize-and-hash passes.
-        session.record_digest_midstates_for_bytes(&snapshot);
         Ok(Self {
-            snapshot,
-            session: Some(session),
+            kind: BoundSessionCommitKind::WholeBlobTyped {
+                session,
+                whole_blob: std::sync::Arc::new(std::sync::OnceLock::new()),
+            },
+            #[cfg(test)]
+            whole_blob_encode_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         })
     }
 
@@ -454,40 +668,380 @@ impl BoundSessionCommit {
     #[must_use]
     pub fn untyped(snapshot: Vec<u8>) -> Self {
         Self {
-            snapshot,
-            session: None,
+            kind: BoundSessionCommitKind::WholeBlobUntyped {
+                whole_blob: std::sync::Arc::new(std::sync::OnceLock::from(Ok(
+                    std::sync::Arc::new(crate::SerializedSessionArtifact::from_raw_bytes(snapshot)),
+                ))),
+            },
+            #[cfg(test)]
+            whole_blob_encode_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 
-    /// The bytes to durably commit.
+    /// Seal the exact latest provisional receipt as the final persistence
+    /// boundary for its run.
     #[must_use]
-    pub fn snapshot_bytes(&self) -> &[u8] {
-        &self.snapshot
+    pub fn provisional_promotion(receipt: crate::RunCheckpointReceipt) -> Self {
+        Self {
+            kind: BoundSessionCommitKind::ProvisionalPromotion { receipt },
+            #[cfg(test)]
+            whole_blob_encode_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
     }
 
-    /// Consume the pair into the bytes to durably commit.
-    #[must_use]
-    pub fn into_snapshot_bytes(self) -> Vec<u8> {
-        self.snapshot
+    /// Convert a typed whole-blob carrier into a bounded head mutation.
+    ///
+    /// This compatibility constructor validates the typed successor and then
+    /// drops it; the returned carrier is the disjoint head-only variant. New
+    /// live actor paths should call [`Self::head_canonical_from_session`]
+    /// directly while borrowing the actor-owned session.
+    pub fn with_head_canonical_mutation(
+        self,
+        mutation: crate::session_store::PreparedHeadCanonicalMutation,
+    ) -> Result<Self, crate::SessionStoreError> {
+        let mutation_session_id = mutation.session_id().clone();
+        let invalid = |reason: String| crate::SessionStoreError::InvalidTranscriptRewrite {
+            id: mutation_session_id.clone(),
+            reason,
+        };
+        let session = match &self.kind {
+            BoundSessionCommitKind::WholeBlobTyped { session, .. } => {
+                std::sync::Arc::clone(session)
+            }
+            BoundSessionCommitKind::WholeBlobUntyped { .. } => {
+                return Err(invalid(
+                    "head-canonical persistence requires a typed session boundary".to_string(),
+                ));
+            }
+            BoundSessionCommitKind::HeadCanonical { .. } => {
+                return Err(invalid(
+                    "head-canonical mutation was already attached to this boundary".to_string(),
+                ));
+            }
+            BoundSessionCommitKind::ProvisionalPromotion { .. } => {
+                return Err(invalid(
+                    "provisional promotion cannot be converted into a head-canonical mutation"
+                        .to_string(),
+                ));
+            }
+        };
+        Self::head_canonical_from_session(session.as_ref(), mutation)
     }
 
-    /// The typed session, when the producer certified one; identical by
-    /// construction to the document encoded in [`Self::snapshot_bytes`].
+    /// Mint a bounded head-canonical carrier from a borrowed live session.
+    ///
+    /// The session is used only while validating the prepared mutation and
+    /// small compaction outbox facts. It is deliberately not retained by the
+    /// returned carrier: ordinary head-canonical persistence must never turn
+    /// an O(delta) suffix into an O(document) `Session` clone or whole-blob
+    /// encode merely to cross the runtime boundary.
+    pub fn head_canonical_from_session(
+        session: &crate::Session,
+        mutation: crate::session_store::PreparedHeadCanonicalMutation,
+    ) -> Result<Self, crate::SessionStoreError> {
+        Self::head_canonical_physical_from_session(session, mutation.into())
+    }
+
+    /// Mint a bounded HeadCanonical carrier from either disjoint physical
+    /// mutation kind.
+    pub fn head_canonical_physical_from_session(
+        session: &crate::Session,
+        mutation: PreparedHeadCanonicalPhysicalMutation,
+    ) -> Result<Self, crate::SessionStoreError> {
+        let boundary = Self::prepare_head_canonical_boundary(session, mutation)?;
+        Ok(Self {
+            kind: BoundSessionCommitKind::HeadCanonical {
+                boundary: std::sync::Arc::new(boundary),
+            },
+            #[cfg(test)]
+            whole_blob_encode_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        })
+    }
+
+    /// Mint a bounded same-session rewrite carrier from a borrowed live
+    /// session without retaining or encoding the accumulated document.
+    pub fn head_canonical_rewrite_from_session(
+        session: &crate::Session,
+        mutation: crate::session_store::PreparedHeadCanonicalRewriteMutation,
+    ) -> Result<Self, crate::SessionStoreError> {
+        Self::head_canonical_physical_from_session(session, mutation.into())
+    }
+
+    fn prepare_head_canonical_boundary(
+        session: &crate::Session,
+        mutation: PreparedHeadCanonicalPhysicalMutation,
+    ) -> Result<PreparedHeadCanonicalBoundary, crate::SessionStoreError> {
+        let mutation_session_id = mutation.session_id().clone();
+        let invalid = |reason: String| crate::SessionStoreError::InvalidTranscriptRewrite {
+            id: mutation_session_id.clone(),
+            reason,
+        };
+        if session.id() != mutation.session_id() {
+            return Err(invalid(format!(
+                "prepared mutation belongs to session {}, not sealed session {}",
+                mutation.session_id(),
+                session.id()
+            )));
+        }
+
+        mutation.validate_live_successor(session)?;
+
+        let compaction_projection_intents = session
+            .validated_compaction_projection_intents()
+            .map_err(|error| {
+                invalid(format!(
+                    "head-canonical successor carries invalid compaction projection intents: {error}"
+                ))
+            })?
+            .into();
+        let catalog_labels = session
+            .metadata()
+            .get("session_labels")
+            .map(|value| {
+                serde_json::from_value::<std::collections::BTreeMap<String, String>>(value.clone())
+                    .map_err(|error| {
+                        invalid(format!(
+                            "head-canonical successor carries malformed catalog labels: {error}"
+                        ))
+                    })
+            })
+            .transpose()?
+            .unwrap_or_default();
+        let catalog_lifecycle_terminal = session.try_lifecycle_terminal().map_err(|error| {
+            invalid(format!(
+                "head-canonical successor carries malformed lifecycle-terminal metadata: {error}"
+            ))
+        })?;
+
+        Ok(PreparedHeadCanonicalBoundary {
+            mutation,
+            compaction_projection_intents,
+            catalog_labels,
+            catalog_lifecycle_terminal,
+        })
+    }
+
+    /// Prepared bounded mutation and independent authority proofs, when this
+    /// boundary is eligible for `HeadCanonicalV1`.
+    #[must_use]
+    pub fn head_canonical(&self) -> Option<&PreparedHeadCanonicalBoundary> {
+        match &self.kind {
+            BoundSessionCommitKind::HeadCanonical { boundary } => Some(boundary.as_ref()),
+            BoundSessionCommitKind::WholeBlobTyped { .. }
+            | BoundSessionCommitKind::WholeBlobUntyped { .. }
+            | BoundSessionCommitKind::ProvisionalPromotion { .. } => None,
+        }
+    }
+
+    /// Store-issued provisional physical identity carried by a final promotion
+    /// boundary.
+    #[must_use]
+    pub fn provisional_promotion_receipt(&self) -> Option<&crate::RunCheckpointReceipt> {
+        match &self.kind {
+            BoundSessionCommitKind::ProvisionalPromotion { receipt } => Some(receipt),
+            BoundSessionCommitKind::WholeBlobTyped { .. }
+            | BoundSessionCommitKind::WholeBlobUntyped { .. }
+            | BoundSessionCommitKind::HeadCanonical { .. } => None,
+        }
+    }
+
+    /// Verify that an acknowledgement names this exact prepared successor.
+    ///
+    /// The head-only carrier does not retain the live session. The actor owner
+    /// applies only the prepared row/component acknowledgement after this exact
+    /// store-issued token check succeeds.
+    pub fn acknowledge_head_canonical_commit(
+        &self,
+        committed_head_cas_token: &str,
+    ) -> Result<(), crate::SessionStoreError> {
+        let boundary = self.head_canonical().ok_or_else(|| {
+            crate::SessionStoreError::Internal(
+                "session boundary has no head-canonical mutation to acknowledge".to_string(),
+            )
+        })?;
+        if boundary.mutation().successor_head_token() != committed_head_cas_token {
+            return Err(crate::SessionStoreError::TranscriptRevisionConflict {
+                id: boundary.mutation().session_id().clone(),
+                expected: boundary.mutation().successor_head_token().to_string(),
+                actual: committed_head_cas_token.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Materialize the whole-blob representation, if the selected backend
+    /// requires one.
+    ///
+    /// A typed carrier serializes its exact `Session` into this single-assignment
+    /// buffer. An untyped carrier returns the bytes supplied to
+    /// [`Self::untyped`]. Calling this on the disjoint head-canonical variant
+    /// is a typed error.
+    pub fn whole_blob_bytes(&self) -> Result<&[u8], SessionBoundaryEncodeError> {
+        let (whole_blob, session) = match &self.kind {
+            BoundSessionCommitKind::WholeBlobTyped {
+                session,
+                whole_blob,
+            } => (whole_blob, Some(session)),
+            BoundSessionCommitKind::WholeBlobUntyped { whole_blob } => (whole_blob, None),
+            BoundSessionCommitKind::HeadCanonical { .. } => {
+                return Err(SessionBoundaryEncodeError {
+                    message: std::sync::Arc::from(
+                        "head-canonical boundary has no whole-blob representation",
+                    ),
+                });
+            }
+            BoundSessionCommitKind::ProvisionalPromotion { .. } => {
+                return Err(SessionBoundaryEncodeError {
+                    message: std::sync::Arc::from(
+                        "provisional promotion boundary has no whole-blob representation",
+                    ),
+                });
+            }
+        };
+        whole_blob
+            .get_or_init(|| {
+                let Some(session) = session else {
+                    return Err(SessionBoundaryEncodeError {
+                        message: std::sync::Arc::from(
+                            "untyped whole-blob carrier lost its compatibility bytes",
+                        ),
+                    });
+                };
+                let snapshot = session
+                    .to_persisted_artifact()
+                    .map_err(SessionBoundaryEncodeError::from_serde)?;
+                #[cfg(test)]
+                self.whole_blob_encode_count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(std::sync::Arc::new(snapshot))
+            })
+            .as_ref()
+            .map(|snapshot| snapshot.bytes())
+            .map_err(Clone::clone)
+    }
+
+    /// The sealed WholeBlob bytes together with their single-pass physical
+    /// row digest.
+    ///
+    /// Runtime/store WholeBlob paths should consume this artifact directly
+    /// and reuse [`crate::SerializedSessionArtifact::row_sha256_token`] rather
+    /// than hashing [`Self::whole_blob_bytes`] again.
+    pub fn whole_blob_artifact(
+        &self,
+    ) -> Result<&crate::SerializedSessionArtifact, SessionBoundaryEncodeError> {
+        let _ = self.whole_blob_bytes()?;
+        let whole_blob = match &self.kind {
+            BoundSessionCommitKind::WholeBlobTyped { whole_blob, .. }
+            | BoundSessionCommitKind::WholeBlobUntyped { whole_blob } => whole_blob,
+            BoundSessionCommitKind::HeadCanonical { .. } => {
+                return Err(SessionBoundaryEncodeError {
+                    message: std::sync::Arc::from(
+                        "head-canonical boundary has no whole-blob representation",
+                    ),
+                });
+            }
+            BoundSessionCommitKind::ProvisionalPromotion { .. } => {
+                return Err(SessionBoundaryEncodeError {
+                    message: std::sync::Arc::from(
+                        "provisional promotion boundary has no whole-blob representation",
+                    ),
+                });
+            }
+        };
+        match whole_blob.get() {
+            Some(Ok(artifact)) => Ok(artifact.as_ref()),
+            Some(Err(error)) => Err(error.clone()),
+            None => Err(SessionBoundaryEncodeError {
+                message: std::sync::Arc::from(
+                    "whole-blob cell remained empty after successful materialization",
+                ),
+            }),
+        }
+    }
+
+    /// Consume this carrier into a shared whole-blob representation.
+    ///
+    /// This is the owned counterpart to [`Self::whole_blob_bytes`]. It avoids
+    /// copying an already materialized blob; compatibility APIs that still
+    /// require `Vec<u8>` may need one final bridge copy.
+    pub fn into_whole_blob_bytes(
+        self,
+    ) -> Result<std::sync::Arc<Vec<u8>>, SessionBoundaryEncodeError> {
+        let _ = self.whole_blob_bytes()?;
+        let whole_blob = match &self.kind {
+            BoundSessionCommitKind::WholeBlobTyped { whole_blob, .. }
+            | BoundSessionCommitKind::WholeBlobUntyped { whole_blob } => whole_blob,
+            BoundSessionCommitKind::HeadCanonical { .. } => {
+                return Err(SessionBoundaryEncodeError {
+                    message: std::sync::Arc::from(
+                        "head-canonical boundary has no whole-blob representation",
+                    ),
+                });
+            }
+            BoundSessionCommitKind::ProvisionalPromotion { .. } => {
+                return Err(SessionBoundaryEncodeError {
+                    message: std::sync::Arc::from(
+                        "provisional promotion boundary has no whole-blob representation",
+                    ),
+                });
+            }
+        };
+        match whole_blob.get() {
+            Some(Ok(snapshot)) => Ok(snapshot.bytes_arc()),
+            Some(Err(error)) => Err(error.clone()),
+            None => Err(SessionBoundaryEncodeError {
+                message: std::sync::Arc::from(
+                    "whole-blob cell remained empty after successful materialization",
+                ),
+            }),
+        }
+    }
+
+    #[cfg(test)]
+    fn whole_blob_encode_count(&self) -> usize {
+        self.whole_blob_encode_count
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The typed session, when the producer certified a WholeBlob document;
+    /// identical by construction to [`Self::whole_blob_bytes`].
     #[must_use]
     pub fn session(&self) -> Option<&crate::Session> {
-        self.session.as_deref()
+        match &self.kind {
+            BoundSessionCommitKind::WholeBlobTyped { session, .. } => Some(session.as_ref()),
+            BoundSessionCommitKind::WholeBlobUntyped { .. }
+            | BoundSessionCommitKind::HeadCanonical { .. }
+            | BoundSessionCommitKind::ProvisionalPromotion { .. } => None,
+        }
     }
 
     /// Borrow the certified session as a shared handle.
     #[must_use]
     pub fn session_arc(&self) -> Option<&std::sync::Arc<crate::Session>> {
-        self.session.as_ref()
+        match &self.kind {
+            BoundSessionCommitKind::WholeBlobTyped { session, .. } => Some(session),
+            BoundSessionCommitKind::WholeBlobUntyped { .. }
+            | BoundSessionCommitKind::HeadCanonical { .. }
+            | BoundSessionCommitKind::ProvisionalPromotion { .. } => None,
+        }
+    }
+
+    /// Clone the shared handle to the certified Session without consuming this
+    /// carrier or reparsing its WholeBlob bytes.
+    #[must_use]
+    pub fn session_arc_cloned(&self) -> Option<std::sync::Arc<crate::Session>> {
+        self.session_arc().cloned()
     }
 
     /// Consume the pair into the certified session handle, if any.
     #[must_use]
     pub fn into_session_arc(self) -> Option<std::sync::Arc<crate::Session>> {
-        self.session
+        match self.kind {
+            BoundSessionCommitKind::WholeBlobTyped { session, .. } => Some(session),
+            BoundSessionCommitKind::WholeBlobUntyped { .. }
+            | BoundSessionCommitKind::HeadCanonical { .. }
+            | BoundSessionCommitKind::ProvisionalPromotion { .. } => None,
+        }
     }
 }
 
@@ -498,11 +1052,11 @@ pub struct CoreApplyOutput {
     /// from the generated machine's per-run boundary counter at commit time
     /// (dogma K10 — executors cannot produce the boundary sequence).
     pub receipt: RunBoundaryReceiptDraft,
-    /// The session document to durably commit atomically with the receipt and
-    /// input-state updates, held as ONE sealed value.
+    /// The session persistence mutation to commit atomically with the receipt
+    /// and input-state updates, held as one disjoint sealed value.
     ///
     /// Private, and readable only through [`Self::committed`] /
-    /// [`Self::snapshot_bytes`] / [`Self::session`]: as two assignable `pub`
+    /// [`Self::whole_blob_bytes`] / [`Self::session`]: as two assignable `pub`
     /// halves the seal was a convention a producer could break by overwriting
     /// the bytes after attaching the typed session, or by moving a typed
     /// session into a struct literal beside foreign bytes. One private field
@@ -510,19 +1064,11 @@ pub struct CoreApplyOutput {
     /// half and persists the bytes is validating and persisting the same
     /// document by construction.
     ///
-    /// The typed half exists because the boundary path otherwise pays O(document) three
-    /// more times per turn on top of the one serialization it genuinely
-    /// needs: the witness validator deserializes the bytes back into a
-    /// `Session`, re-serializes its messages, and SHA-256s them. On a 94 MB
-    /// transcript that is the difference between a turn costing milliseconds
-    /// and costing minutes, and none of it scales with the size of the delta
-    /// the turn actually appended.
-    ///
-    /// Carrying the typed session also preserves its retained digest
-    /// midstate. A `Session` recovered via `from_slice` starts with a cold
-    /// accumulator, so its first digest is a full pass no matter how small
-    /// the append was — which is why round-tripping through bytes silently
-    /// discards the incremental digest work.
+    /// Whole-blob variants preserve typed/byte pairing and pay for at most one
+    /// encode. The head-canonical variant contains no `Session` at all: it
+    /// carries only the prepared suffix and successor authority, so neither a
+    /// consumer nor an error fallback can accidentally turn an ordinary
+    /// append into O(document) work.
     committed: Option<BoundSessionCommit>,
     /// Terminal payload observation produced by runtime-backed execution.
     ///
@@ -780,13 +1326,12 @@ impl CoreApplyOutput {
         Self::with_untyped_snapshot(receipt, untyped_snapshot, None)
     }
 
-    /// Commit the typed session and the bytes derived from it as one sealed
-    /// pair.
+    /// Commit the typed session as one sealed prepared boundary document.
     ///
-    /// The serialization happens HERE, inside the mint, so the typed half and
-    /// the byte half can never diverge. Any uncertified bytes a constructor
-    /// installed earlier are replaced wholesale — the halves are never
-    /// assignable apart, so no producer can certify one transcript while a
+    /// Whole-blob serialization is deferred until the selected persistence
+    /// profile requests it. Any uncertified bytes a constructor installed
+    /// earlier are replaced wholesale — typed authority and lazy bytes remain
+    /// one private carrier, so no producer can certify one transcript while a
     /// different one is committed.
     pub fn with_session(
         mut self,
@@ -796,22 +1341,35 @@ impl CoreApplyOutput {
         Ok(self)
     }
 
+    /// Install an already sealed session boundary carrier.
+    ///
+    /// This is the profile-aware counterpart to [`Self::with_session`].
+    /// Producers that prepared a bounded head-canonical mutation must retain
+    /// that mutation on the exact typed carrier handed to RuntimeStore;
+    /// reminting from only the `Session` would silently discard its physical
+    /// predecessor CAS and suffix proof.
+    #[must_use]
+    pub fn with_bound_session(mut self, committed: BoundSessionCommit) -> Self {
+        self.committed = Some(committed);
+        self
+    }
+
     /// The sealed session document this boundary commits, if any.
     #[must_use]
     pub fn committed(&self) -> Option<&BoundSessionCommit> {
         self.committed.as_ref()
     }
 
-    /// The exact bytes this boundary commits.
-    #[must_use]
-    pub fn snapshot_bytes(&self) -> Option<&[u8]> {
+    /// Lazily materialize the exact whole-blob bytes this boundary commits.
+    pub fn whole_blob_bytes(&self) -> Result<Option<&[u8]>, SessionBoundaryEncodeError> {
         self.committed
             .as_ref()
-            .map(BoundSessionCommit::snapshot_bytes)
+            .map(BoundSessionCommit::whole_blob_bytes)
+            .transpose()
     }
 
-    /// The typed session sealed to [`Self::snapshot_bytes`], when the producer
-    /// certified one.
+    /// The typed WholeBlob session sealed to [`Self::whole_blob_bytes`], when
+    /// the producer certified one.
     #[must_use]
     pub fn session(&self) -> Option<&crate::Session> {
         self.committed
@@ -862,21 +1420,19 @@ pub trait CoreExecutorBoundaryHandle: Send + Sync {
         reason: String,
     ) -> Result<(), CoreExecutorError>;
 
-    /// Prepare runtime-owned system context for one exact cooperative LLM
+    /// Prepare request-only runtime context for one exact cooperative LLM
     /// boundary and return only after the actor is parked immediately before
     /// consumption. The non-clone result owns explicit commit/abort authority.
     ///
-    /// Implementations that can serialize the staged session snapshot return
-    /// it so the runtime control plane can commit the snapshot atomically with
-    /// the consumed input state. Implementations without durable session
-    /// authority may return `None`.
-    async fn prepare_system_context_at_boundary(
+    /// This context is never Session state and therefore carries no durable
+    /// session snapshot.
+    async fn prepare_transient_turn_context_at_boundary(
         &self,
         _expected_run_id: &RunId,
-        _appends: Vec<PendingSystemContextAppend>,
+        _contexts: Vec<TurnRequestContext>,
     ) -> Result<CoreBoundaryStageOutput, CoreBoundaryStageError> {
         Err(CoreBoundaryStageError::unavailable(
-            "live boundary system-context preparation is unsupported by this executor",
+            "live transient turn-context preparation is unsupported by this executor",
         ))
     }
 }
@@ -1027,9 +1583,62 @@ pub trait CoreExecutor: Send + Sync {
     /// already-finalized compaction intent.
     async fn checkpoint_committed_session_snapshot(
         &mut self,
-        _session_snapshot: &[u8],
+        _session_snapshot: std::sync::Arc<Vec<u8>>,
     ) -> Result<(), CoreExecutorError> {
         Ok(())
+    }
+
+    /// Acknowledge an ordinary WholeBlob boundary from its store-issued
+    /// fixed-size authority.
+    ///
+    /// The runtime compares this authority with the exact prepared artifact
+    /// before invoking the executor. Durable implementations then confirm the
+    /// revision/digest through the store's bounded authority seam and publish
+    /// executor-owned post-commit effects. Ordinary finalization must not
+    /// reload or compare the accumulated document.
+    async fn acknowledge_whole_blob_session_boundary(
+        &mut self,
+        _committed_store_revision: u64,
+        _committed_blob_sha256: &str,
+    ) -> Result<(), CoreExecutorError> {
+        Ok(())
+    }
+
+    /// Acknowledge a session boundary whose canonical head and transcript
+    /// suffix were already committed inside the RuntimeStore transaction.
+    ///
+    /// Unlike [`Self::checkpoint_committed_session_snapshot`], this hook
+    /// carries no whole document and performs no compatibility projection.
+    /// It lets the executor publish post-commit side effects (for example,
+    /// staged context lifecycle events) against the exact small authority
+    /// returned by the store. Implementations that can be paired with a
+    /// head-canonical runtime must override it; the default fails closed so a
+    /// successful durable commit is never silently reported as fully
+    /// finalized when executor-owned side effects remain staged.
+    async fn acknowledge_head_canonical_session_boundary(
+        &mut self,
+        _committed_head_token: &str,
+    ) -> Result<(), CoreExecutorError> {
+        Err(CoreExecutorError::Internal(
+            "executor cannot acknowledge a head-canonical session boundary".to_string(),
+        ))
+    }
+
+    /// Acknowledge metadata-only promotion of an exact provisional tail.
+    ///
+    /// The runtime has already verified that the store-returned authority
+    /// matches the actor-carried receipt. This hook carries only the fixed-size
+    /// committed revision/token so executor-owned staged effects can publish
+    /// and actor-local committed-base fencing can advance without re-encoding
+    /// WholeBlob state or reapplying a HeadCanonical mutation.
+    async fn acknowledge_provisional_session_boundary(
+        &mut self,
+        _committed_store_revision: u64,
+        _committed_authority_token: &str,
+    ) -> Result<(), CoreExecutorError> {
+        Err(CoreExecutorError::Internal(
+            "executor cannot acknowledge a promoted provisional session boundary".to_string(),
+        ))
     }
 
     /// Reconcile and finalize semantic-memory compaction stages named by the
@@ -1116,6 +1725,21 @@ mod tests {
     fn _assert_object_safe(_: &dyn CoreExecutor) {}
 
     #[test]
+    fn prepared_session_boundary_serializes_exactly_once_across_clones() {
+        let Ok(commit) = BoundSessionCommit::sealed(std::sync::Arc::new(crate::Session::new()))
+        else {
+            panic!("sealing a typed boundary no longer serializes and cannot fail");
+        };
+        let cloned = commit.clone();
+
+        assert_eq!(commit.whole_blob_encode_count(), 0);
+        assert!(commit.whole_blob_bytes().is_ok());
+        assert!(cloned.whole_blob_bytes().is_ok());
+        assert_eq!(commit.whole_blob_encode_count(), 1);
+        assert_eq!(cloned.whole_blob_encode_count(), 1);
+    }
+
+    #[test]
     fn core_executor_error_display() {
         let err = CoreExecutorError::ApplyFailed {
             cause: CoreApplyFailureCause::runtime_turn("bad input"),
@@ -1172,6 +1796,32 @@ mod tests {
         );
 
         assert!(matches!(err, CoreExecutorError::Stopped));
+    }
+
+    #[test]
+    fn durable_projection_authority_unknown_requests_canonical_runtime_teardown() {
+        let err = CoreExecutorError::apply_failed_from_session_error(SessionError::Agent(
+            AgentError::session_durable_projection_authority_unknown(
+                "durable transcript projection split",
+            ),
+        ));
+
+        assert!(err.requires_runtime_teardown());
+        assert_eq!(
+            CoreExecutorTeardownReason::DurableProjectionAuthorityUnknown.as_str(),
+            "DurableProjectionAuthorityUnknown"
+        );
+        assert_eq!(
+            CoreExecutorTeardownReason::from_wire_str("DurableProjectionAuthorityUnknown"),
+            Some(CoreExecutorTeardownReason::DurableProjectionAuthorityUnknown)
+        );
+        assert!(matches!(
+            err,
+            CoreExecutorError::TeardownRequired {
+                reason: CoreExecutorTeardownReason::DurableProjectionAuthorityUnknown,
+                ..
+            }
+        ));
     }
 
     #[test]

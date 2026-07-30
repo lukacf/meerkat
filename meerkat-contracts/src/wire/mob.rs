@@ -1712,6 +1712,9 @@ pub struct MobLifecycleResult {
 }
 
 /// Request payload for `mob/append_system_context`.
+///
+/// Appends one ordinary durable ordered System message to the member session
+/// at the admitted transcript boundary. The text is preserved exactly.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -1727,14 +1730,13 @@ pub struct MobAppendSystemContextParams {
 
 /// Outcome of a `mob/append_system_context` call on the wire. Mirrors
 /// `meerkat_core::AppendSystemContextStatus` so consumers reason about the
-/// applied/staged/duplicate distinction through a closed type rather than a
-/// free-form status string.
+/// applied/duplicate distinction through a closed type rather than a free-form
+/// status string.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum WireAppendSystemContextStatus {
     Applied,
-    Staged,
     Duplicate,
 }
 
@@ -1742,7 +1744,6 @@ impl From<meerkat_core::AppendSystemContextStatus> for WireAppendSystemContextSt
     fn from(status: meerkat_core::AppendSystemContextStatus) -> Self {
         match status {
             meerkat_core::AppendSystemContextStatus::Applied => Self::Applied,
-            meerkat_core::AppendSystemContextStatus::Staged => Self::Staged,
             meerkat_core::AppendSystemContextStatus::Duplicate => Self::Duplicate,
         }
     }
@@ -2014,6 +2015,9 @@ pub struct MobTurnStartParams {
     /// rejects autonomous members, so this always rides a turn-driven turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub injected_context: Option<Vec<WireContentInput>>,
+    /// Host-regenerated request-only context for this member turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transient_turn_context: Option<meerkat_core::lifecycle::run_primitive::TurnRequestContext>,
 }
 
 /// One currently wired peer that is known to be unreachable.
@@ -2472,6 +2476,9 @@ pub struct MobSubmitWorkParams {
     /// autonomous inbox delivery rejects it with a typed error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub injected_context: Option<Vec<WireContentInput>>,
+    /// Host-regenerated request-only context for this work turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transient_turn_context: Option<meerkat_core::lifecycle::run_primitive::TurnRequestContext>,
     /// Durable kickoff objective correlation to stamp onto this delegated turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub objective_id: Option<String>,

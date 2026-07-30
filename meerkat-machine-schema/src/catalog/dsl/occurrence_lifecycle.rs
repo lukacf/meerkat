@@ -190,6 +190,11 @@ machine! {
             },
             Claim { owner_id: ClaimOwner, at_utc_ms: u64, lease_expires_at_utc_ms: u64, claim_token: ClaimToken },
             DispatchStarted { correlation_id: Option<CorrelationId>, at_utc_ms: u64 },
+            // Target admission returned after the durable DispatchStarted
+            // intent was committed. The correlation id is deliberately not an
+            // input here: this transition can only retain the machine-owned
+            // identity committed before the external effect.
+            DispatchAccepted { at_utc_ms: u64 },
             AwaitCompletion { at_utc_ms: u64 },
             Complete { at_utc_ms: u64 },
             ResolveRuntimeCompletion {
@@ -250,6 +255,7 @@ machine! {
         effect OccurrenceLifecycleEffect {
             Claimed,
             DispatchStarted,
+            DispatchAccepted,
             AwaitingCompletion,
             Completed,
             Skipped,
@@ -358,6 +364,7 @@ machine! {
 
         disposition Claimed => external seam SurfaceResultAlignment,
         disposition DispatchStarted => external seam SurfaceResultAlignment,
+        disposition DispatchAccepted => external seam SurfaceResultAlignment,
         disposition AwaitingCompletion => external seam SurfaceResultAlignment,
         disposition Completed => external seam SurfaceResultAlignment,
         disposition Skipped => external seam SurfaceResultAlignment,
@@ -573,7 +580,10 @@ machine! {
             per_phase [Pending, Claimed, Dispatching, AwaitingCompletion, Completed, Skipped, Misfired, Superseded, DeliveryFailed]
             on input ClassifyTransitionFailure { refusal_kind, trigger }
             guard "not_dispatching" {
-                trigger == OccurrenceLifecycleInputVariant::AwaitCompletion
+                (
+                    trigger == OccurrenceLifecycleInputVariant::DispatchAccepted
+                    || trigger == OccurrenceLifecycleInputVariant::AwaitCompletion
+                )
                 && (
                     refusal_kind == OccurrenceTransitionFailureRefusalKind::GuardRejected
                     || refusal_kind == OccurrenceTransitionFailureRefusalKind::NoMatchingTransition
@@ -1383,6 +1393,22 @@ machine! {
             }
             to Dispatching
             emit DispatchStarted
+        }
+
+        transition DispatchAcceptedFromDispatching {
+            on input DispatchAccepted { at_utc_ms }
+            guard {
+                self.lifecycle_phase == Phase::Dispatching
+                && self.delivery_correlation_id != None
+            }
+            update {
+                self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
+                self.receipt_stage = Some(DeliveryReceiptStage::DispatchAccepted);
+                self.receipt_failure_class = None;
+                self.receipt_detail = None;
+            }
+            to Dispatching
+            emit DispatchAccepted
         }
 
         // --- Await completion ---

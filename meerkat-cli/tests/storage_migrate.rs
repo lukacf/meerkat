@@ -52,14 +52,16 @@ fn create_healthy_realm(state_root: &Path, realm_id: &str) {
     meerkat_store::SqliteSessionStore::open(&paths.sessions_sqlite_path).unwrap();
 }
 
-/// A legacy-shaped realm: raw `sessions` table, one unstamped
-/// current-envelope session row, and no `meerkat_schema` ledger.
-fn create_legacy_realm(state_root: &Path, realm_id: &str) -> PathBuf {
+/// An unsupported unledgered owned-object fixture: raw `sessions` table, one
+/// session row, and no `meerkat_schema` ledger.
+fn create_unledgered_owned_fixture_realm(state_root: &Path, realm_id: &str) -> PathBuf {
     let paths = write_manifest(state_root, realm_id);
     let conn = Connection::open(&paths.sessions_sqlite_path).unwrap();
     conn.execute_batch(SESSIONS_DDL).unwrap();
     let mut session = Session::new();
-    session.push(Message::User(UserMessage::text("hello from 0.7.x")));
+    session.push(Message::User(UserMessage::text(
+        "unledgered owned-object fixture",
+    )));
     insert_session(&conn, &session);
     paths.sessions_sqlite_path
 }
@@ -141,13 +143,13 @@ fn findings_with_code<'a>(report: &'a serde_json::Value, code: &str) -> Vec<&'a 
 }
 
 #[test]
-fn legacy_realm_dry_run_reports_then_apply_stamps_and_adopts_idempotently() {
+fn migrate_refuses_unledgered_owned_sessions_without_mutation() {
     let temp = TempDir::new().unwrap();
     let state_root = temp.path().join("realms");
-    let database = create_legacy_realm(&state_root, "legacy-shape");
+    let database = create_unledgered_owned_fixture_realm(&state_root, "unledgered");
     let before = std::fs::read(&database).unwrap();
 
-    // Dry-run: pending baseline + legacy census, byte-identical database.
+    // Dry-run: pending ledger baseline and a byte-identical database.
     let dry = run_rkat(
         &temp,
         &[
@@ -163,24 +165,21 @@ fn legacy_realm_dry_run_reports_then_apply_stamps_and_adopts_idempotently() {
     assert_eq!(report["mode"], "dry_run");
     let realms = report["realms"].as_array().expect("realms array");
     assert_eq!(realms.len(), 1, "{report:#}");
-    assert_eq!(realms[0]["realm"], "legacy-shape");
+    assert_eq!(realms[0]["realm"], "unledgered");
     assert_eq!(realms[0]["backend"], "sqlite");
     let pending = ledger_entries(&realms[0], "session-store", "sessions.sqlite3");
     assert_eq!(pending.len(), 1, "{report:#}");
-    assert_eq!(pending[0]["action"], "would-stamp");
+    assert_eq!(pending[0]["action"], "missing-row");
     assert!(pending[0].get("before").is_none(), "no ledger row yet");
-    let adoption = &realms[0]["adoption"];
-    assert_eq!(adoption["legacy_pending"], 1, "{report:#}");
     assert!(
-        adoption["skipped"]
-            .as_str()
-            .expect("dry-run adoption is a census")
-            .contains("census"),
+        realms[0].get("adoption").is_none(),
+        "the retired checkpoint-adoption report must not survive: {report:#}"
     );
     let after_dry = std::fs::read(&database).unwrap();
     assert_eq!(before, after_dry, "dry-run must not mutate the database");
 
-    // Apply: ledgers stamped AND the legacy session adopted.
+    // Apply refuses the unversioned owned schema; it is not inferred or
+    // baseline-stamped.
     let apply = run_rkat(
         &temp,
         &[
@@ -192,69 +191,48 @@ fn legacy_realm_dry_run_reports_then_apply_stamps_and_adopts_idempotently() {
             "--json",
         ],
     );
-    assert_success(&apply, "apply migrate");
+    assert_eq!(
+        apply.status.code(),
+        Some(1),
+        "unledgered owned schema must refuse\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&apply.stdout),
+        String::from_utf8_lossy(&apply.stderr)
+    );
     let report = parse_json(&apply);
     assert_eq!(report["mode"], "apply");
     let realms = report["realms"].as_array().expect("realms array");
     assert_eq!(realms.len(), 1, "{report:#}");
-    let stamped = ledger_entries(&realms[0], "session-store", "sessions.sqlite3");
-    assert_eq!(stamped.len(), 1, "{report:#}");
-    assert_eq!(stamped[0]["action"], "stamped");
-    // v2 = base-schema + strand-supersession-links.
-    assert_eq!(stamped[0]["after"], 2);
-    let jobs = ledger_entries(&realms[0], "jobs", "jobs.sqlite3");
-    assert_eq!(jobs.len(), 1, "{report:#}");
-    assert_eq!(jobs[0]["action"], "stamped");
-    assert_eq!(jobs[0]["after"], 2);
-    let adoption = &realms[0]["adoption"];
-    assert_eq!(adoption["scanned"], 1, "{report:#}");
-    assert_eq!(adoption["adopted"], 1, "{report:#}");
-    assert_eq!(adoption["refused"].as_array().unwrap().len(), 0);
-
-    // Doctor afterwards: no missing-ledger findings, census legacy = 0.
-    let doctor = run_rkat(
-        &temp,
-        &[
-            "--state-root",
-            state_root.to_str().unwrap(),
-            "storage",
-            "doctor",
-            "--json",
-        ],
-    );
-    assert_success(&doctor, "doctor after apply");
-    let diagnosis = parse_json(&doctor);
     assert!(
-        findings_with_code(&diagnosis, "no-schema-ledger").is_empty(),
-        "{diagnosis:#}"
+        realms[0]["errors"]
+            .as_array()
+            .expect("errors")
+            .iter()
+            .any(|error| error
+                .as_str()
+                .is_some_and(|error| error.contains("no ledger row"))),
+        "{report:#}"
     );
     assert!(
-        findings_with_code(&diagnosis, "legacy-unverified-sessions").is_empty(),
-        "{diagnosis:#}"
+        ledger_entries(&realms[0], "session-store", "sessions.sqlite3").is_empty(),
+        "{report:#}"
     );
-
-    // Idempotence: a second --apply is a no-op.
-    let again = run_rkat(
-        &temp,
-        &[
-            "--state-root",
-            state_root.to_str().unwrap(),
-            "storage",
-            "migrate",
-            "--apply",
-            "--json",
-        ],
+    assert_eq!(
+        std::fs::read(&database).unwrap(),
+        before,
+        "refusal must leave the database byte-identical"
     );
-    assert_success(&again, "second apply migrate");
-    let report = parse_json(&again);
-    let realms = report["realms"].as_array().expect("realms array");
-    let entries = ledger_entries(&realms[0], "session-store", "sessions.sqlite3");
-    assert_eq!(entries[0]["action"], "already-current");
-    let jobs = ledger_entries(&realms[0], "jobs", "jobs.sqlite3");
-    assert_eq!(jobs[0]["action"], "already-current");
-    let adoption = &realms[0]["adoption"];
-    assert_eq!(adoption["adopted"], 0, "{report:#}");
-    assert_eq!(adoption["already_verified"], 1, "{report:#}");
+    let conn = Connection::open(&database).unwrap();
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'table' AND name = 'meerkat_schema'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap(),
+        0,
+        "refusal created the ledger"
+    );
 }
 
 #[test]
@@ -352,7 +330,8 @@ fn split_brain_refuses_without_adopt_root_then_archives_the_other_copy() {
     assert!(root_a.join("team").is_dir());
     assert!(root_a.join("team/sessions.sqlite3").is_file());
     assert!(root_a.join("team/realm_manifest.json").is_file());
-    // The adopted realm then went through cases 1/4 in the same run.
+    // The adopted realm then went through the structural-ledger case in the
+    // same run.
     let realms = report["realms"].as_array().expect("realms array");
     assert_eq!(realms.len(), 1, "{report:#}");
     assert_eq!(realms[0]["realm"], "team");
@@ -608,7 +587,7 @@ fn explicit_roots_skip_the_ambient_legacy_home_probe() {
 fn foreign_fence_holder_fails_migrate_apply_typed() {
     let temp = TempDir::new().unwrap();
     let state_root = temp.path().join("realms");
-    let database = create_legacy_realm(&state_root, "fenced");
+    let database = create_unledgered_owned_fixture_realm(&state_root, "fenced");
     let before = std::fs::read(&database).unwrap();
 
     // THIS process plays the foreign maintenance holder: a raw exclusive
@@ -728,12 +707,12 @@ fn foreign_fence_holder_blocks_split_brain_resolution_before_any_compare_or_arch
 }
 
 #[test]
-fn ledger_baseline_read_failures_and_future_versions_are_refusals_not_would_stamp() {
+fn ledger_baseline_read_failures_and_future_versions_are_refusals_not_missing_rows() {
     let temp = TempDir::new().unwrap();
     let state_root = temp.path().join("realms");
     let paths = write_manifest(&state_root, "poisoned");
     // An unreadable database must surface as a per-realm error, never as a
-    // missing ledger the dry-run could report as would-stamp.
+    // missing ledger the dry-run reports as missing-row.
     std::fs::write(paths.root.join("tasks.db"), b"this is not sqlite").unwrap();
     // A future-versioned domain must be reported as a refusal exactly as
     // `--apply`'s guarded constructor would refuse it.
@@ -790,13 +769,13 @@ fn ledger_baseline_read_failures_and_future_versions_are_refusals_not_would_stam
             .any(|error| error.contains("from the future") && error.contains("jsonl-index")),
         "future version must surface as a refusal: {errors:?}"
     );
-    // The unreadable database contributes no ledger rows (no would-stamp
+    // The unreadable database contributes no ledger rows (no missing-row
     // laundering)...
     assert!(
         ledger_entries(&realms[0], "tools-tasks", "tasks.db").is_empty(),
         "{report:#}"
     );
-    // ...and the future domain's row is report-only, never would-stamp.
+    // ...and the future domain's row is report-only, never missing-row.
     let future_rows = ledger_entries(&realms[0], "jsonl-index", "session_index.sqlite3");
     assert_eq!(future_rows.len(), 1, "{report:#}");
     assert_eq!(future_rows[0]["action"], "report-only", "{report:#}");

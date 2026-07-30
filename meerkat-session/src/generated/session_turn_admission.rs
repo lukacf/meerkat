@@ -61,13 +61,6 @@ pub enum RuntimeKeepAlivePersistenceDecision {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub enum RuntimeSystemContextApplicationAuthorization {
-    #[default]
-    Authorized,
-    SessionArchived,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum TurnAdmissionShutdownTerminal {
     #[default]
     SessionArchived,
@@ -86,7 +79,6 @@ pub enum SessionTurnAdmissionInput {
     AuthorizeStartTurnDispatch,
     AuthorizeCancelAfterBoundary,
     ResolveLastStartTurnPublicTerminal,
-    AuthorizeRuntimeSystemContextApplication,
     ResolvePendingAdmissionDrained,
     AuthorizeSessionTeardown,
     ResolveRuntimeKeepAlive {
@@ -126,9 +118,6 @@ pub enum SessionTurnAdmissionEffect {
         decision: RuntimeKeepAlivePersistenceDecision,
     },
     PendingAdmissionDrainRequested,
-    RuntimeSystemContextApplicationResolved {
-        authorization: RuntimeSystemContextApplicationAuthorization,
-    },
     TurnAdmissionShutdownTerminalResolved {
         terminal: TurnAdmissionShutdownTerminal,
     },
@@ -219,11 +208,6 @@ enum SessionTurnAdmissionTransition {
     AuthorizeCancelAfterBoundaryAdmitted,
     AuthorizeStartTurnDispatchAdmitted,
     AuthorizeStartTurnDispatchShuttingDown,
-    AuthorizeRuntimeSystemContextApplicationActiveIdle,
-    AuthorizeRuntimeSystemContextApplicationActiveAdmitted,
-    AuthorizeRuntimeSystemContextApplicationActiveRunning,
-    AuthorizeRuntimeSystemContextApplicationActiveCompleting,
-    AuthorizeRuntimeSystemContextApplicationShuttingDown,
     AuthorizeCancelAfterBoundaryRunning,
     ResolveDispositionContentTurn,
     ResolveDispositionResumePendingWithBoundary,
@@ -824,59 +808,6 @@ impl SessionTurnAdmissionMachineAuthority {
                     #[allow(unreachable_patterns)] _ => Err(SessionTurnAdmissionError { op: "ResolveLastStartTurnPublicTerminal_transition" }),
                 }
             }
-            SessionTurnAdmissionInput::AuthorizeRuntimeSystemContextApplication => {
-                let mut matches = Vec::new();
-                if (self.state.lifecycle_phase == TurnAdmissionPhase::Idle) {
-                    matches.push(SessionTurnAdmissionTransition::AuthorizeRuntimeSystemContextApplicationActiveIdle);
-                }
-                if (self.state.lifecycle_phase == TurnAdmissionPhase::Admitted) {
-                    matches.push(SessionTurnAdmissionTransition::AuthorizeRuntimeSystemContextApplicationActiveAdmitted);
-                }
-                if (self.state.lifecycle_phase == TurnAdmissionPhase::Running) {
-                    matches.push(SessionTurnAdmissionTransition::AuthorizeRuntimeSystemContextApplicationActiveRunning);
-                }
-                if (self.state.lifecycle_phase == TurnAdmissionPhase::Completing) {
-                    matches.push(SessionTurnAdmissionTransition::AuthorizeRuntimeSystemContextApplicationActiveCompleting);
-                }
-                if (self.state.lifecycle_phase == TurnAdmissionPhase::ShuttingDown) {
-                    matches.push(SessionTurnAdmissionTransition::AuthorizeRuntimeSystemContextApplicationShuttingDown);
-                }
-                let transition =
-                    Self::single_transition(matches, "AuthorizeRuntimeSystemContextApplication")?;
-                match transition {
-                    SessionTurnAdmissionTransition::AuthorizeRuntimeSystemContextApplicationActiveIdle => {
-                        self.state.lifecycle_phase = TurnAdmissionPhase::Idle;
-                        Ok(vec![
-                            SessionTurnAdmissionEffect::RuntimeSystemContextApplicationResolved { authorization: RuntimeSystemContextApplicationAuthorization::Authorized, },
-                        ])
-                    }
-                    SessionTurnAdmissionTransition::AuthorizeRuntimeSystemContextApplicationActiveAdmitted => {
-                        self.state.lifecycle_phase = TurnAdmissionPhase::Admitted;
-                        Ok(vec![
-                            SessionTurnAdmissionEffect::RuntimeSystemContextApplicationResolved { authorization: RuntimeSystemContextApplicationAuthorization::Authorized, },
-                        ])
-                    }
-                    SessionTurnAdmissionTransition::AuthorizeRuntimeSystemContextApplicationActiveRunning => {
-                        self.state.lifecycle_phase = TurnAdmissionPhase::Running;
-                        Ok(vec![
-                            SessionTurnAdmissionEffect::RuntimeSystemContextApplicationResolved { authorization: RuntimeSystemContextApplicationAuthorization::Authorized, },
-                        ])
-                    }
-                    SessionTurnAdmissionTransition::AuthorizeRuntimeSystemContextApplicationActiveCompleting => {
-                        self.state.lifecycle_phase = TurnAdmissionPhase::Completing;
-                        Ok(vec![
-                            SessionTurnAdmissionEffect::RuntimeSystemContextApplicationResolved { authorization: RuntimeSystemContextApplicationAuthorization::Authorized, },
-                        ])
-                    }
-                    SessionTurnAdmissionTransition::AuthorizeRuntimeSystemContextApplicationShuttingDown => {
-                        self.state.lifecycle_phase = TurnAdmissionPhase::ShuttingDown;
-                        Ok(vec![
-                            SessionTurnAdmissionEffect::RuntimeSystemContextApplicationResolved { authorization: RuntimeSystemContextApplicationAuthorization::SessionArchived, },
-                        ])
-                    }
-                    #[allow(unreachable_patterns)] _ => Err(SessionTurnAdmissionError { op: "AuthorizeRuntimeSystemContextApplication_transition" }),
-                }
-            }
             SessionTurnAdmissionInput::ResolvePendingAdmissionDrained => {
                 let mut matches = Vec::new();
                 if (self.state.lifecycle_phase == TurnAdmissionPhase::ShuttingDown)
@@ -1165,12 +1096,6 @@ impl SessionTurnAdmissionMachineAuthority {
         &mut self,
     ) -> Result<Vec<SessionTurnAdmissionEffect>, SessionTurnAdmissionError> {
         self.apply_input(SessionTurnAdmissionInput::ResolveLastStartTurnPublicTerminal)
-    }
-
-    pub fn authorize_runtime_system_context_application(
-        &mut self,
-    ) -> Result<Vec<SessionTurnAdmissionEffect>, SessionTurnAdmissionError> {
-        self.apply_input(SessionTurnAdmissionInput::AuthorizeRuntimeSystemContextApplication)
     }
 
     pub fn resolve_pending_admission_drained(

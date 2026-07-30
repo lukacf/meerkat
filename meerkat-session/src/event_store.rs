@@ -3,15 +3,15 @@
 //! Gated behind the `session-store` feature.
 //!
 //! File-backed sequence contract:
-//! - Owner: `FileEventStore` allocates event order from the canonical event log
-//!   tail, reconciled against a durable per-session sequence owner hint.
-//! - Bootstrap: when the owner is absent, the canonical event log tail seeds it;
-//!   projected `.rkat/sessions/...` files are never consulted.
-//! - Durable ordering: the sequence owner is advanced only AFTER the log bytes
-//!   are flushed and `fsync`ed (see [`FileEventStore::append`]). A crash between
-//!   allocation and the owner write therefore leaves the owner trailing the log
-//!   tail — a benign stale hint that the tail authoritatively overrides — never a
-//!   forward gap or a reused/overwritten sequence.
+//! - Owner: one atomic per-session event-log head binds sequence high-water,
+//!   byte length, native log identity, final-row anchor, and optional rewrite
+//!   prefix authority. There is no parallel rewrite sidecar/sequence owner.
+//! - Bootstrap: a missing/stale head is rebuilt from the canonical JSONL. The
+//!   old `.seq` file is a one-time migration hint only; projected
+//!   `.rkat/sessions/...` files are never consulted.
+//! - Durable ordering: JSONL bytes are flushed and `fsync`ed before the head is
+//!   atomically replaced. A crash can leave the head trailing canonical bytes,
+//!   never ahead of them, so no durable sequence is reused or overwritten.
 //! - Failure: allocation errors abort append; the store never falls back to a
 //!   process-local counter or projection checkpoint.
 
@@ -20,7 +20,12 @@ use meerkat_core::event::{AgentEvent, EventEnvelope, EventSourceIdentity};
 use meerkat_core::interaction::InteractionId;
 use meerkat_core::time_compat::SystemTime;
 use meerkat_core::types::SessionId;
+use meerkat_core::{
+    TranscriptRewriteAuditReceiptBatch, TranscriptRewriteCommit, TranscriptRewritePrefixAccumulator,
+};
 use serde::{Deserialize, Serialize};
+#[cfg(not(target_arch = "wasm32"))]
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 #[cfg(not(target_arch = "wasm32"))]
 use std::collections::{BTreeMap, HashMap};
@@ -38,6 +43,40 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::Mutex;
+
+fn transcript_rewrite_event_parts(
+    event: &AgentEvent,
+) -> Option<(&SessionId, &[TranscriptRewriteCommit])> {
+    match event {
+        AgentEvent::TranscriptRewriteCommitted { session_id, record } => {
+            Some((session_id, std::slice::from_ref(&record.commit)))
+        }
+        AgentEvent::TranscriptRewriteAuditReceiptCommitted {
+            session_id,
+            receipt,
+            ..
+        } => Some((session_id, receipt.commits())),
+        _ => None,
+    }
+}
+
+fn transcript_rewrite_receipt_event_parts(
+    event: &AgentEvent,
+) -> Option<(
+    &SessionId,
+    &TranscriptRewriteAuditReceiptBatch,
+    &Option<String>,
+)> {
+    let AgentEvent::TranscriptRewriteAuditReceiptCommitted {
+        session_id,
+        receipt,
+        final_assistant_text,
+    } = event
+    else {
+        return None;
+    };
+    Some((session_id, receipt, final_assistant_text))
+}
 
 /// A stored event with sequence metadata and canonical stream-envelope identity.
 ///
@@ -88,11 +127,401 @@ pub struct RawStoredEvent {
     pub event: Box<serde_json::value::RawValue>,
 }
 
+/// Store-owned proof of one canonical transcript-rewrite audit prefix.
+///
+/// This is an output receipt, not a consumer cursor. File offsets, log
+/// generations, fingerprints, and boundary anchors remain private to the
+/// backend that minted it. The semantic accumulator is independently bound by
+/// the sealed transcript graph; matching those two facts is what authorizes a
+/// backend-local tail seek.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranscriptRewritePrefixReceipt {
+    session_id: SessionId,
+    through_log_seq: u64,
+    accumulator: TranscriptRewritePrefixAccumulator,
+    last_commit: Option<TranscriptRewriteCommit>,
+    /// Opaque one-use handle for a backend-private candidate that must not
+    /// become skip authority until the consumer has validated and applied the
+    /// exact rows. Public/custom receipts do not need one.
+    finalization_id: Option<String>,
+}
+
+impl TranscriptRewritePrefixReceipt {
+    /// Construct a semantic receipt minted at one backend-stable high-water.
+    ///
+    /// Storage-specific proof remains the implementing store's obligation;
+    /// this constructor prevents downstream backends from depending on private
+    /// FileEventStore token bytes.
+    #[must_use]
+    pub fn new(
+        session_id: SessionId,
+        through_log_seq: u64,
+        accumulator: TranscriptRewritePrefixAccumulator,
+        last_commit: Option<TranscriptRewriteCommit>,
+    ) -> Result<Self, EventStoreError> {
+        validate_accumulator_last_commit(&accumulator, last_commit.as_ref())?;
+        Ok(Self {
+            session_id,
+            through_log_seq,
+            accumulator,
+            last_commit,
+            finalization_id: None,
+        })
+    }
+
+    /// Session whose canonical event log supplied this receipt.
+    #[must_use]
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    /// Inclusive event-log sequence covered by this receipt.
+    #[must_use]
+    pub fn through_log_seq(&self) -> u64 {
+        self.through_log_seq
+    }
+
+    /// Canonical ordered occurrence prefix bound at this high-water.
+    #[must_use]
+    pub fn accumulator(&self) -> &TranscriptRewritePrefixAccumulator {
+        &self.accumulator
+    }
+
+    /// Last occurrence fact bound by the receipt, if the prefix is nonempty.
+    #[must_use]
+    pub fn last_commit(&self) -> Option<&TranscriptRewriteCommit> {
+        self.last_commit.as_ref()
+    }
+}
+
+/// One transcript-rewrite row returned by the combined audit read.
+///
+/// The wrapper is typed as a rewrite event, while retaining the exact payload
+/// bytes so commit-only coverage and full record materialization cannot race
+/// through two different reads.
+#[derive(Debug)]
+pub struct RawTranscriptRewriteEvent {
+    seq: u64,
+    event: Box<serde_json::value::RawValue>,
+}
+
+impl RawTranscriptRewriteEvent {
+    /// Validate and wrap exact stored rewrite-event payload bytes.
+    pub fn new(seq: u64, event: Box<serde_json::value::RawValue>) -> Result<Self, EventStoreError> {
+        match meerkat_core::event::transcript_rewrite_commits_from_payload(&event)
+            .map_err(|error| EventStoreError::Serialization(error.to_string()))?
+        {
+            Some(_) => Ok(Self { seq, event }),
+            None => Err(EventStoreError::Store(
+                "raw transcript rewrite row carries a different AgentEvent variant".to_string(),
+            )),
+        }
+    }
+
+    /// Durable event-log sequence of this row.
+    #[must_use]
+    pub fn seq(&self) -> u64 {
+        self.seq
+    }
+
+    /// Exact stored `AgentEvent` payload bytes.
+    #[must_use]
+    pub fn event(&self) -> &serde_json::value::RawValue {
+        &self.event
+    }
+
+    /// Consume the wrapper while preserving the exact stored payload bytes.
+    #[must_use]
+    pub fn into_event(self) -> Box<serde_json::value::RawValue> {
+        self.event
+    }
+}
+
+/// Rows and high-water returned by one stable transcript-rewrite audit read.
+#[derive(Debug)]
+pub struct TranscriptRewriteAuditRows {
+    session_id: SessionId,
+    observed_through_log_seq: u64,
+    receipt: Option<TranscriptRewritePrefixReceipt>,
+    rewrite_rows: Vec<RawTranscriptRewriteEvent>,
+}
+
+impl TranscriptRewriteAuditRows {
+    /// Session whose canonical audit log supplied these rows.
+    #[must_use]
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    /// Exact stable event-log high-water, including ordinary rows.
+    #[must_use]
+    pub fn observed_through_log_seq(&self) -> u64 {
+        self.observed_through_log_seq
+    }
+
+    /// Prefix receipt at the stable high-water observed by this read.
+    ///
+    /// Full reconciliation may have no canonical receipt yet (for example
+    /// while graph-authorized repair still owes a missing generation).
+    #[must_use]
+    pub fn receipt(&self) -> Option<&TranscriptRewritePrefixReceipt> {
+        self.receipt.as_ref()
+    }
+
+    /// Exact rewrite-event rows read after the proved prefix.
+    #[must_use]
+    pub fn rewrite_rows(&self) -> &[RawTranscriptRewriteEvent] {
+        &self.rewrite_rows
+    }
+
+    /// Consume the result and transfer its exact rewrite payload rows.
+    #[must_use]
+    pub fn into_rewrite_rows(self) -> Vec<RawTranscriptRewriteEvent> {
+        self.rewrite_rows
+    }
+}
+
+/// Result scope of one combined store-owned rewrite audit read.
+///
+/// An authorized tail begins strictly after a backend-private byte/log
+/// boundary whose semantic prefix exactly matched the supplied graph
+/// accumulator. Full reconciliation starts at the canonical log beginning and
+/// carries no skip authorization.
+#[derive(Debug)]
+pub enum TranscriptRewriteAuditRead {
+    /// Backend proved the supplied prefix and returned only its delta.
+    AuthorizedTail(TranscriptRewriteAuditRows),
+    /// Backend could not prove a prefix and returned all rewrite rows.
+    FullReconciliation(TranscriptRewriteAuditRows),
+}
+
+impl TranscriptRewriteAuditRead {
+    /// Construct a backend-authorized delta after validating its public shape.
+    pub fn authorized_tail(
+        expected_prefix: &TranscriptRewritePrefixAccumulator,
+        expected_last_commit: Option<&TranscriptRewriteCommit>,
+        receipt: TranscriptRewritePrefixReceipt,
+        rewrite_rows: Vec<RawTranscriptRewriteEvent>,
+    ) -> Result<Self, EventStoreError> {
+        let session_id = receipt.session_id.clone();
+        let observed_through_log_seq = receipt.through_log_seq;
+        validate_public_rewrite_audit_rows(&session_id, observed_through_log_seq, &rewrite_rows)?;
+        let read = Self::AuthorizedTail(TranscriptRewriteAuditRows {
+            session_id,
+            observed_through_log_seq,
+            receipt: Some(receipt),
+            rewrite_rows,
+        });
+        read.verify_authorized_tail(expected_prefix, expected_last_commit)?;
+        Ok(read)
+    }
+
+    /// Construct a full reconciliation result after validating session,
+    /// high-water, receipt, ordering, and exact rewrite payload shape.
+    pub fn full_reconciliation(
+        session_id: SessionId,
+        observed_through_log_seq: u64,
+        receipt: Option<TranscriptRewritePrefixReceipt>,
+        rewrite_rows: Vec<RawTranscriptRewriteEvent>,
+    ) -> Result<Self, EventStoreError> {
+        if receipt.as_ref().is_some_and(|receipt| {
+            receipt.session_id != session_id || receipt.through_log_seq != observed_through_log_seq
+        }) {
+            return Err(EventStoreError::Store(
+                "rewrite audit receipt does not bind the result session/high-water".to_string(),
+            ));
+        }
+        validate_public_rewrite_audit_rows(&session_id, observed_through_log_seq, &rewrite_rows)?;
+        Ok(Self::FullReconciliation(TranscriptRewriteAuditRows {
+            session_id,
+            observed_through_log_seq,
+            receipt,
+            rewrite_rows,
+        }))
+    }
+
+    /// Independently bind an authorized tail to the caller's checkpoint-proved
+    /// start prefix.
+    ///
+    /// Consumers must call this even for in-tree stores: a trait implementer
+    /// is trusted to prove storage position, but an end digest alone cannot
+    /// prove that it did not omit a row. This verifier enforces strict
+    /// next-generation extension, exact same-generation retries, and an exact
+    /// fold to the returned receipt.
+    pub fn verify_authorized_tail(
+        &self,
+        expected_prefix: &TranscriptRewritePrefixAccumulator,
+        expected_last_commit: Option<&TranscriptRewriteCommit>,
+    ) -> Result<(), EventStoreError> {
+        let Self::AuthorizedTail(rows) = self else {
+            return Ok(());
+        };
+        let receipt = rows.receipt.as_ref().ok_or_else(|| {
+            EventStoreError::Store("authorized rewrite tail has no end receipt".to_string())
+        })?;
+        if receipt.session_id != rows.session_id
+            || receipt.through_log_seq != rows.observed_through_log_seq
+        {
+            return Err(EventStoreError::Store(
+                "authorized rewrite tail receipt does not bind the result session/high-water"
+                    .to_string(),
+            ));
+        }
+        validate_accumulator_last_commit(&receipt.accumulator, receipt.last_commit.as_ref())?;
+        validate_public_rewrite_audit_rows(
+            &rows.session_id,
+            rows.observed_through_log_seq,
+            &rows.rewrite_rows,
+        )?;
+        validate_accumulator_last_commit(expected_prefix, expected_last_commit)?;
+        let mut accumulator = expected_prefix.clone();
+        let mut last_commit = expected_last_commit.cloned();
+        for row in &rows.rewrite_rows {
+            let Some((row_session_id, commits)) =
+                meerkat_core::event::transcript_rewrite_commits_from_payload(&row.event)
+                    .map_err(|error| EventStoreError::Serialization(error.to_string()))?
+            else {
+                return Err(EventStoreError::Store(
+                    "authorized rewrite tail contains a non-rewrite payload".to_string(),
+                ));
+            };
+            if row_session_id != rows.session_id {
+                return Err(EventStoreError::Store(format!(
+                    "authorized rewrite tail row belongs to session {row_session_id}, expected {}",
+                    rows.session_id
+                )));
+            }
+            for commit in commits {
+                let current_generation = accumulator.occurrence_count();
+                if commit.rewrite_generation == current_generation {
+                    if last_commit.as_ref() != Some(&commit) {
+                        return Err(EventStoreError::Store(format!(
+                            "authorized rewrite tail conflicts with occurrence generation {}",
+                            commit.rewrite_generation
+                        )));
+                    }
+                    continue;
+                }
+                if current_generation.checked_add(1) != Some(commit.rewrite_generation) {
+                    return Err(EventStoreError::Store(format!(
+                        "authorized rewrite tail jumps from occurrence generation {current_generation} to {}",
+                        commit.rewrite_generation
+                    )));
+                }
+                accumulator = accumulator
+                    .extend(&commit)
+                    .map_err(|error| EventStoreError::Serialization(error.to_string()))?;
+                last_commit = Some(commit);
+            }
+        }
+        if accumulator != receipt.accumulator || last_commit != receipt.last_commit {
+            return Err(EventStoreError::Store(
+                "authorized rewrite tail does not fold exactly to its end receipt".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn validate_accumulator_last_commit(
+    accumulator: &TranscriptRewritePrefixAccumulator,
+    last_commit: Option<&TranscriptRewriteCommit>,
+) -> Result<(), EventStoreError> {
+    match last_commit {
+        Some(commit) if commit.rewrite_generation == accumulator.occurrence_count() => Ok(()),
+        None if accumulator.occurrence_count() == 0 => Ok(()),
+        Some(commit) => Err(EventStoreError::Store(format!(
+            "rewrite receipt last generation {} does not equal prefix occurrence count {}",
+            commit.rewrite_generation,
+            accumulator.occurrence_count()
+        ))),
+        None => Err(EventStoreError::Store(
+            "nonempty rewrite prefix has no last occurrence fact".to_string(),
+        )),
+    }
+}
+
+fn validate_public_rewrite_audit_rows(
+    session_id: &SessionId,
+    observed_through_log_seq: u64,
+    rows: &[RawTranscriptRewriteEvent],
+) -> Result<(), EventStoreError> {
+    let mut previous_seq = 0_u64;
+    for row in rows {
+        if row.seq <= previous_seq || row.seq > observed_through_log_seq {
+            return Err(EventStoreError::Store(format!(
+                "rewrite audit row sequence {} is outside the strict ordered high-water {}",
+                row.seq, observed_through_log_seq
+            )));
+        }
+        previous_seq = row.seq;
+        let Some((row_session_id, _)) =
+            meerkat_core::event::transcript_rewrite_commits_from_payload(&row.event)
+                .map_err(|error| EventStoreError::Serialization(error.to_string()))?
+        else {
+            return Err(EventStoreError::Store(
+                "raw transcript rewrite row carries a different AgentEvent variant".to_string(),
+            ));
+        };
+        if row_session_id != *session_id {
+            return Err(EventStoreError::Store(format!(
+                "rewrite audit row belongs to session {row_session_id}, expected {session_id}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Semantic expectation supplied to the combined audit read.
+///
+/// The current variant is O(1) by construction. Only the explicit one-time
+/// 0.8.10 variant exposes the already-proved ordered graph vector needed to
+/// map generation-zero physical rows without granting those rows order
+/// authority.
+#[derive(Clone, Copy)]
+pub enum TranscriptRewriteAuditExpectation<'a> {
+    /// Current checkpoint-bound occurrence prefix.
+    Current(&'a TranscriptRewritePrefixAccumulator),
+    /// One-time migration of generation-zero 0.8.10 audit rows.
+    LegacyGenerationZero {
+        /// Prefix derived from the normalized, checkpoint-proved graph vector.
+        expected_prefix: &'a TranscriptRewritePrefixAccumulator,
+        /// Same graph vector in semantic occurrence order.
+        ordered_commits: &'a [TranscriptRewriteCommit],
+    },
+}
+
+impl TranscriptRewriteAuditExpectation<'_> {
+    fn expected_prefix(&self) -> &TranscriptRewritePrefixAccumulator {
+        match self {
+            Self::Current(prefix) => prefix,
+            Self::LegacyGenerationZero {
+                expected_prefix, ..
+            } => expected_prefix,
+        }
+    }
+}
+
 /// The [`StoredEvent`] fields a raw read needs, with the payload left alone.
 #[derive(Deserialize)]
 struct RawStoredEventWire {
     seq: u64,
     schema_version: u32,
+    event: Box<serde_json::value::RawValue>,
+}
+
+/// Compact row shape used while reconstructing the sparse EventStore index.
+///
+/// The index needs durable sequence, typed source, and at most the small
+/// transcript-rewrite commit projection. It must not materialize the two full
+/// transcript bodies merely to recover sequence or exact-interaction
+/// occupancy.
+#[derive(Deserialize)]
+struct IndexedStoredEventWire {
+    seq: u64,
+    schema_version: u32,
+    #[serde(default = "stored_event_legacy_source")]
+    source: EventSourceIdentity,
     event: Box<serde_json::value::RawValue>,
 }
 
@@ -131,6 +560,34 @@ pub enum ExactInteractionAppend {
     Inserted(StoredEvent),
     /// One semantically identical row already existed and was reused.
     Replayed(StoredEvent),
+}
+
+/// Result of an exact receipt-only transcript-rewrite append.
+///
+/// A replay returns the one canonical stored row, so projection recovery can
+/// resume from its durable sequence without emitting another audit row.
+#[derive(Debug, Clone)]
+pub enum ExactTranscriptRewriteReceiptAppend {
+    /// No identical receipt row existed, so this call durably inserted one.
+    Inserted(StoredEvent),
+    /// One identical receipt row already existed and was reused.
+    Replayed(StoredEvent),
+}
+
+impl ExactTranscriptRewriteReceiptAppend {
+    /// The canonical durable row selected by the exact append.
+    #[must_use]
+    pub fn stored_event(&self) -> &StoredEvent {
+        match self {
+            Self::Inserted(event) | Self::Replayed(event) => event,
+        }
+    }
+
+    /// Whether this call added a physical event row.
+    #[must_use]
+    pub fn inserted(&self) -> bool {
+        matches!(self, Self::Inserted(_))
+    }
 }
 
 /// Maximum number of exact interaction terminals accepted by one durable
@@ -504,6 +961,19 @@ pub trait EventStore: Send + Sync {
         }
     }
 
+    /// Durably append one receipt-only transcript-rewrite batch, or return the
+    /// canonical identical row already stored for the exact receipt identity.
+    ///
+    /// Implementations must make the receipt lookup and optional append one
+    /// atomic operation. The final assistant text is a derived, delta-sized
+    /// projection fact; a retry with different projection text conflicts.
+    async fn append_transcript_rewrite_receipt_exact(
+        &self,
+        session_id: &SessionId,
+        receipt: &TranscriptRewriteAuditReceiptBatch,
+        final_assistant_text: Option<&str>,
+    ) -> Result<ExactTranscriptRewriteReceiptAppend, EventStoreError>;
+
     /// Append bare session-scoped events to the log for a session.
     ///
     /// Each event is reduced to a session-sourced envelope before being handed to
@@ -575,6 +1045,45 @@ pub trait EventStore: Send + Sync {
         Ok(None)
     }
 
+    /// Read transcript-rewrite audit rows through one store-owned authority
+    /// boundary.
+    ///
+    /// [`TranscriptRewriteAuditExpectation::Current`] is O(1) by type.
+    /// [`TranscriptRewriteAuditExpectation::LegacyGenerationZero`] alone may
+    /// expose the already-proved graph vector during one full 0.8.10
+    /// reconciliation, because semantic occurrence order cannot be
+    /// rediscovered from revision reachability. Consumer positions, file
+    /// offsets, and log identity never enter this API.
+    ///
+    /// `None` means this store does not implement the capability. Callers must
+    /// then use their existing full typed audit path. The default is
+    /// deliberately safe-slow so a custom store cannot accidentally authorize
+    /// a skip.
+    async fn read_transcript_rewrite_audit(
+        &self,
+        session_id: &SessionId,
+        expectation: TranscriptRewriteAuditExpectation<'_>,
+    ) -> Result<Option<TranscriptRewriteAuditRead>, EventStoreError> {
+        let _ = (session_id, expectation);
+        Ok(None)
+    }
+
+    /// Publish backend-private tail/reconciliation authority only after the
+    /// consumer has validated the exact returned bodies and successfully
+    /// applied their semantic replay.
+    ///
+    /// The receipt carries no file offset, fingerprint, or log generation.
+    /// Implementations that stage a private candidate bind it to the receipt's
+    /// opaque one-use handle; unknown/already-finalized receipts are idempotent
+    /// no-ops. The safe default has no persisted marker authority to publish.
+    async fn finalize_transcript_rewrite_audit(
+        &self,
+        receipt: &TranscriptRewritePrefixReceipt,
+    ) -> Result<(), EventStoreError> {
+        let _ = receipt;
+        Ok(())
+    }
+
     /// Read at most `max_rows` events from a sequence floor. Production
     /// stores override this to avoid materializing an unbounded backlog;
     /// the default preserves compatibility for small test stores.
@@ -636,6 +1145,26 @@ pub enum EventStoreError {
     },
 
     #[error(
+        "transcript rewrite generation conflict for session {session_id}, generation {generation}: \
+         row {first_seq} and row {conflicting_seq} carry different commit facts"
+    )]
+    TranscriptRewriteGenerationConflict {
+        session_id: SessionId,
+        generation: u64,
+        first_seq: u64,
+        conflicting_seq: u64,
+    },
+
+    #[error(
+        "exact transcript rewrite receipt conflict for session {session_id}: found {existing_count} exact row(s): {reason}"
+    )]
+    ExactTranscriptRewriteReceiptConflict {
+        session_id: SessionId,
+        existing_count: usize,
+        reason: String,
+    },
+
+    #[error(
         "event log schema version mismatch: stored row has schema_version {found}, \
          runtime expects {expected}; refusing to project an unknown schema"
     )]
@@ -653,6 +1182,7 @@ pub struct FileEventStore {
     root: PathBuf,
     append_lock: Arc<Mutex<()>>,
     index_registry: Arc<Mutex<EventLogIndexRegistry>>,
+    pending_rewrite_heads: Arc<Mutex<BTreeMap<String, PendingTranscriptRewriteHead>>>,
     #[cfg(test)]
     decoded_rows: Arc<AtomicUsize>,
 }
@@ -668,13 +1198,20 @@ const EVENT_LOG_INDEX_STRIDE: u64 = 64;
 #[cfg(not(target_arch = "wasm32"))]
 const EVENT_LOG_INDEX_CACHE_CAPACITY: usize = 256;
 
+/// Pending audit proofs are reconstructable and safe to evict: an evicted
+/// finalization becomes a no-op and the next load performs reconciliation
+/// again. Bounding them avoids failed/cancelled loads accumulating one entry
+/// per session for process lifetime.
+#[cfg(not(target_arch = "wasm32"))]
+const PENDING_REWRITE_HEAD_CAPACITY: usize = 256;
+
 /// Prefix/suffix bytes sampled from the final indexed row when validating a
 /// fingerprint hit. This catches replaced tails without making a very large
 /// event row an unbounded per-page read.
 #[cfg(not(target_arch = "wasm32"))]
 const EVENT_LOG_ANCHOR_SAMPLE_BYTES: usize = 64;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg(not(target_arch = "wasm32"))]
 struct EventLogFingerprint {
     len: u64,
@@ -696,7 +1233,7 @@ struct EventLogCheckpoint {
     byte_offset: u64,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[cfg(not(target_arch = "wasm32"))]
 struct EventLogLineAnchor {
     byte_offset: u64,
@@ -704,6 +1241,55 @@ struct EventLogLineAnchor {
     prefix_hash: u64,
     suffix_hash: u64,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg(not(target_arch = "wasm32"))]
+struct DurableEventLogHeadBody {
+    schema_version: u32,
+    session_id: SessionId,
+    /// Exact event-log sequence reached after the covered append fsync.
+    through_log_seq: u64,
+    /// Exact event-log byte length reached after that same fsync.
+    covered_log_len: u64,
+    /// Native file identity/timestamps at the covered boundary. An unchanged
+    /// length must match this exactly; a longer cooperative append is instead
+    /// validated through the preserved boundary-row anchor below.
+    covered_log_fingerprint: EventLogFingerprint,
+    /// Last row ending at `covered_log_len`; absent only for an empty log.
+    last_line: Option<EventLogLineAnchor>,
+    /// Sequence of the last semantic rewrite occurrence in the prefix.
+    /// Every requested sequence from here through `through_log_seq` therefore
+    /// names the same canonical rewrite prefix.
+    last_distinct_rewrite_seq: u64,
+    /// Last semantic occurrence generation bound by `rewrite_prefix`.
+    last_rewrite_generation: u64,
+    /// Full last occurrence fact. This lets a direct-tail reader classify an
+    /// exact retry of the boundary generation without retaining the historical
+    /// commit vector or accepting digest-only equality.
+    last_rewrite_commit: Option<TranscriptRewriteCommit>,
+    /// Checkpoint-comparable semantic prefix. Backend-local log identity and
+    /// offsets never escape this event-log head.
+    rewrite_prefix: Option<TranscriptRewritePrefixAccumulator>,
+    /// This boundary was produced by matching generation-zero 0.8.10 rows
+    /// against the already-proved ordered graph vector, never by physical row
+    /// order or revision reachability.
+    legacy_generation_zero_normalized: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg(not(target_arch = "wasm32"))]
+struct DurableEventLogHead {
+    body: DurableEventLogHeadBody,
+    /// SHA-256 over the exact serialized body with a domain separator.
+    ///
+    /// The canonical JSONL remains authority. This checksum rejects torn or
+    /// independently-corrupted heads before their bounded log-tail binding
+    /// is considered.
+    checksum: String,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+const EVENT_LOG_HEAD_SCHEMA_VERSION: u32 = 1;
 
 /// Validated sparse projection of one canonical JSONL log.
 ///
@@ -729,17 +1315,74 @@ struct EventLogIndex {
     last_line: Option<EventLogLineAnchor>,
     /// Reconstructable exact-source occupancy index. Every durable row whose
     /// typed source is `Interaction(id)` occupies that identity, even when its
-    /// payload is nonterminal/corrupt. Keeping the first canonical row plus a
-    /// count lets exact appends distinguish zero/one/many in O(1) after the
-    /// validated log index is warm.
+    /// payload is nonterminal/corrupt. Keeping only the first row's compact
+    /// byte locator plus a count lets exact appends distinguish zero/one/many
+    /// in O(1) memory; the one replayed row is sought and decoded on demand.
     exact_interaction_occupants: HashMap<InteractionId, ExactInteractionOccupant>,
+    /// Exact receipt-only rows keyed by the canonical serialized receipt
+    /// (without the derived summary projection).
+    transcript_rewrite_receipt_occupants: HashMap<Vec<u8>, ExactTranscriptRewriteReceiptOccupant>,
+    /// Current rewrite occurrences keyed by serialized generation.
+    ///
+    /// Physical row order is deliberately irrelevant: late audit repair may
+    /// append an older occurrence after a newer one. Same-generation retries
+    /// collapse only when every commit fact is equal; a conflicting fact is
+    /// corruption.
+    transcript_rewrite_commits: BTreeMap<u64, SequencedTranscriptRewriteCommit>,
+    /// Generation-zero rows written by 0.8.10. Their physical
+    /// order has no semantic authority. A one-time reconciliation maps them
+    /// against the already-proved graph vector under 0.8.10 equality semantics
+    /// before a normalized event-log head may be minted.
+    legacy_transcript_rewrite_commits: Vec<SequencedTranscriptRewriteCommit>,
+    /// O(1)-extendable current occurrence prefix. Missing generations or
+    /// unresolved legacy rows leave this absent and force full reconciliation.
+    transcript_rewrite_prefix: Option<TranscriptRewritePrefixEvidence>,
 }
 
 #[derive(Debug, Clone)]
 #[cfg(not(target_arch = "wasm32"))]
 struct ExactInteractionOccupant {
+    first: EventLogRowLocator,
+    count: usize,
+}
+
+#[derive(Debug, Clone)]
+#[cfg(not(target_arch = "wasm32"))]
+struct ExactTranscriptRewriteReceiptOccupant {
+    first_seq: u64,
+    count: usize,
+    final_assistant_text: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+#[cfg(not(target_arch = "wasm32"))]
+struct EventLogRowLocator {
+    seq: u64,
+    byte_offset: u64,
+    byte_len: u64,
+}
+
+#[derive(Debug, Clone)]
+#[cfg(not(target_arch = "wasm32"))]
+struct ResolvedExactInteractionOccupant {
     first: StoredEvent,
     count: usize,
+}
+
+#[derive(Debug, Clone)]
+#[cfg(not(target_arch = "wasm32"))]
+struct SequencedTranscriptRewriteCommit {
+    seq: u64,
+    commit: TranscriptRewriteCommit,
+}
+
+#[derive(Debug, Clone)]
+#[cfg(not(target_arch = "wasm32"))]
+struct TranscriptRewritePrefixEvidence {
+    accumulator: TranscriptRewritePrefixAccumulator,
+    last_generation: u64,
+    last_distinct_rewrite_seq: u64,
+    last_commit: Option<TranscriptRewriteCommit>,
 }
 
 /// Immutable O(1)-size view captured while the shared index mutex is held.
@@ -776,19 +1419,440 @@ struct AppendedIndexRow {
     byte_len: u64,
 }
 
+#[derive(Debug)]
+#[cfg(not(target_arch = "wasm32"))]
+struct FullTranscriptRewriteAuditScan {
+    fingerprint: Option<EventLogFingerprint>,
+    last_line: Option<EventLogLineAnchor>,
+    observed_through_log_seq: u64,
+    index: EventLogIndex,
+    rewrite_rows: Vec<RawTranscriptRewriteEvent>,
+}
+
+#[derive(Debug, Clone)]
+#[cfg(not(target_arch = "wasm32"))]
+struct PendingTranscriptRewriteHead {
+    receipt: TranscriptRewritePrefixReceipt,
+    body: DurableEventLogHeadBody,
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 impl EventLogIndex {
-    fn note_exact_interaction_occupant(&mut self, event: &StoredEvent) {
-        let EventSourceIdentity::Interaction { interaction_id } = &event.source else {
+    fn note_exact_interaction_occupant(
+        &mut self,
+        source: &EventSourceIdentity,
+        seq: u64,
+        byte_offset: u64,
+        byte_len: u64,
+    ) {
+        let EventSourceIdentity::Interaction { interaction_id } = source else {
             return;
         };
         self.exact_interaction_occupants
             .entry(*interaction_id)
             .and_modify(|occupant| occupant.count = occupant.count.saturating_add(1))
             .or_insert_with(|| ExactInteractionOccupant {
-                first: event.clone(),
+                first: EventLogRowLocator {
+                    seq,
+                    byte_offset,
+                    byte_len,
+                },
                 count: 1,
             });
+    }
+
+    fn note_transcript_rewrite_commit(
+        &mut self,
+        session_id: &SessionId,
+        event: &StoredEvent,
+    ) -> Result<(), EventStoreError> {
+        let Some((event_session_id, commits)) = transcript_rewrite_event_parts(&event.event) else {
+            return Ok(());
+        };
+        if event_session_id != session_id {
+            return Err(EventStoreError::Store(format!(
+                "transcript rewrite event for session {event_session_id} is stored in session {session_id}'s log"
+            )));
+        }
+        if let Some((_, receipt, final_assistant_text)) =
+            transcript_rewrite_receipt_event_parts(&event.event)
+        {
+            let identity = serde_json::to_vec(receipt)
+                .map_err(|error| EventStoreError::Serialization(error.to_string()))?;
+            match self.transcript_rewrite_receipt_occupants.get_mut(&identity) {
+                Some(occupant) if occupant.final_assistant_text == *final_assistant_text => {
+                    occupant.count = occupant.count.saturating_add(1);
+                }
+                Some(occupant) => {
+                    return Err(EventStoreError::ExactTranscriptRewriteReceiptConflict {
+                        session_id: session_id.clone(),
+                        existing_count: occupant.count,
+                        reason: format!(
+                            "row {} carries a different terminal assistant-text projection",
+                            occupant.first_seq
+                        ),
+                    });
+                }
+                None => {
+                    self.transcript_rewrite_receipt_occupants.insert(
+                        identity,
+                        ExactTranscriptRewriteReceiptOccupant {
+                            first_seq: event.seq,
+                            count: 1,
+                            final_assistant_text: final_assistant_text.clone(),
+                        },
+                    );
+                }
+            }
+        }
+        for commit in commits {
+            self.note_transcript_rewrite_occurrence(session_id, event.seq, commit)?;
+        }
+        Ok(())
+    }
+
+    fn note_transcript_rewrite_payload(
+        &mut self,
+        session_id: &SessionId,
+        seq: u64,
+        payload: &serde_json::value::RawValue,
+    ) -> Result<(), EventStoreError> {
+        let decoded = meerkat_core::event::transcript_rewrite_commits_from_payload(payload)
+            .map_err(|error| EventStoreError::Serialization(error.to_string()))?;
+        let Some((event_session_id, commits)) = decoded else {
+            return Ok(());
+        };
+        if event_session_id != *session_id {
+            return Err(EventStoreError::Store(format!(
+                "transcript rewrite event for session {event_session_id} is stored in session {session_id}'s log"
+            )));
+        }
+        if let Some((receipt_session_id, receipt, final_assistant_text)) =
+            meerkat_core::event::transcript_rewrite_audit_receipt_from_payload(payload)
+                .map_err(|error| EventStoreError::Serialization(error.to_string()))?
+        {
+            if receipt_session_id != *session_id {
+                return Err(EventStoreError::Store(format!(
+                    "transcript rewrite receipt for session {receipt_session_id} is stored in session {session_id}'s log"
+                )));
+            }
+            let identity = serde_json::to_vec(&receipt)
+                .map_err(|error| EventStoreError::Serialization(error.to_string()))?;
+            match self.transcript_rewrite_receipt_occupants.get_mut(&identity) {
+                Some(occupant) if occupant.final_assistant_text == final_assistant_text => {
+                    occupant.count = occupant.count.saturating_add(1);
+                }
+                Some(occupant) => {
+                    return Err(EventStoreError::ExactTranscriptRewriteReceiptConflict {
+                        session_id: session_id.clone(),
+                        existing_count: occupant.count,
+                        reason: format!(
+                            "row {} carries a different terminal assistant-text projection",
+                            occupant.first_seq
+                        ),
+                    });
+                }
+                None => {
+                    self.transcript_rewrite_receipt_occupants.insert(
+                        identity,
+                        ExactTranscriptRewriteReceiptOccupant {
+                            first_seq: seq,
+                            count: 1,
+                            final_assistant_text,
+                        },
+                    );
+                }
+            }
+        }
+        for commit in &commits {
+            self.note_transcript_rewrite_occurrence(session_id, seq, commit)?;
+        }
+        Ok(())
+    }
+
+    fn note_transcript_rewrite_occurrence(
+        &mut self,
+        session_id: &SessionId,
+        seq: u64,
+        commit: &TranscriptRewriteCommit,
+    ) -> Result<(), EventStoreError> {
+        if commit.rewrite_generation == 0 {
+            // Retain physical multiplicity. A proved 0.8.10 graph may carry
+            // byte-equal semantic occurrences; one physical row cannot prove
+            // both. Counts beyond graph multiplicity are retries.
+            self.legacy_transcript_rewrite_commits
+                .push(SequencedTranscriptRewriteCommit {
+                    seq,
+                    commit: commit.clone(),
+                });
+            self.transcript_rewrite_prefix = None;
+            return Ok(());
+        }
+
+        if let Some(existing) = self
+            .transcript_rewrite_commits
+            .get(&commit.rewrite_generation)
+        {
+            if existing.commit == *commit {
+                // A retry reuses the occurrence generation and every fact.
+                return Ok(());
+            }
+            return Err(EventStoreError::TranscriptRewriteGenerationConflict {
+                session_id: session_id.clone(),
+                generation: commit.rewrite_generation,
+                first_seq: existing.seq,
+                conflicting_seq: seq,
+            });
+        }
+
+        let can_extend = self.legacy_transcript_rewrite_commits.is_empty()
+            && self
+                .transcript_rewrite_prefix
+                .as_ref()
+                .is_some_and(|prefix| {
+                    prefix.last_generation.checked_add(1) == Some(commit.rewrite_generation)
+                });
+        self.transcript_rewrite_commits.insert(
+            commit.rewrite_generation,
+            SequencedTranscriptRewriteCommit {
+                seq,
+                commit: commit.clone(),
+            },
+        );
+
+        if can_extend {
+            let prefix = self
+                .transcript_rewrite_prefix
+                .as_mut()
+                .expect("can_extend requires a prefix");
+            prefix.accumulator = prefix
+                .accumulator
+                .extend(commit)
+                .map_err(|error| EventStoreError::Serialization(error.to_string()))?;
+            prefix.last_generation = commit.rewrite_generation;
+            prefix.last_distinct_rewrite_seq = seq;
+            prefix.last_commit = Some(commit.clone());
+        } else {
+            self.rebuild_current_transcript_rewrite_prefix()?;
+        }
+        Ok(())
+    }
+
+    fn rebuild_current_transcript_rewrite_prefix(&mut self) -> Result<(), EventStoreError> {
+        self.transcript_rewrite_prefix = None;
+        if !self.legacy_transcript_rewrite_commits.is_empty() {
+            return Ok(());
+        }
+        let mut accumulator = TranscriptRewritePrefixAccumulator::empty();
+        let mut expected_generation = 1_u64;
+        let mut last_distinct_rewrite_seq = 0_u64;
+        for (&generation, row) in &self.transcript_rewrite_commits {
+            if generation != expected_generation {
+                // Missing audit occurrences are recoverable by the session
+                // graph. They deny a prefix receipt but do not make the whole
+                // event log unreadable.
+                return Ok(());
+            }
+            accumulator = accumulator
+                .extend(&row.commit)
+                .map_err(|error| EventStoreError::Serialization(error.to_string()))?;
+            last_distinct_rewrite_seq = last_distinct_rewrite_seq.max(row.seq);
+            expected_generation = expected_generation.checked_add(1).ok_or_else(|| {
+                EventStoreError::Store(
+                    "transcript rewrite generation overflow while rebuilding prefix".to_string(),
+                )
+            })?;
+        }
+        self.transcript_rewrite_prefix = Some(TranscriptRewritePrefixEvidence {
+            accumulator,
+            last_generation: expected_generation.saturating_sub(1),
+            last_distinct_rewrite_seq,
+            last_commit: self
+                .transcript_rewrite_commits
+                .last_key_value()
+                .map(|(_, row)| row.commit.clone()),
+        });
+        Ok(())
+    }
+
+    fn current_transcript_rewrite_prefix_receipt(
+        &self,
+        session_id: &SessionId,
+        through_log_seq: u64,
+    ) -> Option<TranscriptRewritePrefixReceipt> {
+        match self.transcript_rewrite_prefix.as_ref() {
+            Some(evidence) if evidence.last_distinct_rewrite_seq <= through_log_seq => {
+                Some(TranscriptRewritePrefixReceipt {
+                    session_id: session_id.clone(),
+                    through_log_seq,
+                    accumulator: evidence.accumulator.clone(),
+                    last_commit: evidence.last_commit.clone(),
+                    finalization_id: None,
+                })
+            }
+            None if self.transcript_rewrite_commits.is_empty()
+                && self.legacy_transcript_rewrite_commits.is_empty() =>
+            {
+                Some(TranscriptRewritePrefixReceipt {
+                    session_id: session_id.clone(),
+                    through_log_seq,
+                    accumulator: TranscriptRewritePrefixAccumulator::empty(),
+                    last_commit: None,
+                    finalization_id: None,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    fn legacy_prefix_reconciled_by_expected_graph(
+        &self,
+        session_id: &SessionId,
+        through_log_seq: u64,
+        expected_prefix: &TranscriptRewritePrefixAccumulator,
+        expected_commits: &[TranscriptRewriteCommit],
+        rewrite_rows: &[RawTranscriptRewriteEvent],
+    ) -> Result<Option<TranscriptRewritePrefixReceipt>, EventStoreError> {
+        if self.legacy_transcript_rewrite_commits.is_empty() {
+            return Ok(None);
+        }
+        let rebuilt = TranscriptRewritePrefixAccumulator::from_commits(expected_commits)
+            .map_err(|error| EventStoreError::Serialization(error.to_string()))?;
+        if &rebuilt != expected_prefix {
+            return Ok(None);
+        }
+        for (index, expected) in expected_commits.iter().enumerate() {
+            let expected_generation = u64::try_from(index)
+                .ok()
+                .and_then(|index| index.checked_add(1))
+                .ok_or_else(|| {
+                    EventStoreError::Store(
+                        "expected transcript rewrite vector exceeds u64 generations".to_string(),
+                    )
+                })?;
+            if expected.rewrite_generation != expected_generation {
+                return Ok(None);
+            }
+        }
+
+        if self
+            .transcript_rewrite_commits
+            .iter()
+            .any(|(&generation, row)| {
+                let Ok(index) = usize::try_from(generation.saturating_sub(1)) else {
+                    return true;
+                };
+                expected_commits.get(index) != Some(&row.commit)
+            })
+        {
+            // An explicit current generation is occurrence identity. A
+            // matching generation-zero fact must never mask a conflicting
+            // fact under that generation.
+            return Ok(None);
+        }
+
+        let mut allowed_legacy_counts = HashMap::<Vec<u8>, u64>::new();
+        let mut required_legacy_counts = HashMap::<Vec<u8>, u64>::new();
+        for expected in expected_commits {
+            let mut legacy_fact = expected.clone();
+            legacy_fact.rewrite_generation = 0;
+            let identity = serde_json::to_vec(&legacy_fact)
+                .map_err(|error| EventStoreError::Serialization(error.to_string()))?;
+            *allowed_legacy_counts.entry(identity.clone()).or_default() += 1;
+            if !self
+                .transcript_rewrite_commits
+                .contains_key(&expected.rewrite_generation)
+            {
+                *required_legacy_counts.entry(identity).or_default() += 1;
+            }
+        }
+        // The commit-only index deliberately does not materialize rewrite
+        // bodies, so it also cannot perform body-authorized compatibility
+        // healing. A legacy graph has already applied those same heals while
+        // becoming checkpoint proof. Decode only generation-zero rows here so
+        // comparison uses the exact post-heal commit the consumer will later
+        // validate from these same payload bytes. The resulting head remains a
+        // private candidate until that validation and replay succeed.
+        let mut physical_legacy_counts = HashMap::<Vec<u8>, u64>::new();
+        let mut healed_legacy_count = 0_usize;
+        for row in rewrite_rows {
+            let Some((_, indexed_commits)) =
+                meerkat_core::event::transcript_rewrite_commits_from_payload(&row.event)
+                    .map_err(|error| EventStoreError::Serialization(error.to_string()))?
+            else {
+                return Err(EventStoreError::Store(
+                    "full rewrite reconciliation contains a non-rewrite payload".to_string(),
+                ));
+            };
+            let [indexed_commit] = indexed_commits.as_slice() else {
+                if indexed_commits
+                    .iter()
+                    .any(|commit| commit.rewrite_generation == 0)
+                {
+                    return Err(EventStoreError::Store(
+                        "generation-zero compatibility evidence must be one released singleton row"
+                            .to_string(),
+                    ));
+                }
+                continue;
+            };
+            if indexed_commit.rewrite_generation != 0 {
+                continue;
+            }
+            let event: AgentEvent = serde_json::from_str(row.event.get())
+                .map_err(|error| EventStoreError::Serialization(error.to_string()))?;
+            let AgentEvent::TranscriptRewriteCommitted {
+                session_id: event_session_id,
+                record,
+            } = event
+            else {
+                return Err(EventStoreError::Store(
+                    "full rewrite reconciliation contains a non-rewrite payload".to_string(),
+                ));
+            };
+            if event_session_id != *session_id {
+                return Err(EventStoreError::Store(format!(
+                    "transcript rewrite event for session {event_session_id} is stored in session {session_id}'s log"
+                )));
+            }
+            if record.commit.rewrite_generation != 0 {
+                return Err(EventStoreError::Store(
+                    "generation-zero rewrite changed occurrence identity during compatibility decode"
+                        .to_string(),
+                ));
+            }
+            healed_legacy_count = healed_legacy_count.saturating_add(1);
+            let identity = serde_json::to_vec(&record.commit)
+                .map_err(|error| EventStoreError::Serialization(error.to_string()))?;
+            if !allowed_legacy_counts.contains_key(&identity) {
+                // A generation-zero fact foreign to the sealed graph cannot
+                // be hidden behind a migration marker.
+                return Ok(None);
+            }
+            *physical_legacy_counts.entry(identity).or_default() += 1;
+        }
+        if healed_legacy_count != self.legacy_transcript_rewrite_commits.len() {
+            return Err(EventStoreError::Store(
+                "full rewrite reconciliation did not retain every indexed generation-zero row"
+                    .to_string(),
+            ));
+        }
+        if required_legacy_counts.iter().any(|(identity, required)| {
+            physical_legacy_counts.get(identity).copied().unwrap_or(0) < *required
+        }) {
+            // The caller's existing audit-repair lane may append these missing
+            // occurrences with current generation identity. Until it does, no
+            // skip authority is minted. Extra physical rows are old retries.
+            return Ok(None);
+        }
+
+        Ok(Some(TranscriptRewritePrefixReceipt {
+            session_id: session_id.clone(),
+            through_log_seq,
+            accumulator: expected_prefix.clone(),
+            last_commit: expected_commits.last().cloned(),
+            finalization_id: None,
+        }))
     }
 }
 
@@ -804,6 +1868,7 @@ impl FileEventStore {
             root: root.into(),
             append_lock: Arc::new(Mutex::new(())),
             index_registry: Arc::new(Mutex::new(EventLogIndexRegistry::default())),
+            pending_rewrite_heads: Arc::new(Mutex::new(BTreeMap::new())),
             #[cfg(test)]
             decoded_rows: Arc::new(AtomicUsize::new(0)),
         }
@@ -815,6 +1880,519 @@ impl FileEventStore {
 
     fn log_path(&self, session_id: &SessionId) -> PathBuf {
         self.root.join(format!("{session_id}.jsonl"))
+    }
+
+    fn event_log_head_dir(&self) -> PathBuf {
+        self.root.join(".event-log-head")
+    }
+
+    fn event_log_head_path(&self, session_id: &SessionId) -> PathBuf {
+        self.event_log_head_dir().join(format!("{session_id}.json"))
+    }
+
+    fn durable_event_log_head_checksum(
+        body: &DurableEventLogHeadBody,
+    ) -> Result<String, EventStoreError> {
+        let bytes = serde_json::to_vec(body)
+            .map_err(|error| EventStoreError::Serialization(error.to_string()))?;
+        let mut hasher = Sha256::new();
+        hasher.update(b"meerkat.file-event-store.event-log-head.v1\0");
+        hasher.update(bytes);
+        Ok(format!("sha256:{:x}", hasher.finalize()))
+    }
+
+    async fn read_durable_event_log_head(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<DurableEventLogHeadBody>, EventStoreError> {
+        let head_path = self.event_log_head_path(session_id);
+        let bytes = match tokio::fs::read(&head_path).await {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(EventStoreError::Io(error)),
+        };
+        let head: DurableEventLogHead = match serde_json::from_slice(&bytes) {
+            Ok(head) => head,
+            Err(_) => return Ok(None),
+        };
+        let expected_checksum = Self::durable_event_log_head_checksum(&head.body)?;
+        if head.checksum != expected_checksum
+            || head.body.schema_version != EVENT_LOG_HEAD_SCHEMA_VERSION
+            || head.body.session_id != *session_id
+            || head.body.last_distinct_rewrite_seq > head.body.through_log_seq
+            || match &head.body.rewrite_prefix {
+                Some(prefix) => {
+                    head.body.last_rewrite_generation != prefix.occurrence_count()
+                        || match &head.body.last_rewrite_commit {
+                            Some(commit) => {
+                                commit.rewrite_generation != head.body.last_rewrite_generation
+                            }
+                            None => head.body.last_rewrite_generation != 0,
+                        }
+                }
+                None => {
+                    head.body.last_rewrite_generation != 0
+                        || head.body.last_rewrite_commit.is_some()
+                }
+            }
+        {
+            return Ok(None);
+        }
+        Ok(Some(head.body))
+    }
+
+    async fn read_exact_event_log_head(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<DurableEventLogHeadBody>, EventStoreError> {
+        let Some(head) = self.read_durable_event_log_head(session_id).await? else {
+            return Ok(None);
+        };
+        let path = self.log_path(session_id);
+        let mut file = match tokio::fs::File::open(&path).await {
+            Ok(file) => file,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound && head.covered_log_len == 0 =>
+            {
+                return Ok(Some(head));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(EventStoreError::Io(error)),
+        };
+        let before = Self::event_log_fingerprint_from_metadata(&file.metadata().await?);
+        if before != head.covered_log_fingerprint || before.len != head.covered_log_len {
+            return Ok(None);
+        }
+        match head.last_line {
+            Some(anchor)
+                if anchor.byte_offset.checked_add(anchor.byte_len)
+                    == Some(head.covered_log_len)
+                    && Self::tail_anchor_matches(&mut file, anchor).await? => {}
+            None if head.covered_log_len == 0 && head.through_log_seq == 0 => {}
+            _ => return Ok(None),
+        }
+        let after = Self::event_log_fingerprint_from_metadata(&file.metadata().await?);
+        Ok((after == before).then_some(head))
+    }
+
+    /// Validate the durable head and advance it in memory across a stable
+    /// append-only suffix. Callers that are about to append persist the final
+    /// advanced head once after their own JSONL fsync.
+    async fn read_current_event_log_head(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<DurableEventLogHeadBody>, EventStoreError> {
+        let Some(mut head) = self.read_durable_event_log_head(session_id).await? else {
+            return Ok(None);
+        };
+        let path = self.log_path(session_id);
+        let mut file = match tokio::fs::File::open(&path).await {
+            Ok(file) => file,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound && head.covered_log_len == 0 =>
+            {
+                return Ok(Some(head));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(EventStoreError::Io(error)),
+        };
+        let target = Self::event_log_fingerprint_from_metadata(&file.metadata().await?);
+        if target.len < head.covered_log_len {
+            return Ok(None);
+        }
+        if target.len == head.covered_log_len && target != head.covered_log_fingerprint {
+            return Ok(None);
+        }
+        #[cfg(unix)]
+        if target.len > head.covered_log_len
+            && (target.device != head.covered_log_fingerprint.device
+                || target.inode != head.covered_log_fingerprint.inode)
+        {
+            return Ok(None);
+        }
+        #[cfg(not(unix))]
+        if target.len > head.covered_log_len {
+            return Ok(None);
+        }
+        match head.last_line {
+            Some(anchor)
+                if anchor.byte_offset.checked_add(anchor.byte_len)
+                    == Some(head.covered_log_len)
+                    && Self::tail_anchor_matches(&mut file, anchor).await? => {}
+            None if head.covered_log_len == 0 && head.through_log_seq == 0 => {}
+            _ => return Ok(None),
+        }
+        let after_anchor = Self::event_log_fingerprint_from_metadata(&file.metadata().await?);
+        if after_anchor != target {
+            return Ok(None);
+        }
+        if target.len == head.covered_log_len {
+            return Ok(Some(head));
+        }
+
+        file.seek(SeekFrom::Start(head.covered_log_len)).await?;
+        let mut lines =
+            BufReader::new((&mut file).take(target.len.saturating_sub(head.covered_log_len)));
+        let mut line = String::new();
+        let mut offset = head.covered_log_len;
+        let mut observed_seq = head.through_log_seq;
+        while offset < target.len {
+            line.clear();
+            let bytes_read = lines.read_line(&mut line).await?;
+            if bytes_read == 0 || !line.ends_with('\n') {
+                return Err(EventStoreError::Store(format!(
+                    "event log '{}' has a torn row after durable head byte {}",
+                    path.display(),
+                    head.covered_log_len
+                )));
+            }
+            let byte_len = u64::try_from(bytes_read).map_err(|_| {
+                EventStoreError::Store(format!(
+                    "event log '{}' contains an address-unrepresentable row",
+                    path.display()
+                ))
+            })?;
+            let line_start = offset;
+            offset = offset.checked_add(byte_len).ok_or_else(|| {
+                EventStoreError::Store(format!(
+                    "event log '{}' byte offset overflow",
+                    path.display()
+                ))
+            })?;
+            let row = self.decode_raw_event_line(&line)?;
+            if row.seq <= observed_seq {
+                return Err(EventStoreError::Store(format!(
+                    "event log '{}' sequence {} is not strictly greater than durable head {}",
+                    path.display(),
+                    row.seq,
+                    observed_seq
+                )));
+            }
+            observed_seq = row.seq;
+            head.last_line = Some(Self::event_log_line_anchor(
+                line_start,
+                byte_len,
+                line.as_bytes(),
+            ));
+            let Some((raw_rewrite, commits)) = Self::transcript_rewrite_row(session_id, row)?
+            else {
+                continue;
+            };
+            let Some(_) = head.rewrite_prefix.as_ref() else {
+                continue;
+            };
+            if let Some((_, receipt, _)) =
+                meerkat_core::event::transcript_rewrite_audit_receipt_from_payload(
+                    &raw_rewrite.event,
+                )
+                .map_err(|error| EventStoreError::Serialization(error.to_string()))?
+            {
+                let current_prefix = head.rewrite_prefix.as_ref().ok_or_else(|| {
+                    EventStoreError::Store(
+                        "rewrite-prefix authority disappeared while applying a receipt".to_string(),
+                    )
+                })?;
+                if receipt.end_prefix() == current_prefix {
+                    if head.last_rewrite_commit.as_ref() != receipt.commits().last() {
+                        return Err(EventStoreError::TranscriptRewriteGenerationConflict {
+                            session_id: session_id.clone(),
+                            generation: head.last_rewrite_generation,
+                            first_seq: head.last_distinct_rewrite_seq,
+                            conflicting_seq: raw_rewrite.seq,
+                        });
+                    }
+                    continue;
+                }
+                if receipt.start_prefix() == current_prefix {
+                    let last = receipt.commits().last().cloned().ok_or_else(|| {
+                        EventStoreError::Store(
+                            "validated transcript rewrite receipt is empty".to_string(),
+                        )
+                    })?;
+                    head.rewrite_prefix = Some(receipt.end_prefix().clone());
+                    head.last_rewrite_generation = last.rewrite_generation;
+                    head.last_rewrite_commit = Some(last);
+                    head.last_distinct_rewrite_seq = raw_rewrite.seq;
+                    continue;
+                }
+            }
+            if let [commit] = commits.as_slice()
+                && commit.rewrite_generation == head.last_rewrite_generation
+                && head.last_rewrite_commit.as_ref() != Some(commit)
+            {
+                return Err(EventStoreError::TranscriptRewriteGenerationConflict {
+                    session_id: session_id.clone(),
+                    generation: commit.rewrite_generation,
+                    first_seq: head.last_distinct_rewrite_seq,
+                    conflicting_seq: raw_rewrite.seq,
+                });
+            }
+            // This suffix was recovered from disk, not from the current
+            // receipt path. Released singleton bodies still require one-time
+            // compatibility reconciliation before they can advance semantic
+            // skip authority.
+            head.rewrite_prefix = None;
+            head.last_rewrite_generation = 0;
+            head.last_rewrite_commit = None;
+            head.legacy_generation_zero_normalized = false;
+        }
+        drop(lines);
+        let after = Self::event_log_fingerprint_from_metadata(&file.metadata().await?);
+        if after != target {
+            return Ok(None);
+        }
+        head.through_log_seq = observed_seq;
+        head.covered_log_len = target.len;
+        head.covered_log_fingerprint = target;
+        Ok(Some(head))
+    }
+
+    async fn write_event_log_head(
+        &self,
+        session_id: &SessionId,
+        body: DurableEventLogHeadBody,
+    ) -> Result<(), EventStoreError> {
+        let head = DurableEventLogHead {
+            checksum: Self::durable_event_log_head_checksum(&body)?,
+            body,
+        };
+        let bytes = serde_json::to_vec(&head)
+            .map_err(|error| EventStoreError::Serialization(error.to_string()))?;
+        let directory = self.event_log_head_dir();
+        tokio::fs::create_dir_all(&directory).await?;
+        let destination = self.event_log_head_path(session_id);
+        let temporary = directory.join(format!(
+            ".{session_id}.tmp.{}",
+            meerkat_core::time_compat::new_uuid_v7()
+        ));
+        let result = async {
+            let mut file = tokio::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)
+                .await?;
+            file.write_all(&bytes).await?;
+            file.flush().await?;
+            file.sync_all().await?;
+            drop(file);
+            tokio::fs::rename(&temporary, &destination).await?;
+            let sync_directory = directory.clone();
+            tokio::task::spawn_blocking(move || -> Result<(), std::io::Error> {
+                std::fs::File::open(sync_directory)?.sync_all()
+            })
+            .await
+            .map_err(|error| {
+                EventStoreError::Store(format!(
+                    "event-log head directory sync task failed: {error}"
+                ))
+            })??;
+            Ok::<(), EventStoreError>(())
+        }
+        .await;
+        if result.is_err() {
+            let _ = tokio::fs::remove_file(&temporary).await;
+        }
+        result
+    }
+
+    /// Build one fixed-size durable prefix snapshot from the validated index.
+    ///
+    /// The caller holds the durable per-session sequence lock. `fingerprint`
+    /// and `through_log_seq` are the post-fsync event-log state; a concurrent
+    /// reader may have rebuilt the same state, but no writer can advance it.
+    async fn persist_event_log_head_from_index(
+        &self,
+        session_id: &SessionId,
+        fingerprint: EventLogFingerprint,
+        through_log_seq: u64,
+        trusted_empty_base: bool,
+    ) -> Result<(), EventStoreError> {
+        let shared = self.event_log_index(session_id).await;
+        let body = {
+            let index = shared.lock().await;
+            if index.fingerprint != Some(fingerprint) || index.last_seq != through_log_seq {
+                return Ok(());
+            }
+            let receipt =
+                index.current_transcript_rewrite_prefix_receipt(session_id, through_log_seq);
+            let evidence = index.transcript_rewrite_prefix.as_ref();
+            let last_distinct_rewrite_seq = evidence
+                .map(|evidence| evidence.last_distinct_rewrite_seq)
+                .unwrap_or_else(|| {
+                    index
+                        .legacy_transcript_rewrite_commits
+                        .iter()
+                        .chain(index.transcript_rewrite_commits.values())
+                        .map(|row| row.seq)
+                        .max()
+                        .unwrap_or(0)
+                });
+            let (last_rewrite_generation, last_rewrite_commit, rewrite_prefix) =
+                if trusted_empty_base {
+                    match (receipt, evidence) {
+                        (Some(receipt), Some(evidence)) => (
+                            receipt.accumulator.occurrence_count(),
+                            evidence.last_commit.clone(),
+                            Some(receipt.accumulator),
+                        ),
+                        (Some(receipt), None) if receipt.accumulator.occurrence_count() == 0 => {
+                            (0, None, Some(receipt.accumulator))
+                        }
+                        _ => (0, None, None),
+                    }
+                } else if index.transcript_rewrite_commits.is_empty()
+                    && index.legacy_transcript_rewrite_commits.is_empty()
+                {
+                    // A rebuilt index may publish positional high-water, but
+                    // rows read from disk have not passed exact-body replay.
+                    // Only the provably empty rewrite prefix is safe before a
+                    // consumer-staged receipt is finalized.
+                    (0, None, Some(TranscriptRewritePrefixAccumulator::empty()))
+                } else {
+                    (0, None, None)
+                };
+            DurableEventLogHeadBody {
+                schema_version: EVENT_LOG_HEAD_SCHEMA_VERSION,
+                session_id: session_id.clone(),
+                through_log_seq,
+                covered_log_len: fingerprint.len,
+                covered_log_fingerprint: fingerprint,
+                last_line: index.last_line,
+                last_distinct_rewrite_seq,
+                last_rewrite_generation,
+                last_rewrite_commit,
+                rewrite_prefix,
+                legacy_generation_zero_normalized: false,
+            }
+        };
+        self.write_event_log_head(session_id, body).await
+    }
+
+    async fn stage_event_log_head(
+        &self,
+        mut receipt: TranscriptRewritePrefixReceipt,
+        body: DurableEventLogHeadBody,
+    ) -> Result<TranscriptRewritePrefixReceipt, EventStoreError> {
+        if receipt.session_id != body.session_id
+            || receipt.through_log_seq != body.through_log_seq
+            || body.rewrite_prefix.as_ref() != Some(&receipt.accumulator)
+            || body.last_rewrite_commit != receipt.last_commit
+            || body.last_rewrite_generation != receipt.accumulator.occurrence_count()
+        {
+            return Err(EventStoreError::Store(
+                "cannot stage an event-log head that disagrees with its rewrite receipt"
+                    .to_string(),
+            ));
+        }
+        let finalization_id = meerkat_core::time_compat::new_uuid_v7().to_string();
+        receipt.finalization_id = Some(finalization_id.clone());
+        let mut pending = self.pending_rewrite_heads.lock().await;
+        if pending.len() == PENDING_REWRITE_HEAD_CAPACITY
+            && let Some(evicted) = pending.keys().next().cloned()
+        {
+            pending.remove(&evicted);
+        }
+        pending.insert(
+            finalization_id,
+            PendingTranscriptRewriteHead {
+                receipt: receipt.clone(),
+                body,
+            },
+        );
+        Ok(receipt)
+    }
+
+    async fn stage_reconciled_event_log_head(
+        &self,
+        session_id: &SessionId,
+        fingerprint: EventLogFingerprint,
+        through_log_seq: u64,
+        last_line: Option<EventLogLineAnchor>,
+        last_distinct_rewrite_seq: u64,
+        receipt: TranscriptRewritePrefixReceipt,
+        legacy_generation_zero_normalized: bool,
+    ) -> Result<TranscriptRewritePrefixReceipt, EventStoreError> {
+        let last_rewrite_generation = receipt.accumulator.occurrence_count();
+        let body = DurableEventLogHeadBody {
+            schema_version: EVENT_LOG_HEAD_SCHEMA_VERSION,
+            session_id: session_id.clone(),
+            through_log_seq,
+            covered_log_len: fingerprint.len,
+            covered_log_fingerprint: fingerprint,
+            last_line,
+            last_distinct_rewrite_seq,
+            last_rewrite_generation,
+            last_rewrite_commit: receipt.last_commit.clone(),
+            rewrite_prefix: Some(receipt.accumulator.clone()),
+            legacy_generation_zero_normalized,
+        };
+        self.stage_event_log_head(receipt, body).await
+    }
+
+    async fn finalize_pending_rewrite_head(
+        &self,
+        receipt: &TranscriptRewritePrefixReceipt,
+    ) -> Result<(), EventStoreError> {
+        let Some(finalization_id) = receipt.finalization_id.as_ref() else {
+            return Ok(());
+        };
+        let candidate = {
+            let pending = self.pending_rewrite_heads.lock().await;
+            let Some(candidate) = pending.get(finalization_id) else {
+                // Already finalized or safely evicted.
+                return Ok(());
+            };
+            if candidate.receipt != *receipt {
+                return Err(EventStoreError::Store(
+                    "rewrite audit finalization receipt does not bind its private candidate"
+                        .to_string(),
+                ));
+            }
+            candidate.clone()
+        };
+
+        let session_id = &candidate.body.session_id;
+        let _sequence_lock = self.acquire_sequence_lock(session_id).await?;
+        let path = self.log_path(session_id);
+        let current = match tokio::fs::metadata(&path).await {
+            Ok(metadata) => Self::event_log_fingerprint_from_metadata(&metadata),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.pending_rewrite_heads
+                    .lock()
+                    .await
+                    .remove(finalization_id);
+                return Ok(());
+            }
+            Err(error) => return Err(EventStoreError::Io(error)),
+        };
+        if current != candidate.body.covered_log_fingerprint {
+            self.pending_rewrite_heads
+                .lock()
+                .await
+                .remove(finalization_id);
+            return Ok(());
+        }
+
+        self.write_event_log_head(session_id, candidate.body.clone())
+            .await?;
+        let after = match tokio::fs::metadata(&path).await {
+            Ok(metadata) => Self::event_log_fingerprint_from_metadata(&metadata),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.pending_rewrite_heads
+                    .lock()
+                    .await
+                    .remove(finalization_id);
+                return Ok(());
+            }
+            Err(error) => return Err(EventStoreError::Io(error)),
+        };
+        if after == candidate.body.covered_log_fingerprint {
+            self.pending_rewrite_heads
+                .lock()
+                .await
+                .remove(finalization_id);
+        }
+        Ok(())
     }
 
     async fn event_log_index(&self, session_id: &SessionId) -> Arc<Mutex<EventLogIndex>> {
@@ -975,6 +2553,24 @@ impl FileEventStore {
         })
     }
 
+    /// Decode only the row metadata retained by the sparse index.
+    fn decode_index_event_line(
+        &self,
+        line: &str,
+    ) -> Result<IndexedStoredEventWire, EventStoreError> {
+        #[cfg(test)]
+        self.decoded_rows.fetch_add(1, Ordering::Relaxed);
+        let wire: IndexedStoredEventWire = serde_json::from_str(line)
+            .map_err(|error| EventStoreError::Serialization(error.to_string()))?;
+        if wire.schema_version != EVENT_SCHEMA_VERSION {
+            return Err(EventStoreError::SchemaVersionMismatch {
+                expected: EVENT_SCHEMA_VERSION,
+                found: wire.schema_version,
+            });
+        }
+        Ok(wire)
+    }
+
     async fn tail_anchor_matches(
         file: &mut tokio::fs::File,
         anchor: EventLogLineAnchor,
@@ -1006,8 +2602,360 @@ impl FileEventStore {
             && Self::event_log_line_hash(&suffix) == anchor.suffix_hash)
     }
 
+    fn transcript_rewrite_row(
+        session_id: &SessionId,
+        row: RawStoredEvent,
+    ) -> Result<Option<(RawTranscriptRewriteEvent, Vec<TranscriptRewriteCommit>)>, EventStoreError>
+    {
+        let decoded = meerkat_core::event::transcript_rewrite_commits_from_payload(&row.event)
+            .map_err(|error| EventStoreError::Serialization(error.to_string()))?;
+        let Some((event_session_id, commits)) = decoded else {
+            return Ok(None);
+        };
+        if event_session_id != *session_id {
+            return Err(EventStoreError::Store(format!(
+                "transcript rewrite event for session {event_session_id} is stored in session {session_id}'s log"
+            )));
+        }
+        Ok(Some((
+            RawTranscriptRewriteEvent {
+                seq: row.seq,
+                event: row.event,
+            },
+            commits,
+        )))
+    }
+
+    /// Prove one durable event-log head boundary and read only bytes appended after
+    /// it. The durable sequence lock makes this atomic against cooperative
+    /// writers; native file identity, the boundary anchor, and the stable
+    /// before/after fingerprint fail closed against replacement/truncation.
+    async fn read_authorized_transcript_rewrite_tail(
+        &self,
+        session_id: &SessionId,
+        expected_prefix: &TranscriptRewritePrefixAccumulator,
+    ) -> Result<Option<TranscriptRewriteAuditRows>, EventStoreError> {
+        let _sequence_lock = self.acquire_sequence_lock(session_id).await?;
+        let Some(sidecar) = self.read_durable_event_log_head(session_id).await? else {
+            return Ok(None);
+        };
+        if sidecar.rewrite_prefix.as_ref() != Some(expected_prefix) {
+            return Ok(None);
+        }
+
+        let path = self.log_path(session_id);
+        let mut file = match tokio::fs::File::open(&path).await {
+            Ok(file) => file,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound && sidecar.covered_log_len == 0 =>
+            {
+                return Ok(Some(TranscriptRewriteAuditRows {
+                    session_id: session_id.clone(),
+                    observed_through_log_seq: 0,
+                    receipt: Some(TranscriptRewritePrefixReceipt {
+                        session_id: session_id.clone(),
+                        through_log_seq: 0,
+                        accumulator: sidecar
+                            .rewrite_prefix
+                            .expect("authorized head carries rewrite prefix"),
+                        last_commit: sidecar.last_rewrite_commit,
+                        finalization_id: None,
+                    }),
+                    rewrite_rows: Vec::new(),
+                }));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(EventStoreError::Io(error)),
+        };
+        let target = Self::event_log_fingerprint_from_metadata(&file.metadata().await?);
+        if target.len < sidecar.covered_log_len {
+            return Ok(None);
+        }
+        if target.len == sidecar.covered_log_len && target != sidecar.covered_log_fingerprint {
+            return Ok(None);
+        }
+        #[cfg(unix)]
+        if target.len > sidecar.covered_log_len
+            && (target.device != sidecar.covered_log_fingerprint.device
+                || target.inode != sidecar.covered_log_fingerprint.inode)
+        {
+            return Ok(None);
+        }
+        #[cfg(not(unix))]
+        if target.len > sidecar.covered_log_len {
+            // Without a stable native file identity, a longer replacement
+            // cannot be distinguished from an append by a bounded check.
+            return Ok(None);
+        }
+        match sidecar.last_line {
+            Some(anchor)
+                if anchor.byte_offset.checked_add(anchor.byte_len)
+                    == Some(sidecar.covered_log_len)
+                    && Self::tail_anchor_matches(&mut file, anchor).await? => {}
+            None if sidecar.covered_log_len == 0 => {}
+            _ => return Ok(None),
+        }
+        let after_anchor = Self::event_log_fingerprint_from_metadata(&file.metadata().await?);
+        if after_anchor != target {
+            return Ok(None);
+        }
+
+        if target.len == sidecar.covered_log_len {
+            return Ok(Some(TranscriptRewriteAuditRows {
+                session_id: session_id.clone(),
+                observed_through_log_seq: sidecar.through_log_seq,
+                receipt: Some(TranscriptRewritePrefixReceipt {
+                    session_id: session_id.clone(),
+                    through_log_seq: sidecar.through_log_seq,
+                    accumulator: sidecar
+                        .rewrite_prefix
+                        .expect("authorized head carries rewrite prefix"),
+                    last_commit: sidecar.last_rewrite_commit,
+                    finalization_id: None,
+                }),
+                rewrite_rows: Vec::new(),
+            }));
+        }
+
+        file.seek(SeekFrom::Start(sidecar.covered_log_len)).await?;
+        let mut lines =
+            BufReader::new((&mut file).take(target.len.saturating_sub(sidecar.covered_log_len)));
+        let mut line = String::new();
+        let mut offset = sidecar.covered_log_len;
+        let mut observed_seq = sidecar.through_log_seq;
+        let mut accumulator = sidecar
+            .rewrite_prefix
+            .clone()
+            .expect("authorized head carries rewrite prefix");
+        let mut last_generation = sidecar.last_rewrite_generation;
+        let mut last_commit = sidecar.last_rewrite_commit.clone();
+        let mut last_distinct_rewrite_seq = sidecar.last_distinct_rewrite_seq;
+        let mut last_line = sidecar.last_line;
+        let mut rewrite_rows = Vec::new();
+        while offset < target.len {
+            line.clear();
+            let bytes_read = lines.read_line(&mut line).await?;
+            if bytes_read == 0 || !line.ends_with('\n') {
+                return Err(EventStoreError::Store(format!(
+                    "event log '{}' has a torn appended row after byte {}",
+                    path.display(),
+                    sidecar.covered_log_len
+                )));
+            }
+            let byte_len = u64::try_from(bytes_read).map_err(|_| {
+                EventStoreError::Store(format!(
+                    "event log '{}' contains an address-unrepresentable row",
+                    path.display()
+                ))
+            })?;
+            let line_start = offset;
+            offset = offset.checked_add(byte_len).ok_or_else(|| {
+                EventStoreError::Store(format!(
+                    "event log '{}' byte offset overflow",
+                    path.display()
+                ))
+            })?;
+            let row = self.decode_raw_event_line(&line)?;
+            if row.seq <= observed_seq {
+                return Err(EventStoreError::Store(format!(
+                    "event log '{}' sequence {} is not strictly greater than authorized high-water {}",
+                    path.display(),
+                    row.seq,
+                    observed_seq
+                )));
+            }
+            observed_seq = row.seq;
+            last_line = Some(Self::event_log_line_anchor(
+                line_start,
+                byte_len,
+                line.as_bytes(),
+            ));
+            let Some((raw_rewrite, commits)) = Self::transcript_rewrite_row(session_id, row)?
+            else {
+                continue;
+            };
+            for commit in commits {
+                if commit.rewrite_generation == 0 {
+                    // A normalized boundary may never be followed by a newly
+                    // written generation-zero fact.
+                    return Ok(None);
+                }
+                if commit.rewrite_generation == last_generation {
+                    if last_commit.as_ref() != Some(&commit) {
+                        return Err(EventStoreError::TranscriptRewriteGenerationConflict {
+                            session_id: session_id.clone(),
+                            generation: commit.rewrite_generation,
+                            first_seq: last_distinct_rewrite_seq,
+                            conflicting_seq: raw_rewrite.seq,
+                        });
+                    }
+                    continue;
+                }
+                if last_generation.checked_add(1) != Some(commit.rewrite_generation) {
+                    // A gap or late repair older than the bounded last
+                    // occurrence needs the full generation map.
+                    return Ok(None);
+                }
+                accumulator = accumulator
+                    .extend(&commit)
+                    .map_err(|error| EventStoreError::Serialization(error.to_string()))?;
+                last_generation = commit.rewrite_generation;
+                last_commit = Some(commit);
+                last_distinct_rewrite_seq = raw_rewrite.seq;
+            }
+            rewrite_rows.push(raw_rewrite);
+            rewrite_rows.push(raw_rewrite);
+        }
+        drop(lines);
+        if offset != target.len {
+            return Err(EventStoreError::Store(format!(
+                "event log '{}' tail ended at byte {offset}, expected {}",
+                path.display(),
+                target.len
+            )));
+        }
+        let after = Self::event_log_fingerprint_from_metadata(&file.metadata().await?);
+        if after != target {
+            return Ok(None);
+        }
+
+        let receipt = TranscriptRewritePrefixReceipt {
+            session_id: session_id.clone(),
+            through_log_seq: observed_seq,
+            accumulator: accumulator.clone(),
+            last_commit: last_commit.clone(),
+            finalization_id: None,
+        };
+        let advanced = DurableEventLogHeadBody {
+            schema_version: EVENT_LOG_HEAD_SCHEMA_VERSION,
+            session_id: session_id.clone(),
+            through_log_seq: observed_seq,
+            covered_log_len: target.len,
+            covered_log_fingerprint: target,
+            last_line,
+            last_distinct_rewrite_seq,
+            last_rewrite_generation: last_generation,
+            last_rewrite_commit: last_commit,
+            rewrite_prefix: Some(accumulator),
+            legacy_generation_zero_normalized: sidecar.legacy_generation_zero_normalized,
+        };
+        let final_fingerprint = Self::event_log_fingerprint_from_metadata(&file.metadata().await?);
+        if final_fingerprint != target {
+            return Ok(None);
+        }
+        // Reading proves a candidate; it does not publish skip authority.
+        // The consumer must validate the exact bodies and successfully apply
+        // semantic replay before finalizing this private head.
+        let receipt = self.stage_event_log_head(receipt, advanced).await?;
+        Ok(Some(TranscriptRewriteAuditRows {
+            session_id: session_id.clone(),
+            observed_through_log_seq: observed_seq,
+            receipt: Some(receipt),
+            rewrite_rows,
+        }))
+    }
+
+    async fn full_transcript_rewrite_audit_scan(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<FullTranscriptRewriteAuditScan, EventStoreError> {
+        const MAX_STABILITY_ATTEMPTS: usize = 3;
+
+        let path = self.log_path(session_id);
+        for _ in 0..MAX_STABILITY_ATTEMPTS {
+            let mut file = match tokio::fs::File::open(&path).await {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    let mut index = EventLogIndex::default();
+                    index.rebuild_current_transcript_rewrite_prefix()?;
+                    return Ok(FullTranscriptRewriteAuditScan {
+                        fingerprint: None,
+                        last_line: None,
+                        observed_through_log_seq: 0,
+                        index,
+                        rewrite_rows: Vec::new(),
+                    });
+                }
+                Err(error) => return Err(EventStoreError::Io(error)),
+            };
+            let target = Self::event_log_fingerprint_from_metadata(&file.metadata().await?);
+            file.seek(SeekFrom::Start(0)).await?;
+            let mut lines = BufReader::new((&mut file).take(target.len));
+            let mut line = String::new();
+            let mut offset = 0_u64;
+            let mut observed_seq = 0_u64;
+            let mut last_line = None;
+            let mut index = EventLogIndex::default();
+            let mut rewrite_rows = Vec::new();
+            while offset < target.len {
+                line.clear();
+                let bytes_read = lines.read_line(&mut line).await?;
+                if bytes_read == 0 || !line.ends_with('\n') {
+                    return Err(EventStoreError::Store(format!(
+                        "event log '{}' has a torn row during full rewrite reconciliation",
+                        path.display()
+                    )));
+                }
+                let byte_len = u64::try_from(bytes_read).map_err(|_| {
+                    EventStoreError::Store(format!(
+                        "event log '{}' contains an address-unrepresentable row",
+                        path.display()
+                    ))
+                })?;
+                let line_start = offset;
+                offset = offset.checked_add(byte_len).ok_or_else(|| {
+                    EventStoreError::Store(format!(
+                        "event log '{}' byte offset overflow",
+                        path.display()
+                    ))
+                })?;
+                let row = self.decode_raw_event_line(&line)?;
+                if row.seq <= observed_seq {
+                    return Err(EventStoreError::Store(format!(
+                        "event log '{}' sequence {} is not strictly greater than {}",
+                        path.display(),
+                        row.seq,
+                        observed_seq
+                    )));
+                }
+                observed_seq = row.seq;
+                last_line = Some(Self::event_log_line_anchor(
+                    line_start,
+                    byte_len,
+                    line.as_bytes(),
+                ));
+                let Some((raw_rewrite, _commits)) = Self::transcript_rewrite_row(session_id, row)?
+                else {
+                    continue;
+                };
+                index.note_transcript_rewrite_payload(
+                    session_id,
+                    raw_rewrite.seq,
+                    &raw_rewrite.event,
+                )?;
+                rewrite_rows.push(raw_rewrite);
+            }
+            drop(lines);
+            let after = Self::event_log_fingerprint_from_metadata(&file.metadata().await?);
+            if after == target {
+                return Ok(FullTranscriptRewriteAuditScan {
+                    fingerprint: Some(target),
+                    last_line,
+                    observed_through_log_seq: observed_seq,
+                    index,
+                    rewrite_rows,
+                });
+            }
+        }
+        Err(EventStoreError::Store(format!(
+            "event log '{}' did not remain stable during full rewrite reconciliation",
+            path.display()
+        )))
+    }
+
     async fn rebuild_event_log_index(
         &self,
+        session_id: &SessionId,
         file: &mut tokio::fs::File,
         path: &Path,
         target: EventLogFingerprint,
@@ -1043,7 +2991,7 @@ impl FileEventStore {
             if line.trim().is_empty() {
                 continue;
             }
-            let event = self.decode_event_line(&line)?;
+            let event = self.decode_index_event_line(&line)?;
             if index.row_count > 0 && event.seq <= index.last_seq {
                 return Err(EventStoreError::Store(format!(
                     "event log '{}' sequence {} is not strictly greater than {}",
@@ -1058,7 +3006,8 @@ impl FileEventStore {
                     byte_offset: line_start,
                 });
             }
-            index.note_exact_interaction_occupant(&event);
+            index.note_exact_interaction_occupant(&event.source, event.seq, line_start, byte_len);
+            index.note_transcript_rewrite_payload(session_id, event.seq, &event.event)?;
             index.row_count = index.row_count.checked_add(1).ok_or_else(|| {
                 EventStoreError::Store(format!("event log '{}' row count overflow", path.display()))
             })?;
@@ -1108,7 +3057,10 @@ impl FileEventStore {
                 }
             }
 
-            let candidate = match self.rebuild_event_log_index(&mut file, &path, before).await {
+            let candidate = match self
+                .rebuild_event_log_index(session_id, &mut file, &path, before)
+                .await
+            {
                 Ok(candidate) => candidate,
                 Err(error) => {
                     *cached = EventLogIndex::default();
@@ -1216,14 +3168,19 @@ impl FileEventStore {
         &self,
         session_id: &SessionId,
         interaction_id: InteractionId,
-    ) -> Result<Option<ExactInteractionOccupant>, EventStoreError> {
-        let _ = self.refresh_event_log_index(session_id, None).await?;
-        let shared = self.event_log_index(session_id).await;
-        let index = shared.lock().await;
-        Ok(index
-            .exact_interaction_occupants
-            .get(&interaction_id)
-            .cloned())
+    ) -> Result<Option<ResolvedExactInteractionOccupant>, EventStoreError> {
+        let mut occupants = self
+            .exact_interaction_batch_occupants(session_id, &[interaction_id])
+            .await?;
+        match occupants.pop() {
+            Some(ExactInteractionOccupancy::Empty) | None => Ok(None),
+            Some(ExactInteractionOccupancy::One(first)) => {
+                Ok(Some(ResolvedExactInteractionOccupant { first, count: 1 }))
+            }
+            Some(ExactInteractionOccupancy::Multiple { first, count }) => {
+                Ok(Some(ResolvedExactInteractionOccupant { first, count }))
+            }
+        }
     }
 
     /// Capture all requested exact-source occupants from one validated index
@@ -1236,24 +3193,96 @@ impl FileEventStore {
     ) -> Result<Vec<ExactInteractionOccupancy>, EventStoreError> {
         let _ = self.refresh_event_log_index(session_id, None).await?;
         let shared = self.event_log_index(session_id).await;
-        let index = shared.lock().await;
-        Ok(interaction_ids
-            .iter()
-            .map(
-                |interaction_id| match index.exact_interaction_occupants.get(interaction_id) {
-                    None => ExactInteractionOccupancy::Empty,
-                    Some(ExactInteractionOccupant { first, count: 1 }) => {
-                        ExactInteractionOccupancy::One(first.clone())
-                    }
-                    Some(ExactInteractionOccupant { first, count }) => {
-                        ExactInteractionOccupancy::Multiple {
-                            first: first.clone(),
-                            count: *count,
-                        }
-                    }
-                },
+        let (locators, expected) = {
+            let index = shared.lock().await;
+            let locators = interaction_ids
+                .iter()
+                .map(|interaction_id| {
+                    index
+                        .exact_interaction_occupants
+                        .get(interaction_id)
+                        .cloned()
+                })
+                .collect::<Vec<_>>();
+            (locators, index.fingerprint)
+        };
+        if locators.iter().all(Option::is_none) {
+            return Ok(vec![
+                ExactInteractionOccupancy::Empty;
+                interaction_ids.len()
+            ]);
+        }
+        let expected = expected.ok_or_else(|| {
+            EventStoreError::Store(
+                "nonempty exact-interaction index has no event-log fingerprint".to_string(),
             )
-            .collect())
+        })?;
+        let path = self.log_path(session_id);
+        let mut file = tokio::fs::File::open(&path).await?;
+        let before = Self::event_log_fingerprint_from_metadata(&file.metadata().await?);
+        if before != expected {
+            return Err(EventStoreError::Store(format!(
+                "event log '{}' changed after exact-interaction index validation",
+                path.display()
+            )));
+        }
+        let mut resolved = Vec::with_capacity(locators.len());
+        for locator in locators {
+            let Some(ExactInteractionOccupant { first, count }) = locator else {
+                resolved.push(ExactInteractionOccupancy::Empty);
+                continue;
+            };
+            let stored = self.read_event_log_row_at(&path, &mut file, first).await?;
+            resolved.push(if count == 1 {
+                ExactInteractionOccupancy::One(stored)
+            } else {
+                ExactInteractionOccupancy::Multiple {
+                    first: stored,
+                    count,
+                }
+            });
+        }
+        let after = Self::event_log_fingerprint_from_metadata(&file.metadata().await?);
+        if after != expected {
+            return Err(EventStoreError::Store(format!(
+                "event log '{}' changed while exact-interaction occupants were read",
+                path.display()
+            )));
+        }
+        Ok(resolved)
+    }
+
+    async fn read_event_log_row_at(
+        &self,
+        path: &Path,
+        file: &mut tokio::fs::File,
+        locator: EventLogRowLocator,
+    ) -> Result<StoredEvent, EventStoreError> {
+        let byte_len = usize::try_from(locator.byte_len).map_err(|_| {
+            EventStoreError::Store(format!(
+                "event log '{}' exact-interaction row is too large to address",
+                path.display()
+            ))
+        })?;
+        file.seek(SeekFrom::Start(locator.byte_offset)).await?;
+        let mut bytes = vec![0_u8; byte_len];
+        file.read_exact(&mut bytes).await?;
+        let line = std::str::from_utf8(&bytes).map_err(|error| {
+            EventStoreError::Serialization(format!(
+                "event log '{}' exact-interaction row is not UTF-8: {error}",
+                path.display()
+            ))
+        })?;
+        let stored = self.decode_event_line(line)?;
+        if stored.seq != locator.seq {
+            return Err(EventStoreError::Store(format!(
+                "event log '{}' exact-interaction locator expected sequence {}, found {}",
+                path.display(),
+                locator.seq,
+                stored.seq
+            )));
+        }
+        Ok(stored)
     }
 
     async fn read_index_snapshot<T>(
@@ -1350,7 +3379,19 @@ impl FileEventStore {
         // the mutex. Never erase that newer validated snapshot. Mechanical
         // extension is legal only from the exact pre-append state.
         if index.fingerprint != Some(pre_fingerprint) {
-            return;
+            // The first append creates the JSONL after `last_seq()` validated
+            // its absence. Bind that still-empty index to the newly-created
+            // zero-byte file before mechanically extending it. No other
+            // mismatch is legal.
+            if index.fingerprint.is_none()
+                && index.row_count == 0
+                && index.last_seq == 0
+                && pre_fingerprint.len == 0
+            {
+                index.fingerprint = Some(pre_fingerprint);
+            } else {
+                return;
+            }
         }
         if post_fingerprint.len != expected_post_len {
             *index = EventLogIndex::default();
@@ -1405,7 +3446,19 @@ impl FileEventStore {
                 row.byte_len,
                 line,
             ));
-            index.note_exact_interaction_occupant(event);
+            index.note_exact_interaction_occupant(
+                &event.source,
+                event.seq,
+                absolute_offset,
+                row.byte_len,
+            );
+            if index
+                .note_transcript_rewrite_commit(session_id, event)
+                .is_err()
+            {
+                *index = EventLogIndex::default();
+                return;
+            }
         }
         index.fingerprint = Some(post_fingerprint);
     }
@@ -1516,6 +3569,7 @@ impl FileEventStore {
         })
     }
 
+    #[cfg(test)]
     async fn write_sequence_owner(
         &self,
         session_id: &SessionId,
@@ -1537,20 +3591,291 @@ impl FileEventStore {
         Ok(())
     }
 
-    /// Allocate a contiguous sequence range WITHOUT advancing the durable owner.
+    fn event_log_head_after_append(
+        &self,
+        session_id: &SessionId,
+        mut head: DurableEventLogHeadBody,
+        pre_fingerprint: EventLogFingerprint,
+        post_fingerprint: EventLogFingerprint,
+        appended_bytes: &[u8],
+        rows: &[AppendedIndexRow],
+        stored_events: &[StoredEvent],
+    ) -> Result<DurableEventLogHeadBody, EventStoreError> {
+        if head.covered_log_fingerprint != pre_fingerprint
+            || head.covered_log_len != pre_fingerprint.len
+            || rows.len() != stored_events.len()
+        {
+            return Err(EventStoreError::Store(
+                "validated event-log head no longer matches append pre-state".to_string(),
+            ));
+        }
+
+        let mut rewrite_prefix = head.rewrite_prefix.take();
+        let mut last_generation = head.last_rewrite_generation;
+        let mut last_commit = head.last_rewrite_commit.take();
+        let mut last_distinct_rewrite_seq = head.last_distinct_rewrite_seq;
+        for event in stored_events {
+            let Some((event_session_id, commits)) = transcript_rewrite_event_parts(&event.event)
+            else {
+                continue;
+            };
+            if event_session_id != session_id {
+                continue;
+            }
+            let Some(accumulator) = rewrite_prefix.as_mut() else {
+                continue;
+            };
+            if let Some((_, receipt, _)) = transcript_rewrite_receipt_event_parts(&event.event) {
+                if receipt.end_prefix() == accumulator {
+                    if last_commit.as_ref() != receipt.commits().last() {
+                        return Err(EventStoreError::TranscriptRewriteGenerationConflict {
+                            session_id: session_id.clone(),
+                            generation: last_generation,
+                            first_seq: last_distinct_rewrite_seq,
+                            conflicting_seq: event.seq,
+                        });
+                    }
+                    continue;
+                }
+                if receipt.start_prefix() != accumulator {
+                    return Err(EventStoreError::Store(format!(
+                        "transcript rewrite receipt starts at occurrence {}, but the durable head is at {}",
+                        receipt.start_prefix().occurrence_count(),
+                        accumulator.occurrence_count()
+                    )));
+                }
+            }
+            let mut invalid_legacy_transition = false;
+            for commit in commits {
+                if commit.rewrite_generation == last_generation {
+                    if last_commit.as_ref() != Some(commit) {
+                        return Err(EventStoreError::TranscriptRewriteGenerationConflict {
+                            session_id: session_id.clone(),
+                            generation: commit.rewrite_generation,
+                            first_seq: last_distinct_rewrite_seq,
+                            conflicting_seq: event.seq,
+                        });
+                    }
+                    continue;
+                }
+                if last_generation.checked_add(1) == Some(commit.rewrite_generation) {
+                    *accumulator = accumulator
+                        .extend(commit)
+                        .map_err(|error| EventStoreError::Serialization(error.to_string()))?;
+                    last_generation = commit.rewrite_generation;
+                    last_commit = Some(commit.clone());
+                    last_distinct_rewrite_seq = event.seq;
+                    continue;
+                }
+                invalid_legacy_transition = true;
+                break;
+            }
+            if !invalid_legacy_transition {
+                continue;
+            }
+            // A generation-zero append, a gap, or a late older repair needs
+            // the full occurrence map. Keep the exact log head/high-water but
+            // remove semantic skip authority until reconciliation.
+            rewrite_prefix = None;
+            last_generation = 0;
+            last_commit = None;
+            head.legacy_generation_zero_normalized = false;
+        }
+
+        let Some(last_row) = rows.last() else {
+            return Err(EventStoreError::Store(
+                "nonempty append has no event-log head row".to_string(),
+            ));
+        };
+        let Some(relative_end) = last_row
+            .relative_offset
+            .checked_add(last_row.byte_len)
+            .and_then(|end| usize::try_from(end).ok())
+        else {
+            return Err(EventStoreError::Store(
+                "appended event-log head row exceeds addressable bytes".to_string(),
+            ));
+        };
+        let Some(relative_start) = usize::try_from(last_row.relative_offset).ok() else {
+            return Err(EventStoreError::Store(
+                "appended event-log head row has an unaddressable offset".to_string(),
+            ));
+        };
+        let Some(line) = appended_bytes.get(relative_start..relative_end) else {
+            return Err(EventStoreError::Store(
+                "appended event-log head row is outside serialized bytes".to_string(),
+            ));
+        };
+        let absolute_offset = pre_fingerprint
+            .len
+            .checked_add(last_row.relative_offset)
+            .ok_or_else(|| {
+                EventStoreError::Store(
+                    "event-log head byte offset overflow after append".to_string(),
+                )
+            })?;
+        head.through_log_seq = last_row.seq;
+        head.covered_log_len = post_fingerprint.len;
+        head.covered_log_fingerprint = post_fingerprint;
+        head.last_line = Some(Self::event_log_line_anchor(
+            absolute_offset,
+            last_row.byte_len,
+            line,
+        ));
+        head.last_distinct_rewrite_seq = last_distinct_rewrite_seq;
+        head.last_rewrite_generation = last_generation;
+        head.last_rewrite_commit = last_commit;
+        head.rewrite_prefix = rewrite_prefix;
+        Ok(head)
+    }
+
+    fn rewrite_batch_is_head_local(
+        session_id: &SessionId,
+        head: Option<&DurableEventLogHeadBody>,
+        events: &[StoredEvent],
+    ) -> bool {
+        let Some(head) = head else {
+            return false;
+        };
+        let Some(mut prefix) = head.rewrite_prefix.clone() else {
+            return false;
+        };
+        let mut last_generation = head.last_rewrite_generation;
+        let mut last_commit = head.last_rewrite_commit.clone();
+        for event in events {
+            let Some((event_session_id, commits)) = transcript_rewrite_event_parts(&event.event)
+            else {
+                continue;
+            };
+            if event_session_id != session_id {
+                continue;
+            }
+            if let Some((_, receipt, _)) = transcript_rewrite_receipt_event_parts(&event.event) {
+                if receipt.end_prefix() == &prefix {
+                    if last_commit.as_ref() != receipt.commits().last() {
+                        return true;
+                    }
+                    continue;
+                }
+                if receipt.start_prefix() != &prefix {
+                    return false;
+                }
+            }
+            for commit in commits {
+                if commit.rewrite_generation == last_generation {
+                    // Equal is a local retry; unequal is a local conflict.
+                    if last_commit.as_ref() != Some(commit) {
+                        return true;
+                    }
+                    continue;
+                }
+                if last_generation.checked_add(1) != Some(commit.rewrite_generation) {
+                    return false;
+                }
+                let Ok(next_prefix) = prefix.extend(commit) else {
+                    return true;
+                };
+                prefix = next_prefix;
+                last_generation = commit.rewrite_generation;
+                last_commit = Some(commit.clone());
+            }
+        }
+        true
+    }
+
+    fn validate_transcript_rewrite_events_before_append(
+        session_id: &SessionId,
+        envelopes: &[EventEnvelope<AgentEvent>],
+    ) -> Result<(), EventStoreError> {
+        for envelope in envelopes {
+            match &envelope.payload {
+                AgentEvent::TranscriptRewriteCommitted { .. } => {
+                    return Err(EventStoreError::Store(
+                        "current EventStore writers refuse full-body TranscriptRewriteCommitted rows; use exact receipt-only publication"
+                            .to_string(),
+                    ));
+                }
+                AgentEvent::TranscriptRewriteAuditReceiptCommitted {
+                    session_id: event_session_id,
+                    ..
+                } if event_session_id != session_id => {
+                    return Err(EventStoreError::Store(format!(
+                        "refusing to append a transcript rewrite receipt for session {event_session_id} to session {session_id}'s log"
+                    )));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    async fn validate_rewrite_append_against_full_index(
+        &self,
+        session_id: &SessionId,
+        events: &[StoredEvent],
+    ) -> Result<(), EventStoreError> {
+        let _ = self.refresh_event_log_index(session_id, None).await?;
+        let shared = self.event_log_index(session_id).await;
+        let index = shared.lock().await;
+        let mut batch = BTreeMap::<u64, (&TranscriptRewriteCommit, u64)>::new();
+        for event in events {
+            let Some((event_session_id, commits)) = transcript_rewrite_event_parts(&event.event)
+            else {
+                continue;
+            };
+            if event_session_id != session_id {
+                continue;
+            }
+            for commit in commits {
+                if commit.rewrite_generation == 0 {
+                    return Err(EventStoreError::Store(
+                        "current EventStore writer refuses a generation-zero transcript rewrite"
+                            .to_string(),
+                    ));
+                }
+                if let Some(existing) = index
+                    .transcript_rewrite_commits
+                    .get(&commit.rewrite_generation)
+                {
+                    if existing.commit != *commit {
+                        return Err(EventStoreError::TranscriptRewriteGenerationConflict {
+                            session_id: session_id.clone(),
+                            generation: commit.rewrite_generation,
+                            first_seq: existing.seq,
+                            conflicting_seq: event.seq,
+                        });
+                    }
+                    continue;
+                }
+                if let Some((existing, first_seq)) = batch.get(&commit.rewrite_generation) {
+                    if *existing != commit {
+                        return Err(EventStoreError::TranscriptRewriteGenerationConflict {
+                            session_id: session_id.clone(),
+                            generation: commit.rewrite_generation,
+                            first_seq: *first_seq,
+                            conflicting_seq: event.seq,
+                        });
+                    }
+                    continue;
+                }
+                batch.insert(commit.rewrite_generation, (commit, event.seq));
+            }
+        }
+        Ok(())
+    }
+
+    /// Allocate a contiguous sequence range from the one durable event-log
+    /// head. A validated exact head is O(1) and is returned so the append can
+    /// advance the same metadata record after the JSONL fsync.
     ///
-    /// The owner is advanced only after the log bytes are flushed and `fsync`ed
-    /// (see [`FileEventStore::append`]). A durable owner that trails the canonical
-    /// event log tail is therefore the expected post-crash state — a benign stale
-    /// hint — so the tail authoritatively reconciles it (`base = max(owner, tail)`)
-    /// rather than being treated as corruption. A durable owner AHEAD of the tail
-    /// is an intentional reservation and remains authoritative; the projection
-    /// checkpoint is never consulted.
+    /// Missing/stale heads pay one canonical-log reconciliation. The old
+    /// truncate-in-place `.seq` file is read only on that migration fallback;
+    /// current writers never update it or maintain parallel authority.
     async fn allocate_sequence_range(
         &self,
         session_id: &SessionId,
         event_count: usize,
-    ) -> Result<(u64, u64), EventStoreError> {
+    ) -> Result<(u64, u64, Option<DurableEventLogHeadBody>, bool), EventStoreError> {
         let event_count = u64::try_from(event_count).map_err(|_| {
             EventStoreError::Store("event batch is too large to allocate a sequence range".into())
         })?;
@@ -1560,9 +3885,19 @@ impl FileEventStore {
             ));
         }
 
-        let event_log_tail = self.last_seq(session_id).await?;
-        let sequence_owner = self.read_sequence_owner(session_id).await?;
-        let base_seq = sequence_owner.unwrap_or(event_log_tail).max(event_log_tail);
+        let current_head = self.read_current_event_log_head(session_id).await?;
+        let (base_seq, trusted_empty_base) = if let Some(head) = current_head.as_ref() {
+            (head.through_log_seq, false)
+        } else {
+            let (snapshot, _file) = self.refresh_event_log_index(session_id, None).await?;
+            let legacy_sequence_owner = self.read_sequence_owner(session_id).await?;
+            (
+                legacy_sequence_owner
+                    .unwrap_or(snapshot.last_seq)
+                    .max(snapshot.last_seq),
+                snapshot.row_count == 0,
+            )
+        };
         let first_seq = base_seq.checked_add(1).ok_or_else(|| {
             EventStoreError::Store("event sequence overflow while allocating first sequence".into())
         })?;
@@ -1570,7 +3905,7 @@ impl FileEventStore {
             EventStoreError::Store("event sequence overflow while allocating range".into())
         })?;
 
-        Ok((first_seq, last_seq))
+        Ok((first_seq, last_seq, current_head, trusted_empty_base))
     }
 
     /// Append envelopes while the caller holds both `append_lock` and the
@@ -1582,8 +3917,13 @@ impl FileEventStore {
     ) -> Result<Vec<StoredEvent>, EventStoreError> {
         debug_assert!(!envelopes.is_empty());
 
+        // A typed AgentEvent is not a proof that a rewrite record is valid:
+        // TranscriptRewriteRecord's fields are public. No semantic head may be
+        // extended from commit-only metadata until the exact full bodies pass
+        // the same constructor validation used by the session graph.
+        Self::validate_transcript_rewrite_events_before_append(session_id, envelopes)?;
         let path = self.log_path(session_id);
-        let (mut next_seq, last_allocated_seq) = self
+        let (mut next_seq, last_allocated_seq, exact_pre_head, trusted_empty_base) = self
             .allocate_sequence_range(session_id, envelopes.len())
             .await?;
         let mut lines = String::new();
@@ -1626,12 +3966,41 @@ impl FileEventStore {
                 })?;
             }
         }
+        let has_session_rewrite = stored_events.iter().any(|event| {
+            transcript_rewrite_event_parts(&event.event)
+                .is_some_and(|(event_session_id, _)| event_session_id == session_id)
+        });
+        if has_session_rewrite
+            && !Self::rewrite_batch_is_head_local(
+                session_id,
+                exact_pre_head.as_ref(),
+                &stored_events,
+            )
+        {
+            self.validate_rewrite_append_against_full_index(session_id, &stored_events)
+                .await?;
+        }
         let mut file = tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&path)
             .await?;
         let pre_fingerprint = Self::event_log_fingerprint_from_metadata(&file.metadata().await?);
+        // Validate and advance semantic head facts before the authority write:
+        // a same-generation conflict must fail without appending a corrupt row.
+        let mut prospective_head = exact_pre_head
+            .map(|head| {
+                self.event_log_head_after_append(
+                    session_id,
+                    head,
+                    pre_fingerprint,
+                    pre_fingerprint,
+                    lines.as_bytes(),
+                    &appended_index_rows,
+                    &stored_events,
+                )
+            })
+            .transpose()?;
         file.write_all(lines.as_bytes()).await?;
         file.flush().await?;
         file.sync_all().await?;
@@ -1645,13 +4014,30 @@ impl FileEventStore {
             &stored_events,
         )
         .await;
-        // Advance the durable sequence owner only AFTER the log bytes are
-        // durably persisted (flushed + fsynced). A crash before this point
-        // leaves the owner trailing the log tail (a benign stale hint that the
-        // tail reconciles on the next allocation), never a forward gap or a
-        // reused sequence.
-        self.write_sequence_owner(session_id, last_allocated_seq)
-            .await?;
+        // JSONL fsync is the authority boundary. Exactly one atomic metadata
+        // replacement follows it: sequence allocation and rewrite-tail
+        // authorization share this event-log head instead of maintaining a
+        // `.seq` file plus a second sidecar.
+        let head_result = if let Some(head) = prospective_head.as_mut() {
+            head.covered_log_len = post_fingerprint.len;
+            head.covered_log_fingerprint = post_fingerprint;
+            self.write_event_log_head(session_id, head.clone()).await
+        } else {
+            self.persist_event_log_head_from_index(
+                session_id,
+                post_fingerprint,
+                last_allocated_seq,
+                trusted_empty_base,
+            )
+            .await
+        };
+        if let Err(error) = head_result {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %error,
+                "failed to update event-log head; canonical JSONL reconciliation will rebuild it"
+            );
+        }
         Ok(stored_events)
     }
 }
@@ -1667,6 +4053,31 @@ impl EventStore for FileEventStore {
     ) -> Result<u64, EventStoreError> {
         if envelopes.is_empty() {
             return self.last_seq(session_id).await;
+        }
+
+        let mut receipt_related = envelopes
+            .iter()
+            .filter_map(|envelope| transcript_rewrite_receipt_event_parts(&envelope.payload));
+        if let Some((event_session_id, receipt, final_assistant_text)) = receipt_related.next() {
+            if envelopes.len() != 1 || receipt_related.next().is_some() {
+                return Err(EventStoreError::Store(
+                    "generic event batches containing transcript rewrite receipts are forbidden; publish exactly one receipt"
+                        .to_string(),
+                ));
+            }
+            if event_session_id != session_id {
+                return Err(EventStoreError::Store(format!(
+                    "transcript rewrite receipt for session {event_session_id} cannot be stored in session {session_id}'s log"
+                )));
+            }
+            return self
+                .append_transcript_rewrite_receipt_exact(
+                    session_id,
+                    receipt,
+                    final_assistant_text.as_deref(),
+                )
+                .await
+                .map(|result| result.stored_event().seq);
         }
 
         // Interaction source identity is an exactly-one terminal keyspace, not
@@ -1731,7 +4142,7 @@ impl EventStore for FileEventStore {
                 })?;
                 Ok(ExactInteractionAppend::Inserted(stored))
             }
-            Some(ExactInteractionOccupant { first, count: 1 })
+            Some(ResolvedExactInteractionOccupant { first, count: 1 })
                 if first.mob_id == envelope.mob_id
                     && interaction_terminal_events_semantically_equal(
                         &first.event,
@@ -1740,7 +4151,7 @@ impl EventStore for FileEventStore {
             {
                 Ok(ExactInteractionAppend::Replayed(first))
             }
-            Some(ExactInteractionOccupant { first, count: 1 }) => {
+            Some(ResolvedExactInteractionOccupant { first, count: 1 }) => {
                 Err(EventStoreError::ExactInteractionTerminalConflict {
                     session_id: session_id.clone(),
                     interaction_id,
@@ -1751,7 +4162,7 @@ impl EventStore for FileEventStore {
                     ),
                 })
             }
-            Some(ExactInteractionOccupant { count, .. }) => {
+            Some(ResolvedExactInteractionOccupant { count, .. }) => {
                 Err(EventStoreError::ExactInteractionTerminalConflict {
                     session_id: session_id.clone(),
                     interaction_id,
@@ -1836,6 +4247,104 @@ impl EventStore for FileEventStore {
         Ok(results)
     }
 
+    async fn append_transcript_rewrite_receipt_exact(
+        &self,
+        session_id: &SessionId,
+        receipt: &TranscriptRewriteAuditReceiptBatch,
+        final_assistant_text: Option<&str>,
+    ) -> Result<ExactTranscriptRewriteReceiptAppend, EventStoreError> {
+        let identity = serde_json::to_vec(receipt)
+            .map_err(|error| EventStoreError::Serialization(error.to_string()))?;
+        let incoming_summary = final_assistant_text.map(ToOwned::to_owned);
+
+        let _guard = self.append_lock.lock().await;
+        tokio::fs::create_dir_all(&self.root).await?;
+        let _sequence_lock = self.acquire_sequence_lock(session_id).await?;
+        let _ = self.refresh_event_log_index(session_id, None).await?;
+        let shared = self.event_log_index(session_id).await;
+        let occupant = {
+            let index = shared.lock().await;
+            index
+                .transcript_rewrite_receipt_occupants
+                .get(&identity)
+                .cloned()
+        };
+
+        match occupant {
+            None => {
+                let event = AgentEvent::TranscriptRewriteAuditReceiptCommitted {
+                    session_id: session_id.clone(),
+                    receipt: receipt.clone(),
+                    final_assistant_text: incoming_summary,
+                };
+                let envelope = EventEnvelope::new_with_source(
+                    EventSourceIdentity::session(session_id.clone()),
+                    0,
+                    None,
+                    event,
+                );
+                let mut inserted = self
+                    .append_envelopes_locked(session_id, std::slice::from_ref(&envelope))
+                    .await?;
+                let stored = inserted.pop().ok_or_else(|| {
+                    EventStoreError::Store(
+                        "exact transcript rewrite receipt append produced no durable event"
+                            .to_string(),
+                    )
+                })?;
+                Ok(ExactTranscriptRewriteReceiptAppend::Inserted(stored))
+            }
+            Some(ExactTranscriptRewriteReceiptOccupant {
+                first_seq,
+                count: 1,
+                final_assistant_text: existing_summary,
+            }) if existing_summary == incoming_summary => {
+                let mut rows = self.read_indexed(session_id, first_seq, Some(1)).await?;
+                let stored = rows.pop().ok_or_else(|| {
+                    EventStoreError::Store(format!(
+                        "exact transcript rewrite receipt index points to missing row {first_seq}"
+                    ))
+                })?;
+                let Some((stored_session_id, stored_receipt, stored_summary)) =
+                    transcript_rewrite_receipt_event_parts(&stored.event)
+                else {
+                    return Err(EventStoreError::ExactTranscriptRewriteReceiptConflict {
+                        session_id: session_id.clone(),
+                        existing_count: 1,
+                        reason: format!(
+                            "indexed exact receipt row {first_seq} changed event variant"
+                        ),
+                    });
+                };
+                if stored.seq != first_seq
+                    || stored_session_id != session_id
+                    || stored_receipt != receipt
+                    || *stored_summary != incoming_summary
+                {
+                    return Err(EventStoreError::ExactTranscriptRewriteReceiptConflict {
+                        session_id: session_id.clone(),
+                        existing_count: 1,
+                        reason: format!(
+                            "indexed exact receipt row {first_seq} does not match its canonical identity"
+                        ),
+                    });
+                }
+                Ok(ExactTranscriptRewriteReceiptAppend::Replayed(stored))
+            }
+            Some(ExactTranscriptRewriteReceiptOccupant {
+                first_seq,
+                count,
+                final_assistant_text: existing_summary,
+            }) => Err(EventStoreError::ExactTranscriptRewriteReceiptConflict {
+                session_id: session_id.clone(),
+                existing_count: count,
+                reason: format!(
+                    "row {first_seq} carries terminal assistant text {existing_summary:?}, incoming is {incoming_summary:?}"
+                ),
+            }),
+        }
+    }
+
     async fn record_projection_halt(
         &self,
         session_id: &SessionId,
@@ -1898,6 +4407,97 @@ impl EventStore for FileEventStore {
             .map(Some)
     }
 
+    async fn read_transcript_rewrite_audit(
+        &self,
+        session_id: &SessionId,
+        expectation: TranscriptRewriteAuditExpectation<'_>,
+    ) -> Result<Option<TranscriptRewriteAuditRead>, EventStoreError> {
+        let expected_prefix = expectation.expected_prefix();
+        if let Some(tail) = self
+            .read_authorized_transcript_rewrite_tail(session_id, expected_prefix)
+            .await?
+        {
+            return Ok(Some(TranscriptRewriteAuditRead::AuthorizedTail(tail)));
+        }
+
+        let scan = self.full_transcript_rewrite_audit_scan(session_id).await?;
+        let current_receipt = scan
+            .index
+            .current_transcript_rewrite_prefix_receipt(session_id, scan.observed_through_log_seq);
+        let legacy_receipt = match expectation {
+            TranscriptRewriteAuditExpectation::Current(_) => None,
+            TranscriptRewriteAuditExpectation::LegacyGenerationZero {
+                ordered_commits, ..
+            } => scan.index.legacy_prefix_reconciled_by_expected_graph(
+                session_id,
+                scan.observed_through_log_seq,
+                expected_prefix,
+                ordered_commits,
+                &scan.rewrite_rows,
+            )?,
+        };
+        let legacy_normalized = legacy_receipt.is_some();
+        let mut receipt = legacy_receipt.or(current_receipt);
+        if let Some(fingerprint) = scan.fingerprint {
+            if let Some(candidate_receipt) = receipt.take() {
+                let last_distinct_rewrite_seq = scan
+                    .index
+                    .transcript_rewrite_prefix
+                    .as_ref()
+                    .map(|prefix| prefix.last_distinct_rewrite_seq)
+                    .unwrap_or_else(|| {
+                        scan.index
+                            .legacy_transcript_rewrite_commits
+                            .iter()
+                            .chain(scan.index.transcript_rewrite_commits.values())
+                            .map(|row| row.seq)
+                            .max()
+                            .unwrap_or(0)
+                    });
+                receipt = Some(
+                    self.stage_reconciled_event_log_head(
+                        session_id,
+                        fingerprint,
+                        scan.observed_through_log_seq,
+                        scan.last_line,
+                        last_distinct_rewrite_seq,
+                        candidate_receipt,
+                        legacy_normalized,
+                    )
+                    .await?,
+                );
+            }
+        } else if scan.fingerprint.is_none() && expected_prefix.occurrence_count() == 0 {
+            return Ok(Some(TranscriptRewriteAuditRead::AuthorizedTail(
+                TranscriptRewriteAuditRows {
+                    session_id: session_id.clone(),
+                    observed_through_log_seq: 0,
+                    receipt,
+                    rewrite_rows: Vec::new(),
+                },
+            )));
+        }
+
+        // A full read always returns every exact row it observed. Its staged
+        // head remains private and inert until the consumer validates the
+        // bodies, applies replay, and explicitly finalizes the receipt.
+        Ok(Some(TranscriptRewriteAuditRead::FullReconciliation(
+            TranscriptRewriteAuditRows {
+                session_id: session_id.clone(),
+                observed_through_log_seq: scan.observed_through_log_seq,
+                receipt,
+                rewrite_rows: scan.rewrite_rows,
+            },
+        )))
+    }
+
+    async fn finalize_transcript_rewrite_audit(
+        &self,
+        receipt: &TranscriptRewritePrefixReceipt,
+    ) -> Result<(), EventStoreError> {
+        self.finalize_pending_rewrite_head(receipt).await
+    }
+
     async fn read_from_bounded(
         &self,
         session_id: &SessionId,
@@ -1918,8 +4518,15 @@ impl EventStore for FileEventStore {
     }
 
     async fn last_seq(&self, session_id: &SessionId) -> Result<u64, EventStoreError> {
+        if let Some(head) = self.read_current_event_log_head(session_id).await? {
+            return Ok(head.through_log_seq);
+        }
         let (snapshot, _file) = self.refresh_event_log_index(session_id, None).await?;
-        Ok(snapshot.last_seq)
+        Ok(self
+            .read_sequence_owner(session_id)
+            .await?
+            .unwrap_or(snapshot.last_seq)
+            .max(snapshot.last_seq))
     }
 }
 
@@ -1938,6 +4545,18 @@ mod tests {
             _envelopes: &[EventEnvelope<AgentEvent>],
         ) -> Result<u64, EventStoreError> {
             Ok(0)
+        }
+
+        async fn append_transcript_rewrite_receipt_exact(
+            &self,
+            _session_id: &SessionId,
+            _receipt: &TranscriptRewriteAuditReceiptBatch,
+            _final_assistant_text: Option<&str>,
+        ) -> Result<ExactTranscriptRewriteReceiptAppend, EventStoreError> {
+            Err(EventStoreError::Store(
+                "LegacyEventStore does not support exact transcript-rewrite receipt publication"
+                    .to_string(),
+            ))
         }
 
         async fn record_projection_halt(
@@ -2014,6 +4633,74 @@ mod tests {
             .collect()
     }
 
+    fn transcript_body(
+        text: &str,
+        parent_revision: Option<String>,
+    ) -> meerkat_core::TranscriptRevisionBody {
+        let messages = vec![meerkat_core::Message::User(
+            meerkat_core::types::UserMessage::text(text),
+        )];
+        meerkat_core::TranscriptRevisionBody {
+            revision: meerkat_core::transcript_messages_digest(&messages)
+                .expect("test transcript body must digest"),
+            parent_revision,
+            messages,
+            created_at: SystemTime::UNIX_EPOCH,
+        }
+    }
+
+    fn transcript_rewrite_record(
+        rewrite_generation: u64,
+        parent_text: &str,
+        revision_text: &str,
+        parent_parent_revision: Option<String>,
+        reason: &str,
+    ) -> meerkat_core::TranscriptRewriteRecord {
+        let parent_body = transcript_body(parent_text, parent_parent_revision);
+        let revision_body = transcript_body(revision_text, Some(parent_body.revision.clone()));
+        let commit = TranscriptRewriteCommit {
+            rewrite_generation,
+            parent_revision: parent_body.revision.clone(),
+            revision: revision_body.revision.clone(),
+            selection: meerkat_core::TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+            original_span_digest: meerkat_core::transcript_messages_digest(&parent_body.messages)
+                .expect("test original span must digest"),
+            replacement_digest: meerkat_core::transcript_messages_digest(&revision_body.messages)
+                .expect("test replacement span must digest"),
+            messages_before: parent_body.messages.len(),
+            messages_after: revision_body.messages.len(),
+            reason: meerkat_core::TranscriptRewriteReason::new(reason),
+            actor: Some("event-store-receipt-test".to_string()),
+            committed_at: SystemTime::UNIX_EPOCH,
+        };
+        meerkat_core::TranscriptRewriteRecord::new(commit, parent_body, revision_body)
+            .expect("test rewrite record must validate")
+    }
+
+    fn transcript_rewrite_event(
+        session_id: &SessionId,
+        record: meerkat_core::TranscriptRewriteRecord,
+    ) -> AgentEvent {
+        AgentEvent::TranscriptRewriteCommitted {
+            session_id: session_id.clone(),
+            record,
+        }
+    }
+
+    fn transcript_rewrite_receipt(
+        start_prefix: TranscriptRewritePrefixAccumulator,
+        commits: &[TranscriptRewriteCommit],
+    ) -> TranscriptRewriteAuditReceiptBatch {
+        let mut end_prefix = start_prefix.clone();
+        for commit in commits {
+            end_prefix = end_prefix
+                .extend(commit)
+                .expect("test rewrite receipt must fold");
+        }
+        TranscriptRewriteAuditReceiptBatch::new(start_prefix, commits.to_vec(), end_prefix)
+            .expect("test rewrite receipt must validate")
+    }
+
     fn assert_invalid_exact_terminal(error: EventStoreError, interaction_id: InteractionId) {
         assert!(
             matches!(
@@ -2046,6 +4733,855 @@ mod tests {
             ),
             "default exact-terminal capability must fail closed, got {error:?}"
         );
+        assert!(
+            store
+                .read_transcript_rewrite_audit(
+                    &session_id,
+                    TranscriptRewriteAuditExpectation::Current(
+                        &TranscriptRewritePrefixAccumulator::empty(),
+                    ),
+                )
+                .await
+                .expect("the default receipt capability must not fail")
+                .is_none(),
+            "a custom store must not silently claim rewrite-prefix authority"
+        );
+    }
+
+    #[test]
+    fn public_authorized_tail_constructor_rejects_omission_and_conflicting_retry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let session_id = SessionId::new();
+        let first = transcript_rewrite_record(1, "A", "B", None, "first");
+        let second = transcript_rewrite_record(
+            2,
+            "B",
+            "C",
+            Some(first.commit.parent_revision.clone()),
+            "second",
+        );
+        let first_prefix =
+            TranscriptRewritePrefixAccumulator::from_commits(std::slice::from_ref(&first.commit))?;
+        let second_prefix = TranscriptRewritePrefixAccumulator::from_commits(&[
+            first.commit.clone(),
+            second.commit.clone(),
+        ])?;
+        let second_receipt = TranscriptRewritePrefixReceipt::new(
+            session_id.clone(),
+            2,
+            second_prefix,
+            Some(second.commit.clone()),
+        )?;
+
+        let omission = TranscriptRewriteAuditRead::authorized_tail(
+            &first_prefix,
+            Some(&first.commit),
+            second_receipt,
+            Vec::new(),
+        )
+        .expect_err("an end receipt cannot authorize omitted exact tail rows");
+        assert!(
+            matches!(
+                &omission,
+                EventStoreError::Store(message)
+                    if message.contains("does not fold exactly")
+            ),
+            "expected exact-fold rejection, got {omission:?}"
+        );
+
+        let conflicting = transcript_rewrite_record(1, "A", "X", None, "conflicting-first");
+        let conflicting_row = RawTranscriptRewriteEvent::new(
+            2,
+            serde_json::value::to_raw_value(&transcript_rewrite_event(&session_id, conflicting))?,
+        )?;
+        let first_receipt = TranscriptRewritePrefixReceipt::new(
+            session_id,
+            2,
+            first_prefix.clone(),
+            Some(first.commit.clone()),
+        )?;
+        let conflict = TranscriptRewriteAuditRead::authorized_tail(
+            &first_prefix,
+            Some(&first.commit),
+            first_receipt,
+            vec![conflicting_row],
+        )
+        .expect_err("same-generation unequal facts are corruption, not retries");
+        assert!(
+            matches!(
+                &conflict,
+                EventStoreError::Store(message)
+                    if message.contains("conflicts with occurrence generation 1")
+            ),
+            "expected generation-conflict rejection, got {conflict:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rewrite_generation_conflict_is_rejected_before_jsonl_write_without_a_head()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("events");
+        let store = FileEventStore::new(&root);
+        let session_id = SessionId::new();
+        let first = transcript_rewrite_record(1, "A", "B", None, "first");
+        let first_receipt = transcript_rewrite_receipt(
+            TranscriptRewritePrefixAccumulator::empty(),
+            std::slice::from_ref(&first.commit),
+        );
+        store
+            .append_transcript_rewrite_receipt_exact(&session_id, &first_receipt, None)
+            .await?;
+
+        tokio::fs::remove_file(store.event_log_head_path(&session_id)).await?;
+        let log_path = store.log_path(&session_id);
+        let before = tokio::fs::read(&log_path).await?;
+        let conflicting = transcript_rewrite_record(1, "A", "X", None, "conflicting-first");
+        let conflicting_receipt = transcript_rewrite_receipt(
+            TranscriptRewritePrefixAccumulator::empty(),
+            std::slice::from_ref(&conflicting.commit),
+        );
+        let error = store
+            .append_transcript_rewrite_receipt_exact(&session_id, &conflicting_receipt, None)
+            .await
+            .expect_err("a conflicting occurrence must fail before its JSONL append");
+        assert!(
+            matches!(
+                error,
+                EventStoreError::TranscriptRewriteGenerationConflict { generation: 1, .. }
+            ),
+            "expected typed generation conflict, got {error:?}"
+        );
+        assert_eq!(
+            tokio::fs::read(&log_path).await?,
+            before,
+            "conflict preflight must leave canonical JSONL byte-for-byte unchanged"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn full_body_rewrite_writer_is_rejected_before_write_with_empty_or_existing_head()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("events");
+        let store = FileEventStore::new(&root);
+        let session_id = SessionId::new();
+
+        let first = transcript_rewrite_record(1, "A", "B", None, "first");
+        let empty_error = store
+            .append(
+                &session_id,
+                &[transcript_rewrite_event(&session_id, first.clone())],
+            )
+            .await
+            .expect_err("current writers must not seed a full-body rewrite row");
+        assert!(
+            matches!(
+                &empty_error,
+                EventStoreError::Store(message)
+                    if message.contains("refuse full-body")
+            ),
+            "expected full-body writer rejection, got {empty_error:?}"
+        );
+        assert!(
+            !store.log_path(&session_id).exists(),
+            "full-body writer rejection must precede canonical JSONL creation"
+        );
+
+        let first_receipt = transcript_rewrite_receipt(
+            TranscriptRewritePrefixAccumulator::empty(),
+            std::slice::from_ref(&first.commit),
+        );
+        store
+            .append_transcript_rewrite_receipt_exact(&session_id, &first_receipt, None)
+            .await?;
+        let log_path = store.log_path(&session_id);
+        let before = tokio::fs::read(&log_path).await?;
+        let second = transcript_rewrite_record(
+            2,
+            "B",
+            "C",
+            Some(first.commit.parent_revision.clone()),
+            "second",
+        );
+        let existing_error = store
+            .append(
+                &session_id,
+                &[transcript_rewrite_event(&session_id, second)],
+            )
+            .await
+            .expect_err("a full-body successor must not extend receipt authority");
+        assert!(
+            matches!(
+                &existing_error,
+                EventStoreError::Store(message)
+                    if message.contains("refuse full-body")
+            ),
+            "expected full-body writer rejection, got {existing_error:?}"
+        );
+        assert_eq!(
+            tokio::fs::read(&log_path).await?,
+            before,
+            "rejected full-body successor must leave canonical JSONL byte-for-byte unchanged"
+        );
+        let expected =
+            TranscriptRewritePrefixAccumulator::from_commits(std::slice::from_ref(&first.commit))?;
+        assert_eq!(
+            store
+                .read_durable_event_log_head(&session_id)
+                .await?
+                .expect("valid first append has a head")
+                .rewrite_prefix
+                .as_ref(),
+            Some(&expected),
+            "invalid successor must not advance semantic head authority"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_fallback_does_not_authorize_unvalidated_historical_rewrite_bodies()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("events");
+        let store = FileEventStore::new(&root);
+        let session_id = SessionId::new();
+        let mut corrupt = transcript_rewrite_record(1, "A", "B", None, "first");
+        corrupt
+            .revision_body
+            .messages
+            .push(meerkat_core::Message::User(
+                meerkat_core::types::UserMessage::text("corrupt-on-disk-body"),
+            ));
+        let commit = corrupt.commit.clone();
+        append_raw_test_rows(
+            &store,
+            &session_id,
+            &[StoredEvent {
+                seq: 1,
+                schema_version: EVENT_SCHEMA_VERSION,
+                timestamp: SystemTime::now(),
+                source: EventSourceIdentity::session(session_id.clone()),
+                mob_id: None,
+                stream_seq: 1,
+                event: transcript_rewrite_event(&session_id, corrupt),
+            }],
+        )
+        .await?;
+
+        store
+            .append(&session_id, &[AgentEvent::TurnStarted { turn_number: 1 }])
+            .await?;
+        let head = store
+            .read_durable_event_log_head(&session_id)
+            .await?
+            .expect("ordinary append publishes positional high-water");
+        assert_eq!(head.through_log_seq, 2);
+        assert!(
+            head.rewrite_prefix.is_none(),
+            "index-only fallback must not mint semantic authority over historical bodies"
+        );
+
+        let expected =
+            TranscriptRewritePrefixAccumulator::from_commits(std::slice::from_ref(&commit))?;
+        let audit = store
+            .read_transcript_rewrite_audit(
+                &session_id,
+                TranscriptRewriteAuditExpectation::Current(&expected),
+            )
+            .await?
+            .expect("file store supports combined audit");
+        assert!(
+            matches!(audit, TranscriptRewriteAuditRead::FullReconciliation(_)),
+            "unvalidated historical bodies must remain visible to a full reconciliation"
+        );
+
+        let anchored_session = SessionId::new();
+        store
+            .append(
+                &anchored_session,
+                &[AgentEvent::TurnStarted { turn_number: 1 }],
+            )
+            .await?;
+        let mut anchored_corrupt = transcript_rewrite_record(1, "A", "B", None, "anchored-first");
+        anchored_corrupt
+            .revision_body
+            .messages
+            .push(meerkat_core::Message::User(
+                meerkat_core::types::UserMessage::text("corrupt-anchored-suffix"),
+            ));
+        append_raw_test_rows(
+            &store,
+            &anchored_session,
+            &[StoredEvent {
+                seq: 2,
+                schema_version: EVENT_SCHEMA_VERSION,
+                timestamp: SystemTime::now(),
+                source: EventSourceIdentity::session(anchored_session.clone()),
+                mob_id: None,
+                stream_seq: 2,
+                event: transcript_rewrite_event(&anchored_session, anchored_corrupt),
+            }],
+        )
+        .await?;
+        store
+            .append(
+                &anchored_session,
+                &[AgentEvent::TurnStarted { turn_number: 2 }],
+            )
+            .await?;
+        assert!(
+            store
+                .read_durable_event_log_head(&anchored_session)
+                .await?
+                .expect("ordinary append advances positional high-water")
+                .rewrite_prefix
+                .is_none(),
+            "an append must not publish semantic authority over an unvalidated suffix after an exact older head"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn authorized_rewrite_tail_binds_loop_occurrences_and_cold_no_tail_decodes_zero_rows()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("events");
+        let store = FileEventStore::new(&root);
+        let session_id = SessionId::new();
+        let a_to_b = transcript_rewrite_record(1, "A", "B", None, "a-to-b");
+        let b_to_a = transcript_rewrite_record(
+            2,
+            "B",
+            "A",
+            Some(a_to_b.commit.parent_revision.clone()),
+            "b-to-a",
+        );
+
+        let empty_prefix = TranscriptRewritePrefixAccumulator::empty();
+        let first_receipt =
+            transcript_rewrite_receipt(empty_prefix, std::slice::from_ref(&a_to_b.commit));
+        store
+            .append_transcript_rewrite_receipt_exact(&session_id, &first_receipt, None)
+            .await?;
+        let before_prefix = first_receipt.end_prefix().clone();
+        let before_loop = store
+            .read_transcript_rewrite_audit(
+                &session_id,
+                TranscriptRewriteAuditExpectation::Current(&before_prefix),
+            )
+            .await?
+            .expect("file store implements combined rewrite audit");
+        let TranscriptRewriteAuditRead::AuthorizedTail(before_loop) = before_loop else {
+            return Err(std::io::Error::other("current prefix must authorize a tail").into());
+        };
+
+        let second_receipt =
+            transcript_rewrite_receipt(before_prefix.clone(), std::slice::from_ref(&b_to_a.commit));
+        store
+            .append_transcript_rewrite_receipt_exact(&session_id, &second_receipt, None)
+            .await?;
+        let replayed = store
+            .append_transcript_rewrite_receipt_exact(&session_id, &first_receipt, None)
+            .await?;
+        assert!(
+            matches!(replayed, ExactTranscriptRewriteReceiptAppend::Replayed(_)),
+            "an exact older receipt retry must reuse its row"
+        );
+        let expected = TranscriptRewritePrefixAccumulator::from_commits(&[
+            a_to_b.commit.clone(),
+            b_to_a.commit.clone(),
+        ])?;
+        let after_loop = store
+            .read_transcript_rewrite_audit(
+                &session_id,
+                TranscriptRewriteAuditExpectation::Current(&expected),
+            )
+            .await?
+            .expect("file store implements combined rewrite audit");
+        let TranscriptRewriteAuditRead::AuthorizedTail(after_loop) = after_loop else {
+            return Err(
+                std::io::Error::other("exact receipt replay must retain O(1) authority").into(),
+            );
+        };
+        let after_receipt = after_loop.receipt().expect("authorized tail has a receipt");
+        let before_receipt = before_loop
+            .receipt()
+            .expect("authorized tail has a receipt");
+
+        assert_eq!(after_receipt.session_id(), &session_id);
+        assert_eq!(after_receipt.through_log_seq(), 2);
+        assert_eq!(
+            after_receipt.accumulator().occurrence_count(),
+            2,
+            "the exact retry must not become a third occurrence"
+        );
+        assert_eq!(after_receipt.accumulator(), &expected);
+        assert_ne!(
+            after_receipt.accumulator(),
+            before_receipt.accumulator(),
+            "the B -> A return must change the prefix despite the exact A -> B replay"
+        );
+        store
+            .finalize_transcript_rewrite_audit(after_receipt)
+            .await?;
+
+        store
+            .append(&session_id, &[AgentEvent::TurnStarted { turn_number: 1 }])
+            .await?;
+        let restarted = FileEventStore::new(store.root());
+        restarted.reset_decoded_rows();
+        let ordinary_high_water = restarted
+            .read_transcript_rewrite_audit(
+                &session_id,
+                TranscriptRewriteAuditExpectation::Current(&expected),
+            )
+            .await?
+            .expect("the event-log head binds an ordinary-event high-water");
+        let TranscriptRewriteAuditRead::AuthorizedTail(ordinary_high_water) = ordinary_high_water
+        else {
+            return Err(std::io::Error::other("cold exact head must authorize a tail").into());
+        };
+        assert_eq!(ordinary_high_water.observed_through_log_seq(), 3);
+        assert!(ordinary_high_water.rewrite_rows().is_empty());
+        assert_eq!(
+            ordinary_high_water
+                .receipt()
+                .expect("authorized tail has a receipt")
+                .accumulator(),
+            &expected
+        );
+        assert_eq!(
+            restarted.decoded_rows(),
+            0,
+            "fresh-store combined no-tail read must not build an index or decode a JSONL row"
+        );
+
+        let a_to_c =
+            transcript_rewrite_record(3, "A", "C", Some(a_to_b.commit.revision.clone()), "a-to-c");
+        append_raw_test_rows(
+            &restarted,
+            &session_id,
+            &[
+                StoredEvent {
+                    seq: 4,
+                    schema_version: EVENT_SCHEMA_VERSION,
+                    timestamp: SystemTime::now(),
+                    source: EventSourceIdentity::session(session_id.clone()),
+                    mob_id: None,
+                    stream_seq: 4,
+                    event: AgentEvent::TurnStarted { turn_number: 2 },
+                },
+                StoredEvent {
+                    seq: 5,
+                    schema_version: EVENT_SCHEMA_VERSION,
+                    timestamp: SystemTime::now(),
+                    source: EventSourceIdentity::session(session_id.clone()),
+                    mob_id: None,
+                    stream_seq: 5,
+                    event: transcript_rewrite_event(&session_id, a_to_c.clone()),
+                },
+            ],
+        )
+        .await?;
+        let tail_store = FileEventStore::new(&root);
+        tail_store.reset_decoded_rows();
+        let tail = tail_store
+            .read_transcript_rewrite_audit(
+                &session_id,
+                TranscriptRewriteAuditExpectation::Current(&expected),
+            )
+            .await?
+            .expect("stale event-log head still authorizes its exact suffix");
+        tail.verify_authorized_tail(&expected, Some(&b_to_a.commit))?;
+        let TranscriptRewriteAuditRead::AuthorizedTail(tail) = tail else {
+            return Err(std::io::Error::other("append-only suffix must stay a tail read").into());
+        };
+        let expected_after_tail = TranscriptRewritePrefixAccumulator::from_commits(&[
+            a_to_b.commit,
+            b_to_a.commit,
+            a_to_c.commit,
+        ])?;
+        assert_eq!(tail.observed_through_log_seq(), 5);
+        assert_eq!(tail.rewrite_rows().len(), 1);
+        assert_eq!(
+            tail.receipt()
+                .expect("authorized tail has a receipt")
+                .accumulator(),
+            &expected_after_tail
+        );
+        assert_eq!(
+            tail_store.decoded_rows(),
+            2,
+            "direct seek must decode only the two appended rows"
+        );
+        assert!(
+            !tail_store.index_registry_contains(&session_id).await,
+            "authorized direct-tail read must not construct the broad event-log index"
+        );
+        assert_eq!(
+            tail_store
+                .read_durable_event_log_head(&session_id)
+                .await?
+                .expect("the earlier head remains durable until validation")
+                .through_log_seq,
+            3,
+            "reading a tail must not publish its high-water before body validation"
+        );
+        tail_store
+            .finalize_transcript_rewrite_audit(
+                tail.receipt()
+                    .expect("validated authorized tail has a receipt"),
+            )
+            .await?;
+        assert_eq!(
+            tail_store
+                .read_durable_event_log_head(&session_id)
+                .await?
+                .expect("finalization publishes the validated head")
+                .through_log_seq,
+            5
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rewrite_receipt_repair_requires_one_exact_ordered_missing_suffix()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("events");
+        let store = FileEventStore::new(&root);
+        let session_id = SessionId::new();
+        let a_to_b = transcript_rewrite_record(1, "A", "B", None, "a-to-b");
+        let b_to_c = transcript_rewrite_record(
+            2,
+            "B",
+            "C",
+            Some(a_to_b.commit.parent_revision.clone()),
+            "b-to-c",
+        );
+
+        let first_prefix =
+            TranscriptRewritePrefixAccumulator::from_commits(std::slice::from_ref(&a_to_b.commit))?;
+        let descendant_only =
+            transcript_rewrite_receipt(first_prefix, std::slice::from_ref(&b_to_c.commit));
+        store
+            .append_transcript_rewrite_receipt_exact(&session_id, &descendant_only, None)
+            .await
+            .expect_err("a descendant-only receipt cannot skip its missing ancestor");
+        assert!(
+            !store.log_path(&session_id).exists(),
+            "rejected descendant-only evidence must not create canonical JSONL"
+        );
+
+        // Graph repair publishes the complete missing semantic suffix in one
+        // receipt row, preserving order without body rows or physical-row
+        // sorting.
+        let repaired_receipt = transcript_rewrite_receipt(
+            TranscriptRewritePrefixAccumulator::empty(),
+            &[a_to_b.commit.clone(), b_to_c.commit.clone()],
+        );
+        store
+            .append_transcript_rewrite_receipt_exact(&session_id, &repaired_receipt, None)
+            .await?;
+        let expected = TranscriptRewritePrefixAccumulator::from_commits(&[
+            a_to_b.commit.clone(),
+            b_to_c.commit.clone(),
+        ])?;
+        assert_eq!(
+            store
+                .read_durable_event_log_head(&session_id)
+                .await?
+                .expect("exact repair receipt advances semantic authority")
+                .rewrite_prefix
+                .as_ref(),
+            Some(&expected),
+            "one exact missing-suffix receipt must publish its proved end prefix"
+        );
+
+        let warm = store
+            .read_transcript_rewrite_audit(
+                &session_id,
+                TranscriptRewriteAuditExpectation::Current(&expected),
+            )
+            .await?
+            .expect("warm store supports combined audit");
+        let TranscriptRewriteAuditRead::AuthorizedTail(warm) = warm else {
+            return Err(std::io::Error::other(
+                "exact receipt repair must stay on the O(1) read path",
+            )
+            .into());
+        };
+        assert!(warm.rewrite_rows().is_empty());
+        assert_eq!(
+            warm.receipt()
+                .expect("authorized tail has a receipt")
+                .accumulator(),
+            &expected
+        );
+        let restarted = FileEventStore::new(&root);
+        restarted.reset_decoded_rows();
+        let rebuilt = restarted
+            .read_transcript_rewrite_audit(
+                &session_id,
+                TranscriptRewriteAuditExpectation::Current(&expected),
+            )
+            .await?
+            .expect("cold store supports combined audit");
+        let TranscriptRewriteAuditRead::AuthorizedTail(rebuilt) = rebuilt else {
+            return Err(std::io::Error::other("durable head must bind repaired prefix").into());
+        };
+        assert_eq!(
+            rebuilt
+                .receipt()
+                .expect("authorized tail has a receipt")
+                .accumulator(),
+            &expected
+        );
+        assert_eq!(
+            restarted.decoded_rows(),
+            0,
+            "a valid event-log head must avoid a cold JSONL rebuild"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn legacy_generation_zero_receipt_uses_the_same_body_authorized_heal_as_replay()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("events");
+        let store = FileEventStore::new(&root);
+        let session_id = SessionId::new();
+        let parent_messages = vec![
+            meerkat_core::Message::User(meerkat_core::types::UserMessage::text("old one")),
+            meerkat_core::Message::User(meerkat_core::types::UserMessage::text("old two")),
+        ];
+        let revision_messages = vec![meerkat_core::Message::User(
+            meerkat_core::types::UserMessage::compaction_summary("summary"),
+        )];
+        let parent_body = meerkat_core::TranscriptRevisionBody {
+            revision: meerkat_core::transcript_messages_digest(&parent_messages)?,
+            parent_revision: None,
+            messages: parent_messages,
+            created_at: SystemTime::UNIX_EPOCH,
+        };
+        let revision_body = meerkat_core::TranscriptRevisionBody {
+            revision: meerkat_core::transcript_messages_digest(&revision_messages)?,
+            parent_revision: Some(parent_body.revision.clone()),
+            messages: revision_messages,
+            created_at: SystemTime::UNIX_EPOCH,
+        };
+        let commit = TranscriptRewriteCommit {
+            rewrite_generation: 1,
+            parent_revision: parent_body.revision.clone(),
+            revision: revision_body.revision.clone(),
+            selection: meerkat_core::TranscriptRewriteSelection::MessageRange {
+                start: 0,
+                end: parent_body.messages.len(),
+            },
+            original_span_digest: meerkat_core::transcript_messages_digest(&parent_body.messages)?,
+            replacement_digest: meerkat_core::transcript_messages_digest(&revision_body.messages)?,
+            messages_before: parent_body.messages.len(),
+            messages_after: revision_body.messages.len(),
+            reason: meerkat_core::TranscriptRewriteReason::new("legacy-compaction"),
+            actor: None,
+            committed_at: SystemTime::UNIX_EPOCH,
+        };
+        let mut legacy_record =
+            meerkat_core::TranscriptRewriteRecord::new(commit, parent_body, revision_body)?;
+        legacy_record.commit.rewrite_generation = 0;
+        let legacy_event = transcript_rewrite_event(&session_id, legacy_record);
+
+        // Full payload decode owns compatibility healing because the retained
+        // bodies are the authority for classifying a legacy compaction.
+        let encoded = serde_json::to_string(&legacy_event)?;
+        let AgentEvent::TranscriptRewriteCommitted {
+            record: healed_record,
+            ..
+        } = serde_json::from_str::<AgentEvent>(&encoded)?
+        else {
+            return Err(std::io::Error::other("legacy event changed variant").into());
+        };
+        assert!(matches!(
+            healed_record.commit.selection,
+            meerkat_core::TranscriptRewriteSelection::CompactionMessageRange { .. }
+        ));
+        let mut expected_commit = healed_record.commit;
+        expected_commit.rewrite_generation = 1;
+        let expected_commits = vec![expected_commit.clone()];
+        let expected_prefix = TranscriptRewritePrefixAccumulator::from_commits(&expected_commits)?;
+
+        append_raw_test_rows(
+            &store,
+            &session_id,
+            &[StoredEvent {
+                seq: 1,
+                schema_version: EVENT_SCHEMA_VERSION,
+                timestamp: SystemTime::now(),
+                source: EventSourceIdentity::session(session_id.clone()),
+                mob_id: None,
+                stream_seq: 1,
+                event: legacy_event,
+            }],
+        )
+        .await?;
+
+        let migrated = store
+            .read_transcript_rewrite_audit(
+                &session_id,
+                TranscriptRewriteAuditExpectation::LegacyGenerationZero {
+                    expected_prefix: &expected_prefix,
+                    ordered_commits: &expected_commits,
+                },
+            )
+            .await?
+            .expect("file store supports generation-zero migration");
+        let TranscriptRewriteAuditRead::FullReconciliation(migrated) = migrated else {
+            return Err(
+                std::io::Error::other("legacy healing requires one full reconciliation").into(),
+            );
+        };
+        let receipt = migrated
+            .receipt()
+            .expect("healed exact payloads must produce a staged receipt");
+        assert_eq!(receipt.accumulator(), &expected_prefix);
+        store.finalize_transcript_rewrite_audit(receipt).await?;
+        assert!(
+            store
+                .read_durable_event_log_head(&session_id)
+                .await?
+                .expect("validated migration publishes a durable head")
+                .legacy_generation_zero_normalized
+        );
+
+        let reopened = FileEventStore::new(&root);
+        reopened.reset_decoded_rows();
+        let steady = reopened
+            .read_transcript_rewrite_audit(
+                &session_id,
+                TranscriptRewriteAuditExpectation::Current(&expected_prefix),
+            )
+            .await?
+            .expect("normalized head authorizes the current prefix");
+        let TranscriptRewriteAuditRead::AuthorizedTail(steady) = steady else {
+            return Err(std::io::Error::other(
+                "normalized legacy head must avoid repeated full reconciliation",
+            )
+            .into());
+        };
+        assert!(steady.rewrite_rows().is_empty());
+        assert_eq!(
+            reopened.decoded_rows(),
+            0,
+            "a normalized legacy head must not decode historical JSONL rows"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn corrupt_event_log_head_falls_back_and_repairs_from_jsonl()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("events");
+        let store = FileEventStore::new(&root);
+        let session_id = SessionId::new();
+        let a_to_b = transcript_rewrite_record(1, "A", "B", None, "a-to-b");
+        let receipt = transcript_rewrite_receipt(
+            TranscriptRewritePrefixAccumulator::empty(),
+            std::slice::from_ref(&a_to_b.commit),
+        );
+        store
+            .append_transcript_rewrite_receipt_exact(&session_id, &receipt, None)
+            .await?;
+        let expected = receipt.end_prefix().clone();
+
+        let sidecar_path = store.event_log_head_path(&session_id);
+        let mut sidecar: serde_json::Value =
+            serde_json::from_slice(&tokio::fs::read(&sidecar_path).await?)?;
+        sidecar["checksum"] = serde_json::json!("sha256:corrupt");
+        tokio::fs::write(&sidecar_path, serde_json::to_vec(&sidecar)?).await?;
+
+        let rebuilding = FileEventStore::new(&root);
+        rebuilding.reset_decoded_rows();
+        let repaired = rebuilding
+            .read_transcript_rewrite_audit(
+                &session_id,
+                TranscriptRewriteAuditExpectation::Current(&expected),
+            )
+            .await?
+            .expect("canonical JSONL reconciliation supplies the result");
+        let TranscriptRewriteAuditRead::FullReconciliation(repaired) = repaired else {
+            return Err(std::io::Error::other(
+                "an invalid sidecar must force one full receipt-log reconciliation",
+            )
+            .into());
+        };
+        assert!(
+            repaired.rewrite_rows().is_empty(),
+            "current receipt-only reconciliation must not expose rewrite bodies"
+        );
+        assert_eq!(
+            repaired
+                .receipt()
+                .expect("authorized tail has a receipt")
+                .accumulator(),
+            &expected
+        );
+        assert_eq!(
+            rebuilding.decoded_rows(),
+            1,
+            "an invalid sidecar must decode the one receipt row exactly once"
+        );
+        assert!(
+            rebuilding
+                .read_durable_event_log_head(&session_id)
+                .await?
+                .is_none(),
+            "a read must not publish skip authority before receipt validation succeeds"
+        );
+        rebuilding
+            .finalize_transcript_rewrite_audit(
+                repaired
+                    .receipt()
+                    .expect("validated full reconciliation has a receipt"),
+            )
+            .await?;
+        rebuilding
+            .finalize_transcript_rewrite_audit(
+                repaired
+                    .receipt()
+                    .expect("validated full reconciliation has a receipt"),
+            )
+            .await?;
+
+        let reopened = FileEventStore::new(&root);
+        reopened.reset_decoded_rows();
+        let durable = reopened
+            .read_transcript_rewrite_audit(
+                &session_id,
+                TranscriptRewriteAuditExpectation::Current(&expected),
+            )
+            .await?
+            .expect("the fallback rebuild repairs the durable event-log head");
+        let TranscriptRewriteAuditRead::AuthorizedTail(durable) = durable else {
+            return Err(std::io::Error::other("repaired head must authorize a tail").into());
+        };
+        assert_eq!(
+            durable
+                .receipt()
+                .expect("authorized tail has a receipt")
+                .accumulator(),
+            &expected
+        );
+        assert_eq!(
+            reopened.decoded_rows(),
+            0,
+            "the repaired event-log head must make the next cold lookup bounded"
+        );
+        Ok(())
     }
 
     async fn append_raw_test_rows(
@@ -3466,7 +7002,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn file_event_store_restart_continues_from_durable_sequence_owner()
+    async fn file_event_store_restart_continues_from_atomic_event_log_head()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let root = temp.path().join("events");
@@ -3485,7 +7021,19 @@ mod tests {
             )
             .await?;
         assert_eq!(seq, 2);
-        assert_eq!(store.read_sequence_owner(&session_id).await?, Some(2));
+        assert_eq!(
+            store
+                .read_exact_event_log_head(&session_id)
+                .await?
+                .expect("append persists an exact event-log head")
+                .through_log_seq,
+            2
+        );
+        assert_eq!(
+            store.read_sequence_owner(&session_id).await?,
+            None,
+            "current writers do not maintain a parallel .seq authority"
+        );
 
         let restarted = FileEventStore::new(&root);
         let seq = restarted
@@ -3498,7 +7046,14 @@ mod tests {
             .await?;
 
         assert_eq!(seq, 3);
-        assert_eq!(restarted.read_sequence_owner(&session_id).await?, Some(3));
+        assert_eq!(
+            restarted
+                .read_exact_event_log_head(&session_id)
+                .await?
+                .expect("restart advances the event-log head")
+                .through_log_seq,
+            3
+        );
         let sequences: Vec<u64> = restarted
             .read_from(&session_id, 1)
             .await?
@@ -3555,7 +7110,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn file_event_store_process_local_counter_is_inert_when_durable_owner_advances()
+    async fn file_event_store_missing_head_adopts_legacy_sequence_owner_once()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let store = FileEventStore::new(temp.path().join("events"));
@@ -3566,12 +7121,13 @@ mod tests {
             .await?;
         assert_eq!(seq, 1);
 
+        tokio::fs::remove_file(store.event_log_head_path(&session_id)).await?;
         store.write_sequence_owner(&session_id, 41).await?;
         let seq = store
             .append(
                 &session_id,
                 &[AgentEvent::TextComplete {
-                    content: "durable owner wins".to_string(),
+                    content: "legacy owner is migrated".to_string(),
                 }],
             )
             .await?;
@@ -3588,7 +7144,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn file_event_store_corrupt_sequence_owner_fails_closed()
+    async fn file_event_store_exact_head_ignores_corrupt_legacy_sequence_file()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let store = FileEventStore::new(temp.path().join("events"));
@@ -3599,31 +7155,27 @@ mod tests {
             .await?;
         tokio::fs::write(store.sequence_path(&session_id), b"not-a-sequence").await?;
 
-        let err = store
+        let seq = store
             .append(
                 &session_id,
                 &[AgentEvent::TextComplete {
                     content: "must not be minted".to_string(),
                 }],
             )
-            .await
-            .expect_err("corrupt durable sequence owner must fail closed");
+            .await?;
 
-        assert!(err.to_string().contains("durable sequence owner"));
-        assert_eq!(store.last_seq(&session_id).await?, 1);
+        assert_eq!(seq, 2);
+        assert_eq!(store.last_seq(&session_id).await?, 2);
         let events = store.read_from(&session_id, 1).await?;
-        assert_eq!(events.len(), 1);
+        assert_eq!(events.len(), 2);
         Ok(())
     }
 
     #[tokio::test]
-    async fn file_event_store_owner_trailing_log_tail_reconciles_to_tail()
+    async fn file_event_store_legacy_owner_trailing_exact_head_is_ignored()
     -> Result<(), Box<dyn std::error::Error>> {
-        // Row #71: with the durable sequence owner advanced only AFTER the log
-        // bytes are fsynced, an owner that trails the log tail is the normal
-        // post-crash state (bytes synced, owner write lost) — NOT corruption.
-        // The canonical event log tail authoritatively reconciles it, so the
-        // next append continues contiguously from the tail (no reuse, no gap).
+        // A stale legacy `.seq` file has no authority once an exact atomic
+        // event-log head exists.
         let temp = tempfile::tempdir()?;
         let store = FileEventStore::new(temp.path().join("events"));
         let session_id = SessionId::new();
@@ -3639,8 +7191,6 @@ mod tests {
                 ],
             )
             .await?;
-        // Simulate a crash that lost the owner write after the log fsync: the
-        // owner trails the durable tail of 2.
         store.write_sequence_owner(&session_id, 1).await?;
 
         let seq = store
@@ -3660,23 +7210,28 @@ mod tests {
             .map(|event| event.seq)
             .collect();
         assert_eq!(sequences, vec![1, 2, 3]);
-        // The owner is re-advanced past the tail after the successful fsync.
-        assert_eq!(store.read_sequence_owner(&session_id).await?, Some(3));
+        assert_eq!(
+            store.read_sequence_owner(&session_id).await?,
+            Some(1),
+            "current writers leave the legacy file untouched"
+        );
+        assert_eq!(
+            store
+                .read_exact_event_log_head(&session_id)
+                .await?
+                .expect("current append advances the atomic head")
+                .through_log_seq,
+            3
+        );
         Ok(())
     }
 
     #[tokio::test]
-    async fn file_event_store_owner_advances_only_after_fsync_no_forward_gap()
+    async fn file_event_store_head_advances_only_after_jsonl_fsync_no_forward_gap()
     -> Result<(), Box<dyn std::error::Error>> {
-        // Row #71 hardening: the OLD code advanced the durable owner BEFORE
-        // writing the log bytes, so a write/flush failure after sequence
-        // allocation left the owner ahead of the tail, minting a forward gap on
-        // the next append. The fix advances the owner only after
-        // `file.sync_all()`. This pins the post-commit invariant — owner equals
-        // the durable tail (never ahead) — so an interrupted append can only
-        // ever leave the owner trailing (reconciled by the tail), never ahead.
-        // (The fails-old/passes-new behavioral gate is the trailing-owner
-        // reconcile test above.)
+        // The JSONL is fsynced before the atomic event-log head replacement.
+        // A crash can therefore leave the head trailing canonical bytes, never
+        // ahead of them.
         let temp = tempfile::tempdir()?;
         let store = FileEventStore::new(temp.path().join("events"));
         let session_id = SessionId::new();
@@ -3685,10 +7240,15 @@ mod tests {
             .append(&session_id, &[AgentEvent::TurnStarted { turn_number: 1 }])
             .await?;
         assert_eq!(seq, 1);
-        // Post-commit invariant: owner == durable tail (NOT ahead). Under the
-        // old "advance-before-write" ordering an interrupted append would leave
-        // the owner ahead of the tail here.
-        assert_eq!(store.read_sequence_owner(&session_id).await?, Some(1));
+        assert_eq!(
+            store
+                .read_exact_event_log_head(&session_id)
+                .await?
+                .expect("append persists an exact head")
+                .through_log_seq,
+            1
+        );
+        assert_eq!(store.read_sequence_owner(&session_id).await?, None);
         assert_eq!(store.last_seq(&session_id).await?, 1);
 
         // The next append therefore reuses first_seq == tail + 1 with no gap.

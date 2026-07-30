@@ -41,29 +41,6 @@ pub enum SessionInitialPromptStageDecision {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub enum SystemContextAppendDecision {
-    #[default]
-    Staged,
-    Duplicate,
-    RejectEmpty,
-    RejectConflict,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub enum SystemContextPersistAppendAdmission {
-    #[default]
-    Reject,
-    Admit,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub enum SystemContextSource {
-    #[default]
-    Normal,
-    RuntimeSteer,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum RealtimeTranscriptRoleKind {
     #[default]
     User,
@@ -137,17 +114,6 @@ pub enum TranscriptEditKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub enum SessionSystemPromptSource {
-    #[default]
-    DirectMutation,
-    ExplicitBuild,
-    DefaultBuild,
-    WasmDefaultBuild,
-    RuntimeContextAppend,
-    RuntimeSteerCleanup,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum ObservedSessionTailKind {
     #[default]
     Empty,
@@ -206,25 +172,7 @@ pub enum LiveSessionAuthorityReason {
     #[default]
     StoredArchived,
     LiveUncommittedTranscript,
-    RuntimeSystemContextDiverged,
     StoredTranscriptRevisionDiverged,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub enum CheckpointProvenanceClass {
-    #[default]
-    Unstamped,
-    Committed,
-    IntraTurn,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub enum RuntimeSnapshotReadDisposition {
-    #[default]
-    UseRuntimeSnapshot,
-    UseCommittedStoreHead,
-    RecoveryRequired,
-    Quarantine,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -245,18 +193,9 @@ pub enum DurableTailStopReason {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub enum DurableTailExecutionEvidence {
-    NoExecutionContent,
-    BoundExecution,
-    #[default]
-    UnboundExecution,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum DurableTailRecoveryClass {
     CompletedCandidate,
     InterruptedRepairableCandidate,
-    LegacyCompletedCandidate,
     #[default]
     Ambiguous,
 }
@@ -272,21 +211,6 @@ pub enum DurableHeadRelation {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub enum DurableHeadStampEra {
-    #[default]
-    WitnessV3OrNewer,
-    PreWitnessV3,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub enum RuntimeProjectionConflictDisposition {
-    #[default]
-    RejectDivergent,
-    ConvergeSupersededProjection,
-    RetainForRecovery,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum RuntimeCheckpointProjectionDisposition {
     #[default]
     IgnoreArchived,
@@ -294,31 +218,10 @@ pub enum RuntimeCheckpointProjectionDisposition {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub enum LegacyCheckpointTranscriptRelation {
-    #[default]
-    Divergent,
-    Identical,
-    ProjectionExtendsSnapshot,
-    SnapshotExtendsProjection,
-    NotComparable,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub enum LegacyCheckpointMigrationDisposition {
-    #[default]
-    RefuseDivergent,
-    MigrateCanonicalSnapshot,
-    AdoptProjectionExtension,
-    MigrateStoreProjection,
-    RebuildProjectionFromTypedSnapshot,
-    ConvergeSnapshotOntoTypedProjection,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub enum LegacyCheckpointLifecycleMerge {
+pub enum SessionDocumentLifecycleMerge {
     #[default]
     CarryArchived,
-    CarryElected,
+    CarryAuthority,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -376,30 +279,6 @@ pub enum SessionDocumentInput {
     },
     ResolveSessionFirstTurnOverridesAllowed {
         session_id: SessionDocumentKey,
-    },
-    ResolveSystemContextAppend {
-        trimmed_text_byte_count: u64,
-        idempotency_key_present: bool,
-        existing_key_matches: bool,
-        existing_key_conflicts: bool,
-        active_turn_scoped: bool,
-    },
-    ResolveSystemContextPendingApplyItem {
-        source_kind: SystemContextSource,
-    },
-    ResolveSystemContextSteerCleanupItem {
-        source_kind: SystemContextSource,
-    },
-    RestoreSystemContextSnapshot {
-        active_turn_membership_is_consistent: bool,
-        seen_keys_match_known_appends: bool,
-    },
-    ResolveSystemContextPersistAppendAdmission {
-        has_previous: bool,
-        content_identical: bool,
-        content_extends_previous: bool,
-        appended_starts_with_separator: bool,
-        incoming_is_runtime_context_append: bool,
     },
     ResolveRealtimeItemObserved {
         role: RealtimeTranscriptRoleKind,
@@ -517,12 +396,6 @@ pub enum SessionDocumentInput {
         mob_tool_authority_context_generated: bool,
     },
     RestoreSessionBuildState,
-    AuthorizeSystemPromptMutation {
-        source: SessionSystemPromptSource,
-        prompt_present: bool,
-        prompt_byte_count: u64,
-        replacing_existing: bool,
-    },
     ResolvePendingContinuation {
         session_tail: ObservedSessionTailKind,
         staged_tool_result_count: u64,
@@ -537,7 +410,6 @@ pub enum SessionDocumentInput {
     ClassifyLiveSessionAuthority {
         stored_transcript_diverged: bool,
         live_has_uncommitted_transcript: bool,
-        runtime_system_context_diverged: bool,
         stored_is_archived: bool,
     },
     RecoverSessionFromStore {
@@ -546,35 +418,13 @@ pub enum SessionDocumentInput {
         has_build_state: bool,
         runtime_projection_quarantined: bool,
     },
-    ResolveRuntimeProjectionConflict {
-        session_id: SessionDocumentKey,
-        relation: DurableHeadRelation,
-        row_provenance: CheckpointProvenanceClass,
-        authority_supersedes_row: bool,
-    },
     ResolveRuntimeCheckpointProjection {
         session_id: SessionDocumentKey,
     },
-    ResolveLegacyCheckpointMigration {
+    ResolveSessionDocumentLifecycleMerge {
         session_id: SessionDocumentKey,
-        runtime_snapshot_present: bool,
-        runtime_snapshot_legacy: bool,
-        store_row_present: bool,
-        store_row_legacy: bool,
-        transcript_relation: LegacyCheckpointTranscriptRelation,
-    },
-    ResolveLegacyCheckpointMigrationLifecycle {
-        session_id: SessionDocumentKey,
-        runtime_copy_archived: bool,
-        store_row_archived: bool,
-    },
-    ResolveRuntimeSnapshotReadSource {
-        session_id: SessionDocumentKey,
-        relation: DurableHeadRelation,
-        store_provenance: CheckpointProvenanceClass,
-        session_is_live: bool,
-        tail_execution: DurableTailExecutionEvidence,
-        head_stamp_era: DurableHeadStampEra,
+        authority_archived: bool,
+        candidate_archived: bool,
     },
     ClassifyDurableTail {
         session_id: SessionDocumentKey,
@@ -585,7 +435,6 @@ pub enum SessionDocumentInput {
         dangling_tool_use_count: u64,
         orphan_tool_result_count: u64,
         messages_after_terminal: bool,
-        head_stamp_era: DurableHeadStampEra,
     },
     ApplyPendingToolResults {
         session_id: SessionDocumentKey,
@@ -631,22 +480,6 @@ pub enum SessionDocumentEffect {
         restore_tool_results: bool,
     },
     SessionFirstTurnPhaseRecovered,
-    SystemContextAppendResolved {
-        decision: SystemContextAppendDecision,
-        active_turn_scoped: bool,
-    },
-    SystemContextPendingApplyItemResolved {
-        promote_to_applied: bool,
-        mark_seen_applied: bool,
-        remove_seen: bool,
-    },
-    SystemContextSteerCleanupItemResolved {
-        discard: bool,
-    },
-    SystemContextSnapshotRestoreAuthorized,
-    SystemContextPersistAppendAdmissionResolved {
-        admission: SystemContextPersistAppendAdmission,
-    },
     RealtimeTranscriptEventResolved {
         observe_item: bool,
         observe_skipped: bool,
@@ -683,7 +516,6 @@ pub enum SessionDocumentEffect {
     SessionMetadataPersistAuthorized,
     SessionBuildStatePersistAuthorized,
     SessionBuildStateRestoreAuthorized,
-    SystemPromptMutationAuthorized,
     PendingContinuationResolved {
         disposition: PendingContinuationDisposition,
     },
@@ -705,20 +537,11 @@ pub enum SessionDocumentEffect {
     SessionStoreRecoverySourceResolved {
         recoverable: bool,
     },
-    RuntimeProjectionConflictResolved {
-        disposition: RuntimeProjectionConflictDisposition,
-    },
     RuntimeCheckpointProjectionResolved {
         disposition: RuntimeCheckpointProjectionDisposition,
     },
-    LegacyCheckpointMigrationResolved {
-        disposition: LegacyCheckpointMigrationDisposition,
-    },
-    LegacyCheckpointMigrationLifecycleResolved {
-        merge: LegacyCheckpointLifecycleMerge,
-    },
-    RuntimeSnapshotReadSourceResolved {
-        disposition: RuntimeSnapshotReadDisposition,
+    SessionDocumentLifecycleMergeResolved {
+        merge: SessionDocumentLifecycleMerge,
     },
     DurableTailClassified {
         candidate_id: String,
@@ -798,17 +621,6 @@ enum SessionDocumentTransition {
     RestoreSessionConsumedInputs,
     RestoreSessionConsumedInputsNoPhaseRollback,
     RecoverSessionFirstTurnPhase,
-    ResolveSystemContextAppendEmpty,
-    ResolveSystemContextAppendConflict,
-    ResolveSystemContextAppendDuplicate,
-    ResolveSystemContextAppendNew,
-    ResolveSystemContextPersistAppendAdmissionAdmit,
-    ResolveSystemContextPersistAppendAdmissionReject,
-    ResolveSystemContextPendingApplyItemRuntimeSteer,
-    ResolveSystemContextPendingApplyItemNormal,
-    ResolveSystemContextSteerCleanupItemRuntimeSteer,
-    ResolveSystemContextSteerCleanupItemNormal,
-    RestoreSystemContextSnapshot,
     ResolveRealtimeItemObservedDiscardedAssistant,
     ResolveRealtimeItemObservedPresent,
     ResolveRealtimeItemSkipped,
@@ -859,7 +671,6 @@ enum SessionDocumentTransition {
     AuthorizeSessionMetadataPersist,
     AuthorizeSessionBuildStatePersist,
     RestoreSessionBuildState,
-    AuthorizeSystemPromptMutation,
     ResolvePendingContinuationWithBoundary,
     ResolvePendingContinuationWithoutBoundary,
     AuthorizeSessionResumeOverridesRejectProviderRequiresModel,
@@ -873,38 +684,16 @@ enum SessionDocumentTransition {
     ClassifyLiveSessionAuthorityLive,
     ClassifyLiveSessionAuthorityDurableArchived,
     ClassifyLiveSessionAuthorityDurableUncommitted,
-    ClassifyLiveSessionAuthorityDurableSystemContext,
     ClassifyLiveSessionAuthorityDurableRevision,
     RecoverSessionFromStoreAuthorized,
     RecoverSessionFromStoreUnrecoverable,
-    ResolveRuntimeSnapshotReadSourceCommittedHead,
-    ResolveRuntimeSnapshotReadSourceRecoveryRequired,
-    ResolveRuntimeSnapshotReadSourceLegacyRecoveryRequired,
-    ResolveRuntimeSnapshotReadSourceQuarantine,
-    ResolveRuntimeSnapshotReadSourceSnapshot,
     ClassifyDurableTailCompleted,
-    ClassifyDurableTailLegacyCompleted,
     ClassifyDurableTailRepairable,
     ClassifyDurableTailAmbiguous,
-    ResolveRuntimeProjectionConflictRetain,
-    ResolveRuntimeProjectionConflictConverge,
-    ResolveRuntimeProjectionConflictReject,
     ResolveRuntimeCheckpointProjectionActive,
     ResolveRuntimeCheckpointProjectionArchived,
-    ResolveLegacyCheckpointMigrationSnapshotIdenticalProjection,
-    ResolveLegacyCheckpointMigrationSnapshotAheadOfProjection,
-    ResolveLegacyCheckpointMigrationProjectionExtension,
-    ResolveLegacyCheckpointMigrationDivergentCopies,
-    ResolveLegacyCheckpointMigrationSnapshotOnly,
-    ResolveLegacyCheckpointMigrationStoreRowOnly,
-    ResolveLegacyCheckpointMigrationTypedSnapshotLegacyProjection,
-    ResolveLegacyCheckpointMigrationSnapshotIdenticalTypedProjection,
-    ResolveLegacyCheckpointMigrationTypedProjectionExtension,
-    ResolveLegacyCheckpointMigrationSnapshotAheadOfTypedProjection,
-    ResolveLegacyCheckpointMigrationDivergentFromTypedProjection,
-    ResolveLegacyCheckpointMigrationTypedProjectionNotComparable,
-    ResolveLegacyCheckpointMigrationLifecycleArchivedAbsorbing,
-    ResolveLegacyCheckpointMigrationLifecycleElected,
+    ResolveSessionDocumentLifecycleMergeArchivedAbsorbing,
+    ResolveSessionDocumentLifecycleMergeAuthority,
     ApplyPendingToolResults,
     TranscriptEditFork,
     TranscriptEditRewrite,
@@ -1429,250 +1218,6 @@ impl SessionDocumentMachineAuthority {
                     #[allow(unreachable_patterns)]
                     _ => Err(SessionDocumentError {
                         op: "ResolveSessionFirstTurnOverridesAllowed_transition",
-                    }),
-                }
-            }
-            SessionDocumentInput::ResolveSystemContextAppend {
-                trimmed_text_byte_count,
-                idempotency_key_present,
-                existing_key_matches,
-                existing_key_conflicts,
-                active_turn_scoped,
-            } => {
-                let mut matches = Vec::new();
-                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && (append_is_empty(trimmed_text_byte_count))
-                {
-                    matches.push(SessionDocumentTransition::ResolveSystemContextAppendEmpty);
-                }
-                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && ((append_is_empty(trimmed_text_byte_count) == false)
-                        && (append_is_conflict(idempotency_key_present, existing_key_conflicts)))
-                {
-                    matches.push(SessionDocumentTransition::ResolveSystemContextAppendConflict);
-                }
-                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && ((append_is_empty(trimmed_text_byte_count) == false)
-                        && (append_is_duplicate(
-                            idempotency_key_present,
-                            existing_key_matches,
-                            existing_key_conflicts,
-                        )))
-                {
-                    matches.push(SessionDocumentTransition::ResolveSystemContextAppendDuplicate);
-                }
-                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && ((append_is_empty(trimmed_text_byte_count) == false)
-                        && (append_is_new(
-                            idempotency_key_present,
-                            existing_key_matches,
-                            existing_key_conflicts,
-                        )))
-                {
-                    matches.push(SessionDocumentTransition::ResolveSystemContextAppendNew);
-                }
-                let transition = Self::single_transition(matches, "ResolveSystemContextAppend")?;
-                match transition {
-                    SessionDocumentTransition::ResolveSystemContextAppendEmpty => {
-                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
-                        Ok(vec![SessionDocumentEffect::SystemContextAppendResolved {
-                            decision: SystemContextAppendDecision::RejectEmpty,
-                            active_turn_scoped: active_turn_scoped,
-                        }])
-                    }
-                    SessionDocumentTransition::ResolveSystemContextAppendConflict => {
-                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
-                        Ok(vec![SessionDocumentEffect::SystemContextAppendResolved {
-                            decision: SystemContextAppendDecision::RejectConflict,
-                            active_turn_scoped: active_turn_scoped,
-                        }])
-                    }
-                    SessionDocumentTransition::ResolveSystemContextAppendDuplicate => {
-                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
-                        Ok(vec![SessionDocumentEffect::SystemContextAppendResolved {
-                            decision: SystemContextAppendDecision::Duplicate,
-                            active_turn_scoped: active_turn_scoped,
-                        }])
-                    }
-                    SessionDocumentTransition::ResolveSystemContextAppendNew => {
-                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
-                        Ok(vec![SessionDocumentEffect::SystemContextAppendResolved {
-                            decision: SystemContextAppendDecision::Staged,
-                            active_turn_scoped: active_turn_scoped,
-                        }])
-                    }
-                    #[allow(unreachable_patterns)]
-                    _ => Err(SessionDocumentError {
-                        op: "ResolveSystemContextAppend_transition",
-                    }),
-                }
-            }
-            SessionDocumentInput::ResolveSystemContextPendingApplyItem { source_kind } => {
-                let mut matches = Vec::new();
-                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && (source_kind == SystemContextSource::RuntimeSteer)
-                {
-                    matches.push(
-                        SessionDocumentTransition::ResolveSystemContextPendingApplyItemRuntimeSteer,
-                    );
-                }
-                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && (source_kind == SystemContextSource::Normal)
-                {
-                    matches.push(
-                        SessionDocumentTransition::ResolveSystemContextPendingApplyItemNormal,
-                    );
-                }
-                let transition =
-                    Self::single_transition(matches, "ResolveSystemContextPendingApplyItem")?;
-                match transition {
-                    SessionDocumentTransition::ResolveSystemContextPendingApplyItemRuntimeSteer => {
-                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
-                        Ok(vec![
-                            SessionDocumentEffect::SystemContextPendingApplyItemResolved {
-                                promote_to_applied: false,
-                                mark_seen_applied: false,
-                                remove_seen: true,
-                            },
-                        ])
-                    }
-                    SessionDocumentTransition::ResolveSystemContextPendingApplyItemNormal => {
-                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
-                        Ok(vec![
-                            SessionDocumentEffect::SystemContextPendingApplyItemResolved {
-                                promote_to_applied: true,
-                                mark_seen_applied: true,
-                                remove_seen: false,
-                            },
-                        ])
-                    }
-                    #[allow(unreachable_patterns)]
-                    _ => Err(SessionDocumentError {
-                        op: "ResolveSystemContextPendingApplyItem_transition",
-                    }),
-                }
-            }
-            SessionDocumentInput::ResolveSystemContextSteerCleanupItem { source_kind } => {
-                let mut matches = Vec::new();
-                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && (source_kind == SystemContextSource::RuntimeSteer)
-                {
-                    matches.push(
-                        SessionDocumentTransition::ResolveSystemContextSteerCleanupItemRuntimeSteer,
-                    );
-                }
-                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && (source_kind == SystemContextSource::Normal)
-                {
-                    matches.push(
-                        SessionDocumentTransition::ResolveSystemContextSteerCleanupItemNormal,
-                    );
-                }
-                let transition =
-                    Self::single_transition(matches, "ResolveSystemContextSteerCleanupItem")?;
-                match transition {
-                    SessionDocumentTransition::ResolveSystemContextSteerCleanupItemRuntimeSteer => {
-                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
-                        Ok(vec![
-                            SessionDocumentEffect::SystemContextSteerCleanupItemResolved {
-                                discard: true,
-                            },
-                        ])
-                    }
-                    SessionDocumentTransition::ResolveSystemContextSteerCleanupItemNormal => {
-                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
-                        Ok(vec![
-                            SessionDocumentEffect::SystemContextSteerCleanupItemResolved {
-                                discard: false,
-                            },
-                        ])
-                    }
-                    #[allow(unreachable_patterns)]
-                    _ => Err(SessionDocumentError {
-                        op: "ResolveSystemContextSteerCleanupItem_transition",
-                    }),
-                }
-            }
-            SessionDocumentInput::RestoreSystemContextSnapshot {
-                active_turn_membership_is_consistent,
-                seen_keys_match_known_appends,
-            } => {
-                let mut matches = Vec::new();
-                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && ((active_turn_membership_is_consistent) && (seen_keys_match_known_appends))
-                {
-                    matches.push(SessionDocumentTransition::RestoreSystemContextSnapshot);
-                }
-                let transition = Self::single_transition(matches, "RestoreSystemContextSnapshot")?;
-                match transition {
-                    SessionDocumentTransition::RestoreSystemContextSnapshot => {
-                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
-                        Ok(vec![
-                            SessionDocumentEffect::SystemContextSnapshotRestoreAuthorized,
-                        ])
-                    }
-                    #[allow(unreachable_patterns)]
-                    _ => Err(SessionDocumentError {
-                        op: "RestoreSystemContextSnapshot_transition",
-                    }),
-                }
-            }
-            SessionDocumentInput::ResolveSystemContextPersistAppendAdmission {
-                has_previous,
-                content_identical,
-                content_extends_previous,
-                appended_starts_with_separator,
-                incoming_is_runtime_context_append,
-            } => {
-                let mut matches = Vec::new();
-                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && (persist_append_is_admissible(
-                        has_previous,
-                        content_identical,
-                        content_extends_previous,
-                        appended_starts_with_separator,
-                        incoming_is_runtime_context_append,
-                    ))
-                {
-                    matches.push(
-                        SessionDocumentTransition::ResolveSystemContextPersistAppendAdmissionAdmit,
-                    );
-                }
-                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && (persist_append_is_admissible(
-                        has_previous,
-                        content_identical,
-                        content_extends_previous,
-                        appended_starts_with_separator,
-                        incoming_is_runtime_context_append,
-                    ) == false)
-                {
-                    matches.push(
-                        SessionDocumentTransition::ResolveSystemContextPersistAppendAdmissionReject,
-                    );
-                }
-                let transition =
-                    Self::single_transition(matches, "ResolveSystemContextPersistAppendAdmission")?;
-                match transition {
-                    SessionDocumentTransition::ResolveSystemContextPersistAppendAdmissionAdmit => {
-                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
-                        Ok(vec![
-                            SessionDocumentEffect::SystemContextPersistAppendAdmissionResolved {
-                                admission: SystemContextPersistAppendAdmission::Admit,
-                            },
-                        ])
-                    }
-                    SessionDocumentTransition::ResolveSystemContextPersistAppendAdmissionReject => {
-                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
-                        Ok(vec![
-                            SessionDocumentEffect::SystemContextPersistAppendAdmissionResolved {
-                                admission: SystemContextPersistAppendAdmission::Reject,
-                            },
-                        ])
-                    }
-                    #[allow(unreachable_patterns)]
-                    _ => Err(SessionDocumentError {
-                        op: "ResolveSystemContextPersistAppendAdmission_transition",
                     }),
                 }
             }
@@ -2952,30 +2497,6 @@ impl SessionDocumentMachineAuthority {
                     }),
                 }
             }
-            SessionDocumentInput::AuthorizeSystemPromptMutation {
-                source,
-                prompt_present,
-                prompt_byte_count,
-                replacing_existing,
-            } => {
-                let mut matches = Vec::new();
-                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && ((prompt_present == true) || (prompt_byte_count == 0))
-                {
-                    matches.push(SessionDocumentTransition::AuthorizeSystemPromptMutation);
-                }
-                let transition = Self::single_transition(matches, "AuthorizeSystemPromptMutation")?;
-                match transition {
-                    SessionDocumentTransition::AuthorizeSystemPromptMutation => {
-                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
-                        Ok(vec![SessionDocumentEffect::SystemPromptMutationAuthorized])
-                    }
-                    #[allow(unreachable_patterns)]
-                    _ => Err(SessionDocumentError {
-                        op: "AuthorizeSystemPromptMutation_transition",
-                    }),
-                }
-            }
             SessionDocumentInput::ResolvePendingContinuation {
                 session_tail,
                 staged_tool_result_count,
@@ -3191,14 +2712,12 @@ impl SessionDocumentMachineAuthority {
             SessionDocumentInput::ClassifyLiveSessionAuthority {
                 stored_transcript_diverged,
                 live_has_uncommitted_transcript,
-                runtime_system_context_diverged,
                 stored_is_archived,
             } => {
                 let mut matches = Vec::new();
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
                     && ((stored_transcript_diverged == false)
                         && (live_has_uncommitted_transcript == false)
-                        && (runtime_system_context_diverged == false)
                         && (stored_is_archived == false))
                 {
                     matches.push(SessionDocumentTransition::ClassifyLiveSessionAuthorityLive);
@@ -3220,16 +2739,6 @@ impl SessionDocumentMachineAuthority {
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
                     && ((stored_is_archived == false)
                         && (live_has_uncommitted_transcript == false)
-                        && (runtime_system_context_diverged == true))
-                {
-                    matches.push(
-                        SessionDocumentTransition::ClassifyLiveSessionAuthorityDurableSystemContext,
-                    );
-                }
-                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && ((stored_is_archived == false)
-                        && (live_has_uncommitted_transcript == false)
-                        && (runtime_system_context_diverged == false)
                         && (stored_transcript_diverged == true))
                 {
                     matches.push(
@@ -3262,15 +2771,6 @@ impl SessionDocumentMachineAuthority {
                             SessionDocumentEffect::LiveSessionAuthorityClassified {
                                 authority: LiveSessionAuthorityKind::DurableAuthoritative,
                                 reason: LiveSessionAuthorityReason::LiveUncommittedTranscript,
-                            },
-                        ])
-                    }
-                    SessionDocumentTransition::ClassifyLiveSessionAuthorityDurableSystemContext => {
-                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
-                        Ok(vec![
-                            SessionDocumentEffect::LiveSessionAuthorityClassified {
-                                authority: LiveSessionAuthorityKind::DurableAuthoritative,
-                                reason: LiveSessionAuthorityReason::RuntimeSystemContextDiverged,
                             },
                         ])
                     }
@@ -3339,65 +2839,6 @@ impl SessionDocumentMachineAuthority {
                     }),
                 }
             }
-            SessionDocumentInput::ResolveRuntimeProjectionConflict {
-                session_id,
-                relation,
-                row_provenance,
-                authority_supersedes_row,
-            } => {
-                let mut matches = Vec::new();
-                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && (relation == DurableHeadRelation::VerifiedStrictDescendant)
-                {
-                    matches.push(SessionDocumentTransition::ResolveRuntimeProjectionConflictRetain);
-                }
-                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && ((relation != DurableHeadRelation::VerifiedStrictDescendant)
-                        && (row_provenance == CheckpointProvenanceClass::IntraTurn)
-                        && (authority_supersedes_row == true))
-                {
-                    matches
-                        .push(SessionDocumentTransition::ResolveRuntimeProjectionConflictConverge);
-                }
-                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && ((relation != DurableHeadRelation::VerifiedStrictDescendant)
-                        && ((authority_supersedes_row == false)
-                            || (row_provenance != CheckpointProvenanceClass::IntraTurn)))
-                {
-                    matches.push(SessionDocumentTransition::ResolveRuntimeProjectionConflictReject);
-                }
-                let transition =
-                    Self::single_transition(matches, "ResolveRuntimeProjectionConflict")?;
-                match transition {
-                    SessionDocumentTransition::ResolveRuntimeProjectionConflictRetain => {
-                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
-                        Ok(vec![
-                            SessionDocumentEffect::RuntimeProjectionConflictResolved {
-                                disposition:
-                                    RuntimeProjectionConflictDisposition::RetainForRecovery,
-                            },
-                        ])
-                    }
-                    SessionDocumentTransition::ResolveRuntimeProjectionConflictConverge => {
-                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
-                        Ok(vec![
-                            SessionDocumentEffect::RuntimeProjectionConflictResolved { disposition: RuntimeProjectionConflictDisposition::ConvergeSupersededProjection, },
-                        ])
-                    }
-                    SessionDocumentTransition::ResolveRuntimeProjectionConflictReject => {
-                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
-                        Ok(vec![
-                            SessionDocumentEffect::RuntimeProjectionConflictResolved {
-                                disposition: RuntimeProjectionConflictDisposition::RejectDivergent,
-                            },
-                        ])
-                    }
-                    #[allow(unreachable_patterns)]
-                    _ => Err(SessionDocumentError {
-                        op: "ResolveRuntimeProjectionConflict_transition",
-                    }),
-                }
-            }
             SessionDocumentInput::ResolveRuntimeCheckpointProjection { session_id } => {
                 let mut matches = Vec::new();
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
@@ -3440,341 +2881,40 @@ impl SessionDocumentMachineAuthority {
                     }),
                 }
             }
-            SessionDocumentInput::ResolveLegacyCheckpointMigration {
+            SessionDocumentInput::ResolveSessionDocumentLifecycleMerge {
                 session_id,
-                runtime_snapshot_present,
-                runtime_snapshot_legacy,
-                store_row_present,
-                store_row_legacy,
-                transcript_relation,
+                authority_archived,
+                candidate_archived,
             } => {
                 let mut matches = Vec::new();
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && ((runtime_snapshot_present == true)
-                        && (runtime_snapshot_legacy == true)
-                        && (store_row_present == true)
-                        && (store_row_legacy == true)
-                        && (transcript_relation == LegacyCheckpointTranscriptRelation::Identical))
+                    && ((authority_archived == true) || (candidate_archived == true))
                 {
-                    matches.push(SessionDocumentTransition::ResolveLegacyCheckpointMigrationSnapshotIdenticalProjection);
+                    matches.push(SessionDocumentTransition::ResolveSessionDocumentLifecycleMergeArchivedAbsorbing);
                 }
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && ((runtime_snapshot_present == true)
-                        && (runtime_snapshot_legacy == true)
-                        && (store_row_present == true)
-                        && (store_row_legacy == true)
-                        && (transcript_relation
-                            == LegacyCheckpointTranscriptRelation::SnapshotExtendsProjection))
-                {
-                    matches.push(SessionDocumentTransition::ResolveLegacyCheckpointMigrationSnapshotAheadOfProjection);
-                }
-                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && ((runtime_snapshot_present == true)
-                        && (runtime_snapshot_legacy == true)
-                        && (store_row_present == true)
-                        && (store_row_legacy == true)
-                        && (transcript_relation
-                            == LegacyCheckpointTranscriptRelation::ProjectionExtendsSnapshot))
-                {
-                    matches.push(SessionDocumentTransition::ResolveLegacyCheckpointMigrationProjectionExtension);
-                }
-                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && ((runtime_snapshot_present == true)
-                        && (runtime_snapshot_legacy == true)
-                        && (store_row_present == true)
-                        && (store_row_legacy == true)
-                        && (transcript_relation == LegacyCheckpointTranscriptRelation::Divergent))
+                    && ((authority_archived == false) && (candidate_archived == false))
                 {
                     matches.push(
-                        SessionDocumentTransition::ResolveLegacyCheckpointMigrationDivergentCopies,
-                    );
-                }
-                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && ((runtime_snapshot_present == true)
-                        && (runtime_snapshot_legacy == true)
-                        && (store_row_present == false))
-                {
-                    matches.push(
-                        SessionDocumentTransition::ResolveLegacyCheckpointMigrationSnapshotOnly,
-                    );
-                }
-                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && ((runtime_snapshot_present == false)
-                        && (store_row_present == true)
-                        && (store_row_legacy == true))
-                {
-                    matches.push(
-                        SessionDocumentTransition::ResolveLegacyCheckpointMigrationStoreRowOnly,
-                    );
-                }
-                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && ((runtime_snapshot_present == true)
-                        && (runtime_snapshot_legacy == false)
-                        && (store_row_present == true)
-                        && (store_row_legacy == true))
-                {
-                    matches.push(SessionDocumentTransition::ResolveLegacyCheckpointMigrationTypedSnapshotLegacyProjection);
-                }
-                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && ((runtime_snapshot_present == true)
-                        && (runtime_snapshot_legacy == true)
-                        && (store_row_present == true)
-                        && (store_row_legacy == false)
-                        && (transcript_relation == LegacyCheckpointTranscriptRelation::Identical))
-                {
-                    matches.push(SessionDocumentTransition::ResolveLegacyCheckpointMigrationSnapshotIdenticalTypedProjection);
-                }
-                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && ((runtime_snapshot_present == true)
-                        && (runtime_snapshot_legacy == true)
-                        && (store_row_present == true)
-                        && (store_row_legacy == false)
-                        && (transcript_relation
-                            == LegacyCheckpointTranscriptRelation::ProjectionExtendsSnapshot))
-                {
-                    matches.push(SessionDocumentTransition::ResolveLegacyCheckpointMigrationTypedProjectionExtension);
-                }
-                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && ((runtime_snapshot_present == true)
-                        && (runtime_snapshot_legacy == true)
-                        && (store_row_present == true)
-                        && (store_row_legacy == false)
-                        && (transcript_relation
-                            == LegacyCheckpointTranscriptRelation::SnapshotExtendsProjection))
-                {
-                    matches.push(SessionDocumentTransition::ResolveLegacyCheckpointMigrationSnapshotAheadOfTypedProjection);
-                }
-                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && ((runtime_snapshot_present == true)
-                        && (runtime_snapshot_legacy == true)
-                        && (store_row_present == true)
-                        && (store_row_legacy == false)
-                        && (transcript_relation == LegacyCheckpointTranscriptRelation::Divergent))
-                {
-                    matches.push(SessionDocumentTransition::ResolveLegacyCheckpointMigrationDivergentFromTypedProjection);
-                }
-                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && ((runtime_snapshot_present == true)
-                        && (runtime_snapshot_legacy == true)
-                        && (store_row_present == true)
-                        && (store_row_legacy == false)
-                        && (transcript_relation
-                            == LegacyCheckpointTranscriptRelation::NotComparable))
-                {
-                    matches.push(SessionDocumentTransition::ResolveLegacyCheckpointMigrationTypedProjectionNotComparable);
-                }
-                let transition =
-                    Self::single_transition(matches, "ResolveLegacyCheckpointMigration")?;
-                match transition {
-                    SessionDocumentTransition::ResolveLegacyCheckpointMigrationSnapshotIdenticalProjection => {
-                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
-                        Ok(vec![
-                            SessionDocumentEffect::LegacyCheckpointMigrationResolved { disposition: LegacyCheckpointMigrationDisposition::MigrateCanonicalSnapshot, },
-                        ])
-                    }
-                    SessionDocumentTransition::ResolveLegacyCheckpointMigrationSnapshotAheadOfProjection => {
-                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
-                        Ok(vec![
-                            SessionDocumentEffect::LegacyCheckpointMigrationResolved { disposition: LegacyCheckpointMigrationDisposition::MigrateCanonicalSnapshot, },
-                        ])
-                    }
-                    SessionDocumentTransition::ResolveLegacyCheckpointMigrationProjectionExtension => {
-                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
-                        Ok(vec![
-                            SessionDocumentEffect::LegacyCheckpointMigrationResolved { disposition: LegacyCheckpointMigrationDisposition::AdoptProjectionExtension, },
-                        ])
-                    }
-                    SessionDocumentTransition::ResolveLegacyCheckpointMigrationDivergentCopies => {
-                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
-                        Ok(vec![
-                            SessionDocumentEffect::LegacyCheckpointMigrationResolved { disposition: LegacyCheckpointMigrationDisposition::RefuseDivergent, },
-                        ])
-                    }
-                    SessionDocumentTransition::ResolveLegacyCheckpointMigrationSnapshotOnly => {
-                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
-                        Ok(vec![
-                            SessionDocumentEffect::LegacyCheckpointMigrationResolved { disposition: LegacyCheckpointMigrationDisposition::MigrateCanonicalSnapshot, },
-                        ])
-                    }
-                    SessionDocumentTransition::ResolveLegacyCheckpointMigrationStoreRowOnly => {
-                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
-                        Ok(vec![
-                            SessionDocumentEffect::LegacyCheckpointMigrationResolved { disposition: LegacyCheckpointMigrationDisposition::MigrateStoreProjection, },
-                        ])
-                    }
-                    SessionDocumentTransition::ResolveLegacyCheckpointMigrationTypedSnapshotLegacyProjection => {
-                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
-                        Ok(vec![
-                            SessionDocumentEffect::LegacyCheckpointMigrationResolved { disposition: LegacyCheckpointMigrationDisposition::RebuildProjectionFromTypedSnapshot, },
-                        ])
-                    }
-                    SessionDocumentTransition::ResolveLegacyCheckpointMigrationSnapshotIdenticalTypedProjection => {
-                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
-                        Ok(vec![
-                            SessionDocumentEffect::LegacyCheckpointMigrationResolved { disposition: LegacyCheckpointMigrationDisposition::ConvergeSnapshotOntoTypedProjection, },
-                        ])
-                    }
-                    SessionDocumentTransition::ResolveLegacyCheckpointMigrationTypedProjectionExtension => {
-                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
-                        Ok(vec![
-                            SessionDocumentEffect::LegacyCheckpointMigrationResolved { disposition: LegacyCheckpointMigrationDisposition::ConvergeSnapshotOntoTypedProjection, },
-                        ])
-                    }
-                    SessionDocumentTransition::ResolveLegacyCheckpointMigrationSnapshotAheadOfTypedProjection => {
-                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
-                        Ok(vec![
-                            SessionDocumentEffect::LegacyCheckpointMigrationResolved { disposition: LegacyCheckpointMigrationDisposition::RefuseDivergent, },
-                        ])
-                    }
-                    SessionDocumentTransition::ResolveLegacyCheckpointMigrationDivergentFromTypedProjection => {
-                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
-                        Ok(vec![
-                            SessionDocumentEffect::LegacyCheckpointMigrationResolved { disposition: LegacyCheckpointMigrationDisposition::RefuseDivergent, },
-                        ])
-                    }
-                    SessionDocumentTransition::ResolveLegacyCheckpointMigrationTypedProjectionNotComparable => {
-                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
-                        Ok(vec![
-                            SessionDocumentEffect::LegacyCheckpointMigrationResolved { disposition: LegacyCheckpointMigrationDisposition::RefuseDivergent, },
-                        ])
-                    }
-                    #[allow(unreachable_patterns)] _ => Err(SessionDocumentError { op: "ResolveLegacyCheckpointMigration_transition" }),
-                }
-            }
-            SessionDocumentInput::ResolveLegacyCheckpointMigrationLifecycle {
-                session_id,
-                runtime_copy_archived,
-                store_row_archived,
-            } => {
-                let mut matches = Vec::new();
-                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && ((runtime_copy_archived == true) || (store_row_archived == true))
-                {
-                    matches.push(SessionDocumentTransition::ResolveLegacyCheckpointMigrationLifecycleArchivedAbsorbing);
-                }
-                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && ((runtime_copy_archived == false) && (store_row_archived == false))
-                {
-                    matches.push(
-                        SessionDocumentTransition::ResolveLegacyCheckpointMigrationLifecycleElected,
+                        SessionDocumentTransition::ResolveSessionDocumentLifecycleMergeAuthority,
                     );
                 }
                 let transition =
-                    Self::single_transition(matches, "ResolveLegacyCheckpointMigrationLifecycle")?;
+                    Self::single_transition(matches, "ResolveSessionDocumentLifecycleMerge")?;
                 match transition {
-                    SessionDocumentTransition::ResolveLegacyCheckpointMigrationLifecycleArchivedAbsorbing => {
+                    SessionDocumentTransition::ResolveSessionDocumentLifecycleMergeArchivedAbsorbing => {
                         self.state.lifecycle_phase = SessionDocumentPhase::Ready;
                         Ok(vec![
-                            SessionDocumentEffect::LegacyCheckpointMigrationLifecycleResolved { merge: LegacyCheckpointLifecycleMerge::CarryArchived, },
+                            SessionDocumentEffect::SessionDocumentLifecycleMergeResolved { merge: SessionDocumentLifecycleMerge::CarryArchived, },
                         ])
                     }
-                    SessionDocumentTransition::ResolveLegacyCheckpointMigrationLifecycleElected => {
+                    SessionDocumentTransition::ResolveSessionDocumentLifecycleMergeAuthority => {
                         self.state.lifecycle_phase = SessionDocumentPhase::Ready;
                         Ok(vec![
-                            SessionDocumentEffect::LegacyCheckpointMigrationLifecycleResolved { merge: LegacyCheckpointLifecycleMerge::CarryElected, },
+                            SessionDocumentEffect::SessionDocumentLifecycleMergeResolved { merge: SessionDocumentLifecycleMerge::CarryAuthority, },
                         ])
                     }
-                    #[allow(unreachable_patterns)] _ => Err(SessionDocumentError { op: "ResolveLegacyCheckpointMigrationLifecycle_transition" }),
-                }
-            }
-            SessionDocumentInput::ResolveRuntimeSnapshotReadSource {
-                session_id,
-                relation,
-                store_provenance,
-                session_is_live,
-                tail_execution,
-                head_stamp_era,
-            } => {
-                let mut matches = Vec::new();
-                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && ((relation == DurableHeadRelation::VerifiedStrictDescendant)
-                        && (store_provenance == CheckpointProvenanceClass::Committed))
-                {
-                    matches.push(
-                        SessionDocumentTransition::ResolveRuntimeSnapshotReadSourceCommittedHead,
-                    );
-                }
-                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && ((relation == DurableHeadRelation::VerifiedStrictDescendant)
-                        && (store_provenance != CheckpointProvenanceClass::Committed)
-                        && (session_is_live == false)
-                        && (tail_execution == DurableTailExecutionEvidence::BoundExecution))
-                {
-                    matches.push(
-                        SessionDocumentTransition::ResolveRuntimeSnapshotReadSourceRecoveryRequired,
-                    );
-                }
-                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && ((relation == DurableHeadRelation::VerifiedStrictDescendant)
-                        && (store_provenance == CheckpointProvenanceClass::IntraTurn)
-                        && (session_is_live == false)
-                        && (tail_execution == DurableTailExecutionEvidence::UnboundExecution)
-                        && (head_stamp_era == DurableHeadStampEra::PreWitnessV3))
-                {
-                    matches.push(SessionDocumentTransition::ResolveRuntimeSnapshotReadSourceLegacyRecoveryRequired);
-                }
-                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && (((relation == DurableHeadRelation::Diverged)
-                        && (store_provenance != CheckpointProvenanceClass::IntraTurn))
-                        || (relation == DurableHeadRelation::Unverifiable)
-                        || ((relation == DurableHeadRelation::VerifiedStrictDescendant)
-                            && (store_provenance != CheckpointProvenanceClass::Committed)
-                            && (session_is_live == false)
-                            && (tail_execution == DurableTailExecutionEvidence::UnboundExecution)
-                            && ((store_provenance != CheckpointProvenanceClass::IntraTurn)
-                                || (head_stamp_era != DurableHeadStampEra::PreWitnessV3))))
-                {
-                    matches.push(
-                        SessionDocumentTransition::ResolveRuntimeSnapshotReadSourceQuarantine,
-                    );
-                }
-                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && ((relation != DurableHeadRelation::Unverifiable)
-                        && ((relation != DurableHeadRelation::Diverged)
-                            || (store_provenance == CheckpointProvenanceClass::IntraTurn))
-                        && ((relation != DurableHeadRelation::VerifiedStrictDescendant)
-                            || ((store_provenance != CheckpointProvenanceClass::Committed)
-                                && ((session_is_live == true)
-                                    || (tail_execution
-                                        == DurableTailExecutionEvidence::NoExecutionContent)))))
-                {
-                    matches
-                        .push(SessionDocumentTransition::ResolveRuntimeSnapshotReadSourceSnapshot);
-                }
-                let transition =
-                    Self::single_transition(matches, "ResolveRuntimeSnapshotReadSource")?;
-                match transition {
-                    SessionDocumentTransition::ResolveRuntimeSnapshotReadSourceCommittedHead => {
-                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
-                        Ok(vec![
-                            SessionDocumentEffect::RuntimeSnapshotReadSourceResolved { disposition: RuntimeSnapshotReadDisposition::UseCommittedStoreHead, },
-                        ])
-                    }
-                    SessionDocumentTransition::ResolveRuntimeSnapshotReadSourceRecoveryRequired => {
-                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
-                        Ok(vec![
-                            SessionDocumentEffect::RuntimeSnapshotReadSourceResolved { disposition: RuntimeSnapshotReadDisposition::RecoveryRequired, },
-                        ])
-                    }
-                    SessionDocumentTransition::ResolveRuntimeSnapshotReadSourceLegacyRecoveryRequired => {
-                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
-                        Ok(vec![
-                            SessionDocumentEffect::RuntimeSnapshotReadSourceResolved { disposition: RuntimeSnapshotReadDisposition::RecoveryRequired, },
-                        ])
-                    }
-                    SessionDocumentTransition::ResolveRuntimeSnapshotReadSourceQuarantine => {
-                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
-                        Ok(vec![
-                            SessionDocumentEffect::RuntimeSnapshotReadSourceResolved { disposition: RuntimeSnapshotReadDisposition::Quarantine, },
-                        ])
-                    }
-                    SessionDocumentTransition::ResolveRuntimeSnapshotReadSourceSnapshot => {
-                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
-                        Ok(vec![
-                            SessionDocumentEffect::RuntimeSnapshotReadSourceResolved { disposition: RuntimeSnapshotReadDisposition::UseRuntimeSnapshot, },
-                        ])
-                    }
-                    #[allow(unreachable_patterns)] _ => Err(SessionDocumentError { op: "ResolveRuntimeSnapshotReadSource_transition" }),
+                    #[allow(unreachable_patterns)] _ => Err(SessionDocumentError { op: "ResolveSessionDocumentLifecycleMerge_transition" }),
                 }
             }
             SessionDocumentInput::ClassifyDurableTail {
@@ -3786,7 +2926,6 @@ impl SessionDocumentMachineAuthority {
                 dangling_tool_use_count,
                 orphan_tool_result_count,
                 messages_after_terminal,
-                head_stamp_era,
             } => {
                 let mut matches = Vec::new();
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
@@ -3801,17 +2940,6 @@ impl SessionDocumentMachineAuthority {
                 }
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
                     && ((relation == DurableHeadRelation::VerifiedStrictDescendant)
-                        && (run_id_cardinality == RunIdCardinality::NoRunId)
-                        && (terminal_stop_reason == DurableTailStopReason::EndTurn)
-                        && (dangling_tool_use_count == 0)
-                        && (orphan_tool_result_count == 0)
-                        && (messages_after_terminal == false)
-                        && (head_stamp_era == DurableHeadStampEra::PreWitnessV3))
-                {
-                    matches.push(SessionDocumentTransition::ClassifyDurableTailLegacyCompleted);
-                }
-                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && ((relation == DurableHeadRelation::VerifiedStrictDescendant)
                         && (run_id_cardinality == RunIdCardinality::SingleRunId)
                         && (dangling_tool_use_count == 0)
                         && (orphan_tool_result_count == 0)
@@ -3822,19 +2950,12 @@ impl SessionDocumentMachineAuthority {
                     matches.push(SessionDocumentTransition::ClassifyDurableTailRepairable);
                 }
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
-                    && (((relation != DurableHeadRelation::VerifiedStrictDescendant)
+                    && ((relation != DurableHeadRelation::VerifiedStrictDescendant)
                         || (run_id_cardinality != RunIdCardinality::SingleRunId)
                         || (orphan_tool_result_count != 0)
                         || (messages_after_terminal == true)
                         || (terminal_stop_reason == DurableTailStopReason::Other)
                         || (dangling_tool_use_count != 0))
-                        && ((relation != DurableHeadRelation::VerifiedStrictDescendant)
-                            || (run_id_cardinality != RunIdCardinality::NoRunId)
-                            || (terminal_stop_reason != DurableTailStopReason::EndTurn)
-                            || (dangling_tool_use_count != 0)
-                            || (orphan_tool_result_count != 0)
-                            || (messages_after_terminal == true)
-                            || (head_stamp_era != DurableHeadStampEra::PreWitnessV3)))
                 {
                     matches.push(SessionDocumentTransition::ClassifyDurableTailAmbiguous);
                 }
@@ -3845,13 +2966,6 @@ impl SessionDocumentMachineAuthority {
                         Ok(vec![SessionDocumentEffect::DurableTailClassified {
                             candidate_id: candidate_id,
                             class: DurableTailRecoveryClass::CompletedCandidate,
-                        }])
-                    }
-                    SessionDocumentTransition::ClassifyDurableTailLegacyCompleted => {
-                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
-                        Ok(vec![SessionDocumentEffect::DurableTailClassified {
-                            candidate_id: candidate_id,
-                            class: DurableTailRecoveryClass::LegacyCompletedCandidate,
                         }])
                     }
                     SessionDocumentTransition::ClassifyDurableTailRepairable => {
@@ -4133,67 +3247,6 @@ impl SessionDocumentMachineAuthority {
     ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
         self.apply_input(
             SessionDocumentInput::ResolveSessionFirstTurnOverridesAllowed { session_id },
-        )
-    }
-
-    pub fn resolve_system_context_append(
-        &mut self,
-        trimmed_text_byte_count: u64,
-        idempotency_key_present: bool,
-        existing_key_matches: bool,
-        existing_key_conflicts: bool,
-        active_turn_scoped: bool,
-    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
-        self.apply_input(SessionDocumentInput::ResolveSystemContextAppend {
-            trimmed_text_byte_count,
-            idempotency_key_present,
-            existing_key_matches,
-            existing_key_conflicts,
-            active_turn_scoped,
-        })
-    }
-
-    pub fn resolve_system_context_pending_apply_item(
-        &mut self,
-        source_kind: SystemContextSource,
-    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
-        self.apply_input(SessionDocumentInput::ResolveSystemContextPendingApplyItem { source_kind })
-    }
-
-    pub fn resolve_system_context_steer_cleanup_item(
-        &mut self,
-        source_kind: SystemContextSource,
-    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
-        self.apply_input(SessionDocumentInput::ResolveSystemContextSteerCleanupItem { source_kind })
-    }
-
-    pub fn restore_system_context_snapshot(
-        &mut self,
-        active_turn_membership_is_consistent: bool,
-        seen_keys_match_known_appends: bool,
-    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
-        self.apply_input(SessionDocumentInput::RestoreSystemContextSnapshot {
-            active_turn_membership_is_consistent,
-            seen_keys_match_known_appends,
-        })
-    }
-
-    pub fn resolve_system_context_persist_append_admission(
-        &mut self,
-        has_previous: bool,
-        content_identical: bool,
-        content_extends_previous: bool,
-        appended_starts_with_separator: bool,
-        incoming_is_runtime_context_append: bool,
-    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
-        self.apply_input(
-            SessionDocumentInput::ResolveSystemContextPersistAppendAdmission {
-                has_previous,
-                content_identical,
-                content_extends_previous,
-                appended_starts_with_separator,
-                incoming_is_runtime_context_append,
-            },
         )
     }
 
@@ -4490,21 +3543,6 @@ impl SessionDocumentMachineAuthority {
         self.apply_input(SessionDocumentInput::RestoreSessionBuildState)
     }
 
-    pub fn authorize_system_prompt_mutation(
-        &mut self,
-        source: SessionSystemPromptSource,
-        prompt_present: bool,
-        prompt_byte_count: u64,
-        replacing_existing: bool,
-    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
-        self.apply_input(SessionDocumentInput::AuthorizeSystemPromptMutation {
-            source,
-            prompt_present,
-            prompt_byte_count,
-            replacing_existing,
-        })
-    }
-
     pub fn resolve_pending_continuation(
         &mut self,
         session_tail: ObservedSessionTailKind,
@@ -4537,13 +3575,11 @@ impl SessionDocumentMachineAuthority {
         &mut self,
         stored_transcript_diverged: bool,
         live_has_uncommitted_transcript: bool,
-        runtime_system_context_diverged: bool,
         stored_is_archived: bool,
     ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
         self.apply_input(SessionDocumentInput::ClassifyLiveSessionAuthority {
             stored_transcript_diverged,
             live_has_uncommitted_transcript,
-            runtime_system_context_diverged,
             stored_is_archived,
         })
     }
@@ -4563,21 +3599,6 @@ impl SessionDocumentMachineAuthority {
         })
     }
 
-    pub fn resolve_runtime_projection_conflict(
-        &mut self,
-        session_id: SessionDocumentKey,
-        relation: DurableHeadRelation,
-        row_provenance: CheckpointProvenanceClass,
-        authority_supersedes_row: bool,
-    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
-        self.apply_input(SessionDocumentInput::ResolveRuntimeProjectionConflict {
-            session_id,
-            relation,
-            row_provenance,
-            authority_supersedes_row,
-        })
-    }
-
     pub fn resolve_runtime_checkpoint_projection(
         &mut self,
         session_id: SessionDocumentKey,
@@ -4585,56 +3606,16 @@ impl SessionDocumentMachineAuthority {
         self.apply_input(SessionDocumentInput::ResolveRuntimeCheckpointProjection { session_id })
     }
 
-    pub fn resolve_legacy_checkpoint_migration(
+    pub fn resolve_session_document_lifecycle_merge(
         &mut self,
         session_id: SessionDocumentKey,
-        runtime_snapshot_present: bool,
-        runtime_snapshot_legacy: bool,
-        store_row_present: bool,
-        store_row_legacy: bool,
-        transcript_relation: LegacyCheckpointTranscriptRelation,
+        authority_archived: bool,
+        candidate_archived: bool,
     ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
-        self.apply_input(SessionDocumentInput::ResolveLegacyCheckpointMigration {
+        self.apply_input(SessionDocumentInput::ResolveSessionDocumentLifecycleMerge {
             session_id,
-            runtime_snapshot_present,
-            runtime_snapshot_legacy,
-            store_row_present,
-            store_row_legacy,
-            transcript_relation,
-        })
-    }
-
-    pub fn resolve_legacy_checkpoint_migration_lifecycle(
-        &mut self,
-        session_id: SessionDocumentKey,
-        runtime_copy_archived: bool,
-        store_row_archived: bool,
-    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
-        self.apply_input(
-            SessionDocumentInput::ResolveLegacyCheckpointMigrationLifecycle {
-                session_id,
-                runtime_copy_archived,
-                store_row_archived,
-            },
-        )
-    }
-
-    pub fn resolve_runtime_snapshot_read_source(
-        &mut self,
-        session_id: SessionDocumentKey,
-        relation: DurableHeadRelation,
-        store_provenance: CheckpointProvenanceClass,
-        session_is_live: bool,
-        tail_execution: DurableTailExecutionEvidence,
-        head_stamp_era: DurableHeadStampEra,
-    ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
-        self.apply_input(SessionDocumentInput::ResolveRuntimeSnapshotReadSource {
-            session_id,
-            relation,
-            store_provenance,
-            session_is_live,
-            tail_execution,
-            head_stamp_era,
+            authority_archived,
+            candidate_archived,
         })
     }
 
@@ -4648,7 +3629,6 @@ impl SessionDocumentMachineAuthority {
         dangling_tool_use_count: u64,
         orphan_tool_result_count: u64,
         messages_after_terminal: bool,
-        head_stamp_era: DurableHeadStampEra,
     ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
         self.apply_input(SessionDocumentInput::ClassifyDurableTail {
             session_id,
@@ -4659,7 +3639,6 @@ impl SessionDocumentMachineAuthority {
             dangling_tool_use_count,
             orphan_tool_result_count,
             messages_after_terminal,
-            head_stamp_era,
         })
     }
 
@@ -4725,46 +3704,6 @@ fn phase_allows_initial_turn_overrides(phase: SessionFirstTurnPhase) -> bool {
 
 fn should_store_initial_prompt(phase: SessionFirstTurnPhase, prompt_has_content: bool) -> bool {
     (phase == SessionFirstTurnPhase::Pending) && (prompt_has_content)
-}
-
-fn append_is_empty(trimmed_text_byte_count: u64) -> bool {
-    trimmed_text_byte_count == 0
-}
-
-fn append_is_conflict(idempotency_key_present: bool, existing_key_conflicts: bool) -> bool {
-    (idempotency_key_present) && (existing_key_conflicts)
-}
-
-fn append_is_duplicate(
-    idempotency_key_present: bool,
-    existing_key_matches: bool,
-    existing_key_conflicts: bool,
-) -> bool {
-    (idempotency_key_present) && (existing_key_matches) && (existing_key_conflicts == false)
-}
-
-fn append_is_new(
-    idempotency_key_present: bool,
-    existing_key_matches: bool,
-    existing_key_conflicts: bool,
-) -> bool {
-    (idempotency_key_present == false)
-        || ((existing_key_matches == false) && (existing_key_conflicts == false))
-}
-
-fn persist_append_is_admissible(
-    has_previous: bool,
-    content_identical: bool,
-    content_extends_previous: bool,
-    appended_starts_with_separator: bool,
-    incoming_is_runtime_context_append: bool,
-) -> bool {
-    ((has_previous) && (content_identical))
-        || ((has_previous)
-            && (content_extends_previous)
-            && (appended_starts_with_separator)
-            && (incoming_is_runtime_context_append))
-        || ((has_previous == false) && (incoming_is_runtime_context_append))
 }
 
 fn realtime_delta_is_duplicate(delta_id_present: bool, delta_id_seen: bool) -> bool {

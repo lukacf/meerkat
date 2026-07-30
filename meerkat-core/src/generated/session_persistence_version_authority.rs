@@ -3,17 +3,15 @@
 
 use std::fmt;
 
-pub const SESSION_VERSION: u32 = 2;
-pub const STORED_INPUT_STATE_VERSION: u32 = 4;
+pub const SESSION_VERSION: u32 = 3;
+pub const STORED_INPUT_STATE_VERSION: u32 = 5;
 pub const SESSION_METADATA_SCHEMA_VERSION: u32 = 2;
-pub const TRANSCRIPT_HISTORY_WITNESS_FORMAT: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionPersistenceVersionField {
     SessionEnvelope,
     StoredInputState,
     SessionMetadataSchema,
-    TranscriptHistoryWitnessFormat,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,10 +66,6 @@ pub fn session_metadata_schema_version() -> u32 {
 }
 
 #[must_use]
-pub fn transcript_history_witness_format() -> u32 {
-    TRANSCRIPT_HISTORY_WITNESS_FORMAT
-}
-
 pub fn restore_session_envelope_version(
     observed: u32,
 ) -> Result<u32, SessionPersistenceVersionAuthorityError> {
@@ -79,7 +73,7 @@ pub fn restore_session_envelope_version(
         SessionPersistenceVersionField::SessionEnvelope,
         observed,
         SESSION_VERSION,
-        &[2],
+        &[3],
     )
 }
 
@@ -90,7 +84,7 @@ pub fn restore_stored_input_state_version(
         SessionPersistenceVersionField::StoredInputState,
         observed,
         STORED_INPUT_STATE_VERSION,
-        &[3, 4],
+        &[3, 4, 5],
     )
 }
 
@@ -102,16 +96,5 @@ pub fn restore_session_metadata_schema_version(
         observed,
         SESSION_METADATA_SCHEMA_VERSION,
         &[2],
-    )
-}
-
-pub fn restore_transcript_history_witness_format(
-    observed: u32,
-) -> Result<u32, SessionPersistenceVersionAuthorityError> {
-    restore_version(
-        SessionPersistenceVersionField::TranscriptHistoryWitnessFormat,
-        observed,
-        TRANSCRIPT_HISTORY_WITNESS_FORMAT,
-        &[2, 3],
     )
 }

@@ -64,7 +64,7 @@ This overview follows the generated OpenAPI artifact at
 | `GET` | `/sessions/{id}` | Fetch session metadata and usage |
 | `GET` | `/sessions/{id}/status` | Fetch current runtime state for a session |
 | `GET` | `/sessions/{id}/history` | Fetch committed session transcript messages |
-| `POST` | `/sessions/{id}/system_context` | Append staged runtime system context |
+| `POST` | `/sessions/{id}/system_context` | Append one ordinary durable ordered System message |
 | `POST` | `/sessions/{id}/messages` | Continue an existing session |
 | `POST` | `/sessions/{id}/external-events` | Queue a runtime-backed external event |
 | `POST` | `/sessions/{id}/peer-response-terminal` | Queue a typed peer terminal response event |
@@ -299,6 +299,14 @@ Create and run a new session.
   (existing REST version-skew posture).
 </ParamField>
 
+<ParamField body="transient_turn_context" type="string | null" default="null">
+  Non-empty, exact host-regenerated facts for the first logical turn.
+  Whitespace is significant. Meerkat persists the text only with the pending
+  runtime input for crash retry and projects it as a request-local user-channel
+  context message immediately before that turn's conversational user message.
+  It never enters Session history, compaction, or extraction requests.
+</ParamField>
+
 <ParamField body="system_prompt" type="SystemPromptOverride" default="inherit">
   Typed per-request system-prompt policy: omit/`null` to inherit, a string to
   set an explicit prompt, or `{"action": "disable"}` to suppress every prompt
@@ -486,6 +494,13 @@ Continue an existing session.
   turn's user message, in order; injected context is excluded from
   semantic-memory indexing. Older REST servers silently ignore this field
   (existing REST version-skew posture).
+</ParamField>
+
+<ParamField body="transient_turn_context" type="string | null" default="null">
+  Non-empty, exact host-regenerated facts for this logical turn. Whitespace is
+  significant. The value is available to every foreground provider call and
+  retry in the turn, persists only while the runtime input is pending, and
+  never becomes a Session message.
 </ParamField>
 
 <ParamField body="system_prompt" type="string | null" default="null">
@@ -747,7 +762,7 @@ Return the curated model catalog with provider profiles, capability metadata, an
 
 ```json Response (abbreviated)
 {
-  "contract_version": "0.8.10",
+  "contract_version": "0.8.11",
   "providers": [
     {
       "provider": "anthropic",
@@ -781,7 +796,7 @@ Returns runtime capabilities with status resolved against config.
 
 ```json Response (abbreviated)
 {
-  "contract_version": {"major": 0, "minor": 8, "patch": 10},
+  "contract_version": {"major": 0, "minor": 8, "patch": 11},
   "capabilities": [
     {
       "id": "sessions",

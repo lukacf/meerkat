@@ -33,7 +33,7 @@ Tags: `[U]` = user-found, `[R]` = reviewer-only, `[U+R]` = both.
   Location: `meerkat-openai/src/live.rs:2797-2810`. The Refresh arm in
   `execute_openai_live_command` only calls `seed_history_projection`,
   so a `config/patch` that flips `model_id` / `provider_id` /
-  `visible_tools` / `system_prompt` / `audio_config` leaves the hosted
+  `visible_tools` / `ordered_system_instructions` / `audio_config` leaves the hosted
   OpenAI realtime session running on stale state while RPC reports
   `refreshed: true`. Required: rebuild or reconfigure the provider
   session against the new snapshot fields. At minimum the realtime
@@ -59,7 +59,7 @@ Tags: `[U]` = user-found, `[R]` = reviewer-only, `[U+R]` = both.
   (2) On a clean refresh, calls a new
   `apply_refresh_session_update_from_snapshot` method (~line 2046-2058)
   which sends `ClientEvent::SessionUpdate` built from the snapshot's
-  `system_prompt` / `visible_tools` / `runtime_system_context` /
+  `ordered_system_instructions` / `visible_tools` / `runtime_system_context` /
   `audio_config` (helper `openai_refresh_session_update_from_snapshot`
   ~line 631-685, with `openai_refresh_instructions_from_snapshot` ~line
   687-720) and waits for the matching `SessionUpdated` ack via the new
@@ -72,9 +72,10 @@ Tags: `[U]` = user-found, `[R]` = reviewer-only, `[U+R]` = both.
   runtime system context and seed messages still flow.
 
   Regression tests (all in `meerkat-openai/src/live.rs`):
-  `refresh_command_emits_session_update_for_mutated_prompt_and_tools`
+  `refresh_command_emits_session_update_for_ordered_system_instructions_and_tools`
   asserts exactly one `session.update` ClientEvent reaches the provider
-  carrying the snapshot's `system_prompt` text inside `instructions`
+  carrying the snapshot's `ordered_system_instructions` projection inside
+  provider `instructions`
   and the snapshot's `fresh_tool` inside `tools`.
   `refresh_command_rejects_model_swap_without_emitting_session_update`
   drives a snapshot with a swapped `model_id`, expects a typed
@@ -429,76 +430,28 @@ review uncovered four issues with that model.
   `--features realtime`.
 
 - [x] fix · [x] verify · **R10.** Refresh `session.update`
-  instructions field is built only from `snapshot.system_prompt` +
-  `runtime_system_context`, but both real snapshot builders set
-  `system_prompt: None`. `[R]` Location:
-  `meerkat-openai/src/live.rs:649-655`. The root system prompt lives
-  inside `seed_messages` as a `Message::System` entry; the
-  history-event projector explicitly drops `Message::System` and
-  `SystemNotice`; so the refresh `session.update` replaces the
-  provider instructions with just the language-pin / runtime-context
-  text, losing the actual Meerkat system prompt. Required: populate
-  `LiveProjectionSnapshot.system_prompt` in both
+  instructions are built from `snapshot.ordered_system_instructions` plus typed
+  `runtime_system_context`. `[R]` Location:
+  `meerkat-openai/src/live.rs:649-655`. The historical defect left
+  an absent ordered-System projection, so refresh replaced provider instructions with
+  only language-pin/runtime-context text. Required: populate
+  `LiveProjectionSnapshot.ordered_system_instructions` in both
   `build_live_projection_snapshot` and
   `build_live_projection_snapshot_for_runtime` from the resolved
-  `RealtimeSessionOpenConfig.system_prompt` (or extract it from the
-  first `Message::System` in `seed_messages`). Without this fix, every
-  refresh wipes the system prompt.
+  `RealtimeSessionOpenConfig.ordered_system_instructions`. Without this fix,
+  every refresh loses the ordinary ordered System instructions.
 
-  **Fix note (foundation-2 phase).** `RealtimeSessionOpenConfig`
-  does not yet model `system_prompt` as a typed field; the resolved
-  root prompt is materialized into `seed_messages[0]` as a
-  `Message::System` by `realtime_projection_root_system_message` /
-  `realtime_projection_messages` in
-  `meerkat-rpc/src/session_runtime.rs:341-389`. Both snapshot builders
-  now consult that invariant via small extractors that match
-  `seed_messages.first()` and lift the `SystemMessage.content` string.
-  Producers: `extract_system_prompt_from_seed_messages` in
-  `meerkat-rpc/src/handlers/live.rs:42-62` (consumed by
-  `build_live_projection_snapshot` at the rebuilt `system_prompt:`
-  field around line 86); mirror
-  `extract_system_prompt_from_seed_messages_runtime` in
-  `meerkat-rpc/src/session_runtime.rs:304-318` (consumed by
-  `build_live_projection_snapshot_for_runtime` around line 340). The
-  pre-existing snapshot round-trip test
-  `snapshot_round_trips_with_runtime_system_context` and the new
-  producer-side regressions
-  `extract_system_prompt_returns_first_system_message_content` and
-  `extract_system_prompt_returns_none_when_no_system_message` in
-  `meerkat-rpc/src/handlers/live.rs:748-786` pin the contract. We
-  preferred the typed extractor over a future
-  `RealtimeSessionOpenConfig.system_prompt` field because the
-  projection invariant is already enforced upstream and adding a
-  parallel field would create two truths to keep in sync; an inline
-  comment at both call sites documents the choice.
+  **Superseded by the 0.8.11 ordered-System contract.**
+  `RealtimeSessionOpenConfig.ordered_system_instructions` is the deterministic
+  provider lowering of every ordered `Message::System` in the transcript. The seed
+  remains the exact ordered transcript; neither snapshot builders nor refresh
+  infer instructions from message zero. Providers with one instruction field
+  receive the ordered contents joined by the shared realtime lowering.
 
-  **Fix note (FIX-R10, SystemNotice extension).** The original R10 fix
-  only matched `Message::System` at index 0. An adversarial verifier
-  observed that `realtime_projection_messages`
-  (`meerkat-rpc/src/session_runtime.rs:435-444`) only rewrites
-  `seed_messages[0]` when `realtime_projection_root_system_message`
-  returns `Some` — when it returns `None`, the canonical session
-  transcript's original first message is left in place and that can
-  legitimately be a `Message::SystemNotice` (e.g. an idle pre-prompt
-  session whose only lead is a runtime-injected
-  `[SYSTEM NOTICE][MCP_PENDING]` notice). Both extractors
-  (`extract_system_prompt_from_seed_messages` in
-  `meerkat-rpc/src/handlers/live.rs` and the runtime mirror in
-  `meerkat-rpc/src/session_runtime.rs`) now also match
-  `Message::SystemNotice(n)` and return `n.rendered_text()` — the
-  prefix-tagged form, matching the projection the root-system helper
-  itself emits at `session_runtime.rs:405`. Without this arm, a
-  refresh whose snapshot leads with a `SystemNotice` would silently
-  emit empty instructions on `session.update` and wipe the realtime
-  provider's session-level instructions. New regression tests:
-  `extract_system_prompt_returns_rendered_text_for_first_system_notice`
-  in the handler tests module and
-  `extract_system_prompt_runtime_returns_rendered_text_for_first_system_notice`
-  in the session-runtime tests module pin the rendered-text shape on
-  both extractors. Inline doc-comments at both extractors now document
-  why both `Message::System` and `Message::SystemNotice` are valid
-  lead messages for a live snapshot and why we prefer `rendered_text()`
-  over the raw `body` field.
+  **Superseded FIX-R10 note.** The original fix also treated a leading
+  `Message::SystemNotice` as provider instructions. That singleton inference
+  is removed. `Message::SystemNotice` remains a distinct transcript role and
+  never substitutes for ordered System instructions.
 
 ### F. Realtime model switching
 

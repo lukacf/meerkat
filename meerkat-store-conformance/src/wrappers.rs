@@ -23,7 +23,7 @@ use meerkat_core::session_store::IncrementalSessionStore;
 use meerkat_core::{
     Message, Session, SessionFilter, SessionHead, SessionHeadCas, SessionId, SessionMeta,
     SessionStore, SessionStoreError, TranscriptRewriteCommit, TranscriptRewriteRecord,
-    TranscriptStrandId,
+    TranscriptStrandId, VerifiedSessionHeadMaterialization,
 };
 
 /// Correctly forwarding delegating wrapper (the documented pattern).
@@ -335,6 +335,13 @@ impl IncrementalSessionStore for DefaultRangeVerbIncrementalStore {
 
     async fn load_head(&self, id: &SessionId) -> Result<Option<SessionHead>, SessionStoreError> {
         self.inner_inc.load_head(id).await
+    }
+
+    async fn materialize_head(
+        &self,
+        expected: &SessionHead,
+    ) -> Result<VerifiedSessionHeadMaterialization, SessionStoreError> {
+        self.inner_inc.materialize_head(expected).await
     }
 
     async fn load_messages(

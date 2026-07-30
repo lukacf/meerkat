@@ -56,7 +56,8 @@ impl std::fmt::Display for RuntimeEffectKind {
 /// domain-failure vocabulary (`DeliveryFailureReason`); the mapping lives at
 /// the consumer because the schedule-failure type is owned by a crate
 /// `meerkat-mob` does not (and must not) depend on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MobFailureClass {
     /// The addressed mob/profile/member/flow/run/work does not exist.
     TargetMissing,
@@ -109,6 +110,23 @@ impl std::fmt::Display for SessionResumeUnavailableReason {
             Self::Absent => f.write_str("missing durable session snapshot"),
         }
     }
+}
+
+/// Typed cause for a member provision that cannot recover inside the current
+/// process incarnation.
+///
+/// The transport owner must construct this cause at the boundary where it
+/// observes terminal closure. Callers must never infer it from display prose:
+/// ordinary session, provider, or tool failures remain retryable unless they
+/// arrive through this explicit carrier.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum MemberProvisionFailureCause {
+    /// The process-local callback transport is terminally closed. A fresh
+    /// declaration may install a replacement transport; otherwise recovery
+    /// requires a new process incarnation.
+    #[error("callback transport closed: {detail}")]
+    CallbackTransportClosed { detail: String },
 }
 
 /// Errors returned by mob operations.
@@ -417,6 +435,12 @@ pub enum MobError {
     /// A session service operation failed.
     #[error("session error: {0}")]
     SessionError(#[from] meerkat_core::service::SessionError),
+
+    /// Member provisioning reached a typed process-incarnation-terminal
+    /// boundary. The cause owner, not the actor's display formatter, decides
+    /// whether the failure is permanent for this incarnation.
+    #[error("member provision failed: {cause}")]
+    MemberProvisionFailed { cause: MemberProvisionFailureCause },
 
     /// A comms operation failed.
     #[error("comms error: {0}")]
@@ -743,6 +767,7 @@ impl MobError {
             Self::MemberAlreadyExists(_) => MobFailureClass::TargetBusy,
             Self::StorageError(_)
             | Self::SessionError(_)
+            | Self::MemberProvisionFailed { .. }
             | Self::CommsError(_)
             | Self::RetirementTopologyIncomplete(_)
             | Self::MemberRestoreFailed { .. }
@@ -1058,6 +1083,11 @@ mod tests {
                 "e",
             ))),
             MobError::SessionError(meerkat_core::service::SessionError::PersistenceDisabled),
+            MobError::MemberProvisionFailed {
+                cause: MemberProvisionFailureCause::CallbackTransportClosed {
+                    detail: "stdio eof".to_string(),
+                },
+            },
             MobError::CommsError(meerkat_core::comms::SendError::PeerOffline),
             MobError::StaleFenceToken {
                 runtime_id: crate::ids::AgentRuntimeId::initial(crate::ids::AgentIdentity::from(
@@ -1163,6 +1193,14 @@ mod tests {
                 MobFailureClass::Transport,
             ),
             (MobError::FlowTurnTimedOut, MobFailureClass::Transport),
+            (
+                MobError::MemberProvisionFailed {
+                    cause: MemberProvisionFailureCause::CallbackTransportClosed {
+                        detail: "stdio eof".to_string(),
+                    },
+                },
+                MobFailureClass::Transport,
+            ),
             (
                 MobError::CallbackPending {
                     session_id: meerkat_core::types::SessionId::new(),

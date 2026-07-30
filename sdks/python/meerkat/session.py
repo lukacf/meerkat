@@ -135,6 +135,7 @@ class Session:
         prompt: str | list[ContentBlock],
         *,
         injected_context: list[str | list[ContentBlock]] | None = None,
+        transient_turn_context: str | None = None,
         skill_refs: list[SkillRef] | None = None,
         turn_tool_overlay: PublicTurnToolOverlay | None = None,
         additional_instructions: list[str] | None = None,
@@ -157,6 +158,7 @@ class Session:
             self._id,
             prompt,
             injected_context=injected_context,
+            transient_turn_context=transient_turn_context,
             skill_refs=skill_refs,
             turn_tool_overlay=turn_tool_overlay,
             additional_instructions=additional_instructions,
@@ -178,6 +180,7 @@ class Session:
         prompt: str | list[ContentBlock],
         *,
         injected_context: list[str | list[ContentBlock]] | None = None,
+        transient_turn_context: str | None = None,
         skill_refs: list[SkillRef] | None = None,
         turn_tool_overlay: PublicTurnToolOverlay | None = None,
         additional_instructions: list[str] | None = None,
@@ -206,6 +209,7 @@ class Session:
             self._id,
             prompt,
             injected_context=injected_context,
+            transient_turn_context=transient_turn_context,
             skill_refs=skill_refs,
             turn_tool_overlay=turn_tool_overlay,
             additional_instructions=additional_instructions,
@@ -239,7 +243,7 @@ class Session:
         source: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Inject system context into this session."""
+        """Append one ordinary durable System message to this session."""
         return await self._client.inject_context(
             self._id,
             text,
@@ -478,6 +482,7 @@ class DeferredSession:
         prompt: str | list[ContentBlock],
         *,
         injected_context: list[str | list[ContentBlock]] | None = None,
+        transient_turn_context: str | None = None,
         skill_refs: list[SkillRef] | None = None,
         turn_tool_overlay: PublicTurnToolOverlay | None = None,
         additional_instructions: list[str] | None = None,
@@ -500,6 +505,7 @@ class DeferredSession:
             self._id,
             prompt,
             injected_context=injected_context,
+            transient_turn_context=transient_turn_context,
             skill_refs=skill_refs,
             turn_tool_overlay=turn_tool_overlay,
             additional_instructions=additional_instructions,
@@ -530,7 +536,7 @@ class DeferredSession:
         source: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Inject system context into this session."""
+        """Append one ordinary durable System message to this session."""
         return await self._client.inject_context(
             self._id,
             text,

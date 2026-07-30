@@ -3297,12 +3297,14 @@ impl MobHandle {
                 Ok(MobMachineCommandResult::Unit)
             }
             MobMachineCommand::RunFlow {
+                run_id,
                 flow_id,
                 activation_params,
                 scoped_event_tx,
             } => {
                 let run_id = self
                     .send_actor_command(|reply_tx| MobCommand::RunFlow {
+                        run_id,
                         flow_id,
                         activation_params,
                         scoped_event_tx,
@@ -3397,13 +3399,31 @@ impl MobHandle {
                     work_ref,
                     spec,
                     handling_mode,
-                    turn_metadata,
+                    external_delivery_identity,
+                    mut turn_metadata,
                     event_tx,
                     completion_tx,
                     llm_identity_applied_tx,
                     ack_mode,
                 } = *cmd;
                 let receipt_work_ref = work_ref.clone();
+                if let Some(context) = spec.transient_turn_context {
+                    let mut metadata = turn_metadata.unwrap_or_default();
+                    metadata
+                        .merge(
+                            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                                transient_turn_context: Some(context),
+                                ..Default::default()
+                            },
+                        )
+                        .map_err(|conflict| {
+                            MobError::Internal(format!(
+                                "work-spec turn metadata conflict on `{}`: {}",
+                                conflict.field, conflict.reason
+                            ))
+                        })?;
+                    turn_metadata = Some(metadata);
+                }
                 let payload = Box::new(super::state::SubmitWorkPayload {
                     runtime_id,
                     fence_token,
@@ -3414,6 +3434,7 @@ impl MobHandle {
                     interaction_id: spec.interaction_id,
                     objective_id: spec.objective_id,
                     handling_mode,
+                    external_delivery_identity,
                     turn_metadata,
                     event_tx,
                     completion_tx,
@@ -3523,16 +3544,6 @@ impl MobHandle {
                     .await??;
                 Ok(MobMachineCommandResult::MemberStatus(snapshot))
             }
-            MobMachineCommand::ApplyIdentityDeclarationManifest { manifest } => {
-                let outcome =
-                    self.send_actor_command(|reply_tx| {
-                        MobCommand::ApplyIdentityDeclarationManifest { manifest, reply_tx }
-                    })
-                    .await??;
-                Ok(MobMachineCommandResult::IdentityDeclarationManifestApplied(
-                    Box::new(outcome),
-                ))
-            }
             MobMachineCommand::GetIdentityIntent { agent_identity } => {
                 let observation = self
                     .send_actor_command(|reply_tx| MobCommand::GetIdentityIntent {
@@ -3543,21 +3554,6 @@ impl MobHandle {
                 Ok(MobMachineCommandResult::IdentityIntent(Box::new(
                     observation,
                 )))
-            }
-            MobMachineCommand::GetIdentityDeclarationReceipt {
-                scope_id,
-                operation_id,
-            } => {
-                let observation = self
-                    .send_actor_command(|reply_tx| MobCommand::GetIdentityDeclarationReceipt {
-                        scope_id,
-                        operation_id,
-                        reply_tx,
-                    })
-                    .await??;
-                Ok(MobMachineCommandResult::IdentityDeclarationReceipt(
-                    Box::new(observation),
-                ))
             }
             MobMachineCommand::GetIdentityConvergenceStatus { agent_identity } => {
                 let observation = self
@@ -5133,33 +5129,6 @@ impl MobHandle {
         Self::project_get_member_result(result)
     }
 
-    /// Atomically apply one complete provider-scoped identity declaration.
-    ///
-    /// In the 0.8.2 production slice, a new operation is admitted only for a
-    /// non-empty, missing scope whose members all adopt exact verified legacy
-    /// sessions, require their existing history, use controlling-session
-    /// execution, and declare no initial delivery. Desired wiring remains part
-    /// of the sealed intent, but non-empty topology is reported as typed
-    /// `RepairBlocked` in this narrow release until a target-atomic actuator
-    /// exists. Replaying an already committed operation still returns its exact
-    /// original outcome before this admission check.
-    pub async fn apply_identity_declaration_manifest(
-        &self,
-        manifest: crate::identity::IdentityDeclarationManifest,
-    ) -> Result<crate::identity::IdentityDeclarationManifestApplyOutcome, MobError> {
-        match self
-            .execute_machine_command(MobMachineCommand::ApplyIdentityDeclarationManifest {
-                manifest: Box::new(manifest),
-            })
-            .await?
-        {
-            MobMachineCommandResult::IdentityDeclarationManifestApplied(outcome) => Ok(*outcome),
-            _ => Err(MobError::Internal(
-                "unexpected identity declaration command result variant".into(),
-            )),
-        }
-    }
-
     /// Read the total stored observation for one identity intent row.
     pub async fn identity_intent(
         &self,
@@ -5177,36 +5146,6 @@ impl MobHandle {
             MobMachineCommandResult::IdentityIntent(observation) => Ok(*observation),
             _ => Err(MobError::Internal(
                 "unexpected identity intent command result variant".into(),
-            )),
-        }
-    }
-
-    /// Read the immutable receipt for one exact declaration operation.
-    ///
-    /// The returned total store observation preserves malformed or unsupported
-    /// physical evidence. A valid receipt contains the exact original sealed
-    /// apply outcome and its request digest, so lost-ack recovery can resume
-    /// without recompiling portable material or rewriting desired state. This
-    /// is historical custody only: callers must not treat it as the current
-    /// intent or as mutation authority.
-    pub async fn identity_declaration_receipt(
-        &self,
-        scope_id: &crate::identity::IdentityDeclarationScopeId,
-        operation_id: &meerkat_core::ops::OperationId,
-    ) -> Result<
-        crate::identity::IdentityStoredObservation<crate::identity::IdentityOperationReceipt>,
-        MobError,
-    > {
-        match self
-            .execute_machine_command(MobMachineCommand::GetIdentityDeclarationReceipt {
-                scope_id: scope_id.clone(),
-                operation_id: operation_id.clone(),
-            })
-            .await?
-        {
-            MobMachineCommandResult::IdentityDeclarationReceipt(observation) => Ok(*observation),
-            _ => Err(MobError::Internal(
-                "unexpected identity declaration receipt command result variant".into(),
             )),
         }
     }
@@ -5504,12 +5443,97 @@ impl MobHandle {
         self.run_flow_with_stream(flow_id, params, None).await
     }
 
+    /// Persist one caller-stable external-delivery admission before its
+    /// effect is attempted.
+    pub async fn begin_external_delivery(
+        &self,
+        intent: &crate::store::MobExternalDeliveryIntent,
+    ) -> Result<crate::store::MobExternalDeliveryBeginOutcome, MobError> {
+        if intent.mob_id != self.definition.id {
+            return Err(MobError::Internal(format!(
+                "external-delivery intent mob '{}' does not match handle mob '{}'",
+                intent.mob_id, self.definition.id
+            )));
+        }
+        intent.validate()?;
+        self.admit_control_scope(mob_dsl::ControlScope::SendCommand)
+            .await?;
+        self.events
+            .begin_external_delivery(intent)
+            .await
+            .map_err(MobError::from)
+    }
+
+    /// Commit the exact terminal for a previously admitted external delivery.
+    ///
+    /// This is completion mechanics, not a fresh effect admission, so it
+    /// remains available after the actor's command gate has closed.
+    pub async fn complete_external_delivery(
+        &self,
+        intent: &crate::store::MobExternalDeliveryIntent,
+        terminal: &crate::store::MobExternalDeliveryTerminal,
+    ) -> Result<crate::store::MobExternalDeliveryCompleteOutcome, MobError> {
+        if intent.mob_id != self.definition.id {
+            return Err(MobError::Internal(format!(
+                "external-delivery terminal mob '{}' does not match handle mob '{}'",
+                intent.mob_id, self.definition.id
+            )));
+        }
+        self.events
+            .complete_external_delivery(intent, terminal)
+            .await
+            .map_err(MobError::from)
+    }
+
+    /// Advance the durable retry attempt/deadline for a begun delivery.
+    ///
+    /// Like terminal completion, this is repair mechanics over already
+    /// admitted authority and remains available after the command gate closes.
+    pub async fn schedule_external_delivery_repair(
+        &self,
+        intent: &crate::store::MobExternalDeliveryIntent,
+    ) -> Result<crate::store::MobExternalDeliveryRepairOutcome, MobError> {
+        if intent.mob_id != self.definition.id {
+            return Err(MobError::Internal(format!(
+                "external-delivery repair mob '{}' does not match handle mob '{}'",
+                intent.mob_id, self.definition.id
+            )));
+        }
+        self.events
+            .schedule_external_delivery_repair(intent)
+            .await
+            .map_err(MobError::from)
+    }
+
     /// Start a flow run with an optional scoped stream sink.
     pub async fn run_flow_with_stream(
         &self,
         flow_id: FlowId,
         params: serde_json::Value,
         scoped_event_tx: Option<mpsc::Sender<meerkat_core::ScopedAgentEvent>>,
+    ) -> Result<RunId, MobError> {
+        self.run_flow_with_stream_and_external_identity(flow_id, params, scoped_event_tx, None)
+            .await
+    }
+
+    /// Start or recover the one durable flow run selected by an external
+    /// delivery identity.
+    pub async fn run_flow_with_external_identity(
+        &self,
+        flow_id: FlowId,
+        params: serde_json::Value,
+        identity: &crate::store::MobExternalDeliveryIdentity,
+    ) -> Result<RunId, MobError> {
+        self.run_flow_with_stream_and_external_identity(flow_id, params, None, Some(identity))
+            .await
+    }
+
+    async fn run_flow_with_stream_and_external_identity(
+        &self,
+        flow_id: FlowId,
+        params: serde_json::Value,
+        scoped_event_tx: Option<mpsc::Sender<meerkat_core::ScopedAgentEvent>>,
+        identity: Option<&crate::store::MobExternalDeliveryIdentity>,
     ) -> Result<RunId, MobError> {
         self.execute_machine_command(MobMachineCommand::PreviewRunFlowAdmission)
             .await?;
@@ -5528,8 +5552,20 @@ impl MobHandle {
             provisioner().await?;
         }
         self.ensure_flow_targets_provisioned(&flow_id).await?;
+        let run_id = match identity {
+            Some(identity) => {
+                identity.validate()?;
+                Some(RunId::for_external_delivery(
+                    &self.definition.id,
+                    &flow_id,
+                    &identity.idempotency_key,
+                ))
+            }
+            None => None,
+        };
         match self
             .execute_machine_command(MobMachineCommand::RunFlow {
+                run_id,
                 flow_id,
                 activation_params: params,
                 scoped_event_tx,
@@ -6929,6 +6965,7 @@ impl MobHandle {
         message: meerkat_core::types::ContentInput,
         handling_mode: HandlingMode,
         turn_metadata: Option<RuntimeTurnMetadata>,
+        external_delivery_identity: Option<crate::store::MobExternalDeliveryIdentity>,
         observers: MemberTurnObservers,
     ) -> Result<(AgentRuntimeId, FenceToken, Option<SessionId>), MobError> {
         let domain_identity = AgentIdentity::from(agent_identity.as_str());
@@ -6948,12 +6985,25 @@ impl MobHandle {
         };
         let session_id =
             Self::machine_bridge_session_id_for_identity(&domain_identity, &machine_state);
+        if let Some(identity) = &external_delivery_identity {
+            identity.validate()?;
+        }
+        let work_ref = external_delivery_identity
+            .as_ref()
+            .map_or_else(WorkRef::new, |identity| {
+                WorkRef::for_external_delivery(
+                    &self.definition.id,
+                    &agent_identity,
+                    &identity.idempotency_key,
+                )
+            });
         let cmd = Box::new(crate::mob_machine::SubmitWorkCommand {
             runtime_id: runtime_id.clone(),
             fence_token,
-            work_ref: WorkRef::new(),
+            work_ref,
             spec: WorkSpec::new(message, WorkOrigin::External),
             handling_mode,
+            external_delivery_identity,
             turn_metadata,
             event_tx: observers.event_tx,
             completion_tx: observers.completion_tx,
@@ -6983,6 +7033,7 @@ impl MobHandle {
             work_ref: WorkRef::new(),
             spec: WorkSpec::new(message, WorkOrigin::Internal),
             handling_mode: HandlingMode::Queue,
+            external_delivery_identity: None,
             turn_metadata: None,
             event_tx: None,
             completion_tx: None,
@@ -7111,6 +7162,7 @@ impl MobHandle {
             work_ref: work_ref.clone(),
             spec,
             handling_mode,
+            external_delivery_identity: None,
             turn_metadata: None,
             event_tx: None,
             completion_tx: None,
@@ -9490,7 +9542,7 @@ impl MemberHandle {
         content: impl Into<meerkat_core::types::ContentInput>,
         handling_mode: HandlingMode,
     ) -> Result<MemberDeliveryReceipt, MobError> {
-        self.send_with_internal_turn_metadata(content, handling_mode, None, None, None)
+        self.send_with_internal_turn_metadata(content, handling_mode, None, None, None, None)
             .await
     }
 
@@ -9505,8 +9557,38 @@ impl MemberHandle {
             render_metadata: Some(render_metadata),
             ..Default::default()
         });
-        self.send_with_internal_turn_metadata(content, handling_mode, turn_metadata, None, None)
-            .await
+        self.send_with_internal_turn_metadata(
+            content,
+            handling_mode,
+            turn_metadata,
+            None,
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// Submit external work with one caller-stable durable admission identity.
+    pub async fn send_with_render_metadata_and_external_identity(
+        &self,
+        content: impl Into<meerkat_core::types::ContentInput>,
+        handling_mode: HandlingMode,
+        render_metadata: Option<RenderMetadata>,
+        identity: crate::store::MobExternalDeliveryIdentity,
+    ) -> Result<MemberDeliveryReceipt, MobError> {
+        let turn_metadata = render_metadata.map(|render_metadata| RuntimeTurnMetadata {
+            render_metadata: Some(render_metadata),
+            ..Default::default()
+        });
+        self.send_with_internal_turn_metadata(
+            content,
+            handling_mode,
+            turn_metadata,
+            Some(identity),
+            None,
+            None,
+        )
+        .await
     }
 
     /// Start an external member turn with host-owned runtime options and an
@@ -9534,6 +9616,7 @@ impl MemberHandle {
                 content.into(),
                 handling_mode,
                 Some(turn_metadata),
+                None,
                 MemberTurnObservers {
                     event_tx,
                     completion_tx: Some(completion_tx),
@@ -9559,6 +9642,7 @@ impl MemberHandle {
         content: impl Into<meerkat_core::types::ContentInput>,
         handling_mode: HandlingMode,
         turn_metadata: Option<RuntimeTurnMetadata>,
+        external_delivery_identity: Option<crate::store::MobExternalDeliveryIdentity>,
         event_tx: Option<MemberTurnEventSender>,
         completion_tx: Option<tokio::sync::oneshot::Sender<Result<(), MobError>>>,
     ) -> Result<MemberDeliveryReceipt, MobError> {
@@ -9569,6 +9653,7 @@ impl MemberHandle {
                 content.into(),
                 handling_mode,
                 turn_metadata,
+                external_delivery_identity,
                 MemberTurnObservers {
                     event_tx,
                     completion_tx,

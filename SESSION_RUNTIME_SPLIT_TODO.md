@@ -145,10 +145,10 @@ self-verify.
   - `apply_precheck_gates` (l.167) → `live_orchestration`
   - `render_context_append_text` (l.84) → `runtime_state` (helper)
   - `pending_system_context_appends` (l.99) → `staged_promotion`
-  - `extract_system_prompt_from_seed_messages_runtime` (l.329) → `live_orchestration`
+  - ordered System instruction lowering from seed messages → `live_orchestration`
   - `build_live_projection_snapshot_for_runtime` (l.351) → `live_orchestration`
   - `live_channel_requires_close_for_identity_change` (l.400) → `live_orchestration`
-  - `realtime_projection_root_system_message` (l.410) → `live_orchestration`
+  - `realtime_projection_ordered_system_instructions` → `live_orchestration`
   - `realtime_projection_messages` (l.450) → `live_orchestration`
   - `realtime_projection_runtime_system_context` (l.461) → `live_orchestration`
   - `exported_tool_visibility_state` (l.470) → `live_orchestration`

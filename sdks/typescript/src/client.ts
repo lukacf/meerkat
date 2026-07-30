@@ -554,6 +554,7 @@ function mobTurnStartPayload(
     "injected_context",
     options?.injectedContext as MobTurnStartParams["injected_context"],
   );
+  setIfDefined(payload, "transient_turn_context", options?.transientTurnContext);
   setIfDefined(payload, "keep_alive", options?.keepAlive);
   setIfDefined(payload, "model", options?.model);
   setIfDefined(payload, "provider", options?.provider);
@@ -1136,7 +1137,7 @@ export class MeerkatClient {
     const status = MeerkatClient.requireClosedStringField(
       result,
       "status",
-      ["applied", "staged", "duplicate"],
+      ["applied", "duplicate"],
       "Invalid session/inject_context response",
     ) as RpcInjectSystemContextResult["status"];
     return { status };
@@ -2734,6 +2735,7 @@ export class MeerkatClient {
     workRef?: string;
     origin?: "external" | "internal";
     injectedContext?: ContentInput[];
+    transientTurnContext?: string;
     objectiveId?: string;
   }): Promise<{ mobId: string; workRef: string; memberRef: string; objectiveId?: string }> {
     const params: Record<string, unknown> = {
@@ -2746,6 +2748,9 @@ export class MeerkatClient {
     }
     if (args.injectedContext !== undefined && args.injectedContext.length > 0) {
       params.injected_context = args.injectedContext;
+    }
+    if (args.transientTurnContext !== undefined) {
+      params.transient_turn_context = args.transientTurnContext;
     }
     if (args.objectiveId !== undefined) {
       params.objective_id = args.objectiveId;
@@ -3356,6 +3361,9 @@ export class MeerkatClient {
     if (options?.injectedContext != null) {
       params.injected_context = options.injectedContext;
     }
+    if (options?.transientTurnContext != null) {
+      params.transient_turn_context = options.transientTurnContext;
+    }
     const wireRefs = skillRefsToWire(options?.skillRefs);
     if (wireRefs) {
       params.skill_refs = wireRefs;
@@ -3409,6 +3417,9 @@ export class MeerkatClient {
     const params: Record<string, unknown> = { session_id: sessionId, prompt };
     if (options?.injectedContext != null) {
       params.injected_context = options.injectedContext;
+    }
+    if (options?.transientTurnContext != null) {
+      params.transient_turn_context = options.transientTurnContext;
     }
     const wireRefs = skillRefsToWire(options?.skillRefs);
     if (wireRefs) {
@@ -6645,6 +6656,9 @@ export class MeerkatClient {
     if (!options) return params;
 
     if (options.injectedContext != null) params.injected_context = options.injectedContext;
+    if (options.transientTurnContext != null) {
+      params.transient_turn_context = options.transientTurnContext;
+    }
     if (options.model) params.model = options.model;
     if (options.provider) params.provider = options.provider;
     if (options.systemPrompt !== undefined) params.system_prompt = options.systemPrompt;

@@ -9,6 +9,7 @@ use meerkat_core::types::SessionId;
 
 use crate::accept::AcceptOutcome;
 use crate::completion::CompletionHandle;
+use crate::completion::CompletionOutcome;
 use crate::input::Input;
 use crate::input_state::StoredInputState;
 use crate::meerkat_machine_types::{
@@ -79,6 +80,20 @@ pub trait SessionServiceRuntimeExt: Send + Sync {
         session_id: &SessionId,
         input_id: &InputId,
     ) -> Result<Option<StoredInputState>, RuntimeDriverError>;
+
+    /// Return the exact rich public completion previously selected for this
+    /// input, without registering a waiter or reviving an unregistered runtime.
+    ///
+    /// `Ok(None)` means an admitted input has no finalized receipt yet,
+    /// including the durable pre-finalization window. A terminal 0.8.10 row
+    /// whose rich result was never recorded is repair-blocked rather than
+    /// reported as retryable absence. `InputTerminalOutcome::Consumed` is not
+    /// evidence for any particular public completion class.
+    async fn input_terminal_completion(
+        &self,
+        session_id: &SessionId,
+        input_id: &InputId,
+    ) -> Result<Option<CompletionOutcome>, RuntimeDriverError>;
 
     /// Resolve a caller-supplied idempotency key to its admitted input and
     /// return that input's stored state (terminal outcome, last run id,

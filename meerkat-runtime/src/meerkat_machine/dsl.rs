@@ -93,7 +93,6 @@ pub struct RunId(pub String);
 pub enum DurableTailRecoveryClass {
     CompletedCandidate,
     InterruptedRepairableCandidate,
-    LegacyCompletedCandidate,
     #[default]
     Ambiguous,
 }
@@ -106,8 +105,7 @@ pub enum DurableTailRecoveryDisposition {
     RefuseRecovery,
     CommitCompleted,
     RepairAndCommitInterrupted,
-    CommitLegacyCompleted,
-    CommitLegacyCompletedRetainInputs,
+    CommitCompletedRetainInputs,
     HoldIntact,
 }
 
@@ -1647,7 +1645,6 @@ pub enum TurnPrimitiveKind {
     None,
     ConversationTurn,
     ImmediateAppend,
-    ImmediateContextAppend,
 }
 
 impl From<meerkat_core::turn_execution_authority::TurnPrimitiveKind> for TurnPrimitiveKind {
@@ -1660,9 +1657,6 @@ impl From<meerkat_core::turn_execution_authority::TurnPrimitiveKind> for TurnPri
             meerkat_core::turn_execution_authority::TurnPrimitiveKind::ImmediateAppend => {
                 Self::ImmediateAppend
             }
-            meerkat_core::turn_execution_authority::TurnPrimitiveKind::ImmediateContextAppend => {
-                Self::ImmediateContextAppend
-            }
         }
     }
 }
@@ -1673,7 +1667,6 @@ impl From<TurnPrimitiveKind> for meerkat_core::turn_execution_authority::TurnPri
             TurnPrimitiveKind::None => Self::None,
             TurnPrimitiveKind::ConversationTurn => Self::ConversationTurn,
             TurnPrimitiveKind::ImmediateAppend => Self::ImmediateAppend,
-            TurnPrimitiveKind::ImmediateContextAppend => Self::ImmediateContextAppend,
         }
     }
 }
@@ -1685,11 +1678,8 @@ impl From<TurnPrimitiveKind> for meerkat_core::turn_execution_authority::TurnPri
 pub enum ContentShape {
     #[default]
     Conversation,
-    ConversationAndContext,
-    Context,
     Empty,
     ImmediateAppend,
-    ImmediateContext,
 }
 
 impl ContentShape {
@@ -1698,17 +1688,9 @@ impl ContentShape {
             Self::Conversation => {
                 meerkat_core::turn_execution_authority::ContentShape::Conversation.as_str()
             }
-            Self::ConversationAndContext => {
-                meerkat_core::turn_execution_authority::ContentShape::ConversationAndContext
-                    .as_str()
-            }
-            Self::Context => meerkat_core::turn_execution_authority::ContentShape::Context.as_str(),
             Self::Empty => meerkat_core::turn_execution_authority::ContentShape::Empty.as_str(),
             Self::ImmediateAppend => {
                 meerkat_core::turn_execution_authority::ContentShape::ImmediateAppend.as_str()
-            }
-            Self::ImmediateContext => {
-                meerkat_core::turn_execution_authority::ContentShape::ImmediateContext.as_str()
             }
         }
     }
@@ -1726,16 +1708,9 @@ impl From<meerkat_core::turn_execution_authority::ContentShape> for ContentShape
             meerkat_core::turn_execution_authority::ContentShape::Conversation => {
                 Self::Conversation
             }
-            meerkat_core::turn_execution_authority::ContentShape::ConversationAndContext => {
-                Self::ConversationAndContext
-            }
-            meerkat_core::turn_execution_authority::ContentShape::Context => Self::Context,
             meerkat_core::turn_execution_authority::ContentShape::Empty => Self::Empty,
             meerkat_core::turn_execution_authority::ContentShape::ImmediateAppend => {
                 Self::ImmediateAppend
-            }
-            meerkat_core::turn_execution_authority::ContentShape::ImmediateContext => {
-                Self::ImmediateContext
             }
         }
     }
@@ -1745,11 +1720,8 @@ impl From<ContentShape> for meerkat_core::turn_execution_authority::ContentShape
     fn from(shape: ContentShape) -> Self {
         match shape {
             ContentShape::Conversation => Self::Conversation,
-            ContentShape::ConversationAndContext => Self::ConversationAndContext,
-            ContentShape::Context => Self::Context,
             ContentShape::Empty => Self::Empty,
             ContentShape::ImmediateAppend => Self::ImmediateAppend,
-            ContentShape::ImmediateContext => Self::ImmediateContext,
         }
     }
 }
@@ -3544,7 +3516,7 @@ impl From<AdmissionRuntimeExecutionKind> for meerkat_core::lifecycle::RuntimeExe
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum AdmissionPeerResponseTerminalApplyIntent {
     #[default]
-    AppendContextAndRun,
+    AppendContentAndRun,
 }
 
 impl From<AdmissionPeerResponseTerminalApplyIntent>
@@ -3552,8 +3524,8 @@ impl From<AdmissionPeerResponseTerminalApplyIntent>
 {
     fn from(intent: AdmissionPeerResponseTerminalApplyIntent) -> Self {
         match intent {
-            AdmissionPeerResponseTerminalApplyIntent::AppendContextAndRun => {
-                Self::AppendContextAndRun
+            AdmissionPeerResponseTerminalApplyIntent::AppendContentAndRun => {
+                Self::AppendContentAndRun
             }
         }
     }
@@ -3737,7 +3709,7 @@ impl From<meerkat_core::lifecycle::RuntimeExecutionKind> for RecoveredRuntimeExe
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum RecoveredPeerResponseTerminalApplyIntent {
     #[default]
-    AppendContextAndRun,
+    AppendContentAndRun,
 }
 
 impl From<meerkat_core::lifecycle::run_primitive::PeerResponseTerminalApplyIntent>
@@ -3747,8 +3719,8 @@ impl From<meerkat_core::lifecycle::run_primitive::PeerResponseTerminalApplyInten
         intent: meerkat_core::lifecycle::run_primitive::PeerResponseTerminalApplyIntent,
     ) -> Self {
         match intent {
-            meerkat_core::lifecycle::run_primitive::PeerResponseTerminalApplyIntent::AppendContextAndRun => {
-                Self::AppendContextAndRun
+            meerkat_core::lifecycle::run_primitive::PeerResponseTerminalApplyIntent::AppendContentAndRun => {
+                Self::AppendContentAndRun
             }
         }
     }

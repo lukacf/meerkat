@@ -270,14 +270,16 @@ mod tests {
             .await
             .expect("runtime turn should complete");
         let snapshot = output
-            .snapshot_bytes()
-            .expect("runtime turn should produce a session snapshot")
-            .to_vec();
+            .committed()
+            .expect("runtime turn should produce a committed boundary")
+            .whole_blob_artifact()
+            .expect("runtime turn snapshot should encode")
+            .bytes_arc();
         runtime_store
             .atomic_apply(
                 &meerkat_runtime::LogicalRuntimeId::for_session(session_id),
-                Some(meerkat_runtime::store::SessionDelta {
-                    session_snapshot: snapshot.clone(),
+                Some(meerkat_runtime::store::SerializedSessionSnapshot {
+                    session_snapshot: Arc::clone(&snapshot),
                 }),
                 output.receipt.clone().into_sequenced(0),
                 Vec::new(),
@@ -286,7 +288,7 @@ mod tests {
             .await
             .expect("machine-owned runtime output commit should succeed");
         service
-            .checkpoint_committed_runtime_session_snapshot(session_id, &snapshot)
+            .checkpoint_committed_runtime_session_snapshot(session_id, snapshot)
             .await
             .expect("committed runtime snapshot should project to the session store");
     }

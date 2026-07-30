@@ -113,19 +113,19 @@ v1 (recorded v2 hardening).
 ```toml
 # Minimal: just the agent loop
 [dependencies]
-meerkat = { version = "0.8.10", default-features = false, features = ["anthropic"] }
+meerkat = { version = "0.8.11", default-features = false, features = ["anthropic"] }
 
 # Add persistence
-meerkat = { version = "0.8.10", default-features = false, features = ["anthropic", "session-store"] }
+meerkat = { version = "0.8.11", default-features = false, features = ["anthropic", "session-store"] }
 
 # Add compaction
-meerkat = { version = "0.8.10", default-features = false, features = ["anthropic", "session-store", "session-compaction"] }
+meerkat = { version = "0.8.11", default-features = false, features = ["anthropic", "session-store", "session-compaction"] }
 
 # Add scheduling
-meerkat = { version = "0.8.10", default-features = false, features = ["anthropic", "session-store", "schedule"] }
+meerkat = { version = "0.8.11", default-features = false, features = ["anthropic", "session-store", "schedule"] }
 
 # Kitchen sink
-meerkat = { version = "0.8.10", features = [
+meerkat = { version = "0.8.11", features = [
   "all-providers", "openai-realtime", "session-store", "session-compaction",
   "memory-store-session", "comms", "mcp", "skills", "schedule", "workgraph", "live"
 ] }
@@ -176,6 +176,33 @@ These fields are set in `meerkat-models/src/capabilities/**` (the types live in 
 - **`ContentBlock::Image` in user messages** -- providers that do not support `vision` will not receive image content blocks in user messages.
 - **Still images on live channels** -- a realtime model's `vision` capability projects to `LiveOpenResult.capabilities.image_in`; clients must check that channel capability before sending an image chunk.
 - **Provider-native web search** -- injected by default when `supports_web_search` is `true` and the corresponding `provider_tools.*` config is enabled.
+
+## System-message projection
+
+The durable Session transcript is the authority for instructions. It retains
+every `System` and `SystemNotice` message at its exact authored position; an
+adapter projection never rewrites that transcript.
+
+| Provider wire | Provider-side representation | Relative position |
+|---------------|------------------------------|-------------------|
+| Standard OpenAI Responses | Ordinary ordered input item | Preserved |
+| OpenAI-compatible Chat Completions | Ordinary ordered message | Preserved |
+| Anthropic Messages | Ordered top-level system blocks | Lossy: top-level-only |
+| Gemini `generateContent` | Ordered `systemInstruction.parts` | Lossy: top-level-only |
+| Private ChatGPT Responses | One ordered top-level instruction string | Lossy: top-level-only |
+| OpenAI Realtime | One ordered session instruction string | Lossy: top-level-only |
+
+Top-level-only adapters preserve every instruction's exact bytes and transcript
+order, including empty, whitespace-only, and duplicate messages. They use
+distinct blocks or parts when the provider supports them; singular string
+channels use `"\n\n"` as their stable separator. They never trim,
+deduplicate, replace, or silently drop instructions. A backend that cannot
+carry all instruction bytes and order fails locally instead.
+
+Realtime reconstruction has no second instruction authority:
+`runtime_system_context` is retired, and reconnect/refresh derives its
+instruction projection only from canonical transcript `System` and
+`SystemNotice` messages.
 
 Image generation uses provider-owned image profiles rather than `ModelProfile` chat-model flags. OpenAI and Gemini provider crates advertise image targets, supported backend plans, dimensions/aspect ratios, and provider-specific `provider_params`; the runtime exposes one model-facing `generate_image` tool and commits generated outputs as blob-backed assistant image blocks.
 

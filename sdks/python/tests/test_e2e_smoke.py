@@ -309,7 +309,7 @@ if include_scenario(38):
                 "Always include the marker [PY-CTX-38] in your replies.",
                 source="python-sdk-live-smoke",
             )
-            assert injected["status"] in {"applied", "staged", "duplicate"}
+            assert injected["status"] in {"applied", "duplicate"}
 
             streamed_text, result = await collect_stream_text(
                 session.stream(
@@ -448,7 +448,7 @@ if include_scenario(40):
                 source="python-sdk",
                 idempotency_key="py-swarm-40",
             )
-            assert append["status"] in {"staged", "duplicate"}
+            assert append["status"] in {"applied", "duplicate"}
             assert append["agent_identity"] == "reviewer-1"
 
             async with await mob.subscribe_member_events("reviewer-1") as subscription:

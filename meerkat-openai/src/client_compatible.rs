@@ -960,6 +960,37 @@ mod tests {
     }
 
     #[test]
+    fn chat_completions_preserves_ordered_system_messages_exactly_in_place() {
+        let messages = vec![
+            Message::User(UserMessage::text("work")),
+            Message::System(meerkat_core::SystemMessage::new("")),
+            Message::User(UserMessage::text("continue")),
+            Message::System(meerkat_core::SystemMessage::new(" \t ")),
+            Message::System(meerkat_core::SystemMessage::new("duplicate")),
+            Message::System(meerkat_core::SystemMessage::new("duplicate")),
+        ];
+        let original = messages.clone();
+
+        let projected = OpenAiCompatibleClient::convert_to_chat_messages(&messages)
+            .expect("convert chat messages");
+
+        assert_eq!(messages, original);
+        assert_eq!(projected.len(), 6);
+        assert_eq!(projected[0]["role"], "user");
+        assert_eq!(projected[0]["content"], "work");
+        assert_eq!(projected[1]["role"], "system");
+        assert_eq!(projected[1]["content"], "");
+        assert_eq!(projected[2]["role"], "user");
+        assert_eq!(projected[2]["content"], "continue");
+        assert_eq!(projected[3]["role"], "system");
+        assert_eq!(projected[3]["content"], " \t ");
+        assert_eq!(projected[4]["role"], "system");
+        assert_eq!(projected[4]["content"], "duplicate");
+        assert_eq!(projected[5]["role"], "system");
+        assert_eq!(projected[5]["content"], "duplicate");
+    }
+
+    #[test]
     fn chat_completions_system_notice_with_image_emits_typed_image_part() {
         use meerkat_core::{ContentBlock, ImageData, SystemNoticeKind, SystemNoticeMessage};
 

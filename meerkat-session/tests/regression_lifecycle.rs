@@ -12,14 +12,13 @@ use meerkat_core::event::AgentEvent;
 use meerkat_core::lifecycle::RunId;
 use meerkat_core::ops::OperationId;
 use meerkat_core::service::{
-    AppendSystemContextRequest, AppendSystemContextStatus, CreateSessionRequest,
-    DeferredPromptPolicy, InitialTurnPolicy, SessionError, SessionQuery, SessionService,
-    SessionServiceControlExt, StartTurnRequest, TurnToolOverlay,
+    CreateSessionRequest, DeferredPromptPolicy, InitialTurnPolicy, SessionError, SessionQuery,
+    SessionService, SessionServiceControlExt, StartTurnRequest, TurnToolOverlay,
 };
 use meerkat_core::types::{
     HandlingMode, RenderClass, RenderMetadata, RenderSalience, RunResult, SessionId, Usage,
 };
-use meerkat_core::{SnapshotProjectionError, SystemContextStateError};
+use meerkat_core::{SnapshotProjectionError, TransientTurnContextStateHandle};
 use meerkat_session::ephemeral::SessionSnapshot;
 use meerkat_session::{EphemeralSessionService, SessionAgent, SessionAgentBuilder};
 use std::collections::BTreeMap;
@@ -38,7 +37,7 @@ struct MockAgent {
     should_fail: bool,
     total_input_tokens: u64,
     total_output_tokens: u64,
-    system_context_state: meerkat_core::SystemContextStateHandle,
+    transient_turn_context_state: TransientTurnContextStateHandle,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -50,7 +49,7 @@ struct RecordedTurnMetadata {
 struct RecordingTurnAgent {
     session_id: SessionId,
     recorded: Arc<std::sync::Mutex<Vec<RecordedTurnMetadata>>>,
-    system_context_state: meerkat_core::SystemContextStateHandle,
+    transient_turn_context_state: TransientTurnContextStateHandle,
 }
 
 struct SnapshotAgent {
@@ -58,14 +57,11 @@ struct SnapshotAgent {
     execution_snapshot: AgentExecutionSnapshot,
     tool_scope_snapshot: meerkat_core::ToolScopeSnapshot,
     external_tool_surface_snapshot: Option<meerkat_core::ExternalToolSurfaceSnapshot>,
-    system_context_state: meerkat_core::SystemContextStateHandle,
+    transient_turn_context_state: TransientTurnContextStateHandle,
 }
 
-fn system_context_handle_for_test(
-    state: meerkat_core::SessionSystemContextState,
-) -> meerkat_core::SystemContextStateHandle {
-    meerkat_core::SystemContextStateHandle::new(state)
-        .expect("test system-context state should restore")
+fn transient_turn_context_handle_for_test() -> TransientTurnContextStateHandle {
+    TransientTurnContextStateHandle::new()
 }
 
 #[async_trait]
@@ -181,12 +177,8 @@ impl SessionAgent for MockAgent {
         }
     }
 
-    fn session_clone(&self) -> Result<meerkat_core::Session, SystemContextStateError> {
-        let mut session = meerkat_core::Session::with_id(self.session_id.clone());
-        session
-            .set_system_context_state(self.system_context_state.snapshot())
-            .expect("serialize system-context state");
-        Ok(session)
+    fn session_clone(&self) -> Result<meerkat_core::Session, meerkat_core::AgentError> {
+        Ok(meerkat_core::Session::with_id(self.session_id.clone()))
     }
 
     fn durable_llm_identity(&self) -> Option<meerkat_core::SessionLlmIdentity> {
@@ -201,22 +193,8 @@ impl SessionAgent for MockAgent {
         )
     }
 
-    fn apply_runtime_system_context(
-        &mut self,
-        appends: &[meerkat_core::PendingSystemContextAppend],
-    ) {
-        let mut session = self
-            .session_clone()
-            .expect("test session clone should succeed");
-        session.append_system_context_blocks(appends);
-        self.message_count = session.messages().len();
-        self.system_context_state
-            .replace_from_generated_restore(session.system_context_state().unwrap_or_default())
-            .expect("test system-context state should restore");
-    }
-
-    fn system_context_state(&self) -> meerkat_core::SystemContextStateHandle {
-        self.system_context_state.clone()
+    fn transient_turn_context_state(&self) -> TransientTurnContextStateHandle {
+        self.transient_turn_context_state.clone()
     }
 }
 
@@ -290,12 +268,8 @@ impl SessionAgent for SnapshotAgent {
         self.external_tool_surface_snapshot.clone()
     }
 
-    fn session_clone(&self) -> Result<meerkat_core::Session, SystemContextStateError> {
-        let mut session = meerkat_core::Session::with_id(self.session_id.clone());
-        session
-            .set_system_context_state(self.system_context_state.snapshot())
-            .expect("serialize system-context state");
-        Ok(session)
+    fn session_clone(&self) -> Result<meerkat_core::Session, meerkat_core::AgentError> {
+        Ok(meerkat_core::Session::with_id(self.session_id.clone()))
     }
 
     fn durable_llm_identity(&self) -> Option<meerkat_core::SessionLlmIdentity> {
@@ -310,14 +284,8 @@ impl SessionAgent for SnapshotAgent {
         )
     }
 
-    fn apply_runtime_system_context(
-        &mut self,
-        _appends: &[meerkat_core::PendingSystemContextAppend],
-    ) {
-    }
-
-    fn system_context_state(&self) -> meerkat_core::SystemContextStateHandle {
-        self.system_context_state.clone()
+    fn transient_turn_context_state(&self) -> TransientTurnContextStateHandle {
+        self.transient_turn_context_state.clone()
     }
 }
 
@@ -343,7 +311,7 @@ impl SessionAgentBuilder for MockAgentBuilder {
             should_fail: false,
             total_input_tokens: 0,
             total_output_tokens: 0,
-            system_context_state: system_context_handle_for_test(Default::default()),
+            transient_turn_context_state: transient_turn_context_handle_for_test(),
         })
     }
 }
@@ -368,7 +336,7 @@ impl SessionAgentBuilder for SnapshotAgentBuilder {
             execution_snapshot: self.execution_snapshot.clone(),
             tool_scope_snapshot: self.tool_scope_snapshot.clone(),
             external_tool_surface_snapshot: self.external_tool_surface_snapshot.clone(),
-            system_context_state: system_context_handle_for_test(Default::default()),
+            transient_turn_context_state: transient_turn_context_handle_for_test(),
         })
     }
 }
@@ -394,7 +362,7 @@ impl SessionAgentBuilder for SlowMockAgentBuilder {
             should_fail: false,
             total_input_tokens: 0,
             total_output_tokens: 0,
-            system_context_state: system_context_handle_for_test(Default::default()),
+            transient_turn_context_state: transient_turn_context_handle_for_test(),
         })
     }
 }
@@ -418,7 +386,7 @@ impl SessionAgentBuilder for FailingMockAgentBuilder {
             should_fail: true,
             total_input_tokens: 0,
             total_output_tokens: 0,
-            system_context_state: system_context_handle_for_test(Default::default()),
+            transient_turn_context_state: transient_turn_context_handle_for_test(),
         })
     }
 }
@@ -439,7 +407,7 @@ impl SessionAgentBuilder for RecordingTurnAgentBuilder {
         Ok(RecordingTurnAgent {
             session_id: SessionId::new(),
             recorded: Arc::clone(&self.recorded),
-            system_context_state: system_context_handle_for_test(Default::default()),
+            transient_turn_context_state: transient_turn_context_handle_for_test(),
         })
     }
 }
@@ -526,12 +494,8 @@ impl SessionAgent for RecordingTurnAgent {
         }
     }
 
-    fn session_clone(&self) -> Result<meerkat_core::Session, SystemContextStateError> {
-        let mut session = meerkat_core::Session::with_id(self.session_id.clone());
-        session
-            .set_system_context_state(self.system_context_state.snapshot())
-            .expect("serialize system-context state");
-        Ok(session)
+    fn session_clone(&self) -> Result<meerkat_core::Session, meerkat_core::AgentError> {
+        Ok(meerkat_core::Session::with_id(self.session_id.clone()))
     }
 
     fn durable_llm_identity(&self) -> Option<meerkat_core::SessionLlmIdentity> {
@@ -546,14 +510,8 @@ impl SessionAgent for RecordingTurnAgent {
         )
     }
 
-    fn apply_runtime_system_context(
-        &mut self,
-        _appends: &[meerkat_core::PendingSystemContextAppend],
-    ) {
-    }
-
-    fn system_context_state(&self) -> meerkat_core::SystemContextStateHandle {
-        self.system_context_state.clone()
+    fn transient_turn_context_state(&self) -> TransientTurnContextStateHandle {
+        self.transient_turn_context_state.clone()
     }
 }
 
@@ -1124,87 +1082,6 @@ async fn labels_preserved_in_read() {
     assert_eq!(
         view.state.labels, labels,
         "labels should be preserved in read"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// 13. Inject context applied when idle
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn inject_context_applied_when_idle() {
-    let service = make_service(MockAgentBuilder);
-
-    let created = service
-        .create_session(create_req_deferred("context test"))
-        .await
-        .unwrap();
-    let sid = created.session_id;
-
-    let result = service
-        .append_system_context(
-            &sid,
-            AppendSystemContextRequest {
-                content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
-                    "New runtime context".to_string(),
-                ),
-                source: Some("test".to_string()),
-                idempotency_key: Some("ctx-idle-1".to_string()),
-                source_kind: meerkat_core::session::SystemContextSource::Normal,
-                peer_response_terminal: None,
-            },
-        )
-        .await
-        .expect("append should succeed on idle session");
-
-    // When idle, context is staged (pending for next turn boundary)
-    assert_eq!(
-        result.status,
-        AppendSystemContextStatus::Staged,
-        "context on idle session should be staged"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// 14. Inject context duplicate idempotent
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn inject_context_duplicate_idempotent() {
-    let service = make_service(MockAgentBuilder);
-
-    let created = service
-        .create_session(create_req_deferred("dedup test"))
-        .await
-        .unwrap();
-    let sid = created.session_id;
-
-    let req = AppendSystemContextRequest {
-        content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
-            "Idempotent context".to_string(),
-        ),
-        source: Some("test".to_string()),
-        idempotency_key: Some("ctx-dedup-1".to_string()),
-        source_kind: meerkat_core::session::SystemContextSource::Normal,
-        peer_response_terminal: None,
-    };
-
-    // First append
-    let first = service
-        .append_system_context(&sid, req.clone())
-        .await
-        .expect("first append should succeed");
-    assert_eq!(first.status, AppendSystemContextStatus::Staged);
-
-    // Second append with same key and same content
-    let second = service
-        .append_system_context(&sid, req.clone())
-        .await
-        .expect("duplicate append should succeed");
-    assert_eq!(
-        second.status,
-        AppendSystemContextStatus::Duplicate,
-        "second append with same key should be duplicate"
     );
 }
 

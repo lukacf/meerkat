@@ -8,8 +8,7 @@
 //! - metadata-persist admission (`schema_version > 0 && model_present`),
 //! - build-state-persist consistency admission (mob-tool authority context
 //!   must be absent or generated-authority),
-//! - build-state restore authorization (the recovery half of the same fact),
-//! - system-prompt-mutation admission (`prompt_present || prompt_byte_count == 0`).
+//! - build-state restore authorization (the recovery half of the same fact).
 //!
 //! This module performs only the MECHANICAL work the DSL cannot express: it
 //! extracts the typed facts the machine's verdict actually reads from the bulky
@@ -23,37 +22,6 @@
 
 use crate::generated::session_document::{self, SessionDocumentEffect, SessionDocumentError};
 use crate::{SessionBuildState, SessionMetadata};
-
-/// Typed provenance class for a system-prompt mutation request.
-///
-/// This is the meerkat-core domain mirror of
-/// [`session_document::SessionSystemPromptSource`]; producers construct it with
-/// their typed intent and it crosses the machine seam as a typed fact (no
-/// `source` string folklore). The mutation guard does not branch on it — the
-/// verdict is decided from prompt presence — but pinning the class typed keeps
-/// the producer's intent explicit at the boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SessionSystemPromptSource {
-    DirectMutation,
-    ExplicitBuild,
-    DefaultBuild,
-    WasmDefaultBuild,
-    RuntimeContextAppend,
-    RuntimeSteerCleanup,
-}
-
-impl From<SessionSystemPromptSource> for session_document::SessionSystemPromptSource {
-    fn from(value: SessionSystemPromptSource) -> Self {
-        match value {
-            SessionSystemPromptSource::DirectMutation => Self::DirectMutation,
-            SessionSystemPromptSource::ExplicitBuild => Self::ExplicitBuild,
-            SessionSystemPromptSource::DefaultBuild => Self::DefaultBuild,
-            SessionSystemPromptSource::WasmDefaultBuild => Self::WasmDefaultBuild,
-            SessionSystemPromptSource::RuntimeContextAppend => Self::RuntimeContextAppend,
-            SessionSystemPromptSource::RuntimeSteerCleanup => Self::RuntimeSteerCleanup,
-        }
-    }
-}
 
 /// Error surfaced when the canonical machine rejects a durable-config request.
 ///
@@ -106,46 +74,6 @@ impl AuthorizedSessionBuildState {
     pub fn into_state(self) -> SessionBuildState {
         self.state
     }
-}
-
-/// System prompt whose mutation the canonical machine has authorized.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AuthorizedSystemPrompt {
-    prompt: String,
-    replacing_existing: bool,
-    source: SessionSystemPromptSource,
-}
-
-impl AuthorizedSystemPrompt {
-    #[must_use]
-    pub fn into_parts(self) -> (String, bool) {
-        (self.prompt, self.replacing_existing)
-    }
-
-    /// The typed mutation provenance carried into the applied system message so
-    /// the transcript-continuity save-guard reads a typed fact, not a rendered
-    /// prompt prefix.
-    #[must_use]
-    pub fn mutation_kind(&self) -> crate::types::SystemPromptMutationKind {
-        self.source.into()
-    }
-}
-
-impl From<SessionSystemPromptSource> for crate::types::SystemPromptMutationKind {
-    fn from(value: SessionSystemPromptSource) -> Self {
-        match value {
-            SessionSystemPromptSource::DirectMutation => Self::DirectMutation,
-            SessionSystemPromptSource::ExplicitBuild => Self::ExplicitBuild,
-            SessionSystemPromptSource::DefaultBuild => Self::DefaultBuild,
-            SessionSystemPromptSource::WasmDefaultBuild => Self::WasmDefaultBuild,
-            SessionSystemPromptSource::RuntimeContextAppend => Self::RuntimeContextAppend,
-            SessionSystemPromptSource::RuntimeSteerCleanup => Self::RuntimeSteerCleanup,
-        }
-    }
-}
-
-fn usize_to_u64(value: usize) -> u64 {
-    u64::try_from(value).unwrap_or(u64::MAX)
 }
 
 fn document_authority() -> session_document::SessionDocumentMachineAuthority {
@@ -258,30 +186,4 @@ pub fn restore_session_build_state(
 ) -> Result<SessionBuildState, SessionDurableConfigAuthorityError> {
     drive_build_state_restore()?;
     Ok(state)
-}
-
-/// Authorize a system-prompt mutation through the canonical machine.
-pub fn authorize_system_prompt_mutation(
-    prompt: String,
-    source: SessionSystemPromptSource,
-    replacing_existing: bool,
-) -> Result<AuthorizedSystemPrompt, SessionDurableConfigAuthorityError> {
-    let mut authority = document_authority();
-    let effects = authority.authorize_system_prompt_mutation(
-        source.into(),
-        !prompt.is_empty(),
-        usize_to_u64(prompt.len()),
-        replacing_existing,
-    )?;
-    expect_effect(&effects, |effect| {
-        matches!(
-            effect,
-            SessionDocumentEffect::SystemPromptMutationAuthorized
-        )
-    })?;
-    Ok(AuthorizedSystemPrompt {
-        prompt,
-        replacing_existing,
-        source,
-    })
 }

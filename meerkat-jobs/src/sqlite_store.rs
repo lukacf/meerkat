@@ -170,7 +170,26 @@ pub const JOBS_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::SchemaDoma
             apply: migration_0002_notification_outbox_and_subscriptions,
         },
     ],
+    initialize_current: initialize_current_jobs_schema,
+    allowed_existing_versions: &[2],
+    released_predecessors: &[],
+    owned_objects: &[
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "detached_jobs",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Index,
+            name: "idx_detached_jobs_pending_outbox",
+        },
+    ],
+    retired_objects: &[],
 };
+
+fn initialize_current_jobs_schema(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+    migration_0001_jobs_schema(tx)?;
+    migration_0002_notification_outbox_and_subscriptions(tx)
+}
 
 fn migration_0001_jobs_schema(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
     tx.execute_batch(

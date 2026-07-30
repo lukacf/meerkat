@@ -1514,14 +1514,21 @@ async fn build_agent_with_resume_preserves_explicit_override_masked_fields() {
 }
 
 #[tokio::test]
-async fn build_agent_with_resume_preserves_persisted_system_prompt() {
+async fn repeated_materialization_is_invisible_to_ordered_system_transcript() {
     let temp = tempfile::tempdir().unwrap();
     let factory = temp_factory(&temp);
     let mut config = Config::default();
     config.agent.system_prompt = Some("Current config prompt should not be applied".to_string());
 
     let mut session = Session::new();
-    session.set_system_prompt("Persisted system prompt".to_string());
+    session.append_system_message("Persisted system prompt".to_string());
+    session.push(meerkat_core::Message::User(UserMessage::text(
+        "durable conversation".to_string(),
+    )));
+    session.append_system_message("ordinary later System fact".to_string());
+    session
+        .set_build_state(meerkat_core::SessionBuildState::default())
+        .unwrap();
     session
         .set_session_metadata(SessionMetadata {
             schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
@@ -1556,23 +1563,40 @@ async fn build_agent_with_resume_preserves_persisted_system_prompt() {
         })
         .unwrap();
 
+    let original_messages = session.messages().to_vec();
     let build_config = AgentBuildConfig {
         llm_client_override: Some(Arc::new(MockLlmClient)),
         resume_session: Some(session),
+        system_prompt: meerkat::SystemPromptOverride::Set("Persisted system prompt".to_string()),
         ..AgentBuildConfig::new("gpt-5.4")
     };
 
     let agent = factory.build_agent(build_config, &config).await.unwrap();
+    assert_eq!(
+        agent.session().messages(),
+        original_messages.as_slice(),
+        "resume materialization must preserve the transcript byte-for-byte"
+    );
 
-    match agent.session().messages().first() {
-        Some(meerkat_core::Message::System(system)) => {
-            assert_eq!(
-                system.content, "Persisted system prompt",
-                "resume should preserve the persisted system prompt instead of silently composing the current one"
-            );
-        }
-        other => panic!("expected persisted system prompt, got {other:?}"),
-    }
+    let rematerialized = factory
+        .build_agent(
+            AgentBuildConfig {
+                llm_client_override: Some(Arc::new(MockLlmClient)),
+                resume_session: Some(agent.session().clone()),
+                system_prompt: meerkat::SystemPromptOverride::Set(
+                    "host config changed while the process was down".to_string(),
+                ),
+                ..AgentBuildConfig::new("gpt-5.4")
+            },
+            &config,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rematerialized.session().messages(),
+        original_messages.as_slice(),
+        "host config drift during break must not inject, replace, or deduplicate any System row"
+    );
 }
 
 #[tokio::test]
@@ -1997,19 +2021,17 @@ async fn build_agent_with_explicit_provider() {
     assert_eq!(metadata.model, "my-custom-model");
 }
 
-/// 11. `build_agent` uses config default max_tokens when not specified.
+/// 11. `build_agent` uses the catalog output cap for an unpinned thinking model.
 #[tokio::test]
-async fn build_agent_uses_config_default_max_tokens() {
+async fn build_agent_uses_model_aware_default_max_tokens() {
     let temp = tempfile::tempdir().unwrap();
     let factory = temp_factory(&temp);
     let config = Config::default();
-    // The factory resolves the operative per-turn limit from the (now optional)
-    // config field at point-of-use; mirror that here.
-    let expected_max_tokens = config.resolved_max_tokens();
+    let expected_max_tokens = 64_000;
 
     let build_config = AgentBuildConfig {
         llm_client_override: Some(Arc::new(MockLlmClient)),
-        // max_tokens: None -- should use config default
+        // max_tokens: None -- should use the catalog-owned thinking-model cap
         ..AgentBuildConfig::new("claude-sonnet-4-5")
     };
 
@@ -2021,7 +2043,7 @@ async fn build_agent_uses_config_default_max_tokens() {
         .expect("session should have metadata");
     assert_eq!(
         metadata.max_tokens, expected_max_tokens,
-        "Should use config default max_tokens"
+        "Should use catalog max_output_tokens for an unpinned thinking model"
     );
 }
 

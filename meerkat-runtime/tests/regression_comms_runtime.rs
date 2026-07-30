@@ -314,7 +314,7 @@ async fn completed_response_admission_stamps_apply_intent_without_context_projec
     assert_eq!(
         semantics.peer_response_terminal_apply_intent(),
         Some(
-            meerkat_core::lifecycle::run_primitive::PeerResponseTerminalApplyIntent::AppendContextAndRun
+            meerkat_core::lifecycle::run_primitive::PeerResponseTerminalApplyIntent::AppendContentAndRun
         )
     );
     assert_eq!(
@@ -328,10 +328,6 @@ async fn completed_response_admission_stamps_apply_intent_without_context_projec
         projection.append.is_some(),
         "terminal response must carry its typed comms notice append so the mandatory \
          requester reaction turn has model-visible content"
-    );
-    assert!(
-        projection.context_append.is_none(),
-        "terminal response context projection is supplied by the machine-selected runtime batch"
     );
 }
 

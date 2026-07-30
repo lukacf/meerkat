@@ -27,8 +27,8 @@ use crate::turn_execution_authority::{
     TurnTerminalCauseKind, TurnTerminalOutcome,
 };
 use crate::types::{
-    BlockAssistantMessage, Message, RunResult, SystemNoticeKind, SystemNoticeMessage, ToolCallView,
-    ToolDef, ToolNameSet, UserMessage,
+    AssistantBlock, BlockAssistantMessage, Message, RunResult, StopReason, SystemNoticeKind,
+    SystemNoticeMessage, ToolCallView, ToolDef, ToolNameSet, UserMessage,
 };
 use serde_json::Value;
 use serde_json::value::RawValue;
@@ -78,7 +78,10 @@ struct LlmRetryRequest<'a> {
     run_id: &'a RunId,
     turn_count: u32,
     event_tx: &'a Option<mpsc::Sender<AgentEvent>>,
-    messages: &'a [Message],
+    /// Already-composed, hydrated provider request. Ownership crosses into the
+    /// retry loop so ordinary calls do not deep-clone the accumulated
+    /// transcript merely to obtain a mutable fallback/retry buffer.
+    messages: Vec<Message>,
     tools: &'a [Arc<ToolDef>],
     max_tokens: u32,
     temperature: Option<f32>,
@@ -451,6 +454,10 @@ enum CallingLlmBoundaryGate {
 /// reached a terminal result inside the phase.
 enum CallingLlmGate<T> {
     Continue(T),
+    /// Re-enter CallingLlm without advancing the turn. Used when exact
+    /// request pressure triggered a transcript rewrite and the request must be
+    /// recomposed from the new canonical session.
+    Repoll,
     Done(Result<RunResult, AgentError>),
 }
 
@@ -496,38 +503,75 @@ where
 {
     /// Best-effort intra-loop session checkpoint.
     ///
-    /// This is deliberately NOT the authoritative persistence path: the
-    /// `PersistentSessionService` re-persists the full session with
-    /// `?`-propagation after each turn (`persist_full_session_or_discard_live`),
-    /// and that is the path callers rely on for durability. This in-loop save
-    /// is a redundant convenience for the keep-alive checkpointer / store and
-    /// must therefore stay non-terminal: a failure here is logged, not
-    /// propagated, because the authoritative persistence boundary owns the
-    /// durable outcome.
+    /// This is not the authoritative runtime-boundary commit. WholeBlob keeps
+    /// the historical best-effort behavior because the later boundary owns
+    /// durable truth. A mutable checkpointer may nevertheless return a fatal
+    /// error after an incremental physical mutation: once the store may be
+    /// ahead, continuing with stale actor-local row/component authorities is
+    /// unsafe, so the caller must discard and reload that actor.
     ///
     /// Consistent with that contract, [`RunResult`](crate::types::RunResult)
-    /// exposes no persistence-success field — the run result never claims a
-    /// persistence outcome, so a best-effort miss here cannot launder into a
-    /// false success.
-    async fn save_session_best_effort(&mut self) {
-        if let Err(e) = self.sync_system_context_state_to_session() {
-            tracing::warn!("Failed to sync system-context state into session: {}", e);
+    /// exposes no persistence-success field. A safe best-effort miss still
+    /// produces no claim; an uncertain or unacknowledged physical successor
+    /// terminates before a result can be returned.
+    async fn save_session_best_effort(&mut self, run_id: &RunId) -> Result<(), AgentError> {
+        self.sync_control_state_to_session().map_err(|error| {
+            AgentError::InternalError(format!(
+                "failed to sync agent control state before session checkpoint: {error}"
+            ))
+        })?;
+        if let Some(checkpointer) = self.checkpointer.clone() {
+            let previous = match self.latest_run_checkpoint_receipt.take() {
+                Some(receipt)
+                    if receipt.session_id() == self.session.id() && receipt.run_id() == run_id =>
+                {
+                    Some(receipt)
+                }
+                Some(receipt) => {
+                    return Err(AgentError::InternalError(format!(
+                        "actor retained provisional receipt for session {}/run {}, not active session {}/run {}",
+                        receipt.session_id(),
+                        receipt.run_id(),
+                        self.session.id(),
+                        run_id
+                    )));
+                }
+                None => None,
+            };
+            let expected_sequence = match previous.as_ref() {
+                Some(receipt) => receipt.candidate_sequence().checked_add(1).ok_or_else(|| {
+                    AgentError::InternalError(
+                        "session checkpointer provisional candidate sequence is exhausted"
+                            .to_string(),
+                    )
+                })?,
+                None => 1,
+            };
+            let next = checkpointer
+                .checkpoint_run(&mut self.session, run_id, previous.as_ref())
+                .await?;
+            if let Some(next) = next {
+                if next.session_id() != self.session.id()
+                    || next.run_id() != run_id
+                    || next.candidate_sequence() != expected_sequence
+                {
+                    return Err(AgentError::InternalError(
+                        "session checkpointer returned a provisional receipt for the wrong session/run or noncontiguous candidate sequence".to_string(),
+                    ));
+                }
+                self.latest_run_checkpoint_receipt = Some(next);
+            } else if previous.is_some() {
+                return Err(AgentError::InternalError(
+                    "session checkpointer dropped an existing provisional receipt".to_string(),
+                ));
+            }
+            return Ok(());
         }
-        // Warm the framed checkpoint midstate on the LIVE session before any
-        // persistence path clones it: the checkpoint documents downstream are
-        // minted on per-save clones, so a framed-less live session pays one
-        // O(document) reseed per clone per boundary, while a warmed live
-        // session hands every clone (and, through the sealed snapshots, every
-        // decoded copy) a midstate that ordinary appends keep extending.
-        // One-time O(document) per session lifetime; a no-op when warm.
-        crate::checkpoint::warm_framed_checkpoint_midstate(&self.session);
-        if let Some(ref checkpointer) = self.checkpointer {
-            checkpointer.checkpoint(&self.session).await;
-            return;
-        }
+        self.latest_run_checkpoint_receipt = None;
         if let Err(e) = self.store.save(&self.session).await {
             tracing::warn!("Failed to save session: {}", e);
         }
+        Ok(())
     }
 
     fn publish_pending_sticky_model_fallback(&mut self) -> Result<(), AgentError> {
@@ -1300,13 +1344,14 @@ where
             durable_visibility_parent,
         } = request;
 
-        let mut current_messages = messages.to_vec();
+        let mut current_messages = messages;
         // `tools` is already the ToolScope authority's boundary projection;
         // the client cannot narrow or widen it with a private semantic view.
         let mut current_tools: Arc<[Arc<ToolDef>]> = tools.to_vec().into();
         let mut current_max_tokens = max_tokens;
         let mut current_provider_params = provider_params.cloned();
         let mut attempt = 0u32;
+        let mut fallback_request_pressure_recheck = false;
 
         loop {
             // 1. Budget gate at loop entry
@@ -1323,6 +1368,30 @@ where
                 && let Some(exceeded) = self.budget.observe().exceeded()
             {
                 return Err(exceeded.to_agent_error());
+            }
+
+            if fallback_request_pressure_recheck {
+                fallback_request_pressure_recheck = false;
+                if let Some(pressure) = self.client.request_pressure(
+                    &current_messages,
+                    &current_tools,
+                    current_max_tokens,
+                    temperature,
+                    current_provider_params.as_ref(),
+                )? {
+                    let effective_cap = self
+                        .compactor
+                        .as_ref()
+                        .and_then(|compactor| compactor.request_byte_cap(pressure))
+                        .or(pressure.max_bytes);
+                    if effective_cap.is_some_and(|max_bytes| pressure.encoded_bytes > max_bytes) {
+                        return Err(self.request_too_large_preflight_error(
+                            "request exceeds the newly activated fallback provider cap",
+                            pressure.encoded_bytes,
+                            effective_cap,
+                        ));
+                    }
+                }
             }
 
             // 4. Determine whether to wrap the call and select timeout source
@@ -1539,6 +1608,7 @@ where
                                 current_max_tokens = next_max_tokens;
                                 current_messages.push(notice);
                                 *durable_visibility_parent = Some(next_durable_visibility_parent);
+                                fallback_request_pressure_recheck = true;
                             }
                             self.execute_turn_effects(&recover, turn_count, event_tx)
                                 .await?;
@@ -1644,6 +1714,7 @@ where
                             current_max_tokens = next_max_tokens;
                             current_messages.push(notice);
                             *durable_visibility_parent = Some(next_durable_visibility_parent);
+                            fallback_request_pressure_recheck = true;
                         }
                         self.execute_turn_effects(&recover, turn_count, event_tx)
                             .await?;
@@ -1915,6 +1986,16 @@ where
         event_tx: &Option<mpsc::Sender<AgentEvent>>,
     ) -> Result<(), AgentError> {
         for effect in &transition.effects {
+            if matches!(
+                effect,
+                TurnExecutionEffect::RunCompleted { .. }
+                    | TurnExecutionEffect::RunFailed { .. }
+                    | TurnExecutionEffect::RunCancelled { .. }
+            ) {
+                self.pending_compaction_boundary_index = None;
+                self.pending_compaction_request_pressure = None;
+                self.post_compaction_pressure_check = None;
+            }
             match effect {
                 TurnExecutionEffect::RunCompleted { run_id } => {
                     if let Some(handle) = self.turn_state_handle.as_deref() {
@@ -1960,8 +2041,30 @@ where
                 | TurnExecutionEffect::CallTimeoutClassified { .. } => {}
             }
             if let TurnExecutionEffect::CheckCompaction = effect {
-                let current_boundary_index = self.compaction_cadence.session_boundary_index;
-                if let Some(ref compactor) = self.compactor {
+                let Some(current_boundary_index) = self.pending_compaction_boundary_index.take()
+                else {
+                    // The machine owns when a compaction check exists, but an
+                    // exact byte decision is not available until the later
+                    // provider-request seam. Park this exact boundary and
+                    // advance/persist cadence once; preflight replays only the
+                    // parked effect after composition and hydration.
+                    let current_boundary_index = self.compaction_cadence.session_boundary_index;
+                    self.pending_compaction_boundary_index = Some(current_boundary_index);
+                    self.compaction_cadence.session_boundary_index = self
+                        .compaction_cadence
+                        .session_boundary_index
+                        .saturating_add(1);
+                    let cadence = self.compaction_cadence.clone();
+                    crate::agent::compact::persist_compaction_cadence(self.session_mut(), &cadence)
+                        .map_err(|error| {
+                            AgentError::InternalError(format!(
+                                "failed to persist session compaction cadence metadata: {error}"
+                            ))
+                        })?;
+                    continue;
+                };
+                let provider_request_pressure = self.pending_compaction_request_pressure.take();
+                if let Some(compactor) = self.compactor.clone() {
                     let last_guarded_boundary = [
                         self.compaction_cadence.last_compaction_boundary_index,
                         self.compaction_cadence
@@ -1973,6 +2076,7 @@ where
                     let ctx = crate::agent::compact::build_compaction_context(
                         self.session.messages(),
                         self.last_input_tokens,
+                        provider_request_pressure,
                         last_guarded_boundary,
                         current_boundary_index,
                     );
@@ -1993,7 +2097,7 @@ where
                             Ok(parent_revision) => {
                                 crate::agent::compact::run_compaction(
                                     self.client.as_ref(),
-                                    compactor,
+                                    &compactor,
                                     self.compaction_curator.as_ref(),
                                     crate::compact::CompactionWindow {
                                         messages: self.session.messages(),
@@ -2288,6 +2392,13 @@ where
                             }
                             if rewrite_committed {
                                 self.last_input_tokens = 0;
+                                self.post_compaction_pressure_check = provider_request_pressure
+                                    .map(|pressure| {
+                                        crate::ProviderRequestPressure::new(
+                                            pressure.encoded_bytes,
+                                            compactor.request_byte_cap(pressure),
+                                        )
+                                    });
                                 self.compaction_cadence.last_compaction_boundary_index =
                                     Some(outcome.session_boundary_index);
                                 if emit_completed_now
@@ -2310,14 +2421,7 @@ where
                         }
                     }
                 }
-                self.compaction_cadence.session_boundary_index = self
-                    .compaction_cadence
-                    .session_boundary_index
-                    .saturating_add(1);
                 let cadence = self.compaction_cadence.clone();
-                // A cadence-persist failure is a typed serialization fault, not
-                // a best-effort no-op: surfacing it keeps the persisted cadence
-                // and the in-memory `compaction_cadence` from silently diverging.
                 crate::agent::compact::persist_compaction_cadence(self.session_mut(), &cadence)
                     .map_err(|error| {
                         AgentError::InternalError(format!(
@@ -3127,7 +3231,7 @@ where
             schema_warnings: self.extraction_state.take_schema_warnings(),
             skill_diagnostics: self.resolve_skill_diagnostics_for_result().await,
         };
-        self.save_session_best_effort().await;
+        self.save_session_best_effort(run_id).await?;
         self.emit_extraction_failed_event(&extraction_error, event_tx.as_ref())
             .await;
         // `ExtractionFailed` IS the terminal observability event for a failed
@@ -3232,13 +3336,18 @@ where
             })?;
             run_id
         };
+        // A provisional receipt belongs to exactly one run. Clear any
+        // zero-checkpoint predecessor synchronously once the fresh run
+        // identity is known, before the first suspension point, so service
+        // finalization can consume it only through the matching run-id filter.
+        self.latest_run_checkpoint_receipt = None;
         self.runtime_started_run_id = Some(run_id.clone());
         // Open the first actor-local boundary generation before the first
         // suspension point, and retain a run-scope guard so normal errors,
         // natural completion, hard-interrupt future drops, and task abort all
         // close any pending or parked preparation.
-        let _system_context_boundary_run = self
-            .system_context_state
+        let _transient_turn_context_boundary_run = self
+            .transient_turn_context_state
             .begin_boundary_run(run_id.clone())
             .map_err(|error| AgentError::InternalError(error.to_string()))?;
         // PrimitiveApplied transitions ApplyingPrimitive -> CallingLlm
@@ -3491,6 +3600,7 @@ where
         let tool_defs = self.apply_calling_llm_tool_scope(ctx).await?;
         let prepared = match self.prepare_calling_llm_request(ctx).await? {
             CallingLlmGate::Continue(prepared) => prepared,
+            CallingLlmGate::Repoll => return Ok(CallingLlmStep::Repoll),
             CallingLlmGate::Done(result) => return Ok(CallingLlmStep::Done(result)),
         };
         let result = match self
@@ -3498,6 +3608,7 @@ where
             .await?
         {
             CallingLlmGate::Continue(result) => result,
+            CallingLlmGate::Repoll => return Ok(CallingLlmStep::Repoll),
             CallingLlmGate::Done(result) => return Ok(CallingLlmStep::Done(result)),
         };
         let assistant = match self
@@ -3505,6 +3616,7 @@ where
             .await?
         {
             CallingLlmGate::Continue(assistant) => assistant,
+            CallingLlmGate::Repoll => return Ok(CallingLlmStep::Repoll),
             CallingLlmGate::Done(result) => return Ok(CallingLlmStep::Done(result)),
         };
         // Check if we have tool calls
@@ -3523,7 +3635,7 @@ where
         &mut self,
         ctx: &mut CallingLlmTurnCtx<'_>,
     ) -> Result<CallingLlmBoundaryGate, AgentError> {
-        self.system_context_state
+        self.transient_turn_context_state
             .open_next_boundary(ctx.run_id)
             .map_err(|error| AgentError::InternalError(error.to_string()))?;
         // 0. Auth lease refresh loop (Phase 1.5-rev).
@@ -3879,7 +3991,7 @@ where
                         );
                         // Represent runtime notices as user-scoped synthetic context
                         // (same pattern as peer lifecycle updates) so this does not
-                        // mutate or replace the canonical system prompt.
+                        // mutate or replace any ordered System event.
                         self.session.push(synthetic_notice_block_message(
                             SystemNoticeKind::ToolScope,
                             format!("Tool configuration changed at turn boundary: {status}"),
@@ -4189,36 +4301,113 @@ where
         // context pending across fallible/async request hydration.
         // Only the final synchronous consume below records that the
         // model request has crossed its consumption seam.
-        let boundary_system_context = self
-            .prepare_pending_system_context_boundary(ctx.run_id)
+        let boundary_contexts = self
+            .take_transient_turn_context_at_boundary(ctx.run_id)
             .await
             .map_err(|e| AgentError::InternalError(e.to_string()))?;
-        let request_messages =
-            self.llm_messages_with_runtime_system_context(boundary_system_context.appends());
+        let base_context_count = self.active_turn_request_contexts.len();
+        self.active_turn_request_contexts.extend(boundary_contexts);
+        let request_messages = self.llm_messages_for_boundary(!prepared.in_extraction);
+        self.active_turn_request_contexts
+            .truncate(base_context_count);
+        let request_messages = request_messages?;
         let request_messages = self.hydrate_llm_request_messages(request_messages).await?;
-        // Peer-ingestion observations are emitted while canonical
-        // context is still pending. If an awaited event send is
-        // cancelled, dropping the runner witness leaves it
-        // unapplied. Once the final send returns, consume and the
-        // LLM call follow synchronously in the same task poll.
-        for append in boundary_system_context.appends() {
-            for event in crate::event::peer_content_ingested_events(&append.content) {
-                let _ =
-                    crate::event_tap::tap_emit(&self.event_tap, ctx.event_tx.as_ref(), event).await;
+        let request_pressure = match self.client.request_pressure(
+            &request_messages,
+            call_tool_defs,
+            prepared.effective_max_tokens,
+            prepared.effective_temperature,
+            prepared.typed_provider_params.as_ref(),
+        ) {
+            Ok(pressure) => pressure,
+            Err(error) => {
+                self.terminalize_fatal_error(ctx.run_id, ctx.turn_count, ctx.event_tx, &error)
+                    .await?;
+                return Err(error);
+            }
+        };
+
+        if let Some(before) = self.post_compaction_pressure_check.take() {
+            let Some(after) = request_pressure else {
+                let error = self.request_too_large_preflight_error(
+                    "the provider could not verify the rebuilt request after compaction",
+                    before.encoded_bytes,
+                    before.max_bytes,
+                );
+                self.terminalize_fatal_error(ctx.run_id, ctx.turn_count, ctx.event_tx, &error)
+                    .await?;
+                return Err(error);
+            };
+            let effective_cap = self
+                .compactor
+                .as_ref()
+                .and_then(|compactor| compactor.request_byte_cap(after))
+                .or(after.max_bytes);
+            let exceeds_cap =
+                effective_cap.is_some_and(|max_bytes| after.encoded_bytes > max_bytes);
+            if after.encoded_bytes >= before.encoded_bytes || exceeds_cap {
+                let error = self.request_too_large_preflight_error(
+                    &format!(
+                        "compaction is irreducible at the configured retention: provider request \
+                         body changed from {} to {} bytes",
+                        before.encoded_bytes, after.encoded_bytes
+                    ),
+                    after.encoded_bytes,
+                    effective_cap,
+                );
+                self.terminalize_fatal_error(ctx.run_id, ctx.turn_count, ctx.event_tx, &error)
+                    .await?;
+                return Err(error);
             }
         }
-        self.consume_pending_system_context_boundary(boundary_system_context)
-            .map_err(|e| AgentError::InternalError(e.to_string()))?;
-        // Steer-delivered peer content commits here (applied as
-        // runtime system context at the model boundary). There is
-        // no unrelated await between this consume and entry into
-        // the exact LLM future.
+
+        if self.pending_compaction_boundary_index.is_some() {
+            let prior_completed_boundary = self.compaction_cadence.last_compaction_boundary_index;
+            self.pending_compaction_request_pressure = request_pressure;
+            let transition = TurnExecutionTransition {
+                prev_phase: TurnPhase::CallingLlm,
+                next_phase: TurnPhase::CallingLlm,
+                effects: vec![TurnExecutionEffect::CheckCompaction],
+            };
+            self.execute_turn_effects(&transition, ctx.turn_count, ctx.event_tx)
+                .await?;
+            if self.compaction_cadence.last_compaction_boundary_index != prior_completed_boundary {
+                // The request composed above belongs to the old transcript.
+                // Re-enter the boundary so system overlays, blobs,
+                // tools, provider parameters, and provider JSON are all
+                // recomposed from the committed rewrite.
+                return Ok(CallingLlmGate::Repoll);
+            }
+        }
+
+        if let Some(pressure) = request_pressure
+            && self
+                .compactor
+                .as_ref()
+                .and_then(|compactor| compactor.request_byte_cap(pressure))
+                .or(pressure.max_bytes)
+                .is_some_and(|max_bytes| pressure.encoded_bytes > max_bytes)
+        {
+            let effective_cap = self
+                .compactor
+                .as_ref()
+                .and_then(|compactor| compactor.request_byte_cap(pressure))
+                .or(pressure.max_bytes);
+            let error = self.request_too_large_preflight_error(
+                "provider request body exceeds the active provider cap and compaction did not produce a fitting rewrite",
+                pressure.encoded_bytes,
+                effective_cap,
+            );
+            self.terminalize_fatal_error(ctx.run_id, ctx.turn_count, ctx.event_tx, &error)
+                .await?;
+            return Err(error);
+        }
         let result = match self
             .call_llm_with_retry(LlmRetryRequest {
                 run_id: ctx.run_id,
                 turn_count: ctx.turn_count,
                 event_tx: ctx.event_tx,
-                messages: &request_messages,
+                messages: request_messages,
                 tools: call_tool_defs,
                 max_tokens: prepared.effective_max_tokens,
                 temperature: prepared.effective_temperature,
@@ -4297,6 +4486,34 @@ where
         };
         Ok(CallingLlmGate::Continue(result))
     }
+
+    fn request_too_large_preflight_error(
+        &self,
+        message: &str,
+        encoded_bytes: u64,
+        max_bytes: Option<u64>,
+    ) -> AgentError {
+        let recovery = "retries cannot succeed until the provider request shrinks; reduce retained \
+            history or media, or use curator-driven compaction";
+        AgentError::llm(
+            self.client.provider().as_str(),
+            crate::error::LlmFailureReason::ProviderError(
+                crate::error::LlmProviderError::non_retryable(
+                    crate::error::LlmProviderErrorKind::RequestTooLarge,
+                    serde_json::json!({
+                        "message": message,
+                        "encoded_bytes": encoded_bytes,
+                        "max_bytes": max_bytes,
+                        "recovery": recovery,
+                    }),
+                ),
+            ),
+            format!(
+                "{message}; encoded_bytes={encoded_bytes}, max_bytes={max_bytes:?}; {recovery}"
+            ),
+        )
+    }
+
     /// Records usage, classifies empty output, and runs post-LLM hooks
     /// over the assistant response.
     async fn commit_calling_llm_response(
@@ -4333,6 +4550,31 @@ where
         }
 
         let (blocks, stop_reason, usage) = result.into_parts();
+        let has_reasoning = blocks
+            .iter()
+            .any(|block| matches!(block, AssistantBlock::Reasoning { .. }));
+        let has_answer_or_action = blocks.iter().any(|block| match block {
+            AssistantBlock::Text { text, .. } | AssistantBlock::Transcript { text, .. } => {
+                !text.trim().is_empty()
+            }
+            AssistantBlock::ToolUse { .. } | AssistantBlock::Image { .. } => true,
+            AssistantBlock::Reasoning { .. } | AssistantBlock::ServerToolContent { .. } => false,
+        });
+        let exhausted_during_thinking =
+            stop_reason == StopReason::MaxTokens && has_reasoning && !has_answer_or_action;
+        if exhausted_during_thinking {
+            let error = AgentError::MaxTokensReached {
+                turn: ctx.turn_count,
+                partial: "turn exhausted max_tokens during thinking; raise max_tokens or set a thinking budget"
+                    .to_string(),
+            };
+            // Usage above is intentionally retained, but no empty assistant
+            // message is committed: the typed failure and recovery hint are
+            // the only truthful user-visible outcome.
+            self.terminalize_fatal_error(ctx.run_id, ctx.turn_count, ctx.event_tx, &error)
+                .await?;
+            return Err(error);
+        }
         let assistant_msg = self.stamp_assistant_message_identity(
             BlockAssistantMessage::new(blocks, stop_reason),
             ctx.run_id,
@@ -4545,7 +4787,7 @@ where
         // post-tool model boundary. Open its exact actor-local
         // generation before any tool/hook await so Steer can
         // prepare while tools or barrier ops are still running.
-        self.system_context_state
+        self.transient_turn_context_state
             .open_next_boundary(ctx.run_id)
             .map_err(|error| AgentError::InternalError(error.to_string()))?;
 
@@ -5134,7 +5376,7 @@ where
                     schema_warnings: self.extraction_state.take_schema_warnings(),
                     skill_diagnostics: self.resolve_skill_diagnostics_for_result().await,
                 };
-                self.save_session_best_effort().await;
+                self.save_session_best_effort(ctx.run_id).await?;
                 self.emit_extraction_failed_event(&extraction_error, ctx.event_tx.as_ref())
                     .await;
                 return Ok(CallingLlmStep::Done(Ok(result)));
@@ -5168,7 +5410,7 @@ where
         })?;
         self.execute_turn_effects(&t, ctx.turn_count, ctx.event_tx)
             .await?;
-        self.save_session_best_effort().await;
+        self.save_session_best_effort(ctx.run_id).await?;
         if let Some(structured_output) = result.structured_output.clone() {
             self.emit_extraction_succeeded_event(
                 structured_output,
@@ -5299,7 +5541,7 @@ where
             })?;
             self.execute_turn_effects(&t, ctx.turn_count, ctx.event_tx)
                 .await?;
-            self.save_session_best_effort().await;
+            self.save_session_best_effort(ctx.run_id).await?;
             return Ok(CallingLlmStep::Done(
                 self.build_result(ctx.turn_count + 1, ctx.tool_call_count)
                     .await,
@@ -5338,7 +5580,7 @@ where
             .await?;
 
         // Save session
-        self.save_session_best_effort().await;
+        self.save_session_best_effort(ctx.run_id).await?;
 
         Ok(CallingLlmStep::Done(Ok(result)))
     }
@@ -6144,23 +6386,49 @@ mod tests {
 
     struct ImageHydrationLlmClient {
         seen_user_blocks: Mutex<Vec<Vec<ContentBlock>>>,
+        seen_pressure_blocks: Mutex<Vec<Vec<ContentBlock>>>,
     }
 
     impl ImageHydrationLlmClient {
         fn new() -> Self {
             Self {
                 seen_user_blocks: Mutex::new(Vec::new()),
+                seen_pressure_blocks: Mutex::new(Vec::new()),
             }
         }
 
         fn seen(&self) -> Vec<Vec<ContentBlock>> {
             self.seen_user_blocks.lock().unwrap().clone()
         }
+
+        fn seen_pressure(&self) -> Vec<Vec<ContentBlock>> {
+            self.seen_pressure_blocks.lock().unwrap().clone()
+        }
     }
 
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
     #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     impl AgentLlmClient for ImageHydrationLlmClient {
+        fn request_pressure(
+            &self,
+            messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+        ) -> Result<Option<crate::ProviderRequestPressure>, AgentError> {
+            let mut seen = self.seen_pressure_blocks.lock().unwrap();
+            for message in messages {
+                if let Message::User(user) = message {
+                    seen.push(user.content.clone());
+                }
+            }
+            Ok(Some(crate::ProviderRequestPressure::new(
+                1_024,
+                Some(1_000_000),
+            )))
+        }
+
         async fn stream_response(
             &self,
             messages: &[Message],
@@ -8784,201 +9052,6 @@ mod tests {
             .await
     }
 
-    #[tokio::test]
-    async fn active_turn_system_context_is_visible_after_tool_boundary() {
-        let client = Arc::new(BoundaryContextRecordingClient::new());
-        let tool_started = Arc::new(Notify::new());
-        let release_tool = Arc::new(Notify::new());
-        let tools = Arc::new(BlockingToolDispatcher {
-            tools: Arc::from([Arc::new(ToolDef::new(
-                "slow_tool",
-                "blocks until the test releases it",
-                serde_json::json!({ "type": "object" }),
-            ))]),
-            started: Arc::clone(&tool_started),
-            release: Arc::clone(&release_tool),
-        });
-        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
-            .system_prompt("base system prompt")
-            .build_standalone(client.clone(), tools, Arc::new(NoopStore))
-            .await;
-        let state = agent.system_context_state();
-
-        let (tx, mut rx) = mpsc::channel(32);
-        let run = tokio::spawn(async move {
-            agent
-                .run_with_events("start with a tool".to_string().into(), tx)
-                .await
-        });
-
-        tokio::time::timeout(std::time::Duration::from_secs(1), tool_started.notified())
-            .await
-            .expect("tool should start");
-
-        state
-            .stage_active_turn_append(
-                &crate::service::AppendSystemContextRequest {
-                    content: crate::lifecycle::run_primitive::CoreRenderable::text(
-                        "STEER_MARKER_visible_after_tool".to_string(),
-                    ),
-                    source: Some("test:active-steer".to_string()),
-                    idempotency_key: Some("test:active-steer".to_string()),
-                    source_kind: crate::session::SystemContextSource::RuntimeSteer,
-                    peer_response_terminal: None,
-                },
-                crate::time_compat::SystemTime::now(),
-            )
-            .expect("active-turn append should stage");
-
-        release_tool.notify_waiters();
-        let result = tokio::time::timeout(std::time::Duration::from_secs(2), run)
-            .await
-            .expect("run should complete")
-            .expect("run task should join")
-            .expect("agent run should succeed");
-        assert_eq!(result.turns, 2);
-
-        while rx.try_recv().is_ok() {}
-        let seen = client.seen_system_messages();
-        assert!(
-            seen.len() >= 2,
-            "client should have seen both pre-tool and post-tool model requests: {seen:?}"
-        );
-        assert!(
-            seen.iter()
-                .skip(1)
-                .any(|system| system.contains("STEER_MARKER_visible_after_tool")),
-            "active-turn staged context must be present on the model request after the tool boundary; seen={seen:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn active_turn_terminal_fact_is_visible_and_persisted_as_notice() {
-        let client = Arc::new(BoundaryContextRecordingClient::new());
-        let tool_started = Arc::new(Notify::new());
-        let release_tool = Arc::new(Notify::new());
-        let tools = Arc::new(BlockingToolDispatcher {
-            tools: Arc::from([Arc::new(ToolDef::new(
-                "slow_tool",
-                "blocks until the test releases it",
-                serde_json::json!({ "type": "object" }),
-            ))]),
-            started: Arc::clone(&tool_started),
-            release: Arc::clone(&release_tool),
-        });
-        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
-            .system_prompt("base system prompt")
-            .build_standalone(client.clone(), tools, Arc::new(NoopStore))
-            .await;
-        let state = agent.system_context_state();
-
-        let (tx, _rx) = mpsc::channel(32);
-        let run = tokio::spawn(async move {
-            let result = agent
-                .run_with_events("start with a tool".to_string().into(), tx)
-                .await;
-            (result, agent)
-        });
-
-        tokio::time::timeout(std::time::Duration::from_secs(1), tool_started.notified())
-            .await
-            .expect("tool should start");
-
-        let route_identity = crate::handles::PeerResponseTerminalRouteIdentity::parse(
-            "550e8400-e29b-41d4-a716-446655440000",
-        )
-        .expect("route identity");
-        let correlation_id = crate::handles::PeerResponseTerminalCorrelationId::parse(
-            "018f6f79-7a82-7c4e-a552-a3b86f9630f1",
-        )
-        .expect("correlation id");
-        let fact = crate::handles::PeerResponseTerminalFact::new(
-            crate::handles::PeerResponseTerminalSource::new(
-                None,
-                route_identity,
-                crate::handles::PeerResponseTerminalDisplayIdentity::parse("Analyst")
-                    .expect("display identity"),
-            ),
-            correlation_id,
-            crate::handles::PeerResponseTerminalProjectionStatus::Completed,
-            crate::handles::PeerResponseTerminalRenderPayload::new(Some(
-                serde_json::json!({"token": "birch seventeen"}),
-            )),
-        );
-        state
-            .stage_active_turn_append(
-                &crate::service::AppendSystemContextRequest {
-                    content: crate::lifecycle::run_primitive::CoreRenderable::SystemNotice {
-                        kind: crate::types::SystemNoticeKind::Comms,
-                        body: Some("Peer terminal response context".to_string()),
-                        blocks: vec![crate::types::SystemNoticeBlock::Comms {
-                            kind: crate::types::CommsNoticeKind::ResponseTerminal,
-                            direction: crate::types::SystemNoticeDirection::Incoming,
-                            peer: Some(crate::types::SystemNoticePeer {
-                                id: fact.source.route_identity.peer_id(),
-                                display_name: Some(fact.source.display_identity.to_string()),
-                            }),
-                            sender_taint: None,
-                            request_id: Some(fact.correlation_id.to_string()),
-                            intent: None,
-                            status: Some(fact.status.label().to_string()),
-                            summary: Some("Peer terminal response".to_string()),
-                            payload: fact.render_payload_value().cloned(),
-                            content: Vec::new(),
-                        }],
-                    },
-                    source: Some(fact.context_key()),
-                    idempotency_key: Some(fact.context_key()),
-                    source_kind: crate::session::SystemContextSource::Normal,
-                    peer_response_terminal: Some(fact),
-                },
-                crate::time_compat::SystemTime::now(),
-            )
-            .expect("active terminal fact should stage");
-
-        release_tool.notify_waiters();
-        let (result, agent) = tokio::time::timeout(std::time::Duration::from_secs(2), run)
-            .await
-            .expect("run should complete")
-            .expect("run task should join");
-        assert_eq!(result.expect("agent run should succeed").turns, 2);
-
-        let seen_counts = client.seen_terminal_notice_counts();
-        assert!(
-            seen_counts.iter().skip(1).any(|count| *count == 1),
-            "the post-tool provider request must see the terminal notice: {seen_counts:?}"
-        );
-        assert_eq!(
-            agent
-                .session()
-                .messages()
-                .iter()
-                .filter(|message| {
-                    matches!(
-                        message,
-                        Message::SystemNotice(notice)
-                            if notice.blocks.iter().any(|block| matches!(
-                                block,
-                                crate::types::SystemNoticeBlock::Comms {
-                                    kind: crate::types::CommsNoticeKind::ResponseTerminal,
-                                    ..
-                                }
-                            ))
-                    )
-                })
-                .count(),
-            1,
-            "consuming the active boundary must persist the terminal notice canonically"
-        );
-        assert!(
-            client
-                .seen_system_messages()
-                .iter()
-                .all(|system| !system.contains("Peer terminal response")),
-            "terminal facts must never enter the leading system prompt"
-        );
-    }
-
     fn incoming_peer_comms_renderable(
         sender_taint: Option<crate::comms::SenderContentTaint>,
     ) -> crate::lifecycle::run_primitive::CoreRenderable {
@@ -9014,12 +9087,14 @@ mod tests {
         let appends = vec![
             crate::lifecycle::run_primitive::ConversationAppend {
                 role: crate::lifecycle::run_primitive::ConversationAppendRole::SystemNotice,
+                identity: None,
                 content: incoming_peer_comms_renderable(Some(
                     crate::comms::SenderContentTaint::Tainted,
                 )),
             },
             crate::lifecycle::run_primitive::ConversationAppend {
                 role: crate::lifecycle::run_primitive::ConversationAppendRole::User,
+                identity: None,
                 content: crate::lifecycle::run_primitive::CoreRenderable::text(
                     "reply to the peer".to_string(),
                 ),
@@ -9060,80 +9135,9 @@ mod tests {
         );
     }
 
-    /// Steer-delivered peer content (runtime system context applied at the
-    /// model boundary) emits the same typed observe fact through the same
+    /// Steer-delivered peer content (a request-local User message injected at
+    /// the model boundary) emits the same typed observe fact through the same
     /// projection owner.
-    #[tokio::test]
-    async fn steer_peer_context_emits_peer_content_ingested_at_boundary() {
-        let client = Arc::new(BoundaryContextRecordingClient::new());
-        let tool_started = Arc::new(Notify::new());
-        let release_tool = Arc::new(Notify::new());
-        let tools = Arc::new(BlockingToolDispatcher {
-            tools: Arc::from([Arc::new(ToolDef::new(
-                "slow_tool",
-                "blocks until the test releases it",
-                serde_json::json!({ "type": "object" }),
-            ))]),
-            started: Arc::clone(&tool_started),
-            release: Arc::clone(&release_tool),
-        });
-        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
-            .system_prompt("base system prompt")
-            .build_standalone(client.clone(), tools, Arc::new(NoopStore))
-            .await;
-        let state = agent.system_context_state();
-
-        let (tx, mut rx) = mpsc::channel(128);
-        let run = tokio::spawn(async move {
-            agent
-                .run_with_events("start with a tool".to_string().into(), tx)
-                .await
-        });
-
-        tokio::time::timeout(std::time::Duration::from_secs(1), tool_started.notified())
-            .await
-            .expect("tool should start");
-
-        state
-            .stage_active_turn_append(
-                &crate::service::AppendSystemContextRequest {
-                    content: incoming_peer_comms_renderable(Some(
-                        crate::comms::SenderContentTaint::Tainted,
-                    )),
-                    source: Some("test:peer-steer".to_string()),
-                    idempotency_key: Some("test:peer-steer".to_string()),
-                    source_kind: crate::session::SystemContextSource::RuntimeSteer,
-                    peer_response_terminal: None,
-                },
-                crate::time_compat::SystemTime::now(),
-            )
-            .expect("active-turn append should stage");
-
-        release_tool.notify_waiters();
-        tokio::time::timeout(std::time::Duration::from_secs(2), run)
-            .await
-            .expect("run should complete")
-            .expect("run task should join")
-            .expect("agent run should succeed");
-
-        let mut saw_ingested = false;
-        while let Ok(event) = rx.try_recv() {
-            if matches!(
-                event,
-                crate::event::AgentEvent::PeerContentIngested {
-                    sender_taint: Some(crate::comms::SenderContentTaint::Tainted),
-                    ..
-                }
-            ) {
-                saw_ingested = true;
-            }
-        }
-        assert!(
-            saw_ingested,
-            "steer-applied peer context must emit PeerContentIngested at the boundary"
-        );
-    }
-
     /// The core trait default fails typed — a runtime that cannot carry the
     /// declaration must never silently drop it.
     #[test]
@@ -10534,13 +10538,6 @@ mod tests {
             self.inner.start_immediate_append(run_id)
         }
 
-        fn start_immediate_context(
-            &self,
-            run_id: RunId,
-        ) -> Result<(), crate::handles::DslTransitionError> {
-            self.inner.start_immediate_context(run_id)
-        }
-
         fn primitive_applied(
             &self,
             run_id: RunId,
@@ -11385,6 +11382,17 @@ mod tests {
                 } if data == "restored-base64"
             )),
             "provider should receive hydrated inline image bytes"
+        );
+        let seen_pressure = client.seen_pressure();
+        assert!(
+            seen_pressure.iter().flatten().any(|block| matches!(
+                block,
+                ContentBlock::Image {
+                    data: ImageData::Inline { data },
+                    ..
+                } if data == "restored-base64"
+            )),
+            "request-pressure witness must be built after cold-resumed blob hydration"
         );
         assert_eq!(blob_store.gets(), vec![blob_id]);
     }
@@ -12519,7 +12527,7 @@ mod tests {
             "the staged sibling barrier must survive callback application"
         );
 
-        let mut unstamped_agent = AgentBuilder::new()
+        let mut unbound_execution_kind_agent = AgentBuilder::new()
             .resume_session(agent.session().clone())
             .with_turn_state_handle(Arc::new(
                 crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
@@ -12543,30 +12551,30 @@ mod tests {
                 Arc::new(NoopStore),
             )
             .await;
-        unstamped_agent.runtime_execution_kind_required = true;
-        let unstamped_before = serde_json::to_value(unstamped_agent.session()).unwrap();
-        let (unstamped_tx, mut unstamped_rx) = mpsc::channel(16);
-        let unstamped_error = unstamped_agent
-            .run_pending_with_events(unstamped_tx)
+        unbound_execution_kind_agent.runtime_execution_kind_required = true;
+        let unbound_before = serde_json::to_value(unbound_execution_kind_agent.session()).unwrap();
+        let (unbound_tx, mut unbound_rx) = mpsc::channel(16);
+        let unbound_error = unbound_execution_kind_agent
+            .run_pending_with_events(unbound_tx)
             .await
-            .expect_err("runtime-attached continuation without its execution stamp must fail");
+            .expect_err("runtime-attached continuation without its execution kind must fail");
         assert!(
-            unstamped_error
+            unbound_error
                 .to_string()
                 .contains("runtime_execution_kind not set"),
-            "unexpected missing-stamp error: {unstamped_error}"
+            "unexpected missing execution-kind error: {unbound_error}"
         );
         assert_eq!(
-            serde_json::to_value(unstamped_agent.session()).unwrap(),
-            unstamped_before,
-            "missing runtime stamp must fail before staged transcript effects apply"
+            serde_json::to_value(unbound_execution_kind_agent.session()).unwrap(),
+            unbound_before,
+            "missing runtime execution kind must fail before staged transcript effects apply"
         );
         assert!(
-            !std::iter::from_fn(|| unstamped_rx.try_recv().ok()).any(|event| matches!(
+            !std::iter::from_fn(|| unbound_rx.try_recv().ok()).any(|event| matches!(
                 event,
                 crate::event::AgentEvent::AssistantImageAppended { .. }
             )),
-            "missing runtime stamp must fail before staged image publication"
+            "missing runtime execution kind must fail before staged image publication"
         );
 
         agent.runtime_execution_kind_required = true;
@@ -14190,7 +14198,7 @@ mod tests {
                         response_id: None,
                     })),
                 }],
-                StopReason::EndTurn,
+                StopReason::MaxTokens,
                 Usage {
                     input_tokens: 11,
                     output_tokens: 7,
@@ -14209,31 +14217,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reasoning_only_llm_response_completes_silent_turn() {
+    async fn max_token_reasoning_only_response_is_a_typed_visible_failure() {
         let mut agent = build_agent(Arc::new(ReasoningOnlyLlmClient)).await;
         agent.config.max_turns = Some(1);
 
-        let result = agent
+        let error = agent
             .run("Use a tool".to_string().into())
             .await
-            .expect("reasoning-only LLM response should commit as a silent completion");
-
-        assert_eq!(
-            result.text, "",
-            "reasoning-only completions have no user-visible assistant text"
+            .expect_err("thinking-only max-token exhaustion must not complete silently");
+        assert!(
+            matches!(
+                &error,
+                AgentError::MaxTokensReached { partial, .. }
+                    if partial.contains("raise max_tokens")
+                        && partial.contains("thinking budget")
+            ),
+            "typed failure must carry an actionable recovery hint: {error}"
         );
-        assert_eq!(result.usage.output_tokens, 7);
+        assert_eq!(agent.session.total_usage().output_tokens, 7);
+        assert!(
+            !agent
+                .session
+                .messages()
+                .iter()
+                .any(|message| matches!(message, Message::BlockAssistant(_))),
+            "thinking-only exhaustion must not commit an empty assistant turn"
+        );
 
         let snapshot = agent
             .execution_snapshot()
             .expect("snapshot projects")
             .expect("test turn-state handle should expose a snapshot");
-        assert_eq!(snapshot.turn_phase, crate::TurnPhase::Completed);
+        assert_eq!(snapshot.turn_phase, crate::TurnPhase::Failed);
         assert_eq!(
             snapshot.terminal_outcome,
-            crate::TurnTerminalOutcome::Completed
+            crate::TurnTerminalOutcome::Failed
         );
-        assert_eq!(snapshot.terminal_cause_kind, None);
+        assert_eq!(
+            snapshot.terminal_cause_kind,
+            Some(crate::TurnTerminalCauseKind::FatalFailure)
+        );
     }
 
     #[tokio::test]
@@ -14521,7 +14544,7 @@ mod tests {
             .start_conversation_run(
                 run_id,
                 TurnPrimitiveKind::ConversationTurn,
-                ContentShape::ConversationAndContext,
+                ContentShape::Conversation,
                 false,
                 false,
                 0,
@@ -14551,7 +14574,7 @@ mod tests {
             .expect("test turn-state handle should expose a snapshot");
         assert_eq!(
             snapshot.admitted_content_shape,
-            Some(ContentShape::ConversationAndContext)
+            Some(ContentShape::Conversation)
         );
     }
 
@@ -16718,13 +16741,6 @@ mod tests {
             run_id: RunId,
         ) -> Result<(), crate::handles::DslTransitionError> {
             self.inner.start_immediate_append(run_id)
-        }
-
-        fn start_immediate_context(
-            &self,
-            run_id: RunId,
-        ) -> Result<(), crate::handles::DslTransitionError> {
-            self.inner.start_immediate_context(run_id)
         }
 
         fn primitive_applied(
@@ -19099,7 +19115,7 @@ mod tests {
 
         let mut bad_session = crate::Session::new();
         bad_session.set_metadata_unchecked_for_test(
-            crate::SESSION_REALTIME_TRANSCRIPT_STATE_KEY,
+            crate::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
             serde_json::json!("malformed"),
         );
         let mut bad_agent = with_test_turn_state_handle_for_session(
@@ -19118,7 +19134,7 @@ mod tests {
         bad_agent
             .run_with_events("first".to_string().into(), bad_tx)
             .await
-            .expect_err("malformed transcript metadata must fail the notice refresh");
+            .expect_err("malformed transcript history must fail the notice refresh");
         assert_eq!(registry.cursor(), 0, "failed notice apply must not advance");
         assert!(
             !std::iter::from_fn(|| bad_rx.try_recv().ok()).any(|event| matches!(
@@ -19129,13 +19145,7 @@ mod tests {
         );
 
         let mut recovered_session = bad_agent.session().clone();
-        recovered_session.set_metadata_unchecked_for_test(
-            crate::SESSION_REALTIME_TRANSCRIPT_STATE_KEY,
-            serde_json::to_value(
-                crate::realtime_transcript_revision::SessionRealtimeTranscriptState::default(),
-            )
-            .unwrap(),
-        );
+        recovered_session.clear_transcript_history_state();
         let mut recovered_agent = with_test_turn_state_handle_for_session(
             AgentBuilder::new()
                 .with_ops_lifecycle(registry.clone())

@@ -2,7 +2,7 @@
 
 Python SDK for the [Meerkat](https://github.com/lukacf/meerkat) runtime.
 
-- **Contract version:** `0.7.0-alpha.0`
+- **Contract version:** `0.8.11`
 - **Python:** `>=3.10`
 - **Package:** `meerkat-sdk`
 

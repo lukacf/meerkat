@@ -1473,61 +1473,12 @@ impl MobMcpState {
                     message: format!("member has no session: {identity}"),
                 })
             })?;
-        self.wait_for_member_system_context_boundary(&bridge_session_id)
-            .await
-            .map_err(MobAppendSystemContextError::Session)?;
         let result = self
             .session_service()
             .append_system_context(&bridge_session_id, req)
             .await
             .map_err(MobAppendSystemContextError::Session)?;
         Ok((bridge_session_id, result))
-    }
-
-    async fn wait_for_member_system_context_boundary(
-        &self,
-        bridge_session_id: &SessionId,
-    ) -> Result<(), SessionControlError> {
-        let Some(adapter) = &self.runtime_adapter else {
-            return Ok(());
-        };
-        if !adapter.contains_session(bridge_session_id).await {
-            return Ok(());
-        }
-
-        let deadline = Instant::now() + Duration::from_mins(2);
-        loop {
-            if !adapter.contains_session(bridge_session_id).await {
-                return Ok(());
-            }
-            let Some(snapshot) = adapter
-                .meerkat_machine_spine_snapshot(bridge_session_id)
-                .await
-            else {
-                return Ok(());
-            };
-            let active_boundary = snapshot.control.phase == meerkat_runtime::RuntimeState::Running
-                || snapshot.control.current_run_id.is_some()
-                || snapshot.inputs.current_run_id.is_some()
-                || !snapshot.inputs.queue.is_empty()
-                || !snapshot.inputs.steer_queue.is_empty();
-            if !active_boundary {
-                return Ok(());
-            }
-            if Instant::now() >= deadline {
-                return Err(SessionControlError::Session(SessionError::Agent(
-                    meerkat_core::error::AgentError::InternalError(format!(
-                        "timed out waiting for member runtime boundary before appending system context for {bridge_session_id}: phase={:?}, control_run={:?}, ingress_run={:?}, queue_len={}, steer_queue_len={}",
-                        snapshot.control.phase,
-                        snapshot.control.current_run_id,
-                        snapshot.inputs.current_run_id,
-                        snapshot.inputs.queue.len(),
-                        snapshot.inputs.steer_queue.len(),
-                    )),
-                )));
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
     }
 
     pub async fn mob_resolve_bridge_session_id(
@@ -1558,6 +1509,28 @@ impl MobMcpState {
             .member(&identity)
             .await?
             .send_with_render_metadata(content, handling_mode, render_metadata)
+            .await
+    }
+
+    pub async fn mob_member_send_with_external_identity(
+        &self,
+        mob_id: &MobId,
+        identity: AgentIdentity,
+        content: ContentInput,
+        handling_mode: HandlingMode,
+        render_metadata: Option<RenderMetadata>,
+        delivery_identity: meerkat_mob::MobExternalDeliveryIdentity,
+    ) -> Result<meerkat_mob::MemberDeliveryReceipt, MobError> {
+        self.admitted_handle_for(mob_id, ControlScope::SendCommand)
+            .await?
+            .member(&identity)
+            .await?
+            .send_with_render_metadata_and_external_identity(
+                content,
+                handling_mode,
+                render_metadata,
+                delivery_identity,
+            )
             .await
     }
 
@@ -1834,6 +1807,50 @@ impl MobMcpState {
         params: serde_json::Value,
     ) -> Result<RunId, MobError> {
         self.mob_run_flow_with_stream(mob_id, flow_id, params, None)
+            .await
+    }
+
+    pub async fn mob_run_flow_with_external_identity(
+        &self,
+        mob_id: &MobId,
+        flow_id: FlowId,
+        params: serde_json::Value,
+        identity: &meerkat_mob::MobExternalDeliveryIdentity,
+    ) -> Result<RunId, MobError> {
+        self.handle_for(mob_id)
+            .await?
+            .run_flow_with_external_identity(flow_id, params, identity)
+            .await
+    }
+
+    pub async fn mob_begin_external_delivery(
+        &self,
+        intent: &meerkat_mob::MobExternalDeliveryIntent,
+    ) -> Result<meerkat_mob::MobExternalDeliveryBeginOutcome, MobError> {
+        self.handle_for(&intent.mob_id)
+            .await?
+            .begin_external_delivery(intent)
+            .await
+    }
+
+    pub async fn mob_complete_external_delivery(
+        &self,
+        intent: &meerkat_mob::MobExternalDeliveryIntent,
+        terminal: &meerkat_mob::MobExternalDeliveryTerminal,
+    ) -> Result<meerkat_mob::MobExternalDeliveryCompleteOutcome, MobError> {
+        self.handle_for(&intent.mob_id)
+            .await?
+            .complete_external_delivery(intent, terminal)
+            .await
+    }
+
+    pub async fn mob_schedule_external_delivery_repair(
+        &self,
+        intent: &meerkat_mob::MobExternalDeliveryIntent,
+    ) -> Result<meerkat_mob::MobExternalDeliveryRepairOutcome, MobError> {
+        self.handle_for(&intent.mob_id)
+            .await?
+            .schedule_external_delivery_repair(intent)
             .await
     }
 
@@ -2765,13 +2782,11 @@ fn register_live_actor(
     slot: &meerkat_session::LiveSessionActorWitnessSlot,
     session_id: SessionId,
 ) -> Result<meerkat_session::LiveSessionActorWitness, SessionError> {
-    let system_context_state = meerkat_core::SystemContextStateHandle::new(Default::default())
-        .map_err(|error| {
-            SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                "live actor system-context authority rejected initialization: {error}"
-            )))
-        })?;
-    registry.insert_and_publish(slot, session_id, system_context_state)
+    registry.insert_and_publish(
+        slot,
+        session_id,
+        meerkat_core::TransientTurnContextStateHandle::new(),
+    )
 }
 
 fn begin_live_actor_materialization(
@@ -3219,7 +3234,7 @@ struct LocalSessionService {
     sessions: RwLock<HashMap<SessionId, LocalSessionActor>>,
     actor_registry: meerkat_session::LiveSessionActorRegistry,
     archived_views: RwLock<HashMap<SessionId, SessionView>>,
-    pending_context: RwLock<HashMap<SessionId, Vec<AppendSystemContextRequest>>>,
+    system_messages: RwLock<HashMap<SessionId, Vec<AppendSystemContextRequest>>>,
     /// Per-session broadcast channels for event streaming.
     event_txs:
         RwLock<HashMap<SessionId, tokio::sync::broadcast::Sender<EventEnvelope<AgentEvent>>>>,
@@ -3239,7 +3254,7 @@ impl LocalSessionService {
             sessions: RwLock::new(HashMap::new()),
             actor_registry: meerkat_session::LiveSessionActorRegistry::default(),
             archived_views: RwLock::new(HashMap::new()),
-            pending_context: RwLock::new(HashMap::new()),
+            system_messages: RwLock::new(HashMap::new()),
             event_txs: RwLock::new(HashMap::new()),
             runtime_adapter: Arc::new(meerkat_runtime::MeerkatMachine::ephemeral()),
             counter: std::sync::atomic::AtomicU64::new(0),
@@ -3385,7 +3400,7 @@ impl LocalSessionService {
             &actor_witness,
         )
         .await?;
-        self.pending_context
+        self.system_messages
             .write()
             .await
             .insert(sid.clone(), Vec::new());
@@ -3423,30 +3438,10 @@ impl SessionService for LocalSessionService {
         if !self.sessions.read().await.contains_key(id) {
             return Err(SessionError::NotFound { id: id.clone() });
         }
-        // Drain any staged system context so the append_system_context contract
-        // is honored (staged context is consumed on the next turn).
-        let staged_context = {
-            let mut pending = self.pending_context.write().await;
-            let entry = pending.entry(id.clone()).or_default();
-            std::mem::take(entry)
-        };
-        let effective_prompt = if staged_context.is_empty() {
-            req.prompt.clone()
-        } else {
-            let staged_sections = staged_context
-                .iter()
-                .map(|append| match append.source.as_deref() {
-                    Some(source) => format!("[SYSTEM CONTEXT:{source}] {}", append.text()),
-                    None => format!("[SYSTEM CONTEXT] {}", append.text()),
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            let mut blocks = vec![meerkat_core::types::ContentBlock::Text {
-                text: format!("{staged_sections}\n\n"),
-            }];
-            blocks.extend(req.prompt.clone().into_blocks());
-            meerkat_core::types::ContentInput::Blocks(blocks)
-        };
+        // System messages are transcript entries, not request-local prompt
+        // decoration. This lightweight local service retains their identity
+        // separately and keeps the conversational prompt byte-exact.
+        let effective_prompt = req.prompt.clone();
 
         let event_tx = self.event_txs.read().await.get(id).cloned();
         let next_seq = |seq: &mut u64| {
@@ -3591,9 +3586,14 @@ impl SessionService for LocalSessionService {
             }
             sessions.remove(id)
         };
-        self.pending_context.write().await.remove(id);
         self.event_txs.write().await.remove(id);
         if removed.is_some() {
+            let message_count = self
+                .system_messages
+                .read()
+                .await
+                .get(id)
+                .map_or(0, std::vec::Vec::len);
             self.archived_views.write().await.insert(
                 id.clone(),
                 SessionView {
@@ -3601,7 +3601,7 @@ impl SessionService for LocalSessionService {
                         session_id: id.clone(),
                         created_at: SystemTime::now(),
                         updated_at: SystemTime::now(),
-                        message_count: 0,
+                        message_count,
                         is_active: false,
                         model: "claude-sonnet-4-5".to_string(),
                         provider: Provider::Anthropic,
@@ -3662,20 +3662,26 @@ impl SessionServiceControlExt for LocalSessionService {
         if !self.sessions.read().await.contains_key(id) {
             return Err(SessionError::NotFound { id: id.clone() }.into());
         }
-        let mut pending = self.pending_context.write().await;
+        let mut pending = self.system_messages.write().await;
         let entry = pending.entry(id.clone()).or_default();
         if let Some(key) = req.idempotency_key.as_deref()
-            && entry
+            && let Some(existing) = entry
                 .iter()
-                .any(|existing| existing.idempotency_key.as_deref() == Some(key))
+                .find(|existing| existing.idempotency_key.as_deref() == Some(key))
         {
-            return Ok(AppendSystemContextResult {
-                status: AppendSystemContextStatus::Staged,
+            if existing.content == req.content && existing.source == req.source {
+                return Ok(AppendSystemContextResult {
+                    status: AppendSystemContextStatus::Duplicate,
+                });
+            }
+            return Err(SessionControlError::Conflict {
+                id: id.clone(),
+                key: key.to_string(),
             });
         }
         entry.push(req);
         Ok(AppendSystemContextResult {
-            status: AppendSystemContextStatus::Staged,
+            status: AppendSystemContextStatus::Applied,
         })
     }
 }
@@ -3691,7 +3697,26 @@ impl SessionServiceHistoryExt for LocalSessionService {
         if self.sessions.read().await.contains_key(id)
             || self.archived_views.read().await.contains_key(id)
         {
-            return Ok(SessionHistoryPage::from_messages(id.clone(), &[], query));
+            let messages = self
+                .system_messages
+                .read()
+                .await
+                .get(id)
+                .into_iter()
+                .flatten()
+                .map(|append| {
+                    meerkat_core::Message::System(meerkat_core::SystemMessage::with_identity(
+                        append.content.render_text(),
+                        append.source.clone(),
+                        append.idempotency_key.clone(),
+                    ))
+                })
+                .collect::<Vec<_>>();
+            return Ok(SessionHistoryPage::from_messages(
+                id.clone(),
+                &messages,
+                query,
+            ));
         }
         Err(SessionError::NotFound { id: id.clone() })
     }
@@ -3769,7 +3794,7 @@ impl MobSessionService for LocalSessionService {
             sessions.remove(witness.session_id()).is_some()
         };
         if removed {
-            self.pending_context
+            self.system_messages
                 .write()
                 .await
                 .remove(witness.session_id());
@@ -3839,7 +3864,7 @@ impl MobSessionService for LocalSessionService {
             }
             sessions.remove(session_id);
         }
-        self.pending_context.write().await.remove(session_id);
+        self.system_messages.write().await.remove(session_id);
         self.event_txs.write().await.remove(session_id);
         Ok(())
     }
@@ -6567,7 +6592,7 @@ mod tests {
                 return Err(SessionError::NotFound { id: id.clone() }.into());
             }
             Ok(AppendSystemContextResult {
-                status: AppendSystemContextStatus::Staged,
+                status: AppendSystemContextStatus::Applied,
             })
         }
     }
@@ -6814,19 +6839,18 @@ mod tests {
                     ),
                     source: Some("mob".to_string()),
                     idempotency_key: Some("ctx-1".to_string()),
-                    source_kind: meerkat_core::session::SystemContextSource::Normal,
-                    peer_response_terminal: None,
                 },
             )
             .await
             .expect("append context");
-        assert_eq!(result.status, AppendSystemContextStatus::Staged);
-        let pending = service.pending_context.read().await;
+        assert_eq!(result.status, AppendSystemContextStatus::Applied);
+        let pending = service.system_messages.read().await;
         assert_eq!(pending.get(&session_id).map(std::vec::Vec::len), Some(1));
     }
 
     #[tokio::test]
-    async fn local_session_service_consumes_staged_context_on_next_turn() -> Result<(), String> {
+    async fn local_session_service_does_not_fold_system_messages_into_user_prompt()
+    -> Result<(), String> {
         use futures::StreamExt;
 
         let service = LocalSessionService::new();
@@ -6856,8 +6880,6 @@ mod tests {
                     ),
                     source: Some("mob".to_string()),
                     idempotency_key: Some("ctx-1".to_string()),
-                    source_kind: meerkat_core::session::SystemContextSource::Normal,
-                    peer_response_terminal: None,
                 },
             )
             .await
@@ -6878,7 +6900,6 @@ mod tests {
                     runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
                         HandlingMode::Queue,
                         None,
-                        Vec::new(),
                         None,
                     ),
                 },
@@ -6893,19 +6914,21 @@ mod tests {
                     .content()
                     .expect("content-bearing run input")
                     .text_content();
-                assert!(prompt.contains("Remember the customer preference."));
-                assert!(prompt.contains("hello"));
+                assert_eq!(prompt, "hello");
             }
             other => return Err(format!("expected RunStarted, got {other:?}")),
         }
 
-        let pending = service.pending_context.read().await;
-        assert_eq!(pending.get(&session_id).map(std::vec::Vec::len), Some(0));
+        let system_messages = service.system_messages.read().await;
+        assert_eq!(
+            system_messages.get(&session_id).map(std::vec::Vec::len),
+            Some(1)
+        );
         Ok(())
     }
 
     #[tokio::test]
-    async fn local_session_service_preserves_multimodal_prompt_when_staging_context()
+    async fn local_session_service_preserves_multimodal_prompt_with_system_messages()
     -> Result<(), String> {
         let service = LocalSessionService::new();
         let run = service
@@ -6934,8 +6957,6 @@ mod tests {
                     ),
                     source: Some("mob".to_string()),
                     idempotency_key: Some("ctx-image".to_string()),
-                    source_kind: meerkat_core::session::SystemContextSource::Normal,
-                    peer_response_terminal: None,
                 },
             )
             .await
@@ -6951,39 +6972,15 @@ mod tests {
             },
         ]);
 
-        let staged_context = {
-            let mut pending = service.pending_context.write().await;
-            let entry = pending.entry(session_id.clone()).or_default();
-            std::mem::take(entry)
-        };
-
-        let effective_prompt = if staged_context.is_empty() {
-            prompt.clone()
-        } else {
-            let staged_sections = staged_context
-                .iter()
-                .map(|append| match append.source.as_deref() {
-                    Some(source) => format!("[SYSTEM CONTEXT:{source}] {}", append.text()),
-                    None => format!("[SYSTEM CONTEXT] {}", append.text()),
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            let mut blocks = vec![meerkat_core::types::ContentBlock::Text {
-                text: format!("{staged_sections}\n\n"),
-            }];
-            blocks.extend(prompt.into_blocks());
-            meerkat_core::types::ContentInput::Blocks(blocks)
-        };
-
-        match effective_prompt {
+        match prompt {
             meerkat_core::types::ContentInput::Blocks(blocks) => {
-                assert_eq!(blocks.len(), 3);
+                assert_eq!(blocks.len(), 2);
                 assert!(matches!(
-                    blocks.get(1),
+                    blocks.first(),
                     Some(meerkat_core::types::ContentBlock::Text { text }) if text == "Look at this."
                 ));
                 assert!(matches!(
-                    blocks.get(2),
+                    blocks.get(1),
                     Some(meerkat_core::types::ContentBlock::Image { media_type, .. }) if media_type == "image/png"
                 ));
             }
@@ -6993,7 +6990,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_session_service_archive_drops_staged_context() {
+    async fn local_session_service_archive_retains_system_messages() {
         let service = LocalSessionService::new();
         let run = service
             .create_session(CreateSessionRequest {
@@ -7021,8 +7018,6 @@ mod tests {
                     ),
                     source: Some("mob".to_string()),
                     idempotency_key: Some("ctx-archive".to_string()),
-                    source_kind: meerkat_core::session::SystemContextSource::Normal,
-                    peer_response_terminal: None,
                 },
             )
             .await
@@ -7030,10 +7025,11 @@ mod tests {
 
         service.archive(&session_id).await.expect("archive session");
 
-        let pending = service.pending_context.read().await;
-        assert!(
-            !pending.contains_key(&session_id),
-            "archive must drop unapplied staged context"
+        let messages = service.system_messages.read().await;
+        assert_eq!(
+            messages.get(&session_id).map(std::vec::Vec::len),
+            Some(1),
+            "archive must retain ordinary System transcript entries"
         );
     }
 
@@ -7074,7 +7070,6 @@ mod tests {
                     runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
                         HandlingMode::Queue,
                         None,
-                        Vec::new(),
                         None,
                     ),
                 },
@@ -8962,8 +8957,9 @@ mod tests {
         assert!(matches!(probe, meerkat::TargetProbeOutcome::Ready));
 
         let before_turns = svc.start_turn_call_count();
+        let delivery_identity = meerkat::ScheduleDeliveryIdentity::for_occurrence(&occurrence);
         let dispatch = host
-            .deliver_identity_target(&occurrence, restored_binding)
+            .deliver_identity_target(&occurrence, &delivery_identity, restored_binding)
             .await
             .expect("deliver restored identity target")
             .expect("mob identity should deliver through restored mob host");
@@ -8973,7 +8969,10 @@ mod tests {
             meerkat::OccurrencePhase::Completed,
             "scheduled identity delivery failed: {terminal:?}"
         );
-        assert_eq!(dispatch.correlation_id.as_deref(), Some("worker-1"));
+        assert_eq!(
+            dispatch.correlation_id.as_deref(),
+            Some(delivery_identity.correlation_id.as_str())
+        );
         let delivery_deadline = Instant::now() + Duration::from_secs(2);
         while svc.start_turn_call_count() <= before_turns {
             assert!(
@@ -10133,8 +10132,6 @@ mod tests {
                     content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text("x"),
                     source: None,
                     idempotency_key: None,
-                    source_kind: meerkat_core::session::SystemContextSource::Normal,
-                    peer_response_terminal: None,
                 },
             )
             .await

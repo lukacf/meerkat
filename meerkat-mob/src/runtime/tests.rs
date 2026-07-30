@@ -45,13 +45,12 @@ use meerkat_core::types::{
 };
 use meerkat_core::{
     AgentToolDispatcher, AppendSystemContextStatus, EventInjector, EventInjectorError,
-    PeerCorrelationId, PendingSystemContextAppend, PlainEventSource,
+    PeerCorrelationId, PlainEventSource,
     event_injector::{InteractionSubscription, SubscribableInjector},
 };
 use meerkat_core::{CommsCapabilityError, Provider};
 use meerkat_core::{
-    Session, SessionLlmIdentity, SessionMetadata, SessionSystemContextState, SessionTooling,
-    SystemContextStateError, ToolCategoryOverride,
+    Session, SessionLlmIdentity, SessionMetadata, SessionTooling, ToolCategoryOverride,
 };
 use meerkat_machine_schema::catalog::dsl::{
     dsl_mob_machine as schema_mob_machine,
@@ -1297,15 +1296,8 @@ fn begin_test_runtime_actor_materialization(
     }
 }
 
-fn test_actor_system_context_state() -> Result<meerkat_core::SystemContextStateHandle, SessionError>
-{
-    meerkat_core::SystemContextStateHandle::new(SessionSystemContextState::default()).map_err(
-        |error| {
-            SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                "test actor system-context restore failed: {error}"
-            )))
-        },
-    )
+fn test_actor_transient_turn_context_state() -> meerkat_core::TransientTurnContextStateHandle {
+    meerkat_core::TransientTurnContextStateHandle::new()
 }
 
 fn install_session_owned_peer_request_response_authority(
@@ -1347,6 +1339,24 @@ struct CreateSessionRecord {
     runtime_build_mode_session_owned: bool,
     budget_limits: Option<meerkat_core::BudgetLimits>,
     model: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RuntimeBoundaryAcknowledgement {
+    WholeBlob {
+        session_id: SessionId,
+        store_revision: u64,
+        blob_sha256: String,
+    },
+    HeadCanonical {
+        session_id: SessionId,
+        head_token: String,
+    },
+    Provisional {
+        session_id: SessionId,
+        store_revision: u64,
+        authority_token: String,
+    },
 }
 
 struct AtomicInFlightGuard<'a>(&'a AtomicU64);
@@ -1502,6 +1512,7 @@ struct MockSessionService {
     /// window on every retire/complete/reset because the mock was reporting
     /// an always-`true` flag that the real service never would.
     active_sessions: RwLock<HashSet<SessionId>>,
+    runtime_boundary_acknowledgements: RwLock<Vec<RuntimeBoundaryAcknowledgement>>,
 }
 
 impl MockSessionService {
@@ -1578,6 +1589,7 @@ impl MockSessionService {
             discard_actor_failures_remaining: AtomicU64::new(0),
             subscribe_fail_sessions: RwLock::new(HashSet::new()),
             active_sessions: RwLock::new(HashSet::new()),
+            runtime_boundary_acknowledgements: RwLock::new(Vec::new()),
         }
     }
 
@@ -2312,16 +2324,7 @@ impl MockSessionService {
         comms.default_name.clone_from(&comms_name);
         comms.default_address = format!("inproc://{comms_name}");
         let comms = Arc::new(comms);
-        let system_context_state = meerkat_core::SystemContextStateHandle::new(
-            session.system_context_state().unwrap_or_default(),
-        )
-        .map_err(|error| {
-            self.create_session_in_flight
-                .fetch_sub(1, Ordering::Relaxed);
-            SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                "failed to restore mock actor system-context state: {error}"
-            )))
-        })?;
+        let transient_turn_context_state = meerkat_core::TransientTurnContextStateHandle::new();
         let local_actor_witness_slot = meerkat_session::LiveSessionActorWitnessSlot::default();
         let actor_witness_slot = actor_witness_slot.unwrap_or(&local_actor_witness_slot);
         let mut sessions = self.sessions.write().await;
@@ -2336,7 +2339,11 @@ impl MockSessionService {
         debug_assert!(replaced.is_none());
         let actor_witness = self
             .actor_registry
-            .insert_and_publish(actor_witness_slot, session_id.clone(), system_context_state)
+            .insert_and_publish(
+                actor_witness_slot,
+                session_id.clone(),
+                transient_turn_context_state,
+            )
             .inspect_err(|_| {
                 sessions.remove(&session_id);
                 self.create_session_in_flight
@@ -2353,7 +2360,7 @@ impl MockSessionService {
             .entry(session_id.clone())
             .or_insert_with(|| tokio::sync::watch::channel(0).0);
         if let Some(system_prompt) = req.system_prompt.as_set_prompt() {
-            session.set_system_prompt(system_prompt.to_string());
+            session.append_system_message(system_prompt.to_string());
         }
         if session.session_metadata().is_none() {
             let build = req.build.as_ref();
@@ -3430,6 +3437,52 @@ impl MobSessionService for MockSessionService {
                 None,
             ),
         )
+    }
+
+    async fn acknowledge_whole_blob_runtime_session_boundary_under_turn_finalization_boundary(
+        &self,
+        session_id: &SessionId,
+        committed_store_revision: u64,
+        committed_blob_sha256: &str,
+    ) -> Result<(), SessionError> {
+        self.runtime_boundary_acknowledgements.write().await.push(
+            RuntimeBoundaryAcknowledgement::WholeBlob {
+                session_id: session_id.clone(),
+                store_revision: committed_store_revision,
+                blob_sha256: committed_blob_sha256.to_string(),
+            },
+        );
+        Ok(())
+    }
+
+    async fn acknowledge_head_canonical_runtime_session_boundary_under_turn_finalization_boundary(
+        &self,
+        session_id: &SessionId,
+        committed_head_token: &str,
+    ) -> Result<(), SessionError> {
+        self.runtime_boundary_acknowledgements.write().await.push(
+            RuntimeBoundaryAcknowledgement::HeadCanonical {
+                session_id: session_id.clone(),
+                head_token: committed_head_token.to_string(),
+            },
+        );
+        Ok(())
+    }
+
+    async fn acknowledge_provisional_runtime_session_boundary_under_turn_finalization_boundary(
+        &self,
+        session_id: &SessionId,
+        committed_store_revision: u64,
+        committed_authority_token: &str,
+    ) -> Result<(), SessionError> {
+        self.runtime_boundary_acknowledgements.write().await.push(
+            RuntimeBoundaryAcknowledgement::Provisional {
+                session_id: session_id.clone(),
+                store_revision: committed_store_revision,
+                authority_token: committed_authority_token.to_string(),
+            },
+        );
+        Ok(())
     }
 
     async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), SessionError> {
@@ -6826,2128 +6879,6 @@ async fn create_test_mob(definition: MobDefinition) -> (MobHandle, Arc<MockSessi
     (handle, service)
 }
 
-fn test_identity_declaration_manifest(
-    scope: &str,
-    operation_id: meerkat_core::ops::OperationId,
-    identity: AgentIdentity,
-) -> crate::identity::IdentityDeclarationManifest {
-    crate::identity::IdentityDeclarationManifest {
-        scope_id: crate::identity::IdentityDeclarationScopeId::new(scope)
-            .expect("valid declaration scope"),
-        operation_id,
-        expected_scope: crate::identity::IdentityDeclarationScopePrecondition::Missing,
-        members: BTreeMap::from([(
-            identity,
-            crate::identity::IdentityMemberDeclaration {
-                material: crate::identity::IdentityMemberMaterialDeclaration::Profile(
-                    crate::identity::IdentityProfileMemberDeclaration {
-                        profile_name: ProfileName::from("worker"),
-                        profile_override: None,
-                        model_override: None,
-                        external_addressable_override: None,
-                        context: None,
-                        labels: Some(BTreeMap::from([(
-                            "declaration".to_string(),
-                            "actor-owned".to_string(),
-                        )])),
-                        additional_instructions: Some(vec![
-                            "Preserve the sealed declaration.".to_string(),
-                        ]),
-                        system_prompt_override: Some(
-                            meerkat_contracts::wire::PortableSystemPrompt::Disable,
-                        ),
-                        tool_access_policy: None,
-                        auth_binding: None,
-                        budget_limits: None,
-                        runtime_mode: None,
-                        required_env_keys: Vec::new(),
-                        required_local_callback_tools: Vec::new(),
-                        execution: crate::identity::DesiredExecution::ControllingSession,
-                    },
-                ),
-                session_authority_policy:
-                    crate::identity::DesiredSessionAuthorityPolicy::CreateIfAbsent,
-                initial_message: Some(ContentInput::from("declare once")),
-                legacy_import: None,
-            },
-        )]),
-        wiring: BTreeSet::new(),
-    }
-}
-
-fn require_identity_local_callback_tool(
-    manifest: &mut crate::identity::IdentityDeclarationManifest,
-    identity: &AgentIdentity,
-    name: &str,
-) {
-    let declaration = manifest
-        .members
-        .get_mut(identity)
-        .expect("identity declaration requiring local callback tool");
-    let crate::identity::IdentityMemberMaterialDeclaration::Profile(material) =
-        &mut declaration.material
-    else {
-        panic!("test helper requires a profile material declaration");
-    };
-    material.required_local_callback_tools = vec![
-        crate::identity::DesiredLocalCallbackTool::new(
-            name,
-            format!("Tool {name}"),
-            serde_json::json!({}),
-        )
-        .expect("valid identity-local callback tool"),
-    ];
-}
-
-async fn test_verified_legacy_declaration_manifest(
-    service: &MockSessionService,
-    scope: &str,
-    operation_id: meerkat_core::ops::OperationId,
-    identity: AgentIdentity,
-) -> (crate::identity::IdentityDeclarationManifest, Session) {
-    let session_id = SessionId::new();
-    let lineage_id = meerkat_core::SessionLineageId::for_session(&session_id);
-    let mut session = factory_policy_session(
-        Session::with_id(session_id.clone()),
-        "claude-sonnet-4-5".to_string(),
-        4096,
-    );
-    session.push_batch(vec![meerkat_core::Message::User(
-        meerkat_core::types::UserMessage::text("retained legacy history"),
-    )]);
-    let legacy_bytes = serde_json::to_vec(&session).expect("serialize legacy session");
-    let checkpoint = meerkat_core::checkpoint::SessionCheckpointStamp::recovery_migration(
-        &session,
-        &legacy_bytes,
-        meerkat_core::SessionGeneration::INITIAL,
-        meerkat_core::SessionCheckpointRevision::new(1),
-    )
-    .expect("mint exact recovery-migration checkpoint");
-    session
-        .install_checkpoint_stamp(checkpoint.clone())
-        .expect("install exact recovery-migration checkpoint");
-    service
-        .persisted_sessions
-        .write()
-        .await
-        .insert(session_id.clone(), session.clone());
-
-    let mut manifest = test_identity_declaration_manifest(scope, operation_id, identity.clone());
-    let declaration = manifest
-        .members
-        .get_mut(&identity)
-        .expect("legacy declaration member");
-    declaration.session_authority_policy =
-        crate::identity::DesiredSessionAuthorityPolicy::RequireExisting;
-    declaration.initial_message = None;
-    declaration.legacy_import = Some(crate::identity::IdentityLegacyImport::AdoptVerifiedLegacy {
-        session: crate::identity::DesiredSessionTarget {
-            session_id,
-            lineage_id,
-            lineage_generation: meerkat_core::SessionGeneration::INITIAL,
-            authority_policy: crate::identity::DesiredSessionAuthorityPolicy::RequireExisting,
-        },
-        checkpoint,
-        continuity_epoch_highwater: 7,
-        snapshot_fence_audit: 3,
-    });
-    (manifest, session)
-}
-
-/// Like [`test_verified_legacy_declaration_manifest`], but the persisted
-/// legacy session carries the durable member metadata (comms name, peer meta,
-/// realm id, mob binding) that member re-materialization requires, so
-/// reconcile actuation reaches the session-service create path instead of
-/// failing on "missing durable comms_name for resumed mob member".
-async fn test_materializable_legacy_declaration_manifest(
-    service: &MockSessionService,
-    mob_id: &MobId,
-    scope: &str,
-    operation_id: meerkat_core::ops::OperationId,
-    identity: AgentIdentity,
-) -> (crate::identity::IdentityDeclarationManifest, Session) {
-    let session_id = SessionId::new();
-    let lineage_id = meerkat_core::SessionLineageId::for_session(&session_id);
-    let mut session = factory_policy_session(
-        Session::with_id(session_id.clone()),
-        "claude-sonnet-4-5".to_string(),
-        4096,
-    );
-    let mut metadata = session.session_metadata().expect("seed session metadata");
-    metadata.comms_name = Some(test_comms_name_for(mob_id, "worker", identity.as_str()));
-    metadata.peer_meta = Some(
-        meerkat_core::PeerMeta::default()
-            .with_label("mob_id", mob_id.as_str())
-            .with_label("role", "worker")
-            .with_label("member_id", identity.as_str()),
-    );
-    metadata.realm_id =
-        Some(meerkat_core::RealmId::parse(format!("mob.{mob_id}")).expect("valid mob realm id"));
-    metadata.mob_member_binding = Some(meerkat_core::MobMemberBinding {
-        mob_id: mob_id.as_str().to_string(),
-        role: "worker".to_string(),
-        member: identity.as_str().to_string(),
-    });
-    session
-        .set_session_metadata(metadata)
-        .expect("install durable member metadata");
-    session.push_batch(vec![meerkat_core::Message::User(
-        meerkat_core::types::UserMessage::text("retained legacy history"),
-    )]);
-    let legacy_bytes = serde_json::to_vec(&session).expect("serialize legacy session");
-    let checkpoint = meerkat_core::checkpoint::SessionCheckpointStamp::recovery_migration(
-        &session,
-        &legacy_bytes,
-        meerkat_core::SessionGeneration::INITIAL,
-        meerkat_core::SessionCheckpointRevision::new(1),
-    )
-    .expect("mint exact recovery-migration checkpoint");
-    session
-        .install_checkpoint_stamp(checkpoint.clone())
-        .expect("install exact recovery-migration checkpoint");
-    service
-        .persisted_sessions
-        .write()
-        .await
-        .insert(session_id.clone(), session.clone());
-
-    let mut manifest = test_identity_declaration_manifest(scope, operation_id, identity.clone());
-    let declaration = manifest
-        .members
-        .get_mut(&identity)
-        .expect("legacy declaration member");
-    declaration.session_authority_policy =
-        crate::identity::DesiredSessionAuthorityPolicy::RequireExisting;
-    declaration.initial_message = None;
-    declaration.legacy_import = Some(crate::identity::IdentityLegacyImport::AdoptVerifiedLegacy {
-        session: crate::identity::DesiredSessionTarget {
-            session_id,
-            lineage_id,
-            lineage_generation: meerkat_core::SessionGeneration::INITIAL,
-            authority_policy: crate::identity::DesiredSessionAuthorityPolicy::RequireExisting,
-        },
-        checkpoint,
-        continuity_epoch_highwater: 7,
-        snapshot_fence_audit: 3,
-    });
-    (manifest, session)
-}
-
-#[tokio::test]
-async fn identity_declaration_actor_apply_reads_and_replays_exact_sealed_target() {
-    let definition = with_unique_mob_id(sample_definition(), "identity-declaration-actor");
-    let storage = MobStorage::in_memory();
-    let service = Arc::new(MockSessionService::new());
-    let _ = service.enable_runtime_adapter();
-    let handle = MobBuilder::new(definition, storage)
-        .with_session_service(service.clone())
-        .create()
-        .await
-        .expect("create declaration test mob");
-
-    let identity = AgentIdentity::from("declared-worker");
-    let (manifest, original_session) = test_verified_legacy_declaration_manifest(
-        service.as_ref(),
-        "provider-a",
-        meerkat_core::ops::OperationId::new(),
-        identity.clone(),
-    )
-    .await;
-    let first = handle
-        .apply_identity_declaration_manifest(manifest.clone())
-        .await
-        .expect("apply declaration manifest");
-    first.validate().expect("valid declaration outcome");
-    let first_identity = first
-        .identities
-        .get(&identity)
-        .expect("declared identity outcome");
-    let first_target = match &first_identity.intent {
-        crate::identity::IdentityIntent::Present {
-            identity: stored_identity,
-            session,
-            member,
-            owned_wiring,
-        } => {
-            assert_eq!(stored_identity, &identity);
-            assert!(owned_wiring.is_empty());
-            assert_eq!(member.material.profile_name.as_str(), "worker");
-            assert_eq!(
-                member.material.overlay.labels.as_ref(),
-                Some(&BTreeMap::from([(
-                    "declaration".to_string(),
-                    "actor-owned".to_string(),
-                )]))
-            );
-            assert!(member.initial_delivery.is_none());
-            assert_eq!(session.session_id, original_session.id().clone());
-            session.clone()
-        }
-        other => panic!("expected present intent, got {other:?}"),
-    };
-
-    match handle
-        .identity_intent(&identity)
-        .await
-        .expect("read current identity intent")
-    {
-        crate::identity::IdentityStoredObservation::Valid(record) => {
-            record.validate().expect("valid sealed intent record");
-            assert_eq!(record.intent_revision, first_identity.intent_revision);
-            assert_eq!(record.declaration_scope, first_identity.declaration_scope);
-            assert_eq!(
-                record.declaration_revision,
-                first_identity.declaration_revision
-            );
-            assert_eq!(record.intent_digest, first_identity.intent_digest);
-            assert_eq!(record.authority_digest, first_identity.authority_digest);
-            assert_eq!(record.intent, first_identity.intent);
-        }
-        other => panic!("expected valid stored intent, got {other:?}"),
-    }
-
-    // The actor mints fresh candidate ids for a new apply. Exact replay must
-    // bypass compilation/allocation and return the immutable original result.
-    let replay = handle
-        .apply_identity_declaration_manifest(manifest)
-        .await
-        .expect("replay declaration after lost acknowledgement");
-    assert_eq!(replay, first);
-    let replay_target = match &replay.identities[&identity].intent {
-        crate::identity::IdentityIntent::Present { session, .. } => session,
-        other => panic!("expected replayed present intent, got {other:?}"),
-    };
-    assert_eq!(replay_target, &first_target);
-
-    assert!(matches!(
-        handle
-            .identity_intent(&AgentIdentity::from("missing-identity"))
-            .await
-            .expect("read missing intent through actor"),
-        crate::identity::IdentityStoredObservation::Missing
-    ));
-
-    handle
-        .shutdown()
-        .await
-        .expect("shutdown declaration test mob");
-}
-
-#[tokio::test]
-async fn identity_declaration_actor_reads_exact_immutable_receipt() {
-    let definition = with_unique_mob_id(sample_definition(), "identity-declaration-receipt");
-    let storage = MobStorage::in_memory();
-    let service = Arc::new(MockSessionService::new());
-    let _ = service.enable_runtime_adapter();
-    let handle = MobBuilder::new(definition, storage)
-        .with_session_service(service.clone())
-        .create()
-        .await
-        .expect("create declaration receipt test mob");
-
-    let identity = AgentIdentity::from("receipt-worker");
-    let operation_id = meerkat_core::ops::OperationId::new();
-    let (manifest, _) = test_verified_legacy_declaration_manifest(
-        service.as_ref(),
-        "provider-receipt",
-        operation_id.clone(),
-        identity,
-    )
-    .await;
-    let scope_id = manifest.scope_id.clone();
-    let request_digest = manifest.request_digest().expect("manifest request digest");
-    let outcome = handle
-        .apply_identity_declaration_manifest(manifest)
-        .await
-        .expect("apply declaration manifest");
-
-    match handle
-        .identity_declaration_receipt(&scope_id, &operation_id)
-        .await
-        .expect("read declaration receipt")
-    {
-        crate::identity::IdentityStoredObservation::Valid(receipt) => {
-            receipt.validate().expect("valid immutable receipt");
-            assert_eq!(receipt.receipt_id, operation_id);
-            assert_eq!(
-                receipt.subject,
-                crate::identity::IdentityOperationSubject::DeclarationScope {
-                    scope_id: scope_id.clone(),
-                }
-            );
-            assert_eq!(
-                receipt.slot,
-                crate::identity::IdentityOperationSlot::ApplyDeclarationManifest {
-                    scope_id: scope_id.clone(),
-                    mutation_id: operation_id,
-                }
-            );
-            match receipt.payload {
-                crate::identity::IdentityOperationReceiptPayload::ApplyDeclarationManifest {
-                    outcome: stored,
-                } => {
-                    assert_eq!(stored.request_digest, request_digest);
-                    assert_eq!(stored, outcome);
-                }
-                other => panic!("expected declaration apply receipt, got {other:?}"),
-            }
-        }
-        other => panic!("expected valid declaration receipt, got {other:?}"),
-    }
-
-    assert!(matches!(
-        handle
-            .identity_declaration_receipt(&scope_id, &meerkat_core::ops::OperationId::new(),)
-            .await
-            .expect("read absent declaration receipt"),
-        crate::identity::IdentityStoredObservation::Missing
-    ));
-
-    handle
-        .shutdown()
-        .await
-        .expect("shutdown declaration receipt test mob");
-}
-
-#[tokio::test]
-async fn identity_declaration_actor_rejects_unsupported_shape_before_durable_write() {
-    let definition = with_unique_mob_id(sample_definition(), "identity-declaration-boundary");
-    let mob_id = definition.id.clone();
-    let storage = MobStorage::in_memory();
-    let identity_store = Arc::clone(&storage.identity);
-    let service = Arc::new(MockSessionService::new());
-    let _ = service.enable_runtime_adapter();
-    let handle = MobBuilder::new(definition, storage)
-        .with_session_service(service)
-        .create()
-        .await
-        .expect("create declaration boundary test mob");
-
-    let identity = AgentIdentity::from("unsupported-worker");
-    let manifest = test_identity_declaration_manifest(
-        "provider-unsupported",
-        meerkat_core::ops::OperationId::new(),
-        identity.clone(),
-    );
-    let scope_id = manifest.scope_id.clone();
-    match handle.apply_identity_declaration_manifest(manifest).await {
-        Err(MobError::WiringError(reason)) => {
-            assert!(reason.contains("outside the 0.8.2 legacy recovery slice"));
-        }
-        other => panic!("unsupported declaration should fail before commit, got {other:?}"),
-    }
-
-    assert!(matches!(
-        identity_store
-            .observe_identity_declaration_scope(&mob_id, &scope_id)
-            .await
-            .expect("observe rejected declaration scope"),
-        crate::identity::IdentityStoredObservation::Missing
-    ));
-    assert!(matches!(
-        identity_store
-            .observe_identity_intent(&mob_id, &identity)
-            .await
-            .expect("observe rejected declaration intent"),
-        crate::identity::IdentityStoredObservation::Missing
-    ));
-    assert!(matches!(
-        identity_store
-            .observe_identity_lease(&mob_id, &identity)
-            .await
-            .expect("observe rejected declaration lease"),
-        crate::identity::IdentityStoredObservation::Missing
-    ));
-
-    handle
-        .shutdown()
-        .await
-        .expect("shutdown declaration boundary test mob");
-}
-
-#[derive(Default)]
-struct ScanDiagnosticIdentityStore {
-    point_reads: AtomicUsize,
-}
-
-#[async_trait]
-impl MobIdentityStore for ScanDiagnosticIdentityStore {
-    async fn observe_identity_declaration_scope(
-        &self,
-        _mob_id: &MobId,
-        _scope_id: &crate::identity::IdentityDeclarationScopeId,
-    ) -> Result<
-        crate::identity::IdentityStoredObservation<crate::identity::IdentityDeclarationScopeHead>,
-        MobStoreError,
-    > {
-        Ok(crate::identity::IdentityStoredObservation::Missing)
-    }
-
-    async fn observe_identity_intent(
-        &self,
-        _mob_id: &MobId,
-        _identity: &AgentIdentity,
-    ) -> Result<
-        crate::identity::IdentityStoredObservation<crate::identity::IdentityIntentRecord>,
-        MobStoreError,
-    > {
-        self.point_reads.fetch_add(1, Ordering::Relaxed);
-        Ok(crate::identity::IdentityStoredObservation::Missing)
-    }
-
-    async fn list_identity_intents(
-        &self,
-        _mob_id: &MobId,
-    ) -> Result<
-        BTreeMap<
-            AgentIdentity,
-            crate::identity::IdentityStoredObservation<crate::identity::IdentityIntentRecord>,
-        >,
-        MobStoreError,
-    > {
-        Ok(BTreeMap::from([
-            (
-                AgentIdentity::from("malformed-physical-identity:scan-evidence"),
-                crate::identity::IdentityStoredObservation::Malformed {
-                    evidence_digest: format!("sha256:{}", "a".repeat(64)),
-                    detail: "physical identity key is not decodable".to_string(),
-                },
-            ),
-            (
-                AgentIdentity::from("unsupported-intent-row"),
-                crate::identity::IdentityStoredObservation::Unsupported {
-                    evidence_digest: format!("sha256:{}", "b".repeat(64)),
-                    detail: "future intent schema".to_string(),
-                },
-            ),
-        ]))
-    }
-
-    async fn replay_identity_declaration(
-        &self,
-        _mob_id: &MobId,
-        _scope_id: &crate::identity::IdentityDeclarationScopeId,
-        _operation_id: &meerkat_core::ops::OperationId,
-        _request_digest: &str,
-    ) -> Result<Option<crate::identity::IdentityDeclarationManifestApplyOutcome>, MobStoreError>
-    {
-        Ok(None)
-    }
-
-    async fn apply_identity_declaration(
-        &self,
-        _mob_id: &MobId,
-        _plan: &crate::identity::IdentityDeclarationApplyPlan,
-    ) -> Result<crate::identity::IdentityDeclarationManifestApplyOutcome, MobStoreError> {
-        Err(MobStoreError::WriteFailed(
-            "scan-only identity store".to_string(),
-        ))
-    }
-
-    async fn observe_identity_lease(
-        &self,
-        _mob_id: &MobId,
-        _identity: &AgentIdentity,
-    ) -> Result<
-        crate::identity::IdentityStoredObservation<crate::identity::IdentityLeaseRecord>,
-        MobStoreError,
-    > {
-        Ok(crate::identity::IdentityStoredObservation::Missing)
-    }
-
-    async fn claim_or_renew_identity_lease(
-        &self,
-        _mob_id: &MobId,
-        _identity: &AgentIdentity,
-        _holder_id: &str,
-        _incarnation_id: &str,
-        _ttl_ms: u64,
-    ) -> Result<crate::identity::IdentityLeaseClaimOutcome, MobStoreError> {
-        Err(MobStoreError::WriteFailed(
-            "scan-only identity store".to_string(),
-        ))
-    }
-
-    async fn release_identity_lease(
-        &self,
-        _mob_id: &MobId,
-        _identity: &AgentIdentity,
-        _expected: &crate::identity::IdentityLeaseClaim,
-    ) -> Result<bool, MobStoreError> {
-        Ok(false)
-    }
-
-    async fn validate_identity_actuation_permit(
-        &self,
-        _permit: &crate::identity::IdentityActuationPermit,
-    ) -> Result<(), MobStoreError> {
-        Err(MobStoreError::WriteFailed(
-            "scan-only identity store".to_string(),
-        ))
-    }
-
-    async fn observe_identity_operation_receipt(
-        &self,
-        _mob_id: &MobId,
-        _subject: &crate::identity::IdentityOperationSubject,
-        _slot: &crate::identity::IdentityOperationSlot,
-    ) -> Result<
-        crate::identity::IdentityStoredObservation<crate::identity::IdentityOperationReceipt>,
-        MobStoreError,
-    > {
-        Ok(crate::identity::IdentityStoredObservation::Missing)
-    }
-
-    async fn insert_identity_operation_receipt_if_absent(
-        &self,
-        _receipt: &crate::identity::IdentityOperationReceipt,
-        _permit: &crate::identity::IdentityActuationPermit,
-    ) -> Result<crate::identity::IdentityOperationReceiptInsertOutcome, MobStoreError> {
-        Err(MobStoreError::WriteFailed(
-            "scan-only identity store".to_string(),
-        ))
-    }
-}
-
-#[derive(Default)]
-struct RejectingIdentityStatusStore {
-    replace_calls: AtomicUsize,
-    last_attempt: Mutex<Option<crate::identity::IdentityConvergenceStatus>>,
-}
-
-#[async_trait]
-impl MobIdentityStatusStore for RejectingIdentityStatusStore {
-    async fn load_identity_convergence_status(
-        &self,
-        _mob_id: &MobId,
-        _identity: &AgentIdentity,
-    ) -> Result<
-        crate::identity::IdentityStoredObservation<crate::identity::IdentityConvergenceStatus>,
-        MobStoreError,
-    > {
-        Ok(crate::identity::IdentityStoredObservation::Missing)
-    }
-
-    async fn list_identity_convergence_statuses(
-        &self,
-        _mob_id: &MobId,
-    ) -> Result<
-        BTreeMap<
-            AgentIdentity,
-            crate::identity::IdentityStoredObservation<crate::identity::IdentityConvergenceStatus>,
-        >,
-        MobStoreError,
-    > {
-        Ok(BTreeMap::new())
-    }
-
-    async fn replace_identity_convergence_status(
-        &self,
-        _mob_id: &MobId,
-        status: &crate::identity::IdentityConvergenceStatus,
-    ) -> Result<(), MobStoreError> {
-        self.replace_calls.fetch_add(1, Ordering::Relaxed);
-        *self
-            .last_attempt
-            .lock()
-            .expect("rejecting status observation mutex") = Some(status.clone());
-        Err(MobStoreError::WriteFailed(
-            "injected output-status failure".to_string(),
-        ))
-    }
-}
-
-#[tokio::test]
-async fn identity_intent_scan_projects_invalid_rows_without_fabricated_point_reads() {
-    let definition = with_unique_mob_id(sample_definition(), "identity-invalid-scan");
-    let scan_store = Arc::new(ScanDiagnosticIdentityStore::default());
-    let status_store = Arc::new(InMemoryMobIdentityStatusStore::new());
-    let service = Arc::new(MockSessionService::new());
-    let _ = service.enable_runtime_adapter();
-    let mut storage = MobStorage::in_memory();
-    storage.identity = scan_store.clone();
-    storage.identity_member = None;
-    storage.identity_status = status_store.clone();
-    let handle = MobBuilder::new(definition, storage)
-        .with_session_service(service)
-        .create()
-        .await
-        .expect("create invalid identity scan mob");
-
-    for identity in [
-        AgentIdentity::from("malformed-physical-identity:scan-evidence"),
-        AgentIdentity::from("unsupported-intent-row"),
-    ] {
-        tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                if matches!(
-                    status_store
-                        .load_identity_convergence_status(handle.mob_id(), &identity)
-                        .await
-                        .expect("load invalid-row diagnostic"),
-                    crate::identity::IdentityStoredObservation::Valid(status)
-                        if status.decision
-                            == Some(crate::identity::IdentityReconcileDecision::RepairBlocked)
-                ) {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("invalid scan row should remain visible as RepairBlocked");
-    }
-    assert_eq!(
-        scan_store.point_reads.load(Ordering::Relaxed),
-        0,
-        "scan-invalid rows must not be re-read through a fabricated identity key"
-    );
-
-    handle
-        .shutdown()
-        .await
-        .expect("shutdown invalid identity scan mob");
-}
-
-#[tokio::test]
-async fn identity_status_failure_does_not_block_member_actuation() {
-    let definition = with_unique_mob_id(sample_definition(), "identity-status-failure");
-    let rejecting_status = Arc::new(RejectingIdentityStatusStore::default());
-    let service = Arc::new(MockSessionService::new());
-    let runtime_store = Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
-    let runtime_store_for_machine: Arc<dyn meerkat_runtime::RuntimeStore> = runtime_store.clone();
-    service.set_runtime_adapter(Arc::new(
-        meerkat_runtime::MeerkatMachine::persistent_without_blobs(runtime_store_for_machine),
-    ));
-    let mut storage = MobStorage::in_memory();
-    let identity_store = Arc::clone(&storage.identity);
-    storage.identity_status = rejecting_status.clone();
-    let handle = MobBuilder::new(definition, storage)
-        .with_session_service(service.clone())
-        .create()
-        .await
-        .expect("create status-failure identity mob");
-
-    let identity = AgentIdentity::from("status-independent-worker");
-    let mut manifest = test_identity_declaration_manifest(
-        "status-independent",
-        meerkat_core::ops::OperationId::new(),
-        identity.clone(),
-    );
-    let session_id = SessionId::new();
-    let lineage_id = meerkat_core::SessionLineageId::for_session(&session_id);
-    let mut original_session = factory_policy_session(
-        Session::with_id(session_id.clone()),
-        "claude-sonnet-4-5".to_string(),
-        4096,
-    );
-    let mut metadata = original_session
-        .session_metadata()
-        .expect("seed status-independent session metadata");
-    metadata.comms_name = Some(test_comms_name_for(
-        handle.mob_id(),
-        "worker",
-        identity.as_str(),
-    ));
-    metadata.peer_meta = Some(
-        meerkat_core::PeerMeta::default()
-            .with_label("mob_id", handle.mob_id().as_str())
-            .with_label("role", "worker")
-            .with_label("member_id", identity.as_str()),
-    );
-    metadata.realm_id = Some(
-        meerkat_core::RealmId::parse(format!("mob.{}", handle.mob_id()))
-            .expect("valid status-independent realm id"),
-    );
-    metadata.mob_member_binding = Some(meerkat_core::MobMemberBinding {
-        mob_id: handle.mob_id().as_str().to_string(),
-        role: "worker".to_string(),
-        member: identity.as_str().to_string(),
-    });
-    original_session
-        .set_session_metadata(metadata)
-        .expect("install status-independent member metadata");
-    original_session.push_batch(vec![meerkat_core::Message::User(
-        meerkat_core::types::UserMessage::text("retained status-independent history"),
-    )]);
-    let legacy_bytes =
-        serde_json::to_vec(&original_session).expect("serialize status-independent session");
-    let checkpoint = meerkat_core::checkpoint::SessionCheckpointStamp::recovery_migration(
-        &original_session,
-        &legacy_bytes,
-        meerkat_core::SessionGeneration::INITIAL,
-        meerkat_core::SessionCheckpointRevision::new(1),
-    )
-    .expect("mint status-independent checkpoint");
-    original_session
-        .install_checkpoint_stamp(checkpoint.clone())
-        .expect("install status-independent checkpoint");
-    service
-        .persisted_sessions
-        .write()
-        .await
-        .insert(session_id.clone(), original_session.clone());
-    let declaration = manifest
-        .members
-        .get_mut(&identity)
-        .expect("status-independent declaration member");
-    declaration.session_authority_policy =
-        crate::identity::DesiredSessionAuthorityPolicy::RequireExisting;
-    declaration.initial_message = None;
-    declaration.legacy_import = Some(crate::identity::IdentityLegacyImport::AdoptVerifiedLegacy {
-        session: crate::identity::DesiredSessionTarget {
-            session_id,
-            lineage_id,
-            lineage_generation: meerkat_core::SessionGeneration::INITIAL,
-            authority_policy: crate::identity::DesiredSessionAuthorityPolicy::RequireExisting,
-        },
-        checkpoint,
-        continuity_epoch_highwater: 7,
-        snapshot_fence_audit: 3,
-    });
-    handle
-        .apply_identity_declaration_manifest(manifest)
-        .await
-        .expect("seal identity despite rejecting status projection");
-
-    let materialized = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if handle
-                .get_member(&identity)
-                .await
-                .expect("read status-independent member")
-                .is_some()
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await;
-    if materialized.is_err() {
-        let intent = identity_store
-            .observe_identity_intent(handle.mob_id(), &identity)
-            .await;
-        let lease = identity_store
-            .observe_identity_lease(handle.mob_id(), &identity)
-            .await;
-        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(original_session.id());
-        let lifecycle = meerkat_runtime::RuntimeStore::observe_machine_lifecycle(
-            runtime_store.as_ref(),
-            &runtime_id,
-        )
-        .await;
-        let member = handle.get_member(&identity).await;
-        let machine = handle.query_machine_state().await;
-        let create_requests = service.recorded_create_requests().await;
-        panic!(
-            "failed output-status writes stalled member actuation: intent={intent:?}, lease={lease:?}, lifecycle={lifecycle:?}, member={member:?}, machine={machine:?}, create_requests={}, status_replace_calls={}, last_status_attempt={:?}",
-            create_requests.len(),
-            rejecting_status.replace_calls.load(Ordering::Relaxed),
-            rejecting_status
-                .last_attempt
-                .lock()
-                .expect("rejecting status observation mutex")
-                .clone(),
-        );
-    }
-    assert!(
-        rejecting_status.replace_calls.load(Ordering::Relaxed) > 0,
-        "the test must exercise at least one rejected status projection"
-    );
-
-    handle
-        .shutdown()
-        .await
-        .expect("shutdown status-failure identity mob");
-}
-
-#[tokio::test]
-async fn identity_reconcile_loop_rematerializes_existing_history_and_ignores_status() {
-    let definition = with_unique_mob_id(sample_definition(), "identity-reconcile-existing");
-    let mob_id = definition.id.clone();
-    let storage = MobStorage::in_memory();
-    let identity_store = Arc::clone(&storage.identity);
-    let identity_status = Arc::clone(&storage.identity_status);
-    let service = Arc::new(MockSessionService::new());
-    let runtime_store = Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
-    let runtime_store_for_machine: Arc<dyn meerkat_runtime::RuntimeStore> = runtime_store.clone();
-    let runtime_adapter = Arc::new(meerkat_runtime::MeerkatMachine::persistent_without_blobs(
-        runtime_store_for_machine,
-    ));
-    service.set_runtime_adapter(runtime_adapter.clone());
-    let observed_local_materialization_keys =
-        Arc::new(Mutex::new(Vec::<IdentityLocalMaterializationKey>::new()));
-    let observed_local_materialization_keys_for_provider =
-        Arc::clone(&observed_local_materialization_keys);
-    let identity_local_dispatcher: Arc<dyn AgentToolDispatcher> =
-        Arc::new(MultiToolDispatcher::new(&["identity_local_probe"]));
-    let identity_local_provider: Arc<dyn IdentityLocalExternalToolsProvider> =
-        Arc::new(
-            move |key: &IdentityLocalMaterializationKey| -> Result<
-                Option<Arc<dyn AgentToolDispatcher>>,
-                IdentityLocalExternalToolsError,
-            > {
-                observed_local_materialization_keys_for_provider
-                    .lock()
-                    .expect("identity local materialization key mutex")
-                    .push(key.clone());
-                Ok(Some(Arc::clone(&identity_local_dispatcher)))
-            },
-        );
-    let handle = MobBuilder::new(definition, storage)
-        .with_session_service(service.clone())
-        .with_identity_local_external_tools_provider(identity_local_provider)
-        .create()
-        .await
-        .expect("create identity reconcile test mob");
-
-    let identity = AgentIdentity::from("parent-1");
-    let mut manifest = test_identity_declaration_manifest(
-        "homecore-repro",
-        meerkat_core::ops::OperationId::new(),
-        identity.clone(),
-    );
-    require_identity_local_callback_tool(&mut manifest, &identity, "identity_local_probe");
-    let fixed_session_id = SessionId::parse("019f2bdc-40cb-7380-916d-6c49f4e9e0d1")
-        .expect("fixed HomeCore session id");
-    let fixed_lineage_id = meerkat_core::SessionLineageId::for_session(&fixed_session_id);
-    let mut original = factory_policy_session(
-        Session::with_id(fixed_session_id.clone()),
-        "claude-sonnet-4-5".to_string(),
-        4096,
-    );
-    let mut metadata = original.session_metadata().expect("seed session metadata");
-    metadata.comms_name = Some(test_comms_name_for(&mob_id, "worker", identity.as_str()));
-    metadata.peer_meta = Some(
-        meerkat_core::PeerMeta::default()
-            .with_label("mob_id", mob_id.as_str())
-            .with_label("role", "worker")
-            .with_label("member_id", identity.as_str()),
-    );
-    metadata.realm_id =
-        Some(meerkat_core::RealmId::parse(format!("mob.{mob_id}")).expect("valid mob realm id"));
-    metadata.mob_member_binding = Some(meerkat_core::MobMemberBinding {
-        mob_id: mob_id.as_str().to_string(),
-        role: "worker".to_string(),
-        member: identity.as_str().to_string(),
-    });
-    original
-        .set_session_metadata(metadata)
-        .expect("install durable member metadata");
-    original.push_batch(
-        (0..371)
-            .map(|index| {
-                meerkat_core::Message::User(meerkat_core::types::UserMessage::text(format!(
-                    "synthetic HomeCore transcript message {index:03}"
-                )))
-            })
-            .collect(),
-    );
-    let legacy_bytes = serde_json::to_vec(&original).expect("serialize legacy session");
-    let stamp = meerkat_core::checkpoint::SessionCheckpointStamp::recovery_migration(
-        &original,
-        &legacy_bytes,
-        meerkat_core::SessionGeneration::INITIAL,
-        meerkat_core::SessionCheckpointRevision::new(859),
-    )
-    .expect("mint exact recovery-migration checkpoint");
-    original
-        .install_checkpoint_stamp(stamp.clone())
-        .expect("install exact recovery-migration checkpoint");
-    service
-        .persisted_sessions
-        .write()
-        .await
-        .insert(fixed_session_id.clone(), original.clone());
-
-    let declaration = manifest
-        .members
-        .get_mut(&identity)
-        .expect("parent declaration");
-    declaration.session_authority_policy =
-        crate::identity::DesiredSessionAuthorityPolicy::RequireExisting;
-    declaration.initial_message = None;
-    declaration.legacy_import = Some(crate::identity::IdentityLegacyImport::AdoptVerifiedLegacy {
-        session: crate::identity::DesiredSessionTarget {
-            session_id: fixed_session_id.clone(),
-            lineage_id: fixed_lineage_id.clone(),
-            lineage_generation: meerkat_core::SessionGeneration::INITIAL,
-            authority_policy: crate::identity::DesiredSessionAuthorityPolicy::RequireExisting,
-        },
-        checkpoint: stamp,
-        continuity_epoch_highwater: 14_462,
-        snapshot_fence_audit: 11_130,
-    });
-    let completion_requeues_before =
-        super::actor::IDENTITY_RECONCILE_COMPLETION_REQUEUES.load(Ordering::Relaxed);
-    let reply_delivery_failures_before =
-        super::actor::IDENTITY_RECONCILE_REPLY_DELIVERY_FAILURES.load(Ordering::Relaxed);
-    let spawn_completion_delay = SpawnProvisionedCommandDelayGuard::set(100);
-    let outcome = handle
-        .apply_identity_declaration_manifest(manifest)
-        .await
-        .expect("seal verified existing-session intent");
-    let sealed_outcome = &outcome.identities[&identity];
-    let expected_local_materialization_key = IdentityLocalMaterializationKey::new(
-        mob_id.clone(),
-        identity.clone(),
-        sealed_outcome.intent_revision,
-        sealed_outcome.intent_digest.clone(),
-        sealed_outcome.authority_digest.clone(),
-    );
-    let (desired_session, sealed_model) = match &sealed_outcome.intent {
-        crate::identity::IdentityIntent::Present {
-            session, member, ..
-        } => {
-            assert_eq!(
-                member.material.required_local_callback_tools,
-                vec![
-                    crate::identity::DesiredLocalCallbackTool::new(
-                        "identity_local_probe",
-                        "Tool identity_local_probe",
-                        serde_json::json!({}),
-                    )
-                    .expect("valid expected callback definition")
-                ]
-            );
-            (session.clone(), member.material.profile.model.clone())
-        }
-        other => panic!("expected present identity intent, got {other:?}"),
-    };
-    assert_eq!(desired_session.session_id, fixed_session_id);
-    assert_eq!(desired_session.lineage_id, fixed_lineage_id);
-
-    let convergence = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let converged = matches!(
-                handle
-                    .identity_convergence_status(&identity)
-                    .await
-                    .expect("read identity convergence status"),
-                crate::identity::IdentityStoredObservation::Valid(status)
-                    if status.decision
-                        == Some(crate::identity::IdentityReconcileDecision::Converged)
-            );
-            let materialized = handle
-                .get_member(&identity)
-                .await
-                .expect("read rematerialized member")
-                .is_some();
-            if converged && materialized {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await;
-    if convergence.is_err() {
-        let status = handle
-            .identity_convergence_status(&identity)
-            .await
-            .expect("read timed-out identity status");
-        let member = handle
-            .get_member(&identity)
-            .await
-            .expect("read timed-out member");
-        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&fixed_session_id);
-        let lifecycle = meerkat_runtime::RuntimeStore::observe_machine_lifecycle(
-            runtime_store.as_ref(),
-            &runtime_id,
-        )
-        .await;
-        let live = runtime_adapter.contains_session(&fixed_session_id).await;
-        panic!(
-            "existing identity should converge; status={status:?}, member={member:?}, runtime_live={live}, lifecycle={lifecycle:?}"
-        );
-    }
-    drop(spawn_completion_delay);
-    assert!(
-        super::actor::IDENTITY_RECONCILE_COMPLETION_REQUEUES.load(Ordering::Relaxed)
-            > completion_requeues_before,
-        "the serialized terminal spawn path must causally requeue identity reconciliation"
-    );
-    assert!(
-        super::actor::IDENTITY_RECONCILE_REPLY_DELIVERY_FAILURES.load(Ordering::Relaxed)
-            > reply_delivery_failures_before,
-        "identity convergence must not depend on delivery of its internal spawn reply"
-    );
-
-    let retained = service
-        .persisted_session_clone(&desired_session.session_id)
-        .await
-        .expect("existing session retained");
-    assert_eq!(retained.id(), original.id());
-    assert_eq!(retained.messages(), original.messages());
-    assert_eq!(retained.messages().len(), 371);
-    assert_eq!(
-        retained
-            .try_checkpoint_state()
-            .expect("retained checkpoint"),
-        original
-            .try_checkpoint_state()
-            .expect("original checkpoint")
-    );
-    assert_eq!(
-        service.start_turn_calls.load(Ordering::Relaxed),
-        0,
-        "identity rematerialization must not redeliver an initial input"
-    );
-    assert_eq!(
-        service.keep_alive_start_turn_calls.load(Ordering::Relaxed),
-        0,
-        "identity rematerialization must not manufacture keep-alive work"
-    );
-    let observed_local_materialization_keys = observed_local_materialization_keys
-        .lock()
-        .expect("identity local materialization key mutex")
-        .clone();
-    assert!(
-        !observed_local_materialization_keys.is_empty(),
-        "identity reconciliation must request fresh process-local services"
-    );
-    assert!(
-        observed_local_materialization_keys
-            .iter()
-            .all(|key| key == &expected_local_materialization_key),
-        "every process-local lookup must be bound to the exact sealed intent authority: {observed_local_materialization_keys:?}"
-    );
-    assert_eq!(
-        service
-            .external_tool_names(&desired_session.session_id)
-            .await,
-        vec!["identity_local_probe".to_string()],
-        "the provider may attach only its process-local dispatcher overlay"
-    );
-    let local_tool_result = service
-        .dispatch_external_tool(
-            &desired_session.session_id,
-            "identity_local_probe",
-            serde_json::json!({}),
-        )
-        .await
-        .expect("dispatch identity-local external tool");
-    assert!(
-        !local_tool_result.is_error,
-        "the freshly attached local dispatcher must remain executable"
-    );
-    assert_eq!(
-        service.recorded_create_requests().await[0].model,
-        sealed_model,
-        "process-local services must not rewrite the sealed model"
-    );
-    match identity_store
-        .observe_identity_intent(&mob_id, &identity)
-        .await
-        .expect("read post-materialization intent")
-    {
-        crate::identity::IdentityStoredObservation::Valid(record) => {
-            assert_eq!(record.intent_revision, sealed_outcome.intent_revision);
-            assert_eq!(record.intent_digest, sealed_outcome.intent_digest);
-            assert_eq!(record.authority_digest, sealed_outcome.authority_digest);
-            assert_eq!(record.intent, sealed_outcome.intent);
-        }
-        other => panic!("expected exact post-materialization intent, got {other:?}"),
-    }
-    let lease = identity_store
-        .observe_identity_lease(&mob_id, &identity)
-        .await
-        .expect("read imported identity lease");
-    assert!(
-        matches!(
-            &lease,
-            crate::identity::IdentityStoredObservation::Valid(
-                crate::identity::IdentityLeaseRecord {
-                    epoch_highwater: 14_463,
-                    active: Some(crate::identity::IdentityLeaseClaim { epoch: 14_463, .. }),
-                    ..
-                }
-            )
-        ),
-        "continuity fence must seed the first live lease epoch; observed {lease:?}",
-    );
-    let dsl_identity = crate::machines::mob_machine::AgentIdentity::from_domain(&identity);
-    let machine = handle
-        .query_machine_state()
-        .await
-        .expect("read post-import machine state");
-    assert!(
-        !machine.member_kickoff_pending.contains(&dsl_identity)
-            && !machine.member_kickoff_starting.contains(&dsl_identity)
-            && !machine
-                .member_kickoff_callback_pending
-                .contains(&dsl_identity)
-            && !machine.member_kickoff_started.contains(&dsl_identity)
-            && !machine.member_kickoff_failed.contains(&dsl_identity)
-            && !machine.member_kickoff_cancelled.contains(&dsl_identity)
-            && !machine.member_kickoff_error.contains_key(&dsl_identity)
-            && !machine
-                .member_kickoff_objective_ids
-                .contains_key(&dsl_identity)
-            && !machine.member_kickoff_input_ids.contains_key(&dsl_identity),
-        "verified legacy adoption must never enter the kickoff state machine",
-    );
-
-    identity_status
-        .replace_identity_convergence_status(
-            &mob_id,
-            &crate::identity::IdentityConvergenceStatus {
-                identity: identity.clone(),
-                intent_revision: None,
-                lease_epoch: None,
-                decision: Some(crate::identity::IdentityReconcileDecision::RepairBlocked),
-                observed_at_ms: 1,
-                detail: Some("corrupt output-only status".to_string()),
-            },
-        )
-        .await
-        .expect("overwrite output-only status");
-    tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            if matches!(
-                handle
-                    .identity_convergence_status(&identity)
-                    .await
-                    .expect("read refreshed status"),
-                crate::identity::IdentityStoredObservation::Valid(status)
-                    if status.decision
-                        == Some(crate::identity::IdentityReconcileDecision::Converged)
-            ) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .expect("status corruption must not affect reconciliation authority");
-
-    handle
-        .shutdown()
-        .await
-        .expect("shutdown reconcile test mob");
-}
-
-/// Resets the converged-session reverify override on drop so one test cannot
-/// leak a shortened deadline into another.
-struct IdentityReconcileReverifyOverrideGuard;
-
-impl IdentityReconcileReverifyOverrideGuard {
-    fn set(ms: u64) -> Self {
-        super::actor::IDENTITY_RECONCILE_SESSION_REVERIFY_OVERRIDE_MS.store(ms, Ordering::SeqCst);
-        Self
-    }
-}
-
-impl Drop for IdentityReconcileReverifyOverrideGuard {
-    fn drop(&mut self) {
-        super::actor::IDENTITY_RECONCILE_SESSION_REVERIFY_OVERRIDE_MS.store(0, Ordering::SeqCst);
-    }
-}
-
-/// Shared setup for the converged-cadence tests: seed one verified legacy
-/// session, seal its RequireExisting identity intent, and wait for the
-/// reconcile loop to report Converged with the member materialized.
-async fn converge_identity_reconcile_fixture(
-    label: &str,
-) -> (
-    super::MobHandle,
-    Arc<MockSessionService>,
-    AgentIdentity,
-    SessionId,
-) {
-    let definition = with_unique_mob_id(sample_definition(), label);
-    let mob_id = definition.id.clone();
-    let storage = MobStorage::in_memory();
-    let service = Arc::new(MockSessionService::new());
-    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
-        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
-    let runtime_adapter = Arc::new(meerkat_runtime::MeerkatMachine::persistent_without_blobs(
-        runtime_store,
-    ));
-    service.set_runtime_adapter(runtime_adapter.clone());
-    let handle = MobBuilder::new(definition, storage)
-        .with_session_service(service.clone())
-        .create()
-        .await
-        .expect("create converged-cadence identity mob");
-
-    let identity = AgentIdentity::from("steady-1");
-    let mut manifest = test_identity_declaration_manifest(
-        "idle-cadence",
-        meerkat_core::ops::OperationId::new(),
-        identity.clone(),
-    );
-    let fixed_session_id = SessionId::new();
-    let fixed_lineage_id = meerkat_core::SessionLineageId::for_session(&fixed_session_id);
-    let mut original = factory_policy_session(
-        Session::with_id(fixed_session_id.clone()),
-        "claude-sonnet-4-5".to_string(),
-        4096,
-    );
-    let mut metadata = original.session_metadata().expect("seed session metadata");
-    metadata.comms_name = Some(test_comms_name_for(&mob_id, "worker", identity.as_str()));
-    metadata.peer_meta = Some(
-        meerkat_core::PeerMeta::default()
-            .with_label("mob_id", mob_id.as_str())
-            .with_label("role", "worker")
-            .with_label("member_id", identity.as_str()),
-    );
-    metadata.realm_id =
-        Some(meerkat_core::RealmId::parse(format!("mob.{mob_id}")).expect("valid mob realm id"));
-    metadata.mob_member_binding = Some(meerkat_core::MobMemberBinding {
-        mob_id: mob_id.as_str().to_string(),
-        role: "worker".to_string(),
-        member: identity.as_str().to_string(),
-    });
-    original
-        .set_session_metadata(metadata)
-        .expect("install durable member metadata");
-    original.push_batch(
-        (0..12)
-            .map(|index| {
-                meerkat_core::Message::User(meerkat_core::types::UserMessage::text(format!(
-                    "steady-state transcript message {index:02}"
-                )))
-            })
-            .collect(),
-    );
-    let legacy_bytes = serde_json::to_vec(&original).expect("serialize legacy session");
-    let stamp = meerkat_core::checkpoint::SessionCheckpointStamp::recovery_migration(
-        &original,
-        &legacy_bytes,
-        meerkat_core::SessionGeneration::INITIAL,
-        meerkat_core::SessionCheckpointRevision::new(3),
-    )
-    .expect("mint exact recovery-migration checkpoint");
-    original
-        .install_checkpoint_stamp(stamp.clone())
-        .expect("install exact recovery-migration checkpoint");
-    service
-        .persisted_sessions
-        .write()
-        .await
-        .insert(fixed_session_id.clone(), original);
-
-    let declaration = manifest
-        .members
-        .get_mut(&identity)
-        .expect("steady-state declaration");
-    declaration.session_authority_policy =
-        crate::identity::DesiredSessionAuthorityPolicy::RequireExisting;
-    declaration.initial_message = None;
-    declaration.legacy_import = Some(crate::identity::IdentityLegacyImport::AdoptVerifiedLegacy {
-        session: crate::identity::DesiredSessionTarget {
-            session_id: fixed_session_id.clone(),
-            lineage_id: fixed_lineage_id,
-            lineage_generation: meerkat_core::SessionGeneration::INITIAL,
-            authority_policy: crate::identity::DesiredSessionAuthorityPolicy::RequireExisting,
-        },
-        checkpoint: stamp,
-        continuity_epoch_highwater: 11,
-        snapshot_fence_audit: 7,
-    });
-    handle
-        .apply_identity_declaration_manifest(manifest)
-        .await
-        .expect("seal verified existing-session intent");
-
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let converged = matches!(
-                handle
-                    .identity_convergence_status(&identity)
-                    .await
-                    .expect("read identity convergence status"),
-                crate::identity::IdentityStoredObservation::Valid(status)
-                    if status.decision
-                        == Some(crate::identity::IdentityReconcileDecision::Converged)
-            );
-            let materialized = handle
-                .get_member(&identity)
-                .await
-                .expect("read rematerialized member")
-                .is_some();
-            if converged && materialized {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .expect("existing identity should converge");
-
-    (handle, service, identity, fixed_session_id)
-}
-
-/// The customer-facing idle contract: once an identity is Converged and
-/// nothing changes, steady-state reconcile passes must not reload the
-/// persisted session document (the 82 MB HomeCore document was reloaded and
-/// digest-verified once per scan interval per member).
-#[tokio::test]
-async fn identity_reconcile_converged_steady_state_stops_session_document_loads() {
-    let (handle, service, identity, _session_id) =
-        converge_identity_reconcile_fixture("identity-converged-idle").await;
-
-    // Drain any pass already in flight at the moment convergence was observed.
-    tokio::time::sleep(Duration::from_millis(750)).await;
-    let service_loads_before = service.load_persisted_session_calls.load(Ordering::Relaxed);
-    let observe_loads_before =
-        super::actor::IDENTITY_RECONCILE_SESSION_DOCUMENT_LOADS.load(Ordering::Relaxed);
-
-    // Idle window spanning multiple scan intervals (scan = 1s).
-    tokio::time::sleep(Duration::from_secs(3)).await;
-
-    let service_loads_after = service.load_persisted_session_calls.load(Ordering::Relaxed);
-    let observe_loads_after =
-        super::actor::IDENTITY_RECONCILE_SESSION_DOCUMENT_LOADS.load(Ordering::Relaxed);
-    assert_eq!(
-        observe_loads_after, observe_loads_before,
-        "converged steady-state reconcile passes must not re-observe the session document"
-    );
-    assert_eq!(
-        service_loads_after, service_loads_before,
-        "converged steady-state reconcile passes must not call session-service loads"
-    );
-    assert!(
-        matches!(
-            handle
-                .identity_convergence_status(&identity)
-                .await
-                .expect("read post-idle identity convergence status"),
-            crate::identity::IdentityStoredObservation::Valid(status)
-                if status.decision
-                    == Some(crate::identity::IdentityReconcileDecision::Converged)
-        ),
-        "identity must remain Converged across the idle window"
-    );
-
-    handle
-        .shutdown()
-        .await
-        .expect("shutdown converged-idle mob");
-}
-
-/// The witness is a bounded cache, not new authority: after the reverify
-/// deadline the next pass re-reads the document, so session-document-only
-/// drift (here: the persisted document disappearing out-of-band) stays
-/// level-triggered and demotes the identity from Converged.
-#[tokio::test]
-async fn identity_reconcile_converged_witness_expiry_detects_session_document_drift() {
-    let _override_guard = IdentityReconcileReverifyOverrideGuard::set(1_000);
-    let (handle, service, identity, session_id) =
-        converge_identity_reconcile_fixture("identity-converged-reverify").await;
-
-    // Session-document-only drift: invisible to every cheap per-pass
-    // observation, discoverable only by re-reading the document.
-    service
-        .archived_session_ids
-        .write()
-        .await
-        .insert(session_id);
-
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let demoted = matches!(
-                handle
-                    .identity_convergence_status(&identity)
-                    .await
-                    .expect("read post-drift identity convergence status"),
-                crate::identity::IdentityStoredObservation::Valid(status)
-                    if status.decision.is_some()
-                        && status.decision
-                            != Some(crate::identity::IdentityReconcileDecision::Converged)
-            );
-            if demoted {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .expect("witness expiry must re-verify the document and demote Converged");
-
-    handle
-        .shutdown()
-        .await
-        .expect("shutdown converged-reverify mob");
-}
-
-#[test]
-fn identity_local_external_tools_requires_exact_sealed_catalog() {
-    fn provider_for(
-        dispatcher: Arc<dyn AgentToolDispatcher>,
-    ) -> Arc<dyn IdentityLocalExternalToolsProvider> {
-        Arc::new(move |_key: &IdentityLocalMaterializationKey| Ok(Some(Arc::clone(&dispatcher))))
-    }
-
-    fn definition(name: &str) -> crate::identity::DesiredLocalCallbackTool {
-        crate::identity::DesiredLocalCallbackTool::new(
-            name,
-            format!("Tool {name}"),
-            empty_input_schema(),
-        )
-        .expect("valid callback definition")
-    }
-
-    fn empty_input_schema() -> serde_json::Value {
-        serde_json::json!({})
-    }
-
-    fn object_input_schema() -> serde_json::Value {
-        serde_json::json!({"type": "object"})
-    }
-
-    let key = IdentityLocalMaterializationKey::new(
-        MobId::from("local-services"),
-        AgentIdentity::from("worker"),
-        7,
-        format!("sha256:{}", "1".repeat(64)),
-        format!("sha256:{}", "2".repeat(64)),
-    );
-    let required = vec![definition("alpha"), definition("beta")];
-    assert!(
-        super::identity_local_services::resolve_identity_local_external_tools(None, &key, &[],)
-            .expect("an empty requirement needs no provider")
-            .is_none()
-    );
-    assert!(matches!(
-        super::identity_local_services::resolve_identity_local_external_tools(
-            None, &key, &required
-        ),
-        Err(IdentityLocalExternalToolsError::Missing)
-    ));
-
-    let exact = provider_for(Arc::new(MultiToolDispatcher::new(&["alpha", "beta"])));
-    assert!(
-        super::identity_local_services::resolve_identity_local_external_tools(
-            Some(exact.as_ref()),
-            &key,
-            &required,
-        )
-        .expect("exact callback catalog")
-        .is_some()
-    );
-
-    let wrong_order = provider_for(Arc::new(MultiToolDispatcher::new(&["beta", "alpha"])));
-    assert!(
-        super::identity_local_services::resolve_identity_local_external_tools(
-            Some(wrong_order.as_ref()),
-            &key,
-            &required,
-        )
-        .expect("dispatcher catalog order is not semantic")
-        .is_some()
-    );
-    let wrong_description = provider_for(Arc::new(MultiToolDispatcher {
-        defs: Arc::from([
-            Arc::new(ToolDef {
-                name: "alpha".into(),
-                description: "Different alpha".to_string(),
-                input_schema: empty_input_schema(),
-                provenance: None,
-            }),
-            Arc::new(ToolDef {
-                name: "beta".into(),
-                description: "Tool beta".to_string(),
-                input_schema: empty_input_schema(),
-                provenance: None,
-            }),
-        ]),
-    }));
-    let wrong_schema = provider_for(Arc::new(MultiToolDispatcher {
-        defs: Arc::from([
-            Arc::new(ToolDef {
-                name: "alpha".into(),
-                description: "Tool alpha".to_string(),
-                input_schema: object_input_schema(),
-                provenance: None,
-            }),
-            Arc::new(ToolDef {
-                name: "beta".into(),
-                description: "Tool beta".to_string(),
-                input_schema: empty_input_schema(),
-                provenance: None,
-            }),
-        ]),
-    }));
-    let unexpected_provenance = provider_for(Arc::new(MultiToolDispatcher {
-        defs: Arc::from([
-            Arc::new(ToolDef {
-                name: "alpha".into(),
-                description: "Tool alpha".to_string(),
-                input_schema: empty_input_schema(),
-                provenance: Some(meerkat_core::types::ToolProvenance {
-                    kind: meerkat_core::types::ToolSourceKind::Callback,
-                    source_id: meerkat_core::types::ToolSourceId::new("unsealed"),
-                }),
-            }),
-            Arc::new(ToolDef {
-                name: "beta".into(),
-                description: "Tool beta".to_string(),
-                input_schema: empty_input_schema(),
-                provenance: None,
-            }),
-        ]),
-    }));
-    for provider in [wrong_description, wrong_schema, unexpected_provenance] {
-        assert!(matches!(
-            super::identity_local_services::resolve_identity_local_external_tools(
-                Some(provider.as_ref()),
-                &key,
-                &required,
-            ),
-            Err(IdentityLocalExternalToolsError::DefinitionMismatch { .. })
-        ));
-    }
-}
-
-#[tokio::test]
-async fn identity_local_external_tools_failures_map_to_output_status() {
-    let cases = [
-        (
-            "missing-provider",
-            crate::identity::IdentityReconcileDecision::Backoff,
-        ),
-        (
-            "missing",
-            crate::identity::IdentityReconcileDecision::Backoff,
-        ),
-        ("none", crate::identity::IdentityReconcileDecision::Backoff),
-        (
-            "unavailable",
-            crate::identity::IdentityReconcileDecision::Backoff,
-        ),
-        (
-            "authority-mismatched",
-            crate::identity::IdentityReconcileDecision::RepairBlocked,
-        ),
-        (
-            "definition-mismatched",
-            crate::identity::IdentityReconcileDecision::RepairBlocked,
-        ),
-    ];
-
-    for (case, expected_decision) in cases {
-        let definition = with_unique_mob_id(
-            sample_definition(),
-            &format!("identity-local-services-{case}"),
-        );
-        let mob_id = definition.id.clone();
-        let storage = MobStorage::in_memory();
-        let identity_store = Arc::clone(&storage.identity);
-        let service = Arc::new(MockSessionService::new());
-        let runtime_store = Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
-        let runtime_store_for_machine: Arc<dyn meerkat_runtime::RuntimeStore> =
-            runtime_store.clone();
-        service.set_runtime_adapter(Arc::new(
-            meerkat_runtime::MeerkatMachine::persistent_without_blobs(runtime_store_for_machine),
-        ));
-
-        let identity = AgentIdentity::from(format!("worker-{case}"));
-        let provider: Option<Arc<dyn IdentityLocalExternalToolsProvider>> = match case {
-            "missing-provider" => None,
-            "missing" => Some(Arc::new(|_key: &IdentityLocalMaterializationKey| {
-                Err(IdentityLocalExternalToolsError::Missing)
-            })),
-            "none" => Some(Arc::new(|_key: &IdentityLocalMaterializationKey| Ok(None))),
-            "unavailable" => Some(Arc::new(|_key: &IdentityLocalMaterializationKey| {
-                Err(IdentityLocalExternalToolsError::Unavailable {
-                    reason: "dispatcher registry is warming".to_string(),
-                })
-            })),
-            "authority-mismatched" => {
-                let registered = IdentityLocalMaterializationKey::new(
-                    mob_id.clone(),
-                    identity.clone(),
-                    999,
-                    format!("sha256:{}", "a".repeat(64)),
-                    format!("sha256:{}", "b".repeat(64)),
-                );
-                Some(Arc::new(move |_key: &IdentityLocalMaterializationKey| {
-                    Err(IdentityLocalExternalToolsError::AuthorityMismatch {
-                        registered: registered.clone(),
-                    })
-                }))
-            }
-            "definition-mismatched" => {
-                let dispatcher: Arc<dyn AgentToolDispatcher> =
-                    Arc::new(MultiToolDispatcher::new(&["different_tool"]));
-                Some(Arc::new(move |_key: &IdentityLocalMaterializationKey| {
-                    Ok(Some(Arc::clone(&dispatcher)))
-                }))
-            }
-            other => panic!("unknown identity-local-services case {other}"),
-        };
-        let mut builder =
-            MobBuilder::new(definition, storage).with_session_service(service.clone());
-        if let Some(provider) = provider {
-            builder = builder.with_identity_local_external_tools_provider(provider);
-        }
-        let handle = builder
-            .create()
-            .await
-            .expect("create identity local services test mob");
-        let (mut manifest, _) = test_verified_legacy_declaration_manifest(
-            service.as_ref(),
-            &format!("provider-local-services-{case}"),
-            meerkat_core::ops::OperationId::new(),
-            identity.clone(),
-        )
-        .await;
-        require_identity_local_callback_tool(&mut manifest, &identity, "identity_local_probe");
-        let outcome = handle
-            .apply_identity_declaration_manifest(manifest)
-            .await
-            .expect("seal identity local services declaration");
-        let sealed = outcome.identities[&identity].clone();
-
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if matches!(
-                    handle
-                        .identity_convergence_status(&identity)
-                        .await
-                        .expect("read identity local services status"),
-                    crate::identity::IdentityStoredObservation::Valid(status)
-                        if status.decision == Some(expected_decision)
-                ) {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(25)).await;
-            }
-        })
-        .await
-        .unwrap_or_else(|_| {
-            panic!("identity local services case {case} did not reach {expected_decision:?}")
-        });
-
-        assert!(
-            handle
-                .get_member(&identity)
-                .await
-                .expect("read blocked identity member")
-                .is_none(),
-            "{case} process-local services must not materialize a member"
-        );
-        assert!(
-            service.recorded_create_requests().await.is_empty(),
-            "{case} process-local services must fail before session materialization"
-        );
-        match identity_store
-            .observe_identity_intent(&mob_id, &identity)
-            .await
-            .expect("read blocked identity intent")
-        {
-            crate::identity::IdentityStoredObservation::Valid(record) => {
-                assert_eq!(record.intent_revision, sealed.intent_revision);
-                assert_eq!(record.intent_digest, sealed.intent_digest);
-                assert_eq!(record.authority_digest, sealed.authority_digest);
-                assert_eq!(record.intent, sealed.intent);
-            }
-            other => panic!("expected exact blocked intent, got {other:?}"),
-        }
-
-        handle
-            .shutdown()
-            .await
-            .expect("shutdown identity local services test mob");
-    }
-}
-
-/// Minimal thread-scoped tracing capture: records every INFO+ meerkat-mob
-/// event as one "field=value" line so per-spawn outcome logging can be
-/// asserted without a tracing-subscriber registry. Works under the
-/// current-thread test runtime because every actor task polls on the test
-/// thread while the `set_default` guard is held.
-#[derive(Clone, Default)]
-struct SpawnOutcomeLogCapture {
-    lines: Arc<Mutex<Vec<String>>>,
-}
-
-impl SpawnOutcomeLogCapture {
-    fn lines_containing(&self, needle: &str) -> Vec<String> {
-        self.lines
-            .lock()
-            .expect("spawn outcome log capture mutex")
-            .iter()
-            .filter(|line| line.contains(needle))
-            .cloned()
-            .collect()
-    }
-}
-
-struct SpawnOutcomeLogVisitor<'a> {
-    line: &'a mut String,
-}
-
-impl tracing::field::Visit for SpawnOutcomeLogVisitor<'_> {
-    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        use std::fmt::Write as _;
-        let _ = write!(self.line, " {}={value:?}", field.name());
-    }
-}
-
-impl tracing::Subscriber for SpawnOutcomeLogCapture {
-    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
-        *metadata.level() <= tracing::Level::INFO && metadata.target().starts_with("meerkat_mob")
-    }
-
-    fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-        tracing::span::Id::from_u64(1)
-    }
-
-    fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
-
-    fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
-
-    fn event(&self, event: &tracing::Event<'_>) {
-        let mut line = String::new();
-        let mut visitor = SpawnOutcomeLogVisitor { line: &mut line };
-        event.record(&mut visitor);
-        self.lines
-            .lock()
-            .expect("spawn outcome log capture mutex")
-            .push(line);
-    }
-
-    fn enter(&self, _span: &tracing::span::Id) {}
-
-    fn exit(&self, _span: &tracing::span::Id) {}
-}
-
-/// Identity-reconcile member actuation failures must retry on the real
-/// exponential backoff schedule, not the pre-fix hot loop (2026-07-29
-/// incident: terminal-disposition requeue + 25ms tick re-ran full session
-/// provisioning at up to 40Hz per identity, forever).
-#[tokio::test]
-async fn identity_reconcile_member_actuation_backoff_bounds_retry_rate() {
-    let capture = SpawnOutcomeLogCapture::default();
-    let _capture_guard = tracing::subscriber::set_default(capture.clone());
-
-    let definition = with_unique_mob_id(sample_definition(), "identity-actuation-backoff");
-    let mob_id = definition.id.clone();
-    let storage = MobStorage::in_memory();
-    let service = Arc::new(MockSessionService::new());
-    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
-        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
-    service.set_runtime_adapter(Arc::new(
-        meerkat_runtime::MeerkatMachine::persistent_without_blobs(runtime_store),
-    ));
-    let handle = MobBuilder::new(definition, storage)
-        .with_session_service(service.clone())
-        .create()
-        .await
-        .expect("create identity backoff test mob");
-
-    let identity = AgentIdentity::from("backoff-worker");
-    let (manifest, legacy_session) = test_materializable_legacy_declaration_manifest(
-        service.as_ref(),
-        &mob_id,
-        "identity-actuation-backoff",
-        meerkat_core::ops::OperationId::new(),
-        identity.clone(),
-    )
-    .await;
-    let session_id = legacy_session.id().clone();
-    service
-        .set_create_session_failure_detail(&session_id, "mock member build failure")
-        .await;
-    let started = Instant::now();
-    handle
-        .apply_identity_declaration_manifest(manifest)
-        .await
-        .expect("seal identity backoff declaration");
-
-    // Wait for three failed attempts. Without real backoff the loop produced
-    // dozens of attempts per second; three attempts arriving on the schedule
-    // is the regression signal.
-    let attempts = tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            let attempts = service.create_fail_attempt_instants(&session_id).await;
-            if attempts.len() >= 3 {
-                break attempts;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .expect("three backoff-scheduled actuation attempts");
-    let observation_window = started.elapsed();
-
-    // Schedule lower bounds: after consecutive failure n, the next attempt
-    // may not start before 250ms * 2^(n-1). Scan-cadence latency only ever
-    // lengthens the gap, so the lower bound is timing-stable.
-    let first_gap = attempts[1].duration_since(attempts[0]);
-    let second_gap = attempts[2].duration_since(attempts[1]);
-    assert!(
-        first_gap >= Duration::from_millis(250),
-        "first retry arrived {first_gap:?} after the first failure, inside the 250ms backoff deadline"
-    );
-    assert!(
-        second_gap >= Duration::from_millis(500),
-        "second retry arrived {second_gap:?} after the second failure, inside the 500ms backoff deadline"
-    );
-
-    // Bounded attempt rate overall: the 1s intent scan plus the schedule
-    // admits at most about one attempt per second early on.
-    let all_attempts = service.create_fail_attempt_instants(&session_id).await;
-    let max_attempts = usize::try_from(observation_window.as_secs())
-        .unwrap_or(usize::MAX)
-        .saturating_add(2);
-    assert!(
-        all_attempts.len() <= max_attempts,
-        "expected a bounded retry rate, observed {} attempts in {observation_window:?}",
-        all_attempts.len()
-    );
-
-    // The reconcile lane detaches its spawn reply waiter, so the terminal
-    // outcome log is the only per-attempt visibility (the 42-minute
-    // production diagnosis this closes). Every completed failed attempt must
-    // have logged one "spawn failed" line; the newest attempt's completion
-    // may still be in flight when this reads.
-    let failed_lines = capture.lines_containing("spawn failed");
-    assert!(
-        failed_lines.len() >= all_attempts.len().saturating_sub(1),
-        "expected one spawn-failed outcome log per completed attempt, got {} lines for {} attempts",
-        failed_lines.len(),
-        all_attempts.len()
-    );
-    let first_line = failed_lines.first().expect("at least one spawn-failed log");
-    assert!(
-        first_line.contains("backoff-worker")
-            && first_line.contains("mock member build failure")
-            && first_line.contains("elapsed_ms"),
-        "spawn-failed outcome log must carry identity, error, and elapsed time: {first_line}"
-    );
-
-    // Success resets: once the build stops failing, the scan re-admits the
-    // identity after its deadline and convergence completes.
-    service.clear_create_session_failure(&session_id).await;
-    tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            let converged = matches!(
-                handle
-                    .identity_convergence_status(&identity)
-                    .await
-                    .expect("read identity backoff status"),
-                crate::identity::IdentityStoredObservation::Valid(status)
-                    if status.decision
-                        == Some(crate::identity::IdentityReconcileDecision::Converged)
-            );
-            if converged {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .expect("identity converges after the failure clears");
-    assert!(
-        !capture.lines_containing("spawn built").is_empty(),
-        "successful spawn must log its terminal outcome"
-    );
-
-    handle
-        .shutdown()
-        .await
-        .expect("shutdown identity backoff test mob");
-}
-
-/// A closed callback transport fails builds instantly and can never recover
-/// in-process, so it must park the identity (typed status, zero further
-/// attempts) instead of joining the backoff-retry schedule.
-#[tokio::test]
-async fn identity_reconcile_parks_on_closed_callback_transport() {
-    let capture = SpawnOutcomeLogCapture::default();
-    let _capture_guard = tracing::subscriber::set_default(capture.clone());
-
-    let definition = with_unique_mob_id(sample_definition(), "identity-transport-parked");
-    let mob_id = definition.id.clone();
-    let storage = MobStorage::in_memory();
-    let service = Arc::new(MockSessionService::new());
-    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
-        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
-    service.set_runtime_adapter(Arc::new(
-        meerkat_runtime::MeerkatMachine::persistent_without_blobs(runtime_store),
-    ));
-    let handle = MobBuilder::new(definition, storage)
-        .with_session_service(service.clone())
-        .create()
-        .await
-        .expect("create identity parked test mob");
-
-    let identity = AgentIdentity::from("parked-worker");
-    let (manifest, legacy_session) = test_materializable_legacy_declaration_manifest(
-        service.as_ref(),
-        &mob_id,
-        "identity-transport-parked",
-        meerkat_core::ops::OperationId::new(),
-        identity.clone(),
-    )
-    .await;
-    let session_id = legacy_session.id().clone();
-    // The exact prose the rpc-gateway callback bridge emits for a closed
-    // stdio transport; parked classification string-matches it today.
-    service
-        .set_create_session_failure_detail(&session_id, "callback transport closed")
-        .await;
-    handle
-        .apply_identity_declaration_manifest(manifest)
-        .await
-        .expect("seal identity parked declaration");
-
-    // The typed parked projection lands after the first attempt.
-    let parked = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if matches!(
-                handle
-                    .identity_convergence_status(&identity)
-                    .await
-                    .expect("read identity parked status"),
-                crate::identity::IdentityStoredObservation::Valid(status)
-                    if status.decision
-                        == Some(crate::identity::IdentityReconcileDecision::RepairBlocked)
-                        && status.detail.as_deref().is_some_and(|detail| {
-                            detail.contains("parked")
-                                && detail.contains("callback transport closed")
-                        })
-            ) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await;
-    if parked.is_err() {
-        let status = handle
-            .identity_convergence_status(&identity)
-            .await
-            .expect("read timed-out parked status");
-        let attempts = service.create_fail_attempt_instants(&session_id).await;
-        let create_requests = service.recorded_create_requests().await;
-        panic!(
-            "closed callback transport should park the identity as typed RepairBlocked; status={status:?}, refused_attempts={}, create_requests={}",
-            attempts.len(),
-            create_requests.len(),
-        );
-    }
-
-    // Let any already-admitted attempt settle before snapshotting the count.
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    let attempts_at_park = service
-        .create_fail_attempt_instants(&session_id)
-        .await
-        .len();
-    assert!(
-        attempts_at_park >= 1,
-        "parking requires at least the observed fatal attempt"
-    );
-
-    // Multiple intent-scan cycles later, a parked identity must not have been
-    // re-actuated (the pre-fix loop retried instantly, forever).
-    tokio::time::sleep(Duration::from_millis(2600)).await;
-    let attempts_after_wait = service
-        .create_fail_attempt_instants(&session_id)
-        .await
-        .len();
-    assert_eq!(
-        attempts_at_park, attempts_after_wait,
-        "parked identity must not be re-attempted"
-    );
-    assert!(
-        handle
-            .get_member(&identity)
-            .await
-            .expect("read parked identity member")
-            .is_none(),
-        "a parked identity must not materialize a member"
-    );
-
-    // The fatal outcome is visible per attempt despite the detached reply.
-    let failed_lines = capture.lines_containing("spawn failed");
-    assert!(
-        !failed_lines.is_empty()
-            && failed_lines[0].contains("parked-worker")
-            && failed_lines[0].contains("callback transport closed"),
-        "parked spawn failure must log its terminal outcome: {failed_lines:?}"
-    );
-
-    handle
-        .shutdown()
-        .await
-        .expect("shutdown identity parked test mob");
-}
-
-#[tokio::test]
-async fn identity_declaration_requires_retire_send_and_wiring_scopes_together() {
-    let (handle, service) = create_test_mob(with_unique_mob_id(
-        sample_definition(),
-        "identity-declaration-composite-scope",
-    ))
-    .await;
-    let external_id = meerkat_core::auth::PrincipalId::new("console:manifest-writer")
-        .expect("valid external principal");
-    let partial_scopes = BTreeSet::from([
-        crate::ControlScope::Retire,
-        crate::ControlScope::SendCommand,
-    ]);
-    handle
-        .grant_scopes(
-            crate::control_policy::MobControlPrincipal::Owner,
-            external_id.clone(),
-            partial_scopes.clone(),
-            None,
-        )
-        .await
-        .expect("grant partial declaration scopes");
-    let external =
-        handle
-            .clone()
-            .with_command_authority(crate::control_policy::CommandAuthority::principal(
-                crate::control_policy::MobControlPrincipal::External(external_id.clone()),
-            ));
-    let (manifest, _) = test_verified_legacy_declaration_manifest(
-        service.as_ref(),
-        "provider-composite",
-        meerkat_core::ops::OperationId::new(),
-        AgentIdentity::from("composite-worker"),
-    )
-    .await;
-    match external
-        .apply_identity_declaration_manifest(manifest.clone())
-        .await
-    {
-        Err(MobError::ScopeDenied(denial)) => {
-            assert_eq!(denial.required, crate::ControlScope::WireTopology);
-            assert_eq!(denial.presented, partial_scopes);
-        }
-        other => panic!("expected typed composite-scope denial, got {other:?}"),
-    }
-
-    handle
-        .grant_scopes(
-            crate::control_policy::MobControlPrincipal::Owner,
-            external_id,
-            BTreeSet::from([
-                crate::ControlScope::Retire,
-                crate::ControlScope::SendCommand,
-                crate::ControlScope::WireTopology,
-            ]),
-            None,
-        )
-        .await
-        .expect("grant complete declaration scopes");
-    external
-        .apply_identity_declaration_manifest(manifest)
-        .await
-        .expect("all declaration scopes admit the manifest");
-
-    handle
-        .shutdown()
-        .await
-        .expect("shutdown declaration scope test mob");
-}
-
 #[tokio::test]
 async fn actor_startup_prunes_crash_recovered_stale_member_operator_rows() {
     let definition = with_unique_mob_id(sample_definition(), "operator-startup-prune");
@@ -10718,14 +8649,7 @@ impl AgentToolDispatcher for EchoBundleDispatcher {
 struct PersistentMockAgent {
     session_id: SessionId,
     llm_identity: SessionLlmIdentity,
-    system_context_state: meerkat_core::SystemContextStateHandle,
-}
-
-fn system_context_handle_for_test(
-    state: SessionSystemContextState,
-) -> meerkat_core::SystemContextStateHandle {
-    meerkat_core::SystemContextStateHandle::new(state)
-        .expect("test system-context state should restore")
+    transient_turn_context_state: meerkat_core::TransientTurnContextStateHandle,
 }
 
 #[async_trait]
@@ -10780,7 +8704,7 @@ impl SessionAgent for PersistentMockAgent {
         }
     }
 
-    fn session_clone(&self) -> Result<Session, SystemContextStateError> {
+    fn session_clone(&self) -> Result<Session, meerkat_core::error::AgentError> {
         Ok(Session::with_id(self.session_id.clone()))
     }
 
@@ -10788,14 +8712,8 @@ impl SessionAgent for PersistentMockAgent {
         Some(self.llm_identity.clone())
     }
 
-    fn apply_runtime_system_context(
-        &mut self,
-        _appends: &[meerkat_core::PendingSystemContextAppend],
-    ) {
-    }
-
-    fn system_context_state(&self) -> meerkat_core::SystemContextStateHandle {
-        self.system_context_state.clone()
+    fn transient_turn_context_state(&self) -> meerkat_core::TransientTurnContextStateHandle {
+        self.transient_turn_context_state.clone()
     }
 }
 
@@ -10819,9 +8737,7 @@ impl SessionAgentBuilder for PersistentMockBuilder {
         Ok(PersistentMockAgent {
             session_id,
             llm_identity: test_llm_identity(req.model.clone()),
-            system_context_state: system_context_handle_for_test(
-                SessionSystemContextState::default(),
-            ),
+            transient_turn_context_state: meerkat_core::TransientTurnContextStateHandle::new(),
         })
     }
 }
@@ -11468,7 +9384,7 @@ struct OverlayProbeSessionAgent {
     provider_visible_tools: Arc<Mutex<Vec<Vec<meerkat_core::ToolName>>>>,
     provider_turn_overlays: Arc<Mutex<Vec<Option<TurnToolOverlay>>>>,
     turn_tool_overlay: Option<TurnToolOverlay>,
-    system_context_state: meerkat_core::SystemContextStateHandle,
+    transient_turn_context_state: meerkat_core::TransientTurnContextStateHandle,
 }
 
 #[async_trait]
@@ -11561,7 +9477,7 @@ impl SessionAgent for OverlayProbeSessionAgent {
         }
     }
 
-    fn session_clone(&self) -> Result<Session, SystemContextStateError> {
+    fn session_clone(&self) -> Result<Session, meerkat_core::error::AgentError> {
         Ok(self.session.clone())
     }
 
@@ -11587,18 +9503,8 @@ impl SessionAgent for OverlayProbeSessionAgent {
             .map(|metadata| metadata.llm_identity())
     }
 
-    fn apply_runtime_system_context(
-        &mut self,
-        appends: &[meerkat_core::PendingSystemContextAppend],
-    ) {
-        self.session.append_system_context_blocks(appends);
-        self.system_context_state
-            .replace_from_generated_restore(self.session.system_context_state().unwrap_or_default())
-            .expect("test system-context state should restore");
-    }
-
-    fn system_context_state(&self) -> meerkat_core::SystemContextStateHandle {
-        self.system_context_state.clone()
+    fn transient_turn_context_state(&self) -> meerkat_core::TransientTurnContextStateHandle {
+        self.transient_turn_context_state.clone()
     }
 }
 
@@ -11628,9 +9534,7 @@ impl SessionAgentBuilder for OverlayProbeSessionAgentBuilder {
             provider_visible_tools: Arc::clone(&self.provider_visible_tools),
             provider_turn_overlays: Arc::clone(&self.provider_turn_overlays),
             turn_tool_overlay: None,
-            system_context_state: system_context_handle_for_test(
-                SessionSystemContextState::default(),
-            ),
+            transient_turn_context_state: meerkat_core::TransientTurnContextStateHandle::new(),
         })
     }
 }
@@ -15847,6 +13751,7 @@ async fn test_rotate_supervisor_reauthorizes_live_remote_members_and_rejects_sta
         super::bridge_protocol::BridgeDeliveryPayload {
             objective_id: None,
             injected_context: Vec::new(),
+            transient_turn_context: None,
             supervisor: old_bridge
                 .supervisor_spec()
                 .await
@@ -22107,7 +20012,7 @@ async fn test_resume_restores_missing_sessions_with_same_session_and_history() {
         .live_session_clone(&old_sid)
         .await
         .expect("live session");
-    persisted.set_system_prompt("Persisted worker prompt".to_string());
+    persisted.append_system_message("Persisted worker prompt".to_string());
     persisted.push(meerkat_core::Message::User(
         meerkat_core::types::UserMessage::text("Remember session continuity.".to_string()),
     ));
@@ -24060,7 +21965,7 @@ async fn test_resume_restores_persisted_behavior_metadata() {
         .live_session_clone(&old_sid)
         .await
         .expect("live session");
-    persisted.set_system_prompt("Persisted worker prompt".to_string());
+    persisted.append_system_message("Persisted worker prompt".to_string());
     let mut metadata = persisted
         .session_metadata()
         .expect("seeded session metadata should exist");
@@ -33261,6 +31166,7 @@ async fn test_external_turn_unknown_meerkat_fails() {
             "Hello".to_string().into(),
             meerkat_core::types::HandlingMode::Queue,
             None,
+            None,
             super::handle::MemberTurnObservers::default(),
         )
         .await;
@@ -33851,6 +31757,120 @@ async fn test_retire_session_owned_member_completes_disposal_on_archive_authorit
         Some(meerkat_runtime::RuntimeState::Retired),
         "the runtime lifecycle must be durably retired even though the archive authority had no record"
     );
+}
+
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn mob_runtime_executor_forwards_exact_profile_boundary_acknowledgements() {
+    use meerkat_core::lifecycle::core_executor::{
+        CoreApplyOutput, CoreExecutor, CoreExecutorError,
+    };
+    use meerkat_core::lifecycle::run_primitive::RunPrimitive;
+
+    struct IdleExecutor;
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for IdleExecutor {
+        async fn apply(
+            &mut self,
+            _run_id: meerkat_core::RunId,
+            _primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            Err(CoreExecutorError::Internal(
+                "boundary acknowledgement forwarding fixture must not run".to_string(),
+            ))
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let service = Arc::new(MockSessionService::new());
+    let adapter = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register boundary-ack forwarding fixture");
+    let pending = match adapter
+        .ensure_session_with_executor_factory(session_id.clone(), |_| Box::new(IdleExecutor))
+        .await
+        .expect("prepare boundary-ack forwarding fixture")
+    {
+        meerkat_runtime::EnsureRuntimeExecutorAttachment::Pending(pending) => pending,
+        meerkat_runtime::EnsureRuntimeExecutorAttachment::Existing(witness) => {
+            panic!("fresh boundary-ack forwarding fixture unexpectedly found {witness:?}")
+        }
+    };
+    let state = Arc::new(
+        super::provisioner::RuntimeSessionState::for_attachment_without_actor_witness(
+            pending.witness().clone(),
+        ),
+    );
+    let session_service: Arc<dyn super::session_service::MobSessionService> = service.clone();
+    let mut executor = super::provisioner::MobSessionRuntimeExecutor::new(
+        session_service,
+        Arc::clone(&adapter),
+        None,
+        session_id.clone(),
+        state,
+        Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+    );
+
+    CoreExecutor::acknowledge_whole_blob_session_boundary(
+        &mut executor,
+        41,
+        "sha256:whole-blob-exact",
+    )
+    .await
+    .expect("forward WholeBlob acknowledgement");
+    CoreExecutor::acknowledge_head_canonical_session_boundary(&mut executor, "head-cas-exact")
+        .await
+        .expect("forward HeadCanonical acknowledgement");
+    CoreExecutor::acknowledge_provisional_session_boundary(
+        &mut executor,
+        42,
+        "provisional-authority-exact",
+    )
+    .await
+    .expect("forward provisional acknowledgement");
+
+    assert_eq!(
+        *service.runtime_boundary_acknowledgements.read().await,
+        vec![
+            RuntimeBoundaryAcknowledgement::WholeBlob {
+                session_id: session_id.clone(),
+                store_revision: 41,
+                blob_sha256: "sha256:whole-blob-exact".to_string(),
+            },
+            RuntimeBoundaryAcknowledgement::HeadCanonical {
+                session_id: session_id.clone(),
+                head_token: "head-cas-exact".to_string(),
+            },
+            RuntimeBoundaryAcknowledgement::Provisional {
+                session_id,
+                store_revision: 42,
+                authority_token: "provisional-authority-exact".to_string(),
+            },
+        ],
+        "every CoreExecutor profile hook must forward the exact bridge-session authority payload"
+    );
+
+    pending
+        .abort()
+        .await
+        .expect("abort boundary-ack forwarding fixture");
 }
 
 #[cfg(feature = "runtime-adapter")]
@@ -35282,333 +33302,6 @@ async fn test_fresh_provision_failure_preserves_resumable_document_and_quiesces_
         .retire_member(&resumed.member_ref)
         .await
         .expect("retire resumed test member");
-}
-
-/// The production wiring for the one-time 0.8.8 -> 0.8.9 upgrade boundary:
-/// `MobSessionService::runtime_adapter` must hand its machine the session
-/// store's incremental capability as the legacy-history evidence source
-/// (`MeerkatMachine::set_legacy_history_evidence_source`). The machine
-/// exposes no accessor for the wired slot, so this test observes the wiring
-/// through the cheapest honest behavioral seam: a machine-owned service-turn
-/// commit carrying a SLIM boundary snapshot over a legacy INLINE runtime row
-/// is accepted (and the row replaced slim) only when the driver can assemble
-/// store-verified history evidence. A control machine over the SAME stores
-/// without the wiring keeps today's fail-closed refusal, so the wired
-/// acceptance is attributable to `runtime_adapter`'s wiring and to nothing
-/// else.
-#[cfg(feature = "runtime-adapter")]
-#[tokio::test]
-async fn runtime_adapter_commits_a_post_upgrade_boundary_over_a_legacy_inline_row() {
-    fn user_text(text: &str) -> Message {
-        Message::User(meerkat_core::types::UserMessage::text(text.to_string()))
-    }
-
-    fn verified_stamp(session: &Session) -> meerkat_core::SessionCheckpointStamp {
-        match session
-            .try_checkpoint_state()
-            .expect("checkpoint evidence should decode and verify")
-        {
-            meerkat_core::SessionCheckpointState::Verified(stamp) => stamp,
-            meerkat_core::SessionCheckpointState::LegacyUnverified { .. } => {
-                panic!("expected a typed checkpoint stamp")
-            }
-        }
-    }
-
-    /// Seed one pre-0.8.9 session shape: the durable store adopts the
-    /// compaction through the service's committed-checkpoint seam while the
-    /// runtime row keeps the transcript-history graph INLINE.
-    async fn seed_legacy_inline_session(
-        service: &meerkat_session::PersistentSessionService<PersistentMockBuilder>,
-        runtime_store: &Arc<dyn meerkat_runtime::RuntimeStore>,
-    ) -> SessionId {
-        use meerkat_runtime::RuntimeStore as _;
-
-        let mut parent = Session::new();
-        let id = parent.id().clone();
-        parent.push(user_text("turn-0 question"));
-        parent.push(user_text("turn-0 answer"));
-        let root = meerkat_core::SessionCheckpointStamp::root(
-            &parent,
-            meerkat_core::SessionCheckpointProvenance::SessionCreated,
-        )
-        .expect("checkpoint root should be valid");
-        parent
-            .install_checkpoint_stamp(root.clone())
-            .expect("checkpoint root should install");
-        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&id);
-        let parent_bytes = parent
-            .to_persisted_bytes()
-            .expect("serialize parent runtime snapshot");
-        runtime_store
-            .commit_session_snapshot(
-                &runtime_id,
-                meerkat_runtime::store::SessionDelta {
-                    session_snapshot: parent_bytes.clone(),
-                },
-            )
-            .await
-            .expect("parent runtime snapshot commit");
-        service
-            .checkpoint_committed_runtime_session_snapshot(&id, &parent_bytes)
-            .await
-            .expect("parent durable checkpoint");
-
-        let parent_revision = parent
-            .transcript_revision()
-            .expect("parent transcript revision");
-        let mut compacted = parent.clone();
-        compacted
-            .commit_transcript_rewrite(
-                meerkat_core::service::TranscriptRewriteSelection::MessageRange {
-                    start: 0,
-                    end: parent.messages().len(),
-                },
-                vec![user_text("[Context compacted] singleton summary")],
-                meerkat_core::service::TranscriptRewriteReason::new("compaction"),
-                Some("meerkat-core".to_string()),
-                Some(parent_revision),
-            )
-            .expect("compaction rewrite should commit");
-        let compacted_stamp = meerkat_core::SessionCheckpointStamp::successor(
-            &compacted,
-            &root,
-            meerkat_core::SessionCheckpointProvenance::TranscriptRewrite,
-        )
-        .expect("checkpoint successor should be valid");
-        compacted
-            .install_checkpoint_stamp(compacted_stamp)
-            .expect("checkpoint successor should install");
-        let inline_bytes = compacted
-            .to_persisted_bytes()
-            .expect("serialize compacted runtime snapshot");
-        runtime_store
-            .commit_session_snapshot(
-                &runtime_id,
-                meerkat_runtime::store::SessionDelta {
-                    session_snapshot: inline_bytes.clone(),
-                },
-            )
-            .await
-            .expect("compacted runtime snapshot commit (inline, the 0.8.8 shape)");
-        service
-            .checkpoint_committed_runtime_session_snapshot(&id, &inline_bytes)
-            .await
-            .expect("compacted durable checkpoint");
-        id
-    }
-
-    /// The slim run-boundary snapshot a machine service-turn commit carries
-    /// after a post-upgrade resume: the store's slim materialization plus
-    /// one turn message, stamped as a run-boundary successor of the
-    /// committed authority.
-    async fn slim_turn_snapshot(store: &Arc<MemoryStore>, id: &SessionId) -> Vec<u8> {
-        let resumed = store
-            .load(id)
-            .await
-            .expect("load resumed session")
-            .expect("resumed session present");
-        assert!(
-            !resumed
-                .metadata()
-                .contains_key(meerkat_core::SESSION_TRANSCRIPT_HISTORY_STATE_KEY),
-            "precondition: the durable materialization must be slim"
-        );
-        assert!(
-            resumed
-                .metadata()
-                .contains_key(meerkat_core::SESSION_TRANSCRIPT_HISTORY_CHECKPOINT_DIGEST_KEY),
-            "precondition: the slim materialization must carry the history witness"
-        );
-        let authority = verified_stamp(&resumed);
-        let mut turn = resumed;
-        turn.push(user_text("post-upgrade turn"));
-        let stamp = meerkat_core::SessionCheckpointStamp::successor(
-            &turn,
-            &authority,
-            meerkat_core::SessionCheckpointProvenance::RunBoundaryCommit,
-        )
-        .expect("run-boundary stamp should mint");
-        turn.install_checkpoint_stamp(stamp)
-            .expect("run-boundary stamp should install");
-        turn.to_persisted_bytes()
-            .expect("serialize slim boundary snapshot")
-    }
-
-    /// Drive the generated MeerkatMachine turn lifecycle to the coherent
-    /// Completed terminal a direct service-turn commit requires — the exact
-    /// inputs a runtime-bound agent applies through its session bindings.
-    fn drive_service_turn_to_completed(turn_state: &Arc<dyn meerkat_core::TurnStateHandle>) {
-        use meerkat_core::TurnStateHandle as _;
-
-        let run_id = meerkat_core::RunId::new();
-        turn_state
-            .start_conversation_run(
-                run_id.clone(),
-                meerkat_core::turn_execution_authority::TurnPrimitiveKind::ConversationTurn,
-                meerkat_core::turn_execution_authority::ContentShape::Conversation,
-                false,
-                false,
-                0,
-            )
-            .expect("generated machine accepts the service-turn run start");
-        turn_state
-            .primitive_applied(run_id.clone())
-            .expect("generated machine accepts the applied primitive");
-        turn_state
-            .llm_returned_terminal(run_id.clone())
-            .expect("generated machine accepts the terminal LLM return");
-        turn_state
-            .boundary_complete(run_id)
-            .expect("generated machine completes the service turn");
-    }
-
-    use meerkat_runtime::RuntimeStore as _;
-
-    let memory_store = Arc::new(MemoryStore::new());
-    let session_store: Arc<dyn SessionStore> = memory_store.clone();
-    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
-        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
-    let blob_store: Arc<dyn meerkat_core::BlobStore> =
-        Arc::new(meerkat_store::MemoryBlobStore::new());
-    let service = Arc::new(meerkat_session::PersistentSessionService::new(
-        PersistentMockBuilder,
-        16,
-        session_store,
-        Arc::clone(&runtime_store),
-        blob_store,
-    ));
-    let adapter = service
-        .runtime_adapter()
-        .expect("persistent service runtime adapter");
-
-    // Wired path: the adapter's machine must verify the slim replacement of
-    // the legacy inline row against the session store's own rewrite records.
-    let wired_id = seed_legacy_inline_session(service.as_ref(), &runtime_store).await;
-    let wired_runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&wired_id);
-    let inline_row: Session = serde_json::from_slice(
-        &runtime_store
-            .load_session_snapshot(&wired_runtime_id)
-            .await
-            .expect("load wired runtime snapshot")
-            .expect("wired runtime snapshot present"),
-    )
-    .expect("wired runtime snapshot deserializes");
-    assert!(
-        inline_row
-            .metadata()
-            .contains_key(meerkat_core::SESSION_TRANSCRIPT_HISTORY_STATE_KEY),
-        "precondition: the pre-upgrade runtime row must carry the graph inline"
-    );
-    let wired_snapshot = slim_turn_snapshot(&memory_store, &wired_id).await;
-    let bindings = adapter
-        .prepare_bindings(wired_id.clone())
-        .await
-        .expect("prepare wired runtime bindings");
-    drive_service_turn_to_completed(bindings.turn_state());
-    let identity = adapter
-        .capture_service_turn_identity(&wired_id)
-        .await
-        .expect("capture wired service-turn identity");
-    let mut lease = adapter
-        .prepare_service_turn_commit_lease(&identity)
-        .await
-        .expect("prepare wired service-turn commit lease");
-    adapter
-        .commit_service_turn_terminal_receipt_with_lease(&mut lease, wired_snapshot)
-        .await
-        .expect(
-            "the adapter machine must accept the slim boundary over the legacy inline row \
-             through its wired evidence source",
-        );
-    drop(lease);
-    let migrated_row: Session = serde_json::from_slice(
-        &runtime_store
-            .load_session_snapshot(&wired_runtime_id)
-            .await
-            .expect("load migrated wired runtime snapshot")
-            .expect("migrated wired runtime snapshot present"),
-    )
-    .expect("migrated wired runtime snapshot deserializes");
-    assert!(
-        !migrated_row
-            .metadata()
-            .contains_key(meerkat_core::SESSION_TRANSCRIPT_HISTORY_STATE_KEY),
-        "the accepted commit must replace the wired row with the slim representation"
-    );
-    assert!(
-        migrated_row
-            .metadata()
-            .contains_key(meerkat_core::SESSION_TRANSCRIPT_HISTORY_CHECKPOINT_DIGEST_KEY),
-        "the migrated wired row must carry the history witness"
-    );
-
-    // Control, and an honest statement of what it does and does not prove.
-    // An APPEND-ONLY post-upgrade turn leaves the transcript graph unchanged,
-    // so the incoming slim save carries a witness over the SAME graph the
-    // inline row holds — which the format-aware exact-match carve-out accepts
-    // on its own, with or without a wired evidence source. So this control
-    // asserts acceptance, not refusal: over this shape the two machines agree,
-    // and that agreement is itself the contract (an ordinary post-upgrade turn
-    // must never depend on evidence assembly being wired).
-    //
-    // The EVIDENCE path — an evolved graph, where the carve-out cannot match
-    // and the wired source is load-bearing — is exercised end to end by
-    // meerkat-session's `legacy_inline_runtime_row_upgrades_to_slim_on_first_boundary_save`.
-    // Reproducing that shape faithfully here needs the store's rewrite records
-    // and the incoming carrier to agree on the witness, which a hand-built
-    // store-side adoption does not reproduce; asserting a refusal this fixture
-    // cannot legitimately provoke would be a false signal, not coverage.
-    let control_id = seed_legacy_inline_session(service.as_ref(), &runtime_store).await;
-    let control_runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&control_id);
-    let control_snapshot = slim_turn_snapshot(&memory_store, &control_id).await;
-    let unwired = meerkat_runtime::MeerkatMachine::persistent(
-        Arc::clone(&runtime_store),
-        Arc::new(meerkat_store::MemoryBlobStore::new()),
-    );
-    let control_bindings = unwired
-        .prepare_bindings(control_id.clone())
-        .await
-        .expect("prepare control runtime bindings");
-    drive_service_turn_to_completed(control_bindings.turn_state());
-    let control_identity = unwired
-        .capture_service_turn_identity(&control_id)
-        .await
-        .expect("capture control service-turn identity");
-    let mut control_lease = unwired
-        .prepare_service_turn_commit_lease(&control_identity)
-        .await
-        .expect("prepare control service-turn commit lease");
-    unwired
-        .commit_service_turn_terminal_receipt_with_lease(&mut control_lease, control_snapshot)
-        .await
-        .expect(
-            "an append-only turn over an unchanged graph is accepted by the format-aware \
-             carve-out, wired or not",
-        );
-    drop(control_lease);
-    let control_row: Session = serde_json::from_slice(
-        &runtime_store
-            .load_session_snapshot(&control_runtime_id)
-            .await
-            .expect("load control runtime snapshot")
-            .expect("control runtime snapshot present"),
-    )
-    .expect("control runtime snapshot deserializes");
-    assert!(
-        !control_row
-            .metadata()
-            .contains_key(meerkat_core::SESSION_TRANSCRIPT_HISTORY_STATE_KEY),
-        "the accepted control commit replaces the inline row with the slim \
-         representation too — the append-only shape needs no evidence, so the \
-         unwired machine reaches the same durable outcome"
-    );
-    assert!(
-        control_row
-            .metadata()
-            .contains_key(meerkat_core::SESSION_TRANSCRIPT_HISTORY_CHECKPOINT_DIGEST_KEY),
-        "the migrated control row must carry the history witness"
-    );
 }
 
 #[cfg(feature = "runtime-adapter")]
@@ -41933,7 +39626,7 @@ impl RealCommsSessionService {
             )
             .await?;
         }
-        let system_context_state = test_actor_system_context_state()?;
+        let transient_turn_context_state = test_actor_transient_turn_context_state();
         let local_actor_witness_slot = meerkat_session::LiveSessionActorWitnessSlot::default();
         let actor_witness_slot = actor_witness_slot.unwrap_or(&local_actor_witness_slot);
         let actor_witness = {
@@ -41946,7 +39639,7 @@ impl RealCommsSessionService {
             let actor_witness = self.actor_registry.insert_and_publish(
                 actor_witness_slot,
                 session_id.clone(),
-                system_context_state,
+                transient_turn_context_state,
             )?;
             sessions.insert(session_id.clone(), Arc::clone(&comms));
             actor_witness
@@ -41964,7 +39657,7 @@ impl RealCommsSessionService {
             .insert(session_id.clone(), comms_name.clone());
 
         if let Some(system_prompt) = req.system_prompt.as_set_prompt() {
-            session.set_system_prompt(system_prompt.to_string());
+            session.append_system_message(system_prompt.to_string());
         }
         if session.session_metadata().is_none() {
             let build = req.build.as_ref();
@@ -42711,7 +40404,7 @@ struct RuntimeBackedRealCommsSessionService {
     session_read_entered: tokio::sync::Notify,
     release_session_reads: tokio::sync::Notify,
     applied_runtime_prompts: RwLock<HashMap<SessionId, Vec<ContentInput>>>,
-    applied_runtime_context_appends: RwLock<HashMap<SessionId, Vec<AppendSystemContextRequest>>>,
+    applied_runtime_system_appends: RwLock<HashMap<SessionId, Vec<AppendSystemContextRequest>>>,
     applied_runtime_render_metadata:
         RwLock<HashMap<SessionId, Vec<Option<meerkat_core::types::RenderMetadata>>>>,
     applied_runtime_turn_metadata: RwLock<
@@ -42754,7 +40447,7 @@ impl RuntimeBackedRealCommsSessionService {
             session_read_entered: tokio::sync::Notify::new(),
             release_session_reads: tokio::sync::Notify::new(),
             applied_runtime_prompts: RwLock::new(HashMap::new()),
-            applied_runtime_context_appends: RwLock::new(HashMap::new()),
+            applied_runtime_system_appends: RwLock::new(HashMap::new()),
             applied_runtime_render_metadata: RwLock::new(HashMap::new()),
             applied_runtime_turn_metadata: RwLock::new(HashMap::new()),
             runtime_llm_identity_probe: std::sync::RwLock::new(None),
@@ -42799,7 +40492,7 @@ impl RuntimeBackedRealCommsSessionService {
             )
             .await?;
         }
-        let system_context_state = test_actor_system_context_state()?;
+        let transient_turn_context_state = test_actor_transient_turn_context_state();
         let local_actor_witness_slot = meerkat_session::LiveSessionActorWitnessSlot::default();
         let actor_witness_slot = actor_witness_slot.unwrap_or(&local_actor_witness_slot);
         let actor_witness = {
@@ -42812,7 +40505,7 @@ impl RuntimeBackedRealCommsSessionService {
             let actor_witness = self.actor_registry.insert_and_publish(
                 actor_witness_slot,
                 session_id.clone(),
-                system_context_state,
+                transient_turn_context_state,
             )?;
             sessions.insert(session_id.clone(), Arc::clone(&comms));
             actor_witness
@@ -42870,7 +40563,7 @@ impl RuntimeBackedRealCommsSessionService {
             .write()
             .await
             .remove(session_id);
-        self.applied_runtime_context_appends
+        self.applied_runtime_system_appends
             .write()
             .await
             .remove(session_id);
@@ -43018,11 +40711,11 @@ impl RuntimeBackedRealCommsSessionService {
             .unwrap_or_default()
     }
 
-    async fn applied_runtime_context_appends(
+    async fn applied_runtime_system_appends(
         &self,
         session_id: &SessionId,
     ) -> Vec<AppendSystemContextRequest> {
-        self.applied_runtime_context_appends
+        self.applied_runtime_system_appends
             .read()
             .await
             .get(session_id)
@@ -43227,10 +40920,7 @@ impl SessionService for RuntimeBackedRealCommsSessionService {
         }
         self.session_comms_names.write().await.remove(id);
         self.applied_runtime_prompts.write().await.remove(id);
-        self.applied_runtime_context_appends
-            .write()
-            .await
-            .remove(id);
+        self.applied_runtime_system_appends.write().await.remove(id);
         drop(sessions);
         Ok(())
     }
@@ -43279,7 +40969,7 @@ impl SessionServiceControlExt for RuntimeBackedRealCommsSessionService {
         if delay_ms > 0 {
             tokio::time::sleep(Duration::from_millis(delay_ms)).await;
         }
-        let mut appends = self.applied_runtime_context_appends.write().await;
+        let mut appends = self.applied_runtime_system_appends.write().await;
         let session_appends = appends.entry(id.clone()).or_default();
         if let Some(key) = req.idempotency_key.as_ref()
             && let Some(existing) = session_appends
@@ -43448,28 +41138,26 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
                     .contains(&barrier.prompt_substring)
             })
             .cloned();
-        let pre_turn_context_appends = req.runtime.pre_turn_context_appends;
-        if !pre_turn_context_appends.is_empty() {
-            for append in pre_turn_context_appends {
-                self.append_system_context(
-                    session_id,
-                    AppendSystemContextRequest {
-                        content: append.content,
-                        source: append.source,
-                        idempotency_key: append.idempotency_key,
-                        source_kind: meerkat_core::session::SystemContextSource::Normal,
-                        peer_response_terminal: None,
-                    },
+        self.applied_runtime_system_appends
+            .write()
+            .await
+            .entry(session_id.clone())
+            .or_default()
+            .extend(req.runtime.typed_turn_appends.iter().filter_map(|append| {
+                matches!(
+                    append.role,
+                    meerkat_core::lifecycle::run_primitive::ConversationAppendRole::System
+                        | meerkat_core::lifecycle::run_primitive::ConversationAppendRole::SystemNotice
                 )
-                .await
-                .map_err(|err| match err {
-                    SessionControlError::Session(err) => err,
-                    err => SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                        err.to_string(),
-                    )),
-                })?;
-            }
-        }
+                .then(|| AppendSystemContextRequest {
+                    content: append.content.clone(),
+                    source: append.identity.as_ref().and_then(|identity| identity.source.clone()),
+                    idempotency_key: append
+                        .identity
+                        .as_ref()
+                        .and_then(|identity| identity.idempotency_key.clone()),
+                })
+            }));
 
         let identity_probe = {
             self.runtime_llm_identity_probe
@@ -43675,7 +41363,7 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
     async fn checkpoint_committed_runtime_session_snapshot(
         &self,
         _session_id: &SessionId,
-        _session_snapshot: &[u8],
+        _session_snapshot: Arc<Vec<u8>>,
     ) -> Result<(), SessionError> {
         if self.fail_runtime_checkpoint.load(Ordering::Relaxed) {
             Err(SessionError::Agent(
@@ -43686,80 +41374,6 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
         } else {
             Ok(())
         }
-    }
-
-    async fn apply_runtime_context_appends(
-        &self,
-        session_id: &SessionId,
-        run_id: meerkat_core::RunId,
-        appends: Vec<PendingSystemContextAppend>,
-        contributing_input_ids: Vec<meerkat_core::InputId>,
-    ) -> Result<meerkat_core::lifecycle::core_executor::CoreApplyOutput, SessionError> {
-        // Canonical owner: MobSessionService::apply_runtime_context_appends.
-        // Peer response terminals are context-only runtime inputs; the harness
-        // must exercise the same owner boundary as persistent session services.
-        if !self.sessions.read().await.contains_key(session_id) {
-            return Err(SessionError::NotFound {
-                id: session_id.clone(),
-            });
-        }
-
-        self.applied_runtime_context_appends
-            .write()
-            .await
-            .entry(session_id.clone())
-            .or_default()
-            .extend(
-                appends
-                    .into_iter()
-                    .map(|append| AppendSystemContextRequest {
-                        content: append.content,
-                        source: append.source,
-                        idempotency_key: append.idempotency_key,
-                        source_kind: meerkat_core::session::SystemContextSource::Normal,
-                        peer_response_terminal: None,
-                    }),
-            );
-
-        Ok(
-            meerkat_core::lifecycle::core_executor::CoreApplyOutput::without_terminal(
-                meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft {
-                    run_id,
-                    boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::Immediate,
-                    contributing_input_ids,
-                    conversation_digest: None,
-                    message_count: 0,
-                },
-                None,
-            ),
-        )
-    }
-
-    async fn apply_runtime_system_context_for_turn(
-        &self,
-        session_id: &SessionId,
-        appends: Vec<meerkat_core::PendingSystemContextAppend>,
-    ) -> Result<(), SessionError> {
-        for append in appends {
-            self.append_system_context(
-                session_id,
-                AppendSystemContextRequest {
-                    content: append.content,
-                    source: append.source,
-                    idempotency_key: append.idempotency_key,
-                    source_kind: meerkat_core::session::SystemContextSource::Normal,
-                    peer_response_terminal: None,
-                },
-            )
-            .await
-            .map_err(|err| match err {
-                SessionControlError::Session(err) => err,
-                err => SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                    err.to_string(),
-                )),
-            })?;
-        }
-        Ok(())
     }
 
     async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), SessionError> {
@@ -43773,7 +41387,7 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
             .write()
             .await
             .remove(session_id);
-        self.applied_runtime_context_appends
+        self.applied_runtime_system_appends
             .write()
             .await
             .remove(session_id);
@@ -44787,8 +42401,8 @@ async fn test_running_peer_message_to_autonomous_member_queues_when_exact_bounda
         .expect("kickoff should resolve before we switch into blocked-turn mode");
 
     let baseline_prompts = service.applied_runtime_prompts(&sid_worker).await.len();
-    let baseline_context_appends = service
-        .applied_runtime_context_appends(&sid_worker)
+    let baseline_system_appends = service
+        .applied_runtime_system_appends(&sid_worker)
         .await
         .len();
     service.set_keep_alive_turns_complete_immediately(false);
@@ -44849,11 +42463,11 @@ async fn test_running_peer_message_to_autonomous_member_queues_when_exact_bounda
     .await
     .expect("second peer message should succeed");
 
-    let context_appends = service.applied_runtime_context_appends(&sid_worker).await;
+    let system_appends = service.applied_runtime_system_appends(&sid_worker).await;
     assert!(
-        !context_appends
+        !system_appends
             .iter()
-            .skip(baseline_context_appends)
+            .skip(baseline_system_appends)
             .any(|append| append
                 .text()
                 .contains("body: second peer message while running")),
@@ -44926,7 +42540,7 @@ async fn test_active_autonomous_direct_steer_falls_back_when_exact_boundary_is_u
 
     let prompt_baseline = service.applied_runtime_prompts(&sid_worker).await.len();
     let context_baseline = service
-        .applied_runtime_context_appends(&sid_worker)
+        .applied_runtime_system_appends(&sid_worker)
         .await
         .len();
 
@@ -44979,7 +42593,7 @@ async fn test_active_autonomous_direct_steer_falls_back_when_exact_boundary_is_u
         .expect("active steer task should join")
         .expect("active steer queued fallback should be admitted");
 
-    let appends = service.applied_runtime_context_appends(&sid_worker).await;
+    let appends = service.applied_runtime_system_appends(&sid_worker).await;
     assert!(
         !appends.iter().skip(context_baseline).any(|append| append
             .text()
@@ -45051,7 +42665,7 @@ async fn test_active_internal_submit_work_steer_falls_back_when_exact_boundary_i
 
     let prompt_baseline = service.applied_runtime_prompts(&sid_worker).await.len();
     let context_baseline = service
-        .applied_runtime_context_appends(&sid_worker)
+        .applied_runtime_system_appends(&sid_worker)
         .await
         .len();
 
@@ -45103,7 +42717,7 @@ async fn test_active_internal_submit_work_steer_falls_back_when_exact_boundary_i
         .await
         .expect("internal active steer should be admitted");
 
-    let appends = service.applied_runtime_context_appends(&sid_worker).await;
+    let appends = service.applied_runtime_system_appends(&sid_worker).await;
     assert!(
         !appends.iter().skip(context_baseline).any(|append| append
             .text()
@@ -45169,7 +42783,7 @@ async fn test_turn_driven_submit_work_steer_queues_when_exact_boundary_is_unavai
 
     let prompt_baseline = service.applied_runtime_prompts(&sid_worker).await.len();
     let context_baseline = service
-        .applied_runtime_context_appends(&sid_worker)
+        .applied_runtime_system_appends(&sid_worker)
         .await
         .len();
     let entry = handle
@@ -45233,7 +42847,7 @@ async fn test_turn_driven_submit_work_steer_queues_when_exact_boundary_is_unavai
         .expect("steer submit task should join")
         .expect("active steer should be admitted");
 
-    let appends = service.applied_runtime_context_appends(&sid_worker).await;
+    let appends = service.applied_runtime_system_appends(&sid_worker).await;
     assert!(
         !appends.iter().skip(context_baseline).any(|append| append
             .text()
@@ -45297,7 +42911,7 @@ async fn test_member_send_steer_queues_when_exact_boundary_is_unavailable() {
 
     let prompt_baseline = service.applied_runtime_prompts(&sid_worker).await.len();
     let context_baseline = service
-        .applied_runtime_context_appends(&sid_worker)
+        .applied_runtime_system_appends(&sid_worker)
         .await
         .len();
     let worker = handle
@@ -45345,7 +42959,7 @@ async fn test_member_send_steer_queues_when_exact_boundary_is_unavailable() {
         .expect("active member-send steer task should join")
         .expect("active member-send steer should be admitted");
 
-    let appends = service.applied_runtime_context_appends(&sid_worker).await;
+    let appends = service.applied_runtime_system_appends(&sid_worker).await;
     assert!(
         !appends.iter().skip(context_baseline).any(|append| append
             .text()
@@ -45437,7 +43051,7 @@ async fn test_peer_response_reaches_requester_in_runtime_backed_real_comms() {
 
     let requester_prompt_baseline = service.applied_runtime_prompts(&sid_requester).await.len();
     let requester_context_baseline = service
-        .applied_runtime_context_appends(&sid_requester)
+        .applied_runtime_system_appends(&sid_requester)
         .await
         .len();
     let responder_baseline = service.applied_runtime_prompts(&sid_responder).await.len();
@@ -45513,9 +43127,7 @@ async fn test_peer_response_reaches_requester_in_runtime_backed_real_comms() {
         format!("peer_response_terminal:{responder_route_identity}:{request_id}");
     let requester_response_delivery = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            let appends = service
-                .applied_runtime_context_appends(&sid_requester)
-                .await;
+            let appends = service.applied_runtime_system_appends(&sid_requester).await;
             if appends
                 .iter()
                 .skip(requester_context_baseline)
@@ -45667,9 +43279,7 @@ async fn test_peer_response_reaches_requester_in_runtime_backed_real_comms() {
     })
     .await
     .expect("duplicate terminal response should be consumed without re-applying context");
-    let requester_contexts = service
-        .applied_runtime_context_appends(&sid_requester)
-        .await;
+    let requester_contexts = service.applied_runtime_system_appends(&sid_requester).await;
     let response_context_count = requester_contexts
         .iter()
         .filter(|append| {
@@ -45742,7 +43352,7 @@ async fn test_default_peer_response_inherits_request_steer_while_requester_runni
 
     let requester_prompt_baseline = service.applied_runtime_prompts(&sid_requester).await.len();
     let requester_context_baseline = service
-        .applied_runtime_context_appends(&sid_requester)
+        .applied_runtime_system_appends(&sid_requester)
         .await
         .len();
     let responder_baseline = service.applied_runtime_prompts(&sid_responder).await.len();
@@ -45873,7 +43483,7 @@ async fn test_default_peer_response_inherits_request_steer_while_requester_runni
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(
         service
-            .applied_runtime_context_appends(&sid_requester)
+            .applied_runtime_system_appends(&sid_requester)
             .await
             .len(),
         requester_context_baseline,
@@ -45887,9 +43497,7 @@ async fn test_default_peer_response_inherits_request_steer_while_requester_runni
 
     let requester_delivery = tokio::time::timeout(delivery_observation_timeout, async {
         loop {
-            let appends = service
-                .applied_runtime_context_appends(&sid_requester)
-                .await;
+            let appends = service.applied_runtime_system_appends(&sid_requester).await;
             if appends
                 .iter()
                 .skip(requester_context_baseline)
@@ -45906,9 +43514,7 @@ async fn test_default_peer_response_inherits_request_steer_while_requester_runni
     })
     .await;
     if requester_delivery.is_err() {
-        let appends = service
-            .applied_runtime_context_appends(&sid_requester)
-            .await;
+        let appends = service.applied_runtime_system_appends(&sid_requester).await;
         let snapshot = service
             .runtime_adapter
             .meerkat_machine_spine_snapshot(&sid_requester)
@@ -45969,7 +43575,7 @@ async fn test_mcp_send_request_response_terminal_steer_is_visible_to_requester()
 
     let responder_baseline = service.applied_runtime_prompts(&sid_responder).await.len();
     let requester_context_baseline = service
-        .applied_runtime_context_appends(&sid_requester)
+        .applied_runtime_system_appends(&sid_requester)
         .await
         .len();
 
@@ -46055,9 +43661,7 @@ async fn test_mcp_send_request_response_terminal_steer_is_visible_to_requester()
 
     let requester_terminal_context = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            let appends = service
-                .applied_runtime_context_appends(&sid_requester)
-                .await;
+            let appends = service.applied_runtime_system_appends(&sid_requester).await;
             if let Some(append) = appends
                 .iter()
                 .skip(requester_context_baseline)
@@ -58568,6 +56172,7 @@ async fn mob_runtime_parity_execute_probe(
                 meerkat_core::types::ContentInput::from("mob runtime parity external turn"),
                 meerkat_core::types::HandlingMode::Queue,
                 None,
+                None,
                 super::handle::MemberTurnObservers::default(),
             )
             .await
@@ -63373,6 +60978,7 @@ async fn test_member_turn_rejects_conflicting_metadata_handling_mode_before_admi
                     ..Default::default()
                 },
             ),
+            None,
             super::handle::MemberTurnObservers::default(),
         )
         .await

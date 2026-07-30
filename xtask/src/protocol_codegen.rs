@@ -2847,7 +2847,7 @@ struct SessionPersistenceVersionPlan {
 /// The `enum_variant` of each spec is cross-checked against the schema's
 /// `SessionPersistenceVersionField` binding so a renamed/added/removed variant
 /// fails the walk rather than silently mis-emitting.
-const SESSION_PERSISTENCE_FIELD_SPECS: [SessionPersistenceVersionFieldSpec; 4] = [
+const SESSION_PERSISTENCE_FIELD_SPECS: [SessionPersistenceVersionFieldSpec; 3] = [
     SessionPersistenceVersionFieldSpec {
         enum_variant: "SessionEnvelope",
         restore_input: "RestoreSessionEnvelopeVersion",
@@ -2868,13 +2868,6 @@ const SESSION_PERSISTENCE_FIELD_SPECS: [SessionPersistenceVersionFieldSpec; 4] =
         current_const: "SESSION_METADATA_SCHEMA_VERSION",
         current_accessor: "session_metadata_schema_version",
         restore_fn: "restore_session_metadata_schema_version",
-    },
-    SessionPersistenceVersionFieldSpec {
-        enum_variant: "TranscriptHistoryWitnessFormat",
-        restore_input: "RestoreTranscriptHistoryWitnessFormat",
-        current_const: "TRANSCRIPT_HISTORY_WITNESS_FORMAT",
-        current_accessor: "transcript_history_witness_format",
-        restore_fn: "restore_transcript_history_witness_format",
     },
 ];
 
@@ -4603,9 +4596,6 @@ fn generate_session_document_authority(machine: &MachineSchema) -> Result<String
     for enum_name in [
         "SessionFirstTurnPhase",
         "SessionInitialPromptStageDecision",
-        "SystemContextAppendDecision",
-        "SystemContextPersistAppendAdmission",
-        "SystemContextSource",
         "RealtimeTranscriptRoleKind",
         "RealtimeTranscriptLaneKind",
         "RealtimeTranscriptStopReasonKind",
@@ -4615,7 +4605,6 @@ fn generate_session_document_authority(machine: &MachineSchema) -> Result<String
         "RealtimeUserContentBlobRecoveryDisposition",
         "RealtimeUserContentBlobFinalizeDisposition",
         "TranscriptEditKind",
-        "SessionSystemPromptSource",
         "ObservedSessionTailKind",
         "PendingContinuationDisposition",
         "PendingContinuationPublicTerminal",
@@ -4624,19 +4613,12 @@ fn generate_session_document_authority(machine: &MachineSchema) -> Result<String
         "ResumeSelfHostedSelection",
         "LiveSessionAuthorityKind",
         "LiveSessionAuthorityReason",
-        "CheckpointProvenanceClass",
-        "RuntimeSnapshotReadDisposition",
         "RunIdCardinality",
         "DurableTailStopReason",
-        "DurableTailExecutionEvidence",
         "DurableTailRecoveryClass",
         "DurableHeadRelation",
-        "DurableHeadStampEra",
-        "RuntimeProjectionConflictDisposition",
         "RuntimeCheckpointProjectionDisposition",
-        "LegacyCheckpointTranscriptRelation",
-        "LegacyCheckpointMigrationDisposition",
-        "LegacyCheckpointLifecycleMerge",
+        "SessionDocumentLifecycleMerge",
         "SessionDocumentLifecycle",
         "SessionArchiveDisposition",
         "SessionArchiveRuntimeObservation",
@@ -4713,9 +4695,6 @@ fn session_document_default_variant(name: &str) -> Result<&'static str> {
     match name {
         "SessionFirstTurnPhase" => Ok("Inactive"),
         "SessionInitialPromptStageDecision" => Ok("Clear"),
-        "SystemContextAppendDecision" => Ok("Staged"),
-        "SystemContextPersistAppendAdmission" => Ok("Reject"),
-        "SystemContextSource" => Ok("Normal"),
         "RealtimeTranscriptRoleKind" => Ok("User"),
         "RealtimeTranscriptLaneKind" => Ok("Display"),
         "RealtimeTranscriptStopReasonKind" => Ok("Other"),
@@ -4725,7 +4704,6 @@ fn session_document_default_variant(name: &str) -> Result<&'static str> {
         "RealtimeUserContentBlobRecoveryDisposition" => Ok("NoPending"),
         "RealtimeUserContentBlobFinalizeDisposition" => Ok("RejectMismatch"),
         "TranscriptEditKind" => Ok("Fork"),
-        "SessionSystemPromptSource" => Ok("DirectMutation"),
         "ObservedSessionTailKind" => Ok("Empty"),
         "PendingContinuationDisposition" => Ok("NoPendingBoundary"),
         "PendingContinuationPublicTerminal" => Ok("NoPendingBoundary"),
@@ -4734,19 +4712,12 @@ fn session_document_default_variant(name: &str) -> Result<&'static str> {
         "ResumeSelfHostedSelection" => Ok("Clear"),
         "LiveSessionAuthorityKind" => Ok("LiveAuthoritative"),
         "LiveSessionAuthorityReason" => Ok("StoredArchived"),
-        "CheckpointProvenanceClass" => Ok("Unstamped"),
-        "RuntimeSnapshotReadDisposition" => Ok("UseRuntimeSnapshot"),
         "RunIdCardinality" => Ok("NoRunId"),
         "DurableTailStopReason" => Ok("Absent"),
-        "DurableTailExecutionEvidence" => Ok("UnboundExecution"),
         "DurableTailRecoveryClass" => Ok("Ambiguous"),
         "DurableHeadRelation" => Ok("AbsentOrExact"),
-        "DurableHeadStampEra" => Ok("WitnessV3OrNewer"),
-        "RuntimeProjectionConflictDisposition" => Ok("RejectDivergent"),
         "RuntimeCheckpointProjectionDisposition" => Ok("IgnoreArchived"),
-        "LegacyCheckpointTranscriptRelation" => Ok("Divergent"),
-        "LegacyCheckpointMigrationDisposition" => Ok("RefuseDivergent"),
-        "LegacyCheckpointLifecycleMerge" => Ok("CarryArchived"),
+        "SessionDocumentLifecycleMerge" => Ok("CarryArchived"),
         "SessionDocumentLifecycle" => Ok("Active"),
         "SessionArchiveDisposition" => Ok("Archive"),
         "SessionArchiveRuntimeObservation" => Ok("Absent"),
@@ -5553,9 +5524,6 @@ fn session_document_type_is_copy(type_name: &str) -> bool {
             | "u64"
             | "SessionFirstTurnPhase"
             | "SessionInitialPromptStageDecision"
-            | "SystemContextAppendDecision"
-            | "SystemContextPersistAppendAdmission"
-            | "SystemContextSource"
             | "RealtimeTranscriptRoleKind"
             | "RealtimeTranscriptLaneKind"
             | "RealtimeTranscriptStopReasonKind"
@@ -5569,9 +5537,7 @@ fn session_document_type_is_copy(type_name: &str) -> bool {
             | "PendingContinuationPublicTerminal"
             | "SessionDocumentLifecycle"
             | "RuntimeCheckpointProjectionDisposition"
-            | "LegacyCheckpointTranscriptRelation"
-            | "LegacyCheckpointMigrationDisposition"
-            | "LegacyCheckpointLifecycleMerge"
+            | "SessionDocumentLifecycleMerge"
             | "SessionArchiveDisposition"
             | "SessionArchiveRuntimeObservation"
     )
@@ -5606,10 +5572,6 @@ fn validate_session_document_authority_schema(machine: &MachineSchema) -> Result
         "RestoreSessionConsumedInputs",
         "RecoverSessionFirstTurnPhase",
         "ResolveSessionFirstTurnOverridesAllowed",
-        "ResolveSystemContextAppend",
-        "ResolveSystemContextPendingApplyItem",
-        "ResolveSystemContextSteerCleanupItem",
-        "RestoreSystemContextSnapshot",
         "ResolveRealtimeItemObserved",
         "ResolveRealtimeItemSkipped",
         "ResolveRealtimeUserTranscriptFinal",
@@ -5626,13 +5588,12 @@ fn validate_session_document_authority_schema(machine: &MachineSchema) -> Result
         "AuthorizeSessionMetadataPersist",
         "AuthorizeSessionBuildStatePersist",
         "RestoreSessionBuildState",
-        "AuthorizeSystemPromptMutation",
         "ResolvePendingContinuation",
         "AuthorizeSessionResumeOverrides",
         "RecoverSessionLifecycleTerminal",
         "ArchiveSessionDocument",
         "ResolveRuntimeCheckpointProjection",
-        "ResolveLegacyCheckpointMigration",
+        "ResolveSessionDocumentLifecycleMerge",
     ] {
         machine
             .inputs
@@ -5646,10 +5607,6 @@ fn validate_session_document_authority_schema(machine: &MachineSchema) -> Result
         "SessionToolResultsStageResolved",
         "SessionConsumedInputsRestoreResolved",
         "SessionFirstTurnPhaseRecovered",
-        "SystemContextAppendResolved",
-        "SystemContextPendingApplyItemResolved",
-        "SystemContextSteerCleanupItemResolved",
-        "SystemContextSnapshotRestoreAuthorized",
         "RealtimeTranscriptEventResolved",
         "RealtimeMaterializeCandidateResolved",
         "RealtimeUserContentIdentityResolved",
@@ -5660,7 +5617,6 @@ fn validate_session_document_authority_schema(machine: &MachineSchema) -> Result
         "SessionMetadataPersistAuthorized",
         "SessionBuildStatePersistAuthorized",
         "SessionBuildStateRestoreAuthorized",
-        "SystemPromptMutationAuthorized",
         "PendingContinuationResolved",
         "PendingContinuationPublicTerminalResolved",
         "SessionResumeOverridesAuthorized",
@@ -5669,7 +5625,7 @@ fn validate_session_document_authority_schema(machine: &MachineSchema) -> Result
         "SessionLifecycleTerminalRecovered",
         "SessionArchiveResolved",
         "RuntimeCheckpointProjectionResolved",
-        "LegacyCheckpointMigrationResolved",
+        "SessionDocumentLifecycleMergeResolved",
     ] {
         machine
             .effects
@@ -5679,8 +5635,6 @@ fn validate_session_document_authority_schema(machine: &MachineSchema) -> Result
     for required in [
         "SessionFirstTurnPhase",
         "SessionInitialPromptStageDecision",
-        "SystemContextAppendDecision",
-        "SystemContextSource",
         "RealtimeTranscriptRoleKind",
         "RealtimeTranscriptLaneKind",
         "RealtimeTranscriptStopReasonKind",
@@ -5690,7 +5644,6 @@ fn validate_session_document_authority_schema(machine: &MachineSchema) -> Result
         "RealtimeUserContentBlobRecoveryDisposition",
         "RealtimeUserContentBlobFinalizeDisposition",
         "TranscriptEditKind",
-        "SessionSystemPromptSource",
         "ObservedSessionTailKind",
         "PendingContinuationDisposition",
         "PendingContinuationPublicTerminal",
@@ -5699,19 +5652,12 @@ fn validate_session_document_authority_schema(machine: &MachineSchema) -> Result
         "ResumeSelfHostedSelection",
         "LiveSessionAuthorityKind",
         "LiveSessionAuthorityReason",
-        "CheckpointProvenanceClass",
-        "RuntimeSnapshotReadDisposition",
         "RunIdCardinality",
         "DurableTailStopReason",
-        "DurableTailExecutionEvidence",
         "DurableTailRecoveryClass",
         "DurableHeadRelation",
-        "DurableHeadStampEra",
-        "RuntimeProjectionConflictDisposition",
         "RuntimeCheckpointProjectionDisposition",
-        "LegacyCheckpointTranscriptRelation",
-        "LegacyCheckpointMigrationDisposition",
-        "LegacyCheckpointLifecycleMerge",
+        "SessionDocumentLifecycleMerge",
         "SessionDocumentLifecycle",
         "SessionArchiveDisposition",
         "SessionArchiveRuntimeObservation",
@@ -5754,7 +5700,6 @@ const STA_LOCAL_ENUMS: &[&str] = &[
     "StartTurnDispatchAuthorization",
     "RuntimeKeepAliveRequest",
     "RuntimeKeepAlivePersistenceDecision",
-    "RuntimeSystemContextApplicationAuthorization",
     "TurnAdmissionShutdownTerminal",
 ];
 const STA_EXTERNAL_ENUM: &str = "PendingContinuationDisposition";
@@ -5828,7 +5773,6 @@ fn sta_default_variant(name: &str) -> Result<&'static str> {
         "StartTurnDispatchAuthorization" => Ok("Authorized"),
         "RuntimeKeepAliveRequest" => Ok("Preserve"),
         "RuntimeKeepAlivePersistenceDecision" => Ok("PreserveExisting"),
-        "RuntimeSystemContextApplicationAuthorization" => Ok("Authorized"),
         "TurnAdmissionShutdownTerminal" => Ok("SessionArchived"),
         other => bail!("unknown SessionTurnAdmissionMachine enum `{other}`"),
     }

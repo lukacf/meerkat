@@ -28,9 +28,9 @@
 //!   [`PruneReport`], ...) serialized by `rkat storage migrate --json` /
 //!   `rkat storage prune --json` and reused by downstream orchestrators.
 //! - Read-only helpers the orchestration layer composes: realm-directory
-//!   listing, ledger-version reads, the legacy-checkpoint census, and the
-//!   split-brain divergence computation (sessions row-level by id + content
-//!   digest; other domains at file-digest level in v1).
+//!   listing, ledger-version reads, and split-brain divergence computation
+//!   (sessions row-level by id + content digest; other domains at
+//!   file-digest level in v1).
 //!
 //! Orchestration (which store constructors to run, when to fence, what to
 //! archive) lives with the caller — the CLI's `storage migrate` verb for
@@ -42,10 +42,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use meerkat_core::{
-    REALM_MANIFEST_FILE_NAME, SessionCheckpointMetadataState, SessionId,
-    session_checkpoint_metadata_state,
-};
+use meerkat_core::REALM_MANIFEST_FILE_NAME;
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -548,7 +545,7 @@ pub struct MigrateReport {
     /// State roots swept (explicit roots, or the resolver's candidates).
     #[serde(default)]
     pub swept_roots: Vec<PathBuf>,
-    /// Per-realm migration outcomes (cases 1, 2, and 4).
+    /// Per-realm migration outcomes (cases 1 and 2).
     #[serde(default)]
     pub realms: Vec<RealmMigrateReport>,
     /// Split-brain twins and their resolution (case 3).
@@ -595,9 +592,6 @@ pub struct RealmMigrateReport {
     /// Ledger baseline entries per database × domain (case 1).
     #[serde(default)]
     pub ledger: Vec<LedgerBaselineEntry>,
-    /// Checkpoint-evidence adoption outcome (case 4).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub adoption: Option<CheckpointAdoptionOutcome>,
     /// Human-readable per-realm notes (skips, report-only carve-outs).
     #[serde(default)]
     pub notes: Vec<String>,
@@ -614,7 +608,6 @@ impl RealmMigrateReport {
             root,
             backend: None,
             ledger: Vec::new(),
-            adoption: None,
             notes: Vec::new(),
             errors: Vec::new(),
         }
@@ -657,67 +650,20 @@ impl LedgerBaselineEntry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum LedgerBaselineAction {
-    /// Dry-run: no ledger row; the owning store baseline-stamps on
-    /// `--apply` (guarded migrations converge files of any vintage).
-    WouldStamp,
-    /// Dry-run: a ledger row exists; any pending migrations converge on
-    /// `--apply` through the owning store's normal constructor.
+    /// Dry-run: no ledger row. Apply will initialize only if the domain owns
+    /// zero catalog objects; an unledgered owned object is refused rather
+    /// than inferred or stamped.
+    MissingRow,
+    /// Dry-run: a ledger row exists. Apply still verifies that it is current
+    /// or an exact supported released predecessor before migrating.
     Recorded,
     /// Apply: the ledger row was created or advanced.
     Stamped,
     /// Apply: already at the current version; no-op.
     AlreadyCurrent,
     /// Not migrated by this verb in v1 (per-mob databases); the owning
-    /// store converges the file on its next open.
+    /// store verifies and, when eligible, migrates the file on its next open.
     ReportOnly,
-}
-
-/// Case 4 outcome: bulk checkpoint-evidence adoption (or its census).
-#[non_exhaustive]
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CheckpointAdoptionOutcome {
-    /// Session rows enumerated by the apply sweep.
-    #[serde(default)]
-    pub scanned: usize,
-    /// Rows already carrying verified checkpoint authority.
-    #[serde(default)]
-    pub already_verified: usize,
-    /// Rows adopted by the apply sweep.
-    #[serde(default)]
-    pub adopted: usize,
-    /// Dry-run census: legacy-unverified rows pending adoption.
-    #[serde(default)]
-    pub legacy_pending: usize,
-    /// Per-session refusals (divergent pairs, invalid evidence).
-    #[serde(default)]
-    pub refused: Vec<CheckpointAdoptionRefusal>,
-    /// Per-session load/adopt failures the sweep continued past
-    /// (`session id` + error detail).
-    #[serde(default)]
-    pub failures: Vec<(String, String)>,
-    /// Set when adoption did not run (dry-run census, jsonl backend).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub skipped: Option<String>,
-}
-
-/// One per-session adoption refusal.
-#[non_exhaustive]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CheckpointAdoptionRefusal {
-    /// Session id.
-    pub session_id: String,
-    /// Typed refusal reason (reported, never synthesized around).
-    pub reason: String,
-}
-
-impl CheckpointAdoptionRefusal {
-    /// New refusal entry.
-    pub fn new(session_id: impl Into<String>, reason: impl Into<String>) -> Self {
-        Self {
-            session_id: session_id.into(),
-            reason: reason.into(),
-        }
-    }
 }
 
 /// Case 3: one split-brain realm (same realm id under 2+ swept roots).
@@ -1018,8 +964,8 @@ pub fn list_realm_dirs(state_root: &Path) -> Vec<RealmDirEntry> {
     realms
 }
 
-/// Read the schema-ledger rows of one database, read-only. `Ok(None)` = no
-/// `meerkat_schema` table (pre-ledger file).
+/// Read the schema-ledger rows of one database, read-only. `Ok(None)` means
+/// no `meerkat_schema` table; it does not certify a fresh domain.
 pub fn read_domain_versions(db_path: &Path) -> Result<Option<Vec<(String, i64)>>, StoreError> {
     // No schema preflight: this read-only seam is how future versions get
     // reported, so it must open files it would otherwise refuse.
@@ -1102,8 +1048,7 @@ pub struct RealmLedgerBaseline {
     /// them ([`StoreError::SchemaFromTheFuture`]).
     pub future: Vec<FutureDomainVersion>,
     /// Ledger read failures. A corrupt/unreadable database is a per-realm
-    /// error, never a missing ledger (it must not be reported as
-    /// would-stamp).
+    /// error, never a missing ledger.
     pub errors: Vec<String>,
 }
 
@@ -1161,21 +1106,6 @@ pub fn read_realm_ledger_baseline(realm_dir: &Path) -> RealmLedgerBaseline {
     baseline
 }
 
-/// Checkpoint-evidence census of one sqlite session database (read-only).
-#[non_exhaustive]
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
-pub struct LegacySessionCensus {
-    /// Rows carrying verified checkpoint evidence.
-    #[serde(default)]
-    pub verified: usize,
-    /// Rows pending the one-time adoption (legacy-unverified).
-    #[serde(default)]
-    pub legacy: usize,
-    /// Rows with malformed evidence (never laundered into legacy).
-    #[serde(default)]
-    pub invalid: usize,
-}
-
 fn table_exists(conn: &rusqlite::Connection, table: &str) -> Result<bool, rusqlite::Error> {
     Ok(conn
         .query_row(
@@ -1187,71 +1117,19 @@ fn table_exists(conn: &rusqlite::Connection, table: &str) -> Result<bool, rusqli
         .is_some())
 }
 
-/// Count verified / legacy-unverified / invalid session documents in a
-/// sqlite session database, read-only — the same classification doctor's
-/// census applies (`session_heads` canonical over `sessions`).
-pub fn census_legacy_sessions(db_path: &Path) -> Result<LegacySessionCensus, StoreError> {
-    // No schema preflight: a read-only census must also observe files whose
-    // domain is ahead of this binary.
-    let conn = meerkat_sqlite::open(db_path, meerkat_sqlite::ConnectionProfile::ReadOnly)
-        .map_err(StoreError::from)?;
-    let mut census = LegacySessionCensus::default();
-    let mut classify = |session_id: &str, metadata_json: &str| {
-        let Ok(id) = SessionId::parse(session_id) else {
-            census.invalid += 1;
-            return;
-        };
-        let Ok(metadata) =
-            serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(metadata_json)
-        else {
-            census.invalid += 1;
-            return;
-        };
-        match session_checkpoint_metadata_state(&id, &metadata) {
-            Ok(SessionCheckpointMetadataState::Stamped(_)) => census.verified += 1,
-            Ok(SessionCheckpointMetadataState::LegacyUnverified { .. }) => census.legacy += 1,
-            Err(_) => census.invalid += 1,
-        }
-    };
-
-    let heads_exist = table_exists(&conn, "session_heads")?;
-    if heads_exist {
-        let mut statement = conn.prepare("SELECT session_id, metadata_json FROM session_heads")?;
-        let mut rows = statement.query([])?;
-        while let Some(row) = rows.next()? {
-            let session_id: String = row.get(0)?;
-            let metadata_json: String = row.get(1)?;
-            classify(&session_id, &metadata_json);
-        }
-    }
-    if table_exists(&conn, "sessions")? {
-        let sql = if heads_exist {
-            "SELECT session_id, metadata_json FROM sessions \
-             WHERE session_id NOT IN (SELECT session_id FROM session_heads)"
-        } else {
-            "SELECT session_id, metadata_json FROM sessions"
-        };
-        let mut statement = conn.prepare(sql)?;
-        let mut rows = statement.query([])?;
-        while let Some(row) = rows.next()? {
-            let session_id: String = row.get(0)?;
-            let metadata_json: String = row.get(1)?;
-            classify(&session_id, &metadata_json);
-        }
-    }
-    Ok(census)
-}
-
 // ─────────────────────────────────────────────────────────────────────────
 // Split-brain divergence (case 3).
 // ─────────────────────────────────────────────────────────────────────────
 
 type SessionDigests = BTreeMap<String, [u8; 32]>;
 
-/// Per-session content digest over the session-domain tables (`sessions`,
-/// `session_heads`, `session_strand_messages`, `session_rewrites`), fed in a
-/// fixed table order with ordered rows so digests are comparable across
-/// copies.
+/// Per-session content digest over every authoritative session-domain table,
+/// fed in a fixed table order with ordered rows so digests are comparable
+/// across copies. This includes strand links, component events, and both
+/// the immutable and mutable halves of the authenticated HeadCanonical
+/// metadata state graph; a copy missing a cell/state/delta/lineage row or
+/// pointing an owner at a different head token and state is therefore
+/// split-brain even when its compact `session_heads` row matches.
 fn session_digests(db_path: &Path) -> Result<SessionDigests, StoreError> {
     // No schema preflight: divergence comparison is read-only and must not
     // refuse a copy merely because a newer binary migrated it.
@@ -1321,6 +1199,34 @@ fn session_digests(db_path: &Path) -> Result<SessionDigests, StoreError> {
             );
         }
     }
+    if table_exists(&conn, "session_strand_links")? {
+        let mut statement = conn.prepare(
+            "SELECT session_id, strand, successor, strand_len, splice_start, splice_end, \
+             successor_end FROM session_strand_links ORDER BY session_id, strand",
+        )?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let session_id: String = row.get(0)?;
+            let strand: String = row.get(1)?;
+            let successor: String = row.get(2)?;
+            let strand_len: i64 = row.get(3)?;
+            let splice_start: i64 = row.get(4)?;
+            let splice_end: i64 = row.get(5)?;
+            let successor_end: i64 = row.get(6)?;
+            feed(
+                session_id,
+                "strand-link",
+                &[
+                    strand.as_bytes(),
+                    successor.as_bytes(),
+                    strand_len.to_be_bytes().as_slice(),
+                    splice_start.to_be_bytes().as_slice(),
+                    splice_end.to_be_bytes().as_slice(),
+                    successor_end.to_be_bytes().as_slice(),
+                ],
+            );
+        }
+    }
     if table_exists(&conn, "session_rewrites")? {
         let mut statement = conn.prepare(
             "SELECT session_id, rewrite_idx, commit_json FROM session_rewrites \
@@ -1337,6 +1243,220 @@ fn session_digests(db_path: &Path) -> Result<SessionDigests, StoreError> {
                 session_id,
                 "rewrite",
                 &[index.to_be_bytes().as_slice(), &commit],
+            );
+        }
+    }
+    if table_exists(&conn, "session_component_events")? {
+        let mut statement = conn.prepare(
+            "SELECT session_id, component, seq, event_json, event_digest \
+             FROM session_component_events ORDER BY session_id, component, seq",
+        )?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let session_id: String = row.get(0)?;
+            let component: String = row.get(1)?;
+            let seq: i64 = row.get(2)?;
+            let event = row
+                .get::<_, meerkat_sqlite::JsonColumnBytes>(3)?
+                .into_bytes();
+            let event_digest: String = row.get(4)?;
+            feed(
+                session_id,
+                "component-event",
+                &[
+                    component.as_bytes(),
+                    seq.to_be_bytes().as_slice(),
+                    &event,
+                    event_digest.as_bytes(),
+                ],
+            );
+        }
+    }
+    if table_exists(&conn, "session_head_metadata_cells")? {
+        let mut statement = conn.prepare(
+            "SELECT session_id, metadata_key, key_route, exact_value_digest, \
+             metadata_json, created_at_ms \
+             FROM session_head_metadata_cells \
+             ORDER BY session_id, metadata_key, exact_value_digest",
+        )?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let session_id: String = row.get(0)?;
+            let metadata_key: String = row.get(1)?;
+            let key_route: Vec<u8> = row.get(2)?;
+            let exact_value_digest: String = row.get(3)?;
+            let metadata = row
+                .get::<_, meerkat_sqlite::JsonColumnBytes>(4)?
+                .into_bytes();
+            let created_at_ms: i64 = row.get(5)?;
+            feed(
+                session_id,
+                "head-metadata-cell",
+                &[
+                    metadata_key.as_bytes(),
+                    &key_route,
+                    exact_value_digest.as_bytes(),
+                    &metadata,
+                    created_at_ms.to_be_bytes().as_slice(),
+                ],
+            );
+        }
+    }
+    if table_exists(&conn, "session_head_metadata_current")? {
+        let mut statement = conn.prepare(
+            "SELECT session_id, metadata_key, key_route, exact_value_digest \
+             FROM session_head_metadata_current ORDER BY session_id, metadata_key",
+        )?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let session_id: String = row.get(0)?;
+            let metadata_key: String = row.get(1)?;
+            let key_route: Vec<u8> = row.get(2)?;
+            let exact_value_digest: String = row.get(3)?;
+            feed(
+                session_id,
+                "head-metadata-current",
+                &[
+                    metadata_key.as_bytes(),
+                    &key_route,
+                    exact_value_digest.as_bytes(),
+                ],
+            );
+        }
+    }
+    if table_exists(&conn, "session_head_metadata_states")? {
+        let mut statement = conn.prepare(
+            "SELECT session_id, state_id, predecessor_state_id, identity_json, \
+             transition_id, created_at_ms FROM session_head_metadata_states \
+             ORDER BY session_id, state_id",
+        )?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let session_id: String = row.get(0)?;
+            let state_id: String = row.get(1)?;
+            let predecessor_state_id: Option<String> = row.get(2)?;
+            let identity = row
+                .get::<_, meerkat_sqlite::JsonColumnBytes>(3)?
+                .into_bytes();
+            let transition_id: String = row.get(4)?;
+            let created_at_ms: i64 = row.get(5)?;
+            let predecessor_present = [u8::from(predecessor_state_id.is_some())];
+            feed(
+                session_id,
+                "head-metadata-state",
+                &[
+                    state_id.as_bytes(),
+                    &predecessor_present,
+                    predecessor_state_id
+                        .as_deref()
+                        .unwrap_or_default()
+                        .as_bytes(),
+                    &identity,
+                    transition_id.as_bytes(),
+                    created_at_ms.to_be_bytes().as_slice(),
+                ],
+            );
+        }
+    }
+    if table_exists(&conn, "session_head_metadata_state_deltas")? {
+        let mut statement = conn.prepare(
+            "SELECT session_id, state_id, ordinal, metadata_key, key_route, \
+             predecessor_exact_value_digest, successor_exact_value_digest \
+             FROM session_head_metadata_state_deltas \
+             ORDER BY session_id, state_id, ordinal",
+        )?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let session_id: String = row.get(0)?;
+            let state_id: String = row.get(1)?;
+            let ordinal: i64 = row.get(2)?;
+            let metadata_key: String = row.get(3)?;
+            let key_route: Vec<u8> = row.get(4)?;
+            let predecessor_exact_value_digest: Option<String> = row.get(5)?;
+            let successor_exact_value_digest: Option<String> = row.get(6)?;
+            let predecessor_present = [u8::from(predecessor_exact_value_digest.is_some())];
+            let successor_present = [u8::from(successor_exact_value_digest.is_some())];
+            feed(
+                session_id,
+                "head-metadata-state-delta",
+                &[
+                    state_id.as_bytes(),
+                    ordinal.to_be_bytes().as_slice(),
+                    metadata_key.as_bytes(),
+                    &key_route,
+                    &predecessor_present,
+                    predecessor_exact_value_digest
+                        .as_deref()
+                        .unwrap_or_default()
+                        .as_bytes(),
+                    &successor_present,
+                    successor_exact_value_digest
+                        .as_deref()
+                        .unwrap_or_default()
+                        .as_bytes(),
+                ],
+            );
+        }
+    }
+    if table_exists(&conn, "session_head_metadata_refs")? {
+        let mut statement = conn.prepare(
+            "SELECT session_id, owner, head_cas_token, state_id \
+             FROM session_head_metadata_refs ORDER BY session_id, owner",
+        )?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let session_id: String = row.get(0)?;
+            let owner: String = row.get(1)?;
+            let head_cas_token: String = row.get(2)?;
+            let state_id: String = row.get(3)?;
+            feed(
+                session_id,
+                "head-metadata-ref",
+                &[
+                    owner.as_bytes(),
+                    head_cas_token.as_bytes(),
+                    state_id.as_bytes(),
+                ],
+            );
+        }
+    }
+    if table_exists(&conn, "session_head_metadata_head_lineage")? {
+        let mut statement = conn.prepare(
+            "SELECT session_id, transition_id, predecessor_head_cas_token, \
+             successor_head_cas_token, predecessor_state_id, successor_state_id, \
+             created_at_ms FROM session_head_metadata_head_lineage \
+             ORDER BY session_id, transition_id",
+        )?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let session_id: String = row.get(0)?;
+            let transition_id: String = row.get(1)?;
+            let predecessor_head_cas_token: Option<String> = row.get(2)?;
+            let successor_head_cas_token: String = row.get(3)?;
+            let predecessor_state_id: Option<String> = row.get(4)?;
+            let successor_state_id: String = row.get(5)?;
+            let created_at_ms: i64 = row.get(6)?;
+            let predecessor_head_present = [u8::from(predecessor_head_cas_token.is_some())];
+            let predecessor_state_present = [u8::from(predecessor_state_id.is_some())];
+            feed(
+                session_id,
+                "head-metadata-head-lineage",
+                &[
+                    transition_id.as_bytes(),
+                    &predecessor_head_present,
+                    predecessor_head_cas_token
+                        .as_deref()
+                        .unwrap_or_default()
+                        .as_bytes(),
+                    successor_head_cas_token.as_bytes(),
+                    &predecessor_state_present,
+                    predecessor_state_id
+                        .as_deref()
+                        .unwrap_or_default()
+                        .as_bytes(),
+                    successor_state_id.as_bytes(),
+                    created_at_ms.to_be_bytes().as_slice(),
+                ],
             );
         }
     }
@@ -2488,7 +2608,7 @@ mod tests {
         let realm = temp.path().join("team");
         fs::create_dir_all(realm.join("sessions_jsonl")).unwrap();
         // An unreadable database must surface as an error, never as a
-        // missing ledger a dry-run could report as would-stamp.
+        // missing ledger row.
         fs::write(realm.join("tasks.db"), b"this is not sqlite").unwrap();
         // A future jsonl-index version must be reported as a refusal in
         // dry-run exactly as apply's guarded constructor would refuse it.
@@ -2505,7 +2625,7 @@ mod tests {
             )
             .unwrap();
         }
-        // A ledger-less database is a plain would-stamp row, not an error.
+        // A ledger-less database is a missing-row reading, not an error.
         create_db(&realm.join("runtime.sqlite3"));
 
         let baseline = read_realm_ledger_baseline(&realm);
@@ -2624,15 +2744,6 @@ mod tests {
             after: Some(1),
             action: LedgerBaselineAction::Stamped,
         });
-        realm.adoption = Some(CheckpointAdoptionOutcome {
-            failures: Vec::new(),
-            scanned: 3,
-            already_verified: 1,
-            adopted: 2,
-            legacy_pending: 0,
-            refused: vec![],
-            skipped: None,
-        });
         report.realms.push(realm);
         report.split_brain.push(SplitBrainReport {
             realm: "team".to_string(),
@@ -2695,41 +2806,6 @@ mod tests {
         let sparse: PruneReport = serde_json::from_str(r#"{"future_field":1}"#).expect("sparse");
         assert!(matches!(sparse.mode, MigrateMode::DryRun));
         assert!(sparse.artifacts.is_empty());
-    }
-
-    #[test]
-    fn census_counts_legacy_rows() {
-        let temp = tempfile::tempdir().unwrap();
-        let db = temp.path().join("sessions.sqlite3");
-        {
-            let conn = Connection::open(&db).unwrap();
-            conn.execute_batch(
-                "CREATE TABLE sessions (
-                    session_id TEXT PRIMARY KEY,
-                    created_at_ms INTEGER NOT NULL,
-                    updated_at_ms INTEGER NOT NULL,
-                    message_count INTEGER NOT NULL,
-                    total_tokens INTEGER NOT NULL,
-                    metadata_json TEXT NOT NULL,
-                    session_json BLOB NOT NULL
-                )",
-            )
-            .unwrap();
-            let session = meerkat_core::Session::new();
-            conn.execute(
-                "INSERT INTO sessions VALUES (?1, 0, 0, 0, 0, ?2, ?3)",
-                rusqlite::params![
-                    session.id().to_string(),
-                    serde_json::to_string(session.metadata()).unwrap(),
-                    serde_json::to_vec(&session).unwrap(),
-                ],
-            )
-            .unwrap();
-        }
-        let census = census_legacy_sessions(&db).unwrap();
-        assert_eq!(census.legacy, 1);
-        assert_eq!(census.verified, 0);
-        assert_eq!(census.invalid, 0);
     }
 
     #[test]

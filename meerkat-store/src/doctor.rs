@@ -32,10 +32,13 @@
 //! `session_strand_messages` pool split into live prefixes and retained
 //! copies (with `session_strand_links` supersessions counted so a
 //! spliced-away strand still shows up as a retained revision), and the
-//! frozen `sessions.session_json` archives behind head rows.
+//! frozen `sessions.session_json` archives behind head rows. Inline
+//! WholeBlob graphs are measured through borrowed raw JSON: current compact
+//! anchors and occurrence edges are reported separately from exact
+//! released-0.8.10 full-body graphs, without typed body materialization.
 //! Byte counts come from SQL `LENGTH(CAST(<column> AS BLOB))` over the
-//! durable columns (byte-exact for TEXT-or-BLOB storage) or, for a legacy
-//! inline document, from the raw serialized JSON — never from a typed
+//! durable columns (byte-exact for TEXT-or-BLOB storage) or, for an inline
+//! WholeBlob document, from the raw serialized JSON — never from a typed
 //! re-serialization, which would report bytes the disk does not hold.
 //!
 //! The census is fail-closed: a row it cannot measure is counted, excluded
@@ -50,14 +53,14 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
+use meerkat_core::session::TRANSCRIPT_HISTORY_FORMAT_CURRENT;
 use meerkat_core::storage_diagnostics::{
     DatabaseInventory, DiagnoseScope, FindingSeverity, StorageDiagnosis, StorageDiagnosticsError,
     StorageFinding, StorageInventoryEntry, StorageMigrator,
 };
 use meerkat_core::{
-    BlobId, ContentBlock, Message, REALM_MANIFEST_FILE_NAME, SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
-    Session, SessionCheckpointMetadataState, SessionId, SystemNoticeBlock, sanitize_realm_id,
-    session_checkpoint_metadata_state,
+    BlobId, ContentBlock, Message, REALM_MANIFEST_FILE_NAME, SessionId, SystemNoticeBlock,
+    sanitize_realm_id, validate_current_persisted_transcript_history_slice,
 };
 use meerkat_sqlite::JsonColumnBytes;
 use rusqlite::{Connection, OptionalExtension};
@@ -73,8 +76,6 @@ use crate::realm::{
 pub const FINDING_SPLIT_BRAIN_REALM: &str = "split-brain-realm";
 /// A ledger domain version is newer than this binary supports.
 pub const FINDING_SCHEMA_FROM_THE_FUTURE: &str = "schema-from-the-future";
-/// Session documents without a typed checkpoint stamp.
-pub const FINDING_LEGACY_UNVERIFIED_SESSIONS: &str = "legacy-unverified-sessions";
 /// A session references a blob object missing from the realm's blob store.
 pub const FINDING_DANGLING_BLOB_REFERENCE: &str = "dangling-blob-reference";
 /// A lease record older than the staleness window.
@@ -98,15 +99,8 @@ pub const FINDING_QUARANTINED_INDEX: &str = "quarantined-index";
 pub const FINDING_REALM_MANIFEST_UNREADABLE: &str = "realm-manifest-unreadable";
 /// A database file that cannot be opened or queried read-only.
 pub const FINDING_DATABASE_UNREADABLE: &str = "database-unreadable";
-/// Checkpoint census skipped on a JSONL realm (index metadata is not
-/// reliable evidence there).
-pub const FINDING_CENSUS_SKIPPED_JSONL: &str = "census-skipped-jsonl";
-/// Session checkpoint metadata that is present but malformed (never
-/// laundered into "legacy").
-pub const FINDING_CHECKPOINT_METADATA_INVALID: &str = "checkpoint-metadata-invalid";
-/// Persisted session/message documents that do not decode (blob sweep;
-/// error severity — an undecodable canonical document is one the runtime
-/// cannot load either).
+/// Persisted session/message projections that do not decode during the blob
+/// sweep (error severity).
 pub const FINDING_SESSION_DOCUMENT_UNDECODABLE: &str = "session-document-undecodable";
 /// Internal doctor failure (the sweep task itself failed).
 pub const FINDING_DOCTOR_INTERNAL: &str = "doctor-internal";
@@ -144,6 +138,19 @@ pub const FINDING_STRAND_DUPLICATION_RECLAIMABLE: &str = "strand-duplication-rec
 /// `sessions.session_json` bytes retained for sessions that already have a
 /// `session_heads` row (frozen archives the session store never reads).
 pub const FINDING_FROZEN_BLOB_ARCHIVE_RECLAIMABLE: &str = "frozen-blob-archive-reclaimable";
+/// Raw inline transcript-graph footprint: compact current anchor/occurrence
+/// edges and exact released-0.8.10 full-body documents are reported as
+/// physically distinct representations.
+pub const FINDING_INLINE_TRANSCRIPT_GRAPH_FOOTPRINT: &str = "inline-transcript-graph-footprint";
+/// Exact released-0.8.10 graphs were structurally measured but their
+/// arbitrary-base full-body semantics are intentionally proved only by the
+/// one-time persisted-session ingress/migration authority.
+pub const FINDING_RELEASED_TRANSCRIPT_GRAPH_SEMANTIC_VERIFICATION_DEFERRED: &str =
+    "released-transcript-graph-semantic-verification-deferred";
+/// Authenticated per-key HeadCanonical metadata cells, immutable state
+/// transitions, and the physical/runtime owner references that keep exact
+/// states reachable.
+pub const FINDING_HEAD_METADATA_SIDECAR: &str = "head-metadata-sidecar";
 /// Durable rows or documents the storage census could not measure. The
 /// footprint findings exclude them, so the report says *unknown* instead of
 /// implying the unmeasured bytes are healthy.
@@ -770,9 +777,9 @@ fn diagnose_realm_dir(
                     meerkat_sqlite::ConnectionProfile::ReadOnly,
                 ) {
                     Ok(conn) => {
-                        // One deferred read transaction so the checkpoint
-                        // census, the blob sweep and the storage-footprint
-                        // census observe a single SQLite snapshot: a live
+                        // One deferred read transaction so the blob sweep and
+                        // storage-footprint census observe a single SQLite
+                        // snapshot: a live
                         // legacy-to-strand migration landing between separate
                         // autocommit queries could otherwise move a session
                         // out of both views (or let the footprint census
@@ -782,7 +789,6 @@ fn diagnose_realm_dir(
                         // snapshot.
                         match conn.unchecked_transaction() {
                             Ok(tx) => {
-                                census_checkpoint_evidence(&tx, &sessions_db, realm, diagnosis);
                                 sweep_dangling_blobs(
                                     &tx,
                                     realm_dir,
@@ -810,18 +816,6 @@ fn diagnose_realm_dir(
                     }
                 }
             }
-        }
-        Some("jsonl") => {
-            diagnosis.findings.push(
-                StorageFinding::new(
-                    FindingSeverity::Info,
-                    FINDING_CENSUS_SKIPPED_JSONL,
-                    "checkpoint-evidence census skipped: JSONL index metadata is not reliable \
-                     evidence (pre-metadata index rows census as unstamped)",
-                )
-                .with_path(realm_dir.join("sessions_jsonl"))
-                .with_realm(realm),
-            );
         }
         _ => {}
     }
@@ -959,119 +953,6 @@ fn read_ledger_rows(conn: &Connection) -> Result<Option<Vec<(String, i64)>>, rus
     Ok(Some(rows))
 }
 
-/// Checkpoint-evidence census over the sqlite session store: raw read-only
-/// SQL over `session_heads.metadata_json` (canonical representation) plus
-/// `sessions.metadata_json` for sessions without a head row, evaluated with
-/// the core metadata census helper. Callers pass a connection holding the
-/// per-database read snapshot (see `diagnose_realm_dir`) so the two queries
-/// see one consistent view.
-fn census_checkpoint_evidence(
-    conn: &Connection,
-    db_path: &Path,
-    realm: &str,
-    diagnosis: &mut StorageDiagnosis,
-) {
-    let mut verified = 0usize;
-    let mut legacy = 0usize;
-    let mut invalid = 0usize;
-
-    let mut classify = |session_id: &str, metadata_json: &[u8]| {
-        let Ok(id) = SessionId::parse(session_id) else {
-            invalid += 1;
-            return;
-        };
-        let Ok(metadata) =
-            serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(metadata_json)
-        else {
-            invalid += 1;
-            return;
-        };
-        match session_checkpoint_metadata_state(&id, &metadata) {
-            Ok(SessionCheckpointMetadataState::Stamped(_)) => verified += 1,
-            Ok(SessionCheckpointMetadataState::LegacyUnverified { .. }) => legacy += 1,
-            Err(_) => invalid += 1,
-        }
-    };
-
-    let result = (|| -> Result<(), rusqlite::Error> {
-        let heads_exist = table_exists(conn, "session_heads")?;
-        let sessions_exist = table_exists(conn, "sessions")?;
-        if heads_exist {
-            let mut statement = conn.prepare(
-                "SELECT session_id, metadata_json FROM session_heads ORDER BY session_id",
-            )?;
-            let mut rows = statement.query([])?;
-            while let Some(row) = rows.next()? {
-                let session_id: String = row.get(0)?;
-                let metadata_json: JsonColumnBytes = row.get(1)?;
-                classify(&session_id, &metadata_json.into_bytes());
-            }
-        }
-        if sessions_exist {
-            // A head row makes the head representation canonical; the blob
-            // row is then a frozen migration archive and not census evidence.
-            let sql = if heads_exist {
-                "SELECT session_id, metadata_json FROM sessions \
-                 WHERE session_id NOT IN (SELECT session_id FROM session_heads) \
-                 ORDER BY session_id"
-            } else {
-                "SELECT session_id, metadata_json FROM sessions ORDER BY session_id"
-            };
-            let mut statement = conn.prepare(sql)?;
-            let mut rows = statement.query([])?;
-            while let Some(row) = rows.next()? {
-                let session_id: String = row.get(0)?;
-                let metadata_json: JsonColumnBytes = row.get(1)?;
-                classify(&session_id, &metadata_json.into_bytes());
-            }
-        }
-        Ok(())
-    })();
-
-    if let Err(err) = result {
-        diagnosis.findings.push(
-            StorageFinding::new(
-                FindingSeverity::Error,
-                FINDING_DATABASE_UNREADABLE,
-                format!("checkpoint census query failed: {err}"),
-            )
-            .with_path(db_path.to_path_buf())
-            .with_realm(realm),
-        );
-        return;
-    }
-
-    if legacy > 0 {
-        diagnosis.findings.push(
-            StorageFinding::new(
-                FindingSeverity::Warning,
-                FINDING_LEGACY_UNVERIFIED_SESSIONS,
-                format!(
-                    "{legacy} legacy-unverified session document(s) ({verified} verified); \
-                     resume auto-migrates each on first touch, bulk adoption arrives with \
-                     `rkat storage migrate`"
-                ),
-            )
-            .with_path(db_path.to_path_buf())
-            .with_realm(realm),
-        );
-    }
-    if invalid > 0 {
-        diagnosis.findings.push(
-            StorageFinding::new(
-                FindingSeverity::Error,
-                FINDING_CHECKPOINT_METADATA_INVALID,
-                format!(
-                    "{invalid} session document(s) carry malformed checkpoint metadata \
-                     (present-but-invalid evidence is never laundered into legacy)"
-                ),
-            )
-            .with_path(db_path.to_path_buf())
-            .with_realm(realm),
-        );
-    }
-}
-
 /// The on-disk object path `FsBlobStore` uses for a canonical blob id:
 /// `<blobs>/<first-2-hex>/<hex>.json`.
 fn blob_object_path(blobs_root: &Path, blob_id: &BlobId) -> Option<PathBuf> {
@@ -1168,10 +1049,54 @@ impl DanglingCollector {
 }
 
 /// Dangling session→blob reference sweep (sqlite backend): decode persisted
-/// session documents and strand messages, walk them for
+/// live messages and strand messages, walk them for
 /// `ImageData::Blob { blob_id }`, and probe the realm's `blobs/` directory
 /// for each referenced object. Callers pass a connection holding the
 /// per-database read snapshot (see `diagnose_realm_dir`).
+///
+/// Inline documents are read through a raw borrowed `messages`/metadata lens.
+/// Current compact graphs cross core's raw persisted-graph verifier before
+/// live messages are inspected, so dropping typed [`meerkat_core::Session`]
+/// hydration does not also drop current-graph corruption detection. Released
+/// 0.8.10 graphs get an exact raw physical-shape/footprint check here; their
+/// arbitrary-base rebase semantics remain with the one-time full-ingress
+/// authority instead of being normalized by a read-only diagnostic.
+#[derive(Deserialize)]
+struct SessionLiveMessagesLens<'a> {
+    #[serde(borrow)]
+    messages: Vec<&'a serde_json::value::RawValue>,
+    #[serde(borrow, default)]
+    metadata: BTreeMap<String, &'a serde_json::value::RawValue>,
+}
+
+fn collect_inline_session_blob_refs(document: &[u8]) -> Result<Vec<BlobId>, ()> {
+    let lens: SessionLiveMessagesLens<'_> = serde_json::from_slice(document).map_err(|_| ())?;
+    if let Some(graph) = lens.metadata.get(SESSION_TRANSCRIPT_HISTORY_STATE_KEY) {
+        let format: InlineHistoryFormatLens<'_> =
+            serde_json::from_str(graph.get()).map_err(|_| ())?;
+        match format.format {
+            Some(TRANSCRIPT_HISTORY_FORMAT_CURRENT) => {
+                validate_current_persisted_transcript_history_slice(graph.get().as_bytes())
+                    .map_err(|_| ())?;
+            }
+            Some(_) => return Err(()),
+            // Released 0.8.10 rebase entries may reference arbitrary earlier
+            // bodies, so exact semantic verification is intentionally the
+            // one-time full-ingress/migration authority. Doctor checks the
+            // frozen physical wire shape and reports its full-body footprint
+            // without normalizing or retaining every historical body.
+            None if measure_inline_history(graph).is_some() => {}
+            None => return Err(()),
+        }
+    }
+    let mut refs = Vec::new();
+    for raw in lens.messages {
+        let message: Message = serde_json::from_str(raw.get()).map_err(|_| ())?;
+        collect_message_blob_refs(&message, &mut refs);
+    }
+    Ok(refs)
+}
+
 fn sweep_dangling_blobs(
     conn: &Connection,
     realm_dir: &Path,
@@ -1220,14 +1145,8 @@ fn sweep_dangling_blobs(
             while let Some(row) = rows.next()? {
                 let session_id: String = row.get(0)?;
                 let session_json: JsonColumnBytes = row.get(1)?;
-                match serde_json::from_slice::<Session>(&session_json.into_bytes()) {
-                    Ok(session) => {
-                        let mut refs = Vec::new();
-                        for message in session.messages() {
-                            collect_message_blob_refs(message, &mut refs);
-                        }
-                        collector.record(&blobs_root, &session_id, refs);
-                    }
+                match collect_inline_session_blob_refs(&session_json.into_bytes()) {
+                    Ok(refs) => collector.record(&blobs_root, &session_id, refs),
                     Err(_) => undecodable += 1,
                 }
             }
@@ -1279,16 +1198,19 @@ fn sweep_dangling_blobs(
         );
     }
     if undecodable > 0 {
-        // Error severity: these are canonical representations (strand rows,
-        // or blob rows with no head); a document doctor cannot decode is one
-        // the runtime cannot load either.
+        // Error severity: these are canonical live-message representations
+        // (strand rows, or the messages/graph projection of a blob row with no
+        // head). Current inline graphs cross core's raw verifier; released
+        // graphs cross the frozen physical-shape lens and retain their exact
+        // semantic authority at full ingress. Doctor itself does not normalize
+        // them or own a parallel graph-validation algorithm.
         diagnosis.findings.push(
             StorageFinding::new(
                 FindingSeverity::Error,
                 FINDING_SESSION_DOCUMENT_UNDECODABLE,
                 format!(
-                    "{undecodable} persisted session/message document(s) did not decode during \
-                     the blob-reference sweep"
+                    "{undecodable} persisted live-message or transcript-graph projection(s) did \
+                     not validate during the blob-reference sweep"
                 ),
             )
             .with_path(db_path.to_path_buf())
@@ -1315,10 +1237,15 @@ struct HeadKey {
 #[derive(Debug, Default)]
 struct SessionFootprint {
     /// Head-row identity. `None` means no usable `session_heads` row, so the
-    /// session is a legacy inline document (or its head row is unmeasurable).
+    /// session is an inline WholeBlob document (or its head row is
+    /// unmeasurable).
     head: Option<HeadKey>,
     /// `session_heads.head_json` + `session_heads.metadata_json`.
     head_bytes: u64,
+    /// Immutable JSON payload bytes in `session_head_metadata_cells` and
+    /// `session_head_metadata_states`. Reference, delta, and lineage rows are
+    /// counted separately but have no JSON payload to byte-measure.
+    head_metadata_bytes: u64,
     /// Every `session_strand_messages` row for this session.
     strand_bytes: u64,
     /// The live head-strand prefix — the transcript a resume actually loads.
@@ -1334,11 +1261,23 @@ struct SessionFootprint {
     blob_bytes: u64,
     /// Legacy inline document only: the serialized live `messages` array.
     inline_live_bytes: u64,
-    /// Legacy inline document only: retained revision bodies in the inline
+    /// Inline document only: exact serialized compact anchor payload.
+    inline_graph_anchor_bytes: u64,
+    /// Inline document only: exact serialized compact occurrence-edge
+    /// payloads.
+    inline_graph_edge_bytes: u64,
+    /// Inline document only: compact occurrence edges (one per rewrite).
+    inline_graph_edges: u64,
+    /// Inline document only: exact serialized transcript-history graph,
+    /// including its rolling-prefix witnesses.
+    inline_graph_bytes: u64,
+    /// Exact released-0.8.10 inline document only: full revision bodies.
+    inline_released_revision_bodies: u64,
+    /// Exact released-0.8.10 inline document only: rewrite commits.
+    inline_released_commits: u64,
+    /// The inline graph's physical representation. `None` means there is no
     /// transcript-history graph.
-    inline_revisions: u64,
-    /// Legacy inline document only: rewrite commits in that graph.
-    inline_commits: u64,
+    inline_graph_kind: Option<InlineGraphKind>,
     /// `session_strand_messages` rows whose session has no usable
     /// `session_heads` row. `append_messages` lands strand rows and
     /// `save_head` mints the head row in a separate transaction
@@ -1354,7 +1293,7 @@ struct SessionFootprint {
 
 impl SessionFootprint {
     /// Head-canonical sessions are measured across the head/strand/rewrite
-    /// tables; the rest are legacy inline documents.
+    /// tables; the rest are inline WholeBlob documents.
     fn head_canonical(&self) -> bool {
         self.head.is_some()
     }
@@ -1362,6 +1301,7 @@ impl SessionFootprint {
     /// Every durable byte the session owns, across every measured table.
     fn document_bytes(&self) -> u64 {
         self.head_bytes
+            .saturating_add(self.head_metadata_bytes)
             .saturating_add(self.strand_bytes)
             .saturating_add(self.rewrite_bytes)
             .saturating_add(self.blob_bytes)
@@ -1381,20 +1321,36 @@ impl SessionFootprint {
     }
 
     /// Retained revisions besides the live one: one per non-head strand for
-    /// a head-canonical session, one per retained body for an inline one.
+    /// a head-canonical session.
     fn retained_revisions(&self) -> u64 {
-        if self.head_canonical() {
-            self.strands.saturating_sub(1)
-        } else {
-            self.inline_revisions
-        }
+        self.strands.saturating_sub(1)
     }
 
-    fn commits(&self) -> u64 {
-        if self.head_canonical() {
-            self.rewrite_rows
-        } else {
-            self.inline_commits
+    fn rewrite_commits(&self) -> u64 {
+        self.rewrite_rows
+    }
+
+    /// Describe exactly what the inline document stores. Current compact
+    /// graphs retain one anchor and occurrence deltas; they do not retain one
+    /// full transcript body per revision.
+    fn inline_graph_description(&self) -> String {
+        match self.inline_graph_kind {
+            Some(InlineGraphKind::Compact) => format!(
+                "compact transcript graph inline in sessions.session_json: 1 anchor / {}, {} \
+                 occurrence edge(s) / {}, {} total graph bytes including rolling witnesses",
+                format_bytes(self.inline_graph_anchor_bytes),
+                self.inline_graph_edges,
+                format_bytes(self.inline_graph_edge_bytes),
+                format_bytes(self.inline_graph_bytes),
+            ),
+            Some(InlineGraphKind::Released0810) => format!(
+                "released-0.8.10 full-body transcript graph inline in sessions.session_json: {} \
+                 revision bod(ies), {} rewrite commit(s), {} total graph bytes",
+                self.inline_released_revision_bodies,
+                self.inline_released_commits,
+                format_bytes(self.inline_graph_bytes),
+            ),
+            None => "no inline transcript-history graph".to_string(),
         }
     }
 
@@ -1402,7 +1358,7 @@ impl SessionFootprint {
     /// bytes have an unknowable live-or-retained split — the head save that
     /// would classify them has not landed (or did not read back) — so every
     /// ratio finding must fail closed and exclude it: reading it as a
-    /// legacy inline document would claim bytes live in
+    /// inline WholeBlob document would claim bytes live in
     /// `sessions.session_json` for a session that may have no row there at
     /// all, and firing the mass-alone arm would treat "live is unknown" as
     /// "live is zero".
@@ -1459,6 +1415,23 @@ struct FrozenArchiveCensus {
     /// Rows in a legacy `runtime_session_snapshots` table sharing this
     /// database file (see [`legacy_runtime_snapshot_rows`]).
     legacy_runtime_snapshots: u64,
+}
+
+/// Authenticated HeadCanonical metadata cells, state transitions, and exact
+/// owner references. JSON payload bytes are measured with SQLite `LENGTH`;
+/// doctor never parses or allocates the accumulated metadata map.
+#[derive(Debug, Default)]
+struct HeadMetadataPoolCensus {
+    cell_rows: u64,
+    cell_bytes: u64,
+    current_rows: u64,
+    state_rows: u64,
+    state_identity_bytes: u64,
+    delta_rows: u64,
+    physical_refs: u64,
+    runtime_refs: u64,
+    unknown_refs: u64,
+    lineage_rows: u64,
 }
 
 /// What the census could not measure (fail-closed accounting).
@@ -1563,8 +1536,8 @@ fn format_ratio(numerator: u64, denominator: u64) -> String {
 
 /// Read-only storage-footprint census over one sqlite session database (see
 /// the module docs). Callers pass a connection holding the per-database read
-/// snapshot, so the passes below agree with each other and with the
-/// checkpoint census and blob sweep that share it.
+/// snapshot, so the passes below agree with each other and with the blob
+/// sweep that shares it.
 fn census_storage_footprint(
     conn: &Connection,
     db_path: &Path,
@@ -1574,6 +1547,7 @@ fn census_storage_footprint(
     let mut sessions: BTreeMap<String, SessionFootprint> = BTreeMap::new();
     let mut strand_pool = StrandPoolCensus::default();
     let mut archives = FrozenArchiveCensus::default();
+    let mut head_metadata = HeadMetadataPoolCensus::default();
     let mut gaps = CensusGaps::default();
 
     // Order matters: the head pass establishes the classification key the
@@ -1594,6 +1568,19 @@ fn census_storage_footprint(
     if let Err(error) = census_blob_rows(conn, &mut sessions, &mut archives, &mut gaps) {
         gaps.pool_unreadable("sessions", &error, db_path, realm, diagnosis);
     }
+    if let Err(error) =
+        census_head_metadata_rows(conn, &mut sessions, &mut head_metadata, &mut gaps)
+    {
+        gaps.pool_unreadable(
+            "session_head_metadata_cells + session_head_metadata_current + \
+             session_head_metadata_states + session_head_metadata_state_deltas + \
+             session_head_metadata_refs + session_head_metadata_head_lineage",
+            &error,
+            db_path,
+            realm,
+            diagnosis,
+        );
+    }
     // Classification, not measurement, is what failed for these sessions —
     // but the consequence is the same: their footprint is unknown, and every
     // finding below must carry that instead of certifying them healthy.
@@ -1603,8 +1590,10 @@ fn census_storage_footprint(
         .count() as u64;
 
     report_oversized_sessions(&sessions, &gaps, db_path, realm, diagnosis);
+    report_inline_graph_pool(&sessions, &gaps, db_path, realm, diagnosis);
     report_strand_pool(&strand_pool, &gaps, db_path, realm, diagnosis);
     report_frozen_archives(&archives, &gaps, db_path, realm, diagnosis);
+    report_head_metadata_pool(&head_metadata, &gaps, db_path, realm, diagnosis);
     report_census_gaps(&gaps, db_path, realm, diagnosis);
 }
 
@@ -1792,9 +1781,127 @@ fn census_rewrite_rows(
     Ok(())
 }
 
+/// Head metadata sidecar rows. Only row counts and SQLite-reported JSON byte
+/// lengths are read; cells and state identities are never selected or parsed.
+fn census_head_metadata_rows(
+    conn: &Connection,
+    sessions: &mut BTreeMap<String, SessionFootprint>,
+    pool: &mut HeadMetadataPoolCensus,
+    gaps: &mut CensusGaps,
+) -> Result<(), rusqlite::Error> {
+    if table_exists(conn, "session_head_metadata_cells")? {
+        let mut statement = conn.prepare(
+            "SELECT session_id, LENGTH(CAST(metadata_json AS BLOB)) \
+             FROM session_head_metadata_cells \
+             ORDER BY session_id, metadata_key, exact_value_digest",
+        )?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let session_id: String = row.get(0)?;
+            let bytes = measured_u64(row.get(1)?);
+            let footprint = sessions.entry(session_id).or_default();
+            pool.cell_rows += 1;
+            match bytes {
+                Some(bytes) => {
+                    pool.cell_bytes = pool.cell_bytes.saturating_add(bytes);
+                    footprint.head_metadata_bytes =
+                        footprint.head_metadata_bytes.saturating_add(bytes);
+                }
+                None => {
+                    footprint.unmeasured = true;
+                    gaps.rows += 1;
+                }
+            }
+        }
+    }
+    if table_exists(conn, "session_head_metadata_current")? {
+        pool.current_rows = match measured_u64(Some(conn.query_row(
+            "SELECT COUNT(*) FROM session_head_metadata_current",
+            [],
+            |row| row.get(0),
+        )?)) {
+            Some(count) => count,
+            None => {
+                gaps.rows += 1;
+                0
+            }
+        };
+    }
+    if table_exists(conn, "session_head_metadata_states")? {
+        let mut statement = conn.prepare(
+            "SELECT session_id, LENGTH(CAST(identity_json AS BLOB)) \
+             FROM session_head_metadata_states ORDER BY session_id, state_id",
+        )?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let session_id: String = row.get(0)?;
+            let bytes = measured_u64(row.get(1)?);
+            let footprint = sessions.entry(session_id).or_default();
+            pool.state_rows += 1;
+            match bytes {
+                Some(bytes) => {
+                    pool.state_identity_bytes = pool.state_identity_bytes.saturating_add(bytes);
+                    footprint.head_metadata_bytes =
+                        footprint.head_metadata_bytes.saturating_add(bytes);
+                }
+                None => {
+                    footprint.unmeasured = true;
+                    gaps.rows += 1;
+                }
+            }
+        }
+    }
+    if table_exists(conn, "session_head_metadata_state_deltas")? {
+        pool.delta_rows = match measured_u64(Some(conn.query_row(
+            "SELECT COUNT(*) FROM session_head_metadata_state_deltas",
+            [],
+            |row| row.get(0),
+        )?)) {
+            Some(count) => count,
+            None => {
+                gaps.rows += 1;
+                0
+            }
+        };
+    }
+    if table_exists(conn, "session_head_metadata_refs")? {
+        let mut statement = conn.prepare(
+            "SELECT owner, COUNT(*) FROM session_head_metadata_refs \
+             GROUP BY owner ORDER BY owner",
+        )?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let owner: String = row.get(0)?;
+            let Some(count) = measured_u64(row.get(1)?) else {
+                gaps.rows += 1;
+                continue;
+            };
+            match owner.as_str() {
+                "physical_head" => pool.physical_refs = count,
+                "runtime_boundary" => pool.runtime_refs = count,
+                _ => pool.unknown_refs = pool.unknown_refs.saturating_add(count),
+            }
+        }
+    }
+    if table_exists(conn, "session_head_metadata_head_lineage")? {
+        pool.lineage_rows = match measured_u64(Some(conn.query_row(
+            "SELECT COUNT(*) FROM session_head_metadata_head_lineage",
+            [],
+            |row| row.get(0),
+        )?)) {
+            Some(count) => count,
+            None => {
+                gaps.rows += 1;
+                0
+            }
+        };
+    }
+    Ok(())
+}
+
 /// Blob rows: the stored byte length of every `sessions.session_json` (a
 /// frozen archive when a head row exists), plus a raw-JSON measurement of
-/// the live-vs-retained split for the legacy inline documents that have no
+/// the live-vs-retained split for inline WholeBlob documents that have no
 /// head row.
 fn census_blob_rows(
     conn: &Connection,
@@ -1845,8 +1952,13 @@ fn census_blob_rows(
         match measure_inline_document(&document.into_bytes()) {
             Some(measured) => {
                 footprint.inline_live_bytes = measured.live_bytes;
-                footprint.inline_revisions = measured.revisions;
-                footprint.inline_commits = measured.commits;
+                footprint.inline_graph_anchor_bytes = measured.graph_anchor_bytes;
+                footprint.inline_graph_edge_bytes = measured.graph_edge_bytes;
+                footprint.inline_graph_edges = measured.graph_edges;
+                footprint.inline_graph_bytes = measured.graph_bytes;
+                footprint.inline_released_revision_bodies = measured.released_revision_bodies;
+                footprint.inline_released_commits = measured.released_commits;
+                footprint.inline_graph_kind = measured.graph_kind;
             }
             None => {
                 footprint.unmeasured = true;
@@ -1858,17 +1970,9 @@ fn census_blob_rows(
     Ok(())
 }
 
-/// Rows in a legacy `runtime_session_snapshots` table sharing this database
-/// file.
-///
-/// The session store never reads an archived blob row again, but the
-/// runtime's LegacyUnverified recovery path
-/// (`meerkat-runtime/src/store/sqlite.rs`,
-/// `prepare_legacy_session_checkpoint`) still cross-reads
-/// `sessions.session_json` for byte identity when such a snapshot row
-/// exists — and it does so through the runtime store's own connection, i.e.
-/// only when both tables live in this one file. Doctor qualifies the
-/// frozen-archive finding rather than overstating it.
+/// Rows in the retired `runtime_session_snapshots` table sharing this
+/// database file. They are measured as frozen storage only; supported
+/// runtimes no longer read them.
 fn legacy_runtime_snapshot_rows(conn: &Connection) -> Result<u64, rusqlite::Error> {
     if !table_exists(conn, "runtime_session_snapshots")? {
         return Ok(0);
@@ -1878,20 +1982,32 @@ fn legacy_runtime_snapshot_rows(conn: &Connection) -> Result<u64, rusqlite::Erro
     Ok(measured_u64(Some(count)).unwrap_or(0))
 }
 
-/// What a legacy inline document holds, measured from its raw stored bytes.
+/// What an inline WholeBlob document holds, measured from its raw stored
+/// bytes.
 struct InlineDocumentMeasurement {
     live_bytes: u64,
-    revisions: u64,
-    commits: u64,
+    graph_anchor_bytes: u64,
+    graph_edge_bytes: u64,
+    graph_edges: u64,
+    graph_bytes: u64,
+    released_revision_bodies: u64,
+    released_commits: u64,
+    graph_kind: Option<InlineGraphKind>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InlineGraphKind {
+    Compact,
+    Released0810,
 }
 
 /// Doctor's raw lens over a persisted session document: the live transcript
 /// array and the inline transcript-history graph.
 ///
-/// Deliberately not a typed [`Session`] decode — the census must measure the
-/// bytes the disk holds (a typed round-trip would report the bytes this
-/// binary *would* write), and it must keep measuring documents that a future
-/// envelope change makes typed-undecodable.
+/// Deliberately not a typed [`meerkat_core::Session`] decode — the census must
+/// measure the bytes the disk holds (a typed round-trip would report the bytes
+/// this binary *would* write), and it must keep measuring documents that a
+/// future envelope change makes typed-undecodable.
 #[derive(Deserialize)]
 struct InlineDocumentLens<'a> {
     #[serde(borrow)]
@@ -1900,29 +2016,100 @@ struct InlineDocumentLens<'a> {
     metadata: BTreeMap<String, &'a serde_json::value::RawValue>,
 }
 
-/// The retained half of an inline transcript-history graph. Counted, not
-/// validated: doctor measures whatever is stored under the key.
-#[derive(Deserialize, Default)]
-struct InlineHistoryLens<'a> {
+/// Format discriminator only. Doctor selects an exact physical lens from this
+/// field; an unknown current/future value is unmeasurable rather than silently
+/// interpreted as released 0.8.10.
+#[derive(Deserialize)]
+struct InlineHistoryFormatLens<'a> {
     #[serde(borrow, default)]
-    commits: Vec<&'a serde_json::value::RawValue>,
-    #[serde(borrow, default)]
-    revisions: Vec<&'a serde_json::value::RawValue>,
+    format: Option<&'a str>,
+}
+
+/// Current compact graph lens. Raw references preserve exact stored byte
+/// lengths and never materialize the anchor or edge message bodies.
+#[derive(Deserialize)]
+struct CompactInlineHistoryLens<'a> {
+    #[serde(borrow)]
+    anchor: &'a serde_json::value::RawValue,
+    #[serde(borrow)]
+    edges: Vec<&'a serde_json::value::RawValue>,
+}
+
+/// Exact released-0.8.10 graph lens. This is the only supported predecessor
+/// format and is counted as the full-body representation it physically is.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Released0810InlineHistoryLens<'a> {
+    #[serde(borrow, rename = "head")]
+    _released_head: &'a str,
+    #[serde(borrow, default, rename = "commits")]
+    released_commit_rows: Vec<&'a serde_json::value::RawValue>,
+    #[serde(borrow, default, rename = "revisions")]
+    released_revision_rows: Vec<&'a serde_json::value::RawValue>,
+    #[serde(default, rename = "digest_format")]
+    _released_digest_format: u32,
+    #[serde(borrow, default, rename = "replay_cursor")]
+    _released_replay_cursor: Option<&'a serde_json::value::RawValue>,
+}
+
+fn measure_inline_history(
+    value: &serde_json::value::RawValue,
+) -> Option<InlineDocumentMeasurement> {
+    let raw = value.get();
+    let format: InlineHistoryFormatLens<'_> = serde_json::from_str(raw).ok()?;
+    match format.format {
+        Some(TRANSCRIPT_HISTORY_FORMAT_CURRENT) => {
+            let graph: CompactInlineHistoryLens<'_> = serde_json::from_str(raw).ok()?;
+            Some(InlineDocumentMeasurement {
+                live_bytes: 0,
+                graph_anchor_bytes: graph.anchor.get().len() as u64,
+                graph_edge_bytes: graph.edges.iter().map(|edge| edge.get().len() as u64).sum(),
+                graph_edges: graph.edges.len() as u64,
+                graph_bytes: raw.len() as u64,
+                released_revision_bodies: 0,
+                released_commits: 0,
+                graph_kind: Some(InlineGraphKind::Compact),
+            })
+        }
+        Some(_) => None,
+        None => {
+            let graph: Released0810InlineHistoryLens<'_> = serde_json::from_str(raw).ok()?;
+            if graph.released_commit_rows.is_empty() || graph.released_revision_rows.is_empty() {
+                return None;
+            }
+            Some(InlineDocumentMeasurement {
+                live_bytes: 0,
+                graph_anchor_bytes: 0,
+                graph_edge_bytes: 0,
+                graph_edges: 0,
+                graph_bytes: raw.len() as u64,
+                released_revision_bodies: graph.released_revision_rows.len() as u64,
+                released_commits: graph.released_commit_rows.len() as u64,
+                graph_kind: Some(InlineGraphKind::Released0810),
+            })
+        }
+    }
 }
 
 /// `None` when the document cannot be measured (the caller then reports it
 /// unknown instead of assuming a healthy split).
 fn measure_inline_document(document: &[u8]) -> Option<InlineDocumentMeasurement> {
     let lens: InlineDocumentLens<'_> = serde_json::from_slice(document).ok()?;
-    let history = match lens.metadata.get(SESSION_TRANSCRIPT_HISTORY_STATE_KEY) {
-        Some(value) => serde_json::from_str::<InlineHistoryLens<'_>>(value.get()).ok()?,
-        None => InlineHistoryLens::default(),
+    let mut measured = match lens.metadata.get(SESSION_TRANSCRIPT_HISTORY_STATE_KEY) {
+        Some(value) => measure_inline_history(value)?,
+        None => InlineDocumentMeasurement {
+            live_bytes: 0,
+            graph_anchor_bytes: 0,
+            graph_edge_bytes: 0,
+            graph_edges: 0,
+            graph_bytes: 0,
+            released_revision_bodies: 0,
+            released_commits: 0,
+            graph_kind: None,
+        },
     };
-    Some(InlineDocumentMeasurement {
-        live_bytes: lens.messages.get().len() as u64,
-        revisions: history.revisions.len() as u64,
-        commits: history.commits.len() as u64,
-    })
+    measured.live_bytes = lens.messages.get().len() as u64;
+    Some(measured)
 }
 
 /// Per-session footprint findings, worst reclaimable first, plus one
@@ -1952,15 +2139,10 @@ fn report_oversized_sessions(
                 "{} retained revision strand(s) and {} rewrite commit(s) in \
                  session_strand_messages + session_rewrites",
                 footprint.retained_revisions(),
-                footprint.commits()
+                footprint.rewrite_commits()
             )
         } else {
-            format!(
-                "{} retained revision bod(ies) and {} rewrite commit(s) inline in \
-                 sessions.session_json",
-                footprint.retained_revisions(),
-                footprint.commits()
-            )
+            footprint.inline_graph_description()
         };
         diagnosis.findings.push(
             StorageFinding::new(
@@ -1968,7 +2150,8 @@ fn report_oversized_sessions(
                 FINDING_TRANSCRIPT_HISTORY_OVERSIZED,
                 format!(
                     "session {session_id} stores {} of durable transcript for {} of live \
-                     transcript, ratio {}: {retained}; {} is retained history",
+                     transcript, ratio {}: {retained}; {} lies outside the serialized live \
+                     transcript (history plus required envelope/authority bytes)",
                     format_bytes(footprint.document_bytes()),
                     format_bytes(footprint.live_bytes()),
                     format_ratio(footprint.document_bytes(), footprint.live_bytes()),
@@ -2009,7 +2192,8 @@ fn report_oversized_sessions(
             format!(
                 "{} of {measured_sessions} measured session(s) exceed the \
                  {TRANSCRIPT_HISTORY_RATIO_WARN:.1}x durable-to-live threshold; database-wide {} \
-                 durable for {} of live transcript, ratio {}, {} reclaimable{overflow_note}{}",
+                 durable for {} of live transcript, ratio {}, {} beyond the serialized live \
+                 transcript{overflow_note}{}",
                 oversized.len(),
                 format_bytes(document_bytes),
                 format_bytes(live_bytes),
@@ -2021,6 +2205,108 @@ fn report_oversized_sessions(
         .with_path(db_path.to_path_buf())
         .with_realm(realm),
     );
+}
+
+/// Aggregate raw inline graph shape. This is emitted even for healthy compact
+/// graphs: otherwise doctor would remain silent precisely when delta
+/// retention is working and operators could not distinguish it from an
+/// unmeasured pool.
+fn report_inline_graph_pool(
+    sessions: &BTreeMap<String, SessionFootprint>,
+    gaps: &CensusGaps,
+    db_path: &Path,
+    realm: &str,
+    diagnosis: &mut StorageDiagnosis,
+) {
+    let mut compact_sessions = 0u64;
+    let mut compact_anchor_bytes = 0u64;
+    let mut compact_edges = 0u64;
+    let mut compact_edge_bytes = 0u64;
+    let mut compact_graph_bytes = 0u64;
+    let mut released_sessions = 0u64;
+    let mut released_bodies = 0u64;
+    let mut released_commits = 0u64;
+    let mut released_graph_bytes = 0u64;
+
+    for footprint in sessions.values() {
+        match footprint.inline_graph_kind {
+            Some(InlineGraphKind::Compact) => {
+                compact_sessions += 1;
+                compact_anchor_bytes =
+                    compact_anchor_bytes.saturating_add(footprint.inline_graph_anchor_bytes);
+                compact_edges = compact_edges.saturating_add(footprint.inline_graph_edges);
+                compact_edge_bytes =
+                    compact_edge_bytes.saturating_add(footprint.inline_graph_edge_bytes);
+                compact_graph_bytes =
+                    compact_graph_bytes.saturating_add(footprint.inline_graph_bytes);
+            }
+            Some(InlineGraphKind::Released0810) => {
+                released_sessions += 1;
+                released_bodies =
+                    released_bodies.saturating_add(footprint.inline_released_revision_bodies);
+                released_commits =
+                    released_commits.saturating_add(footprint.inline_released_commits);
+                released_graph_bytes =
+                    released_graph_bytes.saturating_add(footprint.inline_graph_bytes);
+            }
+            None => {}
+        }
+    }
+    if compact_sessions == 0 && released_sessions == 0 {
+        return;
+    }
+
+    let mut clauses = Vec::new();
+    if compact_sessions > 0 {
+        clauses.push(format!(
+            "{compact_sessions} current compact inline graph(s): one anchor each / {} total, \
+             {compact_edges} occurrence edge(s) / {}, {} total graph bytes including rolling \
+             witnesses; no full historical revision bodies were materialized by doctor",
+            format_bytes(compact_anchor_bytes),
+            format_bytes(compact_edge_bytes),
+            format_bytes(compact_graph_bytes),
+        ));
+    }
+    if released_sessions > 0 {
+        clauses.push(format!(
+            "{released_sessions} exact released-0.8.10 inline graph(s): \
+             {released_bodies} full revision bod(ies), {released_commits} rewrite commit(s), {} \
+             total graph bytes",
+            format_bytes(released_graph_bytes),
+        ));
+    }
+    let message = format!(
+        "`sessions.session_json` transcript-history footprint: {}{}",
+        clauses.join("; "),
+        gaps.exclusion_note(),
+    );
+    diagnosis.findings.push(
+        StorageFinding::new(
+            FindingSeverity::Info,
+            FINDING_INLINE_TRANSCRIPT_GRAPH_FOOTPRINT,
+            message,
+        )
+        .with_path(db_path.to_path_buf())
+        .with_realm(realm),
+    );
+    if released_sessions > 0 {
+        diagnosis.findings.push(
+            StorageFinding::new(
+                FindingSeverity::Warning,
+                FINDING_RELEASED_TRANSCRIPT_GRAPH_SEMANTIC_VERIFICATION_DEFERRED,
+                format!(
+                    "semantic_verification_deferred=true for {released_sessions} exact \
+                     released-0.8.10 inline graph(s): bounded doctor measured the frozen physical \
+                     shape and {}, but did not normalize or retain arbitrary-base historical \
+                     revision bodies; exact semantic proof runs at the one-time persisted-session \
+                     ingress/migration boundary",
+                    format_bytes(released_graph_bytes),
+                ),
+            )
+            .with_path(db_path.to_path_buf())
+            .with_realm(realm),
+        );
+    }
 }
 
 /// The strand pool, reported whenever it holds a row or a supersession link
@@ -2114,9 +2400,8 @@ fn report_frozen_archives(
     );
     if archives.legacy_runtime_snapshots > 0 {
         message.push_str(&format!(
-            "; this database also holds {} legacy `runtime_session_snapshots` row(s), whose \
-             runtime recovery path still cross-reads `sessions.session_json` for byte identity — \
-             reclaim only after that table is drained",
+            "; this database also holds {} retired `runtime_session_snapshots` row(s), which \
+             supported runtimes no longer read",
             archives.legacy_runtime_snapshots,
         ));
     }
@@ -2125,6 +2410,63 @@ fn report_frozen_archives(
         StorageFinding::new(severity, FINDING_FROZEN_BLOB_ARCHIVE_RECLAIMABLE, message)
             .with_path(db_path.to_path_buf())
             .with_realm(realm),
+    );
+}
+
+/// Metadata cell/state/ref visibility. JSON byte totals are exact without
+/// hydrating any payload; compact current, delta, owner, and lineage records
+/// are reported as row counts.
+fn report_head_metadata_pool(
+    pool: &HeadMetadataPoolCensus,
+    gaps: &CensusGaps,
+    db_path: &Path,
+    realm: &str,
+    diagnosis: &mut StorageDiagnosis,
+) {
+    if pool.cell_rows == 0
+        && pool.current_rows == 0
+        && pool.state_rows == 0
+        && pool.delta_rows == 0
+        && pool.physical_refs == 0
+        && pool.runtime_refs == 0
+        && pool.unknown_refs == 0
+        && pool.lineage_rows == 0
+    {
+        return;
+    }
+    let mut message = format!(
+        "`session_head_metadata_cells` holds {} immutable cell row(s) / {}; \
+         `session_head_metadata_current` holds {} current physical cell reference row(s); \
+         `session_head_metadata_states` holds {} immutable state row(s) / {}; \
+         `session_head_metadata_state_deltas` holds {} per-state delta row(s); \
+         `session_head_metadata_refs` holds {} physical-head and {} runtime-boundary exact \
+         owner reference row(s); `session_head_metadata_head_lineage` holds {} head-token \
+         lineage row(s) (compact rows counted, not byte-measured: they carry no JSON payload)",
+        pool.cell_rows,
+        format_bytes(pool.cell_bytes),
+        pool.current_rows,
+        pool.state_rows,
+        format_bytes(pool.state_identity_bytes),
+        pool.delta_rows,
+        pool.physical_refs,
+        pool.runtime_refs,
+        pool.lineage_rows,
+    );
+    if pool.unknown_refs > 0 {
+        message.push_str(&format!(
+            "; {} reference row(s) have an owner this binary does not understand",
+            pool.unknown_refs,
+        ));
+    }
+    message.push_str(&gaps.exclusion_note());
+    diagnosis.findings.push(
+        StorageFinding::new(
+            FindingSeverity::Info,
+            FINDING_HEAD_METADATA_SIDECAR,
+            message,
+        )
+        .with_path(db_path.to_path_buf())
+        .with_realm(realm),
     );
 }
 
@@ -2348,7 +2690,7 @@ fn sweep_artifacts(realm_dir: &Path, realm: &str, diagnosis: &mut StorageDiagnos
 mod tests {
     use super::*;
     use meerkat_core::{
-        ImageData, TranscriptRewriteReason, TranscriptRewriteSelection, UserMessage,
+        ImageData, Session, TranscriptRewriteReason, TranscriptRewriteSelection, UserMessage,
     };
 
     fn write_manifest(realms_root: &Path, realm_id: &str, backend: &str) -> PathBuf {
@@ -2653,38 +2995,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn census_counts_legacy_rows_and_jsonl_census_is_skipped() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().join("realms");
-        let realm_dir = write_manifest(&root, "census", "sqlite");
-        {
-            let conn = Connection::open(realm_dir.join("sessions.sqlite3")).unwrap();
-            conn.execute_batch(SESSIONS_DDL).unwrap();
-            let mut session = Session::new();
-            session.push(Message::User(UserMessage::text("hello")));
-            insert_session(&conn, &session);
-        }
-        let jsonl_root = temp.path().join("jsonl-realms");
-        write_manifest(&jsonl_root, "journal", "jsonl");
-
-        let diagnosis = diagnose_disk_roots(&scope(&[&root, &jsonl_root])).await;
-        let legacy = diagnosis
-            .findings
-            .iter()
-            .find(|f| f.code == FINDING_LEGACY_UNVERIFIED_SESSIONS)
-            .expect("legacy census finding");
-        assert_eq!(legacy.severity, FindingSeverity::Warning);
-        assert!(legacy.message.starts_with("1 legacy-unverified"));
-        assert_eq!(legacy.realm.as_deref(), Some("census"));
-        let skipped = diagnosis
-            .findings
-            .iter()
-            .find(|f| f.code == FINDING_CENSUS_SKIPPED_JSONL)
-            .expect("jsonl census skip");
-        assert_eq!(skipped.realm.as_deref(), Some("journal"));
-    }
-
-    #[tokio::test]
     async fn dangling_blob_reference_detected_and_present_blob_is_not_flagged() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("realms");
@@ -2763,8 +3073,6 @@ mod tests {
             !codes(&diagnosis).contains(&FINDING_SESSION_DOCUMENT_UNDECODABLE),
             "{diagnosis:?}"
         );
-        // The row still participates in the checkpoint census.
-        assert!(codes(&diagnosis).contains(&FINDING_LEGACY_UNVERIFIED_SESSIONS));
     }
 
     #[tokio::test]
@@ -3472,7 +3780,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_inline_transcript_history_is_measured_from_the_stored_document() {
+    async fn compact_inline_transcript_history_is_measured_from_raw_anchor_and_edges() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("realms");
         let realm_dir = write_manifest(&root, "inline", "sqlite");
@@ -3484,7 +3792,7 @@ mod tests {
         // fixture has to replace large content with different large content
         // for the retained spans themselves to be worth reclaiming. That is
         // also the shape the census exists to flag now: real content churn,
-        // not the per-resume prompt refresh that delta encoding erases.
+        // not a small repeated replacement that delta encoding bounds.
         let mut session = Session::new();
         session.push(Message::User(UserMessage::text("c".repeat(512 * 1024))));
         session.push(Message::User(UserMessage::text("second turn")));
@@ -3505,13 +3813,22 @@ mod tests {
         let document = serde_json::to_vec(&session).unwrap();
         let decoded: serde_json::Value = serde_json::from_slice(&document).unwrap();
         let history = &decoded["metadata"][SESSION_TRANSCRIPT_HISTORY_STATE_KEY];
-        let expected_revisions = history["revisions"].as_array().unwrap().len();
-        let expected_commits = history["commits"].as_array().unwrap().len();
+        assert_eq!(
+            history["format"].as_str(),
+            Some(TRANSCRIPT_HISTORY_FORMAT_CURRENT)
+        );
+        let expected_anchor_bytes = serde_json::to_vec(&history["anchor"]).unwrap().len() as u64;
+        let expected_edges = history["edges"].as_array().unwrap();
+        let expected_edge_bytes = expected_edges
+            .iter()
+            .map(|edge| serde_json::to_vec(edge).unwrap().len() as u64)
+            .sum::<u64>();
+        let expected_graph_bytes = serde_json::to_vec(history).unwrap().len() as u64;
         let live_bytes = serde_json::to_string(&decoded["messages"]).unwrap().len() as u64;
         let document_bytes = document.len() as u64;
         // Guards: a fixture that stopped reproducing inline retention must
         // fail here rather than pass vacuously.
-        assert!(expected_revisions >= 2, "{expected_revisions}");
+        assert_eq!(expected_edges.len(), 8);
         assert!(
             document_bytes - live_bytes >= STORAGE_CENSUS_RECLAIMABLE_FLOOR_BYTES,
             "{document_bytes} - {live_bytes}"
@@ -3538,12 +3855,49 @@ mod tests {
             .expect("inline footprint finding");
         assert_eq!(per_session.severity, FindingSeverity::Warning);
         assert!(
+            per_session
+                .message
+                .contains("compact transcript graph inline in sessions.session_json"),
+            "{}",
+            per_session.message
+        );
+        assert!(
             per_session.message.contains(&format!(
-                "{expected_revisions} retained revision bod(ies) and {expected_commits} rewrite \
-                 commit(s) inline in sessions.session_json"
+                "1 anchor / {}, {} occurrence edge(s) / {}, {} total graph bytes",
+                format_bytes(expected_anchor_bytes),
+                expected_edges.len(),
+                format_bytes(expected_edge_bytes),
+                format_bytes(expected_graph_bytes),
             )),
             "{}",
             per_session.message
+        );
+        assert!(
+            !per_session.message.contains("revision bod"),
+            "compact edges must not be reported as full revision bodies: {}",
+            per_session.message
+        );
+        let graph_pool = finding(&diagnosis, FINDING_INLINE_TRANSCRIPT_GRAPH_FOOTPRINT)
+            .expect("inline compact graph footprint finding");
+        assert_eq!(graph_pool.severity, FindingSeverity::Info);
+        assert!(
+            graph_pool.message.contains(&format!(
+                "1 current compact inline graph(s): one anchor each / {} total, {} occurrence \
+                 edge(s) / {}, {} total graph bytes",
+                format_bytes(expected_anchor_bytes),
+                expected_edges.len(),
+                format_bytes(expected_edge_bytes),
+                format_bytes(expected_graph_bytes),
+            )),
+            "{}",
+            graph_pool.message
+        );
+        assert!(
+            graph_pool
+                .message
+                .contains("no full historical revision bodies were materialized by doctor"),
+            "{}",
+            graph_pool.message
         );
         assert!(
             per_session.message.contains(&format!(
@@ -3564,6 +3918,79 @@ mod tests {
         assert!(!codes(&diagnosis).contains(&FINDING_FROZEN_BLOB_ARCHIVE_RECLAIMABLE));
         assert!(!codes(&diagnosis).contains(&FINDING_STORAGE_CENSUS_UNMEASURED));
         assert!(!diagnosis.has_errors(), "{diagnosis:?}");
+    }
+
+    #[test]
+    fn released_0_8_10_inline_history_is_classified_as_full_body_storage() {
+        let document = br#"{
+            "messages": [{"role":"user","content":[{"type":"text","text":"live"}]}],
+            "metadata": {
+                "session_transcript_history_state_v1": {
+                    "head": "sha256:head",
+                    "commits": [{"rewrite_generation":1}],
+                    "revisions": [
+                        {"revision":"sha256:parent","messages":[]},
+                        {"revision":"sha256:head","messages":[]}
+                    ],
+                    "digest_format": 2
+                }
+            }
+        }"#;
+        let measured = measure_inline_document(document).expect("released graph must measure");
+        assert_eq!(measured.graph_kind, Some(InlineGraphKind::Released0810));
+        assert_eq!(measured.released_commits, 1);
+        assert_eq!(measured.released_revision_bodies, 2);
+        assert_eq!(measured.graph_edges, 0);
+        assert_eq!(measured.graph_anchor_bytes, 0);
+        assert!(measured.graph_bytes > 0);
+
+        let mut footprint = SessionFootprint::default();
+        footprint.inline_graph_kind = measured.graph_kind;
+        footprint.inline_graph_bytes = measured.graph_bytes;
+        footprint.inline_released_commits = measured.released_commits;
+        footprint.inline_released_revision_bodies = measured.released_revision_bodies;
+        let sessions = BTreeMap::from([("released".to_string(), footprint)]);
+        let mut diagnosis = StorageDiagnosis::default();
+        report_inline_graph_pool(
+            &sessions,
+            &CensusGaps::default(),
+            Path::new("sessions.sqlite3"),
+            "released",
+            &mut diagnosis,
+        );
+        let deferred = finding(
+            &diagnosis,
+            FINDING_RELEASED_TRANSCRIPT_GRAPH_SEMANTIC_VERIFICATION_DEFERRED,
+        )
+        .expect("released graph must report deferred semantic verification");
+        assert_eq!(deferred.severity, FindingSeverity::Warning);
+        assert!(
+            deferred
+                .message
+                .contains("semantic_verification_deferred=true"),
+            "{}",
+            deferred.message
+        );
+    }
+
+    #[test]
+    fn current_inline_graph_corruption_is_not_hidden_by_raw_blob_sweep() {
+        let document = format!(
+            r#"{{
+                "messages": [],
+                "metadata": {{
+                    "session_transcript_history_state_v1": {{
+                        "format": "{TRANSCRIPT_HISTORY_FORMAT_CURRENT}",
+                        "anchor": {{}},
+                        "edges": []
+                    }}
+                }}
+            }}"#
+        );
+        assert!(
+            collect_inline_session_blob_refs(document.as_bytes()).is_err(),
+            "raw live-message inspection must retain core-owned current graph validation"
+        );
     }
 
     #[tokio::test]

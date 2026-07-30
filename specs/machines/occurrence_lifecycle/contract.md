@@ -60,6 +60,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ClassifyCompletionSupersession`(schedule_phase: ClaimedDispatchSchedulePhase, current_schedule_revision: u64)
 - `Claim`(owner_id: ClaimOwner, at_utc_ms: u64, lease_expires_at_utc_ms: u64, claim_token: ClaimToken)
 - `DispatchStarted`(correlation_id: Option<CorrelationId>, at_utc_ms: u64)
+- `DispatchAccepted`(at_utc_ms: u64)
 - `AwaitCompletion`(at_utc_ms: u64)
 - `Complete`(at_utc_ms: u64)
 - `ResolveRuntimeCompletion`(outcome: RuntimeCompletionOutcome, detail: Option<String>, at_utc_ms: u64)
@@ -79,6 +80,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ## Effects
 - `Claimed`
 - `DispatchStarted`
+- `DispatchAccepted`
 - `AwaitingCompletion`
 - `Completed`
 - `Skipped`
@@ -1369,6 +1371,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `DispatchStarted`
 - To: `Dispatching`
 
+### `DispatchAcceptedFromDispatching`
+- From: `Dispatching`
+- On: `DispatchAccepted`(at_utc_ms)
+- Guards:
+  - ``
+- Emits: `DispatchAccepted`
+- To: `Dispatching`
+
 ### `AwaitCompletionFromDispatching`
 - From: `Dispatching`
 - On: `AwaitCompletion`(at_utc_ms)
@@ -1666,6 +1676,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### Scenarios
 - `occurrence_start_complete_fail` — occurrence transitions through pending, running, and terminal lifecycle states
-- `occurrence_claim_dispatch_completion` — plan occurrence from pending, sync target snapshot from pending or claimed materialized bindings, record receipt from pending, claimed, dispatching, awaiting completion, completed, skipped, misfired, superseded, or delivery failed result projection, claim pending occurrence, dispatch started from claimed, await completion, complete from dispatching or awaiting, resolve runtime completion outcome, and record claimed/dispatch/awaiting/completed effects
+- `occurrence_claim_dispatch_completion` — plan occurrence from pending, sync target snapshot from pending or claimed materialized bindings, record receipt from pending, claimed, dispatching, awaiting completion, completed, skipped, misfired, superseded, or delivery failed result projection, claim pending occurrence, persist dispatch intent from claimed, record target admission without rewriting its correlation, await completion, complete from dispatching or awaiting, resolve runtime completion outcome, and record claimed/dispatch/accept/await/completed effects
 - `occurrence_terminal_classification` — skip/skipped, misfire/misfired, supersede/superseded, delivery failed, occurrences superseded, records revision and explicit failure class for terminal occurrence outcomes
 - `occurrence_lease_recovery` — classify due no action, due claim eligible, due misfire required, due lease expired, lease renewal by the live claim-token holder from dispatching or awaiting completion, and lease expired from claimed, dispatching, or awaiting completion returns live claimed work to owner-aware recovery

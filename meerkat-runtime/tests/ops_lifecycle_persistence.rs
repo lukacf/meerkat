@@ -466,6 +466,12 @@ impl FailingOpsLifecycleStore {
 
 #[async_trait::async_trait]
 impl RuntimeStore for FailingOpsLifecycleStore {
+    fn session_persistence_profile(
+        &self,
+    ) -> meerkat_runtime::store::RuntimeSessionPersistenceProfile {
+        RuntimeStore::session_persistence_profile(&self.inner)
+    }
+
     fn supports_compaction_projection_outbox(&self) -> bool {
         self.inner.supports_compaction_projection_outbox()
     }
@@ -497,17 +503,27 @@ impl RuntimeStore for FailingOpsLifecycleStore {
     async fn commit_session_snapshot(
         &self,
         runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
-        session_delta: meerkat_runtime::SessionDelta,
+        session_delta: meerkat_runtime::SerializedSessionSnapshot,
     ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
         self.inner
             .commit_session_snapshot(runtime_id, session_delta)
             .await
     }
 
+    async fn commit_prepared_whole_blob_rewrite_boundary(
+        &self,
+        runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+        boundary: meerkat_runtime::store::PreparedWholeBlobRewriteStoreParts,
+    ) -> Result<meerkat_runtime::RuntimeSessionAuthority, meerkat_runtime::RuntimeStoreError> {
+        self.inner
+            .commit_prepared_whole_blob_rewrite_boundary(runtime_id, boundary)
+            .await
+    }
+
     async fn atomic_apply(
         &self,
         runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
-        session_delta: Option<meerkat_runtime::SessionDelta>,
+        session_delta: Option<meerkat_runtime::SerializedSessionSnapshot>,
         receipt: meerkat_core::lifecycle::RunBoundaryReceipt,
         input_updates: Vec<meerkat_runtime::input_state::InputStatePersistenceRecord>,
         session_store_key: Option<SessionId>,
@@ -547,7 +563,7 @@ impl RuntimeStore for FailingOpsLifecycleStore {
     async fn load_session_snapshot(
         &self,
         runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
-    ) -> Result<Option<Vec<u8>>, meerkat_runtime::RuntimeStoreError> {
+    ) -> Result<Option<std::sync::Arc<Vec<u8>>>, meerkat_runtime::RuntimeStoreError> {
         self.inner.load_session_snapshot(runtime_id).await
     }
 

@@ -3,7 +3,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated semantic machine model for SessionTurnAdmissionMachine.
 
-CONSTANTS BooleanValues, NatValues, PendingContinuationDispositionValues, RuntimeKeepAlivePersistenceDecisionValues, RuntimeKeepAliveRequestValues, RuntimeSystemContextApplicationAuthorizationValues, StartTurnDispatchAuthorizationValues, StartTurnDispositionValues, StartTurnExecutionKindValues, StartTurnPublicTerminalValues, TurnAdmissionPhaseValues, TurnAdmissionShutdownTerminalValues
+CONSTANTS BooleanValues, NatValues, PendingContinuationDispositionValues, RuntimeKeepAlivePersistenceDecisionValues, RuntimeKeepAliveRequestValues, StartTurnDispatchAuthorizationValues, StartTurnDispositionValues, StartTurnExecutionKindValues, StartTurnPublicTerminalValues, TurnAdmissionPhaseValues, TurnAdmissionShutdownTerminalValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -266,41 +266,6 @@ AuthorizeStartTurnDispatchShuttingDown ==
     /\ UNCHANGED << interrupt_pending, shutdown_pending, admission_drain_pending, last_public_terminal >>
 
 
-AuthorizeRuntimeSystemContextApplicationActiveIdle ==
-    /\ phase = "Idle"
-    /\ phase' = "Idle"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << interrupt_pending, shutdown_pending, admission_drain_pending, last_public_terminal >>
-
-
-AuthorizeRuntimeSystemContextApplicationActiveAdmitted ==
-    /\ phase = "Admitted"
-    /\ phase' = "Admitted"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << interrupt_pending, shutdown_pending, admission_drain_pending, last_public_terminal >>
-
-
-AuthorizeRuntimeSystemContextApplicationActiveRunning ==
-    /\ phase = "Running"
-    /\ phase' = "Running"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << interrupt_pending, shutdown_pending, admission_drain_pending, last_public_terminal >>
-
-
-AuthorizeRuntimeSystemContextApplicationActiveCompleting ==
-    /\ phase = "Completing"
-    /\ phase' = "Completing"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << interrupt_pending, shutdown_pending, admission_drain_pending, last_public_terminal >>
-
-
-AuthorizeRuntimeSystemContextApplicationShuttingDown ==
-    /\ phase = "ShuttingDown"
-    /\ phase' = "ShuttingDown"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << interrupt_pending, shutdown_pending, admission_drain_pending, last_public_terminal >>
-
-
 AuthorizeCancelAfterBoundaryRunning ==
     /\ phase = "Running"
     /\ phase' = "Running"
@@ -469,11 +434,6 @@ Next ==
     \/ AuthorizeCancelAfterBoundaryAdmitted
     \/ AuthorizeStartTurnDispatchAdmitted
     \/ AuthorizeStartTurnDispatchShuttingDown
-    \/ AuthorizeRuntimeSystemContextApplicationActiveIdle
-    \/ AuthorizeRuntimeSystemContextApplicationActiveAdmitted
-    \/ AuthorizeRuntimeSystemContextApplicationActiveRunning
-    \/ AuthorizeRuntimeSystemContextApplicationActiveCompleting
-    \/ AuthorizeRuntimeSystemContextApplicationShuttingDown
     \/ AuthorizeCancelAfterBoundaryRunning
     \/ \E execution_kind \in StartTurnExecutionKindValues : \E prompt_trimmed_text_byte_count \in 0..2 : \E prompt_non_text_block_count \in 0..2 : \E pending_continuation \in PendingContinuationDispositionValues : ResolveDispositionContentTurn(TRUE, execution_kind, prompt_trimmed_text_byte_count, prompt_non_text_block_count, pending_continuation)
     \/ \E execution_kind \in StartTurnExecutionKindValues : \E prompt_trimmed_text_byte_count \in 0..2 : \E prompt_non_text_block_count \in 0..2 : \E pending_continuation \in PendingContinuationDispositionValues : ResolveDispositionResumePendingWithBoundary(TRUE, execution_kind, prompt_trimmed_text_byte_count, prompt_non_text_block_count, pending_continuation)

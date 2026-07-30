@@ -45,11 +45,6 @@ pub struct RunId(pub String);
 pub enum DurableTailRecoveryClass {
     CompletedCandidate,
     InterruptedRepairableCandidate,
-    /// A complete legacy turn written before run-identity bookkeeping
-    /// existed: identity-less clean EndTurn tail on a pre-witness-v3
-    /// intra-turn row, adopted under a domain-separated deterministic
-    /// legacy run identity.
-    LegacyCompletedCandidate,
     #[default]
     Ambiguous,
 }
@@ -164,21 +159,12 @@ pub enum DurableTailRecoveryDisposition {
     /// Repair the interrupted tail (synthetic interrupted tool results, typed
     /// recovery notice) and commit it as a recovered interrupted boundary.
     RepairAndCommitInterrupted,
-    /// Commit the completed LEGACY tail (pre-run-identity writer) as a
-    /// recovered legacy boundary. Distinct from `CommitCompleted` so the
-    /// commit never claims a modern run boundary was found.
-    CommitLegacyCompleted,
-    /// Commit a completed candidate whose head row carries LEGACY-ERA stamp
-    /// evidence while an unbound content input exists: the digest-proven
-    /// boundary commits and the input row is RETAINED for ordinary
-    /// redelivery — terminalize nothing. A ≤0.8.8 writer persisted staged
-    /// run bindings only inside the boundary commit, so its lost boundary
-    /// routinely leaves the executed turn's own input durably unbound;
-    /// holding on that row would wedge every such session forever on
-    /// upgrade. Retention never fabricates consumption and never drops an
-    /// input — the worst case is one duplicate redelivered turn, the legacy
-    /// fleet's own restart semantics.
-    CommitLegacyCompletedRetainInputs,
+    /// Commit a completed candidate while retaining an unbound content input
+    /// for ordinary redelivery. Modern writers persist the recovered run's
+    /// own binding before execution, so an unbound row is a distinct pending
+    /// input; terminalizing it would drop work and holding the proven boundary
+    /// would wedge recovery.
+    CommitCompletedRetainInputs,
     /// Ambiguous evidence: hold intact, block autonomous execution, clear only
     /// through reconciliation.
     HoldIntact,
@@ -952,7 +938,6 @@ pub enum TurnPrimitiveKind {
     None,
     ConversationTurn,
     ImmediateAppend,
-    ImmediateContextAppend,
 }
 
 /// Typed turn primitive content shape. Closed mirror of
@@ -962,11 +947,8 @@ pub enum TurnPrimitiveKind {
 pub enum ContentShape {
     #[default]
     Conversation,
-    ConversationAndContext,
-    Context,
     Empty,
     ImmediateAppend,
-    ImmediateContext,
 }
 
 /// Typed turn terminal outcome. Closed mirror of
@@ -2118,7 +2100,7 @@ pub enum AdmissionRuntimeExecutionKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum AdmissionPeerResponseTerminalApplyIntent {
     #[default]
-    AppendContextAndRun,
+    AppendContentAndRun,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -2270,7 +2252,7 @@ pub enum RecoveredRuntimeExecutionKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum RecoveredPeerResponseTerminalApplyIntent {
     #[default]
-    AppendContextAndRun,
+    AppendContentAndRun,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -2963,6 +2945,11 @@ macro_rules! meerkat_catalog_machine_dsl {
             admission_authorized_existing_actions: Map<String, Enum<AdmissionExistingQueuedActionKind>>,
             admission_authorized_existing_targets: Map<String, String>,
             admission_idempotency_inputs: Map<String, String>,
+            // Reverse carrier for exact terminal archival. The forward map
+            // preserves public idempotency semantics while an input is live;
+            // this reverse map lets the machine prove and remove that exact
+            // binding without scanning accumulated values.
+            input_idempotency_keys: Map<String, String>,
             // Recovered admission witnesses accepted by MeerkatMachine before
             // shell recovery may re-materialize admission metadata. The lane
             // map records the machine-validated queue/steer witness so
@@ -3431,6 +3418,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             admission_authorized_existing_actions = EmptyMap,
             admission_authorized_existing_targets = EmptyMap,
             admission_idempotency_inputs = EmptyMap,
+            input_idempotency_keys = EmptyMap,
             recovered_admitted_inputs = EmptySet,
             recovered_admitted_lanes = EmptyMap,
             // Ops lifecycle substate
@@ -3792,7 +3780,6 @@ macro_rules! meerkat_catalog_machine_dsl {
                 session_id: SessionId,
                 llm_identity: SessionLlmIdentity,
             },
-            AuthorizeDeferredSessionSystemContextAppend { session_id: SessionId },
             BeginDeferredSessionPromotion { session_id: SessionId },
             AuthorizeDeferredSessionMachineArchivedResume { session_id: SessionId },
             AbandonDeferredSessionPromotion { session_id: SessionId },
@@ -3996,6 +3983,11 @@ macro_rules! meerkat_catalog_machine_dsl {
             AcceptWithCompletion { input_id: InputId, request_immediate_processing: bool, interrupt_yielding: bool, wake_if_idle: bool },
             AcceptWithoutWake { input_id: InputId },
             ResolveLiveBoundaryContextReceipt { run_id: RunId, input_id: String },
+            // Typed observation from the live boundary adapter: the active
+            // target disappeared before this admitted Steer input could be
+            // prepared. The machine, not the shell, authorizes the exact
+            // queue-compatible execution normalization used by fallback.
+            LiveBoundaryUnavailable { input_id: String },
             ResolveAdmissionPlan {
                 input_id: String,
                 input_kind: Enum<AdmissionInputKind>,
@@ -4154,7 +4146,6 @@ macro_rules! meerkat_catalog_machine_dsl {
                 max_extraction_retries: u64,
             },
             StartImmediateAppend { run_id: RunId },
-            StartImmediateContext { run_id: RunId },
             PrimitiveApplied { run_id: RunId },
             LlmReturnedToolCalls { run_id: RunId, tool_count: u64 },
             CallbackPending { run_id: RunId },
@@ -4254,6 +4245,24 @@ macro_rules! meerkat_catalog_machine_dsl {
                 input_id: String,
                 reason: Enum<InputAbandonReason>,
                 attempt_count: u64,
+            },
+            // Remove one exact terminal input image from live machine
+            // authority only after its complete terminal row is durable.
+            // Every persisted seed carrier is supplied as a witness and
+            // compared before any field is erased.
+            ArchiveTerminalInput {
+                input_id: String,
+                phase: Enum<InputPhase>,
+                terminal_kind: Enum<InputTerminalKind>,
+                superseded_by: Option<String>,
+                aggregate_id: Option<String>,
+                abandon_reason: Option<Enum<InputAbandonReason>>,
+                abandon_attempt_count: Option<u64>,
+                attempt_count: u64,
+                run_id: Option<RunId>,
+                boundary_sequence: Option<u64>,
+                admission_sequence: Option<u64>,
+                idempotency_key: Option<String>,
             },
             RecordBoundarySeq { input_id: String, run_id: RunId },
             // Ops lifecycle inputs.
@@ -4552,9 +4561,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             PeerRequestReceived { corr_id: PeerCorrelationId, handling_mode: Enum<InputLane> },
             PeerResponseReplied { corr_id: PeerCorrelationId },
             // Session-context advancement input (W2-E). Shell fires this at every
-            // site that mutates canonical session truth (prompt append, external
-            // content injection, tool-result append, external assistant output,
-            // runtime-system-context append). The transition records
+            // site that mutates canonical session truth (ordinary System append,
+            // external content injection, tool-result append, or external
+            // assistant output). The transition records
             // `last_session_context_updated_at_ms` and emits
             // `SessionContextAdvanced` so external projection consumers (realtime
             // provider session) refresh from a typed effect instead of polling a
@@ -4967,6 +4976,14 @@ macro_rules! meerkat_catalog_machine_dsl {
                 // admission requires a live interrupt at the active boundary).
                 // The shell reads this typed fact instead of re-scanning admitted
                 // inputs for `HandlingMode::Steer`.
+                live_interrupt_required: bool,
+            },
+            // Machine-owned normalization after a typed active-boundary
+            // Unavailable result. The runtime mirrors these exact values into
+            // the already-admitted input semantics before queued fallback.
+            LiveBoundaryUnavailableNormalized {
+                input_id: String,
+                execution_handling_mode: Enum<InputLane>,
                 live_interrupt_required: bool,
             },
             AdmissionValidationResolved {
@@ -6481,17 +6498,14 @@ macro_rules! meerkat_catalog_machine_dsl {
         //      {NoPriorCommit, PrecedesCandidate} && input_evidence ==
         //      Unfenceable -> `...HoldInputEvidence`; input_evidence ==
         //      UnboundContentInput splits on the tail shape:
-        //      a COMPLETED shape (CompletedCandidate or
-        //      LegacyCompletedCandidate)
-        //      -> `...CommitLegacyRetainInputs` (commit the digest-proven
+        //      a COMPLETED shape
+        //      -> `...CommitCompletedRetainInputs` (commit the digest-proven
         //      boundary; RETAIN the unbound row for ordinary redelivery —
-        //      terminalize nothing that was not proven bound; safe in
-        //      every writer era, see the arm's own comment);
+        //      terminalize nothing that was not proven bound);
         //      an Interrupted shape -> `...HoldInputEvidence`.
         //   4. the same as 3 with input_evidence == AllBoundOrInert
         //      -> `...Commit` (CompletedCandidate) xor `...Repair`
-        //      (InterruptedRepairableCandidate) xor `...CommitLegacy`
-        //      (LegacyCompletedCandidate).
+        //      (InterruptedRepairableCandidate).
         // Each dimension is split into complementary variant sets of a closed
         // enum, so cuts 2/3/4 cover A minus the Ambiguous slice exactly once.
         // Both hold-producing dispositions are minted HERE: no shell may
@@ -6595,66 +6609,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
-        // Legacy adoption commit: same admissible core and durable-evidence
-        // guards as the completed commit, for the classifier's
-        // LegacyCompletedCandidate. The candidate run identity is the
-        // domain-separated deterministic legacy run id the shell minted for
-        // the identity-less tail; receipts and input rows are judged under
-        // exactly the same rules (a prior commit for the legacy run id
-        // refuses, unattributable content inputs hold — so a genuinely
-        // pending modern run's input row still blocks the adoption), and
-        // the distinct disposition keeps the commit honest: a recovered
-        // LEGACY boundary, never a claim that a modern run boundary was
-        // found.
-        transition AuthorizeDurableTailRecoveryCommitLegacy {
-            per_phase [Idle, Retired]
-            on input AuthorizeDurableTailRecovery {
-                session_id,
-                candidate_id,
-                candidate_run_id,
-                class,
-                observed_lifecycle,
-                observed_current_run,
-                last_committed_sequence,
-                prior_commit,
-                input_evidence
-            }
-            guard "no_current_run" { self.current_run_id == None }
-            guard "candidate_run_not_terminalized" {
-                self.turn_terminal_run_id != Some(candidate_run_id)
-            }
-            guard "persisted_quiescent" {
-                observed_lifecycle == DurableRecoveryObservedLifecycle::MissingRow
-                || observed_lifecycle == DurableRecoveryObservedLifecycle::Idle
-                || observed_lifecycle == DurableRecoveryObservedLifecycle::Retired
-            }
-            guard "persisted_no_current_run" {
-                observed_current_run == DurableRecoveryObservedRun::NoRun
-            }
-            guard "prior_commit_admits_recovery" {
-                prior_commit == DurableRecoveryPriorCommit::NoPriorCommit
-                || prior_commit == DurableRecoveryPriorCommit::PrecedesCandidate
-            }
-            guard "inputs_attributable" {
-                input_evidence == DurableRecoveryInputEvidence::AllBoundOrInert
-            }
-            guard "legacy_completed_class" {
-                class == DurableTailRecoveryClass::LegacyCompletedCandidate
-            }
-            update {
-                self.recovered_boundary_sequence = last_committed_sequence + 1;
-                self.turn_terminal_run_id = Some(candidate_run_id);
-            }
-            to Idle
-            emit DurableTailRecoveryCommitAuthorized {
-                candidate_id: candidate_id,
-                disposition: DurableTailRecoveryDisposition::CommitLegacyCompleted,
-                boundary_sequence: self.recovered_boundary_sequence
-            }
-        }
-
-        // Retain-inputs commit: a COMPLETED candidate (bound run or
-        // identity-less legacy) with an unbound content input row present.
+        // Retain-inputs commit: a COMPLETED candidate with an unbound content
+        // input row present.
         // The ordinary input-evidence hold would wedge such a session
         // FOREVER: every load re-observes the same durable facts and
         // re-mints the same hold, and no repair verb exists. The commit
@@ -6663,28 +6619,12 @@ macro_rules! meerkat_catalog_machine_dsl {
         // the observation did not PROVE bound to the recovered run, no
         // consumption is fabricated, no input can ever be dropped.
         //
-        // This arm carries no writer-era guard because retaining is safe in
-        // BOTH eras, for different but equally sound reasons:
-        //   - PRE-0.8.9 writer: staging bindings never reached disk, so the
-        //     unbound row is routinely the executed turn's OWN input
-        //     (the HomeCore parent-2 wedge). Retaining and redelivering it
-        //     costs at most ONE duplicate turn — exactly what a pre-upgrade
-        //     restart did anyway.
-        //   - 0.8.9+ writer: staged run bindings are fenced durable BEFORE
-        //     the run executes (fail-closed at run start), so an unbound
-        //     content row is one that never started; redelivering it is not
-        //     merely safe, it is CORRECT.
-        // Holding buys no integrity in either era: the rows the observation
-        // proved bound to the recovered run are terminalized by the realize
-        // pass, and an unattributed row is never claimed as consumed —
-        // content equality is not identity, and fabricating consumption
-        // could silently drop a genuinely new identical prompt, which is
-        // strictly worse than one duplicate reply. Interrupted shapes and
-        // unfenceable rows hold exactly as before, in every era.
-        // (The transition and disposition keep their original "Legacy"
-        // spellings: the arm was introduced for the legacy-era wedge and
-        // the generated vocabulary is stable.)
-        transition AuthorizeDurableTailRecoveryCommitLegacyRetainInputs {
+        // Modern writers persist staged run bindings durably before
+        // execution. Therefore an unbound content row is a distinct pending
+        // input that never started; redelivering it is correct, while
+        // fabricating consumption would silently drop work. Interrupted
+        // shapes and unfenceable rows still hold.
+        transition AuthorizeDurableTailRecoveryCommitCompletedRetainInputs {
             per_phase [Idle, Retired]
             on input AuthorizeDurableTailRecovery {
                 session_id,
@@ -6718,7 +6658,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             guard "completed_shape_class" {
                 class == DurableTailRecoveryClass::CompletedCandidate
-                || class == DurableTailRecoveryClass::LegacyCompletedCandidate
             }
             update {
                 self.recovered_boundary_sequence = last_committed_sequence + 1;
@@ -6727,7 +6666,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Idle
             emit DurableTailRecoveryCommitAuthorized {
                 candidate_id: candidate_id,
-                disposition: DurableTailRecoveryDisposition::CommitLegacyCompletedRetainInputs,
+                disposition: DurableTailRecoveryDisposition::CommitCompletedRetainInputs,
                 boundary_sequence: self.recovered_boundary_sequence
             }
         }
@@ -6812,7 +6751,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "commit_seeking_class" {
                 class == DurableTailRecoveryClass::CompletedCandidate
                 || class == DurableTailRecoveryClass::InterruptedRepairableCandidate
-                || class == DurableTailRecoveryClass::LegacyCompletedCandidate
             }
             guard "prior_commit_conflict" {
                 prior_commit == DurableRecoveryPriorCommit::MatchesCandidate
@@ -6860,7 +6798,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "commit_seeking_class" {
                 class == DurableTailRecoveryClass::CompletedCandidate
                 || class == DurableTailRecoveryClass::InterruptedRepairableCandidate
-                || class == DurableTailRecoveryClass::LegacyCompletedCandidate
             }
             guard "prior_commit_admits_recovery" {
                 prior_commit == DurableRecoveryPriorCommit::NoPriorCommit
@@ -7170,24 +7107,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.staged_session_llm_identity = Some(llm_identity);
             }
-            to Initializing
-        }
-
-        transition AuthorizeDeferredSessionSystemContextAppendStaged {
-            on input AuthorizeDeferredSessionSystemContextAppend { session_id }
-            guard { self.lifecycle_phase == Phase::Initializing }
-            guard "staged" { self.staged_session_phase == StagedSessionPhase::Staged }
-            guard "session_matches" { self.staged_session_id == Some(session_id) }
-            update {}
-            to Initializing
-        }
-
-        transition AuthorizeDeferredSessionSystemContextAppendPromoting {
-            on input AuthorizeDeferredSessionSystemContextAppend { session_id }
-            guard { self.lifecycle_phase == Phase::Initializing }
-            guard "promoting" { self.staged_session_phase == StagedSessionPhase::Promoting }
-            guard "session_matches" { self.staged_session_id == Some(session_id) }
-            update {}
             to Initializing
         }
 
@@ -12651,6 +12570,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {
                 self.admission_idempotency_inputs.insert(idempotency_key, input_id);
+                self.input_idempotency_keys.insert(input_id, idempotency_key);
             }
             to Idle
             emit InputLifecycleNotice
@@ -12681,7 +12601,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.admission_authorized_existing_targets.remove(input_id);
                 self.input_runtime_boundary.insert(input_id, RecoveredRunApplyBoundary::RunStart);
                 self.input_runtime_execution_kind.insert(input_id, RecoveredRuntimeExecutionKind::ContentTurn);
-                self.input_runtime_peer_response_terminal_apply_intent.insert(input_id, RecoveredPeerResponseTerminalApplyIntent::AppendContextAndRun);
+                self.input_runtime_peer_response_terminal_apply_intent.insert(input_id, RecoveredPeerResponseTerminalApplyIntent::AppendContentAndRun);
                 self.input_is_prompt.insert(input_id, false);
             }
             to Idle
@@ -12702,7 +12622,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 requires_active_pre_admission: without_wake == false,
                 runtime_boundary: AdmissionRunApplyBoundary::RunStart,
                 runtime_execution_kind: AdmissionRuntimeExecutionKind::ContentTurn,
-                runtime_peer_response_terminal_apply_intent: Some(AdmissionPeerResponseTerminalApplyIntent::AppendContextAndRun),
+                runtime_peer_response_terminal_apply_intent: Some(AdmissionPeerResponseTerminalApplyIntent::AppendContentAndRun),
                 record_transcript: true,
                 request_immediate_processing: false,
                 interrupt_yielding: false,
@@ -12731,7 +12651,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.admission_authorized_existing_targets.remove(input_id);
                 self.input_runtime_boundary.insert(input_id, RecoveredRunApplyBoundary::RunStart);
                 self.input_runtime_execution_kind.insert(input_id, RecoveredRuntimeExecutionKind::ContentTurn);
-                self.input_runtime_peer_response_terminal_apply_intent.insert(input_id, RecoveredPeerResponseTerminalApplyIntent::AppendContextAndRun);
+                self.input_runtime_peer_response_terminal_apply_intent.insert(input_id, RecoveredPeerResponseTerminalApplyIntent::AppendContentAndRun);
                 self.input_is_prompt.insert(input_id, false);
             }
             to Idle
@@ -12760,7 +12680,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 requires_active_pre_admission: true,
                 runtime_boundary: AdmissionRunApplyBoundary::RunStart,
                 runtime_execution_kind: AdmissionRuntimeExecutionKind::ContentTurn,
-                runtime_peer_response_terminal_apply_intent: Some(AdmissionPeerResponseTerminalApplyIntent::AppendContextAndRun),
+                runtime_peer_response_terminal_apply_intent: Some(AdmissionPeerResponseTerminalApplyIntent::AppendContentAndRun),
                 record_transcript: true,
                 request_immediate_processing: true,
                 interrupt_yielding: false,
@@ -13136,7 +13056,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.admission_authorized_existing_targets.remove(input_id);
                 self.input_runtime_boundary.insert(input_id, RecoveredRunApplyBoundary::RunStart);
                 self.input_runtime_execution_kind.insert(input_id, RecoveredRuntimeExecutionKind::ContentTurn);
-                self.input_runtime_peer_response_terminal_apply_intent.insert(input_id, RecoveredPeerResponseTerminalApplyIntent::AppendContextAndRun);
+                self.input_runtime_peer_response_terminal_apply_intent.insert(input_id, RecoveredPeerResponseTerminalApplyIntent::AppendContentAndRun);
                 self.input_is_prompt.insert(input_id, false);
             }
             to Idle
@@ -13157,7 +13077,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 requires_active_pre_admission: without_wake == false,
                 runtime_boundary: AdmissionRunApplyBoundary::RunStart,
                 runtime_execution_kind: AdmissionRuntimeExecutionKind::ContentTurn,
-                runtime_peer_response_terminal_apply_intent: Some(AdmissionPeerResponseTerminalApplyIntent::AppendContextAndRun),
+                runtime_peer_response_terminal_apply_intent: Some(AdmissionPeerResponseTerminalApplyIntent::AppendContentAndRun),
                 record_transcript: true,
                 request_immediate_processing: false,
                 interrupt_yielding: false,
@@ -14866,8 +14786,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "conversation_shape_matches_primitive" {
                 primitive_kind == TurnPrimitiveKind::ConversationTurn
                 && (admitted_content_shape == ContentShape::Conversation
-                    || admitted_content_shape == ContentShape::ConversationAndContext
-                    || admitted_content_shape == ContentShape::Context
                     || admitted_content_shape == ContentShape::Empty)
             }
             update {
@@ -14914,8 +14832,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "conversation_shape_matches_primitive" {
                 primitive_kind == TurnPrimitiveKind::ConversationTurn
                 && (admitted_content_shape == ContentShape::Conversation
-                    || admitted_content_shape == ContentShape::ConversationAndContext
-                    || admitted_content_shape == ContentShape::Context
                     || admitted_content_shape == ContentShape::Empty)
             }
             update {
@@ -14962,8 +14878,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "conversation_shape_matches_primitive" {
                 primitive_kind == TurnPrimitiveKind::ConversationTurn
                 && (admitted_content_shape == ContentShape::Conversation
-                    || admitted_content_shape == ContentShape::ConversationAndContext
-                    || admitted_content_shape == ContentShape::Context
                     || admitted_content_shape == ContentShape::Empty)
             }
             update {
@@ -15010,8 +14924,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "conversation_shape_matches_primitive" {
                 primitive_kind == TurnPrimitiveKind::ConversationTurn
                 && (admitted_content_shape == ContentShape::Conversation
-                    || admitted_content_shape == ContentShape::ConversationAndContext
-                    || admitted_content_shape == ContentShape::Context
                     || admitted_content_shape == ContentShape::Empty)
             }
             update {
@@ -15169,129 +15081,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit TurnRunStarted { run_id: run_id }
         }
 
-        transition StartImmediateContextInitializing {
-            on input StartImmediateContext { run_id }
-            guard { self.lifecycle_phase == Phase::Initializing }
-            guard "turn_resettable" {
-                self.turn_phase == TurnPhase::Ready
-                || self.turn_phase == TurnPhase::Completed
-                || self.turn_phase == TurnPhase::Failed
-                || self.turn_phase == TurnPhase::Cancelled
-            }
-            update {
-                self.current_run_id = Some(run_id);
-                self.pre_run_phase = Some(PreRunPhase::Attached);
-                self.turn_phase = TurnPhase::ApplyingPrimitive;
-                self.primitive_kind = Some(TurnPrimitiveKind::ImmediateContextAppend);
-                self.admitted_content_shape = Some(ContentShape::ImmediateContext);
-                self.vision_enabled = false;
-                self.image_tool_results_enabled = false;
-                self.tool_calls_pending = 0;
-                self.pending_op_refs = EmptySet;
-                self.barrier_operation_ids = EmptySet;
-                self.has_barrier_ops = false;
-                self.barrier_satisfied = false;
-                self.boundary_count = 0;
-                self.cancel_after_boundary = false;
-                self.boundary_cancel_dispatch_pending = false;
-                self.turn_terminal_run_id = None;
-                self.terminal_outcome = None;
-                self.terminal_cause_kind = None;
-                self.last_runtime_apply_failure_cause = None;
-                self.last_runtime_apply_failure_message = None;
-                self.extraction_attempts = 0;
-                self.extraction_active = false;
-                self.max_extraction_retries = 0;
-                self.llm_retry_attempt = 0;
-                self.llm_retry_max_retries = 0;
-                self.llm_retry_selected_delay_ms = 0;
-                self.llm_retry_last_failure_kind = None;
-            }
-            to Running
-            emit TurnRunStarted { run_id: run_id }
-        }
-        transition StartImmediateContextAttached {
-            on input StartImmediateContext { run_id }
-            guard { self.lifecycle_phase == Phase::Attached }
-            guard "turn_resettable" {
-                self.turn_phase == TurnPhase::Ready
-                || self.turn_phase == TurnPhase::Completed
-                || self.turn_phase == TurnPhase::Failed
-                || self.turn_phase == TurnPhase::Cancelled
-            }
-            update {
-                self.current_run_id = Some(run_id);
-                self.pre_run_phase = Some(PreRunPhase::Attached);
-                self.turn_phase = TurnPhase::ApplyingPrimitive;
-                self.primitive_kind = Some(TurnPrimitiveKind::ImmediateContextAppend);
-                self.admitted_content_shape = Some(ContentShape::ImmediateContext);
-                self.vision_enabled = false;
-                self.image_tool_results_enabled = false;
-                self.tool_calls_pending = 0;
-                self.pending_op_refs = EmptySet;
-                self.barrier_operation_ids = EmptySet;
-                self.has_barrier_ops = false;
-                self.barrier_satisfied = false;
-                self.boundary_count = 0;
-                self.cancel_after_boundary = false;
-                self.boundary_cancel_dispatch_pending = false;
-                self.turn_terminal_run_id = None;
-                self.terminal_outcome = None;
-                self.terminal_cause_kind = None;
-                self.last_runtime_apply_failure_cause = None;
-                self.last_runtime_apply_failure_message = None;
-                self.extraction_attempts = 0;
-                self.extraction_active = false;
-                self.max_extraction_retries = 0;
-                self.llm_retry_attempt = 0;
-                self.llm_retry_max_retries = 0;
-                self.llm_retry_selected_delay_ms = 0;
-                self.llm_retry_last_failure_kind = None;
-            }
-            to Running
-            emit TurnRunStarted { run_id: run_id }
-        }
-        transition StartImmediateContextRunning {
-            on input StartImmediateContext { run_id }
-            guard { self.lifecycle_phase == Phase::Running }
-            guard "turn_resettable" {
-                self.turn_phase == TurnPhase::Ready
-                || self.turn_phase == TurnPhase::Completed
-                || self.turn_phase == TurnPhase::Failed
-                || self.turn_phase == TurnPhase::Cancelled
-            }
-            update {
-                self.current_run_id = Some(run_id);
-                self.turn_phase = TurnPhase::ApplyingPrimitive;
-                self.primitive_kind = Some(TurnPrimitiveKind::ImmediateContextAppend);
-                self.admitted_content_shape = Some(ContentShape::ImmediateContext);
-                self.vision_enabled = false;
-                self.image_tool_results_enabled = false;
-                self.tool_calls_pending = 0;
-                self.pending_op_refs = EmptySet;
-                self.barrier_operation_ids = EmptySet;
-                self.has_barrier_ops = false;
-                self.barrier_satisfied = false;
-                self.boundary_count = 0;
-                self.cancel_after_boundary = false;
-                self.boundary_cancel_dispatch_pending = false;
-                self.turn_terminal_run_id = None;
-                self.terminal_outcome = None;
-                self.terminal_cause_kind = None;
-                self.last_runtime_apply_failure_cause = None;
-                self.last_runtime_apply_failure_message = None;
-                self.extraction_attempts = 0;
-                self.extraction_active = false;
-                self.max_extraction_retries = 0;
-                self.llm_retry_attempt = 0;
-                self.llm_retry_max_retries = 0;
-                self.llm_retry_selected_delay_ms = 0;
-                self.llm_retry_last_failure_kind = None;
-            }
-            to Running
-            emit TurnRunStarted { run_id: run_id }
-        }
-
         transition PrimitiveAppliedConversation {
             on input PrimitiveApplied { run_id }
             guard { self.lifecycle_phase == Phase::Running }
@@ -15313,8 +15102,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "run_matches_current" { self.current_run_id == Some(run_id) }
             guard "turn_applying_immediate" {
                 self.turn_phase == TurnPhase::ApplyingPrimitive
-                && (self.primitive_kind == Some(TurnPrimitiveKind::ImmediateAppend)
-                    || self.primitive_kind == Some(TurnPrimitiveKind::ImmediateContextAppend))
+                && self.primitive_kind == Some(TurnPrimitiveKind::ImmediateAppend)
             }
             guard "cancel_after_boundary_not_requested" { self.cancel_after_boundary == false }
             update {
@@ -15335,8 +15123,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "run_matches_current" { self.current_run_id == Some(run_id) }
             guard "turn_applying_immediate" {
                 self.turn_phase == TurnPhase::ApplyingPrimitive
-                && (self.primitive_kind == Some(TurnPrimitiveKind::ImmediateAppend)
-                    || self.primitive_kind == Some(TurnPrimitiveKind::ImmediateContextAppend))
+                && self.primitive_kind == Some(TurnPrimitiveKind::ImmediateAppend)
             }
             guard "cancel_after_boundary_requested" { self.cancel_after_boundary == true }
             update {
@@ -17489,7 +17276,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             guard "recovered_terminal_intent_matches_input" {
                 (input_kind == RecoveredInputKind::PeerResponseTerminal
-                    && runtime_peer_response_terminal_apply_intent == Some(RecoveredPeerResponseTerminalApplyIntent::AppendContextAndRun))
+                    && runtime_peer_response_terminal_apply_intent == Some(RecoveredPeerResponseTerminalApplyIntent::AppendContentAndRun))
                 || (input_kind != RecoveredInputKind::PeerResponseTerminal
                     && runtime_peer_response_terminal_apply_intent == None)
             }
@@ -18022,6 +17809,27 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
+        // A typed Unavailable result means the active live target vanished;
+        // Stale and Fault remain failures and never drive this transition.
+        // Normalize the admitted Steer input before the runtime takes its
+        // ordinary queued fallback so no stale live-only disposition survives.
+        transition LiveBoundaryUnavailable {
+            per_phase [Running]
+            on input LiveBoundaryUnavailable { input_id }
+            guard "input_tracked" { self.input_phases.contains_key(input_id) }
+            guard "input_is_queued_steer" {
+                self.input_phases.get_cloned(input_id) == InputPhase::Queued
+                && self.input_lane.get_cloned(input_id) == InputLane::Steer
+            }
+            update {}
+            to Running
+            emit LiveBoundaryUnavailableNormalized {
+                input_id: input_id,
+                execution_handling_mode: InputLane::Queue,
+                live_interrupt_required: false
+            }
+        }
+
         // ConsumeOnAccept: direct Accepted → Consumed (skip queue)
         transition ConsumeOnAccept {
             per_phase [Idle, Attached, Running, Retired, Stopped]
@@ -18159,6 +17967,154 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Idle
             emit RecordTerminalOutcome
+        }
+
+        // ArchiveTerminalInput: after the exact terminal row has committed,
+        // release every live per-input carrier. Durable history and public
+        // idempotency/status queries are store-owned; retaining this duplicate
+        // machine image would make every later transition and rollback grow
+        // with accumulated history.
+        transition ArchiveTerminalInput {
+            // Destroy stages its terminal lifecycle before the durable
+            // lifecycle+input-row commit. The post-commit archival self-loop
+            // must therefore remain available in Destroyed as cleanup-only
+            // bookkeeping; it cannot resurrect or accept new work.
+            per_phase [Idle, Attached, Running, Retired, Stopped, Destroyed]
+            on input ArchiveTerminalInput {
+                input_id,
+                phase,
+                terminal_kind,
+                superseded_by,
+                aggregate_id,
+                abandon_reason,
+                abandon_attempt_count,
+                attempt_count,
+                run_id,
+                boundary_sequence,
+                admission_sequence,
+                idempotency_key
+            }
+            guard "archive_phase_is_terminal" {
+                phase == InputPhase::Consumed
+                || phase == InputPhase::Superseded
+                || phase == InputPhase::Coalesced
+                || phase == InputPhase::Abandoned
+            }
+            guard "archive_exact_phase" {
+                self.input_phases.contains_key(input_id)
+                && self.input_phases.get_cloned(input_id).get("value") == phase
+            }
+            guard "archive_exact_terminal_kind" {
+                self.input_terminal_kind.contains_key(input_id)
+                && self.input_terminal_kind.get_cloned(input_id).get("value") == terminal_kind
+            }
+            guard "archive_exact_superseded_by" {
+                (superseded_by == None && !self.input_superseded_by.contains_key(input_id))
+                || (
+                    superseded_by != None
+                    && self.input_superseded_by.contains_key(input_id)
+                    && self.input_superseded_by.get_cloned(input_id).get("value") == superseded_by.get("value")
+                )
+            }
+            guard "archive_exact_aggregate_id" {
+                (aggregate_id == None && !self.input_aggregate_id.contains_key(input_id))
+                || (
+                    aggregate_id != None
+                    && self.input_aggregate_id.contains_key(input_id)
+                    && self.input_aggregate_id.get_cloned(input_id).get("value") == aggregate_id.get("value")
+                )
+            }
+            guard "archive_exact_abandon_reason" {
+                (abandon_reason == None && !self.input_abandon_reason.contains_key(input_id))
+                || (
+                    abandon_reason != None
+                    && self.input_abandon_reason.contains_key(input_id)
+                    && self.input_abandon_reason.get_cloned(input_id).get("value") == abandon_reason.get("value")
+                )
+            }
+            guard "archive_exact_abandon_attempt_count" {
+                (abandon_attempt_count == None && !self.input_abandon_attempt_count.contains_key(input_id))
+                || (
+                    abandon_attempt_count != None
+                    && self.input_abandon_attempt_count.contains_key(input_id)
+                    && self.input_abandon_attempt_count.get_cloned(input_id).get("value") == abandon_attempt_count.get("value")
+                )
+            }
+            guard "archive_exact_attempt_count" {
+                self.input_attempt_counts.contains_key(input_id)
+                && self.input_attempt_counts.get_cloned(input_id).get("value") == attempt_count
+            }
+            guard "archive_exact_run" {
+                (run_id == None && !self.input_run_associations.contains_key(input_id))
+                || (
+                    run_id != None
+                    && self.input_run_associations.contains_key(input_id)
+                    && self.input_run_associations.get_cloned(input_id).get("value") == run_id.get("value")
+                )
+            }
+            guard "archive_exact_boundary_sequence" {
+                (boundary_sequence == None && !self.input_boundary_sequences.contains_key(input_id))
+                || (
+                    boundary_sequence != None
+                    && self.input_boundary_sequences.contains_key(input_id)
+                    && self.input_boundary_sequences.get_cloned(input_id).get("value") == boundary_sequence.get("value")
+                )
+            }
+            guard "archive_exact_admission_sequence" {
+                (admission_sequence == None && !self.input_admission_seq.contains_key(input_id))
+                || (
+                    admission_sequence != None
+                    && self.input_admission_seq.contains_key(input_id)
+                    && self.input_admission_seq.get_cloned(input_id).get("value") == admission_sequence.get("value")
+                )
+            }
+            guard "archive_exact_idempotency_binding" {
+                (
+                    idempotency_key == None
+                    && !self.input_idempotency_keys.contains_key(input_id)
+                )
+                || (
+                    idempotency_key != None
+                    && self.input_idempotency_keys.contains_key(input_id)
+                    && self.input_idempotency_keys.get_cloned(input_id).get("value") == idempotency_key.get("value")
+                    && self.admission_idempotency_inputs.contains_key(idempotency_key.get("value"))
+                    && self.admission_idempotency_inputs.get_cloned(idempotency_key.get("value")).get("value") == input_id
+                )
+            }
+            guard "archive_not_live_in_lane" {
+                !self.input_lane.contains_key(input_id)
+                && !self.input_recovery_lanes.contains_key(input_id)
+            }
+            update {
+                self.input_phases.remove(input_id);
+                self.input_terminal_kind.remove(input_id);
+                self.input_superseded_by.remove(input_id);
+                self.input_aggregate_id.remove(input_id);
+                self.input_abandon_reason.remove(input_id);
+                self.input_abandon_attempt_count.remove(input_id);
+                self.input_attempt_counts.remove(input_id);
+                self.input_run_associations.remove(input_id);
+                self.input_boundary_sequences.remove(input_id);
+                self.input_admission_seq.remove(input_id);
+                self.input_runtime_boundary.remove(input_id);
+                self.input_runtime_execution_kind.remove(input_id);
+                self.input_runtime_peer_response_terminal_apply_intent.remove(input_id);
+                self.input_is_prompt.remove(input_id);
+                self.input_lane.remove(input_id);
+                self.input_recovery_lanes.remove(input_id);
+                self.admission_authorized_lanes.remove(input_id);
+                self.admission_authorized_plans.remove(input_id);
+                self.admission_authorized_existing_actions.remove(input_id);
+                self.admission_authorized_existing_targets.remove(input_id);
+                self.recovered_admitted_inputs.remove(input_id);
+                self.recovered_admitted_lanes.remove(input_id);
+                if idempotency_key != None {
+                    self.admission_idempotency_inputs.remove(idempotency_key.get("value"));
+                }
+                self.input_idempotency_keys.remove(input_id);
+            }
+            to Idle
+            emit InputLifecycleNotice
         }
 
         // =====================================================================
@@ -21512,8 +21468,8 @@ macro_rules! meerkat_catalog_machine_dsl {
         // Session-context advancement transition (W2-E / issue #264).
         //
         // Fires at every shell site that mutates canonical session truth —
-        // prompt append, external content injection, tool-result append,
-        // external assistant output, runtime-system-context append, and the
+        // ordinary System append, external content injection, tool-result
+        // append, external assistant output, and the
         // tail of any turn that advances the session's `updated_at`
         // watermark. Monotonic: the guard rejects any advance whose
         // `updated_at_ms` is not strictly greater than the last recorded

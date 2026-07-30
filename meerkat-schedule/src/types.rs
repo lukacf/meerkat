@@ -1312,6 +1312,7 @@ impl IdentityTargetBinding {
 pub enum ScheduledSessionAction {
     Prompt {
         prompt: ContentInput,
+        /// Ordinary System message appended at this scheduled turn boundary.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         system_prompt: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1333,6 +1334,7 @@ pub enum ScheduledSessionAction {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMaterializationSpec {
     pub model: String,
+    /// Initial host-assembled configuration prompt for a newly materialized session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1962,6 +1964,13 @@ pub enum OccurrenceTargetProbeOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RuntimeDeliveryOutcome {
+    /// The target admitted this occurrence's stable delivery identity for the
+    /// first time.
+    AdmissionAccepted,
+    /// The target had already admitted the same stable delivery identity and
+    /// returned its existing work. This is successful exactly-once admission,
+    /// not a delivery failure.
+    AdmissionDeduplicated,
     AdmissionRejected {
         detail: String,
     },
@@ -1980,6 +1989,8 @@ pub enum RuntimeDeliveryOutcome {
 impl RuntimeDeliveryOutcome {
     pub fn detail(&self) -> String {
         match self {
+            Self::AdmissionAccepted => "target admitted the scheduled input".to_string(),
+            Self::AdmissionDeduplicated => "target deduplicated the scheduled input".to_string(),
             Self::AdmissionRejected { detail }
             | Self::CompletionAbandoned { detail }
             | Self::CompletionRuntimeTerminated { detail } => detail.clone(),

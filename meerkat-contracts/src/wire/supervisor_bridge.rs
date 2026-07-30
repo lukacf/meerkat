@@ -2735,6 +2735,9 @@ pub struct BridgeDeliveryPayload {
     /// `BridgeProtocolVersion` history for the cross-version posture).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub injected_context: Vec<meerkat_core::types::ContentInput>,
+    /// Host-regenerated request-only context for this delivery's logical turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transient_turn_context: Option<meerkat_core::lifecycle::run_primitive::TurnRequestContext>,
     /// Flow-turn directive (V4, §18.10). Absent-omitted so undirected
     /// deliveries stay byte-identical to the pre-field wire shape; a
     /// directed delivery sent to a pre-V4 receiver fails closed at its
@@ -3577,6 +3580,7 @@ mod tests {
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             expected_member: None,
             injected_context: Vec::new(),
+            transient_turn_context: None,
             turn: None,
             outcome_tracking: None,
         });
@@ -3683,6 +3687,7 @@ mod tests {
                 meerkat_core::types::ContentInput::Text("ambient alpha".to_string()),
                 meerkat_core::types::ContentInput::Text("ambient beta".to_string()),
             ],
+            transient_turn_context: None,
             turn: None,
             outcome_tracking: None,
         });
@@ -3702,6 +3707,7 @@ mod tests {
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             expected_member: None,
             injected_context: Vec::new(),
+            transient_turn_context: None,
             turn: None,
             outcome_tracking: None,
         };
@@ -3749,6 +3755,7 @@ mod tests {
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             expected_member: None,
             injected_context: Vec::new(),
+            transient_turn_context: None,
             turn: None,
             outcome_tracking: None,
         };
@@ -3794,6 +3801,7 @@ mod tests {
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             expected_member: None,
             injected_context: Vec::new(),
+            transient_turn_context: None,
             turn: None,
             outcome_tracking: None,
         });
@@ -5132,6 +5140,7 @@ mod tests {
                 fence_token: 7,
             }),
             injected_context: Vec::new(),
+            transient_turn_context: None,
             turn: None,
             outcome_tracking: None,
         }));
@@ -5146,6 +5155,7 @@ mod tests {
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             expected_member: None,
             injected_context: Vec::new(),
+            transient_turn_context: None,
             turn: Some(BridgeTurnDirective {
                 correlation: BridgeTurnCorrelation {
                     run_id: "run-1".to_string(),
@@ -5459,6 +5469,7 @@ mod tests {
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             expected_member: None,
             injected_context: Vec::new(),
+            transient_turn_context: None,
             turn: Some(BridgeTurnDirective {
                 correlation: BridgeTurnCorrelation {
                     run_id: "run-1".to_string(),
@@ -5508,6 +5519,7 @@ mod tests {
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             expected_member: None,
             injected_context: Vec::new(),
+            transient_turn_context: None,
             turn: None,
             outcome_tracking: None,
         })
@@ -5560,6 +5572,7 @@ mod tests {
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             expected_member: Some(sample_member_incarnation()),
             injected_context: Vec::new(),
+            transient_turn_context: None,
             turn: None,
             outcome_tracking: Some(BridgeOutcomeTracking::Interaction),
         })

@@ -795,6 +795,8 @@ pub enum OccurrenceLifecycleInputVariant {
     Claim,
     #[serde(rename = "DispatchStarted")]
     DispatchStarted,
+    #[serde(rename = "DispatchAccepted")]
+    DispatchAccepted,
     #[serde(rename = "AwaitCompletion")]
     AwaitCompletion,
     #[serde(rename = "Complete")]
@@ -834,6 +836,7 @@ impl OccurrenceLifecycleInputVariant {
             Self::ClassifyCompletionSupersession => "ClassifyCompletionSupersession",
             Self::Claim => "Claim",
             Self::DispatchStarted => "DispatchStarted",
+            Self::DispatchAccepted => "DispatchAccepted",
             Self::AwaitCompletion => "AwaitCompletion",
             Self::Complete => "Complete",
             Self::ResolveRuntimeCompletion => "ResolveRuntimeCompletion",
@@ -863,6 +866,7 @@ impl std::convert::TryFrom<&str> for OccurrenceLifecycleInputVariant {
             "ClassifyCompletionSupersession" => Ok(Self::ClassifyCompletionSupersession),
             "Claim" => Ok(Self::Claim),
             "DispatchStarted" => Ok(Self::DispatchStarted),
+            "DispatchAccepted" => Ok(Self::DispatchAccepted),
             "AwaitCompletion" => Ok(Self::AwaitCompletion),
             "Complete" => Ok(Self::Complete),
             "ResolveRuntimeCompletion" => Ok(Self::ResolveRuntimeCompletion),
@@ -1574,6 +1578,10 @@ pub mod inputs {
         pub at_utc_ms: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct DispatchAccepted {
+        pub at_utc_ms: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AwaitCompletion {
         pub at_utc_ms: u64,
     }
@@ -1651,6 +1659,7 @@ pub enum Input {
     ClassifyCompletionSupersession(inputs::ClassifyCompletionSupersession),
     Claim(inputs::Claim),
     DispatchStarted(inputs::DispatchStarted),
+    DispatchAccepted(inputs::DispatchAccepted),
     AwaitCompletion(inputs::AwaitCompletion),
     Complete(inputs::Complete),
     ResolveRuntimeCompletion(inputs::ResolveRuntimeCompletion),
@@ -1679,6 +1688,7 @@ impl Input {
             Self::ClassifyCompletionSupersession(_) => InputKind::ClassifyCompletionSupersession,
             Self::Claim(_) => InputKind::Claim,
             Self::DispatchStarted(_) => InputKind::DispatchStarted,
+            Self::DispatchAccepted(_) => InputKind::DispatchAccepted,
             Self::AwaitCompletion(_) => InputKind::AwaitCompletion,
             Self::Complete(_) => InputKind::Complete,
             Self::ResolveRuntimeCompletion(_) => InputKind::ResolveRuntimeCompletion,
@@ -1708,6 +1718,7 @@ pub enum InputKind {
     ClassifyCompletionSupersession,
     Claim,
     DispatchStarted,
+    DispatchAccepted,
     AwaitCompletion,
     Complete,
     ResolveRuntimeCompletion,
@@ -1730,6 +1741,8 @@ pub mod effects {
     pub struct Claimed {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct DispatchStarted {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct DispatchAccepted {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AwaitingCompletion {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1795,6 +1808,7 @@ pub mod effects {
 pub enum Effect {
     Claimed(effects::Claimed),
     DispatchStarted(effects::DispatchStarted),
+    DispatchAccepted(effects::DispatchAccepted),
     AwaitingCompletion(effects::AwaitingCompletion),
     Completed(effects::Completed),
     Skipped(effects::Skipped),
@@ -1819,6 +1833,7 @@ pub enum Effect {
 pub enum EffectKind {
     Claimed,
     DispatchStarted,
+    DispatchAccepted,
     AwaitingCompletion,
     Completed,
     Skipped,
@@ -2006,6 +2021,7 @@ pub enum TransitionId {
     RecordReceiptDeliveryFailed,
     ClaimPending,
     DispatchStartedFromClaimed,
+    DispatchAcceptedFromDispatching,
     AwaitCompletionFromDispatching,
     AwaitCompletionAfterSupersession,
     CompleteFromDispatchingOrAwaiting,

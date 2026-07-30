@@ -67,13 +67,15 @@ pub struct ArchiveSessionParams {
     pub session_id: String,
 }
 
-/// Parameters for `session/inject_context`.
+/// Parameters for `session/inject_context`, which appends one ordinary durable
+/// ordered System message at the admitted transcript boundary.
 ///
 /// The injected body is the typed [`CoreRenderable`] owner rather than a bare
 /// `text` string: surfaces parse their inbound payload into the renderable at
 /// the ingress boundary and the handler threads it straight through to
 /// `AppendSystemContextRequest.content`. A plain-text client payload still
-/// deserializes via `CoreRenderable`'s tagged `text` variant.
+/// deserializes via `CoreRenderable`'s tagged `text` variant. The rendered
+/// string is preserved exactly, including empty and whitespace-only content.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct InjectSystemContextParams {

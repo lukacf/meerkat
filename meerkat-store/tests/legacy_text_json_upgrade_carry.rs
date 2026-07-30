@@ -114,7 +114,6 @@ async fn schedule_store_reads_legacy_text_rows() {
             owner_id: "legacy-carry".into(),
             limit: 8,
             lease_duration: Duration::minutes(5),
-            live_waiter_occurrence_ids: std::collections::BTreeSet::new(),
         })
         .await
         .expect("claim due occurrences");
@@ -232,7 +231,6 @@ async fn schedule_store_claims_and_writes_over_legacy_text_rows() {
             owner_id: "legacy-carry".into(),
             limit: 8,
             lease_duration: Duration::minutes(5),
-            live_waiter_occurrence_ids: std::collections::BTreeSet::new(),
         })
         .await
         .expect("claim_due_occurrences over TEXT rows");

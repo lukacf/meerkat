@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "fixture": "v0_8_10_ob3_recovery_migration_session.json",
+  "bytes": 52693,
+  "sha256": "43e49a7b216cf61f6ba8f289824c9d6e24a64a81d873f9eb4a09c5b3f6f0cd98",
+  "producer": {
+    "product": "meerkat",
+    "version": "0.8.10",
+    "deployment": "ob3"
+  },
+  "delivery": {
+    "classification": "authorized_system_only_session",
+    "authorization": "OB3 explicitly authorized copying this exact artifact into Meerkat fixtures",
+    "source_artifact_name": "ob3-recovery-migration-stamped-session-v0810.json"
+  },
+  "expected": {
+    "session_envelope_version": 2,
+    "session_id": "019ecb20-4899-7292-a2b4-c81bc7a44258",
+    "message_count": 1,
+    "checkpoint_schema_version": 1,
+    "checkpoint_provenance": "recovery_migration",
+    "checkpoint_generation": 0,
+    "checkpoint_revision": 6,
+    "checkpoint_digest": "sha256:9fcc5c9462e747bdf6fac3d5a967ecf544d9c7217a52d4e7ec3a73b01c954bc8",
+    "checkpoint_authority_base": "legacy",
+    "authority_source_blob_digest": "sha256:1645c5370dc3c27cb9194bef236c0dfc5f441cc6dde7c6524270620b97dbde62",
+    "authority_observed_generation": 0,
+    "authority_observed_checkpoint_revision": 6,
+    "transcript_history_graph": false,
+    "transcript_history_witness": false
+  }
+}

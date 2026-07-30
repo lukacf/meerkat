@@ -2520,8 +2520,8 @@ def test_parse_wire_respawn_outcome_fails_closed(raw):
 # SITE 4 — mob/append_system_context status.
 def test_parse_wire_append_system_context_status_accepts_valid():
     assert (
-        MeerkatClient._parse_wire_append_system_context_status("staged", "ctx")
-        == "staged"
+        MeerkatClient._parse_wire_append_system_context_status("applied", "ctx")
+        == "applied"
     )
     assert (
         MeerkatClient._parse_wire_append_system_context_status("duplicate", "ctx")
@@ -2531,11 +2531,11 @@ def test_parse_wire_append_system_context_status_accepts_valid():
 
 @pytest.mark.parametrize(
     "raw",
-    [None, "", "applied", "queued", 1, {"staged": {}}, []],
+    [None, "", "staged", "queued", 1, {"staged": {}}, []],
 )
 def test_parse_wire_append_system_context_status_fails_closed(raw):
-    # Closed contract is exactly {"staged", "duplicate"} — NOT "applied" — and
-    # absence must not coalesce to "staged".
+    # Closed contract is exactly {"applied", "duplicate"}; absence and the
+    # retired staging outcome must fail closed.
     with pytest.raises(MeerkatError) as excinfo:
         MeerkatClient._parse_wire_append_system_context_status(raw, "ctx")
     assert excinfo.value.code == "INVALID_RESPONSE"
@@ -4920,7 +4920,7 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
                 ]
             }
         if method == "mob/append_system_context":
-            return {"mob_id": "mob-1", "agent_identity": "agent-a", "status": "staged"}
+            return {"mob_id": "mob-1", "agent_identity": "agent-a", "status": "applied"}
         return {}
 
     client._request = fake_request  # type: ignore[method-assign]
@@ -5032,7 +5032,7 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
     assert append_result == {
         "mob_id": "mob-1",
         "agent_identity": "agent-a",
-        "status": "staged",
+        "status": "applied",
     }
     assert await client.list_mob_flows("mob-1") == ["incident"]
     assert await mob_handle.run({"severity": "high"}, prompt="triage") == "run-typed"

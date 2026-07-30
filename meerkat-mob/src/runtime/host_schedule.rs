@@ -11,8 +11,8 @@ use meerkat::surface::{
     NoopScheduleMobHost, SurfaceScheduleMobHost, parse_mob_member_schedule_identity,
 };
 use meerkat::{
-    DeliveryDispatch, IdentityTargetBinding, MobTargetBinding, Occurrence, ScheduleDomainError,
-    TargetProbeOutcome,
+    DeliveryDispatch, IdentityTargetBinding, MobTargetBinding, Occurrence,
+    ScheduleDeliveryIdentity, ScheduleDomainError, TargetProbeOutcome,
 };
 use meerkat_core::types::SessionId;
 
@@ -135,10 +135,11 @@ impl SurfaceScheduleMobHost for HostObservationScheduleMobHost {
     async fn deliver_mob_target(
         &self,
         occurrence: &Occurrence,
+        identity: &ScheduleDeliveryIdentity,
         binding: &MobTargetBinding,
     ) -> Result<DeliveryDispatch, ScheduleDomainError> {
         self.unsupported_mob_host
-            .deliver_mob_target(occurrence, binding)
+            .deliver_mob_target(occurrence, identity, binding)
             .await
     }
 
@@ -183,6 +184,7 @@ impl SurfaceScheduleMobHost for HostObservationScheduleMobHost {
     async fn deliver_identity_target(
         &self,
         _occurrence: &Occurrence,
+        _identity: &ScheduleDeliveryIdentity,
         _binding: &IdentityTargetBinding,
     ) -> Result<Option<DeliveryDispatch>, ScheduleDomainError> {
         // Resolution above binds the exact session. The shared adapter then

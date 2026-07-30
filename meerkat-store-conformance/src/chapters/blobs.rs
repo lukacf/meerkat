@@ -181,7 +181,7 @@ pub async fn dangling_blob_reference(
             blob_id: dangling_id.clone(),
         },
     });
-    let mut session = fixtures::session_with_texts(&[]);
+    let mut session = fixtures::session_with_texts(&[])?;
     session.push(Message::User(message));
     steps.wrap(STEP, session_store.save(&session).await)?;
 

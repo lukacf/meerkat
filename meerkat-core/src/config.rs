@@ -844,6 +844,17 @@ impl Config {
 }
 
 impl Config {
+    /// Return only caller-configured per-turn output limits.
+    ///
+    /// Embedded template defaults are intentionally excluded: factories use
+    /// this presence witness to distinguish an explicit pin from an unset
+    /// value that should be resolved against the active model's capabilities.
+    pub fn configured_max_tokens(&self) -> Option<u32> {
+        self.max_tokens
+            .or(self.agent.max_tokens_per_turn)
+            .filter(|value| *value > 0)
+    }
+
     /// Resolve the operative top-level per-turn output-token limit.
     ///
     /// Precedence: explicit `max_tokens` → embedded template `max_tokens` →
@@ -1960,11 +1971,11 @@ impl CallTimeoutOverride {
 /// shape of `TurnMetadataOverride` and the `Inherit`/`Disabled`/`Value` shape
 /// of [`CallTimeoutOverride`].
 ///
-/// This is the canonical type at every boundary that carries the decision:
-/// the wire `CreateSessionRequest`/`CoreCreateParams.system_prompt` field, the
-/// persisted `SessionBuildState.system_prompt` field, and
-/// `AgentBuildConfig.system_prompt`. Its serde implementation below IS the
-/// wire/persisted representation — there is no adapter pair:
+/// This is the canonical type at create-time boundaries that carry the
+/// decision: the wire `CreateSessionRequest`/`CoreCreateParams.system_prompt`
+/// field and `AgentBuildConfig.system_prompt`. The decision materializes one
+/// ordinary ordered System event and is not persisted as thread
+/// configuration. Its serde implementation below is the wire representation:
 ///
 /// - absent / `null` ⇔ `Inherit` (lossless with the retired `Option<String>`
 ///   `None` shape)

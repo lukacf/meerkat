@@ -192,41 +192,51 @@ if [ -f "$RUNTIME_TS" ]; then
 fi
 
 # ── 6. Bazel package-version metadata ──────────────────────────────────────
-# `meerkat-machine-codegen/BUILD.bazel` hardcodes `CARGO_PKG_VERSION` in each
-# rust_* target's rustc_env (Bazel does not read it from Cargo.toml the way
-# `cargo` does). It is regenerated from the workspace version by
-# `make regen-schemas`, but was previously ungated, so it could silently drift
-# if regen was skipped. Bind every occurrence to the workspace version here.
+# Generated `BUILD.bazel` files hardcode `CARGO_PKG_VERSION` in rust_* targets'
+# rustc_env (Bazel does not read it from Cargo.toml the way `cargo` does).
+# Bind every occurrence in the repository to the workspace version here.
 
 echo ""
 echo "Bazel CARGO_PKG_VERSION metadata:"
-BAZEL_BUILD="$ROOT/meerkat-machine-codegen/BUILD.bazel"
-if [ -f "$BAZEL_BUILD" ]; then
-    BAZEL_OK=true
-    # Collect every distinct CARGO_PKG_VERSION literal in the file.
-    bazel_versions=$(grep -E '"CARGO_PKG_VERSION":' "$BAZEL_BUILD" \
-        | sed -n 's/.*"CARGO_PKG_VERSION": *"\([^"]*\)".*/\1/p' | sort -u)
-    if [ -z "$bazel_versions" ]; then
-        red "FAIL: no CARGO_PKG_VERSION entries found in meerkat-machine-codegen/BUILD.bazel"
-        BAZEL_OK=false
-        FAIL=1
-    else
+BAZEL_BUILDS=$(
+    find "$ROOT" -type f -name BUILD.bazel \
+        -not -path "$ROOT/.git/*" \
+        -not -path "$ROOT/target/*" \
+        -exec grep -l '"CARGO_PKG_VERSION":' {} + |
+        sort
+)
+BAZEL_OK=true
+if [ -z "$BAZEL_BUILDS" ]; then
+    red "FAIL: no BUILD.bazel files contain CARGO_PKG_VERSION"
+    BAZEL_OK=false
+    FAIL=1
+else
+    while IFS= read -r bazel_build; do
+        bazel_versions=$(grep -E '"CARGO_PKG_VERSION":' "$bazel_build" \
+            | sed -n 's/.*"CARGO_PKG_VERSION": *"\([^"]*\)".*/\1/p' | sort -u)
+        if [ -z "$bazel_versions" ]; then
+            red "FAIL: ${bazel_build#"$ROOT"/} has no parseable CARGO_PKG_VERSION entries"
+            BAZEL_OK=false
+            FAIL=1
+            continue
+        fi
         while IFS= read -r bazel_ver; do
             [ -n "$bazel_ver" ] || continue
-            echo "  BUILD.bazel CARGO_PKG_VERSION: $bazel_ver"
             if [ "$bazel_ver" != "$CARGO_VER" ]; then
-                red "FAIL: meerkat-machine-codegen/BUILD.bazel CARGO_PKG_VERSION ($bazel_ver) != workspace version ($CARGO_VER)"
-                red "  Run: make regen-schemas"
+                red "FAIL: ${bazel_build#"$ROOT"/} CARGO_PKG_VERSION ($bazel_ver) != workspace version ($CARGO_VER)"
                 BAZEL_OK=false
                 FAIL=1
             fi
         done <<EOF
 $bazel_versions
 EOF
-    fi
-    if $BAZEL_OK; then
-        green "  Bazel CARGO_PKG_VERSION: OK"
-    fi
+    done <<EOF
+$BAZEL_BUILDS
+EOF
+fi
+if $BAZEL_OK; then
+    bazel_count=$(printf '%s\n' "$BAZEL_BUILDS" | wc -l | tr -d ' ')
+    green "  Bazel CARGO_PKG_VERSION: OK across $bazel_count files"
 fi
 
 # ── 7. Docs version projections ────────────────────────────────────────────

@@ -125,7 +125,7 @@ This is a large workspace (~40 crates). Careless builds waste minutes. Follow th
 meerkat-sqlite    → Shared SQLite mechanics (connection profiles, meerkat_schema migration
                      ledger, JsonColumnBytes codec, per-operation maintenance-fence guards)
 meerkat-store-conformance → Published storage conformance harness (per-trait capability
-                     profiles, capability-discovery, append-only media, legacy-data, blob chapters)
+                     profiles, capability-discovery, append-only media, blob chapters)
 meerkat-core      → Agent loop, types, budget, retry, state machine (no I/O deps)
                      Also: SessionService trait, Compactor + CompactionCurator traits, MemoryStore trait,
                      ToolExecutionPolicy/ExecutionPolicyGatedDispatcher (list-preserving call-level tool gate), SessionError
@@ -345,7 +345,7 @@ The former GCP BuildBuddy CI lane (`buildbuddy.yml`) was retired from routing on
 | `build_web_sdk_package` | Always | Builds the `@rkat/web` package artifact |
 | `publish_github_release` | Tags only | Downloads artifacts, generates `checksums.sha256` + `index.json`, publishes GitHub Release |
 | `update_homebrew` | After GitHub release | Updates the Homebrew tap formula |
-| `publish_registries` | Tags or manual `publish_release_packages=true` | Publishes 40 Rust crates → crates.io, Python SDK → PyPI, TypeScript SDK → npm |
+| `publish_registries` | Tags or manual `publish_release_packages=true` | Publishes 41 Rust crates → crates.io, Python SDK → PyPI, TypeScript SDK → npm |
 | `publish_web_sdk` | Tags or manual | Publishes `@rkat/web` → npm |
 
 **Build matrix:**
@@ -407,7 +407,7 @@ Six files must agree on the same version:
 | `sdks/web/package.json` | `version` |
 | `artifacts/schemas/version.json` | `contract_version` |
 
-Additionally, all internal crate dependencies in `Cargo.toml` (40 path deps) must match the workspace version.
+Additionally, all internal crate dependencies in `Cargo.toml` (42 path deps) must match the workspace version.
 
 **`make verify-version-parity`** runs in CI and fails on any drift. After changing versions or wire types:
 
@@ -459,7 +459,7 @@ make release-preflight       # Full CI + schema freshness + changelog check
 ### Dry-run Publishing
 
 ```bash
-make publish-dry-run              # Parallel dry-run for all 40 publishable Rust crates
+make publish-dry-run              # Parallel dry-run for all 41 publishable Rust crates
 make publish-dry-run-python       # Build + twine check (no upload)
 make publish-dry-run-typescript   # npm publish --dry-run
 make release-dry-run              # Full preflight + all registry dry-runs
@@ -475,8 +475,8 @@ Required GitHub Actions secrets for full release:
 
 ### Crate Publish Order
 
-The canonical publish order lives in `scripts/release-rust-crates.sh` (40 crates, dependency order):
-`meerkat-sqlite` → `meerkat-machine-derive` → `meerkat-machine-dsl-core` → `meerkat-agent-build-authority` → `meerkat-core` → `meerkat-store-conformance` → `meerkat-models` → `meerkat-capabilities` → `meerkat-machine-dsl` → `meerkat-machine-schema` → `meerkat-machine-kernels` → `meerkat-skills` → `meerkat-schedule` → `meerkat-workgraph` → `meerkat-contracts` → `meerkat-store` → `meerkat-llm-core` → `meerkat-live` → `meerkat-auth-core` → `meerkat-memory` → `meerkat-mcp` → `meerkat-hooks` → `meerkat-comms` → `meerkat-runtime` → `meerkat-anthropic` → `meerkat-gemini` → `meerkat-providers` → `meerkat-openai` → `meerkat-tools` → `meerkat-session` → `meerkat-client` → `meerkat` → `meerkat-mob` → `meerkat-mob-adaptive` → `meerkat-mob-mcp` → `meerkat-mob-pack` → `meerkat-mcp-server` → `meerkat-rpc` → `meerkat-rest` → `rkat`
+The canonical publish order lives in `scripts/release-rust-crates.sh` (41 crates, dependency order):
+`meerkat-sqlite` → `meerkat-machine-derive` → `meerkat-machine-dsl-core` → `meerkat-agent-build-authority` → `meerkat-core` → `meerkat-store-conformance` → `meerkat-models` → `meerkat-capabilities` → `meerkat-machine-dsl` → `meerkat-machine-schema` → `meerkat-machine-kernels` → `meerkat-skills` → `meerkat-schedule` → `meerkat-jobs` → `meerkat-workgraph` → `meerkat-contracts` → `meerkat-store` → `meerkat-llm-core` → `meerkat-live` → `meerkat-auth-core` → `meerkat-memory` → `meerkat-mcp` → `meerkat-hooks` → `meerkat-comms` → `meerkat-runtime` → `meerkat-anthropic` → `meerkat-gemini` → `meerkat-providers` → `meerkat-openai` → `meerkat-tools` → `meerkat-session` → `meerkat-client` → `meerkat` → `meerkat-mob` → `meerkat-mob-adaptive` → `meerkat-mob-mcp` → `meerkat-mob-pack` → `meerkat-mcp-server` → `meerkat-rpc` → `meerkat-rest` → `rkat`
 
 ### Key Rules for AI Agents
 

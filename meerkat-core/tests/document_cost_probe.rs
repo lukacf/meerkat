@@ -19,13 +19,10 @@ use std::time::Instant;
 
 use meerkat_core::Session;
 
-fn digest_table(label: &str, before: [u64; 8]) {
-    let now = meerkat_core::checkpoint::digest_site_bytes();
+fn digest_table(label: &str, before: [u64; 6]) {
+    let now = meerkat_core::digest_site_bytes();
     let mut printed = false;
-    for (i, name) in meerkat_core::checkpoint::DIGEST_SITE_LABELS
-        .iter()
-        .enumerate()
-    {
+    for (i, name) in meerkat_core::DIGEST_SITE_LABELS.iter().enumerate() {
         let delta = now[i].saturating_sub(before[i]);
         if delta > 0 {
             if !printed {
@@ -54,7 +51,7 @@ fn document_cost_probe() {
     println!("\ndocument: {} ({:.1} MB)", path, bytes.len() as f64 / 1e6);
 
     // 1. Decode — the durable-document ingress every resume pays.
-    let mark = meerkat_core::checkpoint::digest_site_bytes();
+    let mark = meerkat_core::digest_site_bytes();
     let t = Instant::now();
     let session = Session::from_persisted_bytes(&bytes).expect("decode durable document");
     let decode = t.elapsed();
@@ -63,7 +60,7 @@ fn document_cost_probe() {
     println!("    live messages: {}", session.messages().len());
 
     // 2. Validate the retained transcript graph (content-addressing).
-    let mark = meerkat_core::checkpoint::digest_site_bytes();
+    let mark = meerkat_core::digest_site_bytes();
     let t = Instant::now();
     let validated = session.validate_transcript_history_state();
     let validate = t.elapsed();
@@ -74,20 +71,21 @@ fn document_cost_probe() {
     );
     digest_table("validate", mark);
 
-    // 3. Whole-document checkpoint digest — the verification every load runs.
-    let mark = meerkat_core::checkpoint::digest_site_bytes();
+    // 3. Current conversation digest — the logical fact stores bind to a
+    // provisional receipt at a persistence boundary.
+    let mark = meerkat_core::digest_site_bytes();
     let t = Instant::now();
-    let state = session.try_checkpoint_state();
+    let state = session.transcript_content_digest();
     let digest = t.elapsed();
     println!(
-        "\n  checkpoint verify     {:>8.2?}  ok={}",
+        "\n  conversation digest   {:>8.2?}  ok={}",
         digest,
         state.is_ok()
     );
-    digest_table("checkpoint", mark);
+    digest_table("conversation", mark);
 
     // 4. Re-encode — what a boundary save costs.
-    let mark = meerkat_core::checkpoint::digest_site_bytes();
+    let mark = meerkat_core::digest_site_bytes();
     let t = Instant::now();
     let encoded = session.to_persisted_bytes().expect("encode");
     let encode = t.elapsed();
@@ -102,6 +100,6 @@ fn document_cost_probe() {
     println!("\n  ---- one materialize round trip: {total:.2?}");
     println!(
         "  encode bytes counter: {} B",
-        meerkat_core::checkpoint::global_session_encode_bytes()
+        meerkat_core::global_session_encode_bytes()
     );
 }

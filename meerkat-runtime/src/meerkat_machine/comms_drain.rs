@@ -419,10 +419,23 @@ impl MeerkatMachine {
         runtime: Arc<dyn meerkat_core::agent::CommsRuntime>,
         handle: crate::tokio::task::JoinHandle<()>,
     ) -> Result<bool, SupervisorBindingStageError> {
-        let Some(_gate_guard) = self.lock_current_session_mutation_gate(session_id).await else {
-            handle.abort();
-            let _ = handle.await;
-            return Err(SupervisorBindingStageError::SessionNotRegistered);
+        let _gate_guard = match self
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await
+        {
+            Ok(guard) => guard,
+            Err(RuntimeDriverError::NotReady {
+                state: RuntimeState::Destroyed,
+            }) => {
+                handle.abort();
+                let _ = handle.await;
+                return Err(SupervisorBindingStageError::SessionNotRegistered);
+            }
+            Err(error) => {
+                handle.abort();
+                let _ = handle.await;
+                return Err(SupervisorBindingStageError::Persistence(error.to_string()));
+            }
         };
         let slot = {
             let sessions = self.sessions.read().await;
@@ -536,28 +549,22 @@ impl MeerkatMachine {
         input: crate::meerkat_machine::dsl::MeerkatMachineInput,
     ) -> Result<crate::meerkat_machine::dsl::MeerkatMachineTransition, SupervisorBindingStageError>
     {
-        let (gate, authority) = {
+        let _gate_guard = self
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await
+            .map_err(|error| match error {
+                RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                } => SupervisorBindingStageError::SessionNotRegistered,
+                error => SupervisorBindingStageError::Persistence(error.to_string()),
+            })?;
+        let authority = {
             let sessions = self.sessions.read().await;
             let entry = sessions
                 .get(session_id)
                 .ok_or(SupervisorBindingStageError::SessionNotRegistered)?;
-            (
-                Arc::clone(&entry.mutation_gate),
-                Arc::clone(&entry.dsl_authority),
-            )
+            Arc::clone(&entry.dsl_authority)
         };
-        let _gate_guard = Arc::clone(&gate).lock_owned().await;
-        {
-            let sessions = self.sessions.read().await;
-            let entry = sessions
-                .get(session_id)
-                .ok_or(SupervisorBindingStageError::SessionNotRegistered)?;
-            if !Arc::ptr_eq(&entry.mutation_gate, &gate)
-                || !Arc::ptr_eq(&entry.dsl_authority, &authority)
-            {
-                return Err(SupervisorBindingStageError::SessionNotRegistered);
-            }
-        }
         let mut authority = authority
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -581,30 +588,22 @@ impl MeerkatMachine {
         context: &'static str,
     ) -> Result<crate::meerkat_machine::dsl::MeerkatMachineTransition, SupervisorBindingStageError>
     {
-        let (gate, driver, authority) = {
+        let _gate_guard = self
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await
+            .map_err(|error| match error {
+                RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                } => SupervisorBindingStageError::SessionNotRegistered,
+                error => SupervisorBindingStageError::Persistence(error.to_string()),
+            })?;
+        let (driver, authority) = {
             let sessions = self.sessions.read().await;
             let entry = sessions
                 .get(session_id)
                 .ok_or(SupervisorBindingStageError::SessionNotRegistered)?;
-            (
-                Arc::clone(&entry.mutation_gate),
-                Arc::clone(&entry.driver),
-                Arc::clone(&entry.dsl_authority),
-            )
+            (Arc::clone(&entry.driver), Arc::clone(&entry.dsl_authority))
         };
-        let _gate_guard = Arc::clone(&gate).lock_owned().await;
-        {
-            let sessions = self.sessions.read().await;
-            let entry = sessions
-                .get(session_id)
-                .ok_or(SupervisorBindingStageError::SessionNotRegistered)?;
-            if !Arc::ptr_eq(&entry.mutation_gate, &gate)
-                || !Arc::ptr_eq(&entry.driver, &driver)
-                || !Arc::ptr_eq(&entry.dsl_authority, &authority)
-            {
-                return Err(SupervisorBindingStageError::SessionNotRegistered);
-            }
-        }
         let projected_supervisor_authority = {
             let authority = authority
                 .lock()
@@ -753,11 +752,9 @@ impl MeerkatMachine {
             return Err(RuntimeDriverError::Destroyed);
         }
 
-        let gate = self.session_mutation_gate(session_id).await;
-        let _gate_guard = match gate {
-            Some(ref g) => Some(g.lock().await),
-            None => None,
-        };
+        let _gate_guard = self
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await?;
 
         let Some(comms_runtime) = self.session_owned_drain_runtime(session_id).await else {
             return Ok(false);

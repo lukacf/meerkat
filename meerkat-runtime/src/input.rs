@@ -7,8 +7,7 @@
 use chrono::{DateTime, Utc};
 use meerkat_core::lifecycle::InputId;
 use meerkat_core::lifecycle::run_primitive::{
-    ConversationAppend, ConversationAppendRole, ConversationContextAppend, CoreRenderable,
-    RuntimeTurnMetadata,
+    ConversationAppend, ConversationAppendRole, CoreRenderable, RuntimeTurnMetadata,
 };
 use meerkat_core::ops::{OpEvent, OperationId};
 use meerkat_core::service::TurnToolOverlay;
@@ -698,9 +697,6 @@ pub struct ContinuationInput {
     /// Optional per-turn tool visibility overlay for scoped continuations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_tool_overlay: Option<TurnToolOverlay>,
-    /// Optional runtime-owned context projected into the next turn boundary.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub context_append: Option<ConversationContextAppend>,
     /// Optional runtime-owned turn append used to force a continuation turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_append: Option<ConversationAppend>,
@@ -732,7 +728,6 @@ impl ContinuationInput {
             handling_mode: HandlingMode::Steer,
             request_id: None,
             turn_tool_overlay: None,
-            context_append: None,
             turn_append: None,
         }
     }
@@ -751,10 +746,9 @@ pub struct OperationInput {
 
 /// Build the core-owned peer conversation projection for a runtime peer input.
 ///
-/// Peer-response terminal context projection is deliberately excluded here:
-/// admission must not store it as pre-machine truth. Runtime-loop batch
-/// construction uses [`runtime_input_projection_for_machine_batch`] after the
-/// machine-selected input is dequeued.
+/// Peer-response terminal context projection is deliberately absent: the
+/// typed `SystemNotice` conversation append is the terminal fact's only
+/// Session representation.
 pub(crate) fn peer_projection_from_peer_input(
     peer: &PeerInput,
 ) -> Option<PeerConversationProjection> {
@@ -1083,7 +1077,7 @@ fn input_to_append(input: &Input) -> Option<ConversationAppend> {
     // Terminal peer responses always carry their typed comms notice as the
     // turn's conversation append — with or without multimodal blocks. The
     // former `blocks: None => no append` special case left the mandatory
-    // `AppendContextAndRun` reaction turn with a fabricated empty prompt,
+    // `AppendContentAndRun` reaction turn with a fabricated empty prompt,
     // which providers reject (Anthropic: "user messages must have non-empty
     // content") and which violates the typed-run-input doctrine that no
     // empty-string prompt is ever synthesized.
@@ -1125,7 +1119,11 @@ fn input_to_append(input: &Input) -> Option<ConversationAppend> {
         Input::Operation(_) => return None,
     };
 
-    Some(ConversationAppend { role, content })
+    Some(ConversationAppend {
+        role,
+        content,
+        identity: None,
+    })
 }
 
 fn flow_step_run_renderable(flow_step: &FlowStepInput) -> CoreRenderable {
@@ -1178,59 +1176,6 @@ pub fn directed_input_run_started_content(input: &Input) -> Result<ContentInput,
         .ok_or_else(|| "directed runtime input has no turn-start projection".to_string())
 }
 
-fn input_to_context_append(input: &Input) -> Option<ConversationContextAppend> {
-    let (projection, content) = match input {
-        Input::Continuation(continuation) => {
-            return continuation.context_append.clone();
-        }
-        Input::Peer(peer) => {
-            let projection = peer_projection_from_peer_input(peer)?;
-            let content = peer_notice_renderable(peer)?;
-            (projection, content)
-        }
-        _ => return None,
-    };
-
-    Some(ConversationContextAppend {
-        key: projection.context_key()?,
-        content,
-    })
-}
-
-fn peer_response_terminal_context_append(
-    peer: &PeerInput,
-) -> Result<Option<ConversationContextAppend>, PeerResponseTerminalFactError> {
-    let Some(fact) = peer_response_terminal_fact(peer)? else {
-        return Ok(None);
-    };
-
-    Ok(Some(ConversationContextAppend {
-        key: fact.context_key(),
-        content: CoreRenderable::SystemNotice {
-            kind: SystemNoticeKind::Comms,
-            body: Some("Peer terminal response context".to_string()),
-            blocks: vec![SystemNoticeBlock::Comms {
-                kind: meerkat_core::types::CommsNoticeKind::ResponseTerminal,
-                direction: SystemNoticeDirection::Incoming,
-                peer: Some(SystemNoticePeer {
-                    id: fact.source.route_identity.peer_id(),
-                    display_name: Some(fact.source.display_identity.to_string()),
-                }),
-                // This context append is derived from the machine-echoed
-                // terminal apply intent, which carries no content facts - no
-                // sender declaration is available here.
-                sender_taint: None,
-                request_id: Some(fact.correlation_id.to_string()),
-                intent: None,
-                status: Some(fact.status.label().to_string()),
-                summary: Some("Peer terminal response".to_string()),
-                payload: fact.render_payload.as_ref().cloned(),
-                content: Vec::new(),
-            }],
-        },
-    }))
-}
-
 /// Lower host-attached injected context entries into typed
 /// `InjectedContext`-role transcript appends, preserving delivery order.
 /// The typed slot the content arrived in mints the transcript role.
@@ -1245,6 +1190,7 @@ fn injected_context_appends(entries: &[ContentInput]) -> Vec<ConversationAppend>
                 },
                 ContentInput::Text(text) => CoreRenderable::Text { text: text.clone() },
             },
+            identity: None,
         })
         .collect()
 }
@@ -1263,84 +1209,118 @@ pub(crate) fn runtime_input_projection(
             Input::Prompt(prompt) => prompt.typed_turn_appends.clone(),
             _ => Vec::new(),
         },
-        context_append: input_to_context_append(input),
-        peer_response_terminal: None,
     }
 }
 
 pub(crate) fn runtime_input_projection_for_machine_batch(
     input: &Input,
 ) -> crate::ingress_types::RuntimeInputProjection {
-    let mut projection = runtime_input_projection(input);
-    if let Input::Peer(peer) = input
-        && let Ok(Some(context_append)) = peer_response_terminal_context_append(peer)
-    {
-        projection.context_append = Some(context_append);
-        // Carry the typed terminal-peer-response fact alongside the rendered
-        // context append so the realtime/live consumer reads the typed fact
-        // directly instead of re-parsing the flattened prose.
-        if let Ok(fact) = peer_response_terminal_fact(peer) {
-            projection.peer_response_terminal = fact;
-        }
-    }
-    projection
+    runtime_input_projection(input)
 }
 
-pub(crate) fn context_append_to_pending_system_context_append(
-    append: &ConversationContextAppend,
-    peer_response_terminal: Option<&meerkat_core::PeerResponseTerminalFact>,
-) -> meerkat_core::PendingSystemContextAppend {
-    meerkat_core::PendingSystemContextAppend {
-        content: append.content.clone(),
-        source: Some(append.key.clone()),
-        idempotency_key: Some(append.key.clone()),
-        // Durable keyed context append (peer responses, etc.) — not a steer.
-        source_kind: meerkat_core::session::SystemContextSource::Normal,
-        // Carry the typed `PeerResponseTerminalFact` so the realtime consumer
-        // reads it directly (mirrors the `source_kind` precedent that retired
-        // the `runtime:steer:` string prefix). The fact threads from the
-        // admitted `RuntimeInputProjection.peer_response_terminal` field.
-        peer_response_terminal: peer_response_terminal.cloned(),
-        accepted_at: meerkat_core::time_compat::SystemTime::now(),
-    }
-}
-
-pub(crate) fn projection_to_pending_system_context_appends(
-    input_id: &InputId,
+/// Project one exact machine-admitted live steer into request-only user
+/// context. Input-store persistence remains the retry/idempotency owner; this
+/// clone-cheap value is only the provider-request projection.
+///
+/// Terminal peer responses are deliberately excluded: their ordinary
+/// `SystemNotice` conversation append is the single durable fact. An
+/// idle-normalized steer is also excluded because the machine has converted
+/// it to an ordinary queued turn.
+pub(crate) fn projection_to_transient_turn_context(
     projection: &crate::ingress_types::RuntimeInputProjection,
-) -> Vec<meerkat_core::PendingSystemContextAppend> {
-    if let Some(append) = projection.context_append.as_ref() {
-        return std::iter::once(context_append_to_pending_system_context_append(
-            append,
-            projection.peer_response_terminal.as_ref(),
-        ))
-        .filter(|append| !append.content.render_text().trim().is_empty())
-        .collect();
+    semantics: crate::ingress_types::RuntimeInputSemantics,
+) -> Option<meerkat_core::lifecycle::run_primitive::TurnRequestContext> {
+    if !semantics.live_interrupt_required
+        || semantics.peer_response_terminal_apply_intent.is_some()
+        || semantics.execution_handling_mode == Some(HandlingMode::Queue)
+    {
+        return None;
     }
 
-    projection
+    let rendered = projection
         .append
         .as_ref()
-        .map(|append| {
-            // The PRODUCER of a runtime-steer append sets the typed marker
-            // here, at construction. This is the single source of truth for
-            // the runtime-steer fact — no downstream code reclassifies the
-            // `source` string. The `runtime:steer:` source/idempotency key is
-            // retained only as a stable per-input idempotency identifier.
-            let key = format!("runtime:steer:{input_id}");
-            meerkat_core::PendingSystemContextAppend {
-                content: append.content.clone(),
-                source: Some(key.clone()),
-                idempotency_key: Some(key),
-                source_kind: meerkat_core::session::SystemContextSource::RuntimeSteer,
-                // A runtime steer is never a terminal-peer-response projection.
-                peer_response_terminal: None,
-                accepted_at: meerkat_core::time_compat::SystemTime::now(),
-            }
-        })
+        .map(|append| append.content.render_text())?;
+    // Empty content cannot form a provider request item. Whitespace remains
+    // exact and significant; do not repeat the retired trim-and-drop policy.
+    meerkat_core::lifecycle::run_primitive::TurnRequestContext::new(rendered).ok()
+}
+
+pub(crate) fn input_to_transient_turn_context(
+    input: &Input,
+    semantics: crate::ingress_types::RuntimeInputSemantics,
+) -> Option<meerkat_core::lifecycle::run_primitive::TurnRequestContext> {
+    projection_to_transient_turn_context(
+        &runtime_input_projection_for_machine_batch(input),
+        semantics,
+    )
+}
+
+pub(crate) fn projection_has_transient_turn_context(
+    projection: &crate::ingress_types::RuntimeInputProjection,
+    semantics: crate::ingress_types::RuntimeInputSemantics,
+) -> bool {
+    projection_to_transient_turn_context(projection, semantics).is_some()
+}
+
+pub(crate) fn projection_conversation_appends(
+    projection: &crate::ingress_types::RuntimeInputProjection,
+    semantics: crate::ingress_types::RuntimeInputSemantics,
+) -> Vec<ConversationAppend> {
+    if projection_has_transient_turn_context(projection, semantics) {
+        return Vec::new();
+    }
+    projection
+        .injected_context_appends
+        .clone()
         .into_iter()
-        .filter(|append| !append.content.render_text().trim().is_empty())
+        .chain(projection.append.clone())
+        .chain(projection.additional_appends.clone())
         .collect()
+}
+
+#[cfg(test)]
+fn projection_transient_context_text(
+    projection: &crate::ingress_types::RuntimeInputProjection,
+    semantics: crate::ingress_types::RuntimeInputSemantics,
+) -> Option<String> {
+    projection_to_transient_turn_context(projection, semantics)
+        .map(|context| context.as_str().to_owned())
+}
+
+#[cfg(test)]
+fn live_steer_semantics() -> crate::ingress_types::RuntimeInputSemantics {
+    crate::ingress_types::RuntimeInputSemantics {
+        boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunCheckpoint,
+        execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+        execution_handling_mode: None,
+        peer_response_terminal_apply_intent: None,
+        live_interrupt_required: true,
+    }
+}
+
+#[cfg(test)]
+fn terminal_semantics() -> crate::ingress_types::RuntimeInputSemantics {
+    crate::ingress_types::RuntimeInputSemantics {
+        boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
+        execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+        execution_handling_mode: None,
+        peer_response_terminal_apply_intent: Some(
+            meerkat_core::lifecycle::run_primitive::PeerResponseTerminalApplyIntent::AppendContentAndRun,
+        ),
+        live_interrupt_required: true,
+    }
+}
+
+#[cfg(test)]
+fn projection_durable_notice_count(
+    projection: &crate::ingress_types::RuntimeInputProjection,
+    semantics: crate::ingress_types::RuntimeInputSemantics,
+) -> usize {
+    projection_conversation_appends(projection, semantics)
+        .iter()
+        .filter(|append| append.role == ConversationAppendRole::SystemNotice)
+        .count()
 }
 
 #[cfg(test)]
@@ -1374,6 +1354,7 @@ mod tests {
                     payload: None,
                 }],
             },
+            identity: None,
         }
     }
 
@@ -1815,7 +1796,7 @@ mod tests {
     }
 
     #[test]
-    fn peer_response_terminal_context_is_deferred_to_machine_batch_projection() {
+    fn peer_response_terminal_projects_one_durable_notice_without_sidecar_context() {
         let route_id = "018f6f79-7a82-7c4e-a552-a3b86f9630f2";
         let request_id = "018f6f79-7a82-7c4e-a552-a3b86f9630f1";
         let mut header = make_header();
@@ -1842,22 +1823,20 @@ mod tests {
         let Input::Peer(peer) = &input else {
             panic!("expected peer input");
         };
-        let expected_canonical_key = format!("peer_response_terminal:{route_id}:{request_id}");
         assert!(
             peer_projection_from_peer_input(peer).is_none(),
             "terminal peer response projection must not be built before machine batch selection"
         );
 
-        let projection = runtime_input_projection(&input);
-        assert!(
-            projection.context_append.is_none(),
-            "admission projection must not store terminal peer response context"
-        );
         let projection = runtime_input_projection_for_machine_batch(&input);
-        let context = projection.context_append.expect("context append");
-        assert_eq!(context.key, expected_canonical_key);
-        let CoreRenderable::SystemNotice { blocks, .. } = context.content else {
-            panic!("expected typed context");
+        assert_eq!(
+            projection_durable_notice_count(&projection, terminal_semantics()),
+            1
+        );
+        let CoreRenderable::SystemNotice { blocks, .. } =
+            projection.append.expect("durable notice").content
+        else {
+            panic!("expected typed notice");
         };
         let Some(meerkat_core::types::SystemNoticeBlock::Comms { peer, .. }) = blocks.first()
         else {
@@ -1874,45 +1853,28 @@ mod tests {
     }
 
     #[test]
-    fn steer_projection_uses_context_append_as_pending_system_context() {
-        let input_id = InputId::new();
+    fn live_steer_projects_ordinary_append_as_request_only_user_context() {
         let projection = crate::ingress_types::RuntimeInputProjection {
             injected_context_appends: Vec::new(),
             append: Some(ConversationAppend {
-                role: ConversationAppendRole::SystemNotice,
+                role: ConversationAppendRole::User,
                 content: CoreRenderable::Text {
-                    text: "ordinary append must lose to context append".into(),
+                    text: "steer at the active turn".into(),
                 },
+                identity: None,
             }),
             additional_appends: Vec::new(),
-            context_append: Some(ConversationContextAppend {
-                key: "peer_response_terminal:peer:req".into(),
-                content: CoreRenderable::Text {
-                    text: "terminal response is ready".into(),
-                },
-            }),
-            peer_response_terminal: None,
         };
 
-        let appends = projection_to_pending_system_context_appends(&input_id, &projection);
-
-        assert_eq!(appends.len(), 1);
         assert_eq!(
-            appends[0].content.render_text(),
-            "terminal response is ready"
+            projection_transient_context_text(&projection, live_steer_semantics()).as_deref(),
+            Some("steer at the active turn")
         );
-        assert_eq!(
-            appends[0].source.as_deref(),
-            Some("peer_response_terminal:peer:req")
-        );
-        assert_eq!(
-            appends[0].idempotency_key.as_deref(),
-            Some("peer_response_terminal:peer:req")
-        );
+        assert!(projection_conversation_appends(&projection, live_steer_semantics()).is_empty());
     }
 
     #[test]
-    fn continuation_projection_can_carry_runtime_context_append() {
+    fn continuation_projection_uses_ordinary_turn_append_for_request_context() {
         let input = Input::Continuation(ContinuationInput {
             header: make_header(),
             reason: "workgraph_attention".into(),
@@ -1924,25 +1886,18 @@ mod tests {
                 blocked_tools: None,
                 dispatch_context: Default::default(),
             }),
-            context_append: Some(ConversationContextAppend {
-                key: "workgraph_attention:binding-1:2:5".into(),
+            turn_append: Some(ConversationAppend {
+                role: ConversationAppendRole::User,
                 content: CoreRenderable::Text {
                     text: "WorkGraph attention projection".into(),
                 },
+                identity: None,
             }),
-            turn_append: None,
         });
         let projection = runtime_input_projection_for_machine_batch(&input);
-        let appends = projection_to_pending_system_context_appends(input.id(), &projection);
-
-        assert_eq!(appends.len(), 1);
         assert_eq!(
-            appends[0].content.render_text(),
-            "WorkGraph attention projection"
-        );
-        assert_eq!(
-            appends[0].source.as_deref(),
-            Some("workgraph_attention:binding-1:2:5")
+            projection_transient_context_text(&projection, live_steer_semantics()).as_deref(),
+            Some("WorkGraph attention projection")
         );
         let metadata = crate::runtime_loop::for_input(
             &input,
@@ -1963,7 +1918,7 @@ mod tests {
     }
 
     #[test]
-    fn steer_projection_falls_back_to_ordinary_peer_append() {
+    fn live_peer_steer_is_request_only_and_idle_normalization_is_durable() {
         let mut header = make_header();
         header.source = InputOrigin::Peer {
             peer_id: "peer-a".into(),
@@ -1981,61 +1936,64 @@ mod tests {
             payload: None,
             handling_mode: Some(HandlingMode::Steer),
         });
-        let input_id = input.id().clone();
         let projection = runtime_input_projection(&input);
+        let live_semantics =
+            crate::ingress_types::RuntimeInputSemantics::try_from_generated_admission(
+                &input, false,
+            )
+            .expect("running steer admission");
+        let idle_semantics =
+            crate::ingress_types::RuntimeInputSemantics::try_from_generated_admission(&input, true)
+                .expect("idle steer admission");
 
-        let appends = projection_to_pending_system_context_appends(&input_id, &projection);
-
-        assert_eq!(appends.len(), 1);
-        let rendered = appends[0].content.render_text();
+        let rendered = projection_transient_context_text(&projection, live_semantics).unwrap();
         assert!(
             rendered.contains("please look at this while you work"),
-            "peer message append should be renderable as live system context: {rendered:?}"
+            "peer message should be renderable as request-only steer context: {rendered:?}"
         );
+        assert!(projection_conversation_appends(&projection, live_semantics).is_empty());
+        assert!(projection_transient_context_text(&projection, idle_semantics).is_none());
         assert_eq!(
-            appends[0].source.as_deref(),
-            Some(format!("runtime:steer:{input_id}").as_str())
-        );
-        assert_eq!(
-            appends[0].idempotency_key.as_deref(),
-            Some(format!("runtime:steer:{input_id}").as_str())
+            projection_conversation_appends(&projection, idle_semantics).len(),
+            1
         );
     }
 
     #[test]
-    fn steer_projection_filters_empty_context_and_empty_append() {
-        let input_id = InputId::new();
-        let context_projection = crate::ingress_types::RuntimeInputProjection {
+    fn live_steer_refuses_empty_context_but_preserves_whitespace_exactly() {
+        let whitespace_projection = crate::ingress_types::RuntimeInputProjection {
             injected_context_appends: Vec::new(),
-            append: None,
-            additional_appends: Vec::new(),
-            context_append: Some(ConversationContextAppend {
-                key: "empty-context".into(),
+            append: Some(ConversationAppend {
+                role: ConversationAppendRole::User,
                 content: CoreRenderable::Text { text: "  ".into() },
+                identity: None,
             }),
-            peer_response_terminal: None,
+            additional_appends: Vec::new(),
         };
-        assert!(
-            projection_to_pending_system_context_appends(&input_id, &context_projection).is_empty()
+        assert_eq!(
+            projection_transient_context_text(&whitespace_projection, live_steer_semantics())
+                .as_deref(),
+            Some("  ")
         );
 
         let append_projection = crate::ingress_types::RuntimeInputProjection {
             injected_context_appends: Vec::new(),
             append: Some(ConversationAppend {
                 role: ConversationAppendRole::SystemNotice,
-                content: CoreRenderable::Text { text: "\n".into() },
+                content: CoreRenderable::Text {
+                    text: String::new(),
+                },
+                identity: None,
             }),
             additional_appends: Vec::new(),
-            context_append: None,
-            peer_response_terminal: None,
         };
         assert!(
-            projection_to_pending_system_context_appends(&input_id, &append_projection).is_empty()
+            projection_transient_context_text(&append_projection, live_steer_semantics()).is_none()
         );
     }
 
     #[test]
-    fn peer_response_terminal_with_blocks_projects_append_and_context() {
+    fn peer_response_terminal_with_blocks_projects_single_durable_notice() {
         let route_id = "018f6f79-7a82-7c4e-a552-a3b86f9630f2";
         let request_id = "018f6f79-7a82-7c4e-a552-a3b86f9630f1";
         let mut header = make_header();
@@ -2081,10 +2039,6 @@ mod tests {
             Some(meerkat_core::types::ContentBlock::Image { media_type, .. })
                 if media_type == "image/jpeg"
         ));
-        assert!(
-            projection.context_append.is_some(),
-            "terminal response must still apply runtime-owned context"
-        );
     }
 
     #[test]
@@ -2516,7 +2470,6 @@ mod tests {
             handling_mode: HandlingMode::Steer,
             request_id: None,
             turn_tool_overlay: None,
-            context_append: None,
             turn_append: None,
         });
         assert_eq!(continuation.kind(), InputKind::Continuation);

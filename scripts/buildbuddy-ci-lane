@@ -306,7 +306,10 @@ case "${lane}" in
     run_bazel_lane e2e-smoke-remote-rbe --jobs="${bazel_jobs}"
     ;;
   e2e-smoke-turbo-s)
-    run_bazel_lane e2e-smoke-turbo-s-rbe --jobs="${bazel_jobs}"
+    # buildbuddy-bazel-poc enforces --jobs=1 and one Bazel retry for the real
+    # sh_test cohort. Pass the same value here so dry-run/context evidence
+    # states the effective policy rather than the generic lane default.
+    run_bazel_lane e2e-smoke-turbo-s-rbe --jobs=1 --flaky_test_attempts=2
     ;;
   minimal-feature-builds)
     run_bazel_lane minimal-feature-builds-rbe --jobs="${bazel_jobs}"

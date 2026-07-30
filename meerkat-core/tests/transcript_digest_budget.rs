@@ -42,7 +42,7 @@ fn assistant(text: &str) -> Message {
 /// A session with `turns` prior conversational turns.
 fn session_with_turns(turns: usize) -> Session {
     let mut session = Session::new();
-    session.set_system_prompt("system".to_string());
+    session.append_system_message("system".to_string());
     for index in 0..turns {
         session.push(user(&format!(
             "question {index} with some body text to make the message non-trivial"
@@ -143,11 +143,11 @@ fn append_digest_count_is_independent_of_transcript_size() {
 fn system_context_append_branch_digest_budget_is_constant() {
     fn measure(turns: usize) -> u64 {
         let mut previous = session_with_turns(turns);
-        previous.set_system_prompt("system".to_string());
+        previous.append_system_message("system".to_string());
         let mut live = previous.clone();
         // A runtime system-context append rewrites message 0, which is exactly
         // the shape the plain prefix check cannot admit.
-        live.set_system_prompt("system\n\n---\n\nruntime context".to_string());
+        live.append_system_message("system\n\n---\n\nruntime context".to_string());
         live.push(user("after refresh"));
         let before = session_content_digest_computations();
         let _ = append_only_save_guard(&live, Some(&previous));
@@ -208,28 +208,24 @@ fn synthetic_notice_refresh_branch_digest_budget_is_constant() {
 
 /// The PRODUCTION shape: a history-bearing (compacted/rewritten) session at
 /// an ordinary turn boundary — guard plus durable head projection. This is
-/// the case the original budget suite did not cover, and the whole-graph
-/// canonical pass it performs (`session_transcript_history_checkpoint_digest`
-/// via `SessionHead::from_session`) was invisible to the pass counter, so
+/// the case the original budget suite did not cover. The former whole-graph
+/// canonical pass (`session_transcript_history_checkpoint_digest` via
+/// `SessionHead::from_session`) was invisible to the pass counter, so
 /// the suite reported zero at both sizes while release timing grew 211x.
 /// When first made honest, this measured 1 pass at BOTH sizes (why "equal
 /// counts" lied) hashing 9,560 bytes at 8 turns vs 1,993,054 at 2000.
 ///
-/// The achievable contract under digest_format 2, and what this pins:
-/// exactly ONE hash pass per boundary, hashing AT MOST one canonical-graph's
-/// worth of bytes — no whole-document pass, no double derivation, no
-/// canonicalization multiplier. Full size-independence is NOT achievable:
-/// the canonical graph interleaves the per-append-changing `head` before
-/// the retained bodies and SHA-256 is sequential, so one Ω(graph) hash pass
-/// per boundary is irreducible without a digest-format change (0.8.9
-/// material). The canonicalization/clone/parse elimination around that hash
-/// is pinned by release timing and the turn-latency CPU gate, not by this
-/// counter.
+/// The audited graph no longer changes on ordinary appends: its head is the
+/// latest rewrite occurrence, while the live tail is owned by Session
+/// messages and the incremental transcript accumulator. Once the initial
+/// rewrite boundary is warm, neither the guard nor `SessionHead` may hash the
+/// retained graph again. This pins ZERO full content passes and ZERO content
+/// bytes at both transcript sizes.
 #[test]
-fn history_bearing_boundary_save_pays_at_most_one_graph_hash_pass() {
+fn history_bearing_boundary_save_hashes_zero_content_bytes() {
     use meerkat_core::service::{TranscriptRewriteReason, TranscriptRewriteSelection};
 
-    fn measure(turns: usize) -> (u64, u64, u64) {
+    fn measure(turns: usize) -> (u64, u64) {
         let mut live = session_with_turns(turns);
         let end = live.messages().len();
         live.commit_transcript_rewrite(
@@ -243,6 +239,11 @@ fn history_bearing_boundary_save_pays_at_most_one_graph_hash_pass() {
             None,
         )
         .expect("audited rewrite");
+        let audited_graph = live
+            .metadata()
+            .get(meerkat_core::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY)
+            .cloned()
+            .expect("audited graph");
         // Steady state: two warm-up boundaries, exactly like the plain
         // boundary measurement, each followed by an appended turn.
         let mut previous = live.clone();
@@ -260,39 +261,30 @@ fn history_bearing_boundary_save_pays_at_most_one_graph_hash_pass() {
         SessionHead::from_session(&live, strand(), 1).expect("boundary head");
         let passes = session_content_digest_computations() - passes_before;
         let bytes = session_content_digest_bytes() - bytes_before;
-        // Reference ceiling: one counted full derivation of THIS session's
-        // exact graph = the canonical graph size G.
-        let state = live
-            .transcript_history_state()
-            .expect("graph decodes")
-            .expect("graph present");
-        let graph_before = session_content_digest_bytes();
-        meerkat_core::transcript_history_checkpoint_digest(&state).expect("reference witness");
-        let graph_bytes = session_content_digest_bytes() - graph_before;
-        (passes, bytes, graph_bytes)
+        assert_eq!(
+            live.metadata()
+                .get(meerkat_core::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY),
+            Some(&audited_graph),
+            "ordinary appends must leave audited graph bytes untouched"
+        );
+        (passes, bytes)
     }
 
-    let (small_passes, small_bytes, _) = measure(SMALL);
-    let (large_passes, large_bytes, large_graph_bytes) = measure(LARGE);
+    let (small_passes, small_bytes) = measure(SMALL);
+    let (large_passes, large_bytes) = measure(LARGE);
     println!(
         "history-bearing boundary save: {SMALL} turns => {small_passes} passes / {small_bytes} bytes, \
-         {LARGE} turns => {large_passes} passes / {large_bytes} bytes \
-         (canonical graph reference: {large_graph_bytes} bytes)"
+         {LARGE} turns => {large_passes} passes / {large_bytes} bytes"
     );
     assert_eq!(
-        small_passes, large_passes,
-        "history-bearing boundary digest passes must not depend on transcript size"
+        (small_passes, small_bytes),
+        (0, 0),
+        "a warm small history-bearing boundary must not re-hash live or audited history"
     );
     assert_eq!(
-        large_passes, 1,
-        "a warm history-bearing boundary must pay exactly ONE graph hash pass \
-         — the irreducible format-2 residual — never a document pass or a \
-         second derivation"
-    );
-    assert!(
-        large_bytes <= large_graph_bytes + large_graph_bytes / 50,
-        "the boundary's single hash pass must stay within one canonical \
-         graph's bytes ({large_bytes} hashed vs graph size {large_graph_bytes})"
+        (large_passes, large_bytes),
+        (0, 0),
+        "a warm large history-bearing boundary must not re-hash live or audited history"
     );
 }
 
@@ -337,17 +329,18 @@ fn history_bearing_boundary_release_timing() {
     fn median_boundary(turns: usize) -> std::time::Duration {
         let mut live = session_with_turns(turns);
         let end = live.messages().len();
-        live.commit_transcript_rewrite(
-            TranscriptRewriteSelection::MessageRange {
-                start: end - 1,
-                end,
-            },
-            vec![assistant("audited replacement")],
-            TranscriptRewriteReason::new("timing"),
-            Some("timing".to_string()),
-            None,
-        )
-        .expect("audited rewrite");
+        let rewrite = live
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange {
+                    start: end - 1,
+                    end,
+                },
+                vec![assistant("audited replacement")],
+                TranscriptRewriteReason::new("timing"),
+                Some("timing".to_string()),
+                None,
+            )
+            .expect("audited rewrite");
         let mut previous = live.clone();
         let mut samples = Vec::new();
         // Enough rounds to exhaust the release-mode sampled verification
@@ -402,6 +395,11 @@ fn history_bearing_append_digest_count_is_independent_of_transcript_size() {
             None,
         )
         .expect("audited rewrite");
+        let audited_graph = live
+            .metadata()
+            .get(meerkat_core::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY)
+            .cloned()
+            .expect("audited graph");
         assert!(
             live.transcript_history_state()
                 .expect("history state decodes")
@@ -418,15 +416,26 @@ fn history_bearing_append_digest_count_is_independent_of_transcript_size() {
         live.push(user("one word"));
         let after = session_content_digest_computations() - before;
 
-        // The graph must still be exactly coherent with the live transcript.
+        // The audited graph stays byte-identical while the live revision
+        // advances independently through the transcript accumulator.
         let state = live
             .transcript_history_state()
             .expect("history state decodes")
             .expect("history state present");
         assert_eq!(
+            state.head, rewrite.revision,
+            "graph head must remain the latest audited rewrite endpoint"
+        );
+        assert_ne!(
             state.head,
             live.transcript_content_digest().expect("live digest"),
-            "graph head must track the live transcript"
+            "ordinary append must advance live identity without manufacturing a graph head"
+        );
+        assert_eq!(
+            live.metadata()
+                .get(meerkat_core::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY),
+            Some(&audited_graph),
+            "ordinary append must leave graph bytes untouched"
         );
         live.validate_transcript_history_state()
             .expect("graph must still validate after the fast-path appends");

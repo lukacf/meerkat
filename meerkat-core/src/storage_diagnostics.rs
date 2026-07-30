@@ -49,7 +49,7 @@ pub struct StorageFinding {
     /// Severity class.
     pub severity: FindingSeverity,
     /// Stable kebab-case code (e.g. `"split-brain-realm"`,
-    /// `"schema-from-the-future"`, `"legacy-unverified-sessions"`,
+    /// `"schema-from-the-future"`, `"session-document-undecodable"`,
     /// `"dangling-blob-reference"`, `"orphaned-lease"`,
     /// `"no-schema-ledger"`, `"backup-artifact"`,
     /// `"maintenance-fence-lock"`). Consumers must tolerate unknown codes.

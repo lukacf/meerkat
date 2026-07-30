@@ -5,6 +5,7 @@
 
 use serde::de::{self, DeserializeOwned};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 use super::identifiers::InputId;
 use crate::connection::AuthBindingRef;
@@ -19,6 +20,54 @@ use crate::skills::SkillKey;
 use crate::types::{
     HandlingMode, RenderMetadata, SystemNoticeBlock, SystemNoticeKind, TranscriptMessageIdentity,
 };
+
+/// Exact host-generated context projected into provider requests for one
+/// runtime-owned logical turn.
+///
+/// This is deliberately not a [`crate::types::Message`]: it cannot be appended
+/// to a [`crate::Session`] or acquire durable transcript semantics. Runtime
+/// input persistence owns the bytes until the input reaches a terminal state;
+/// the agent only borrows this clone-cheap value while composing foreground
+/// provider requests for that turn.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnRequestContext(#[cfg_attr(feature = "schema", schemars(length(min = 1)))] Arc<str>);
+
+impl TurnRequestContext {
+    /// Preserve the caller's exact UTF-8 bytes. Empty context is refused;
+    /// whitespace is otherwise significant and is never normalized.
+    pub fn new(value: impl Into<String>) -> Result<Self, &'static str> {
+        let value = value.into();
+        if value.is_empty() {
+            return Err("transient turn context must not be empty");
+        }
+        Ok(Self(Arc::from(value)))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Serialize for TurnRequestContext {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for TurnRequestContext {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(de::Error::custom)
+    }
+}
 
 /// When to apply a conversation mutation relative to the run lifecycle.
 #[non_exhaustive]
@@ -158,6 +207,8 @@ impl CoreRenderable {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConversationAppendRole {
+    /// Ordinary durable System message at this exact transcript position.
+    System,
     /// User message.
     User,
     /// Assistant message.
@@ -182,15 +233,13 @@ pub struct ConversationAppend {
     pub role: ConversationAppendRole,
     /// The content to append.
     pub content: CoreRenderable,
-}
-
-/// A context-only append (system context, not user-facing).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ConversationContextAppend {
-    /// Key for deduplication/replacement.
-    pub key: String,
-    /// The context content.
-    pub content: CoreRenderable,
+    /// Optional identity for an ordinary System append.
+    ///
+    /// This is used only by one-time cross-store adoption to converge two
+    /// historical copies of the same accepted append. Current unkeyed System
+    /// producers leave it absent; non-System roles reject it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<crate::types::SystemMessageIdentity>,
 }
 
 /// Typed execution intent classified by the runtime layer.
@@ -210,15 +259,16 @@ pub enum RuntimeExecutionKind {
 
 /// Machine-owned apply intent for terminal peer responses.
 ///
-/// Terminal peer responses are context facts and requester wake/reaction work.
-/// This closed intent prevents context-only executor shortcuts from inferring a
-/// different meaning from the primitive's append shape.
+/// Terminal peer responses append one ordinary durable `SystemNotice`, then
+/// wake/run the requester reaction. This closed intent prevents executor
+/// shortcuts from inferring a different meaning from the primitive's append
+/// shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PeerResponseTerminalApplyIntent {
-    /// Append the durable system-context fact, then run the requester reaction
-    /// turn using the appended context.
-    AppendContextAndRun,
+    /// Append the durable notice, then run the requester reaction turn.
+    ///
+    AppendContentAndRun,
 }
 
 /// Opaque model identifier carried by a per-turn override.
@@ -1177,6 +1227,29 @@ pub struct RuntimeTurnMetadata {
     /// Additional instructions for this turn, typed by role.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_instructions: Option<Vec<TurnInstruction>>,
+    /// Explicit ordinary System messages admitted with inputs in this runtime
+    /// turn.
+    ///
+    /// This is a convenience ingress, not a singleton prompt/configuration
+    /// slot. A batch may carry more than one; preserve exact bytes and
+    /// admission order and append each before the batched conversational
+    /// appends are applied. Existing System rows are never replaced,
+    /// reconciled, deduplicated, or moved.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub system_prompts: Vec<String>,
+    /// Host-regenerated facts available only to foreground model requests for
+    /// this admitted logical turn. The value remains on the persisted pending
+    /// runtime input for crash retry and never becomes Session history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transient_turn_context: Option<TurnRequestContext>,
+    /// Runtime-admitted steer contexts appended after the caller context.
+    ///
+    /// This is an internal projection cache rebuilt from admitted Inputs on
+    /// recovery. It is never accepted from or serialized onto a public wire
+    /// surface; runtime batch merge preserves admission order.
+    #[serde(skip)]
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    pub transient_turn_context_appends: Vec<TurnRequestContext>,
     /// Override model for this turn (hot-swap on materialized sessions).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<ModelId>,
@@ -1234,13 +1307,16 @@ pub struct RuntimeTurnMetadata {
 }
 
 impl RuntimeTurnMetadata {
-    /// True when every field is `None` — used to skip serializing empty
-    /// metadata carriers on the wire.
+    /// True when every optional field is `None` and every collection is empty
+    /// — used to skip serializing empty metadata carriers on the wire.
     pub fn is_empty(&self) -> bool {
         self.handling_mode.is_none()
             && self.skill_references.is_none()
             && self.turn_tool_overlay.is_none()
             && self.additional_instructions.is_none()
+            && self.system_prompts.is_empty()
+            && self.transient_turn_context.is_none()
+            && self.transient_turn_context_appends.is_empty()
             && self.model.is_none()
             && self.provider.is_none()
             && self.self_hosted_server_id.is_none()
@@ -1275,6 +1351,13 @@ impl RuntimeTurnMetadata {
             "turn_tool_overlay",
         )?;
         merge_scalar(&mut self.model, other.model, "model")?;
+        merge_scalar(
+            &mut self.transient_turn_context,
+            other.transient_turn_context,
+            "transient_turn_context",
+        )?;
+        self.transient_turn_context_appends
+            .extend(other.transient_turn_context_appends);
         merge_scalar(&mut self.provider, other.provider, "provider")?;
         merge_scalar(
             &mut self.self_hosted_server_id,
@@ -1322,6 +1405,7 @@ impl RuntimeTurnMetadata {
                 .get_or_insert_with(Vec::new)
                 .extend(extra);
         }
+        self.system_prompts.extend(other.system_prompts);
         Ok(())
     }
 }
@@ -1417,9 +1501,6 @@ pub struct StagedRunInput {
     /// Conversation mutations to apply.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub appends: Vec<ConversationAppend>,
-    /// Context-only appends.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub context_appends: Vec<ConversationContextAppend>,
     /// Input IDs contributing to this staged input (opaque to core).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub contributing_input_ids: Vec<InputId>,
@@ -1446,8 +1527,6 @@ pub enum RunPrimitive {
     StagedInput(StagedRunInput),
     /// Inject content immediately (no boundary required).
     ImmediateAppend(ConversationAppend),
-    /// Inject context immediately.
-    ImmediateContextAppend(ConversationContextAppend),
 }
 
 impl RunPrimitive {
@@ -1455,14 +1534,14 @@ impl RunPrimitive {
     pub fn contributing_input_ids(&self) -> &[InputId] {
         match self {
             RunPrimitive::StagedInput(staged) => &staged.contributing_input_ids,
-            RunPrimitive::ImmediateAppend(_) | RunPrimitive::ImmediateContextAppend(_) => &[],
+            RunPrimitive::ImmediateAppend(_) => &[],
         }
     }
 
     pub fn turn_metadata(&self) -> Option<&RuntimeTurnMetadata> {
         match self {
             RunPrimitive::StagedInput(staged) => staged.turn_metadata.as_ref(),
-            RunPrimitive::ImmediateAppend(_) | RunPrimitive::ImmediateContextAppend(_) => None,
+            RunPrimitive::ImmediateAppend(_) => None,
         }
     }
 
@@ -1477,9 +1556,6 @@ impl RunPrimitive {
             }
             RunPrimitive::ImmediateAppend(append) => {
                 content_input_from_core_renderable(&append.content)
-            }
-            RunPrimitive::ImmediateContextAppend(ctx) => {
-                content_input_from_core_renderable(&ctx.content)
             }
         }
     }
@@ -1498,9 +1574,6 @@ impl RunPrimitive {
             RunPrimitive::ImmediateAppend(append) => {
                 model_projection_content_input_from_core_renderable(&append.content)
             }
-            RunPrimitive::ImmediateContextAppend(ctx) => {
-                model_projection_content_input_from_core_renderable(&ctx.content)
-            }
         }
     }
 
@@ -1512,7 +1585,6 @@ impl RunPrimitive {
         match self {
             RunPrimitive::StagedInput(staged) => staged.appends.clone(),
             RunPrimitive::ImmediateAppend(append) => vec![append.clone()],
-            RunPrimitive::ImmediateContextAppend(_) => Vec::new(),
         }
     }
 
@@ -1536,9 +1608,7 @@ impl RunPrimitive {
             {
                 vec![content_input_from_core_renderable(&append.content)]
             }
-            RunPrimitive::ImmediateAppend(_) | RunPrimitive::ImmediateContextAppend(_) => {
-                Vec::new()
-            }
+            RunPrimitive::ImmediateAppend(_) => Vec::new(),
         }
     }
 
@@ -1546,9 +1616,7 @@ impl RunPrimitive {
     pub fn apply_boundary(&self) -> RunApplyBoundary {
         match self {
             RunPrimitive::StagedInput(staged) => staged.boundary,
-            RunPrimitive::ImmediateAppend(_) | RunPrimitive::ImmediateContextAppend(_) => {
-                RunApplyBoundary::Immediate
-            }
+            RunPrimitive::ImmediateAppend(_) => RunApplyBoundary::Immediate,
         }
     }
 
@@ -1557,15 +1625,15 @@ impl RunPrimitive {
             .and_then(|metadata| metadata.peer_response_terminal_apply_intent)
     }
 
-    pub fn is_peer_response_terminal_context_and_run(&self) -> bool {
+    pub fn is_peer_response_terminal_notice_and_run(&self) -> bool {
         matches!(
             self.peer_response_terminal_apply_intent(),
-            Some(PeerResponseTerminalApplyIntent::AppendContextAndRun)
+            Some(PeerResponseTerminalApplyIntent::AppendContentAndRun)
         )
     }
 
     pub fn peer_response_terminal_apply_intent_violation(&self) -> Option<&'static str> {
-        if !self.is_peer_response_terminal_context_and_run() {
+        if !self.is_peer_response_terminal_notice_and_run() {
             return None;
         }
 
@@ -1575,8 +1643,15 @@ impl RunPrimitive {
         if staged.boundary != RunApplyBoundary::RunStart {
             return Some("terminal peer-response apply intent requires RunStart boundary");
         }
-        if staged.context_appends.is_empty() {
-            return Some("terminal peer-response apply intent requires a staged context append");
+        let notice_count = staged
+            .appends
+            .iter()
+            .filter(|append| append.role == ConversationAppendRole::SystemNotice)
+            .count();
+        if notice_count != 1 {
+            return Some(
+                "terminal peer-response apply intent requires exactly one SystemNotice append",
+            );
         }
         if staged
             .turn_metadata
@@ -1587,30 +1662,6 @@ impl RunPrimitive {
             return Some("terminal peer-response apply intent requires ContentTurn execution kind");
         }
         None
-    }
-
-    /// Whether this primitive's context appends should be applied without
-    /// running a requester reaction turn.
-    pub fn is_context_only_apply_without_turn(&self) -> bool {
-        matches!(
-            self,
-            RunPrimitive::StagedInput(staged)
-            if staged.appends.is_empty()
-                && !staged.context_appends.is_empty()
-                && !self.is_peer_response_terminal_context_and_run()
-        )
-    }
-
-    /// Whether this primitive is a context-only staged input that should be
-    /// routed to `apply_runtime_context_appends` rather than a full turn.
-    pub fn is_context_only_immediate(&self) -> bool {
-        matches!(
-            self,
-            RunPrimitive::StagedInput(staged)
-            if staged.appends.is_empty()
-                && !staged.context_appends.is_empty()
-                && staged.boundary == RunApplyBoundary::Immediate
-        )
     }
 }
 
@@ -1624,7 +1675,10 @@ pub fn content_input_from_conversation_appends(
         // typed transcript messages. Folding them into the extracted prompt
         // would bake the ambient context into the user message (and
         // double-deliver it wherever the extraction is re-lowered).
-        if append.role == ConversationAppendRole::InjectedContext {
+        if matches!(
+            append.role,
+            ConversationAppendRole::InjectedContext | ConversationAppendRole::System
+        ) {
             continue;
         }
         append_content_blocks(&append.content, &mut all_blocks);
@@ -1733,6 +1787,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn turn_request_context_rejects_empty_and_preserves_exact_text() {
+        assert!(TurnRequestContext::new("").is_err());
+        assert!(serde_json::from_str::<TurnRequestContext>("\"\"").is_err());
+
+        let exact = " \n\tregenerated facts\u{00a0} ";
+        let context = TurnRequestContext::new(exact).expect("non-empty exact context");
+        assert_eq!(context.as_str(), exact);
+        assert_eq!(
+            serde_json::to_string(&context).expect("serialize exact context"),
+            serde_json::to_string(exact).expect("serialize exact fixture")
+        );
+    }
+
+    #[test]
     fn run_apply_boundary_serde_roundtrip() {
         for boundary in [
             RunApplyBoundary::Immediate,
@@ -1774,7 +1842,6 @@ mod tests {
         RunPrimitive::StagedInput(StagedRunInput {
             boundary: RunApplyBoundary::RunStart,
             appends,
-            context_appends: vec![],
             contributing_input_ids: vec![],
             turn_metadata: None,
         })
@@ -1784,6 +1851,7 @@ mod tests {
     fn extract_content_from_staged_text() {
         let p = make_staged(vec![ConversationAppend {
             role: ConversationAppendRole::User,
+            identity: None,
             content: CoreRenderable::Text {
                 text: "hello".into(),
             },
@@ -1798,6 +1866,7 @@ mod tests {
     fn extract_content_from_staged_blocks() {
         let p = make_staged(vec![ConversationAppend {
             role: ConversationAppendRole::User,
+            identity: None,
             content: CoreRenderable::Blocks {
                 blocks: vec![
                     crate::types::ContentBlock::Text { text: "a".into() },
@@ -1825,6 +1894,7 @@ mod tests {
     fn extract_content_single_text_block_collapses() {
         let p = make_staged(vec![ConversationAppend {
             role: ConversationAppendRole::User,
+            identity: None,
             content: CoreRenderable::Blocks {
                 blocks: vec![crate::types::ContentBlock::Text {
                     text: "single".into(),
@@ -1841,6 +1911,7 @@ mod tests {
     fn system_notice_append_does_not_leak_projection_into_operator_prompt() {
         let append = ConversationAppend {
             role: ConversationAppendRole::SystemNotice,
+            identity: None,
             content: CoreRenderable::SystemNotice {
                 kind: SystemNoticeKind::Comms,
                 body: Some("Peer request: checksum_token".to_string()),
@@ -1886,6 +1957,7 @@ mod tests {
         };
         let p = make_staged(vec![ConversationAppend {
             role: ConversationAppendRole::SystemNotice,
+            identity: None,
             content: CoreRenderable::SystemNotice {
                 kind: SystemNoticeKind::ExternalEvent,
                 body: Some("External event".to_string()),
@@ -1928,158 +2000,68 @@ mod tests {
     }
 
     #[test]
-    fn typed_turn_appends_excludes_context_only_appends() {
-        let p = RunPrimitive::ImmediateContextAppend(ConversationContextAppend {
-            key: "ctx".to_string(),
-            content: CoreRenderable::SystemNotice {
-                kind: SystemNoticeKind::Comms,
-                body: Some("context".to_string()),
-                blocks: Vec::new(),
-            },
-        });
-
-        assert!(p.typed_turn_appends().is_empty());
-        assert_eq!(
-            p.extract_content_input(),
-            crate::types::ContentInput::Text(String::new())
-        );
-    }
-
-    // --- is_context_only_immediate tests ---
-
-    #[test]
-    fn context_only_immediate_true() {
-        let p = RunPrimitive::StagedInput(StagedRunInput {
-            boundary: RunApplyBoundary::Immediate,
-            appends: vec![],
-            context_appends: vec![ConversationContextAppend {
-                key: "k".into(),
-                content: CoreRenderable::Text { text: "ctx".into() },
-            }],
-            contributing_input_ids: vec![],
-            turn_metadata: None,
-        });
-        assert!(p.is_context_only_immediate());
-    }
-
-    #[test]
-    fn context_only_immediate_false_with_appends() {
-        let p = RunPrimitive::StagedInput(StagedRunInput {
-            boundary: RunApplyBoundary::Immediate,
-            appends: vec![ConversationAppend {
-                role: ConversationAppendRole::User,
-                content: CoreRenderable::Text { text: "hi".into() },
-            }],
-            context_appends: vec![ConversationContextAppend {
-                key: "k".into(),
-                content: CoreRenderable::Text { text: "ctx".into() },
-            }],
-            contributing_input_ids: vec![],
-            turn_metadata: None,
-        });
-        assert!(!p.is_context_only_immediate());
-    }
-
-    #[test]
-    fn context_only_immediate_false_wrong_boundary() {
-        let p = RunPrimitive::StagedInput(StagedRunInput {
-            boundary: RunApplyBoundary::RunCheckpoint,
-            appends: vec![],
-            context_appends: vec![ConversationContextAppend {
-                key: "k".into(),
-                content: CoreRenderable::Text { text: "ctx".into() },
-            }],
-            contributing_input_ids: vec![],
-            turn_metadata: None,
-        });
-        assert!(!p.is_context_only_immediate());
-    }
-
-    #[test]
-    fn context_only_apply_without_turn_true_for_plain_context() {
-        let p = RunPrimitive::StagedInput(StagedRunInput {
-            boundary: RunApplyBoundary::RunCheckpoint,
-            appends: vec![],
-            context_appends: vec![ConversationContextAppend {
-                key: "k".into(),
-                content: CoreRenderable::Text { text: "ctx".into() },
-            }],
-            contributing_input_ids: vec![],
-            turn_metadata: Some(RuntimeTurnMetadata {
-                execution_kind: Some(RuntimeExecutionKind::ContentTurn),
-                ..Default::default()
-            }),
-        });
-
-        assert!(p.is_context_only_apply_without_turn());
-    }
-
-    #[test]
-    fn terminal_peer_response_context_and_run_bypasses_context_only_shortcut() {
+    fn terminal_peer_response_notice_and_run_needs_no_context_sidecar() {
         let p = RunPrimitive::StagedInput(StagedRunInput {
             boundary: RunApplyBoundary::RunStart,
-            appends: vec![],
-            context_appends: vec![ConversationContextAppend {
-                key: "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:req-123".into(),
-                content: CoreRenderable::Text {
-                    text: "Peer terminal response: done".into(),
+            appends: vec![ConversationAppend {
+                role: ConversationAppendRole::SystemNotice,
+                identity: None,
+                content: CoreRenderable::SystemNotice {
+                    kind: SystemNoticeKind::Comms,
+                    body: Some("Peer terminal response: done".into()),
+                    blocks: Vec::new(),
                 },
             }],
             contributing_input_ids: vec![InputId::new()],
             turn_metadata: Some(RuntimeTurnMetadata {
                 execution_kind: Some(RuntimeExecutionKind::ContentTurn),
                 peer_response_terminal_apply_intent: Some(
-                    PeerResponseTerminalApplyIntent::AppendContextAndRun,
+                    PeerResponseTerminalApplyIntent::AppendContentAndRun,
                 ),
                 ..Default::default()
             }),
         });
 
-        assert!(p.is_peer_response_terminal_context_and_run());
+        assert!(p.is_peer_response_terminal_notice_and_run());
         assert_eq!(p.peer_response_terminal_apply_intent_violation(), None);
-        assert!(!p.is_context_only_apply_without_turn());
     }
 
     #[test]
-    fn terminal_peer_response_with_conversation_append_keeps_context_and_run_intent() {
+    fn terminal_peer_response_notice_can_accompany_conversation_append() {
         let p = RunPrimitive::StagedInput(StagedRunInput {
             boundary: RunApplyBoundary::RunStart,
-            appends: vec![ConversationAppend {
-                role: ConversationAppendRole::User,
-                content: CoreRenderable::Blocks {
-                    blocks: vec![crate::types::ContentBlock::Text {
-                        text: "Peer terminal response: done".into(),
-                    }],
+            appends: vec![
+                ConversationAppend {
+                    role: ConversationAppendRole::User,
+                    identity: None,
+                    content: CoreRenderable::Blocks {
+                        blocks: vec![crate::types::ContentBlock::Text {
+                            text: "Peer terminal response: done".into(),
+                        }],
+                    },
                 },
-            }],
-            context_appends: vec![ConversationContextAppend {
-                key: "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:req-123".into(),
-                content: CoreRenderable::Text {
-                    text: "Peer terminal response: done".into(),
+                ConversationAppend {
+                    role: ConversationAppendRole::SystemNotice,
+                    identity: None,
+                    content: CoreRenderable::SystemNotice {
+                        kind: SystemNoticeKind::Comms,
+                        body: Some("Peer terminal response: done".into()),
+                        blocks: Vec::new(),
+                    },
                 },
-            }],
+            ],
             contributing_input_ids: vec![InputId::new()],
             turn_metadata: Some(RuntimeTurnMetadata {
                 execution_kind: Some(RuntimeExecutionKind::ContentTurn),
                 peer_response_terminal_apply_intent: Some(
-                    PeerResponseTerminalApplyIntent::AppendContextAndRun,
+                    PeerResponseTerminalApplyIntent::AppendContentAndRun,
                 ),
                 ..Default::default()
             }),
         });
 
-        assert!(p.is_peer_response_terminal_context_and_run());
+        assert!(p.is_peer_response_terminal_notice_and_run());
         assert_eq!(p.peer_response_terminal_apply_intent_violation(), None);
-        assert!(!p.is_context_only_apply_without_turn());
-    }
-
-    #[test]
-    fn non_staged_is_not_context_only() {
-        let p = RunPrimitive::ImmediateAppend(ConversationAppend {
-            role: ConversationAppendRole::User,
-            content: CoreRenderable::Text { text: "hi".into() },
-        });
-        assert!(!p.is_context_only_immediate());
     }
 
     #[test]
@@ -2145,8 +2127,54 @@ mod tests {
     }
 
     #[test]
+    fn turn_metadata_system_prompts_round_trip_merge_and_preserve_order() {
+        let mut metadata = RuntimeTurnMetadata {
+            system_prompts: vec!["first".into()],
+            ..Default::default()
+        };
+        metadata
+            .merge(RuntimeTurnMetadata {
+                system_prompts: vec!["second".into(), "third".into()],
+                ..Default::default()
+            })
+            .expect("ordered System prompt merge");
+        assert_eq!(metadata.system_prompts, ["first", "second", "third"]);
+        let json = serde_json::to_value(&metadata).expect("serialize metadata");
+        assert_eq!(
+            serde_json::from_value::<RuntimeTurnMetadata>(json).expect("parse metadata"),
+            metadata
+        );
+    }
+    #[test]
+    fn turn_metadata_internal_steer_contexts_merge_in_order_and_stay_off_wire() {
+        let context = |text| TurnRequestContext::new(text).expect("non-empty context");
+        let mut metadata = RuntimeTurnMetadata {
+            transient_turn_context: Some(context("caller")),
+            transient_turn_context_appends: vec![context("steer one")],
+            ..Default::default()
+        };
+        metadata
+            .merge(RuntimeTurnMetadata {
+                transient_turn_context_appends: vec![context("steer two")],
+                ..Default::default()
+            })
+            .expect("ordered internal append merge");
+        assert_eq!(
+            metadata
+                .transient_turn_context_appends
+                .iter()
+                .map(TurnRequestContext::as_str)
+                .collect::<Vec<_>>(),
+            ["steer one", "steer two"]
+        );
+        let json = serde_json::to_value(&metadata).expect("serialize metadata");
+        assert_eq!(json["transient_turn_context"], "caller");
+        assert!(json.get("transient_turn_context_appends").is_none());
+    }
+    #[test]
     fn conversation_append_role_serde() {
         for role in [
+            ConversationAppendRole::System,
             ConversationAppendRole::User,
             ConversationAppendRole::Assistant,
             ConversationAppendRole::SystemNotice,
@@ -2158,7 +2186,6 @@ mod tests {
             assert_eq!(role, parsed);
         }
     }
-
     #[test]
     fn conversation_append_role_injected_context_is_snake_case() {
         assert_eq!(
@@ -2166,11 +2193,11 @@ mod tests {
             serde_json::json!("injected_context"),
         );
     }
-
     #[test]
     fn conversation_append_serde() {
         let append = ConversationAppend {
             role: ConversationAppendRole::User,
+            identity: None,
             content: CoreRenderable::Text {
                 text: "hello".into(),
             },
@@ -2179,18 +2206,17 @@ mod tests {
         let parsed: ConversationAppend = serde_json::from_value(json).unwrap();
         assert_eq!(append, parsed);
     }
-
     #[test]
     fn staged_run_input_serde() {
         let staged = StagedRunInput {
             boundary: RunApplyBoundary::RunStart,
             appends: vec![ConversationAppend {
                 role: ConversationAppendRole::User,
+                identity: None,
                 content: CoreRenderable::Text {
                     text: "prompt".into(),
                 },
             }],
-            context_appends: vec![],
             contributing_input_ids: vec![InputId::new()],
             turn_metadata: Some(RuntimeTurnMetadata {
                 keep_alive: Some(KeepAliveDirective::Enable(KeepAlivePolicy {
@@ -2204,7 +2230,6 @@ mod tests {
         let parsed: StagedRunInput = serde_json::from_value(json).unwrap();
         assert_eq!(staged, parsed);
     }
-
     /// Dogma K13: the per-turn keep-alive carrier must represent the full
     /// tri-state. `Disable` must survive serde round-trips distinctly from
     /// both `Enable` and absence (`Preserve`).
@@ -2218,7 +2243,6 @@ mod tests {
         let parsed: RuntimeTurnMetadata = serde_json::from_value(json).unwrap();
         assert_eq!(parsed.keep_alive, Some(KeepAliveDirective::Disable));
         assert!(!parsed.is_empty(), "explicit Disable is not empty metadata");
-
         let enable = RuntimeTurnMetadata {
             keep_alive: Some(KeepAliveDirective::Enable(KeepAlivePolicy {
                 ttl: std::time::Duration::from_secs(30),
@@ -2231,13 +2255,11 @@ mod tests {
         assert_eq!(parsed.keep_alive, enable.keep_alive);
         assert_ne!(parsed.keep_alive, Some(KeepAliveDirective::Disable));
     }
-
     #[test]
     fn run_primitive_staged_input_serde() {
         let primitive = RunPrimitive::StagedInput(StagedRunInput {
             boundary: RunApplyBoundary::RunStart,
             appends: vec![],
-            context_appends: vec![],
             contributing_input_ids: vec![InputId::new(), InputId::new()],
             turn_metadata: None,
         });
@@ -2246,11 +2268,11 @@ mod tests {
         let parsed: RunPrimitive = serde_json::from_value(json).unwrap();
         assert_eq!(primitive, parsed);
     }
-
     #[test]
     fn run_primitive_immediate_append_serde() {
         let primitive = RunPrimitive::ImmediateAppend(ConversationAppend {
             role: ConversationAppendRole::SystemNotice,
+            identity: None,
             content: CoreRenderable::Text {
                 text: "notice".into(),
             },
@@ -2260,39 +2282,23 @@ mod tests {
         let parsed: RunPrimitive = serde_json::from_value(json).unwrap();
         assert_eq!(primitive, parsed);
     }
-
     #[test]
     fn run_primitive_contributing_input_ids() {
         let ids = vec![InputId::new(), InputId::new()];
         let primitive = RunPrimitive::StagedInput(StagedRunInput {
             boundary: RunApplyBoundary::RunStart,
             appends: vec![],
-            context_appends: vec![],
             contributing_input_ids: ids.clone(),
             turn_metadata: None,
         });
         assert_eq!(primitive.contributing_input_ids(), &ids);
-
         let immediate = RunPrimitive::ImmediateAppend(ConversationAppend {
             role: ConversationAppendRole::User,
+            identity: None,
             content: CoreRenderable::Text { text: "hi".into() },
         });
         assert!(immediate.contributing_input_ids().is_empty());
     }
-
-    #[test]
-    fn conversation_context_append_serde() {
-        let ctx = ConversationContextAppend {
-            key: "peers".into(),
-            content: CoreRenderable::Json {
-                value: serde_json::json!(["peer1", "peer2"]),
-            },
-        };
-        let json = serde_json::to_value(&ctx).unwrap();
-        let parsed: ConversationContextAppend = serde_json::from_value(json).unwrap();
-        assert_eq!(ctx, parsed);
-    }
-
     /// K2 invariant: the per-turn effective params come from a typed
     /// field-wise merge on the carrier — explicit overrides win, build-derived
     /// tool defaults fill unset slots, and nothing round-trips through JSON.
@@ -2317,7 +2323,6 @@ mod tests {
                 ..Default::default()
             })),
         };
-
         let effective = carrier.effective_params().expect("merge succeeds");
         assert_eq!(effective.temperature, Some(0.3));
         let Some(ProviderTag::Anthropic(tag)) = effective.provider_tag else {
@@ -2337,7 +2342,6 @@ mod tests {
             ))
         );
     }
-
     /// K2 invariant: a provider-family conflict between explicit params and
     /// tool defaults is a typed fault, never a silently-fabricated mixed bag.
     #[test]
@@ -2358,7 +2362,6 @@ mod tests {
             }
         );
     }
-
     #[test]
     fn carrier_effective_params_preserves_explicit_openai_store_false() {
         let carrier = ProviderParamsCarrier {
@@ -2375,7 +2378,6 @@ mod tests {
                 ..Default::default()
             })),
         };
-
         let effective = carrier.effective_params().expect("merge succeeds");
         let Some(ProviderTag::OpenAi(tag)) = effective.provider_tag else {
             panic!("openai tag expected");
@@ -2383,7 +2385,6 @@ mod tests {
         assert_eq!(tag.store, Some(false));
         assert_eq!(tag.prompt_cache_key.as_deref(), Some("default-key"));
     }
-
     #[test]
     fn openai_advanced_params_serde_and_field_merge_round_trip() {
         let explicit: ProviderParamsOverride = serde_json::from_value(serde_json::json!({
@@ -2408,7 +2409,6 @@ mod tests {
                 ..Default::default()
             })),
         };
-
         let effective = carrier.effective_params().expect("merge succeeds");
         let Some(ProviderTag::OpenAi(ref tag)) = effective.provider_tag else {
             panic!("openai tag expected");
@@ -2427,14 +2427,12 @@ mod tests {
                 ttl: Some(OpenAiPromptCacheTtl::ThirtyMinutes),
             })
         );
-
         let json = serde_json::to_value(&effective).expect("serialize merged params");
         assert_eq!(
             json["provider_tag"]["prompt_cache_options"]["ttl"],
             serde_json::json!("30m")
         );
     }
-
     /// K2 invariant: the carrier's durable face is exactly the typed override
     /// shape (transparent serde), and unknown keys fail closed at ingress.
     #[test]
@@ -2444,14 +2442,12 @@ mod tests {
                 .expect("typed shape parses");
         assert_eq!(parsed.params.temperature, Some(0.7));
         assert!(parsed.tool_defaults.is_none());
-
         let unknown =
             serde_json::from_value::<ProviderParamsCarrier>(serde_json::json!({ "thinking": {} }));
         assert!(
             unknown.is_err(),
             "legacy/unknown provider-params keys must be rejected at ingress"
         );
-
         // The durable face is exactly the typed override shape: one
         // `temperature` key (f32-backed, so the JSON number is the f32
         // value), and the re-parsed carrier is identical.
@@ -2467,7 +2463,6 @@ mod tests {
             serde_json::from_value(round).expect("round-trip parses");
         assert_eq!(reparsed, parsed);
     }
-
     /// K2 invariant: extraction structured-output injection goes through the
     /// typed ProviderTag owner and fails typed on identity conflicts.
     #[test]
@@ -2476,7 +2471,6 @@ mod tests {
             serde_json::json!({"type": "object", "properties": {}}),
         )
         .expect("schema");
-
         let mut params = ProviderParamsOverride::default();
         params
             .set_structured_output(Provider::Anthropic, schema.clone())
@@ -2488,7 +2482,6 @@ mod tests {
                 ..
             }))
         ));
-
         let mut mismatched = ProviderParamsOverride {
             provider_tag: Some(ProviderTag::Gemini(GeminiProviderTag::default())),
             ..Default::default()
@@ -2500,7 +2493,6 @@ mod tests {
             err,
             ProviderParamsMergeError::ProviderTagMismatch { .. }
         ));
-
         // `Other` has no provider-native slot: a typed capability outcome,
         // never a fault and never a silent injection.
         let mut other = ProviderParamsOverride::default();
@@ -2510,7 +2502,6 @@ mod tests {
         assert_eq!(outcome, StructuredOutputInjection::NoProviderSlot);
         assert!(other.provider_tag.is_none());
     }
-
     #[test]
     fn opaque_provider_body_round_trip() {
         let v = serde_json::json!({"max_uses": 5, "allowed_domains": ["example.com"]});

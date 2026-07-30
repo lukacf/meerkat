@@ -490,12 +490,12 @@ impl AnthropicClient {
     /// Build request body for Anthropic API
     fn build_request_body(&self, request: &LlmRequest) -> Result<Value, LlmError> {
         let mut messages = Vec::new();
-        let mut system_prompt = None;
+        let mut system_messages = Vec::new();
 
         for msg in &request.messages {
             match msg {
                 Message::System(s) => {
-                    system_prompt = Some(s.content.clone());
+                    system_messages.push(s.content.clone());
                 }
                 Message::SystemNotice(notice) => {
                     messages.push(serde_json::json!({
@@ -714,8 +714,8 @@ impl AnthropicClient {
             });
         }
 
-        if let Some(system) = system_prompt {
-            body["system"] = Self::anthropic_system_prompt_value(&system, cache_control);
+        if !system_messages.is_empty() {
+            body["system"] = Self::anthropic_ordered_system_value(&system_messages, cache_control);
         }
 
         if matches!(cache_control, AnthropicCacheControlPolicy::Automatic) {
@@ -841,18 +841,32 @@ impl AnthropicClient {
         Ok(body)
     }
 
-    fn anthropic_system_prompt_value(
-        system: &str,
+    fn anthropic_ordered_system_value(
+        system_messages: &[String],
         cache_control: AnthropicCacheControlPolicy,
     ) -> Value {
-        match cache_control {
-            AnthropicCacheControlPolicy::SystemPrefix => serde_json::json!([{
-                "type": "text",
-                "text": system,
-                "cache_control": {"type": "ephemeral"}
-            }]),
-            _ => Value::String(system.to_string()),
+        if system_messages.len() == 1 && cache_control != AnthropicCacheControlPolicy::SystemPrefix
+        {
+            return Value::String(system_messages[0].clone());
         }
+        Value::Array(
+            system_messages
+                .iter()
+                .enumerate()
+                .map(|(index, system)| {
+                    let mut block = serde_json::json!({
+                        "type": "text",
+                        "text": system,
+                    });
+                    if cache_control == AnthropicCacheControlPolicy::SystemPrefix
+                        && index + 1 == system_messages.len()
+                    {
+                        block["cache_control"] = serde_json::json!({"type": "ephemeral"});
+                    }
+                    block
+                })
+                .collect(),
+        )
     }
 
     fn ensure_claude_ai_oauth_system_marker(body: &mut Value) {
@@ -861,21 +875,17 @@ impl AnthropicClient {
                 if system.contains(CLAUDE_AI_OAUTH_SYSTEM_MARKER) {
                     return;
                 }
-                if system.is_empty() {
-                    *system = CLAUDE_AI_OAUTH_SYSTEM_MARKER.to_string();
-                } else {
-                    let existing = std::mem::take(system);
-                    body["system"] = Value::Array(vec![
-                        serde_json::json!({
-                            "type": "text",
-                            "text": CLAUDE_AI_OAUTH_SYSTEM_MARKER,
-                        }),
-                        serde_json::json!({
-                            "type": "text",
-                            "text": existing,
-                        }),
-                    ]);
-                }
+                let existing = std::mem::take(system);
+                body["system"] = Value::Array(vec![
+                    serde_json::json!({
+                        "type": "text",
+                        "text": CLAUDE_AI_OAUTH_SYSTEM_MARKER,
+                    }),
+                    serde_json::json!({
+                        "type": "text",
+                        "text": existing,
+                    }),
+                ]);
             }
             Some(Value::Array(blocks)) => {
                 let already_present = blocks.iter().any(|block| {
@@ -996,6 +1006,27 @@ fn merge_usage(target: &mut Usage, update: &AnthropicUsage) {
 impl LlmClient for AnthropicClient {
     fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
         project_anthropic_replay_messages(messages)
+    }
+
+    fn request_pressure(
+        &self,
+        request: &LlmRequest,
+    ) -> Result<Option<meerkat_core::ProviderRequestPressure>, LlmError> {
+        let mut projected_request = request.clone();
+        projected_request.messages = self.project_replay_messages(&request.messages)?;
+        let mut body = self.build_request_body(&projected_request)?;
+        if self.authorizer_needs_claude_ai_oauth_system_marker() {
+            Self::ensure_claude_ai_oauth_system_marker(&mut body);
+        }
+        let encoded_bytes = serde_json::to_vec(&body)
+            .map_err(|error| LlmError::InvalidRequest {
+                message: format!("failed to serialize Anthropic request body: {error}"),
+            })?
+            .len() as u64;
+        Ok(Some(meerkat_core::ProviderRequestPressure::new(
+            encoded_bytes,
+            meerkat_models::approximate_request_byte_cap(self.provider()),
+        )))
     }
 
     fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
@@ -1755,6 +1786,23 @@ mod tests {
     }
 
     #[test]
+    fn claude_ai_oauth_marker_does_not_replace_authored_empty_system() {
+        let client = AnthropicClient::new("test-key".to_string()).unwrap();
+        let request = LlmRequest::new(
+            "claude-sonnet-4-6",
+            vec![Message::System(SystemMessage::new(""))],
+        );
+        let mut body = client.build_request_body(&request).unwrap();
+
+        AnthropicClient::ensure_claude_ai_oauth_system_marker(&mut body);
+
+        let system = body["system"].as_array().expect("system should be blocks");
+        assert_eq!(system.len(), 2);
+        assert_eq!(system[0]["text"], CLAUDE_AI_OAUTH_SYSTEM_MARKER);
+        assert_eq!(system[1]["text"], "");
+    }
+
+    #[test]
     fn build_request_body_does_not_add_claude_ai_oauth_marker_for_api_key_path() {
         let client = AnthropicClient::new("test-key".to_string()).unwrap();
         let request = LlmRequest::new(
@@ -1765,6 +1813,37 @@ mod tests {
         let body = client.build_request_body(&request).unwrap();
 
         assert!(body.get("system").is_none());
+    }
+
+    #[test]
+    fn ordered_system_messages_are_preserved_as_distinct_anthropic_blocks() {
+        let client = AnthropicClient::new("test-key".to_string()).unwrap();
+        let messages = vec![
+            Message::User(UserMessage::text("work")),
+            Message::System(SystemMessage::new("")),
+            Message::User(UserMessage::text("continue")),
+            Message::System(SystemMessage::new(" \t ")),
+            Message::System(SystemMessage::new("duplicate")),
+            Message::System(SystemMessage::new("duplicate")),
+        ];
+        let request = LlmRequest::new("claude-sonnet-4-6", messages.clone());
+
+        let body = client.build_request_body(&request).unwrap();
+        assert_eq!(request.messages, messages);
+        let system = body["system"]
+            .as_array()
+            .expect("multiple ordered system messages should remain distinct blocks");
+        assert_eq!(system.len(), 4);
+        assert_eq!(system[0]["text"], "");
+        assert_eq!(system[1]["text"], " \t ");
+        assert_eq!(system[2]["text"], "duplicate");
+        assert_eq!(system[3]["text"], "duplicate");
+        let projected_messages = body["messages"].as_array().expect("messages array");
+        assert_eq!(projected_messages.len(), 2);
+        assert_eq!(projected_messages[0]["role"], "user");
+        assert_eq!(projected_messages[0]["content"], "work");
+        assert_eq!(projected_messages[1]["role"], "user");
+        assert_eq!(projected_messages[1]["content"], "continue");
     }
 
     // =========================================================================

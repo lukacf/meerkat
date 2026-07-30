@@ -9,8 +9,8 @@ use meerkat_contracts::{
     RealtimeVideoChunk,
 };
 use meerkat_core::{
-    PendingSystemContextAppend, Provider, RealtimeTranscriptEvent, RealtimeUserContentIdentity,
-    RealtimeUserContentTombstone, ToolResult,
+    Provider, RealtimeTranscriptEvent, RealtimeUserContentIdentity, RealtimeUserContentTombstone,
+    ToolResult,
 };
 use meerkat_core::{
     RealtimeOpenProjectionLease, RealtimeOpenProjectionLeaseSlot, SessionLlmIdentity, StopReason,
@@ -228,7 +228,7 @@ pub struct RealtimeSessionOpenConfig {
     pub turning_mode: RealtimeTurningMode,
     pub llm_identity: SessionLlmIdentity,
     pub visible_tools: Vec<ToolDef>,
-    pub seed_messages: Vec<Message>,
+    seed_messages: Vec<Message>,
     /// Take-once process memory custody spanning canonical image hydration
     /// through provider seed acknowledgement.
     ///
@@ -236,27 +236,23 @@ pub struct RealtimeSessionOpenConfig {
     /// reusing or concurrently opening from another clone must acquire fresh
     /// custody instead of reusing the original reservation.
     open_projection_lease: RealtimeOpenProjectionLeaseSlot,
-    /// Authoritative resolved root system prompt for this realtime session.
+    /// Provider-lowered ordered system-channel instructions for this realtime session.
     ///
-    /// This is the canonical owner of the live session's system prompt. It is
-    /// populated at projection time by the runtime from the resolved root
-    /// system message (`realtime_projection_root_system_message`) — the same
-    /// content that, when present, is materialized into `seed_messages[0]`.
+    /// The canonical owners remain the ordered `Message::System` and
+    /// `Message::SystemNotice` transcript rows. Projection deterministically
+    /// lifts every such row, in transcript order, into this singular field for
+    /// realtime providers whose instruction channel cannot represent
+    /// interleaved system-channel messages.
     ///
     /// Provider adapters and snapshot builders MUST consume this typed field
-    /// when they need the prompt as a distinct value (e.g. the OpenAI Refresh
+    /// when they need one provider instruction value (e.g. the OpenAI Refresh
     /// path rebuilding the realtime `session.update` instructions field). They
-    /// MUST NOT re-derive prompt truth by inspecting `seed_messages[0]`: the
+    /// MUST NOT re-derive it by inspecting `seed_messages[0]`: System
+    /// messages have no privileged position, and the
     /// history-event projector drops `Message::System` / `Message::SystemNotice`
-    /// entries, so inference from seed history silently wipes the prompt on
-    /// refresh. `None` means the session has no resolved root system prompt.
-    pub system_prompt: Option<String>,
-    /// Runtime-authored system context carried as typed provenance.
-    ///
-    /// Provider adapters must treat this as the only authoritative realtime
-    /// reconstruction source for runtime context. Rendered transcript markers
-    /// are projections only and must not be parsed back into authority.
-    pub runtime_system_context: Vec<PendingSystemContextAppend>,
+    /// entries. `None` means the session has no ordered system-channel rows;
+    /// `Some("")` means it has an authored empty System row.
+    ordered_system_instructions: Option<String>,
     /// Durable caller-id bindings for committed non-text user inputs. Provider
     /// adapters rebuild this registry on reconnect before accepting retries.
     pub user_content_identities: Vec<RealtimeUserContentIdentity>,
@@ -286,6 +282,23 @@ pub struct RealtimeSessionOpenConfig {
 }
 
 impl RealtimeSessionOpenConfig {
+    /// Deterministically lower every ordered System/SystemNotice row into the
+    /// singular instruction representation used by realtime providers.
+    #[must_use]
+    pub fn lower_ordered_system_messages(messages: &[Message]) -> Option<String> {
+        let mut systems = messages.iter().filter_map(|message| match message {
+            Message::System(system) => Some(system.content.clone()),
+            Message::SystemNotice(notice) => Some(notice.model_projection_text()),
+            _ => None,
+        });
+        let mut lowered = systems.next()?;
+        for system in systems {
+            lowered.push_str("\n\n");
+            lowered.push_str(&system);
+        }
+        Some(lowered)
+    }
+
     #[must_use]
     pub fn new(
         turning_mode: RealtimeTurningMode,
@@ -293,14 +306,56 @@ impl RealtimeSessionOpenConfig {
         visible_tools: Vec<ToolDef>,
         seed_messages: Vec<Message>,
     ) -> Self {
+        let ordered_system_instructions = Self::lower_ordered_system_messages(&seed_messages);
+        Self::new_with_projection(
+            turning_mode,
+            llm_identity,
+            visible_tools,
+            seed_messages,
+            ordered_system_instructions,
+        )
+    }
+
+    /// Construct an open projection from a caller-selected replay seed while
+    /// deriving instructions from the complete active materialized transcript.
+    ///
+    /// A bounded replay seed may omit old dialogue and System rows. The
+    /// provider's top-level instruction projection must nevertheless cover
+    /// every System/SystemNotice in the active transcript. `canonical_messages`
+    /// is that active materialization only; retained historical rewrite
+    /// strands are never instruction input.
+    #[must_use]
+    pub fn for_open_from_messages(
+        turning_mode: RealtimeTurningMode,
+        llm_identity: SessionLlmIdentity,
+        visible_tools: Vec<ToolDef>,
+        seed_messages: Vec<Message>,
+        canonical_messages: &[Message],
+    ) -> Self {
+        let ordered_system_instructions = Self::lower_ordered_system_messages(canonical_messages);
+        Self::new_with_projection(
+            turning_mode,
+            llm_identity,
+            visible_tools,
+            seed_messages,
+            ordered_system_instructions,
+        )
+    }
+
+    fn new_with_projection(
+        turning_mode: RealtimeTurningMode,
+        llm_identity: SessionLlmIdentity,
+        visible_tools: Vec<ToolDef>,
+        seed_messages: Vec<Message>,
+        ordered_system_instructions: Option<String>,
+    ) -> Self {
         Self {
             turning_mode,
             llm_identity,
             visible_tools,
             seed_messages,
             open_projection_lease: RealtimeOpenProjectionLeaseSlot::default(),
-            system_prompt: None,
-            runtime_system_context: Vec::new(),
+            ordered_system_instructions,
             user_content_identities: Vec::new(),
             user_content_tombstones: Vec::new(),
             canonical_user_image_decoded_bytes: None,
@@ -308,6 +363,22 @@ impl RealtimeSessionOpenConfig {
             response_nudge_timeout_ms: None,
             response_nudge_max_attempts: None,
         }
+    }
+
+    /// Construct a refresh-only projection. Refresh has no seed replay, but its
+    /// provider instructions are still derived here from the ordinary ordered
+    /// System rows at the projection boundary.
+    #[must_use]
+    pub fn for_refresh_from_messages(
+        turning_mode: RealtimeTurningMode,
+        llm_identity: SessionLlmIdentity,
+        visible_tools: Vec<ToolDef>,
+        canonical_messages: &[Message],
+    ) -> Self {
+        let mut config = Self::new(turning_mode, llm_identity, visible_tools, Vec::new());
+        config.ordered_system_instructions =
+            Self::lower_ordered_system_messages(canonical_messages);
+        config
     }
 
     /// Carry an already-acquired open-projection lease from the runtime's
@@ -328,24 +399,32 @@ impl RealtimeSessionOpenConfig {
         self.open_projection_lease.take()
     }
 
-    /// Builder-style typed root system prompt for provider reconstruction.
+    /// Provider-lowered ordered System instructions.
     ///
-    /// The runtime populates this from the resolved root system message so the
-    /// provider refresh path consumes the authoritative prompt instead of
-    /// inferring it from `seed_messages[0]`.
+    /// Open configs derive this from every ordered seed System. Refresh-only
+    /// configs derive it from the canonical transcript through
+    /// [`Self::for_refresh_from_messages`].
     #[must_use]
-    pub fn with_system_prompt(mut self, system_prompt: Option<String>) -> Self {
-        self.system_prompt = system_prompt;
-        self
+    pub fn ordered_system_instructions(&self) -> Option<&str> {
+        self.ordered_system_instructions.as_deref()
     }
 
-    /// Builder-style typed runtime context for provider reconstruction.
+    /// Immutable canonical seed transcript paired with
+    /// [`Self::ordered_system_instructions`].
+    ///
+    /// Mutation is intentionally unavailable: changing the seed after
+    /// construction would invalidate the derived ordered-System projection.
     #[must_use]
-    pub fn with_runtime_system_context(
-        mut self,
-        runtime_system_context: Vec<PendingSystemContextAppend>,
-    ) -> Self {
-        self.runtime_system_context = runtime_system_context;
+    pub fn seed_messages(&self) -> &[Message] {
+        &self.seed_messages
+    }
+
+    /// Replace the canonical seed while atomically re-deriving its ordered
+    /// System projection.
+    #[must_use]
+    pub fn with_seed_messages(mut self, seed_messages: Vec<Message>) -> Self {
+        self.ordered_system_instructions = Self::lower_ordered_system_messages(&seed_messages);
+        self.seed_messages = seed_messages;
         self
     }
 
@@ -463,7 +542,7 @@ mod tests {
     use super::*;
 
     use meerkat_core::Provider;
-    use meerkat_core::types::{SystemMessage, UserMessage};
+    use meerkat_core::types::{SystemMessage, SystemNoticeKind, SystemNoticeMessage, UserMessage};
 
     fn sample_identity() -> SessionLlmIdentity {
         SessionLlmIdentity {
@@ -484,55 +563,102 @@ mod tests {
         assert!(matches!(error, LlmError::InvalidRequest { .. }));
     }
 
-    /// Row #209 gate: the realtime open config carries the resolved system
-    /// prompt as a typed field, and the prompt's authority is independent of
-    /// `seed_messages[0]`. A refresh that consumes `config.system_prompt` must
-    /// preserve the prompt even when the seed history has been projected to
-    /// drop its lead `Message::System` (the history-event projector path), so
-    /// no consumer needs to re-infer prompt truth from `seed_messages`.
     #[test]
-    fn open_config_system_prompt_is_typed_and_independent_of_seed_history() {
-        let resolved_prompt = "You are a careful realtime assistant.".to_string();
-
-        // Seed history WITHOUT a lead `Message::System` — i.e. the
-        // history-event projection already dropped the system message, which
-        // is exactly the case where `seed_messages[0]` inference returns the
-        // wrong answer and silently wipes the prompt on refresh.
+    fn open_config_derives_every_ordered_seed_system_without_row_zero_privilege() {
         let config = RealtimeSessionOpenConfig::new(
             RealtimeTurningMode::ProviderManaged,
             sample_identity(),
             Vec::new(),
-            vec![Message::User(UserMessage::text("hello".to_string()))],
-        )
-        .with_system_prompt(Some(resolved_prompt.clone()));
-
-        // The typed field is the authoritative source for the refresh path.
-        assert_eq!(
-            config.system_prompt.as_deref(),
-            Some(resolved_prompt.as_str())
+            vec![
+                Message::User(UserMessage::text("hello")),
+                Message::System(SystemMessage::new("first")),
+                Message::User(UserMessage::text("continue")),
+                Message::System(SystemMessage::new("")),
+                Message::SystemNotice(SystemNoticeMessage::new(SystemNoticeKind::Generic, "")),
+                Message::SystemNotice(SystemNoticeMessage::new(
+                    SystemNoticeKind::Generic,
+                    "duplicate",
+                )),
+                Message::SystemNotice(SystemNoticeMessage::new(
+                    SystemNoticeKind::Generic,
+                    "duplicate",
+                )),
+                Message::System(SystemMessage::new(" \t ")),
+            ],
         );
-
-        // Authority does NOT come from inspecting the seed history lead: the
-        // first seed message is a user turn, not a system message.
-        assert!(matches!(
-            config.seed_messages.first(),
-            Some(Message::User(_))
-        ));
+        assert_eq!(
+            config.ordered_system_instructions(),
+            Some("first\n\n\n\n\n\nduplicate\n\nduplicate\n\n \t ")
+        );
     }
 
-    /// Row #209 gate: `new` defaults the typed prompt to `None`, and the
-    /// builder is the single populate-point used by the runtime projection.
     #[test]
-    fn open_config_system_prompt_defaults_none_and_builder_sets_it() {
+    fn open_without_system_rows_is_none_and_refresh_derives_without_seed_replay() {
+        let open = RealtimeSessionOpenConfig::new(
+            RealtimeTurningMode::ExplicitCommit,
+            sample_identity(),
+            Vec::new(),
+            vec![Message::User(UserMessage::text("hello"))],
+        );
+        assert_eq!(open.ordered_system_instructions(), None);
+
+        let refresh = RealtimeSessionOpenConfig::for_refresh_from_messages(
+            RealtimeTurningMode::ExplicitCommit,
+            sample_identity(),
+            Vec::new(),
+            &[
+                Message::User(UserMessage::text("work")),
+                Message::System(SystemMessage::new("authoritative")),
+                Message::System(SystemMessage::new("")),
+                Message::System(SystemMessage::new(" \t ")),
+            ],
+        );
+        assert!(refresh.seed_messages().is_empty());
+        assert_eq!(
+            refresh.ordered_system_instructions(),
+            Some("authoritative\n\n\n\n \t ")
+        );
+    }
+
+    #[test]
+    fn bounded_open_seed_derives_instructions_from_full_active_materialization() {
+        let seed = vec![Message::User(UserMessage::text("recent"))];
+        let active_messages = vec![
+            Message::System(SystemMessage::new("outside replay window")),
+            Message::User(UserMessage::text("old dialogue")),
+            Message::System(SystemMessage::new("")),
+            Message::User(UserMessage::text("recent")),
+        ];
+
+        let config = RealtimeSessionOpenConfig::for_open_from_messages(
+            RealtimeTurningMode::ExplicitCommit,
+            sample_identity(),
+            Vec::new(),
+            seed.clone(),
+            &active_messages,
+        );
+
+        assert_eq!(config.seed_messages(), seed);
+        assert_eq!(
+            config.ordered_system_instructions(),
+            Some("outside replay window\n\n")
+        );
+    }
+
+    #[test]
+    fn replacing_seed_atomically_rederives_ordered_system_projection() {
         let config = RealtimeSessionOpenConfig::new(
             RealtimeTurningMode::ExplicitCommit,
             sample_identity(),
             Vec::new(),
-            vec![Message::System(SystemMessage::new("seed-lead".to_string()))],
-        );
-        assert_eq!(config.system_prompt, None);
+            vec![Message::System(SystemMessage::new("stale"))],
+        )
+        .with_seed_messages(vec![
+            Message::User(UserMessage::text("work")),
+            Message::System(SystemMessage::new("current")),
+            Message::System(SystemMessage::new("")),
+        ]);
 
-        let config = config.with_system_prompt(Some("authoritative".to_string()));
-        assert_eq!(config.system_prompt.as_deref(), Some("authoritative"));
+        assert_eq!(config.ordered_system_instructions(), Some("current\n\n"));
     }
 }

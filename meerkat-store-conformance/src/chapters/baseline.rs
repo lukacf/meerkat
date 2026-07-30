@@ -3,13 +3,10 @@
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
 
-use meerkat_core::session_store::session_projection_cas_token;
 #[cfg(not(target_arch = "wasm32"))]
-use meerkat_core::{Message, UserMessage};
-use meerkat_core::{
-    SessionCheckpointRevision, SessionCheckpointState, SessionFilter, SessionGeneration, SessionId,
-    SessionStore, SessionStoreError, adopt_legacy_session,
-};
+use meerkat_core::Message;
+use meerkat_core::session_store::session_projection_cas_token;
+use meerkat_core::{SessionFilter, SessionId, SessionStore, SessionStoreError};
 
 use crate::factory::SessionStoreFactory;
 use crate::failure::{ConformanceFailure, Steps};
@@ -27,8 +24,7 @@ const CONCURRENT_WRITE_ATTEMPTS: usize = 200;
 
 /// Baseline chapter: save/load round-trips, list/delete,
 /// `delete_if_current_revision` guard semantics, append-only save-guard
-/// enforcement, checkpoint-stamp preservation across save/load,
-/// concurrent-writer contention, and large payloads.
+/// enforcement, concurrent-writer contention, and large payloads.
 ///
 /// On wasm32 the multi-task contention step is skipped: the target has no
 /// multi-threaded task spawn, so real writer parallelism is inexpressible
@@ -41,7 +37,6 @@ pub async fn baseline(factory: &dyn SessionStoreFactory) -> Result<(), Conforman
     list_and_delete(&steps, store.as_ref()).await?;
     append_only_guard(&steps, store.as_ref()).await?;
     delete_if_current_revision_guard(&steps, store.as_ref()).await?;
-    checkpoint_stamp_round_trip(&steps, factory, store.as_ref()).await?;
     #[cfg(not(target_arch = "wasm32"))]
     concurrent_writer_contention(&steps, Arc::clone(&store)).await?;
     large_payload(&steps, store.as_ref()).await?;
@@ -54,7 +49,7 @@ async fn save_load_round_trip(
     store: &dyn SessionStore,
 ) -> Result<(), ConformanceFailure> {
     const STEP: &str = "save_load_round_trip";
-    let mut session = fixtures::session_with_texts(&["turn one", "turn two"]);
+    let mut session = fixtures::session_with_texts(&["turn one", "turn two"])?;
     session.set_metadata(
         "conformance_marker",
         serde_json::json!({"chapter": CHAPTER}),
@@ -128,7 +123,7 @@ async fn list_and_delete(
     store: &dyn SessionStore,
 ) -> Result<(), ConformanceFailure> {
     const STEP: &str = "list_and_delete";
-    let session = fixtures::session_with_texts(&["listable"]);
+    let session = fixtures::session_with_texts(&["listable"])?;
     steps.wrap(STEP, store.save(&session).await)?;
 
     let listed = steps.wrap(STEP, store.list(SessionFilter::default()).await)?;
@@ -167,11 +162,11 @@ async fn append_only_guard(
     store: &dyn SessionStore,
 ) -> Result<(), ConformanceFailure> {
     const STEP: &str = "append_only_guard";
-    let mut session = fixtures::session_with_texts(&["one", "two", "three"]);
+    let mut session = fixtures::session_with_texts(&["one", "two", "three"])?;
     steps.wrap(STEP, store.save(&session).await)?;
 
     // Prefix-preserving append is admitted.
-    fixtures::push_text(&mut session, "four");
+    fixtures::push_text(&mut session, "four")?;
     steps.wrap(STEP, store.save(&session).await)?;
 
     // Shrink without a transcript-continuity proof must be rejected with the
@@ -225,14 +220,14 @@ async fn delete_if_current_revision_guard(
     store: &dyn SessionStore,
 ) -> Result<(), ConformanceFailure> {
     const STEP: &str = "delete_if_current_revision_guard";
-    let mut session = fixtures::session_with_texts(&["base"]);
+    let mut session = fixtures::session_with_texts(&["base"])?;
     steps.wrap(STEP, store.save(&session).await)?;
     let stale_row = steps
         .wrap(STEP, store.load(session.id()).await)?
         .ok_or_else(|| steps.fail(STEP, "saved session must load"))?;
     let stale_token = steps.wrap(STEP, session_projection_cas_token(&stale_row))?;
 
-    fixtures::push_text(&mut session, "newer");
+    fixtures::push_text(&mut session, "newer")?;
     steps.wrap(STEP, store.save(&session).await)?;
 
     // Stale token: no delete, row intact.
@@ -287,49 +282,13 @@ async fn delete_if_current_revision_guard(
     Ok(())
 }
 
-async fn checkpoint_stamp_round_trip(
-    steps: &Steps,
-    factory: &dyn SessionStoreFactory,
-    store: &dyn SessionStore,
-) -> Result<(), ConformanceFailure> {
-    const STEP: &str = "checkpoint_stamp_round_trip";
-    let session = fixtures::session_with_texts(&["stamped turn"]);
-    let blob = fixtures::legacy_session_blob(&session)?;
-    let adopted = steps.wrap(
-        STEP,
-        adopt_legacy_session(
-            &blob,
-            SessionGeneration::INITIAL,
-            SessionCheckpointRevision::INITIAL,
-        ),
-    )?;
-
-    steps.wrap(STEP, store.save(&adopted.session).await)?;
-    let reopened = factory.open().await?;
-    let loaded = steps
-        .wrap(STEP, reopened.load(adopted.session.id()).await)?
-        .ok_or_else(|| steps.fail(STEP, "stamped session must load after reopen"))?;
-    match steps.wrap(STEP, loaded.try_checkpoint_state())? {
-        SessionCheckpointState::Verified(stamp) if stamp == adopted.stamp => Ok(()),
-        SessionCheckpointState::Verified(_) => Err(steps.fail(
-            STEP,
-            "loaded checkpoint stamp must equal the adopted stamp byte-for-byte",
-        )),
-        SessionCheckpointState::LegacyUnverified { .. } => Err(steps.fail(
-            STEP,
-            "a stamped (adopted) session must stay Verified across save/load — the store dropped \
-             or mangled the reserved checkpoint-stamp metadata",
-        )),
-    }
-}
-
 #[cfg(not(target_arch = "wasm32"))]
 async fn concurrent_writer_contention(
     steps: &Steps,
     store: Arc<dyn SessionStore>,
 ) -> Result<(), ConformanceFailure> {
     const STEP: &str = "concurrent_writer_contention";
-    let base = fixtures::session_with_texts(&["contended base"]);
+    let base = fixtures::session_with_texts(&["contended base"])?;
     steps.wrap(STEP, store.save(&base).await)?;
     let id = base.id().clone();
 
@@ -346,7 +305,7 @@ async fn concurrent_writer_contention(
                     Err(error) => return Err(format!("load failed under contention: {error}")),
                 };
                 let mut next = current;
-                next.push(Message::User(UserMessage::text(marker.clone())));
+                fixtures::push_text(&mut next, &marker).map_err(|error| error.to_string())?;
                 match store.save(&next).await {
                     Ok(()) => return Ok(()),
                     Err(
@@ -416,12 +375,12 @@ async fn large_payload(steps: &Steps, store: &dyn SessionStore) -> Result<(), Co
     const STEP: &str = "large_payload";
     // ~4 MiB across several messages plus one ~2 MiB single message.
     let chunk = fixtures::large_text(512 * 1024);
-    let mut session = fixtures::session_with_texts(&[]);
+    let mut session = fixtures::session_with_texts(&[])?;
     for _ in 0..4 {
-        fixtures::push_text(&mut session, &chunk);
+        fixtures::push_text(&mut session, &chunk)?;
     }
     let big = fixtures::large_text(2 * 1024 * 1024);
-    fixtures::push_text(&mut session, &big);
+    fixtures::push_text(&mut session, &big)?;
     let saved_revision = steps.wrap(STEP, session.transcript_revision())?;
 
     steps.wrap(STEP, store.save(&session).await)?;
@@ -437,7 +396,7 @@ async fn large_payload(steps: &Steps, store: &dyn SessionStore) -> Result<(), Co
 
     // Large sessions still take guarded appends.
     let mut extended = loaded;
-    fixtures::push_text(&mut extended, "post-large append");
+    fixtures::push_text(&mut extended, "post-large append")?;
     steps.wrap(STEP, store.save(&extended).await)?;
     Ok(())
 }

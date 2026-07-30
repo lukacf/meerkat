@@ -386,16 +386,14 @@ impl GeminiClient {
     /// Build request body for Gemini API
     fn build_request_body(&self, request: &LlmRequest) -> Result<Value, LlmError> {
         let mut contents = Vec::new();
-        let mut system_instruction = None;
+        let mut system_instruction_parts = Vec::new();
 
         let mut tool_name_by_id: HashMap<String, String> = HashMap::new();
 
         for msg in &request.messages {
             match msg {
                 Message::System(s) => {
-                    system_instruction = Some(serde_json::json!({
-                        "parts": [{"text": s.content}]
-                    }));
+                    system_instruction_parts.push(serde_json::json!({"text": s.content}));
                 }
                 Message::SystemNotice(notice) => {
                     contents.push(serde_json::json!({
@@ -548,8 +546,10 @@ impl GeminiClient {
             }
         });
 
-        if let Some(system) = system_instruction {
-            body["systemInstruction"] = system;
+        if !system_instruction_parts.is_empty() {
+            body["systemInstruction"] = serde_json::json!({
+                "parts": system_instruction_parts,
+            });
         }
 
         if let Some(temp) = request.temperature
@@ -975,6 +975,34 @@ impl GeminiClient {
             }
         }
         Ok(())
+    }
+
+    fn requires_referenced_video_preparation(&self, messages: &[Message]) -> bool {
+        if !matches!(self.google_backend_kind, GoogleBackendKind::GoogleGenAi) {
+            return false;
+        }
+        let blocks_require_preparation = |blocks: &[ContentBlock]| {
+            blocks.iter().any(|block| {
+                matches!(
+                    block,
+                    ContentBlock::Video {
+                        data: meerkat_core::VideoData::Uri { uri },
+                        ..
+                    } if uri.starts_with("gs://")
+                )
+            })
+        };
+        messages.iter().any(|message| match message {
+            Message::User(user) => blocks_require_preparation(&user.content),
+            Message::SystemNotice(notice) => notice.blocks.iter().any(|block| match block {
+                SystemNoticeBlock::Comms { content, .. }
+                | SystemNoticeBlock::ExternalEvent { content, .. } => {
+                    blocks_require_preparation(content)
+                }
+                _ => false,
+            }),
+            Message::System(_) | Message::BlockAssistant(_) | Message::ToolResults { .. } => false,
+        })
     }
 
     async fn prepare_referenced_video_blocks(
@@ -1734,6 +1762,31 @@ impl LlmClient for GeminiClient {
         project_gemini_replay_messages(messages)
     }
 
+    fn request_pressure(
+        &self,
+        request: &LlmRequest,
+    ) -> Result<Option<meerkat_core::ProviderRequestPressure>, LlmError> {
+        let mut projected_request = request.clone();
+        projected_request.messages = self.project_replay_messages(&request.messages)?;
+        // Google GenAI rewrites gs:// references through an async Files API
+        // registration step. A synchronous observer cannot prove the resulting
+        // URI bytes, so fail truthfully unavailable instead of reporting a
+        // stale pre-registration body as exact.
+        if self.requires_referenced_video_preparation(&projected_request.messages) {
+            return Ok(None);
+        }
+        let body = self.build_stream_request_body(&projected_request)?;
+        let encoded_bytes = serde_json::to_vec(&body)
+            .map_err(|error| LlmError::InvalidRequest {
+                message: format!("failed to serialize Gemini request body: {error}"),
+            })?
+            .len() as u64;
+        Ok(Some(meerkat_core::ProviderRequestPressure::new(
+            encoded_bytes,
+            meerkat_models::approximate_request_byte_cap(self.provider()),
+        )))
+    }
+
     fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
         let inner: LlmStream<'a> = Box::pin(async_stream::try_stream! {
             let mut projected_request = request.clone();
@@ -2013,6 +2066,39 @@ mod tests {
     use meerkat_llm_core::ImageGenerationExecutor;
     use std::sync::{Arc, Mutex};
     use tokio::net::TcpListener;
+
+    #[test]
+    fn ordered_system_messages_are_preserved_as_distinct_gemini_parts()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let client = GeminiClient::new("test-key".to_string());
+        let messages = vec![
+            Message::User(UserMessage::text("work")),
+            Message::System(meerkat_core::SystemMessage::new("")),
+            Message::User(UserMessage::text("continue")),
+            Message::System(meerkat_core::SystemMessage::new(" \t ")),
+            Message::System(meerkat_core::SystemMessage::new("duplicate")),
+            Message::System(meerkat_core::SystemMessage::new("duplicate")),
+        ];
+        let request = LlmRequest::new("gemini-3.1-pro-preview", messages.clone());
+
+        let body = client.build_request_body(&request)?;
+        assert_eq!(request.messages, messages);
+        let parts = body["systemInstruction"]["parts"]
+            .as_array()
+            .ok_or("missing system instruction parts")?;
+        assert_eq!(parts.len(), 4);
+        assert_eq!(parts[0]["text"], "");
+        assert_eq!(parts[1]["text"], " \t ");
+        assert_eq!(parts[2]["text"], "duplicate");
+        assert_eq!(parts[3]["text"], "duplicate");
+        let contents = body["contents"].as_array().ok_or("missing contents")?;
+        assert_eq!(contents.len(), 2);
+        assert_eq!(contents[0]["role"], "user");
+        assert_eq!(contents[0]["parts"][0]["text"], "work");
+        assert_eq!(contents[1]["role"], "user");
+        assert_eq!(contents[1]["parts"][0]["text"], "continue");
+        Ok(())
+    }
 
     fn assistant_image_block() -> AssistantBlock {
         AssistantBlock::Image {

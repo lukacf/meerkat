@@ -5,25 +5,29 @@ use async_trait::async_trait;
 use chrono::Duration as ChronoDuration;
 use meerkat_core::{ContentInput, Session, SessionId, skills::SkillRef, types::RenderMetadata};
 use meerkat_runtime::{
-    CompletionHandle,
+    CompletionHandle, MeerkatMachine, SessionServiceRuntimeExt,
     completion::{CompletionOutcome, CompletionWaitError},
 };
 use meerkat_schedule::{
     DeliveryCompletion, DeliveryCompletionFailureReason, DeliveryDispatch, DeliveryFailureReason,
     DeliveryReceipt, DeliveryReceiptStage, DeliveryTerminal, HostRunnableInvocation,
     HostRunnableParams, HostRunnableTargetBinding, IdentityTargetBinding, MobTargetBinding,
-    Occurrence, OccurrencePhase, RunnableProbe, ScheduleDomainError, ScheduleDriver,
-    ScheduleDriverConfig, ScheduleFilter, ScheduleRunnableHost, ScheduleService, ScheduleStoreKind,
-    ScheduleTargetDelivery, ScheduleTargetProbe, ScheduledSessionAction,
-    SessionMaterializationSpec, SessionTargetBinding, TargetBinding, TargetProbeOutcome,
-    UpdateScheduleRequest,
+    Occurrence, OccurrencePhase, RunnableProbe, ScheduleDeliveryIdentity, ScheduleDomainError,
+    ScheduleDriver, ScheduleDriverConfig, ScheduleFilter, ScheduleRunnableHost, ScheduleService,
+    ScheduleStoreKind, ScheduleStoreWakeMode, ScheduleTargetDelivery, ScheduleTargetProbe,
+    ScheduledSessionAction, SessionMaterializationSpec, SessionTargetBinding, TargetBinding,
+    TargetProbeOutcome, UpdateScheduleRequest,
 };
 use serde::{Deserialize, Serialize};
 
 #[cfg(not(target_arch = "wasm32"))]
+use tokio as schedule_host_tokio;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::oneshot;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::task::JoinHandle;
+#[cfg(target_arch = "wasm32")]
+use tokio_with_wasm::alias as schedule_host_tokio;
 #[cfg(target_arch = "wasm32")]
 use tokio_with_wasm::alias::sync::oneshot;
 #[cfg(target_arch = "wasm32")]
@@ -35,11 +39,22 @@ pub struct ScheduleHostHandle {
 }
 
 impl ScheduleHostHandle {
+    /// Whether the host supervisor task is still alive.
+    ///
+    /// Worker failures do not flip this while the supervisor is applying its
+    /// bounded restart policy. A finished supervisor is observable by surface
+    /// owners, which can replace the stale handle.
+    pub fn is_running(&self) -> bool {
+        !self.join.is_finished()
+    }
+
     pub async fn shutdown(mut self) {
         if let Some(shutdown_tx) = self.shutdown_tx.take() {
             let _ = shutdown_tx.send(());
         }
-        let _ = self.join.await;
+        if let Err(error) = self.join.await {
+            tracing::error!(%error, "schedule host supervisor task terminated");
+        }
     }
 }
 
@@ -47,23 +62,44 @@ impl ScheduleHostHandle {
 struct ResolvedScheduledSession {
     session_id: SessionId,
     materialized_session_id: Option<SessionId>,
-    allow_system_prompt_override: bool,
 }
 
-pub enum AcceptedScheduledInputCompletion {
+enum AcceptedScheduledInputCompletion {
     RuntimeHandle(CompletionHandle),
+    RuntimeTerminal(CompletionOutcome),
     RuntimeCompletionAuthorityUnavailable { detail: String },
 }
 
+/// Exact target-side admission result for one stable schedule delivery
+/// identity. Keeping this narrower than `RuntimeDeliveryOutcome` prevents
+/// completion/failure outcomes from being stamped into a DispatchAccepted
+/// receipt by construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScheduleAdmissionOutcome {
+    Accepted,
+    Deduplicated,
+}
+
+impl ScheduleAdmissionOutcome {
+    fn runtime_outcome(self) -> meerkat_schedule::RuntimeDeliveryOutcome {
+        match self {
+            Self::Accepted => meerkat_schedule::RuntimeDeliveryOutcome::AdmissionAccepted,
+            Self::Deduplicated => meerkat_schedule::RuntimeDeliveryOutcome::AdmissionDeduplicated,
+        }
+    }
+}
+
 pub struct AcceptedScheduledInput {
-    pub correlation_id: Option<String>,
-    pub completion: AcceptedScheduledInputCompletion,
+    correlation_id: Option<String>,
+    admission_outcome: ScheduleAdmissionOutcome,
+    completion: AcceptedScheduledInputCompletion,
 }
 
 impl AcceptedScheduledInput {
     pub fn with_runtime_handle(correlation_id: Option<String>, handle: CompletionHandle) -> Self {
         Self {
             correlation_id,
+            admission_outcome: ScheduleAdmissionOutcome::Accepted,
             completion: AcceptedScheduledInputCompletion::RuntimeHandle(handle),
         }
     }
@@ -74,16 +110,37 @@ impl AcceptedScheduledInput {
     ) -> Self {
         Self {
             correlation_id,
+            admission_outcome: ScheduleAdmissionOutcome::Accepted,
             completion: AcceptedScheduledInputCompletion::RuntimeCompletionAuthorityUnavailable {
                 detail: detail.into(),
             },
         }
+    }
+
+    pub(crate) fn with_runtime_terminal(
+        correlation_id: Option<String>,
+        terminal: CompletionOutcome,
+    ) -> Self {
+        Self {
+            correlation_id,
+            admission_outcome: ScheduleAdmissionOutcome::Accepted,
+            completion: AcceptedScheduledInputCompletion::RuntimeTerminal(terminal),
+        }
+    }
+
+    pub fn with_admission_outcome(mut self, outcome: ScheduleAdmissionOutcome) -> Self {
+        self.admission_outcome = outcome;
+        self
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct ScheduledPromptDispatch {
     pub prompt: ContentInput,
+    /// Host-regenerated request-only context for this occurrence. Schedule
+    /// definitions must not persist this value; it is attached at delivery.
+    pub transient_turn_context: Option<meerkat_core::lifecycle::run_primitive::TurnRequestContext>,
+    pub system_prompt: Option<String>,
     pub render_metadata: Option<RenderMetadata>,
     pub skill_refs: Vec<SkillRef>,
     pub additional_instructions: Vec<String>,
@@ -162,12 +219,10 @@ pub fn parse_mob_member_schedule_identity(identity: &str) -> Option<MobMemberSch
     let json = identity.strip_prefix("mob_member:")?;
     let key: OwnedMobMemberScheduleIdentityKey = serde_json::from_str(json).ok()?;
     match key.schema.as_str() {
-        "meerkat.schedule.mob_member_identity.v1" | "meerkat.schedule.mob_member_identity.v2" => {
-            Some(MobMemberScheduleIdentity {
-                mob_id: key.mob_id,
-                member: key.member,
-            })
-        }
+        "meerkat.schedule.mob_member_identity.v2" => Some(MobMemberScheduleIdentity {
+            mob_id: key.mob_id,
+            member: key.member,
+        }),
         _ => None,
     }
 }
@@ -231,17 +286,19 @@ pub trait SurfaceScheduleSessionHost: Send + Sync {
     /// second orphan. Implementations are required to be create-or-reuse: a
     /// second materialize for an occurrence whose deterministic session id
     /// already exists is a no-op reuse, never a duplicate and never an error.
+    /// Prompt-action System content is deliberately absent from this seam: it
+    /// is an ordinary message delivered exactly once at the turn boundary.
     async fn materialize_session(
         &self,
         occurrence: &Occurrence,
         create: &SessionMaterializationSpec,
-        prompt_system_prompt: Option<&str>,
     ) -> Result<SessionId, ScheduleDomainError>;
 
     async fn deliver_prompt(
         &self,
         session_id: &SessionId,
         occurrence: &Occurrence,
+        identity: &ScheduleDeliveryIdentity,
         dispatch: ScheduledPromptDispatch,
     ) -> Result<DeliveryDispatch, ScheduleDomainError>;
 
@@ -249,6 +306,7 @@ pub trait SurfaceScheduleSessionHost: Send + Sync {
         &self,
         session_id: &SessionId,
         occurrence: &Occurrence,
+        identity: &ScheduleDeliveryIdentity,
         event_type: String,
         payload: serde_json::Value,
         render_metadata: Option<RenderMetadata>,
@@ -266,6 +324,7 @@ pub trait SurfaceScheduleMobHost: Send + Sync {
     async fn deliver_mob_target(
         &self,
         occurrence: &Occurrence,
+        identity: &ScheduleDeliveryIdentity,
         binding: &MobTargetBinding,
     ) -> Result<DeliveryDispatch, ScheduleDomainError>;
 
@@ -292,9 +351,10 @@ pub trait SurfaceScheduleMobHost: Send + Sync {
     async fn deliver_identity_target(
         &self,
         occurrence: &Occurrence,
+        identity: &ScheduleDeliveryIdentity,
         binding: &IdentityTargetBinding,
     ) -> Result<Option<DeliveryDispatch>, ScheduleDomainError> {
-        let _ = (occurrence, binding);
+        let _ = (occurrence, identity, binding);
         Ok(None)
     }
 }
@@ -325,13 +385,14 @@ impl SurfaceScheduleMobHost for NoopScheduleMobHost {
     async fn deliver_mob_target(
         &self,
         occurrence: &Occurrence,
+        identity: &ScheduleDeliveryIdentity,
         _binding: &MobTargetBinding,
     ) -> Result<DeliveryDispatch, ScheduleDomainError> {
         Ok(immediate_delivery_failure(
             occurrence,
             self.detail.clone(),
             DeliveryFailureReason::MobRejected,
-            None,
+            Some(identity.correlation_id.clone()),
             None,
         ))
     }
@@ -346,6 +407,7 @@ impl SurfaceScheduleMobHost for NoopScheduleMobHost {
     async fn deliver_identity_target(
         &self,
         _occurrence: &Occurrence,
+        _identity: &ScheduleDeliveryIdentity,
         _binding: &IdentityTargetBinding,
     ) -> Result<Option<DeliveryDispatch>, ScheduleDomainError> {
         Ok(None)
@@ -385,6 +447,7 @@ impl SharedScheduleTargetAdapter {
     async fn resolve_session(
         &self,
         occurrence: &Occurrence,
+        delivery_identity: &ScheduleDeliveryIdentity,
         binding: &SessionTargetBinding,
     ) -> Result<ResolvedScheduledSession, DeliveryDispatch> {
         match binding {
@@ -402,34 +465,35 @@ impl SharedScheduleTargetAdapter {
                                 occurrence,
                                 error.to_string(),
                                 DeliveryFailureReason::TargetMaterializationFailed,
-                                None,
+                                Some(delivery_identity.correlation_id.clone()),
                                 None,
                             )
                         })?;
                     if let Some(identity) = recovered {
                         if let Some(dispatch) = self
                             .mob_host
-                            .deliver_identity_target(occurrence, &identity)
+                            .deliver_identity_target(occurrence, delivery_identity, &identity)
                             .await
                             .map_err(|error| {
                                 immediate_delivery_failure(
                                     occurrence,
                                     error.to_string(),
                                     DeliveryFailureReason::TargetMaterializationFailed,
-                                    None,
+                                    Some(delivery_identity.correlation_id.clone()),
                                     None,
                                 )
                             })?
                         {
                             return Err(dispatch);
                         }
-                        return self.resolve_identity(occurrence, &identity).await;
+                        return self
+                            .resolve_identity(occurrence, delivery_identity, &identity)
+                            .await;
                     }
                 }
                 Ok(ResolvedScheduledSession {
                     session_id: session_id.clone(),
                     materialized_session_id: None,
-                    allow_system_prompt_override: false,
                 })
             }
             SessionTargetBinding::MaterializeOnDemandSession {
@@ -438,11 +502,10 @@ impl SharedScheduleTargetAdapter {
             } => Ok(ResolvedScheduledSession {
                 session_id: session_id.clone(),
                 materialized_session_id: Some(session_id.clone()),
-                allow_system_prompt_override: false,
             }),
             SessionTargetBinding::MaterializeOnDemandSession {
                 create,
-                action,
+                action: _,
                 bound_session_id: None,
             } => {
                 // Layer B: defensive contractual reuse guard. The in-flight
@@ -456,18 +519,11 @@ impl SharedScheduleTargetAdapter {
                     return Ok(ResolvedScheduledSession {
                         session_id: bound.clone(),
                         materialized_session_id: Some(bound),
-                        allow_system_prompt_override: false,
                     });
                 }
-                let prompt_system_prompt = match action {
-                    ScheduledSessionAction::Prompt { system_prompt, .. } => {
-                        system_prompt.as_deref()
-                    }
-                    ScheduledSessionAction::Event { .. } => None,
-                };
                 match self
                     .session_host
-                    .materialize_session(occurrence, create, prompt_system_prompt)
+                    .materialize_session(occurrence, create)
                     .await
                 {
                     Ok(session_id) => {
@@ -480,21 +536,20 @@ impl SharedScheduleTargetAdapter {
                                 occurrence,
                                 error.to_string(),
                                 DeliveryFailureReason::InternalError,
-                                None,
+                                Some(delivery_identity.correlation_id.clone()),
                                 Some(session_id),
                             ));
                         }
                         Ok(ResolvedScheduledSession {
                             session_id: session_id.clone(),
                             materialized_session_id: Some(session_id),
-                            allow_system_prompt_override: true,
                         })
                     }
                     Err(error) => Err(immediate_delivery_failure(
                         occurrence,
                         error.to_string(),
                         DeliveryFailureReason::TargetMaterializationFailed,
-                        None,
+                        Some(delivery_identity.correlation_id.clone()),
                         None,
                     )),
                 }
@@ -538,6 +593,7 @@ impl SharedScheduleTargetAdapter {
     async fn resolve_identity(
         &self,
         occurrence: &Occurrence,
+        delivery_identity: &ScheduleDeliveryIdentity,
         binding: &IdentityTargetBinding,
     ) -> Result<ResolvedScheduledSession, DeliveryDispatch> {
         let mob_owned = self
@@ -549,7 +605,7 @@ impl SharedScheduleTargetAdapter {
                     occurrence,
                     error.to_string(),
                     DeliveryFailureReason::TargetMaterializationFailed,
-                    None,
+                    Some(delivery_identity.correlation_id.clone()),
                     None,
                 )
             })?;
@@ -561,7 +617,6 @@ impl SharedScheduleTargetAdapter {
             Ok(Some(session_id)) => Ok(ResolvedScheduledSession {
                 session_id,
                 materialized_session_id: None,
-                allow_system_prompt_override: false,
             }),
             Ok(None) => Err(immediate_delivery_failure(
                 occurrence,
@@ -570,19 +625,26 @@ impl SharedScheduleTargetAdapter {
                     binding.identity()
                 ),
                 DeliveryFailureReason::TargetMaterializationFailed,
-                None,
+                Some(delivery_identity.correlation_id.clone()),
                 None,
             )),
             Err(error) => Err(immediate_delivery_failure(
                 occurrence,
                 error.to_string(),
                 DeliveryFailureReason::TargetMaterializationFailed,
-                None,
+                Some(delivery_identity.correlation_id.clone()),
                 None,
             )),
         }
     }
 
+    /// Explicit one-time compatibility boundary for released schedules whose
+    /// durable target is a recoverable Session id rather than an identity.
+    ///
+    /// This intentionally performs catalog-wide work and therefore must be
+    /// invoked by an owning activation/migration transaction, never by the
+    /// long-lived schedule worker or its restart supervisor. The caller owns
+    /// recording completion before starting the worker.
     pub async fn migrate_recoverable_session_targets(&self) -> Result<usize, ScheduleDomainError> {
         let schedules = self
             .schedule_service
@@ -624,6 +686,7 @@ impl SharedScheduleTargetAdapter {
     async fn deliver_session_action(
         &self,
         occurrence: &Occurrence,
+        identity: &ScheduleDeliveryIdentity,
         resolved: ResolvedScheduledSession,
         action: &ScheduledSessionAction,
     ) -> Result<DeliveryDispatch, ScheduleDomainError> {
@@ -635,22 +698,15 @@ impl SharedScheduleTargetAdapter {
                 skill_refs,
                 additional_instructions,
             } => {
-                if system_prompt.is_some() && !resolved.allow_system_prompt_override {
-                    return Ok(immediate_delivery_failure(
-                        occurrence,
-                        "scheduled system_prompt override is only supported when materializing a new session"
-                            .to_string(),
-                        DeliveryFailureReason::RuntimeRejected,
-                        None,
-                        resolved.materialized_session_id,
-                    ));
-                }
                 self.session_host
                     .deliver_prompt(
                         &resolved.session_id,
                         occurrence,
+                        identity,
                         ScheduledPromptDispatch {
                             prompt: prompt.clone(),
+                            transient_turn_context: None,
+                            system_prompt: system_prompt.clone(),
                             render_metadata: render_metadata.clone(),
                             skill_refs: skill_refs.clone(),
                             additional_instructions: additional_instructions.clone(),
@@ -668,6 +724,7 @@ impl SharedScheduleTargetAdapter {
                     .deliver_event(
                         &resolved.session_id,
                         occurrence,
+                        identity,
                         event_type.clone(),
                         payload.clone(),
                         render_metadata.clone(),
@@ -694,6 +751,7 @@ impl SharedScheduleTargetAdapter {
     fn deliver_host_runnable(
         &self,
         occurrence: &Occurrence,
+        identity: &ScheduleDeliveryIdentity,
         binding: &HostRunnableTargetBinding,
     ) -> DeliveryDispatch {
         let Some(runnable_host) = &self.runnable_host else {
@@ -704,7 +762,7 @@ impl SharedScheduleTargetAdapter {
                     binding.runnable
                 ),
                 DeliveryFailureReason::TargetMissing,
-                None,
+                Some(identity.correlation_id.clone()),
                 None,
             );
         };
@@ -713,7 +771,7 @@ impl SharedScheduleTargetAdapter {
                 occurrence,
                 format!("host runnable '{}' is not registered", binding.runnable),
                 DeliveryFailureReason::TargetMissing,
-                None,
+                Some(identity.correlation_id.clone()),
                 None,
             );
         }
@@ -721,6 +779,7 @@ impl SharedScheduleTargetAdapter {
         let invocation = HostRunnableInvocation {
             occurrence_id: occurrence.occurrence_id.clone(),
             schedule_id: occurrence.schedule_id.clone(),
+            delivery_idempotency_key: identity.idempotency_key.clone(),
             runnable: binding.runnable.clone(),
             trigger_time: occurrence.due_at_utc,
             params: binding.params.clone().map(HostRunnableParams::into_raw),
@@ -728,7 +787,7 @@ impl SharedScheduleTargetAdapter {
         let runnable_host = Arc::clone(runnable_host);
         async_completion_dispatch(
             occurrence,
-            None,
+            Some(identity.correlation_id.clone()),
             Box::pin(async move {
                 Ok(match runnable_host.run_occurrence(invocation).await {
                     Ok(_) => DeliveryTerminal::completed(None),
@@ -808,37 +867,40 @@ impl ScheduleTargetDelivery for SharedScheduleTargetAdapter {
     async fn deliver_occurrence(
         &self,
         occurrence: &Occurrence,
+        identity: &ScheduleDeliveryIdentity,
     ) -> Result<DeliveryDispatch, ScheduleDomainError> {
         match &occurrence.target_snapshot {
             TargetBinding::Session(binding) => {
-                let resolved = match self.resolve_session(occurrence, binding).await {
+                let resolved = match self.resolve_session(occurrence, identity, binding).await {
                     Ok(resolved) => resolved,
                     Err(dispatch) => return Ok(dispatch),
                 };
 
-                self.deliver_session_action(occurrence, resolved, binding.action())
+                self.deliver_session_action(occurrence, identity, resolved, binding.action())
                     .await
             }
             TargetBinding::Identity(binding) => {
                 if let Some(dispatch) = self
                     .mob_host
-                    .deliver_identity_target(occurrence, binding)
+                    .deliver_identity_target(occurrence, identity, binding)
                     .await?
                 {
                     return Ok(dispatch);
                 }
-                let resolved = match self.resolve_identity(occurrence, binding).await {
+                let resolved = match self.resolve_identity(occurrence, identity, binding).await {
                     Ok(resolved) => resolved,
                     Err(dispatch) => return Ok(dispatch),
                 };
-                self.deliver_session_action(occurrence, resolved, binding.action())
+                self.deliver_session_action(occurrence, identity, resolved, binding.action())
                     .await
             }
             TargetBinding::Mob(binding) => {
-                self.mob_host.deliver_mob_target(occurrence, binding).await
+                self.mob_host
+                    .deliver_mob_target(occurrence, identity, binding)
+                    .await
             }
             TargetBinding::HostRunnable(binding) => {
-                Ok(self.deliver_host_runnable(occurrence, binding))
+                Ok(self.deliver_host_runnable(occurrence, identity, binding))
             }
         }
     }
@@ -848,45 +910,87 @@ pub fn schedule_host_supported(kind: ScheduleStoreKind) -> bool {
     !matches!(kind, ScheduleStoreKind::Disabled | ScheduleStoreKind::Jsonl)
 }
 
-/// Tick-health bookkeeping for the schedule host loop: a driver that cannot
-/// claim is an incident, not a no-op, so tick errors and per-row faults are
-/// logged on first occurrence and on change at ERROR, with a rate-limited
-/// heartbeat (with the consecutive count) while the same condition persists,
-/// and an INFO recovery line when the loop is healthy again.
-struct TickHealthTracker {
-    fingerprint: Option<String>,
-    /// Ticks the CURRENT fingerprint has persisted (heartbeat counter).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScheduleHostIncidentClass {
+    DriverTickFailed,
+    DriverRowFaults,
+    NextActionReadFailed,
+    DurableWakeFailed,
+    WorkerExited,
+    WorkerPanicked,
+}
+
+impl ScheduleHostIncidentClass {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::DriverTickFailed => "driver_tick_failed",
+            Self::DriverRowFaults => "driver_row_faults",
+            Self::NextActionReadFailed => "next_action_read_failed",
+            Self::DurableWakeFailed => "durable_wake_failed",
+            Self::WorkerExited => "worker_exited",
+            Self::WorkerPanicked => "worker_panicked",
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ScheduleHostIncident {
+    class: ScheduleHostIncidentClass,
+    detail: String,
+}
+
+impl ScheduleHostIncident {
+    fn new(class: ScheduleHostIncidentClass, detail: impl Into<String>) -> Self {
+        Self {
+            class,
+            detail: detail.into(),
+        }
+    }
+}
+
+/// Host-health bookkeeping keyed by a bounded incident class, never by
+/// volatile row ids, page contents, or transport prose. Detail is refreshed
+/// for the next heartbeat, but a changing detail inside the same class cannot
+/// punch through the rate limiter and create an ERROR/page flood.
+struct ScheduleHostIncidentTracker {
+    class: Option<ScheduleHostIncidentClass>,
+    /// Observations in the CURRENT incident class (heartbeat counter).
     consecutive: u64,
-    /// Total unhealthy ticks since the loop was last healthy, across
-    /// fingerprint changes — the outage length reported on recovery.
-    outage_ticks: u64,
+    /// Total unhealthy observations since the loop was last healthy, across
+    /// class changes — the outage length reported on recovery.
+    outage_observations: u64,
     last_logged: Option<meerkat_core::time_compat::Instant>,
     heartbeat_every: std::time::Duration,
 }
 
 #[derive(Debug)]
-enum TickHealthLog {
+enum ScheduleHostHealthLog {
     Quiet,
-    /// A new or changed failure condition: log at ERROR.
-    Incident(String),
-    /// The same condition persists: rate-limited WARN heartbeat.
+    /// A new incident class: log at ERROR.
+    Incident {
+        class: ScheduleHostIncidentClass,
+        detail: String,
+    },
+    /// The same class persists: rate-limited WARN heartbeat with the latest
+    /// bounded detail.
     Heartbeat {
-        fingerprint: String,
+        class: ScheduleHostIncidentClass,
+        detail: String,
         consecutive: u64,
     },
-    /// The loop recovered after `after` unhealthy ticks (counted across
-    /// fingerprint changes within the same outage).
+    /// The loop recovered after `after` unhealthy observations.
     Recovered {
+        class: ScheduleHostIncidentClass,
         after: u64,
     },
 }
 
-impl TickHealthTracker {
+impl ScheduleHostIncidentTracker {
     fn new(heartbeat_every: std::time::Duration) -> Self {
         Self {
-            fingerprint: None,
+            class: None,
             consecutive: 0,
-            outage_ticks: 0,
+            outage_observations: 0,
             last_logged: None,
             heartbeat_every,
         }
@@ -894,77 +998,79 @@ impl TickHealthTracker {
 
     fn observe(
         &mut self,
-        outcome: &Result<
-            meerkat_schedule::ScheduleTickReport,
-            meerkat_schedule::ScheduleDomainError,
-        >,
+        incident: Option<ScheduleHostIncident>,
         now: meerkat_core::time_compat::Instant,
-    ) -> TickHealthLog {
-        let fingerprint = match outcome {
-            Err(error) => Some(format!("tick failed: {error}")),
-            Ok(report) if report.fault_count() > 0 => Some(format!(
-                "tick degraded ({} row fault(s)):\n{}",
-                report.fault_count(),
-                report.fault_fingerprint()
-            )),
-            Ok(_) => None,
-        };
-        match fingerprint {
+    ) -> ScheduleHostHealthLog {
+        match incident {
             None => {
-                let after = self.outage_ticks;
-                self.fingerprint = None;
+                let after = self.outage_observations;
+                let class = self.class.take();
                 self.consecutive = 0;
-                self.outage_ticks = 0;
+                self.outage_observations = 0;
                 self.last_logged = None;
-                if after > 0 {
-                    TickHealthLog::Recovered { after }
-                } else {
-                    TickHealthLog::Quiet
+                match class {
+                    Some(class) => ScheduleHostHealthLog::Recovered { class, after },
+                    None => ScheduleHostHealthLog::Quiet,
                 }
             }
-            Some(fingerprint) => {
-                self.outage_ticks += 1;
+            Some(incident) => {
+                self.outage_observations += 1;
                 self.consecutive += 1;
-                if self.fingerprint.as_deref() != Some(fingerprint.as_str()) {
-                    self.fingerprint = Some(fingerprint.clone());
+                let class_changed = self.class != Some(incident.class);
+                if class_changed {
+                    self.class = Some(incident.class);
                     self.consecutive = 1;
                     self.last_logged = Some(now);
-                    return TickHealthLog::Incident(fingerprint);
+                    return ScheduleHostHealthLog::Incident {
+                        class: incident.class,
+                        detail: incident.detail,
+                    };
                 }
                 if self
                     .last_logged
                     .is_none_or(|last| now.duration_since(last) >= self.heartbeat_every)
                 {
                     self.last_logged = Some(now);
-                    return TickHealthLog::Heartbeat {
-                        fingerprint,
+                    return ScheduleHostHealthLog::Heartbeat {
+                        class: incident.class,
+                        detail: incident.detail,
                         consecutive: self.consecutive,
                     };
                 }
-                TickHealthLog::Quiet
+                ScheduleHostHealthLog::Quiet
             }
         }
     }
 }
 
-fn log_tick_health(action: TickHealthLog) {
+fn log_schedule_host_health(action: ScheduleHostHealthLog) {
     match action {
-        TickHealthLog::Quiet => {}
-        TickHealthLog::Incident(fingerprint) => {
-            tracing::error!(%fingerprint, "schedule driver tick is failing or degraded");
+        ScheduleHostHealthLog::Quiet => {}
+        ScheduleHostHealthLog::Incident { class, detail } => {
+            tracing::error!(
+                incident_class = class.as_str(),
+                %detail,
+                "schedule host entered an unhealthy state"
+            );
         }
-        TickHealthLog::Heartbeat {
-            fingerprint,
+        ScheduleHostHealthLog::Heartbeat {
+            class,
+            detail,
             consecutive,
         } => {
             tracing::warn!(
-                %fingerprint,
+                incident_class = class.as_str(),
+                %detail,
                 consecutive,
-                "schedule driver tick still failing or degraded"
+                "schedule host incident persists"
             );
         }
-        TickHealthLog::Recovered { after } => {
-            tracing::info!(after, "schedule driver tick recovered");
+        ScheduleHostHealthLog::Recovered { class, after } => {
+            tracing::info!(
+                incident_class = class.as_str(),
+                after,
+                "schedule host recovered"
+            );
         }
     }
 }
@@ -975,6 +1081,9 @@ fn log_tick_health(action: TickHealthLog) {
 /// [`spawn_schedule_host`] as the host's tick-pacing policy.
 const IDLE_TICKS_BEFORE_BACKOFF: u32 = 8;
 
+const MAX_FAULT_LOG_SAMPLES: usize = 3;
+const MAX_FAULT_LOG_SAMPLE_CHARS: usize = 512;
+
 /// Exponential tick pacing for the schedule host loop (2026-07-29 incident:
 /// a failing or no-progress tick retried at a fixed 4Hz forever — on a
 /// remote store that is query spam priced in currency; a BigQuery-store
@@ -982,7 +1091,7 @@ const IDLE_TICKS_BEFORE_BACKOFF: u32 = 8;
 ///
 /// Policy: a failing tick escalates immediately; a run of
 /// `idle_grace_ticks` no-progress ticks starts escalating too (doubling,
-/// capped); any tick that moves work snaps back to the base interval.
+/// capped); any healthy tick that moves work snaps back to the base interval.
 struct TickBackoff {
     base: Duration,
     cap: Duration,
@@ -1004,6 +1113,7 @@ impl TickBackoff {
 
     /// Observe one tick outcome and return the delay to sleep before the
     /// next tick.
+    #[cfg(test)]
     fn observe(
         &mut self,
         outcome: &Result<
@@ -1012,31 +1122,318 @@ impl TickBackoff {
         >,
     ) -> Duration {
         match outcome {
-            // A failing tick is retried with immediate escalation: at the
-            // fixed interval every retry hammered the failing store.
-            Err(_) => {
-                self.consecutive_unproductive = self.consecutive_unproductive.saturating_add(1);
-                self.escalate();
-            }
-            Ok(report) if report.made_progress() => {
-                self.consecutive_unproductive = 0;
-                self.current = self.base;
-            }
-            // Successful but unproductive (idle store, or every row
-            // faulting): keep the fast cadence through the grace run so
-            // freshly created work is picked up promptly, then back off.
-            Ok(_) => {
-                self.consecutive_unproductive = self.consecutive_unproductive.saturating_add(1);
-                if self.consecutive_unproductive > self.idle_grace_ticks {
-                    self.escalate();
-                }
-            }
+            Err(_) => self.observe_failure(),
+            Ok(report) => self.observe_report(report),
         }
         self.current
     }
 
+    fn observe_failure(&mut self) {
+        // A failing tick is retried with immediate escalation: at the fixed
+        // interval every retry hammered the failing store.
+        self.consecutive_unproductive = self.consecutive_unproductive.saturating_add(1);
+        self.escalate();
+    }
+
+    fn observe_report(&mut self, report: &meerkat_schedule::ScheduleTickReport) {
+        if report.made_progress() {
+            self.consecutive_unproductive = 0;
+            self.current = self.base;
+        } else {
+            // Successful but unproductive: keep the fast cadence through the
+            // grace run for exact due work, then back off. Idle durable stores
+            // use their declared wake mode rather than this cadence.
+            self.consecutive_unproductive = self.consecutive_unproductive.saturating_add(1);
+            if self.consecutive_unproductive > self.idle_grace_ticks {
+                self.escalate();
+            }
+        }
+    }
+
     fn escalate(&mut self) {
         self.current = self.current.saturating_mul(2).min(self.cap);
+    }
+}
+
+struct RestartBackoff {
+    base: Duration,
+    cap: Duration,
+    next: Duration,
+}
+
+impl RestartBackoff {
+    fn new(base: Duration, cap: Duration) -> Self {
+        Self {
+            base,
+            cap,
+            next: base,
+        }
+    }
+
+    fn after_failure(&mut self) -> Duration {
+        let delay = self.next;
+        self.next = self.next.saturating_mul(2).min(self.cap);
+        delay
+    }
+
+    fn reset(&mut self) {
+        self.next = self.base;
+    }
+}
+
+fn duration_until_store_action(
+    action: meerkat_schedule::ScheduleStoreActionTime,
+) -> Option<Duration> {
+    action.next_action_at_utc.map(|next_action_at_utc| {
+        next_action_at_utc
+            .signed_duration_since(action.store_now_utc)
+            .to_std()
+            .unwrap_or(Duration::ZERO)
+    })
+}
+
+fn idle_delay_for_store_action(
+    action: meerkat_schedule::ScheduleStoreActionTime,
+    wake_mode: ScheduleStoreWakeMode,
+    backoff_delay: Duration,
+    base_interval: Duration,
+) -> Option<Duration> {
+    let until_action = duration_until_store_action(action);
+    match wake_mode {
+        ScheduleStoreWakeMode::ProcessLocal | ScheduleStoreWakeMode::Push => match until_action {
+            Some(delay) if delay.is_zero() => Some(backoff_delay),
+            Some(delay) => Some(delay),
+            None => None,
+        },
+        ScheduleStoreWakeMode::BoundedPoll { max_interval } => {
+            // A zero custom interval cannot create a hot loop. A non-zero
+            // declaration is the store's exact maximum convergence interval,
+            // including intervals tighter than the host's ordinary base
+            // cadence, and must never be silently widened.
+            let poll_interval = if max_interval.is_zero() {
+                base_interval
+            } else {
+                max_interval
+            };
+            match until_action {
+                Some(delay) if delay.is_zero() => Some(backoff_delay),
+                Some(delay) => Some(delay.min(poll_interval)),
+                None => Some(poll_interval),
+            }
+        }
+    }
+}
+
+fn incident_from_tick_report(
+    report: &meerkat_schedule::ScheduleTickReport,
+) -> Option<ScheduleHostIncident> {
+    (report.fault_count() > 0).then(|| {
+        ScheduleHostIncident::new(
+            ScheduleHostIncidentClass::DriverRowFaults,
+            format!(
+                "tick degraded with {} fault(s):\n{}",
+                report.fault_count(),
+                report.bounded_fault_summary(MAX_FAULT_LOG_SAMPLES, MAX_FAULT_LOG_SAMPLE_CHARS)
+            ),
+        )
+    })
+}
+
+async fn optional_schedule_host_sleep(delay: Option<Duration>) {
+    match delay {
+        Some(delay) => schedule_host_tokio::time::sleep(delay).await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
+async fn wait_for_durable_store_wake(
+    store: Arc<dyn meerkat_schedule::ScheduleStore>,
+    wake_mode: ScheduleStoreWakeMode,
+) -> Result<(), meerkat_schedule::ScheduleStoreError> {
+    match wake_mode {
+        ScheduleStoreWakeMode::Push => store.wait_for_durable_wake().await,
+        ScheduleStoreWakeMode::ProcessLocal | ScheduleStoreWakeMode::BoundedPoll { .. } => {
+            std::future::pending::<Result<(), meerkat_schedule::ScheduleStoreError>>().await
+        }
+    }
+}
+
+#[derive(Debug)]
+enum ScheduleHostWorkerExit {
+    DurableWakeFailed(meerkat_schedule::ScheduleStoreError),
+    MutationSignalClosed,
+}
+
+impl ScheduleHostWorkerExit {
+    fn into_incident(self) -> ScheduleHostIncident {
+        match self {
+            Self::DurableWakeFailed(error) => ScheduleHostIncident::new(
+                ScheduleHostIncidentClass::DurableWakeFailed,
+                format!("durable schedule wake failed: {error}"),
+            ),
+            Self::MutationSignalClosed => ScheduleHostIncident::new(
+                ScheduleHostIncidentClass::WorkerExited,
+                "process-local schedule mutation signal closed",
+            ),
+        }
+    }
+}
+
+async fn run_schedule_host_worker(
+    schedule_service: ScheduleService,
+    driver: Arc<ScheduleDriver>,
+    wake_mode: ScheduleStoreWakeMode,
+    base_interval: Duration,
+    backoff_cap: Duration,
+    mut shutdown_rx: oneshot::Receiver<()>,
+) -> Result<(), ScheduleHostWorkerExit> {
+    let mut health = ScheduleHostIncidentTracker::new(std::time::Duration::from_secs(60));
+
+    let mut backoff = TickBackoff::new(base_interval, backoff_cap, IDLE_TICKS_BEFORE_BACKOFF);
+    let mut delay = Some(base_interval);
+    let mut mutation_rx = schedule_service.subscribe_mutations();
+    let store = schedule_service.store();
+
+    loop {
+        schedule_host_tokio::select! {
+            _ = &mut shutdown_rx => return Ok(()),
+            mutation = mutation_rx.changed() => {
+                if mutation.is_err() {
+                    return Err(ScheduleHostWorkerExit::MutationSignalClosed);
+                }
+            }
+            durable_wake = wait_for_durable_store_wake(Arc::clone(&store), wake_mode) => {
+                if let Err(error) = durable_wake {
+                    return Err(ScheduleHostWorkerExit::DurableWakeFailed(error));
+                }
+            }
+            () = optional_schedule_host_sleep(delay) => {}
+        }
+
+        let outcome = driver.tick_once().await;
+        let (next_delay, incident) = match outcome {
+            Err(error) => {
+                backoff.observe_failure();
+                (
+                    Some(backoff.current),
+                    Some(ScheduleHostIncident::new(
+                        ScheduleHostIncidentClass::DriverTickFailed,
+                        format!("schedule driver tick failed: {error}"),
+                    )),
+                )
+            }
+            Ok(report) if report.made_progress() => {
+                let incident = incident_from_tick_report(&report);
+                if incident.is_some() {
+                    backoff.observe_failure();
+                } else {
+                    backoff.observe_report(&report);
+                }
+                (Some(backoff.current), incident)
+            }
+            Ok(report) => match store.next_action_time_utc().await {
+                Err(error) => {
+                    backoff.observe_failure();
+                    (
+                        Some(backoff.current),
+                        Some(ScheduleHostIncident::new(
+                            ScheduleHostIncidentClass::NextActionReadFailed,
+                            format!("could not read next durable action time: {error}"),
+                        )),
+                    )
+                }
+                Ok(action) => {
+                    let incident = incident_from_tick_report(&report);
+                    if incident.is_some() {
+                        backoff.observe_failure();
+                    } else {
+                        backoff.observe_report(&report);
+                    }
+                    (
+                        idle_delay_for_store_action(
+                            action,
+                            wake_mode,
+                            backoff.current,
+                            base_interval,
+                        ),
+                        incident,
+                    )
+                }
+            },
+        };
+        log_schedule_host_health(
+            health.observe(incident, meerkat_core::time_compat::Instant::now()),
+        );
+        delay = next_delay;
+    }
+}
+
+async fn supervise_schedule_host(
+    schedule_service: ScheduleService,
+    driver: Arc<ScheduleDriver>,
+    wake_mode: ScheduleStoreWakeMode,
+    base_interval: Duration,
+    backoff_cap: Duration,
+    stable_window: Duration,
+    mut shutdown_rx: oneshot::Receiver<()>,
+) {
+    let mut health = ScheduleHostIncidentTracker::new(std::time::Duration::from_secs(60));
+    let mut restart_backoff = RestartBackoff::new(base_interval, backoff_cap);
+
+    loop {
+        let (worker_shutdown_tx, worker_shutdown_rx) = oneshot::channel();
+        let mut worker = schedule_host_tokio::task::spawn(run_schedule_host_worker(
+            schedule_service.clone(),
+            Arc::clone(&driver),
+            wake_mode,
+            base_interval,
+            backoff_cap,
+            worker_shutdown_rx,
+        ));
+        let mut worker_shutdown_tx = Some(worker_shutdown_tx);
+        let mut stable_timer = Box::pin(schedule_host_tokio::time::sleep(stable_window));
+        let mut stable = false;
+
+        let worker_result = loop {
+            schedule_host_tokio::select! {
+                _ = &mut shutdown_rx => {
+                    if let Some(shutdown_tx) = worker_shutdown_tx.take() {
+                        let _ = shutdown_tx.send(());
+                    }
+                    let _ = worker.await;
+                    return;
+                }
+                result = &mut worker => break result,
+                () = &mut stable_timer, if !stable => {
+                    stable = true;
+                    restart_backoff.reset();
+                    log_schedule_host_health(health.observe(
+                        None,
+                        meerkat_core::time_compat::Instant::now(),
+                    ));
+                }
+            }
+        };
+        let incident = match worker_result {
+            Ok(Ok(())) => ScheduleHostIncident::new(
+                ScheduleHostIncidentClass::WorkerExited,
+                "schedule host worker exited without supervisor shutdown",
+            ),
+            Ok(Err(exit)) => exit.into_incident(),
+            Err(error) => ScheduleHostIncident::new(
+                ScheduleHostIncidentClass::WorkerPanicked,
+                format!("schedule host worker task terminated: {error}"),
+            ),
+        };
+        log_schedule_host_health(
+            health.observe(Some(incident), meerkat_core::time_compat::Instant::now()),
+        );
+
+        let restart_delay = restart_backoff.after_failure();
+        schedule_host_tokio::select! {
+            _ = &mut shutdown_rx => return,
+            () = schedule_host_tokio::time::sleep(restart_delay) => {}
+        }
     }
 }
 
@@ -1045,7 +1442,6 @@ pub fn spawn_schedule_host(
     adapter: Arc<SharedScheduleTargetAdapter>,
     owner_id: impl Into<String>,
 ) -> ScheduleHostHandle {
-    let migration_adapter = Arc::clone(&adapter);
     let driver = Arc::new(ScheduleDriver::new(
         schedule_service.clone(),
         schedule_service.store(),
@@ -1057,60 +1453,34 @@ pub fn spawn_schedule_host(
             lease_duration: ChronoDuration::seconds(60),
         },
     ));
+    let wake_mode = schedule_service.store().wake_mode();
     // Tick pacing: base interval while work flows, exponential backoff to
     // the cap while ticks fail or make no progress (see `TickBackoff`). The
     // in-crate test profile keeps both bounds small so host tests never wait
     // on an escalated interval.
-    let (base_interval, backoff_cap) = if cfg!(test) {
-        (Duration::from_millis(50), Duration::from_millis(400))
+    let (base_interval, backoff_cap, stable_window) = if cfg!(test) {
+        (
+            Duration::from_millis(50),
+            Duration::from_millis(400),
+            Duration::from_millis(200),
+        )
     } else {
-        (Duration::from_millis(250), Duration::from_secs(30))
+        (
+            Duration::from_millis(250),
+            Duration::from_secs(30),
+            Duration::from_secs(60),
+        )
     };
-    let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
-    #[cfg(not(target_arch = "wasm32"))]
-    let join = tokio::spawn(async move {
-        if let Err(error) = migration_adapter
-            .migrate_recoverable_session_targets()
-            .await
-        {
-            tracing::warn!(%error, "failed to migrate recoverable schedule session targets");
-        }
-        let mut health = TickHealthTracker::new(std::time::Duration::from_secs(60));
-        let mut backoff = TickBackoff::new(base_interval, backoff_cap, IDLE_TICKS_BEFORE_BACKOFF);
-        let mut delay = base_interval;
-        loop {
-            tokio::select! {
-                _ = &mut shutdown_rx => break,
-                () = tokio::time::sleep(delay) => {
-                    let outcome = driver.tick_once().await;
-                    log_tick_health(health.observe(&outcome, meerkat_core::time_compat::Instant::now()));
-                    delay = backoff.observe(&outcome);
-                }
-            }
-        }
-    });
-    #[cfg(target_arch = "wasm32")]
-    let join = tokio_with_wasm::alias::task::spawn(async move {
-        if let Err(error) = migration_adapter
-            .migrate_recoverable_session_targets()
-            .await
-        {
-            tracing::warn!(%error, "failed to migrate recoverable schedule session targets");
-        }
-        let mut health = TickHealthTracker::new(std::time::Duration::from_secs(60));
-        let mut backoff = TickBackoff::new(base_interval, backoff_cap, IDLE_TICKS_BEFORE_BACKOFF);
-        let mut delay = base_interval;
-        loop {
-            tokio_with_wasm::alias::select! {
-                _ = &mut shutdown_rx => break,
-                () = tokio_with_wasm::alias::time::sleep(delay) => {
-                    let outcome = driver.tick_once().await;
-                    log_tick_health(health.observe(&outcome, meerkat_core::time_compat::Instant::now()));
-                    delay = backoff.observe(&outcome);
-                }
-            }
-        }
-    });
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let join = schedule_host_tokio::task::spawn(supervise_schedule_host(
+        schedule_service,
+        driver,
+        wake_mode,
+        base_interval,
+        backoff_cap,
+        stable_window,
+        shutdown_rx,
+    ));
 
     ScheduleHostHandle {
         shutdown_tx: Some(shutdown_tx),
@@ -1129,6 +1499,7 @@ pub fn build_dispatch_from_accepted(
         DeliveryReceiptStage::DispatchAccepted,
     );
     receipt.correlation_id = accepted.correlation_id.clone();
+    receipt.runtime_outcome = Some(accepted.admission_outcome.runtime_outcome());
     receipt.materialized_session_id = materialized_session_id.clone();
 
     let completion = schedule_completion_from_runtime_completion(
@@ -1160,6 +1531,12 @@ fn schedule_completion_from_runtime_completion(
                         });
                     }
                 }
+            }
+            AcceptedScheduledInputCompletion::RuntimeTerminal(terminal) => {
+                return Ok(delivery_terminal_from_completion_outcome(
+                    terminal,
+                    materialized_session_id,
+                ));
             }
             AcceptedScheduledInputCompletion::RuntimeCompletionAuthorityUnavailable { detail } => {
                 return Err(ScheduleDomainError::DeliveryCompletionFailed {
@@ -1237,15 +1614,8 @@ fn delivery_terminal_from_completion_outcome(
                 runtime_outcome,
             )
         }
-        CompletionOutcome::Abandoned { reason, .. } => {
-            let runtime_outcome =
-                meerkat_schedule::RuntimeDeliveryOutcome::CompletionAbandoned { detail: reason };
-            terminal_from_runtime_completion_outcome(
-                meerkat_schedule::RuntimeCompletionOutcome::Abandoned,
-                runtime_outcome,
-            )
-        }
-        CompletionOutcome::AbandonedWithError { reason, error } => {
+        CompletionOutcome::Abandoned { reason, error }
+        | CompletionOutcome::AbandonedWithError { reason, error } => {
             let error_detail =
                 serde_json::to_string(&error).unwrap_or_else(|_| "<unserializable>".to_string());
             let runtime_outcome = meerkat_schedule::RuntimeDeliveryOutcome::CompletionAbandoned {
@@ -1257,20 +1627,20 @@ fn delivery_terminal_from_completion_outcome(
             )
         }
         CompletionOutcome::CompletedWithFinalizationFailure { error, .. } => {
+            let detail = serde_json::to_string(&error)
+                .unwrap_or_else(|_| "turn finalization failed".to_string());
             DeliveryTerminal::runtime_completion(
                 meerkat_schedule::RuntimeCompletionOutcome::FinalizationFailed,
-                Some(
-                    error
-                        .detail
-                        .unwrap_or_else(|| "turn finalization failed".to_string()),
-                ),
+                Some(detail),
                 None,
             )
         }
-        CompletionOutcome::RuntimeTerminated { reason, .. } => {
+        CompletionOutcome::RuntimeTerminated { reason, error } => {
+            let error_detail =
+                serde_json::to_string(&error).unwrap_or_else(|_| "<unserializable>".to_string());
             let runtime_outcome =
                 meerkat_schedule::RuntimeDeliveryOutcome::CompletionRuntimeTerminated {
-                    detail: reason,
+                    detail: format!("{reason}; error={error_detail}"),
                 };
             terminal_from_runtime_completion_outcome(
                 meerkat_schedule::RuntimeCompletionOutcome::RuntimeTerminated,
@@ -1292,12 +1662,25 @@ pub fn immediate_completed_dispatch(
     occurrence: &Occurrence,
     correlation_id: Option<String>,
 ) -> DeliveryDispatch {
+    immediate_completed_dispatch_with_admission_outcome(
+        occurrence,
+        correlation_id,
+        ScheduleAdmissionOutcome::Accepted,
+    )
+}
+
+pub fn immediate_completed_dispatch_with_admission_outcome(
+    occurrence: &Occurrence,
+    correlation_id: Option<String>,
+    admission_outcome: ScheduleAdmissionOutcome,
+) -> DeliveryDispatch {
     let mut receipt = DeliveryReceipt::new(
         occurrence.occurrence_id.clone(),
         occurrence.attempt_count,
         DeliveryReceiptStage::DispatchAccepted,
     );
     receipt.correlation_id = correlation_id.clone();
+    receipt.runtime_outcome = Some(admission_outcome.runtime_outcome());
     DeliveryDispatch {
         receipt,
         correlation_id,
@@ -1311,12 +1694,27 @@ pub fn async_completion_dispatch(
     correlation_id: Option<String>,
     completion: DeliveryCompletion,
 ) -> DeliveryDispatch {
+    async_completion_dispatch_with_admission_outcome(
+        occurrence,
+        correlation_id,
+        ScheduleAdmissionOutcome::Accepted,
+        completion,
+    )
+}
+
+pub fn async_completion_dispatch_with_admission_outcome(
+    occurrence: &Occurrence,
+    correlation_id: Option<String>,
+    admission_outcome: ScheduleAdmissionOutcome,
+    completion: DeliveryCompletion,
+) -> DeliveryDispatch {
     let mut receipt = DeliveryReceipt::new(
         occurrence.occurrence_id.clone(),
         occurrence.attempt_count,
         DeliveryReceiptStage::DispatchAccepted,
     );
     receipt.correlation_id = correlation_id.clone();
+    receipt.runtime_outcome = Some(admission_outcome.runtime_outcome());
     DeliveryDispatch {
         receipt,
         correlation_id,
@@ -1356,6 +1754,87 @@ pub fn immediate_delivery_failure(
     }
 }
 
+/// Project one runtime admission into the schedule driver's typed delivery
+/// contract.
+///
+/// Runtime intentionally returns no live completion handle when an accepted
+/// or deduplicated input is already terminal. That is success with a durable
+/// terminal witness, not missing authority. This single adapter path asks the
+/// runtime for the machine-authorized exact rich completion receipt and
+/// replays it so every schedule surface preserves the same result class and
+/// payload. A coarse input-terminal class is never treated as completion
+/// authority.
+pub async fn runtime_delivery_dispatch_from_admission(
+    runtime_adapter: &MeerkatMachine,
+    session_id: &SessionId,
+    occurrence: &Occurrence,
+    identity: &ScheduleDeliveryIdentity,
+    outcome: meerkat_runtime::accept::AcceptOutcome,
+    handle: Option<CompletionHandle>,
+    materialized_session_id: Option<SessionId>,
+) -> Result<DeliveryDispatch, ScheduleDomainError> {
+    let (input_id, admission_outcome) = match outcome {
+        meerkat_runtime::accept::AcceptOutcome::Accepted { input_id, .. } => {
+            (input_id, ScheduleAdmissionOutcome::Accepted)
+        }
+        meerkat_runtime::accept::AcceptOutcome::Deduplicated { existing_id, .. } => {
+            (existing_id, ScheduleAdmissionOutcome::Deduplicated)
+        }
+        meerkat_runtime::accept::AcceptOutcome::Rejected { reason } => {
+            return Ok(immediate_delivery_failure(
+                occurrence,
+                reason.to_string(),
+                DeliveryFailureReason::RuntimeRejected,
+                Some(identity.correlation_id.clone()),
+                materialized_session_id,
+            ));
+        }
+        _ => {
+            return Ok(immediate_delivery_failure(
+                occurrence,
+                "runtime returned an unknown admission outcome".to_string(),
+                DeliveryFailureReason::RuntimeRejected,
+                Some(identity.correlation_id.clone()),
+                materialized_session_id,
+            ));
+        }
+    };
+    let correlation_id = Some(identity.correlation_id.clone());
+
+    let accepted = match handle {
+        Some(handle) => AcceptedScheduledInput::with_runtime_handle(correlation_id.clone(), handle),
+        None => {
+            match runtime_adapter
+                .input_terminal_completion(session_id, &input_id)
+                .await
+            {
+                Ok(Some(terminal)) => {
+                    AcceptedScheduledInput::with_runtime_terminal(correlation_id.clone(), terminal)
+                }
+                Ok(None) => AcceptedScheduledInput::with_authority_unavailable(
+                    correlation_id.clone(),
+                    format!(
+                        "runtime returned no completion handle and no exact terminal completion receipt for input {input_id}"
+                    ),
+                ),
+                Err(error) => AcceptedScheduledInput::with_authority_unavailable(
+                    correlation_id.clone(),
+                    format!(
+                        "runtime could not provide the exact terminal completion receipt for input {input_id}: {error}"
+                    ),
+                ),
+            }
+        }
+    }
+    .with_admission_outcome(admission_outcome);
+
+    Ok(build_dispatch_from_accepted(
+        occurrence,
+        accepted,
+        materialized_session_id,
+    ))
+}
+
 /// Runtime-facing delivery identity for a scheduled occurrence: schedule +
 /// occurrence ONLY.
 ///
@@ -1369,10 +1848,85 @@ pub fn immediate_delivery_failure(
 /// claim tokens remain store-side claim FENCING only (stale-completion
 /// screening is unchanged).
 pub fn schedule_delivery_idempotency_key(occurrence: &Occurrence) -> String {
-    format!(
-        "schedule:{}:occurrence:{}",
-        occurrence.schedule_id, occurrence.occurrence_id
-    )
+    ScheduleDeliveryIdentity::for_occurrence(occurrence).idempotency_key
+}
+
+fn schedule_v0810_predecessor_delivery_keys(
+    occurrence: &Occurrence,
+) -> impl Iterator<Item = String> + '_ {
+    (1..occurrence.attempt_count)
+        .rev()
+        .map(|predecessor_attempt| {
+            format!(
+                "schedule:{}:occurrence:{}:attempt:{predecessor_attempt}",
+                occurrence.schedule_id, occurrence.occurrence_id
+            )
+        })
+}
+
+/// Resolve the one supported schedule-key upgrade boundary.
+///
+/// Meerkat 0.8.10 keyed a delivery by claim attempt. A redrive under 0.8.11
+/// increments the durable attempt before delivery, so any earlier durable
+/// attempt key can name work originally admitted by 0.8.10. The resolver
+/// walks that finite key family newest-first: this remains correct after
+/// repeated 0.8.11 reclaims that reused the same old binding. New occurrences
+/// use the driver's 0.8.11 occurrence-stable key. This is intentionally not a
+/// general legacy alias mechanism.
+pub async fn schedule_runtime_delivery_idempotency_key(
+    runtime_adapter: &MeerkatMachine,
+    session_id: &SessionId,
+    occurrence: &Occurrence,
+    canonical_idempotency_key: &str,
+) -> Result<String, ScheduleDomainError> {
+    let canonical_key = canonical_idempotency_key.to_owned();
+    if occurrence.attempt_count <= 1 {
+        return Ok(canonical_key);
+    }
+
+    // Prefer the canonical 0.8.11 binding once it exists. Otherwise walk the
+    // finite set of prior durable claim attempts newest-first. This remains
+    // correct across more than one 0.8.11 crash: attempt N may have reused an
+    // attempt-1 key admitted by 0.8.10, so checking only N-1 would lose the
+    // bridge on the next reclaim.
+    let canonical = runtime_adapter
+        .input_state_by_idempotency_key(session_id, &canonical_key)
+        .await
+        .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
+    if canonical.is_some() {
+        return Ok(canonical_key);
+    }
+
+    for candidate_key in schedule_v0810_predecessor_delivery_keys(occurrence) {
+        let predecessor = runtime_adapter
+            .input_state_by_idempotency_key(session_id, &candidate_key)
+            .await
+            .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
+        if predecessor.is_some() {
+            if candidate_key != canonical_key {
+                tracing::info!(
+                    schedule_id = %occurrence.schedule_id,
+                    occurrence_id = %occurrence.occurrence_id,
+                    predecessor_key = %candidate_key,
+                    "reusing Meerkat 0.8.10 schedule delivery identity"
+                );
+            }
+            return Ok(candidate_key);
+        }
+    }
+    Ok(canonical_key)
+}
+
+/// Project the driver's canonical string correlation into the runtime's UUID
+/// carrier. Parsing here makes the schedule/runtime seam fail closed if those
+/// two typed representations ever drift.
+pub fn schedule_runtime_correlation_id(
+    identity: &ScheduleDeliveryIdentity,
+) -> Result<meerkat_runtime::CorrelationId, ScheduleDomainError> {
+    let uuid = identity.correlation_id.parse().map_err(|error| {
+        ScheduleDomainError::Internal(format!("invalid schedule correlation id: {error}"))
+    })?;
+    Ok(meerkat_runtime::CorrelationId::from_uuid(uuid))
 }
 
 #[cfg(test)]
@@ -1380,135 +1934,141 @@ pub fn schedule_delivery_idempotency_key(occurrence: &Occurrence) -> String {
 mod tests {
     use super::*;
 
-    /// Ask 16: a driver that cannot claim is an incident, not a no-op. The
-    /// tracker logs a new/changed condition once at ERROR, heartbeats with
-    /// the consecutive count while it persists, and reports recovery.
+    /// Detail churn inside one stable class cannot punch through the incident
+    /// rate limit. The latest detail is retained for the next heartbeat.
     #[test]
-    fn tick_health_tracker_logs_incident_heartbeat_and_recovery() {
+    fn incident_tracker_rate_limits_by_stable_class() {
         let heartbeat = std::time::Duration::from_secs(60);
-        let mut tracker = TickHealthTracker::new(heartbeat);
+        let mut tracker = ScheduleHostIncidentTracker::new(heartbeat);
         let start = meerkat_core::time_compat::Instant::now();
-        let failure: Result<meerkat_schedule::ScheduleTickReport, _> = Err(
-            meerkat_schedule::ScheduleDomainError::Internal("store unavailable".to_string()),
-        );
-        let ok: Result<_, meerkat_schedule::ScheduleDomainError> =
-            Ok(meerkat_schedule::ScheduleTickReport::default());
 
-        // Healthy ticks stay quiet.
-        assert!(matches!(tracker.observe(&ok, start), TickHealthLog::Quiet));
+        assert!(matches!(
+            tracker.observe(None, start),
+            ScheduleHostHealthLog::Quiet
+        ));
 
-        // First failure: incident at ERROR.
         assert!(matches!(
-            tracker.observe(&failure, start),
-            TickHealthLog::Incident(_)
+            tracker.observe(
+                Some(ScheduleHostIncident::new(
+                    ScheduleHostIncidentClass::DriverTickFailed,
+                    "page 1 failed"
+                )),
+                start
+            ),
+            ScheduleHostHealthLog::Incident {
+                class: ScheduleHostIncidentClass::DriverTickFailed,
+                ..
+            }
         ));
-        // Same condition immediately after: quiet (rate limited).
+
+        // Different volatile detail, same class: still rate limited.
         assert!(matches!(
-            tracker.observe(&failure, start + std::time::Duration::from_millis(250)),
-            TickHealthLog::Quiet
+            tracker.observe(
+                Some(ScheduleHostIncident::new(
+                    ScheduleHostIncidentClass::DriverTickFailed,
+                    "page 2 failed"
+                )),
+                start + std::time::Duration::from_millis(250)
+            ),
+            ScheduleHostHealthLog::Quiet
         ));
-        // Same condition past the heartbeat window: WARN heartbeat with the
-        // consecutive count.
+
         match tracker.observe(
-            &failure,
+            Some(ScheduleHostIncident::new(
+                ScheduleHostIncidentClass::DriverTickFailed,
+                "page 3 failed",
+            )),
             start + heartbeat + std::time::Duration::from_secs(1),
         ) {
-            TickHealthLog::Heartbeat { consecutive, .. } => assert_eq!(consecutive, 3),
+            ScheduleHostHealthLog::Heartbeat {
+                detail,
+                consecutive,
+                ..
+            } => {
+                assert_eq!(consecutive, 3);
+                assert_eq!(detail, "page 3 failed");
+            }
             other => panic!("expected heartbeat, got {other:?}"),
         }
 
-        // A CHANGED condition logs immediately even inside the window.
-        let changed: Result<meerkat_schedule::ScheduleTickReport, _> = Err(
-            meerkat_schedule::ScheduleDomainError::Internal("different failure".to_string()),
-        );
+        // A mechanism/class change is a distinct incident.
         assert!(matches!(
             tracker.observe(
-                &changed,
+                Some(ScheduleHostIncident::new(
+                    ScheduleHostIncidentClass::NextActionReadFailed,
+                    "index unavailable"
+                )),
                 start + heartbeat + std::time::Duration::from_secs(2)
             ),
-            TickHealthLog::Incident(_)
+            ScheduleHostHealthLog::Incident {
+                class: ScheduleHostIncidentClass::NextActionReadFailed,
+                ..
+            }
         ));
 
-        // Recovery reports the FULL outage length (4 unhealthy ticks),
-        // not just the ticks since the condition last changed.
-        match tracker.observe(&ok, start + heartbeat + std::time::Duration::from_secs(3)) {
-            TickHealthLog::Recovered { after } => assert_eq!(after, 4),
+        match tracker.observe(None, start + heartbeat + std::time::Duration::from_secs(3)) {
+            ScheduleHostHealthLog::Recovered { after, .. } => assert_eq!(after, 4),
             other => panic!("expected recovery, got {other:?}"),
         }
-        assert!(matches!(
-            tracker.observe(&ok, start + heartbeat + std::time::Duration::from_secs(4)),
-            TickHealthLog::Quiet
-        ));
     }
 
-    /// A tick that SUCCEEDS but skipped rows as typed faults is degraded,
-    /// not healthy: the tracker treats the fault fingerprint like an error
-    /// condition (log on change, heartbeat while it persists).
+    /// A successful tick with row faults remains degraded, and its operator
+    /// detail is bounded before entering the tracker.
     #[test]
-    fn tick_health_tracker_treats_row_faults_as_degraded() {
+    fn row_fault_incident_is_bounded_and_attributable() {
         let heartbeat = std::time::Duration::from_secs(60);
-        let mut tracker = TickHealthTracker::new(heartbeat);
+        let mut tracker = ScheduleHostIncidentTracker::new(heartbeat);
         let start = meerkat_core::time_compat::Instant::now();
         let mut report = meerkat_schedule::ScheduleTickReport::default();
-        report
-            .occurrence_row_faults
-            .push(meerkat_schedule::ScheduleStoreRowFault {
-                schedule_id: Some("sched-1".to_string()),
-                occurrence_id: Some("occ-1".to_string()),
-                kind: meerkat_schedule::ScheduleStoreRowFaultKind::Deserialization,
-                detail: "poisoned row".to_string(),
-            });
-        let degraded: Result<_, meerkat_schedule::ScheduleDomainError> = Ok(report);
+        for index in 0..8 {
+            report
+                .occurrence_row_faults
+                .push(meerkat_schedule::ScheduleStoreRowFault {
+                    schedule_id: Some("sched-1".to_string()),
+                    occurrence_id: Some(format!("occ-{index}")),
+                    kind: meerkat_schedule::ScheduleStoreRowFaultKind::Deserialization,
+                    detail: "poisoned row".repeat(200),
+                });
+        }
+        let incident = incident_from_tick_report(&report).expect("row faults are unhealthy");
 
-        match tracker.observe(&degraded, start) {
-            TickHealthLog::Incident(fingerprint) => {
-                assert!(fingerprint.contains("occ-1"), "{fingerprint}");
-                assert!(fingerprint.contains("poisoned row"), "{fingerprint}");
+        match tracker.observe(Some(incident), start) {
+            ScheduleHostHealthLog::Incident { class, detail } => {
+                assert_eq!(class, ScheduleHostIncidentClass::DriverRowFaults);
+                assert!(detail.contains("occ-0"), "{detail}");
+                assert!(detail.contains("additional fault(s) omitted"), "{detail}");
+                assert!(!detail.contains("occ-7"), "{detail}");
+                assert!(
+                    detail.len() < 2_500,
+                    "bounded detail grew to {}",
+                    detail.len()
+                );
             }
             other => panic!("expected incident, got {other:?}"),
         }
-        assert!(matches!(
-            tracker.observe(&degraded, start + std::time::Duration::from_millis(250)),
-            TickHealthLog::Quiet
-        ));
-        let ok: Result<_, meerkat_schedule::ScheduleDomainError> =
-            Ok(meerkat_schedule::ScheduleTickReport::default());
-        assert!(matches!(
-            tracker.observe(&ok, start + std::time::Duration::from_secs(1)),
-            TickHealthLog::Recovered { after: 2 }
-        ));
     }
 
-    /// A fingerprint change mid-outage restarts the heartbeat counter but
-    /// must NOT restart the outage counter: recovery reports the whole
-    /// unhealthy stretch.
+    /// Rotating durable pages remain one row-fault incident class rather than
+    /// producing one ERROR per page.
     #[test]
-    fn tick_health_tracker_reports_full_outage_across_fingerprint_changes() {
+    fn rotating_row_fault_pages_do_not_flood_incidents() {
         let heartbeat = std::time::Duration::from_secs(60);
-        let mut tracker = TickHealthTracker::new(heartbeat);
+        let mut tracker = ScheduleHostIncidentTracker::new(heartbeat);
         let start = meerkat_core::time_compat::Instant::now();
-        let failure_a: Result<meerkat_schedule::ScheduleTickReport, _> = Err(
-            meerkat_schedule::ScheduleDomainError::Internal("failure a".to_string()),
-        );
-        let failure_b: Result<meerkat_schedule::ScheduleTickReport, _> = Err(
-            meerkat_schedule::ScheduleDomainError::Internal("failure b".to_string()),
-        );
-        let ok: Result<_, meerkat_schedule::ScheduleDomainError> =
-            Ok(meerkat_schedule::ScheduleTickReport::default());
 
-        for tick in 0..5 {
-            let _ = tracker.observe(
-                &failure_a,
-                start + std::time::Duration::from_millis(250 * tick),
+        for page in 0..4 {
+            let action = tracker.observe(
+                Some(ScheduleHostIncident::new(
+                    ScheduleHostIncidentClass::DriverRowFaults,
+                    format!("fault page {page}"),
+                )),
+                start + std::time::Duration::from_millis(250 * page),
             );
-        }
-        assert!(matches!(
-            tracker.observe(&failure_b, start + std::time::Duration::from_secs(2)),
-            TickHealthLog::Incident(_)
-        ));
-        match tracker.observe(&ok, start + std::time::Duration::from_secs(3)) {
-            TickHealthLog::Recovered { after } => assert_eq!(after, 6),
-            other => panic!("expected recovery, got {other:?}"),
+            if page == 0 {
+                assert!(matches!(action, ScheduleHostHealthLog::Incident { .. }));
+            } else {
+                assert!(matches!(action, ScheduleHostHealthLog::Quiet));
+            }
         }
     }
 
@@ -1588,12 +2148,30 @@ mod tests {
     async fn spawn_schedule_host_logs_failing_ticks() {
         use uuid::Uuid;
 
-        struct FailingScheduleStore;
+        struct FailingScheduleStore {
+            wake_mode: meerkat_schedule::ScheduleStoreWakeMode,
+            durable_wake_attempts: Arc<AtomicUsize>,
+            list_schedules_attempts: Arc<AtomicUsize>,
+        }
 
         #[async_trait]
         impl ScheduleStore for FailingScheduleStore {
             fn kind(&self) -> meerkat_schedule::ScheduleStoreKind {
-                meerkat_schedule::ScheduleStoreKind::Memory
+                meerkat_schedule::ScheduleStoreKind::Custom
+            }
+
+            fn wake_mode(&self) -> meerkat_schedule::ScheduleStoreWakeMode {
+                self.wake_mode
+            }
+
+            async fn wait_for_durable_wake(
+                &self,
+            ) -> Result<(), meerkat_schedule::ScheduleStoreError> {
+                self.durable_wake_attempts
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Err(meerkat_schedule::ScheduleStoreError::Internal(
+                    "synthetic durable wake outage".to_string(),
+                ))
             }
 
             async fn get_store_time_utc(
@@ -1601,6 +2179,27 @@ mod tests {
             ) -> Result<chrono::DateTime<chrono::Utc>, meerkat_schedule::ScheduleStoreError>
             {
                 Ok(chrono::Utc::now())
+            }
+
+            async fn next_action_time_utc(
+                &self,
+            ) -> Result<
+                meerkat_schedule::ScheduleStoreActionTime,
+                meerkat_schedule::ScheduleStoreError,
+            > {
+                Err(meerkat_schedule::ScheduleStoreError::Internal(
+                    "synthetic store outage".to_string(),
+                ))
+            }
+
+            async fn read_due_refill_candidates(
+                &self,
+                _limit: usize,
+            ) -> Result<meerkat_schedule::ScheduleRefillBatch, meerkat_schedule::ScheduleStoreError>
+            {
+                Err(meerkat_schedule::ScheduleStoreError::Internal(
+                    "synthetic store outage".to_string(),
+                ))
             }
 
             async fn commit_schedule_write(
@@ -1627,6 +2226,8 @@ mod tests {
                 _filter: meerkat_schedule::ScheduleFilter,
             ) -> Result<Vec<meerkat_schedule::Schedule>, meerkat_schedule::ScheduleStoreError>
             {
+                self.list_schedules_attempts
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 Err(meerkat_schedule::ScheduleStoreError::Internal(
                     "synthetic store outage".to_string(),
                 ))
@@ -1656,6 +2257,30 @@ mod tests {
                 _occurrences: Vec<meerkat_schedule::AuthorizedOccurrenceWrite>,
             ) -> Result<meerkat_schedule::Schedule, meerkat_schedule::ScheduleStoreError>
             {
+                Err(meerkat_schedule::ScheduleStoreError::Internal(
+                    "synthetic store outage".to_string(),
+                ))
+            }
+
+            async fn commit_schedule_refill(
+                &self,
+                _schedule: meerkat_schedule::AuthorizedScheduleWrite,
+                _occurrences: Vec<meerkat_schedule::AuthorizedOccurrenceWrite>,
+                _next_refill_at_utc: Option<chrono::DateTime<chrono::Utc>>,
+            ) -> Result<meerkat_schedule::Schedule, meerkat_schedule::ScheduleStoreError>
+            {
+                Err(meerkat_schedule::ScheduleStoreError::Internal(
+                    "synthetic store outage".to_string(),
+                ))
+            }
+
+            async fn record_refill_deadline_if_current(
+                &self,
+                _schedule_id: &meerkat_schedule::ScheduleId,
+                _expected_revision: meerkat_schedule::ScheduleRevision,
+                _expected_refill_at_utc: chrono::DateTime<chrono::Utc>,
+                _next_refill_at_utc: Option<chrono::DateTime<chrono::Utc>>,
+            ) -> Result<(), meerkat_schedule::ScheduleStoreError> {
                 Err(meerkat_schedule::ScheduleStoreError::Internal(
                     "synthetic store outage".to_string(),
                 ))
@@ -1703,6 +2328,18 @@ mod tests {
                 _request: meerkat_schedule::ClaimDueRequest,
             ) -> Result<meerkat_schedule::ClaimDueResult, meerkat_schedule::ScheduleStoreError>
             {
+                Err(meerkat_schedule::ScheduleStoreError::Internal(
+                    "synthetic store outage".to_string(),
+                ))
+            }
+
+            async fn renew_occurrence_lease_if_current(
+                &self,
+                _request: meerkat_schedule::RenewOccurrenceLeaseRequest,
+            ) -> Result<
+                meerkat_schedule::RenewOccurrenceLeaseResult,
+                meerkat_schedule::ScheduleStoreError,
+            > {
                 Err(meerkat_schedule::ScheduleStoreError::Internal(
                     "synthetic store outage".to_string(),
                 ))
@@ -1762,7 +2399,12 @@ mod tests {
             .finish();
         let _guard = tracing::subscriber::set_default(subscriber);
 
-        let store = Arc::new(FailingScheduleStore) as Arc<dyn ScheduleStore>;
+        let local_list_schedules_attempts = Arc::new(AtomicUsize::new(0));
+        let store = Arc::new(FailingScheduleStore {
+            wake_mode: ScheduleStoreWakeMode::ProcessLocal,
+            durable_wake_attempts: Arc::new(AtomicUsize::new(0)),
+            list_schedules_attempts: Arc::clone(&local_list_schedules_attempts),
+        }) as Arc<dyn ScheduleStore>;
         let service = ScheduleService::new(store);
         let session_host: Arc<dyn SurfaceScheduleSessionHost> = Arc::new(PanicOnMaterializeHost {
             materialize_calls: Arc::new(AtomicUsize::new(0)),
@@ -1780,16 +2422,61 @@ mod tests {
         // cfg!(test) poll interval is 50ms; give the loop a few ticks.
         tokio::time::sleep(Duration::from_millis(300)).await;
         handle.shutdown().await;
+        assert_eq!(
+            local_list_schedules_attempts.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "the long-lived worker must never run the catalog-wide compatibility migration"
+        );
+
+        // A custom push store whose wait primitive fails terminates only the
+        // worker. The supervisor reports the stable incident class, backs
+        // off, and starts another worker while its public handle stays live.
+        let durable_wake_attempts = Arc::new(AtomicUsize::new(0));
+        let push_list_schedules_attempts = Arc::new(AtomicUsize::new(0));
+        let store = Arc::new(FailingScheduleStore {
+            wake_mode: ScheduleStoreWakeMode::Push,
+            durable_wake_attempts: Arc::clone(&durable_wake_attempts),
+            list_schedules_attempts: Arc::clone(&push_list_schedules_attempts),
+        }) as Arc<dyn ScheduleStore>;
+        let service = ScheduleService::new(store);
+        let session_host: Arc<dyn SurfaceScheduleSessionHost> = Arc::new(PanicOnMaterializeHost {
+            materialize_calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let mob_host: Arc<dyn SurfaceScheduleMobHost> = Arc::new(NoopScheduleMobHost::new(
+            "mob targets unsupported in this test",
+        ));
+        let adapter = Arc::new(SharedScheduleTargetAdapter::new(
+            service.clone(),
+            session_host,
+            mob_host,
+        ));
+        let handle = spawn_schedule_host(service, adapter, "push-wake-supervision-test");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(handle.is_running(), "supervisor must survive worker exits");
+        handle.shutdown().await;
+        assert!(
+            durable_wake_attempts.load(std::sync::atomic::Ordering::Relaxed) >= 2,
+            "bounded supervision must retry a failed custom push wait"
+        );
+        assert_eq!(
+            push_list_schedules_attempts.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "worker restarts must not repeat catalog-wide compatibility migration"
+        );
 
         let logs = String::from_utf8(buf.lock().expect("log buffer lock").clone())
             .expect("captured logs should be utf8");
         assert!(
-            logs.contains("schedule driver tick is failing or degraded"),
+            logs.contains("schedule host entered an unhealthy state"),
             "the host loop must log failing tick outcomes, got: {logs}"
         );
         assert!(
             logs.contains("synthetic store outage"),
             "the incident log must carry the tick failure detail, got: {logs}"
+        );
+        assert!(
+            logs.contains("durable_wake_failed"),
+            "worker push-wait termination must be visible, got: {logs}"
         );
     }
 
@@ -1838,6 +2525,192 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn durable_terminal_dedup_replays_completed_instead_of_failing_authority() {
+        let occurrence = sample_occurrence();
+        let accepted = AcceptedScheduledInput::with_runtime_terminal(
+            Some("existing-input".to_string()),
+            CompletionOutcome::CompletedWithoutResult,
+        )
+        .with_admission_outcome(ScheduleAdmissionOutcome::Deduplicated);
+
+        let dispatch = build_dispatch_from_accepted(&occurrence, accepted, None);
+        assert_eq!(
+            dispatch.receipt.runtime_outcome,
+            Some(meerkat_schedule::RuntimeDeliveryOutcome::AdmissionDeduplicated)
+        );
+        let terminal = dispatch
+            .completion
+            .await
+            .expect("durable terminal witness should be replayable");
+
+        assert_eq!(terminal.phase, OccurrencePhase::AwaitingCompletion);
+        assert_eq!(
+            terminal.runtime_completion_outcome,
+            Some(meerkat_schedule::RuntimeCompletionOutcome::Completed)
+        );
+        assert_eq!(terminal.delivery_failure_reason, None);
+    }
+
+    #[tokio::test]
+    async fn durable_terminal_replay_preserves_rich_failure_metadata() {
+        let occurrence = sample_occurrence();
+        let accepted = AcceptedScheduledInput::with_runtime_terminal(
+            Some("existing-input".to_string()),
+            CompletionOutcome::CompletedWithFinalizationFailure {
+                error: meerkat_core::TurnErrorMetadata::runtime_apply_failure(
+                    "checkpoint commit failed",
+                ),
+            },
+        )
+        .with_admission_outcome(ScheduleAdmissionOutcome::Deduplicated);
+
+        let terminal = build_dispatch_from_accepted(&occurrence, accepted, None)
+            .completion
+            .await
+            .expect("exact durable completion receipt should be replayable");
+
+        assert_eq!(
+            terminal.runtime_completion_outcome,
+            Some(meerkat_schedule::RuntimeCompletionOutcome::FinalizationFailed)
+        );
+        let detail = terminal.detail.expect("rich failure metadata");
+        assert!(detail.contains("runtime_apply_failure"));
+        assert!(detail.contains("checkpoint commit failed"));
+    }
+
+    #[test]
+    fn v0810_predecessor_keys_survive_more_than_one_reclaim() {
+        let mut occurrence = sample_occurrence();
+        assert_eq!(
+            schedule_v0810_predecessor_delivery_keys(&occurrence).collect::<Vec<_>>(),
+            Vec::<String>::new(),
+            "a first 0.8.11 attempt cannot have a 0.8.10 predecessor"
+        );
+
+        occurrence.attempt_count = 3;
+        assert_eq!(
+            schedule_v0810_predecessor_delivery_keys(&occurrence).collect::<Vec<_>>(),
+            vec![
+                format!(
+                    "schedule:{}:occurrence:{}:attempt:2",
+                    occurrence.schedule_id, occurrence.occurrence_id
+                ),
+                format!(
+                    "schedule:{}:occurrence:{}:attempt:1",
+                    occurrence.schedule_id, occurrence.occurrence_id
+                ),
+            ],
+            "attempt 3 must still discover an attempt-1 binding after attempt 2 also crashed"
+        );
+    }
+
+    #[test]
+    fn mob_member_identity_rejects_pre_v0810_schema() {
+        let v1 = r#"mob_member:{"schema":"meerkat.schedule.mob_member_identity.v1","mob_id":"ops","member":"watcher"}"#;
+        let v2 = r#"mob_member:{"schema":"meerkat.schedule.mob_member_identity.v2","mob_id":"ops","member":"watcher"}"#;
+
+        assert!(parse_mob_member_schedule_identity(v1).is_none());
+        assert_eq!(
+            parse_mob_member_schedule_identity(v2),
+            Some(MobMemberScheduleIdentity {
+                mob_id: "ops".to_string(),
+                member: "watcher".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn store_action_delay_uses_store_clock_and_overdue_work_preserves_backoff() {
+        let store_now_utc = chrono::Utc::now();
+        let future_action = meerkat_schedule::ScheduleStoreActionTime {
+            store_now_utc,
+            next_action_at_utc: Some(store_now_utc + ChronoDuration::seconds(3)),
+        };
+        assert_eq!(
+            duration_until_store_action(future_action),
+            Some(Duration::from_secs(3))
+        );
+        assert_eq!(
+            idle_delay_for_store_action(
+                future_action,
+                ScheduleStoreWakeMode::BoundedPoll {
+                    max_interval: Duration::from_secs(5)
+                },
+                Duration::from_secs(10),
+                Duration::from_millis(250),
+            ),
+            Some(Duration::from_secs(3))
+        );
+
+        let overdue_action = meerkat_schedule::ScheduleStoreActionTime {
+            store_now_utc,
+            next_action_at_utc: Some(store_now_utc - ChronoDuration::milliseconds(1)),
+        };
+        assert_eq!(
+            duration_until_store_action(overdue_action),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(
+            idle_delay_for_store_action(
+                overdue_action,
+                ScheduleStoreWakeMode::Push,
+                Duration::from_secs(5),
+                Duration::from_millis(250),
+            ),
+            Some(Duration::from_secs(5))
+        );
+
+        let no_action = meerkat_schedule::ScheduleStoreActionTime {
+            store_now_utc,
+            next_action_at_utc: None,
+        };
+        assert_eq!(
+            idle_delay_for_store_action(
+                no_action,
+                ScheduleStoreWakeMode::ProcessLocal,
+                Duration::from_secs(5),
+                Duration::from_millis(250),
+            ),
+            None
+        );
+        assert_eq!(
+            idle_delay_for_store_action(
+                no_action,
+                ScheduleStoreWakeMode::BoundedPoll {
+                    max_interval: Duration::from_secs(5)
+                },
+                Duration::from_secs(10),
+                Duration::from_millis(250),
+            ),
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(
+            idle_delay_for_store_action(
+                no_action,
+                ScheduleStoreWakeMode::BoundedPoll {
+                    max_interval: Duration::from_millis(100)
+                },
+                Duration::from_secs(10),
+                Duration::from_millis(250),
+            ),
+            Some(Duration::from_millis(100)),
+            "a non-zero store convergence bound must not be widened to the host base cadence"
+        );
+        assert_eq!(
+            idle_delay_for_store_action(
+                no_action,
+                ScheduleStoreWakeMode::BoundedPoll {
+                    max_interval: Duration::ZERO
+                },
+                Duration::from_secs(10),
+                Duration::from_millis(250),
+            ),
+            Some(Duration::from_millis(250)),
+            "zero cannot authorize a hot poll loop"
+        );
+    }
+
+    #[tokio::test]
     async fn noop_mob_host_reports_clear_feature_required_failure() {
         let host = NoopScheduleMobHost::new(
             "scheduled mob targets require the mob feature on the CLI host",
@@ -1864,8 +2737,9 @@ mod tests {
         );
 
         let occurrence = sample_occurrence();
+        let identity = ScheduleDeliveryIdentity::for_occurrence(&occurrence);
         let dispatch = host
-            .deliver_mob_target(&occurrence, &binding)
+            .deliver_mob_target(&occurrence, &identity, &binding)
             .await
             .expect("delivery dispatch");
         let terminal = dispatch.completion.await.expect("delivery terminal");
@@ -1952,6 +2826,11 @@ mod tests {
         legacy_session_id: Option<SessionId>,
     }
 
+    struct RecordingMaterializeHost {
+        materialized_config_prompt: Arc<Mutex<Option<String>>>,
+        dispatched_turn_prompt: Arc<Mutex<Option<String>>>,
+    }
+
     #[async_trait]
     impl SurfaceScheduleSessionHost for PanicOnMaterializeHost {
         async fn probe_session_target(
@@ -1965,7 +2844,6 @@ mod tests {
             &self,
             _occurrence: &Occurrence,
             _create: &SessionMaterializationSpec,
-            _prompt_system_prompt: Option<&str>,
         ) -> Result<SessionId, ScheduleDomainError> {
             self.materialize_calls.fetch_add(1, Ordering::SeqCst);
             Err(ScheduleDomainError::Internal(
@@ -1977,21 +2855,29 @@ mod tests {
             &self,
             _session_id: &SessionId,
             occurrence: &Occurrence,
+            identity: &ScheduleDeliveryIdentity,
             _dispatch: ScheduledPromptDispatch,
         ) -> Result<DeliveryDispatch, ScheduleDomainError> {
-            Ok(immediate_completed_dispatch(occurrence, None))
+            Ok(immediate_completed_dispatch(
+                occurrence,
+                Some(identity.correlation_id.clone()),
+            ))
         }
 
         async fn deliver_event(
             &self,
             _session_id: &SessionId,
             occurrence: &Occurrence,
+            identity: &ScheduleDeliveryIdentity,
             _event_type: String,
             _payload: serde_json::Value,
             _render_metadata: Option<RenderMetadata>,
             _materialized_session_id: Option<SessionId>,
         ) -> Result<DeliveryDispatch, ScheduleDomainError> {
-            Ok(immediate_completed_dispatch(occurrence, None))
+            Ok(immediate_completed_dispatch(
+                occurrence,
+                Some(identity.correlation_id.clone()),
+            ))
         }
     }
 
@@ -2045,7 +2931,6 @@ mod tests {
             &self,
             _occurrence: &Occurrence,
             _create: &SessionMaterializationSpec,
-            _prompt_system_prompt: Option<&str>,
         ) -> Result<SessionId, ScheduleDomainError> {
             panic!("identity targets must resolve existing materialized sessions")
         }
@@ -2054,6 +2939,7 @@ mod tests {
             &self,
             session_id: &SessionId,
             occurrence: &Occurrence,
+            identity: &ScheduleDeliveryIdentity,
             dispatch: ScheduledPromptDispatch,
         ) -> Result<DeliveryDispatch, ScheduleDomainError> {
             assert_eq!(dispatch.materialized_session_id, None);
@@ -2061,19 +2947,81 @@ mod tests {
                 .delivered_session_id
                 .lock()
                 .expect("delivered session lock") = Some(session_id.clone());
-            Ok(immediate_completed_dispatch(occurrence, None))
+            Ok(immediate_completed_dispatch(
+                occurrence,
+                Some(identity.correlation_id.clone()),
+            ))
         }
 
         async fn deliver_event(
             &self,
             _session_id: &SessionId,
             occurrence: &Occurrence,
+            identity: &ScheduleDeliveryIdentity,
             _event_type: String,
             _payload: serde_json::Value,
             _render_metadata: Option<RenderMetadata>,
             _materialized_session_id: Option<SessionId>,
         ) -> Result<DeliveryDispatch, ScheduleDomainError> {
-            Ok(immediate_completed_dispatch(occurrence, None))
+            Ok(immediate_completed_dispatch(
+                occurrence,
+                Some(identity.correlation_id.clone()),
+            ))
+        }
+    }
+
+    #[async_trait]
+    impl SurfaceScheduleSessionHost for RecordingMaterializeHost {
+        async fn probe_session_target(
+            &self,
+            _binding: &SessionTargetBinding,
+        ) -> Result<TargetProbeOutcome, ScheduleDomainError> {
+            Ok(TargetProbeOutcome::Ready)
+        }
+
+        async fn materialize_session(
+            &self,
+            occurrence: &Occurrence,
+            create: &SessionMaterializationSpec,
+        ) -> Result<SessionId, ScheduleDomainError> {
+            *self
+                .materialized_config_prompt
+                .lock()
+                .expect("materialized prompt lock") = create.system_prompt.clone();
+            Ok(occurrence.materialized_session_id())
+        }
+
+        async fn deliver_prompt(
+            &self,
+            _session_id: &SessionId,
+            occurrence: &Occurrence,
+            identity: &ScheduleDeliveryIdentity,
+            dispatch: ScheduledPromptDispatch,
+        ) -> Result<DeliveryDispatch, ScheduleDomainError> {
+            *self
+                .dispatched_turn_prompt
+                .lock()
+                .expect("dispatch prompt lock") = dispatch.system_prompt;
+            Ok(immediate_completed_dispatch(
+                occurrence,
+                Some(identity.correlation_id.clone()),
+            ))
+        }
+
+        async fn deliver_event(
+            &self,
+            _session_id: &SessionId,
+            occurrence: &Occurrence,
+            identity: &ScheduleDeliveryIdentity,
+            _event_type: String,
+            _payload: serde_json::Value,
+            _render_metadata: Option<RenderMetadata>,
+            _materialized_session_id: Option<SessionId>,
+        ) -> Result<DeliveryDispatch, ScheduleDomainError> {
+            Ok(immediate_completed_dispatch(
+                occurrence,
+                Some(identity.correlation_id.clone()),
+            ))
         }
     }
 
@@ -2173,21 +3121,97 @@ mod tests {
         let TargetBinding::Session(stale_binding) = &stale.target_snapshot else {
             panic!("expected a session target binding");
         };
+        let delivery_identity = ScheduleDeliveryIdentity::for_occurrence(&stale);
         let resolved = adapter
-            .resolve_session(&stale, stale_binding)
+            .resolve_session(&stale, &delivery_identity, stale_binding)
             .await
             .expect("reuse guard should resolve without a delivery failure");
 
         assert_eq!(resolved.session_id, bound_id);
         assert_eq!(resolved.materialized_session_id, Some(bound_id));
-        assert!(
-            !resolved.allow_system_prompt_override,
-            "reused session must not allow a fresh system-prompt override"
-        );
         assert_eq!(
             materialize_calls.load(Ordering::SeqCst),
             0,
             "Layer B guard must reuse the bound id, never call materialize_session"
+        );
+    }
+
+    #[tokio::test]
+    async fn materialized_prompt_system_is_dispatched_at_turn_boundary_only() {
+        let store =
+            Arc::new(meerkat_schedule::MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+        let service = ScheduleService::new(store);
+        let mut target = materialize_on_demand_target();
+        let TargetBinding::Session(SessionTargetBinding::MaterializeOnDemandSession {
+            create,
+            action,
+            ..
+        }) = &mut target
+        else {
+            panic!("expected materialized session target");
+        };
+        create.system_prompt = Some("materialization config".to_string());
+        let ScheduledSessionAction::Prompt { system_prompt, .. } = action else {
+            panic!("expected prompt action");
+        };
+        *system_prompt = Some("ordinary scheduled system".to_string());
+
+        let schedule = service
+            .create(meerkat_schedule::CreateScheduleRequest {
+                name: Some("scheduled-system-boundary".to_string()),
+                description: None,
+                trigger: meerkat_schedule::TriggerSpec::Once {
+                    due_at_utc: chrono::Utc::now() - ChronoDuration::seconds(1),
+                },
+                target,
+                misfire_policy: meerkat_schedule::MisfirePolicy::Skip,
+                overlap_policy: meerkat_schedule::OverlapPolicy::AllowConcurrent,
+                missing_target_policy: meerkat_schedule::MissingTargetPolicy::Skip,
+                labels: BTreeMap::new(),
+                planning_horizon_days: Some(1),
+                planning_horizon_occurrences: Some(1),
+            })
+            .await
+            .expect("schedule create");
+        let occurrence = service
+            .list_occurrences(&schedule.schedule_id)
+            .await
+            .expect("list occurrences")
+            .into_iter()
+            .next()
+            .expect("planned occurrence");
+        let materialized_config_prompt = Arc::new(Mutex::new(None));
+        let dispatched_turn_prompt = Arc::new(Mutex::new(None));
+        let session_host: Arc<dyn SurfaceScheduleSessionHost> =
+            Arc::new(RecordingMaterializeHost {
+                materialized_config_prompt: Arc::clone(&materialized_config_prompt),
+                dispatched_turn_prompt: Arc::clone(&dispatched_turn_prompt),
+            });
+        let mob_host: Arc<dyn SurfaceScheduleMobHost> = Arc::new(NoopScheduleMobHost::new(
+            "mob targets unsupported in this test",
+        ));
+        let adapter = SharedScheduleTargetAdapter::new(service, session_host, mob_host);
+        let identity = ScheduleDeliveryIdentity::for_occurrence(&occurrence);
+
+        let dispatch = adapter
+            .deliver_occurrence(&occurrence, &identity)
+            .await
+            .expect("delivery dispatch");
+        dispatch.completion.await.expect("delivery completion");
+
+        assert_eq!(
+            materialized_config_prompt
+                .lock()
+                .expect("materialized prompt lock")
+                .as_deref(),
+            Some("materialization config")
+        );
+        assert_eq!(
+            dispatched_turn_prompt
+                .lock()
+                .expect("dispatch prompt lock")
+                .as_deref(),
+            Some("ordinary scheduled system")
         );
     }
 
@@ -2229,8 +3253,9 @@ mod tests {
             .expect("identity probe should resolve through host");
         assert!(matches!(probe, TargetProbeOutcome::Ready));
 
+        let delivery_identity = ScheduleDeliveryIdentity::for_occurrence(&occurrence);
         let dispatch = adapter
-            .deliver_occurrence(&occurrence)
+            .deliver_occurrence(&occurrence, &delivery_identity)
             .await
             .expect("identity delivery should dispatch");
         let terminal = dispatch.completion.await.expect("delivery completion");
@@ -2446,8 +3471,9 @@ mod tests {
         let mut occurrence = sample_occurrence();
         occurrence.target_snapshot = host_runnable_target("nightly-report", None);
 
+        let delivery_identity = ScheduleDeliveryIdentity::for_occurrence(&occurrence);
         let dispatch = adapter
-            .deliver_occurrence(&occurrence)
+            .deliver_occurrence(&occurrence, &delivery_identity)
             .await
             .expect("delivery dispatch");
         let terminal = dispatch.completion.await.expect("delivery terminal");
@@ -2479,8 +3505,9 @@ mod tests {
         let mut occurrence = sample_occurrence();
         occurrence.target_snapshot = host_runnable_target("nightly-report", None);
 
+        let delivery_identity = ScheduleDeliveryIdentity::for_occurrence(&occurrence);
         let dispatch = adapter
-            .deliver_occurrence(&occurrence)
+            .deliver_occurrence(&occurrence, &delivery_identity)
             .await
             .expect("delivery dispatch");
         let terminal = dispatch.completion.await.expect("delivery terminal");
@@ -2508,13 +3535,22 @@ mod tests {
         let mut occurrence = sample_occurrence();
         occurrence.target_snapshot = host_runnable_target("nightly-report", Some(r#"{"depth":3}"#));
 
+        let delivery_identity = ScheduleDeliveryIdentity::for_occurrence(&occurrence);
         let dispatch = adapter
-            .deliver_occurrence(&occurrence)
+            .deliver_occurrence(&occurrence, &delivery_identity)
             .await
             .expect("delivery dispatch");
         assert_eq!(
             dispatch.receipt.stage,
             DeliveryReceiptStage::DispatchAccepted
+        );
+        assert_eq!(
+            dispatch.receipt.runtime_outcome,
+            Some(meerkat_schedule::RuntimeDeliveryOutcome::AdmissionAccepted)
+        );
+        assert_eq!(
+            dispatch.correlation_id.as_deref(),
+            Some(delivery_identity.correlation_id.as_str())
         );
         let terminal = dispatch.completion.await.expect("delivery terminal");
 
@@ -2525,6 +3561,10 @@ mod tests {
         assert_eq!(recorded.len(), 1);
         assert_eq!(recorded[0].occurrence_id, occurrence.occurrence_id);
         assert_eq!(recorded[0].schedule_id, occurrence.schedule_id);
+        assert_eq!(
+            recorded[0].delivery_idempotency_key,
+            delivery_identity.idempotency_key
+        );
         assert_eq!(recorded[0].runnable.as_str(), "nightly-report");
         assert_eq!(recorded[0].trigger_time, occurrence.due_at_utc);
         assert_eq!(
@@ -2548,8 +3588,9 @@ mod tests {
         let mut occurrence = sample_occurrence();
         occurrence.target_snapshot = host_runnable_target("nightly-report", None);
 
+        let delivery_identity = ScheduleDeliveryIdentity::for_occurrence(&occurrence);
         let dispatch = adapter
-            .deliver_occurrence(&occurrence)
+            .deliver_occurrence(&occurrence, &delivery_identity)
             .await
             .expect("delivery dispatch");
         let terminal = dispatch.completion.await.expect("delivery terminal");

@@ -73,7 +73,7 @@ source of truth for tool names and availability.
 | `meerkat_mob_wire_members_batch` | Wire multiple mob member pairs in one call (mob feature) |
 | `meerkat_mob_unwire` | Remove mob comms wiring (mob feature) |
 | `meerkat_mob_member_send` | Deliver host-owned work to a specific mob member (mob feature) |
-| `meerkat_mob_append_system_context` | Stage system context for a member session (mob feature) |
+| `meerkat_mob_append_system_context` | Append one ordinary durable ordered System message to a member session (mob feature) |
 | `meerkat_mob_events` | Read mob event history (mob feature) |
 | `meerkat_mob_flows` | List flows defined for a mob (mob feature) |
 | `meerkat_mob_run` | Invoke a mob as a typed callable run (mob feature) |
@@ -286,6 +286,7 @@ Start a new Meerkat agent session with the given prompt.
 ```json Request (full)
 {
   "prompt": "Analyze this code for bugs",
+  "transient_turn_context": "Current host facts regenerated for this turn",
   "system_prompt": "You are a senior code reviewer.",
   "model": "claude-opus-4-8",
   "max_tokens": 4096,
@@ -323,6 +324,12 @@ Start a new Meerkat agent session with the given prompt.
   "hooks_override": null
 }
 ```
+
+`transient_turn_context` is non-empty text; whitespace is significant. It is
+retained with the pending runtime input for exact crash retry and projected
+only into foreground provider requests for this logical turn. It is not a
+System message, is not appended to Session, and is excluded from compaction and
+extraction calls.
 
 ```json Response (success)
 {
@@ -434,7 +441,8 @@ tool calls. The call waits for the resumed turn to complete and returns the same
 ```json Request (minimal)
 {
   "session_id": "01936f8a-7b2c-7000-8000-000000000001",
-  "prompt": "Continue with this"
+  "prompt": "Continue with this",
+  "transient_turn_context": "Fresh host facts for this turn"
 }
 ```
 
@@ -649,7 +657,7 @@ Returns the runtime capability set with status resolved against config.
 
 ```json Response
 {
-  "contract_version": {"major": 0, "minor": 8, "patch": 10},
+  "contract_version": {"major": 0, "minor": 8, "patch": 11},
   "capabilities": [
     {
       "id": "sessions",
@@ -716,7 +724,7 @@ Return the curated model catalog with provider profiles, capability metadata, an
 
 ```json Response
 {
-  "contract_version": "0.8.10",
+  "contract_version": "0.8.11",
   "providers": [
     {
       "provider": "anthropic",

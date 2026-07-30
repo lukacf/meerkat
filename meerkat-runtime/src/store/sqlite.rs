@@ -2,36 +2,44 @@
 
 #[cfg(feature = "sqlite-store")]
 mod inner {
-    use std::collections::BTreeMap;
+    use std::collections::{HashMap, HashSet};
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
-    #[cfg(test)]
-    use std::sync::atomic::{AtomicU8, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-    use chrono::{DateTime, Utc};
     use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunId};
     use meerkat_store::json_column::JsonColumnBytes;
     use meerkat_store::sqlite_store::begin_immediate_transaction;
-    use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
-    use serde::{Deserialize, Serialize};
+    use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
-    use crate::identifiers::LogicalRuntimeId;
-    use crate::input_state::{
-        InputLifecycleState, InputState, InputStateHistoryEntry, InputStatePersistenceRecord,
-        InputStateSeed, InputTerminalOutcome, StoredInputState,
-    };
+    use crate::identifiers::{IdempotencyKey, LogicalRuntimeId};
+    use crate::input_state::{InputStatePersistenceRecord, InputStateSeed, StoredInputState};
     use crate::store::{
-        AuthOAuthFlowSnapshotUpdate, FencedInputStateBatchCasOutcome,
-        FencedMachineLifecycleCasOutcome, InputStateBatchCasOutcome, InputStateRow,
-        MachineLifecycleCasOutcome, MachineLifecycleCommit, MachineLifecycleExpectedVersion,
-        MachineLifecycleObservation, MachineLifecycleObservationVersion, MachineLifecycleSnapshot,
-        MachineLifecycleStoreRecord, RuntimeDeliveryAuthorityCasOutcome,
-        RuntimeDeliveryAuthorityRecord, RuntimeDeliveryStoreRecord, RuntimeStore,
-        RuntimeStoreError, RuntimeStoreWriteFence, RuntimeStoreWriteFenceOutcome, SessionDelta,
-        classify_machine_lifecycle_record, complete_compaction_projection_checkpoint,
-        decoded_prepared_machine_lifecycle_replacement, execute_runtime_store_write_fence,
+        AuthOAuthFlowSnapshotUpdate, CommittedRecoveryBoundary, CommittedWholeBlobProvisionalTail,
+        CommittedWholeBlobSnapshot, ExactInputStateObservation, FencedInputStateBatchCasOutcome,
+        FencedMachineLifecycleCasOutcome, HeadCanonicalProvisionalTailAuthority,
+        HeadCanonicalStoreAuthority, InputStateBatchCasImplementationProfile,
+        InputStateBatchCasOutcome, InputStateRow, MachineLifecycleCasOutcome,
+        MachineLifecycleCommit, MachineLifecycleExpectedVersion, MachineLifecycleObservation,
+        MachineLifecycleObservationVersion, MachineLifecycleSnapshot, MachineLifecycleStoreRecord,
+        PreparedDurableTailRecoverySource, PreparedHeadCanonicalProvisionalTail,
+        PreparedRecoveryInputSnapshot, PreparedRecoveryInputStateMutation,
+        PreparedRecoveryReceiptSource, PreparedRuntimeSessionCommit,
+        PreparedRuntimeSessionCommitPayload, PreparedRuntimeSessionCommitResult,
+        PreparedWholeBlobProvisionalTail, PreparedWholeBlobRewriteStoreParts,
+        PreparedWholeBlobSnapshotCas, RecoveryCommitStatus, RecoveryInputSetRevision,
+        RecoveryInputStateMutation, RuntimeDeliveryAuthorityCasOutcome,
+        RuntimeDeliveryAuthorityRecord, RuntimeDeliveryStoreRecord, RuntimeSessionAuthority,
+        RuntimeSessionAuthorityReadCost, RuntimeSessionPersistenceProfile, RuntimeStore,
+        RuntimeStoreError, RuntimeStoreWriteFence, RuntimeStoreWriteFenceOutcome,
+        SerializedSessionSnapshot, WholeBlobProvisionalTailAuthority, WholeBlobSnapshotCasOutcome,
+        WholeBlobStoreAuthority, classify_machine_lifecycle_record,
+        complete_compaction_projection_intent, decoded_prepared_machine_lifecycle_replacement,
+        execute_runtime_store_write_fence, parsed_whole_blob_snapshot,
         prepare_input_state_batch_cas, prepare_machine_lifecycle_replacement,
-        validate_machine_lifecycle_replacement,
+        prepare_recovery_input_state_mutations, prepared_whole_blob_snapshot,
+        validate_input_state_batch_read_ids, validate_machine_lifecycle_replacement,
     };
 
     const CREATE_RUNTIME_SCHEMA_SQL: &str = r"
@@ -120,32 +128,1422 @@ CREATE INDEX IF NOT EXISTS idx_runtime_delivery_inbox_sequence
         tx.execute_batch(CREATE_RUNTIME_DELIVERY_SCHEMA_SQL)
     }
 
+    const HEAD_CANONICAL_FROZEN_SNAPSHOT_ERROR: &str =
+        "runtime session snapshot is frozen by head-canonical authority";
+
+    const CREATE_RUNTIME_SESSION_AUTHORITY_SQL: &str = r"
+CREATE TABLE runtime_session_authority (
+    runtime_id TEXT PRIMARY KEY,
+    authority_version INTEGER NOT NULL CHECK (authority_version = 1),
+    session_id TEXT NOT NULL,
+    store_revision INTEGER NOT NULL CHECK (store_revision >= 1),
+    boundary_head_json BLOB NOT NULL CHECK (length(boundary_head_json) > 0),
+    committed_head_token TEXT NOT NULL CHECK (length(committed_head_token) > 0)
+);
+CREATE TABLE runtime_head_canonical_provisional_tails (
+    runtime_id TEXT PRIMARY KEY,
+    authority_version INTEGER NOT NULL CHECK (authority_version = 1),
+    session_id TEXT NOT NULL,
+    base_store_revision INTEGER NOT NULL CHECK (base_store_revision >= 1),
+    base_committed_head_token TEXT NOT NULL CHECK (length(base_committed_head_token) > 0),
+    physical_store_revision INTEGER NOT NULL
+        CHECK (physical_store_revision > base_store_revision),
+    physical_head_token TEXT NOT NULL CHECK (length(physical_head_token) > 0),
+    run_id TEXT NOT NULL CHECK (length(run_id) > 0),
+    candidate_sequence INTEGER NOT NULL CHECK (
+        candidate_sequence >= 1
+        AND physical_store_revision = base_store_revision + candidate_sequence
+    ),
+    candidate_message_count INTEGER NOT NULL CHECK (candidate_message_count >= 0),
+    candidate_conversation_digest TEXT NOT NULL
+        CHECK (length(candidate_conversation_digest) > 0),
+    catalog_json BLOB NOT NULL CHECK (length(catalog_json) > 0),
+    compaction_intents_json BLOB NOT NULL CHECK (length(compaction_intents_json) > 0),
+    predecessor_candidate_message_count INTEGER,
+    predecessor_candidate_conversation_digest TEXT,
+    predecessor_catalog_json BLOB,
+    predecessor_compaction_intents_json BLOB,
+    CHECK (
+        (predecessor_candidate_message_count IS NULL
+         AND predecessor_candidate_conversation_digest IS NULL
+         AND predecessor_catalog_json IS NULL
+         AND predecessor_compaction_intents_json IS NULL)
+        OR
+        (predecessor_candidate_message_count IS NOT NULL
+         AND predecessor_candidate_conversation_digest IS NOT NULL
+         AND predecessor_catalog_json IS NOT NULL
+         AND predecessor_compaction_intents_json IS NOT NULL
+         AND predecessor_candidate_message_count >= 0
+         AND length(predecessor_candidate_conversation_digest) > 0
+         AND length(predecessor_catalog_json) > 0
+         AND length(predecessor_compaction_intents_json) > 0)
+    )
+);
+CREATE TRIGGER runtime_session_snapshots_head_authority_no_insert
+BEFORE INSERT ON runtime_session_snapshots
+WHEN EXISTS (
+    SELECT 1 FROM runtime_session_authority
+    WHERE runtime_id = NEW.runtime_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'runtime session snapshot is frozen by head-canonical authority');
+END;
+CREATE TRIGGER runtime_session_snapshots_head_authority_no_update
+BEFORE UPDATE ON runtime_session_snapshots
+WHEN EXISTS (
+        SELECT 1 FROM runtime_session_authority
+        WHERE runtime_id = OLD.runtime_id
+    )
+    OR EXISTS (
+        SELECT 1 FROM runtime_session_authority
+        WHERE runtime_id = NEW.runtime_id
+    )
+BEGIN
+    SELECT RAISE(ABORT, 'runtime session snapshot is frozen by head-canonical authority');
+END;
+CREATE TRIGGER runtime_session_snapshots_head_authority_no_delete
+BEFORE DELETE ON runtime_session_snapshots
+WHEN EXISTS (
+    SELECT 1 FROM runtime_session_authority
+    WHERE runtime_id = OLD.runtime_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'runtime session snapshot is frozen by head-canonical authority');
+END;
+CREATE TRIGGER runtime_session_authority_after_delete
+AFTER DELETE ON runtime_session_authority
+BEGIN
+    DELETE FROM runtime_head_canonical_provisional_tails
+    WHERE runtime_id = OLD.runtime_id;
+END";
+
+    const CREATE_RUNTIME_WHOLE_BLOB_AUTHORITY_SQL: &str = r"
+CREATE TABLE runtime_whole_blob_authority (
+    runtime_id TEXT PRIMARY KEY,
+    authority_version INTEGER NOT NULL CHECK (authority_version = 1),
+    session_id TEXT NOT NULL,
+    store_revision INTEGER NOT NULL CHECK (store_revision >= 1),
+    blob_sha256 TEXT NOT NULL CHECK (length(blob_sha256) > 0)
+);
+CREATE TABLE runtime_whole_blob_bodies (
+    blob_sha256 TEXT PRIMARY KEY CHECK (length(blob_sha256) > 0),
+    session_snapshot BLOB NOT NULL
+);
+CREATE TABLE runtime_whole_blob_provisional_tails (
+    runtime_id TEXT PRIMARY KEY,
+    authority_version INTEGER NOT NULL CHECK (authority_version = 1),
+    session_id TEXT NOT NULL,
+    base_store_revision INTEGER NOT NULL CHECK (base_store_revision >= 1),
+    base_blob_sha256 TEXT NOT NULL CHECK (length(base_blob_sha256) > 0),
+    run_id TEXT NOT NULL,
+    candidate_sequence INTEGER NOT NULL CHECK (candidate_sequence >= 1),
+    candidate_blob_sha256 TEXT NOT NULL CHECK (length(candidate_blob_sha256) > 0),
+    conversation_digest TEXT NOT NULL CHECK (length(conversation_digest) > 0),
+    message_count INTEGER NOT NULL CHECK (message_count >= 0),
+    catalog_json BLOB NOT NULL CHECK (length(catalog_json) > 0),
+    compaction_intents_json BLOB NOT NULL CHECK (length(compaction_intents_json) > 0)
+);
+CREATE TABLE runtime_session_catalog (
+    runtime_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL UNIQUE,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    entry_json BLOB NOT NULL CHECK (length(entry_json) > 0)
+);
+CREATE INDEX runtime_session_catalog_updated
+ON runtime_session_catalog(updated_at_ms DESC, session_id ASC)";
+
+    const CREATE_RUNTIME_RECOVERY_BOUNDARY_SCHEMA_SQL: &str = r"
+CREATE TABLE runtime_recovery_boundaries (
+    runtime_id TEXT NOT NULL,
+    candidate_id TEXT NOT NULL CHECK (length(candidate_id) > 0),
+    boundary_json BLOB NOT NULL CHECK (length(boundary_json) > 0),
+    PRIMARY KEY (runtime_id, candidate_id)
+)";
+
+    const CREATE_RUNTIME_ORDINARY_BOUNDARY_WITNESS_SCHEMA_SQL: &str = r"
+CREATE TABLE runtime_session_boundary_witnesses (
+    runtime_id TEXT NOT NULL,
+    boundary_key TEXT NOT NULL CHECK (length(boundary_key) > 0),
+    witness_version INTEGER NOT NULL CHECK (witness_version = 1),
+    request_digest TEXT NOT NULL CHECK (length(request_digest) > 0),
+    PRIMARY KEY (runtime_id, boundary_key)
+)";
+
+    /// One-time migration authority for receipts that exact 0.8.10 wrote before
+    /// ordinary-boundary request witnesses existed.
+    ///
+    /// Hashing the exact released bytes during v1 -> v2 activation prevents a
+    /// missing witness on a current store from being mistaken for legacy state
+    /// without duplicating every historical receipt body. A successful lazy
+    /// adoption consumes exactly one marker atomically with installation of the
+    /// current request witness.
+    const CREATE_RELEASED_0810_BOUNDARY_RECEIPT_MARKERS_SQL: &str = r"
+CREATE TABLE runtime_released_0810_boundary_receipts (
+    runtime_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    receipt_sha256 TEXT NOT NULL CHECK (length(receipt_sha256) = 71),
+    PRIMARY KEY (runtime_id, run_id, sequence)
+)";
+
+    fn capture_released_0810_boundary_receipt_markers(
+        tx: &rusqlite::Transaction<'_>,
+    ) -> Result<(), rusqlite::Error> {
+        use sha2::Digest as _;
+
+        let receipts = {
+            let mut statement = tx.prepare(
+                r"
+                SELECT runtime_id, run_id, sequence, receipt_json
+                FROM runtime_boundary_receipts
+                ORDER BY runtime_id, run_id, sequence
+                ",
+            )?;
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, JsonColumnBytes>(3)?.into_bytes(),
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        for (runtime_id, run_id, sequence, receipt_json) in receipts {
+            let invalid_receipt = |detail: String| {
+                rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "released runtime boundary receipt {runtime_id}/{run_id}/{sequence} \
+                         failed marker capture: {detail}"
+                    ),
+                )))
+            };
+            let receipt: RunBoundaryReceipt = serde_json::from_slice(&receipt_json)
+                .map_err(|error| invalid_receipt(error.to_string()))?;
+            if receipt.run_id.0.to_string() != run_id
+                || encode_receipt_sequence(receipt.sequence) != sequence
+            {
+                return Err(invalid_receipt(
+                    "receipt body identity differs from its primary key".to_string(),
+                ));
+            }
+            let receipt_sha256 = format!("sha256:{:x}", sha2::Sha256::digest(&receipt_json));
+            tx.execute(
+                r"
+                INSERT INTO runtime_released_0810_boundary_receipts (
+                    runtime_id, run_id, sequence, receipt_sha256
+                ) VALUES (?1, ?2, ?3, ?4)
+                ",
+                params![runtime_id, run_id, sequence, receipt_sha256],
+            )?;
+        }
+        Ok(())
+    }
+
+    const CREATE_RUNTIME_PENDING_TERMINAL_OWNER_SCHEMA_SQL: &str = r"
+CREATE TABLE runtime_pending_terminal_owners (
+    runtime_id TEXT NOT NULL,
+    owner_input_id TEXT NOT NULL,
+    PRIMARY KEY (runtime_id, owner_input_id)
+);
+
+INSERT OR IGNORE INTO runtime_pending_terminal_owners
+    (runtime_id, owner_input_id)
+SELECT runtime_id, input_id
+FROM runtime_input_states
+WHERE CASE WHEN json_valid(state_json) THEN
+    (
+        json_extract(state_json, '$.terminal_completion.owner_input_id') = input_id
+        AND json_extract(state_json, '$.terminal_completion.phase.phase') = 'pending'
+    )
+    OR
+    (
+        json_extract(state_json, '$.interaction_terminal_outbox.candidate_owner_input_id') = input_id
+        AND json_extract(state_json, '$.interaction_terminal_outbox.phase.phase')
+            IN ('candidate', 'finalized')
+    )
+ELSE 0 END";
+    const LOAD_PENDING_TERMINAL_OWNER_FIRST_PAGE_SQL: &str = r"
+SELECT owner_input_id
+FROM runtime_pending_terminal_owners
+WHERE runtime_id = ?1
+ORDER BY owner_input_id
+LIMIT ?2";
+    const LOAD_PENDING_TERMINAL_OWNER_CONTINUATION_PAGE_SQL: &str = r"
+SELECT owner_input_id
+FROM runtime_pending_terminal_owners
+WHERE runtime_id = ?1
+  AND owner_input_id > ?2
+ORDER BY owner_input_id
+LIMIT ?3";
+
+    const CREATE_RUNTIME_HEAD_CANONICAL_ACTIVATION_SCHEMA_SQL: &str = r"
+CREATE TABLE runtime_head_canonical_profile_pin (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    pin_version INTEGER NOT NULL CHECK (pin_version = 1),
+    persistence_profile TEXT NOT NULL CHECK (persistence_profile = 'head_canonical_v1'),
+    pinned_at_ms INTEGER NOT NULL CHECK (pinned_at_ms >= 0)
+);
+CREATE TRIGGER runtime_head_canonical_profile_pin_no_update
+BEFORE UPDATE ON runtime_head_canonical_profile_pin
+BEGIN
+    SELECT RAISE(ABORT, 'runtime head-canonical profile pin is immutable');
+END;
+CREATE TRIGGER runtime_head_canonical_profile_pin_no_delete
+BEFORE DELETE ON runtime_head_canonical_profile_pin
+BEGIN
+    SELECT RAISE(ABORT, 'runtime head-canonical profile pin is immutable');
+END;
+CREATE TABLE runtime_head_canonical_activations (
+    runtime_id TEXT PRIMARY KEY,
+    activation_version INTEGER NOT NULL CHECK (activation_version = 1),
+    state TEXT NOT NULL CHECK (state IN ('in_progress', 'complete')),
+    session_id TEXT NOT NULL,
+    source_snapshot_token TEXT,
+    source_snapshot_bytes INTEGER,
+    source_message_count INTEGER,
+    started_at_ms INTEGER NOT NULL CHECK (started_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= started_at_ms),
+    completed_at_ms INTEGER,
+    elapsed_ms INTEGER,
+    boundary_message_count INTEGER,
+    physical_message_count INTEGER,
+    boundary_head_cas_token TEXT,
+    physical_head_cas_token TEXT,
+    CHECK (
+        (
+            state = 'in_progress'
+            AND source_snapshot_token IS NULL
+            AND source_snapshot_bytes IS NULL
+            AND source_message_count IS NULL
+            AND completed_at_ms IS NULL
+            AND elapsed_ms IS NULL
+            AND boundary_message_count IS NULL
+            AND physical_message_count IS NULL
+            AND boundary_head_cas_token IS NULL
+            AND physical_head_cas_token IS NULL
+        )
+        OR
+        (
+            state = 'complete'
+            AND source_snapshot_token IS NOT NULL
+            AND length(source_snapshot_token) > 0
+            AND source_snapshot_bytes IS NOT NULL
+            AND source_snapshot_bytes >= 0
+            AND source_message_count IS NOT NULL
+            AND source_message_count >= 0
+            AND completed_at_ms IS NOT NULL
+            AND completed_at_ms >= started_at_ms
+            AND elapsed_ms IS NOT NULL
+            AND elapsed_ms >= 0
+            AND boundary_message_count IS NOT NULL
+            AND boundary_message_count >= 0
+            AND physical_message_count IS NOT NULL
+            AND physical_message_count >= boundary_message_count
+            AND boundary_head_cas_token IS NOT NULL
+            AND length(boundary_head_cas_token) > 0
+            AND physical_head_cas_token IS NOT NULL
+            AND length(physical_head_cas_token) > 0
+        )
+    )
+);
+CREATE TRIGGER runtime_session_snapshots_hc_activation_no_insert
+BEFORE INSERT ON runtime_session_snapshots
+WHEN EXISTS (
+    SELECT 1 FROM runtime_head_canonical_profile_pin
+    WHERE singleton = 1
+)
+OR EXISTS (
+    SELECT 1 FROM runtime_head_canonical_activations
+    WHERE runtime_id = NEW.runtime_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'runtime session snapshot is frozen by head-canonical authority');
+END;
+CREATE TRIGGER runtime_session_snapshots_hc_activation_no_update
+BEFORE UPDATE ON runtime_session_snapshots
+WHEN EXISTS (
+        SELECT 1 FROM runtime_head_canonical_profile_pin
+        WHERE singleton = 1
+    )
+    OR EXISTS (
+        SELECT 1 FROM runtime_head_canonical_activations
+        WHERE runtime_id = OLD.runtime_id
+    )
+    OR EXISTS (
+        SELECT 1 FROM runtime_head_canonical_activations
+        WHERE runtime_id = NEW.runtime_id
+    )
+BEGIN
+    SELECT RAISE(ABORT, 'runtime session snapshot is frozen by head-canonical authority');
+END;
+CREATE TRIGGER runtime_session_snapshots_hc_activation_no_delete
+BEFORE DELETE ON runtime_session_snapshots
+WHEN EXISTS (
+    SELECT 1 FROM runtime_head_canonical_profile_pin
+    WHERE singleton = 1
+)
+OR EXISTS (
+    SELECT 1 FROM runtime_head_canonical_activations
+    WHERE runtime_id = OLD.runtime_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'runtime session snapshot is frozen by head-canonical authority');
+END";
+
+    /// Single definition shared by the partial index and every exact witness
+    /// read. Keeping classification in one predicate prevents a future phase
+    /// addition from making the indexed set and transactional recheck diverge.
+    const RECOVERY_NONTERMINAL_INPUT_PREDICATE_SQL: &str = r"
+CASE
+    WHEN json_valid(state_json) THEN COALESCE(
+        json_extract(state_json, '$.current_state') NOT IN (
+            'consumed',
+            'superseded',
+            'coalesced',
+            'abandoned'
+        ),
+        1
+    )
+    ELSE 1
+END";
+
+    const CREATE_RUNTIME_INPUT_SET_REVISION_SCHEMA_SQL: &str = r"
+CREATE TABLE runtime_input_set_revisions (
+    runtime_id TEXT PRIMARY KEY,
+    revision INTEGER NOT NULL
+        CHECK (
+            typeof(revision) = 'integer'
+            AND revision >= 1
+            AND revision <= 9223372036854775807
+        )
+);
+
+INSERT OR IGNORE INTO runtime_input_set_revisions (runtime_id, revision)
+SELECT DISTINCT runtime_id, 1
+FROM runtime_input_states;
+
+CREATE TRIGGER runtime_input_states_revision_after_insert
+AFTER INSERT ON runtime_input_states
+BEGIN
+    INSERT INTO runtime_input_set_revisions (runtime_id, revision)
+    VALUES (NEW.runtime_id, 1)
+    ON CONFLICT(runtime_id) DO UPDATE SET revision = revision + 1;
+END;
+
+CREATE TRIGGER runtime_input_states_revision_after_update_old
+AFTER UPDATE OF runtime_id, input_id, state_json ON runtime_input_states
+BEGIN
+    INSERT INTO runtime_input_set_revisions (runtime_id, revision)
+    VALUES (OLD.runtime_id, 1)
+    ON CONFLICT(runtime_id) DO UPDATE SET revision = revision + 1;
+END;
+
+CREATE TRIGGER runtime_input_states_revision_after_update_new
+AFTER UPDATE OF runtime_id, input_id, state_json ON runtime_input_states
+WHEN NEW.runtime_id <> OLD.runtime_id
+BEGIN
+    INSERT INTO runtime_input_set_revisions (runtime_id, revision)
+    VALUES (NEW.runtime_id, 1)
+    ON CONFLICT(runtime_id) DO UPDATE SET revision = revision + 1;
+END;
+
+CREATE TRIGGER runtime_input_states_revision_after_delete
+AFTER DELETE ON runtime_input_states
+BEGIN
+    INSERT INTO runtime_input_set_revisions (runtime_id, revision)
+    VALUES (OLD.runtime_id, 1)
+    ON CONFLICT(runtime_id) DO UPDATE SET revision = revision + 1;
+END;
+
+CREATE TABLE runtime_input_idempotency_keys (
+    runtime_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    input_id TEXT NOT NULL,
+    PRIMARY KEY (runtime_id, idempotency_key),
+    UNIQUE (runtime_id, input_id)
+);
+
+INSERT INTO runtime_input_idempotency_keys
+    (runtime_id, idempotency_key, input_id)
+SELECT
+    runtime_id,
+    json_extract(state_json, '$.idempotency_key'),
+    input_id
+FROM runtime_input_states
+WHERE CASE
+    WHEN json_valid(state_json)
+    THEN json_type(state_json, '$.idempotency_key') = 'text'
+    ELSE 0
+END;
+
+CREATE TRIGGER runtime_input_idempotency_after_insert
+AFTER INSERT ON runtime_input_states
+WHEN CASE
+    WHEN json_valid(NEW.state_json)
+    THEN json_type(NEW.state_json, '$.idempotency_key') = 'text'
+    ELSE 0
+END
+BEGIN
+    INSERT INTO runtime_input_idempotency_keys
+        (runtime_id, idempotency_key, input_id)
+    VALUES (
+        NEW.runtime_id,
+        json_extract(NEW.state_json, '$.idempotency_key'),
+        NEW.input_id
+    );
+END;
+
+CREATE TRIGGER runtime_input_idempotency_after_update
+AFTER UPDATE OF runtime_id, input_id, state_json ON runtime_input_states
+BEGIN
+    DELETE FROM runtime_input_idempotency_keys
+    WHERE runtime_id = OLD.runtime_id AND input_id = OLD.input_id;
+
+    INSERT INTO runtime_input_idempotency_keys
+        (runtime_id, idempotency_key, input_id)
+    SELECT
+        NEW.runtime_id,
+        json_extract(NEW.state_json, '$.idempotency_key'),
+        NEW.input_id
+    WHERE CASE
+        WHEN json_valid(NEW.state_json)
+        THEN json_type(NEW.state_json, '$.idempotency_key') = 'text'
+        ELSE 0
+    END;
+END;
+
+CREATE TRIGGER runtime_input_idempotency_after_delete
+AFTER DELETE ON runtime_input_states
+BEGIN
+    DELETE FROM runtime_input_idempotency_keys
+    WHERE runtime_id = OLD.runtime_id AND input_id = OLD.input_id;
+END";
+
+    const CREATE_RUNTIME_INPUT_IDEMPOTENCY_UNINDEXABLE_SCHEMA_SQL: &str = r"
+CREATE TABLE runtime_input_idempotency_unindexable_rows (
+    runtime_id TEXT NOT NULL,
+    input_id TEXT NOT NULL,
+    reason TEXT NOT NULL CHECK (length(reason) > 0),
+    PRIMARY KEY (runtime_id, input_id)
+);
+
+INSERT INTO runtime_input_idempotency_unindexable_rows
+    (runtime_id, input_id, reason)
+SELECT
+    runtime_id,
+    input_id,
+    CASE
+        WHEN NOT json_valid(state_json)
+        THEN 'state_json is not valid JSON'
+        WHEN (
+            SELECT COUNT(*)
+            FROM json_each(state_json) AS member
+            WHERE member.key = 'idempotency_key'
+        ) > 1
+        THEN 'idempotency_key appears more than once'
+        ELSE 'idempotency_key is not text'
+    END
+FROM runtime_input_states
+WHERE CASE
+    WHEN json_valid(state_json)
+    THEN
+        (
+            SELECT COUNT(*)
+            FROM json_each(state_json) AS member
+            WHERE member.key = 'idempotency_key'
+        ) > 1
+        OR (
+            json_type(state_json, '$.idempotency_key') IS NOT NULL
+            AND json_type(state_json, '$.idempotency_key') NOT IN ('null', 'text')
+        )
+    ELSE 1
+END;
+
+CREATE TRIGGER runtime_input_idempotency_unindexable_after_insert
+AFTER INSERT ON runtime_input_states
+WHEN CASE
+    WHEN json_valid(NEW.state_json)
+    THEN
+        (
+            SELECT COUNT(*)
+            FROM json_each(NEW.state_json) AS member
+            WHERE member.key = 'idempotency_key'
+        ) > 1
+        OR (
+            json_type(NEW.state_json, '$.idempotency_key') IS NOT NULL
+            AND json_type(NEW.state_json, '$.idempotency_key') NOT IN ('null', 'text')
+        )
+    ELSE 1
+END
+BEGIN
+    INSERT OR REPLACE INTO runtime_input_idempotency_unindexable_rows
+        (runtime_id, input_id, reason)
+    VALUES (
+        NEW.runtime_id,
+        NEW.input_id,
+        CASE
+            WHEN NOT json_valid(NEW.state_json)
+            THEN 'state_json is not valid JSON'
+            WHEN (
+                SELECT COUNT(*)
+                FROM json_each(NEW.state_json) AS member
+                WHERE member.key = 'idempotency_key'
+            ) > 1
+            THEN 'idempotency_key appears more than once'
+            ELSE 'idempotency_key is not text'
+        END
+    );
+END;
+
+CREATE TRIGGER runtime_input_idempotency_unindexable_after_update
+AFTER UPDATE OF runtime_id, input_id, state_json ON runtime_input_states
+BEGIN
+    DELETE FROM runtime_input_idempotency_unindexable_rows
+    WHERE runtime_id = OLD.runtime_id AND input_id = OLD.input_id;
+
+    INSERT INTO runtime_input_idempotency_unindexable_rows
+        (runtime_id, input_id, reason)
+    SELECT
+        NEW.runtime_id,
+        NEW.input_id,
+        CASE
+            WHEN NOT json_valid(NEW.state_json)
+            THEN 'state_json is not valid JSON'
+            WHEN (
+                SELECT COUNT(*)
+                FROM json_each(NEW.state_json) AS member
+                WHERE member.key = 'idempotency_key'
+            ) > 1
+            THEN 'idempotency_key appears more than once'
+            ELSE 'idempotency_key is not text'
+        END
+    WHERE CASE
+        WHEN json_valid(NEW.state_json)
+        THEN
+            (
+                SELECT COUNT(*)
+                FROM json_each(NEW.state_json) AS member
+                WHERE member.key = 'idempotency_key'
+            ) > 1
+            OR (
+                json_type(NEW.state_json, '$.idempotency_key') IS NOT NULL
+                AND json_type(NEW.state_json, '$.idempotency_key') NOT IN ('null', 'text')
+            )
+        ELSE 1
+    END;
+END;
+
+CREATE TRIGGER runtime_input_idempotency_unindexable_after_delete
+AFTER DELETE ON runtime_input_states
+BEGIN
+    DELETE FROM runtime_input_idempotency_unindexable_rows
+    WHERE runtime_id = OLD.runtime_id AND input_id = OLD.input_id;
+END";
+
+    const CREATE_RUNTIME_HEAD_CANONICAL_ACTIVATION_QUEUE_SCHEMA_SQL: &str = r"
+CREATE TABLE runtime_head_canonical_activation_queue (
+    runtime_id TEXT PRIMARY KEY
+);
+
+INSERT OR IGNORE INTO runtime_head_canonical_activation_queue (runtime_id)
+SELECT whole_blob.runtime_id
+FROM runtime_whole_blob_authority AS whole_blob
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM runtime_session_authority AS authority
+    WHERE authority.runtime_id = whole_blob.runtime_id
+)
+  AND NOT EXISTS (
+    SELECT 1
+    FROM runtime_head_canonical_activations AS activation
+    WHERE activation.runtime_id = whole_blob.runtime_id
+      AND activation.state = 'in_progress'
+);
+
+CREATE TRIGGER runtime_whole_blob_authority_activation_queue_after_insert
+AFTER INSERT ON runtime_whole_blob_authority
+WHEN NOT EXISTS (
+    SELECT 1
+    FROM runtime_session_authority AS authority
+    WHERE authority.runtime_id = NEW.runtime_id
+)
+AND NOT EXISTS (
+    SELECT 1
+    FROM runtime_head_canonical_activations AS activation
+    WHERE activation.runtime_id = NEW.runtime_id
+      AND activation.state = 'in_progress'
+)
+BEGIN
+    INSERT OR IGNORE INTO runtime_head_canonical_activation_queue (runtime_id)
+    VALUES (NEW.runtime_id);
+END;
+
+CREATE TRIGGER runtime_whole_blob_authority_activation_queue_after_update
+AFTER UPDATE OF runtime_id ON runtime_whole_blob_authority
+BEGIN
+    DELETE FROM runtime_head_canonical_activation_queue
+    WHERE runtime_id = OLD.runtime_id;
+
+    INSERT OR IGNORE INTO runtime_head_canonical_activation_queue (runtime_id)
+    SELECT NEW.runtime_id
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM runtime_session_authority AS authority
+        WHERE authority.runtime_id = NEW.runtime_id
+    )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM runtime_head_canonical_activations AS activation
+        WHERE activation.runtime_id = NEW.runtime_id
+          AND activation.state = 'in_progress'
+    );
+END;
+
+CREATE TRIGGER runtime_whole_blob_authority_activation_queue_after_delete
+AFTER DELETE ON runtime_whole_blob_authority
+BEGIN
+    DELETE FROM runtime_head_canonical_activation_queue
+    WHERE runtime_id = OLD.runtime_id;
+END;
+
+CREATE TRIGGER runtime_session_authority_activation_queue_after_insert
+AFTER INSERT ON runtime_session_authority
+BEGIN
+    DELETE FROM runtime_head_canonical_activation_queue
+    WHERE runtime_id = NEW.runtime_id;
+END;
+
+CREATE TRIGGER runtime_session_authority_activation_queue_after_update
+AFTER UPDATE OF runtime_id ON runtime_session_authority
+BEGIN
+    DELETE FROM runtime_head_canonical_activation_queue
+    WHERE runtime_id IN (OLD.runtime_id, NEW.runtime_id);
+END;
+
+CREATE TRIGGER runtime_head_canonical_activations_queue_after_complete_insert
+AFTER INSERT ON runtime_head_canonical_activations
+WHEN NEW.state = 'complete'
+AND EXISTS (
+    SELECT 1
+    FROM runtime_session_authority AS authority
+    WHERE authority.runtime_id = NEW.runtime_id
+)
+BEGIN
+    DELETE FROM runtime_head_canonical_activation_queue
+    WHERE runtime_id = NEW.runtime_id;
+END;
+
+CREATE TRIGGER runtime_head_canonical_activations_queue_after_complete_update
+AFTER UPDATE OF state ON runtime_head_canonical_activations
+WHEN NEW.state = 'complete'
+AND EXISTS (
+    SELECT 1
+    FROM runtime_session_authority AS authority
+    WHERE authority.runtime_id = NEW.runtime_id
+)
+BEGIN
+    DELETE FROM runtime_head_canonical_activation_queue
+    WHERE runtime_id = NEW.runtime_id;
+END";
+
+    fn backfill_whole_blob_store_authority(
+        tx: &rusqlite::Transaction<'_>,
+    ) -> Result<(), rusqlite::Error> {
+        let migration_data_error = |runtime_id: &str, detail: String| {
+            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("released WholeBlob row for runtime {runtime_id} {detail}"),
+            )))
+        };
+        let rows = {
+            let mut statement = tx.prepare(
+                "SELECT runtime_id, session_snapshot FROM runtime_session_snapshots ORDER BY runtime_id",
+            )?;
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, JsonColumnBytes>(1)?.into_bytes(),
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        for (runtime_id, bytes) in rows {
+            let imported =
+                meerkat_core::import_released_0810_session(&bytes).map_err(|error| {
+                    rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "released WholeBlob row for runtime {runtime_id} failed strict 0.8.10 import: {error}"
+                        ),
+                    )))
+            })?;
+            let (session, receipt) = imported.into_parts();
+            let logical_runtime_id = LogicalRuntimeId(runtime_id.clone());
+            use sha2::Digest as _;
+            let observed_source_sha256: [u8; 32] = sha2::Sha256::digest(&bytes).into();
+            if receipt.source_document_sha256() != &observed_source_sha256 {
+                return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "released WholeBlob row for runtime {runtime_id} changed during exact import"
+                        ),
+                    ),
+                )));
+            }
+            if LogicalRuntimeId::for_session(receipt.session_id()).0 != runtime_id {
+                return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "released WholeBlob row {runtime_id} belongs to session {}",
+                            receipt.session_id()
+                        ),
+                    ),
+                )));
+            }
+            let artifact = session.to_persisted_artifact().map_err(|error| {
+                rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "released WholeBlob row for runtime {runtime_id} failed current representation encoding: {error}"
+                    ),
+                )))
+            })?;
+            let blob_sha256 = artifact.row_sha256_token().to_string();
+            let catalog_entry = crate::store::RuntimeSessionCatalogEntry::from_session(
+                &session,
+                RuntimeSessionPersistenceProfile::WholeBlobV1,
+                None,
+            )
+            .map_err(|error| {
+                migration_data_error(
+                    &runtime_id,
+                    format!("failed current catalog projection: {error}"),
+                )
+            })?;
+            tx.execute(
+                r"
+                INSERT INTO runtime_whole_blob_bodies (blob_sha256, session_snapshot)
+                VALUES (?1, ?2)
+                ",
+                params![&blob_sha256, artifact.bytes()],
+            )?;
+            tx.execute(
+                r"
+                INSERT INTO runtime_whole_blob_authority
+                    (runtime_id, authority_version, session_id, store_revision, blob_sha256)
+                VALUES (?1, 1, ?2, 1, ?3)
+                ",
+                params![&runtime_id, receipt.session_id().to_string(), &blob_sha256],
+            )?;
+            upsert_runtime_session_catalog_entry_in_txn(tx, &logical_runtime_id, &catalog_entry)
+                .map_err(|error| {
+                    migration_data_error(
+                        &runtime_id,
+                        format!("failed atomic catalog adoption: {error}"),
+                    )
+                })?;
+        }
+        Ok(())
+    }
+
+    /// Retire 0.8.10 ingress payloads whose released machine seed is already
+    /// terminal and whose row carries no unfinished completion/publication
+    /// obligation.
+    ///
+    /// This belongs to the exact v1 -> v2 activation importer, not ordinary
+    /// startup recovery: closed terminal rows are intentionally outside the
+    /// live recovery index, so scanning them on every boot would reintroduce
+    /// O(history) work. The generated seed authorizer is run before each
+    /// current replacement is encoded, and the update is exact-byte fenced
+    /// inside the same migration transaction. Directed rows without an outbox,
+    /// malformed directed carriers, and pending terminal sagas retain content.
+    fn retire_released_terminal_input_payloads(
+        tx: &rusqlite::Transaction<'_>,
+    ) -> Result<(), rusqlite::Error> {
+        let migration_data_error = |runtime_id: &str, input_id: &str, detail: String| {
+            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "released runtime input {runtime_id}/{input_id} failed terminal payload import: {detail}"
+                ),
+            )))
+        };
+        let rows = {
+            let mut statement = tx.prepare(
+                "SELECT runtime_id, input_id, state_json
+                 FROM runtime_input_states
+                 WHERE json_valid(state_json)
+                   AND json_extract(state_json, '$.current_state')
+                       IN ('consumed', 'superseded', 'coalesced', 'abandoned')
+                 ORDER BY runtime_id, input_id",
+            )?;
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, JsonColumnBytes>(2)?.into_bytes(),
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        for (runtime_id, input_id, source_bytes) in rows {
+            let mut stored: StoredInputState = serde_json::from_slice(&source_bytes)
+                .map_err(|error| migration_data_error(&runtime_id, &input_id, error.to_string()))?;
+            if stored.state.persisted_input.is_none()
+                || !crate::store::input_state_payload_is_retirable(&stored)
+            {
+                continue;
+            }
+            stored.state.persisted_input = None;
+            let replacement = InputStatePersistenceRecord::from_machine_snapshot(stored)
+                .map_err(|error| migration_data_error(&runtime_id, &input_id, error))?;
+            let replacement_bytes = serde_json::to_vec(replacement.as_stored())
+                .map_err(|error| migration_data_error(&runtime_id, &input_id, error.to_string()))?;
+            let changed = tx.execute(
+                "UPDATE runtime_input_states
+                 SET state_json = ?1
+                 WHERE runtime_id = ?2 AND input_id = ?3 AND state_json = ?4",
+                params![replacement_bytes, &runtime_id, &input_id, &source_bytes],
+            )?;
+            if changed != 1 {
+                return Err(migration_data_error(
+                    &runtime_id,
+                    &input_id,
+                    "source row changed inside the activation transaction".to_string(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct FrozenConversationContextAppend0810 {
+        key: String,
+        content: meerkat_core::lifecycle::run_primitive::CoreRenderable,
+    }
+
+    fn render_released_runtime_context_0810(
+        append: &FrozenConversationContextAppend0810,
+    ) -> String {
+        let mut rendered = String::from("[Runtime System Context]\nsource: ");
+        rendered.push_str(&append.key);
+        rendered.push_str("\n\n");
+        rendered.push_str(append.content.render_text().trim());
+        rendered
+    }
+
+    /// Convert the exact released continuation sidecar carrier before current
+    /// `Input` deserialization can discard its now-unknown field.
+    ///
+    /// The raw input row remains the recovery/idempotency owner. A typed Steer
+    /// becomes an ordinary User turn append: live realization projects it as
+    /// request-only context and suppresses transcript persistence, while the
+    /// machine's idle Queue normalization persists it as an ordinary User.
+    /// Instruction-like continuations become ordinary ordered System appends
+    /// using the frozen 0.8.10 visible rendering. Existing `turn_append`
+    /// already owns the current representation and wins unchanged.
+    fn migrate_released_context_append_input_payloads(
+        tx: &rusqlite::Transaction<'_>,
+    ) -> Result<(), rusqlite::Error> {
+        let migration_data_error = |runtime_id: &str, input_id: &str, detail: String| {
+            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "released runtime input {runtime_id}/{input_id} failed context-append import: {detail}"
+                ),
+            )))
+        };
+        let rows = {
+            let mut statement = tx.prepare(
+                "SELECT runtime_id, input_id, state_json
+                 FROM runtime_input_states
+                 WHERE json_valid(state_json)
+                   AND json_type(state_json, '$.persisted_input.context_append') IS NOT NULL
+                 ORDER BY runtime_id, input_id",
+            )?;
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, JsonColumnBytes>(2)?.into_bytes(),
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        for (runtime_id, input_id, source_bytes) in rows {
+            let mut encoded: serde_json::Value = serde_json::from_slice(&source_bytes)
+                .map_err(|error| migration_data_error(&runtime_id, &input_id, error.to_string()))?;
+            let row = encoded.as_object_mut().ok_or_else(|| {
+                migration_data_error(
+                    &runtime_id,
+                    &input_id,
+                    "input-state row is not a JSON object".to_string(),
+                )
+            })?;
+            let semantics = row
+                .get("runtime_semantics")
+                .cloned()
+                .ok_or_else(|| {
+                    migration_data_error(
+                        &runtime_id,
+                        &input_id,
+                        "context append has no released runtime semantics".to_string(),
+                    )
+                })
+                .and_then(|value| {
+                    serde_json::from_value::<crate::ingress_types::RuntimeInputSemantics>(value)
+                        .map_err(|error| {
+                            migration_data_error(&runtime_id, &input_id, error.to_string())
+                        })
+                })?;
+            let input = row
+                .get_mut("persisted_input")
+                .and_then(serde_json::Value::as_object_mut)
+                .ok_or_else(|| {
+                    migration_data_error(
+                        &runtime_id,
+                        &input_id,
+                        "context append has no persisted input object".to_string(),
+                    )
+                })?;
+            if input.get("input_type").and_then(serde_json::Value::as_str) != Some("continuation") {
+                return Err(migration_data_error(
+                    &runtime_id,
+                    &input_id,
+                    "context append belongs to a non-continuation input".to_string(),
+                ));
+            }
+            let frozen = input.remove("context_append").ok_or_else(|| {
+                migration_data_error(
+                    &runtime_id,
+                    &input_id,
+                    "selected row lost its context append".to_string(),
+                )
+            })?;
+            if frozen.is_null() {
+                // Null means absent in the released shape.
+            } else {
+                let frozen: FrozenConversationContextAppend0810 = serde_json::from_value(frozen)
+                    .map_err(|error| {
+                        migration_data_error(&runtime_id, &input_id, error.to_string())
+                    })?;
+                if !input
+                    .get("turn_append")
+                    .is_some_and(|value| !value.is_null())
+                {
+                    let is_steer = semantics.live_interrupt_required
+                        && semantics.peer_response_terminal_apply_intent.is_none();
+                    let (role, text) = if is_steer {
+                        ("user", frozen.content.render_text())
+                    } else {
+                        ("system", render_released_runtime_context_0810(&frozen))
+                    };
+                    let mut append = serde_json::json!({
+                        "role": role,
+                        "content": {
+                            "type": "text",
+                            "text": text,
+                        },
+                    });
+                    if !is_steer {
+                        let identity_key = frozen.key;
+                        append["identity"] = serde_json::json!({
+                            "source": identity_key.clone(),
+                            "idempotency_key": identity_key,
+                        });
+                    }
+                    input.insert("turn_append".to_string(), append);
+                }
+            }
+            let stored: StoredInputState = serde_json::from_value(encoded)
+                .map_err(|error| migration_data_error(&runtime_id, &input_id, error.to_string()))?;
+            let replacement = InputStatePersistenceRecord::from_machine_snapshot(stored)
+                .map_err(|error| migration_data_error(&runtime_id, &input_id, error))?;
+            let replacement_bytes = serde_json::to_vec(replacement.as_stored())
+                .map_err(|error| migration_data_error(&runtime_id, &input_id, error.to_string()))?;
+            let changed = tx.execute(
+                "UPDATE runtime_input_states
+                 SET state_json = ?1
+                 WHERE runtime_id = ?2 AND input_id = ?3 AND state_json = ?4",
+                params![replacement_bytes, &runtime_id, &input_id, &source_bytes],
+            )?;
+            if changed != 1 {
+                return Err(migration_data_error(
+                    &runtime_id,
+                    &input_id,
+                    "source row changed inside the activation transaction".to_string(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn migration_0002_current_runtime_schema(
+        tx: &rusqlite::Transaction<'_>,
+    ) -> Result<(), rusqlite::Error> {
+        migrate_released_context_append_input_payloads(tx)?;
+        retire_released_terminal_input_payloads(tx)?;
+        tx.execute_batch(CREATE_RUNTIME_SESSION_AUTHORITY_SQL)?;
+        tx.execute_batch(CREATE_RUNTIME_WHOLE_BLOB_AUTHORITY_SQL)?;
+        backfill_whole_blob_store_authority(tx)?;
+        tx.execute_batch(CREATE_RUNTIME_RECOVERY_BOUNDARY_SCHEMA_SQL)?;
+        tx.execute_batch(CREATE_RUNTIME_ORDINARY_BOUNDARY_WITNESS_SCHEMA_SQL)?;
+        tx.execute_batch(CREATE_RELEASED_0810_BOUNDARY_RECEIPT_MARKERS_SQL)?;
+        capture_released_0810_boundary_receipt_markers(tx)?;
+        tx.execute_batch(CREATE_RUNTIME_PENDING_TERMINAL_OWNER_SCHEMA_SQL)?;
+        tx.execute_batch(CREATE_RUNTIME_HEAD_CANONICAL_ACTIVATION_SCHEMA_SQL)?;
+        tx.execute_batch(&format!(
+            r"
+            CREATE INDEX idx_runtime_input_states_recovery_nonterminal
+            ON runtime_input_states (runtime_id, input_id)
+            WHERE {RECOVERY_NONTERMINAL_INPUT_PREDICATE_SQL}
+            "
+        ))?;
+        tx.execute_batch(CREATE_RUNTIME_INPUT_SET_REVISION_SCHEMA_SQL)?;
+        tx.execute_batch(CREATE_RUNTIME_INPUT_IDEMPOTENCY_UNINDEXABLE_SCHEMA_SQL)?;
+        tx.execute_batch(CREATE_RUNTIME_HEAD_CANONICAL_ACTIVATION_QUEUE_SCHEMA_SQL)
+    }
+
+    fn initialize_current_runtime_schema(
+        tx: &rusqlite::Transaction<'_>,
+    ) -> Result<(), rusqlite::Error> {
+        migration_0001_runtime_schema(tx)?;
+        migration_0002_current_runtime_schema(tx)
+    }
+
+    const RELEASED_0_8_10_RUNTIME_OBJECTS: &[meerkat_sqlite::SchemaObject] = &[
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "runtime_input_states",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "runtime_boundary_receipts",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "runtime_session_snapshots",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "runtime_states",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "runtime_ops_lifecycle",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "runtime_retired_ops_epochs",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "runtime_auth_oauth_flow_state",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "runtime_projection_quarantine",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "runtime_compaction_projection_outbox",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "runtime_mob_host_bindings",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "runtime_mob_host_revocations",
+        },
+    ];
+
+    fn verify_released_0_8_10_runtime_schema(conn: &Connection) -> Result<(), String> {
+        meerkat_sqlite::verify_released_schema_fingerprint(
+            conn,
+            &RUNTIME_STORE_DOMAIN,
+            RELEASED_0_8_10_RUNTIME_OBJECTS,
+            migration_0001_runtime_schema,
+        )
+    }
+
     /// The runtime store's schema domain in the per-file migration ledger.
     /// (Co-tenants the sessions file in the sqlite realm backend.)
     ///
-    /// Pinned at version 1: raising this domain's supported version makes
-    /// every pre-existing binary refuse to open the realm's sessions file the
-    /// moment a newer binary opens it once (`SchemaFromTheFuture` on every
-    /// realm open, with no downgrade verb). New capabilities get their own
-    /// lazily-provisioned domain instead — see [`RUNTIME_DELIVERY_DOMAIN`].
+    /// Version 1 is the complete schema published by 0.8.10. Version 2 is the
+    /// single 0.8.11 upgrade: it installs the current head-canonical authority,
+    /// exact boundary and recovery witnesses, a one-time allowlist of exact
+    /// released boundary receipts, bounded recovery indexes, idempotency
+    /// evidence, terminal-payload retirement, and the marker-first
+    /// profile-activation state machine. Its backfills read only version-1
+    /// tables. Whole-BLOB runtimes are materialized once into the activation
+    /// queue; ordinary reopen then reads only pending work and interrupted
+    /// activations.
+    /// This intentionally makes older binaries refuse the file: they do not
+    /// understand the authority split and must never resume writing the frozen
+    /// BLOB after a head-canonical boundary has committed.
     pub const RUNTIME_STORE_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::SchemaDomain {
         name: "runtime-store",
-        migrations: &[meerkat_sqlite::Migration {
+        migrations: &[
+            meerkat_sqlite::Migration {
+                version: 1,
+                name: "base-schema",
+                apply: migration_0001_runtime_schema,
+            },
+            meerkat_sqlite::Migration {
+                version: 2,
+                name: "current-runtime-schema",
+                apply: migration_0002_current_runtime_schema,
+            },
+        ],
+        initialize_current: initialize_current_runtime_schema,
+        allowed_existing_versions: &[1, 2],
+        released_predecessors: &[meerkat_sqlite::SchemaPredecessor {
             version: 1,
-            name: "base-schema",
-            apply: migration_0001_runtime_schema,
+            verify: verify_released_0_8_10_runtime_schema,
         }],
+        owned_objects: &[
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Table,
+                name: "runtime_input_states",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Table,
+                name: "runtime_boundary_receipts",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Table,
+                name: "runtime_session_snapshots",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Table,
+                name: "runtime_whole_blob_authority",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Table,
+                name: "runtime_whole_blob_bodies",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Table,
+                name: "runtime_whole_blob_provisional_tails",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Table,
+                name: "runtime_session_catalog",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Index,
+                name: "runtime_session_catalog_updated",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Table,
+                name: "runtime_states",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Table,
+                name: "runtime_ops_lifecycle",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Table,
+                name: "runtime_retired_ops_epochs",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Table,
+                name: "runtime_auth_oauth_flow_state",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Table,
+                name: "runtime_projection_quarantine",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Table,
+                name: "runtime_compaction_projection_outbox",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Table,
+                name: "runtime_mob_host_bindings",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Table,
+                name: "runtime_mob_host_revocations",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Table,
+                name: "runtime_session_authority",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Table,
+                name: "runtime_head_canonical_provisional_tails",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Trigger,
+                name: "runtime_session_authority_after_delete",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Table,
+                name: "runtime_recovery_boundaries",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Table,
+                name: "runtime_session_boundary_witnesses",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Table,
+                name: "runtime_released_0810_boundary_receipts",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Table,
+                name: "runtime_pending_terminal_owners",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Table,
+                name: "runtime_head_canonical_profile_pin",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Table,
+                name: "runtime_head_canonical_activations",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Table,
+                name: "runtime_input_set_revisions",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Table,
+                name: "runtime_input_idempotency_keys",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Table,
+                name: "runtime_input_idempotency_unindexable_rows",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Table,
+                name: "runtime_head_canonical_activation_queue",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Index,
+                name: "idx_runtime_input_states_recovery_nonterminal",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Trigger,
+                name: "runtime_session_snapshots_head_authority_no_insert",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Trigger,
+                name: "runtime_session_snapshots_head_authority_no_update",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Trigger,
+                name: "runtime_session_snapshots_head_authority_no_delete",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Trigger,
+                name: "runtime_head_canonical_profile_pin_no_update",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Trigger,
+                name: "runtime_head_canonical_profile_pin_no_delete",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Trigger,
+                name: "runtime_session_snapshots_hc_activation_no_insert",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Trigger,
+                name: "runtime_session_snapshots_hc_activation_no_update",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Trigger,
+                name: "runtime_session_snapshots_hc_activation_no_delete",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Trigger,
+                name: "runtime_input_states_revision_after_insert",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Trigger,
+                name: "runtime_input_states_revision_after_update_old",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Trigger,
+                name: "runtime_input_states_revision_after_update_new",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Trigger,
+                name: "runtime_input_states_revision_after_delete",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Trigger,
+                name: "runtime_input_idempotency_after_insert",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Trigger,
+                name: "runtime_input_idempotency_after_update",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Trigger,
+                name: "runtime_input_idempotency_after_delete",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Trigger,
+                name: "runtime_input_idempotency_unindexable_after_insert",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Trigger,
+                name: "runtime_input_idempotency_unindexable_after_update",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Trigger,
+                name: "runtime_input_idempotency_unindexable_after_delete",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Trigger,
+                name: "runtime_whole_blob_authority_activation_queue_after_insert",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Trigger,
+                name: "runtime_whole_blob_authority_activation_queue_after_update",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Trigger,
+                name: "runtime_whole_blob_authority_activation_queue_after_delete",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Trigger,
+                name: "runtime_session_authority_activation_queue_after_insert",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Trigger,
+                name: "runtime_session_authority_activation_queue_after_update",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Trigger,
+                name: "runtime_head_canonical_activations_queue_after_complete_insert",
+            },
+            meerkat_sqlite::SchemaObject {
+                kind: meerkat_sqlite::SchemaObjectKind::Trigger,
+                name: "runtime_head_canonical_activations_queue_after_complete_update",
+            },
+        ],
+        retired_objects: &[],
     };
 
     /// Durable-delivery schema domain (delivery authority + inbox tables).
     ///
     /// Deliberately NOT applied by [`open_runtime_connection`]: it is
     /// provisioned lazily by the first delivery *write*
-    /// ([`open_runtime_delivery_write_connection`]), so merely opening a
-    /// realm with this binary leaves the file fully openable by binaries
-    /// that predate durable delivery. Those binaries never read foreign
-    /// ledger domains, so a `runtime-delivery` row is invisible to them;
-    /// only files where durable delivery was actually used carry it.
+    /// ([`open_runtime_delivery_write_connection`]). Reads of an unused
+    /// feature remain schema-free; only files where durable delivery was
+    /// actually used carry the domain row and its owned objects.
     pub const RUNTIME_DELIVERY_DOMAIN: meerkat_sqlite::SchemaDomain =
         meerkat_sqlite::SchemaDomain {
             name: "runtime-delivery",
@@ -154,7 +1552,80 @@ CREATE INDEX IF NOT EXISTS idx_runtime_delivery_inbox_sequence
                 name: "delivery-inbox",
                 apply: migration_0001_runtime_delivery_inbox,
             }],
+            initialize_current: migration_0001_runtime_delivery_inbox,
+            allowed_existing_versions: &[1],
+            released_predecessors: &[],
+            owned_objects: &[
+                meerkat_sqlite::SchemaObject {
+                    kind: meerkat_sqlite::SchemaObjectKind::Table,
+                    name: "runtime_delivery_authority",
+                },
+                meerkat_sqlite::SchemaObject {
+                    kind: meerkat_sqlite::SchemaObjectKind::Table,
+                    name: "runtime_delivery_inbox",
+                },
+                meerkat_sqlite::SchemaObject {
+                    kind: meerkat_sqlite::SchemaObjectKind::Index,
+                    name: "idx_runtime_delivery_inbox_sequence",
+                },
+            ],
+            retired_objects: &[],
         };
+
+    #[cfg(test)]
+    mod schema_floor_tests {
+        use super::*;
+
+        fn released_v1() -> Connection {
+            let mut conn = Connection::open_in_memory().expect("open");
+            let tx = conn.transaction().expect("tx");
+            migration_0001_runtime_schema(&tx).expect("released schema");
+            tx.commit().expect("commit");
+            conn.execute_batch(
+                "CREATE TABLE meerkat_schema (
+                     domain TEXT PRIMARY KEY,
+                     version INTEGER NOT NULL
+                 );
+                 INSERT INTO meerkat_schema VALUES ('runtime-store', 1);",
+            )
+            .expect("ledger");
+            conn
+        }
+
+        #[test]
+        fn exact_released_v1_upgrades_to_current() {
+            let mut conn = released_v1();
+            let report = meerkat_sqlite::apply_domain_migrations(&mut conn, &RUNTIME_STORE_DOMAIN)
+                .expect("upgrade");
+            assert_eq!(report.from_version, 1);
+            assert_eq!(report.to_version, 2);
+        }
+
+        #[test]
+        fn released_v1_final_table_index_and_trigger_collisions_are_refused_unmutated() {
+            for collision in [
+                "CREATE TABLE runtime_session_authority (candidate INTEGER)",
+                "CREATE INDEX idx_runtime_input_states_recovery_nonterminal
+                     ON runtime_input_states(runtime_id)",
+                "CREATE TRIGGER runtime_session_snapshots_head_authority_no_insert
+                     BEFORE INSERT ON runtime_session_snapshots BEGIN SELECT 1; END",
+            ] {
+                let mut conn = released_v1();
+                conn.execute_batch(collision).expect("collision");
+                let err = meerkat_sqlite::apply_domain_migrations(&mut conn, &RUNTIME_STORE_DOMAIN)
+                    .expect_err("refuse collision");
+                assert!(matches!(
+                    err,
+                    meerkat_sqlite::SqliteStoreError::SchemaFingerprintMismatch { version: 1, .. }
+                ));
+                assert_eq!(
+                    meerkat_sqlite::domain_version(&conn, RUNTIME_STORE_DOMAIN.name)
+                        .expect("ledger"),
+                    Some(1)
+                );
+            }
+        }
+    }
 
     fn map_shared_sqlite_error(err: meerkat_sqlite::SqliteStoreError) -> RuntimeStoreError {
         match err {
@@ -204,7 +1675,7 @@ CREATE INDEX IF NOT EXISTS idx_runtime_delivery_inbox_sequence
             meerkat_sqlite::ConnectionProfile::PRIMARY,
             meerkat_sqlite::OpenOptions {
                 // The runtime store preflights its own domain (not its
-                // co-tenants'): a future runtime-store file is refused
+                // co-tenants'): an ineligible runtime-store file is refused
                 // typed before the Primary profile's WAL conversion.
                 schema_preflight: &[&RUNTIME_STORE_DOMAIN],
                 ..meerkat_sqlite::OpenOptions::default()
@@ -213,6 +1684,43 @@ CREATE INDEX IF NOT EXISTS idx_runtime_delivery_inbox_sequence
         .map_err(map_shared_sqlite_error)?;
         meerkat_sqlite::apply_domain_migrations(&mut conn, &RUNTIME_STORE_DOMAIN)
             .map_err(map_shared_sqlite_error)?;
+        Ok(RuntimeConn {
+            conn,
+            _guard: guard,
+        })
+    }
+
+    /// Runtime connection for the combined head-canonical boundary.
+    ///
+    /// This operation owns rows from both schema domains in one SQLite
+    /// transaction, so it must preflight and migrate both before the Primary
+    /// profile is allowed to touch WAL. Ordinary RuntimeStore-only operations
+    /// continue to use [`open_runtime_connection`] and do not claim ownership
+    /// of the co-tenant session schema.
+    fn open_head_canonical_runtime_connection(
+        path: &Path,
+    ) -> Result<RuntimeConn, RuntimeStoreError> {
+        let guard =
+            meerkat_sqlite::OperationGuard::for_database(path).map_err(map_shared_sqlite_error)?;
+        let mut conn = meerkat_sqlite::open_with(
+            path,
+            meerkat_sqlite::ConnectionProfile::PRIMARY,
+            meerkat_sqlite::OpenOptions {
+                schema_preflight: &[
+                    &RUNTIME_STORE_DOMAIN,
+                    &meerkat_store::sqlite_store::SESSION_STORE_DOMAIN,
+                ],
+                ..meerkat_sqlite::OpenOptions::default()
+            },
+        )
+        .map_err(map_shared_sqlite_error)?;
+        meerkat_sqlite::apply_domain_migrations(&mut conn, &RUNTIME_STORE_DOMAIN)
+            .map_err(map_shared_sqlite_error)?;
+        meerkat_sqlite::apply_domain_migrations(
+            &mut conn,
+            &meerkat_store::sqlite_store::SESSION_STORE_DOMAIN,
+        )
+        .map_err(map_shared_sqlite_error)?;
         Ok(RuntimeConn {
             conn,
             _guard: guard,
@@ -284,6 +1792,3184 @@ CREATE INDEX IF NOT EXISTS idx_runtime_delivery_inbox_sequence
         &runtime_id.0
     }
 
+    fn session_authority_conflict(
+        runtime_id: &LogicalRuntimeId,
+        detail: impl Into<String>,
+    ) -> RuntimeStoreError {
+        RuntimeStoreError::SessionPersistenceAuthorityConflict {
+            runtime_id: runtime_id_text(runtime_id).to_owned(),
+            detail: detail.into(),
+        }
+    }
+
+    fn validate_exact_head_prefix_authority(
+        runtime_id: &LogicalRuntimeId,
+        head: &meerkat_core::session_store::SessionHead,
+        label: &str,
+    ) -> Result<(), RuntimeStoreError> {
+        let prefix = head.message_row_prefix.as_ref().ok_or_else(|| {
+            session_authority_conflict(
+                runtime_id,
+                format!("{label} has no exact message-row prefix authority"),
+            )
+        })?;
+        if prefix.row_count() != head.message_count {
+            return Err(session_authority_conflict(
+                runtime_id,
+                format!(
+                    "{label} covers {} exact message rows but declares {} messages",
+                    prefix.row_count(),
+                    head.message_count
+                ),
+            ));
+        }
+        if head.rewrite_prefix.occurrence_count() != head.rewrite_count {
+            return Err(session_authority_conflict(
+                runtime_id,
+                format!("{label} rewrite count and exact rewrite-prefix authority differ"),
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_head_canonical_provisional_progress(
+        runtime_id: &LogicalRuntimeId,
+        predecessor: &meerkat_core::session_store::SessionHead,
+        successor: &meerkat_core::session_store::SessionHead,
+    ) -> Result<(), RuntimeStoreError> {
+        if predecessor.id != successor.id
+            || predecessor.created_at != successor.created_at
+            || successor.version < predecessor.version
+            || successor.updated_at < predecessor.updated_at
+            || successor.rewrite_count < predecessor.rewrite_count
+            || (successor.rewrite_count == predecessor.rewrite_count
+                && (successor.strand != predecessor.strand
+                    || successor.message_count < predecessor.message_count))
+        {
+            return Err(session_authority_conflict(
+                runtime_id,
+                "provisional HeadCanonical successor moves a store-owned monotonic head axis backwards",
+            ));
+        }
+        Ok(())
+    }
+
+    fn map_runtime_snapshot_mutation_error(
+        runtime_id: &LogicalRuntimeId,
+        error: rusqlite::Error,
+    ) -> RuntimeStoreError {
+        if error
+            .to_string()
+            .contains(HEAD_CANONICAL_FROZEN_SNAPSHOT_ERROR)
+        {
+            return session_authority_conflict(
+                runtime_id,
+                "whole-BLOB mutation refused because head-canonical authority or profile activation is installed",
+            );
+        }
+        RuntimeStoreError::WriteFailed(error.to_string())
+    }
+
+    fn load_head_canonical_authority(
+        conn: &Connection,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<RuntimeSessionAuthority>, RuntimeStoreError> {
+        let row = conn
+            .query_row(
+                r"
+                SELECT authority_version, session_id, store_revision,
+                       boundary_head_json, committed_head_token
+                FROM runtime_session_authority
+                WHERE runtime_id = ?1
+                ",
+                params![runtime_id_text(runtime_id)],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, JsonColumnBytes>(3)?.into_bytes(),
+                        row.get::<_, String>(4)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+        let Some((version, session_id, store_revision, boundary_head_json, head_token)) = row
+        else {
+            return Ok(None);
+        };
+        if version != i64::from(HeadCanonicalStoreAuthority::VERSION) {
+            return Err(session_authority_conflict(
+                runtime_id,
+                format!(
+                    "unsupported HeadCanonical authority version {version}; supported version is {}",
+                    HeadCanonicalStoreAuthority::VERSION
+                ),
+            ));
+        }
+        let store_revision = u64::try_from(store_revision).map_err(|_| {
+            session_authority_conflict(
+                runtime_id,
+                "persisted HeadCanonical store revision is not positive",
+            )
+        })?;
+        let session_id = meerkat_core::types::SessionId::parse(&session_id).map_err(|error| {
+            session_authority_conflict(
+                runtime_id,
+                format!("persisted authority session id is invalid: {error}"),
+            )
+        })?;
+        let boundary_head: meerkat_core::session_store::SessionHead =
+            serde_json::from_slice(&boundary_head_json).map_err(|error| {
+                session_authority_conflict(
+                    runtime_id,
+                    format!("persisted boundary head authority is invalid: {error}"),
+                )
+            })?;
+        validate_exact_head_prefix_authority(
+            runtime_id,
+            &boundary_head,
+            "persisted boundary head",
+        )?;
+        let authority = HeadCanonicalStoreAuthority::issued(
+            session_id,
+            store_revision,
+            boundary_head,
+            head_token,
+        )?;
+        let owner = LogicalRuntimeId::for_session(authority.session_id());
+        if &owner != runtime_id {
+            return Err(session_authority_conflict(
+                runtime_id,
+                format!("persisted session authority belongs to runtime {owner}, not {runtime_id}"),
+            ));
+        }
+        Ok(Some(RuntimeSessionAuthority::HeadCanonical(authority)))
+    }
+
+    #[derive(Debug)]
+    struct StoredHeadCanonicalProvisionalTail {
+        authority: HeadCanonicalProvisionalTailAuthority,
+        candidate_message_count: usize,
+        candidate_conversation_digest: String,
+        catalog_entry: crate::store::RuntimeSessionCatalogEntry,
+        compaction_projection_intents: Vec<meerkat_core::CompactionProjectionIntent>,
+        predecessor_projection: Option<(
+            usize,
+            String,
+            crate::store::RuntimeSessionCatalogEntry,
+            Vec<meerkat_core::CompactionProjectionIntent>,
+        )>,
+    }
+
+    fn load_head_canonical_provisional_tail(
+        conn: &Connection,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<StoredHeadCanonicalProvisionalTail>, RuntimeStoreError> {
+        let row = conn
+            .query_row(
+                r"
+                SELECT authority_version, session_id, base_store_revision,
+                       base_committed_head_token, physical_store_revision,
+                       physical_head_token, run_id, candidate_sequence,
+                       candidate_message_count, candidate_conversation_digest,
+                       catalog_json, compaction_intents_json,
+                       predecessor_candidate_message_count,
+                       predecessor_candidate_conversation_digest,
+                       predecessor_catalog_json,
+                       predecessor_compaction_intents_json
+                FROM runtime_head_canonical_provisional_tails
+                WHERE runtime_id = ?1
+                ",
+                params![runtime_id_text(runtime_id)],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, i64>(7)?,
+                        row.get::<_, i64>(8)?,
+                        row.get::<_, String>(9)?,
+                        row.get::<_, JsonColumnBytes>(10)?.into_bytes(),
+                        row.get::<_, JsonColumnBytes>(11)?.into_bytes(),
+                        row.get::<_, Option<i64>>(12)?,
+                        row.get::<_, Option<String>>(13)?,
+                        row.get::<_, Option<JsonColumnBytes>>(14)?
+                            .map(JsonColumnBytes::into_bytes),
+                        row.get::<_, Option<JsonColumnBytes>>(15)?
+                            .map(JsonColumnBytes::into_bytes),
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+        let Some((
+            version,
+            session_id,
+            base_store_revision,
+            base_committed_head_token,
+            physical_store_revision,
+            physical_head_token,
+            run_id,
+            candidate_sequence,
+            candidate_message_count,
+            candidate_conversation_digest,
+            catalog_json,
+            compaction_intents_json,
+            predecessor_candidate_message_count,
+            predecessor_candidate_conversation_digest,
+            predecessor_catalog_json,
+            predecessor_compaction_intents_json,
+        )) = row
+        else {
+            return Ok(None);
+        };
+        if version != i64::from(HeadCanonicalProvisionalTailAuthority::VERSION) {
+            return Err(session_authority_conflict(
+                runtime_id,
+                format!(
+                    "unsupported provisional HeadCanonical authority version {version}; supported version is {}",
+                    HeadCanonicalProvisionalTailAuthority::VERSION
+                ),
+            ));
+        }
+        let session_id = meerkat_core::types::SessionId::parse(&session_id).map_err(|error| {
+            session_authority_conflict(
+                runtime_id,
+                format!("provisional HeadCanonical session id is invalid: {error}"),
+            )
+        })?;
+        let owner = LogicalRuntimeId::for_session(&session_id);
+        if &owner != runtime_id {
+            return Err(session_authority_conflict(
+                runtime_id,
+                format!("provisional HeadCanonical authority belongs to {owner}, not {runtime_id}"),
+            ));
+        }
+        let base_store_revision = u64::try_from(base_store_revision).map_err(|_| {
+            session_authority_conflict(
+                runtime_id,
+                "provisional HeadCanonical base store revision is not positive",
+            )
+        })?;
+        let physical_store_revision = u64::try_from(physical_store_revision).map_err(|_| {
+            session_authority_conflict(
+                runtime_id,
+                "provisional HeadCanonical physical store revision is not positive",
+            )
+        })?;
+        let run_id = uuid::Uuid::parse_str(&run_id)
+            .map(RunId::from_uuid)
+            .map_err(|error| {
+                session_authority_conflict(
+                    runtime_id,
+                    format!("provisional HeadCanonical run id is invalid: {error}"),
+                )
+            })?;
+        let candidate_sequence = u64::try_from(candidate_sequence).map_err(|_| {
+            session_authority_conflict(
+                runtime_id,
+                "provisional HeadCanonical candidate sequence is not positive",
+            )
+        })?;
+        let authority = HeadCanonicalProvisionalTailAuthority::issued(
+            session_id,
+            base_store_revision,
+            base_committed_head_token,
+            physical_store_revision,
+            physical_head_token,
+            run_id,
+            candidate_sequence,
+        )
+        .map_err(|error| session_authority_conflict(runtime_id, error.to_string()))?;
+        let candidate_message_count = usize::try_from(candidate_message_count).map_err(|_| {
+            session_authority_conflict(
+                runtime_id,
+                "provisional HeadCanonical candidate message count is invalid",
+            )
+        })?;
+        let catalog_entry =
+            serde_json::from_slice::<crate::store::RuntimeSessionCatalogEntry>(&catalog_json)
+                .map_err(|error| {
+                    session_authority_conflict(
+                        runtime_id,
+                        format!("provisional HeadCanonical catalog is invalid: {error}"),
+                    )
+                })?;
+        if catalog_entry.session_id() != authority.session_id()
+            || catalog_entry.persistence_profile()
+                != RuntimeSessionPersistenceProfile::HeadCanonicalV1
+            || catalog_entry.message_count() != candidate_message_count
+        {
+            return Err(session_authority_conflict(
+                runtime_id,
+                "provisional HeadCanonical catalog does not bind its exact candidate",
+            ));
+        }
+        let compaction_projection_intents = serde_json::from_slice::<
+            Vec<meerkat_core::CompactionProjectionIntent>,
+        >(&compaction_intents_json)
+        .map_err(|error| {
+            session_authority_conflict(
+                runtime_id,
+                format!("provisional HeadCanonical compaction intents are invalid: {error}"),
+            )
+        })?;
+        if compaction_projection_intents
+            .iter()
+            .any(|intent| intent.projection.session_id() != authority.session_id())
+        {
+            return Err(session_authority_conflict(
+                runtime_id,
+                "provisional HeadCanonical compaction intents do not bind the candidate session",
+            ));
+        }
+        let predecessor_projection = match (
+            predecessor_candidate_message_count,
+            predecessor_candidate_conversation_digest,
+            predecessor_catalog_json,
+            predecessor_compaction_intents_json,
+        ) {
+            (None, None, None, None) => None,
+            (
+                Some(message_count),
+                Some(conversation_digest),
+                Some(catalog_json),
+                Some(compaction_intents_json),
+            ) => {
+                let message_count = usize::try_from(message_count).map_err(|_| {
+                    session_authority_conflict(
+                        runtime_id,
+                        "provisional HeadCanonical predecessor message count is invalid",
+                    )
+                })?;
+                let catalog_entry = serde_json::from_slice::<
+                    crate::store::RuntimeSessionCatalogEntry,
+                >(&catalog_json)
+                .map_err(|error| {
+                    session_authority_conflict(
+                        runtime_id,
+                        format!(
+                            "provisional HeadCanonical predecessor catalog is invalid: {error}"
+                        ),
+                    )
+                })?;
+                let compaction_projection_intents = serde_json::from_slice::<
+                    Vec<meerkat_core::CompactionProjectionIntent>,
+                >(&compaction_intents_json)
+                .map_err(|error| {
+                    session_authority_conflict(
+                        runtime_id,
+                        format!(
+                            "provisional HeadCanonical predecessor compaction intents are invalid: {error}"
+                        ),
+                    )
+                })?;
+                if compaction_projection_intents
+                    .iter()
+                    .any(|intent| intent.projection.session_id() != authority.session_id())
+                {
+                    return Err(session_authority_conflict(
+                        runtime_id,
+                        "provisional HeadCanonical predecessor compaction intents do not bind the candidate session",
+                    ));
+                }
+                if catalog_entry.session_id() != authority.session_id()
+                    || catalog_entry.persistence_profile()
+                        != RuntimeSessionPersistenceProfile::HeadCanonicalV1
+                    || catalog_entry.message_count() != message_count
+                {
+                    return Err(session_authority_conflict(
+                        runtime_id,
+                        "provisional HeadCanonical predecessor projection is inconsistent",
+                    ));
+                }
+                Some((
+                    message_count,
+                    conversation_digest,
+                    catalog_entry,
+                    compaction_projection_intents,
+                ))
+            }
+            _ => {
+                return Err(session_authority_conflict(
+                    runtime_id,
+                    "provisional HeadCanonical predecessor projection shape is invalid",
+                ));
+            }
+        };
+        Ok(Some(StoredHeadCanonicalProvisionalTail {
+            authority,
+            candidate_message_count,
+            candidate_conversation_digest,
+            catalog_entry,
+            compaction_projection_intents,
+            predecessor_projection,
+        }))
+    }
+
+    fn load_head_canonical_provisional_tail_authority(
+        conn: &Connection,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<HeadCanonicalProvisionalTailAuthority>, RuntimeStoreError> {
+        load_head_canonical_provisional_tail(conn, runtime_id)
+            .map(|stored| stored.map(|stored| stored.authority))
+    }
+
+    fn issue_head_canonical_authority_in_txn(
+        tx: &Transaction<'_>,
+        runtime_id: &LogicalRuntimeId,
+        boundary_head: meerkat_core::session_store::SessionHead,
+    ) -> Result<RuntimeSessionAuthority, RuntimeStoreError> {
+        validate_exact_head_prefix_authority(
+            runtime_id,
+            &boundary_head,
+            "HeadCanonical authority boundary head",
+        )?;
+        let head_token = meerkat_core::session_head_cas_token(&boundary_head).map_err(|error| {
+            session_authority_conflict(
+                runtime_id,
+                format!("HeadCanonical boundary token is invalid: {error}"),
+            )
+        })?;
+        let current = load_head_canonical_authority(tx, runtime_id)?;
+        if let Some(RuntimeSessionAuthority::HeadCanonical(current)) = current.as_ref()
+            && current.boundary_head() == &boundary_head
+            && current.committed_head_token() == head_token.as_str()
+        {
+            return Ok(RuntimeSessionAuthority::HeadCanonical(current.clone()));
+        }
+        let store_revision = match current
+            .as_ref()
+            .and_then(RuntimeSessionAuthority::head_canonical)
+        {
+            Some(current) => {
+                let base = match load_head_canonical_provisional_tail_authority(tx, runtime_id)? {
+                    Some(provisional)
+                        if provisional.session_id() == current.session_id()
+                            && provisional.base_store_revision() == current.store_revision()
+                            && provisional.base_committed_head_token()
+                                == current.committed_head_token() =>
+                    {
+                        provisional.physical_store_revision()
+                    }
+                    Some(_) => {
+                        return Err(session_authority_conflict(
+                            runtime_id,
+                            "provisional HeadCanonical authority does not descend from the current committed authority",
+                        ));
+                    }
+                    None => current.store_revision(),
+                };
+                base.checked_add(1).ok_or_else(|| {
+                    session_authority_conflict(runtime_id, "HeadCanonical store revision overflow")
+                })?
+            }
+            None => 1,
+        };
+        let authority = HeadCanonicalStoreAuthority::issued(
+            boundary_head.id.clone(),
+            store_revision,
+            boundary_head,
+            head_token,
+        )?;
+        Ok(RuntimeSessionAuthority::HeadCanonical(authority))
+    }
+
+    fn write_head_canonical_authority_in_txn(
+        tx: &Transaction<'_>,
+        runtime_id: &LogicalRuntimeId,
+        authority: &RuntimeSessionAuthority,
+    ) -> Result<(), RuntimeStoreError> {
+        let authority = authority.head_canonical().ok_or_else(|| {
+            session_authority_conflict(
+                runtime_id,
+                "cannot write WholeBlob authority into the HeadCanonical table",
+            )
+        })?;
+        let owner = LogicalRuntimeId::for_session(authority.session_id());
+        if &owner != runtime_id {
+            return Err(session_authority_conflict(
+                runtime_id,
+                format!("head-canonical authority belongs to runtime {owner}, not {runtime_id}"),
+            ));
+        }
+        let boundary_head = authority.boundary_head();
+        validate_exact_head_prefix_authority(
+            runtime_id,
+            boundary_head,
+            "head-canonical authority boundary head",
+        )?;
+        let boundary_head_json = serde_json::to_vec(boundary_head)
+            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+        let current = load_head_canonical_authority(tx, runtime_id)?;
+        let advances_authority = match current.as_ref() {
+            None if authority.store_revision() == 1 => true,
+            Some(RuntimeSessionAuthority::HeadCanonical(current)) if current == authority => false,
+            Some(RuntimeSessionAuthority::HeadCanonical(current))
+                if current.session_id() == authority.session_id() =>
+            {
+                let base = match load_head_canonical_provisional_tail_authority(tx, runtime_id)? {
+                    Some(provisional)
+                        if provisional.session_id() == current.session_id()
+                            && provisional.base_store_revision() == current.store_revision()
+                            && provisional.base_committed_head_token()
+                                == current.committed_head_token() =>
+                    {
+                        provisional.physical_store_revision()
+                    }
+                    Some(_) => {
+                        return Err(session_authority_conflict(
+                            runtime_id,
+                            "provisional HeadCanonical authority does not descend from the current committed authority",
+                        ));
+                    }
+                    None => current.store_revision(),
+                };
+                if base.checked_add(1) != Some(authority.store_revision()) {
+                    return Err(session_authority_conflict(
+                        runtime_id,
+                        "HeadCanonical successor does not carry the exact next store revision",
+                    ));
+                }
+                true
+            }
+            Some(_) | None => {
+                return Err(session_authority_conflict(
+                    runtime_id,
+                    "HeadCanonical authority write is neither an exact retry nor the next monotonic store revision",
+                ));
+            }
+        };
+        tx.execute(
+            r"
+            INSERT INTO runtime_session_authority (
+                runtime_id, authority_version, session_id, store_revision,
+                boundary_head_json, committed_head_token
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ON CONFLICT(runtime_id) DO UPDATE SET
+                authority_version = excluded.authority_version,
+                session_id = excluded.session_id,
+                store_revision = excluded.store_revision,
+                boundary_head_json = excluded.boundary_head_json,
+                committed_head_token = excluded.committed_head_token
+            ",
+            params![
+                runtime_id_text(runtime_id),
+                i64::from(authority.authority_version()),
+                authority.session_id().to_string(),
+                i64::try_from(authority.store_revision()).map_err(|_| {
+                    session_authority_conflict(
+                        runtime_id,
+                        "HeadCanonical store revision exceeds SQLite INTEGER",
+                    )
+                })?,
+                boundary_head_json,
+                authority.committed_head_token(),
+            ],
+        )
+        .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+        meerkat_store::sqlite_store::retain_runtime_boundary_head_metadata_in_txn(
+            tx,
+            boundary_head,
+        )
+        .map_err(|error| map_head_canonical_session_store_error(runtime_id, error))?;
+        if advances_authority {
+            tx.execute(
+                "DELETE FROM runtime_head_canonical_provisional_tails WHERE runtime_id = ?1",
+                params![runtime_id_text(runtime_id)],
+            )
+            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+        }
+        Ok(())
+    }
+
+    fn issue_head_canonical_provisional_tail_authority_in_txn(
+        tx: &Transaction<'_>,
+        runtime_id: &LogicalRuntimeId,
+        committed: &HeadCanonicalStoreAuthority,
+        run_id: &RunId,
+        successor_head: &meerkat_core::session_store::SessionHead,
+        successor_head_token: &str,
+        candidate_message_count: usize,
+        candidate_conversation_digest: &str,
+        catalog_entry: &crate::store::RuntimeSessionCatalogEntry,
+        compaction_projection_intents: &[meerkat_core::CompactionProjectionIntent],
+    ) -> Result<HeadCanonicalProvisionalTailAuthority, RuntimeStoreError> {
+        let owner = LogicalRuntimeId::for_session(committed.session_id());
+        if &owner != runtime_id {
+            return Err(session_authority_conflict(
+                runtime_id,
+                format!("provisional HeadCanonical intent belongs to {owner}, not {runtime_id}"),
+            ));
+        }
+        if &successor_head.id != committed.session_id() {
+            return Err(session_authority_conflict(
+                runtime_id,
+                "provisional HeadCanonical successor belongs to another session",
+            ));
+        }
+        let derived_successor_token = meerkat_core::session_head_cas_token(successor_head)
+            .map_err(|error| {
+                session_authority_conflict(
+                    runtime_id,
+                    format!("provisional HeadCanonical successor is invalid: {error}"),
+                )
+            })?;
+        if derived_successor_token.as_str() != successor_head_token
+            || successor_head_token == committed.committed_head_token()
+        {
+            return Err(session_authority_conflict(
+                runtime_id,
+                "provisional HeadCanonical successor token is not the exact distinct target head",
+            ));
+        }
+        let stored_committed = load_head_canonical_authority(tx, runtime_id)?
+            .and_then(|authority| authority.head_canonical().cloned())
+            .ok_or_else(|| {
+                session_authority_conflict(
+                    runtime_id,
+                    "provisional HeadCanonical authority has no committed base",
+                )
+            })?;
+        if &stored_committed != committed {
+            return Err(session_authority_conflict(
+                runtime_id,
+                "provisional HeadCanonical intent does not name the exact committed base",
+            ));
+        }
+        let catalog_json = serde_json::to_vec(catalog_entry)
+            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+        let compaction_intents_json = serde_json::to_vec(compaction_projection_intents)
+            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+        if catalog_entry.session_id() != committed.session_id()
+            || catalog_entry.persistence_profile()
+                != RuntimeSessionPersistenceProfile::HeadCanonicalV1
+            || catalog_entry.message_count() != candidate_message_count
+            || candidate_conversation_digest != successor_head.head_revision
+        {
+            return Err(session_authority_conflict(
+                runtime_id,
+                "provisional HeadCanonical candidate projections do not bind its exact successor",
+            ));
+        }
+        if let Some(existing) = load_head_canonical_provisional_tail(tx, runtime_id)? {
+            if existing.authority.session_id() != committed.session_id()
+                || existing.authority.base_store_revision() != committed.store_revision()
+                || existing.authority.base_committed_head_token()
+                    != committed.committed_head_token()
+                || existing.authority.run_id() != run_id
+            {
+                return Err(session_authority_conflict(
+                    runtime_id,
+                    "a divergent provisional HeadCanonical base or run already exists",
+                ));
+            }
+            if existing.authority.physical_head_token() == successor_head_token {
+                if existing.candidate_message_count != candidate_message_count
+                    || existing.candidate_conversation_digest != candidate_conversation_digest
+                    || existing.catalog_entry != *catalog_entry
+                    || existing.compaction_projection_intents.as_slice()
+                        != compaction_projection_intents
+                {
+                    return Err(session_authority_conflict(
+                        runtime_id,
+                        "exact provisional HeadCanonical target carries divergent candidate projections",
+                    ));
+                }
+                return Ok(existing.authority);
+            }
+            let (physical_head, physical_head_token) =
+                meerkat_store::sqlite_store::load_head_canonical_for_runtime_in_txn(
+                    tx,
+                    committed.session_id(),
+                )
+                .map_err(|error| map_head_canonical_session_store_error(runtime_id, error))?
+                .ok_or_else(|| {
+                    session_authority_conflict(
+                        runtime_id,
+                        "provisional HeadCanonical chain has no physical head",
+                    )
+                })?;
+            if physical_head_token != existing.authority.physical_head_token() {
+                return Err(session_authority_conflict(
+                    runtime_id,
+                    "next provisional HeadCanonical intent does not descend from the latest applied physical checkpoint",
+                ));
+            }
+            validate_exact_head_prefix_authority(
+                runtime_id,
+                &physical_head,
+                "latest provisional physical head",
+            )?;
+            validate_head_canonical_provisional_progress(
+                runtime_id,
+                &physical_head,
+                successor_head,
+            )?;
+            let physical_store_revision = existing
+                .authority
+                .physical_store_revision()
+                .checked_add(1)
+                .ok_or_else(|| {
+                    session_authority_conflict(
+                        runtime_id,
+                        "provisional HeadCanonical physical revision overflow",
+                    )
+                })?;
+            let successor = HeadCanonicalProvisionalTailAuthority::issued(
+                committed.session_id().clone(),
+                committed.store_revision(),
+                committed.committed_head_token().to_string(),
+                physical_store_revision,
+                successor_head_token.to_string(),
+                run_id.clone(),
+                physical_store_revision
+                    .checked_sub(committed.store_revision())
+                    .ok_or_else(|| {
+                        session_authority_conflict(
+                            runtime_id,
+                            "provisional HeadCanonical candidate sequence underflow",
+                        )
+                    })?,
+            )
+            .map_err(|error| session_authority_conflict(runtime_id, error.to_string()))?;
+            let updated = tx
+                .execute(
+                    r"
+                    UPDATE runtime_head_canonical_provisional_tails
+                    SET physical_store_revision = ?2,
+                        physical_head_token = ?3,
+                        candidate_sequence = ?4,
+                        candidate_message_count = ?13,
+                        candidate_conversation_digest = ?14,
+                        catalog_json = ?15,
+                        compaction_intents_json = ?16,
+                        predecessor_candidate_message_count = ?17,
+                        predecessor_candidate_conversation_digest = ?18,
+                        predecessor_catalog_json = ?19,
+                        predecessor_compaction_intents_json = ?20
+                    WHERE runtime_id = ?1
+                      AND authority_version = ?5
+                      AND session_id = ?6
+                      AND base_store_revision = ?7
+                      AND base_committed_head_token = ?8
+                      AND physical_store_revision = ?9
+                      AND physical_head_token = ?10
+                      AND run_id = ?11
+                      AND candidate_sequence = ?12
+                    ",
+                    params![
+                        runtime_id_text(runtime_id),
+                        i64::try_from(successor.physical_store_revision()).map_err(|_| {
+                            session_authority_conflict(
+                                runtime_id,
+                                "provisional physical store revision exceeds SQLite INTEGER",
+                            )
+                        })?,
+                        successor.physical_head_token(),
+                        i64::try_from(successor.candidate_sequence()).map_err(|_| {
+                            session_authority_conflict(
+                                runtime_id,
+                                "provisional candidate sequence exceeds SQLite INTEGER",
+                            )
+                        })?,
+                        i64::from(existing.authority.authority_version()),
+                        existing.authority.session_id().to_string(),
+                        i64::try_from(existing.authority.base_store_revision()).map_err(|_| {
+                            session_authority_conflict(
+                                runtime_id,
+                                "provisional base store revision exceeds SQLite INTEGER",
+                            )
+                        })?,
+                        existing.authority.base_committed_head_token(),
+                        i64::try_from(existing.authority.physical_store_revision()).map_err(
+                            |_| {
+                                session_authority_conflict(
+                                    runtime_id,
+                                    "provisional physical store revision exceeds SQLite INTEGER",
+                                )
+                            }
+                        )?,
+                        existing.authority.physical_head_token(),
+                        existing.authority.run_id().to_string(),
+                        i64::try_from(existing.authority.candidate_sequence()).map_err(|_| {
+                            session_authority_conflict(
+                                runtime_id,
+                                "provisional candidate sequence exceeds SQLite INTEGER",
+                            )
+                        })?,
+                        i64::try_from(candidate_message_count).map_err(|_| {
+                            session_authority_conflict(
+                                runtime_id,
+                                "provisional candidate message count exceeds SQLite INTEGER",
+                            )
+                        })?,
+                        candidate_conversation_digest,
+                        catalog_json,
+                        compaction_intents_json,
+                        i64::try_from(existing.candidate_message_count).map_err(|_| {
+                            session_authority_conflict(
+                                runtime_id,
+                                "provisional predecessor message count exceeds SQLite INTEGER",
+                            )
+                        })?,
+                        existing.candidate_conversation_digest,
+                        serde_json::to_vec(&existing.catalog_entry)
+                            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?,
+                        serde_json::to_vec(&existing.compaction_projection_intents)
+                            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?,
+                    ],
+                )
+                .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+            if updated != 1 {
+                return Err(session_authority_conflict(
+                    runtime_id,
+                    "provisional HeadCanonical authority changed during monotonic advance",
+                ));
+            }
+            return Ok(successor);
+        }
+        let (physical_head, physical_head_token) =
+            meerkat_store::sqlite_store::load_head_canonical_for_runtime_in_txn(
+                tx,
+                committed.session_id(),
+            )
+            .map_err(|error| map_head_canonical_session_store_error(runtime_id, error))?
+            .ok_or_else(|| {
+                session_authority_conflict(
+                    runtime_id,
+                    "first provisional HeadCanonical intent has no physical committed head",
+                )
+            })?;
+        if &physical_head != committed.boundary_head()
+            || physical_head_token != committed.committed_head_token()
+        {
+            return Err(session_authority_conflict(
+                runtime_id,
+                "first provisional HeadCanonical intent does not start at the exact committed physical head",
+            ));
+        }
+        validate_head_canonical_provisional_progress(
+            runtime_id,
+            committed.boundary_head(),
+            successor_head,
+        )?;
+        let physical_store_revision =
+            committed.store_revision().checked_add(1).ok_or_else(|| {
+                session_authority_conflict(
+                    runtime_id,
+                    "provisional HeadCanonical physical revision overflow",
+                )
+            })?;
+        let authority = HeadCanonicalProvisionalTailAuthority::issued(
+            committed.session_id().clone(),
+            committed.store_revision(),
+            committed.committed_head_token().to_string(),
+            physical_store_revision,
+            successor_head_token.to_string(),
+            run_id.clone(),
+            1,
+        )
+        .map_err(|error| session_authority_conflict(runtime_id, error.to_string()))?;
+        tx.execute(
+            r"
+            INSERT INTO runtime_head_canonical_provisional_tails (
+                runtime_id, authority_version, session_id, base_store_revision,
+                base_committed_head_token, physical_store_revision,
+                physical_head_token, run_id, candidate_sequence
+                , candidate_message_count, candidate_conversation_digest,
+                catalog_json, compaction_intents_json
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            ",
+            params![
+                runtime_id_text(runtime_id),
+                i64::from(authority.authority_version()),
+                authority.session_id().to_string(),
+                i64::try_from(authority.base_store_revision()).map_err(|_| {
+                    session_authority_conflict(
+                        runtime_id,
+                        "provisional base store revision exceeds SQLite INTEGER",
+                    )
+                })?,
+                authority.base_committed_head_token(),
+                i64::try_from(authority.physical_store_revision()).map_err(|_| {
+                    session_authority_conflict(
+                        runtime_id,
+                        "provisional physical store revision exceeds SQLite INTEGER",
+                    )
+                })?,
+                authority.physical_head_token(),
+                authority.run_id().to_string(),
+                i64::try_from(authority.candidate_sequence()).map_err(|_| {
+                    session_authority_conflict(
+                        runtime_id,
+                        "provisional candidate sequence exceeds SQLite INTEGER",
+                    )
+                })?,
+                i64::try_from(candidate_message_count).map_err(|_| {
+                    session_authority_conflict(
+                        runtime_id,
+                        "provisional candidate message count exceeds SQLite INTEGER",
+                    )
+                })?,
+                candidate_conversation_digest,
+                catalog_json,
+                compaction_intents_json,
+            ],
+        )
+        .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+        Ok(authority)
+    }
+
+    fn discard_head_canonical_provisional_tail_authority_in_txn(
+        tx: &Transaction<'_>,
+        runtime_id: &LogicalRuntimeId,
+        expected: &HeadCanonicalProvisionalTailAuthority,
+    ) -> Result<bool, RuntimeStoreError> {
+        let stored = match load_head_canonical_provisional_tail(tx, runtime_id)? {
+            Some(current) if current.authority == *expected => current,
+            Some(_) => {
+                return Err(session_authority_conflict(
+                    runtime_id,
+                    "refusing to discard a divergent provisional HeadCanonical authority",
+                ));
+            }
+            None => return Ok(false),
+        };
+        let committed = load_head_canonical_authority(tx, runtime_id)?
+            .and_then(|authority| authority.head_canonical().cloned())
+            .ok_or_else(|| {
+                session_authority_conflict(
+                    runtime_id,
+                    "provisional HeadCanonical discard has no committed base",
+                )
+            })?;
+        if expected.session_id() != committed.session_id()
+            || expected.base_store_revision() != committed.store_revision()
+            || expected.base_committed_head_token() != committed.committed_head_token()
+        {
+            return Err(session_authority_conflict(
+                runtime_id,
+                "provisional HeadCanonical discard base is stale",
+            ));
+        }
+        let (physical_head, physical_head_token) =
+            meerkat_store::sqlite_store::load_head_canonical_for_runtime_in_txn(
+                tx,
+                committed.session_id(),
+            )
+            .map_err(|error| map_head_canonical_session_store_error(runtime_id, error))?
+            .ok_or_else(|| {
+                session_authority_conflict(
+                    runtime_id,
+                    "provisional HeadCanonical discard has no physical head",
+                )
+            })?;
+        if physical_head_token == expected.physical_head_token() {
+            return Err(session_authority_conflict(
+                runtime_id,
+                "refusing to discard an already-applied provisional HeadCanonical checkpoint",
+            ));
+        }
+        if expected.candidate_sequence() == 1 {
+            if &physical_head != committed.boundary_head()
+                || physical_head_token != committed.committed_head_token()
+            {
+                return Err(session_authority_conflict(
+                    runtime_id,
+                    "first provisional HeadCanonical intent cannot be discarded from a divergent physical head",
+                ));
+            }
+        } else {
+            meerkat_store::sqlite_store::verify_physical_head_retains_boundary_prefix_for_runtime_in_txn(
+                tx,
+                committed.boundary_head(),
+                &physical_head,
+            )
+            .map_err(|error| map_head_canonical_session_store_error(runtime_id, error))?;
+            let restored_revision = expected
+                .physical_store_revision()
+                .checked_sub(1)
+                .ok_or_else(|| {
+                    session_authority_conflict(
+                        runtime_id,
+                        "provisional HeadCanonical physical revision underflow",
+                    )
+                })?;
+            let restored = HeadCanonicalProvisionalTailAuthority::issued(
+                expected.session_id().clone(),
+                expected.base_store_revision(),
+                expected.base_committed_head_token().to_string(),
+                restored_revision,
+                physical_head_token,
+                expected.run_id().clone(),
+                expected
+                    .candidate_sequence()
+                    .checked_sub(1)
+                    .ok_or_else(|| {
+                        session_authority_conflict(
+                            runtime_id,
+                            "restored provisional candidate sequence underflow",
+                        )
+                    })?,
+            )
+            .map_err(|error| session_authority_conflict(runtime_id, error.to_string()))?;
+            let (
+                predecessor_message_count,
+                predecessor_conversation_digest,
+                predecessor_catalog,
+                predecessor_compaction_intents,
+            ) = stored.predecessor_projection.ok_or_else(|| {
+                session_authority_conflict(
+                    runtime_id,
+                    "provisional HeadCanonical rollback has no exact predecessor projections",
+                )
+            })?;
+            if physical_head.message_count
+                != u64::try_from(predecessor_message_count).map_err(|_| {
+                    session_authority_conflict(
+                        runtime_id,
+                        "provisional predecessor message count exceeds u64",
+                    )
+                })?
+                || physical_head.head_revision != predecessor_conversation_digest
+            {
+                return Err(session_authority_conflict(
+                    runtime_id,
+                    "provisional HeadCanonical rollback physical head differs from predecessor projections",
+                ));
+            }
+            let updated = tx
+                .execute(
+                    r"
+                    UPDATE runtime_head_canonical_provisional_tails
+                    SET physical_store_revision = ?2,
+                        physical_head_token = ?3,
+                        candidate_sequence = ?4,
+                        candidate_message_count = ?13,
+                        candidate_conversation_digest = ?14,
+                        catalog_json = ?15,
+                        compaction_intents_json = ?16,
+                        predecessor_candidate_message_count = NULL,
+                        predecessor_candidate_conversation_digest = NULL,
+                        predecessor_catalog_json = NULL,
+                        predecessor_compaction_intents_json = NULL
+                    WHERE runtime_id = ?1
+                      AND authority_version = ?5
+                      AND session_id = ?6
+                      AND base_store_revision = ?7
+                      AND base_committed_head_token = ?8
+                      AND physical_store_revision = ?9
+                      AND physical_head_token = ?10
+                      AND run_id = ?11
+                      AND candidate_sequence = ?12
+                    ",
+                    params![
+                        runtime_id_text(runtime_id),
+                        i64::try_from(restored.physical_store_revision()).map_err(|_| {
+                            session_authority_conflict(
+                                runtime_id,
+                                "restored provisional physical revision exceeds SQLite INTEGER",
+                            )
+                        })?,
+                        restored.physical_head_token(),
+                        i64::try_from(restored.candidate_sequence()).map_err(|_| {
+                            session_authority_conflict(
+                                runtime_id,
+                                "restored provisional candidate sequence exceeds SQLite INTEGER",
+                            )
+                        })?,
+                        i64::from(expected.authority_version()),
+                        expected.session_id().to_string(),
+                        i64::try_from(expected.base_store_revision()).map_err(|_| {
+                            session_authority_conflict(
+                                runtime_id,
+                                "provisional base store revision exceeds SQLite INTEGER",
+                            )
+                        })?,
+                        expected.base_committed_head_token(),
+                        i64::try_from(expected.physical_store_revision()).map_err(|_| {
+                            session_authority_conflict(
+                                runtime_id,
+                                "provisional physical store revision exceeds SQLite INTEGER",
+                            )
+                        })?,
+                        expected.physical_head_token(),
+                        expected.run_id().to_string(),
+                        i64::try_from(expected.candidate_sequence()).map_err(|_| {
+                            session_authority_conflict(
+                                runtime_id,
+                                "provisional candidate sequence exceeds SQLite INTEGER",
+                            )
+                        })?,
+                        i64::try_from(predecessor_message_count).map_err(|_| {
+                            session_authority_conflict(
+                                runtime_id,
+                                "provisional predecessor message count exceeds SQLite INTEGER",
+                            )
+                        })?,
+                        predecessor_conversation_digest,
+                        serde_json::to_vec(&predecessor_catalog)
+                            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?,
+                        serde_json::to_vec(&predecessor_compaction_intents)
+                            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?,
+                    ],
+                )
+                .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+            if updated != 1 {
+                return Err(session_authority_conflict(
+                    runtime_id,
+                    "provisional HeadCanonical authority changed during rollback",
+                ));
+            }
+            return Ok(true);
+        }
+        let deleted = tx
+            .execute(
+                r"
+                DELETE FROM runtime_head_canonical_provisional_tails
+                WHERE runtime_id = ?1
+                  AND authority_version = ?2
+                  AND session_id = ?3
+                  AND base_store_revision = ?4
+                  AND base_committed_head_token = ?5
+                  AND physical_store_revision = ?6
+                  AND physical_head_token = ?7
+                  AND run_id = ?8
+                  AND candidate_sequence = ?9
+                ",
+                params![
+                    runtime_id_text(runtime_id),
+                    i64::from(expected.authority_version()),
+                    expected.session_id().to_string(),
+                    i64::try_from(expected.base_store_revision()).map_err(|_| {
+                        session_authority_conflict(
+                            runtime_id,
+                            "provisional base store revision exceeds SQLite INTEGER",
+                        )
+                    })?,
+                    expected.base_committed_head_token(),
+                    i64::try_from(expected.physical_store_revision()).map_err(|_| {
+                        session_authority_conflict(
+                            runtime_id,
+                            "provisional physical store revision exceeds SQLite INTEGER",
+                        )
+                    })?,
+                    expected.physical_head_token(),
+                    expected.run_id().to_string(),
+                    i64::try_from(expected.candidate_sequence()).map_err(|_| {
+                        session_authority_conflict(
+                            runtime_id,
+                            "provisional candidate sequence exceeds SQLite INTEGER",
+                        )
+                    })?,
+                ],
+            )
+            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+        if deleted != 1 {
+            return Err(session_authority_conflict(
+                runtime_id,
+                "provisional HeadCanonical authority changed during exact discard",
+            ));
+        }
+        Ok(true)
+    }
+
+    fn map_head_canonical_session_store_error(
+        runtime_id: &LogicalRuntimeId,
+        error: meerkat_core::SessionStoreError,
+    ) -> RuntimeStoreError {
+        match error {
+            meerkat_core::SessionStoreError::TranscriptRevisionConflict {
+                expected,
+                actual,
+                ..
+            } => RuntimeStoreError::TranscriptRevisionConflict { expected, actual },
+            meerkat_core::SessionStoreError::Io(error) => {
+                RuntimeStoreError::WriteFailed(error.to_string())
+            }
+            meerkat_core::SessionStoreError::Serialization(detail)
+            | meerkat_core::SessionStoreError::Internal(detail) => {
+                RuntimeStoreError::WriteFailed(detail)
+            }
+            other => session_authority_conflict(runtime_id, other.to_string()),
+        }
+    }
+
+    fn refuse_whole_blob_write_under_head_authority(
+        conn: &Connection,
+        runtime_id: &LogicalRuntimeId,
+        operation: &str,
+    ) -> Result<(), RuntimeStoreError> {
+        if load_head_canonical_authority(conn, runtime_id)?.is_some() {
+            return Err(session_authority_conflict(
+                runtime_id,
+                format!(
+                    "{operation} refused because head-canonical runtime authority is installed"
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    const HEAD_CANONICAL_ACTIVATION_VERSION: i64 = 1;
+    const HEAD_CANONICAL_PROFILE_PIN_VERSION: i64 = 1;
+    const HEAD_CANONICAL_ACTIVATION_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(25);
+
+    fn head_canonical_profile_is_pinned(conn: &Connection) -> Result<bool, RuntimeStoreError> {
+        let row = conn
+            .query_row(
+                r"
+                SELECT pin_version, persistence_profile
+                FROM runtime_head_canonical_profile_pin
+                WHERE singleton = 1
+                ",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+        let Some((pin_version, profile)) = row else {
+            return Ok(false);
+        };
+        if pin_version != HEAD_CANONICAL_PROFILE_PIN_VERSION
+            || profile != RuntimeSessionPersistenceProfile::HeadCanonicalV1.to_string()
+        {
+            return Err(RuntimeStoreError::ReadFailed(format!(
+                "unsupported SQLite runtime session profile pin version/profile: {pin_version}/{profile}"
+            )));
+        }
+        Ok(true)
+    }
+
+    fn head_canonical_profile_has_durable_claim(
+        conn: &Connection,
+    ) -> Result<bool, RuntimeStoreError> {
+        if head_canonical_profile_is_pinned(conn)? {
+            return Ok(true);
+        }
+        conn.query_row(
+            r"
+            SELECT EXISTS (
+                SELECT 1 FROM runtime_session_authority
+                UNION ALL
+                SELECT 1 FROM runtime_head_canonical_activations
+            )
+            ",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))
+    }
+
+    fn pin_head_canonical_profile(conn: &mut Connection) -> Result<(), RuntimeStoreError> {
+        let tx = begin_runtime_transaction(conn)?;
+        if head_canonical_profile_is_pinned(&tx)? {
+            tx.commit()
+                .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+            return Ok(());
+        }
+        let pinned_at_ms = unix_time_millis()?;
+        tx.execute(
+            r"
+            INSERT INTO runtime_head_canonical_profile_pin (
+                singleton, pin_version, persistence_profile, pinned_at_ms
+            ) VALUES (1, ?1, ?2, ?3)
+            ",
+            params![
+                HEAD_CANONICAL_PROFILE_PIN_VERSION,
+                RuntimeSessionPersistenceProfile::HeadCanonicalV1.to_string(),
+                pinned_at_ms,
+            ],
+        )
+        .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+        tx.commit()
+            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+        tracing::info!(
+            persistence_profile = %RuntimeSessionPersistenceProfile::HeadCanonicalV1,
+            "committed irreversible SQLite runtime session profile pin"
+        );
+        Ok(())
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum HeadCanonicalActivationState {
+        InProgress,
+        Complete,
+    }
+
+    impl HeadCanonicalActivationState {
+        fn parse(runtime_id: &LogicalRuntimeId, value: &str) -> Result<Self, RuntimeStoreError> {
+            match value {
+                "in_progress" => Ok(Self::InProgress),
+                "complete" => Ok(Self::Complete),
+                other => Err(session_authority_conflict(
+                    runtime_id,
+                    format!("unsupported head-canonical activation state '{other}'"),
+                )),
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct StoreOwnedHeadCanonicalActivationSource {
+        session: meerkat_core::Session,
+        session_id: meerkat_core::types::SessionId,
+        rewrite_prefix: meerkat_core::TranscriptRewritePrefixAccumulator,
+        snapshot_token: String,
+        snapshot_bytes: i64,
+        message_count: i64,
+    }
+
+    #[derive(Debug)]
+    struct HeadCanonicalActivationMarker {
+        activation_version: i64,
+        state: HeadCanonicalActivationState,
+        session_id: String,
+        source_snapshot_token: Option<String>,
+        source_snapshot_bytes: Option<i64>,
+        source_message_count: Option<i64>,
+        started_at_ms: i64,
+    }
+
+    struct HeadCanonicalActivationHeartbeat {
+        stopped: Arc<AtomicBool>,
+        phase: Arc<AtomicU8>,
+        handle: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl HeadCanonicalActivationHeartbeat {
+        fn start(
+            runtime_id: &LogicalRuntimeId,
+            session_id: String,
+        ) -> Result<Self, RuntimeStoreError> {
+            let stopped = Arc::new(AtomicBool::new(false));
+            let phase = Arc::new(AtomicU8::new(0));
+            let thread_stopped = Arc::clone(&stopped);
+            let thread_phase = Arc::clone(&phase);
+            let runtime_id = runtime_id_text(runtime_id).to_owned();
+            let started = Instant::now();
+            let handle = std::thread::Builder::new()
+                .name("rkat-hc-activation-heartbeat".to_string())
+                .spawn(move || {
+                    while !thread_stopped.load(Ordering::Acquire) {
+                        std::thread::park_timeout(HEAD_CANONICAL_ACTIVATION_HEARTBEAT_INTERVAL);
+                        if thread_stopped.load(Ordering::Acquire) {
+                            break;
+                        }
+                        tracing::info!(
+                            runtime_id = %runtime_id,
+                            session_id = %session_id,
+                            phase = activation_phase_label(thread_phase.load(Ordering::Acquire)),
+                            elapsed_ms = u64::try_from(started.elapsed().as_millis())
+                                .unwrap_or(u64::MAX),
+                            "head-canonical profile activation is still in progress"
+                        );
+                    }
+                })
+                .map_err(|error| {
+                    RuntimeStoreError::Internal(format!(
+                        "failed to spawn head-canonical activation heartbeat: {error}"
+                    ))
+                })?;
+            Ok(Self {
+                stopped,
+                phase,
+                handle: Some(handle),
+            })
+        }
+
+        fn set_phase(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            session_id: &meerkat_core::types::SessionId,
+            phase: u8,
+            source_message_count: Option<i64>,
+        ) {
+            self.phase.store(phase, Ordering::Release);
+            tracing::info!(
+                runtime_id = %runtime_id,
+                session_id = %session_id,
+                phase = activation_phase_label(phase),
+                source_message_count = ?source_message_count,
+                "head-canonical profile activation phase started"
+            );
+        }
+
+        fn stop(&mut self) {
+            self.stopped.store(true, Ordering::Release);
+            if let Some(handle) = self.handle.take() {
+                handle.thread().unpark();
+                if handle.join().is_err() {
+                    tracing::warn!(
+                        "head-canonical profile activation heartbeat thread terminated unexpectedly"
+                    );
+                }
+            }
+        }
+    }
+
+    impl Drop for HeadCanonicalActivationHeartbeat {
+        fn drop(&mut self) {
+            self.stop();
+        }
+    }
+
+    fn activation_phase_label(phase: u8) -> &'static str {
+        match phase {
+            0 => "commit_in_progress_marker",
+            1 => "verify_frozen_snapshot",
+            2 => "canonicalize_physical_session",
+            3 => "derive_exact_runtime_boundary",
+            4 => "commit_authority_and_completion",
+            _ => "unknown",
+        }
+    }
+
+    fn unix_time_millis() -> Result<i64, RuntimeStoreError> {
+        let elapsed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| {
+                RuntimeStoreError::Internal(format!(
+                    "system clock is before the Unix epoch during profile activation: {error}"
+                ))
+            })?;
+        i64::try_from(elapsed.as_millis()).map_err(|_| {
+            RuntimeStoreError::Internal(
+                "system clock millisecond value exceeds SQLite INTEGER".to_string(),
+            )
+        })
+    }
+
+    fn activation_source_snapshot_token(bytes: &[u8]) -> String {
+        use sha2::Digest as _;
+
+        format!("sha256:{:x}", sha2::Sha256::digest(bytes))
+    }
+
+    fn load_head_canonical_activation_marker(
+        conn: &Connection,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<HeadCanonicalActivationMarker>, RuntimeStoreError> {
+        let row = conn
+            .query_row(
+                r"
+                SELECT activation_version, state, session_id,
+                       source_snapshot_token, source_snapshot_bytes,
+                       source_message_count, started_at_ms
+                FROM runtime_head_canonical_activations
+                WHERE runtime_id = ?1
+                ",
+                params![runtime_id_text(runtime_id)],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<i64>>(4)?,
+                        row.get::<_, Option<i64>>(5)?,
+                        row.get::<_, i64>(6)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+        row.map(
+            |(
+                activation_version,
+                state,
+                session_id,
+                source_snapshot_token,
+                source_snapshot_bytes,
+                source_message_count,
+                started_at_ms,
+            )| {
+                if activation_version != HEAD_CANONICAL_ACTIVATION_VERSION {
+                    return Err(session_authority_conflict(
+                        runtime_id,
+                        format!(
+                            "unsupported head-canonical activation version {activation_version}"
+                        ),
+                    ));
+                }
+                Ok(HeadCanonicalActivationMarker {
+                    activation_version,
+                    state: HeadCanonicalActivationState::parse(runtime_id, &state)?,
+                    session_id,
+                    source_snapshot_token,
+                    source_snapshot_bytes,
+                    source_message_count,
+                    started_at_ms,
+                })
+            },
+        )
+        .transpose()
+    }
+
+    fn load_store_owned_head_canonical_activation_source_in_txn(
+        tx: &Transaction<'_>,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<StoreOwnedHeadCanonicalActivationSource, RuntimeStoreError> {
+        let authority = load_whole_blob_store_authority(tx, runtime_id)?.ok_or_else(|| {
+            session_authority_conflict(
+                runtime_id,
+                "head-canonical activation requires imported WholeBlob store authority",
+            )
+        })?;
+        let snapshot = tx
+            .query_row(
+                "SELECT session_snapshot FROM runtime_whole_blob_bodies WHERE blob_sha256 = ?1",
+                params![authority.blob_sha256()],
+                |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
+            )
+            .optional()
+            .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+        let Some(snapshot) = snapshot else {
+            return Err(session_authority_conflict(
+                runtime_id,
+                "head-canonical activation WholeBlob authority references a missing body",
+            ));
+        };
+        use sha2::Digest as _;
+        let observed_blob_sha256 = format!("row-sha256:{:x}", sha2::Sha256::digest(&snapshot));
+        if authority.blob_sha256() != observed_blob_sha256 {
+            return Err(session_authority_conflict(
+                runtime_id,
+                "head-canonical activation WholeBlob body differs from store-issued authority",
+            ));
+        }
+        let session = deserialize_persisted_session(&snapshot)?;
+        let session_id = session.id().clone();
+        let owner = LogicalRuntimeId::for_session(&session_id);
+        if &owner != runtime_id || authority.session_id() != &session_id {
+            return Err(session_authority_conflict(
+                runtime_id,
+                format!(
+                    "head-canonical activation body belongs to runtime {owner}, not {runtime_id}"
+                ),
+            ));
+        }
+        let rewrite_prefix = match session.transcript_rewrite_prefix_authority() {
+            Some(prefix) => prefix,
+            None => session
+                .transcript_history_state_shared()
+                .map_err(|error| {
+                    session_authority_conflict(
+                        runtime_id,
+                        format!(
+                            "store-owned WholeBlob rewrite-prefix authority is malformed: {error}"
+                        ),
+                    )
+                })?
+                .map_or_else(Default::default, |history| history.rewrite_prefix.clone()),
+        };
+        let snapshot_bytes = i64::try_from(snapshot.len()).map_err(|_| {
+            session_authority_conflict(
+                runtime_id,
+                "store-owned WholeBlob predecessor exceeds SQLite INTEGER byte accounting",
+            )
+        })?;
+        let message_count = i64::try_from(session.messages().len()).map_err(|_| {
+            session_authority_conflict(
+                runtime_id,
+                "store-owned WholeBlob predecessor exceeds SQLite INTEGER row accounting",
+            )
+        })?;
+        Ok(StoreOwnedHeadCanonicalActivationSource {
+            session,
+            session_id,
+            rewrite_prefix,
+            snapshot_token: activation_source_snapshot_token(&snapshot),
+            snapshot_bytes,
+            message_count,
+        })
+    }
+
+    fn validate_activation_source_against_authority(
+        runtime_id: &LogicalRuntimeId,
+        source: &StoreOwnedHeadCanonicalActivationSource,
+        authority: Option<&RuntimeSessionAuthority>,
+    ) -> Result<(), RuntimeStoreError> {
+        let Some(authority) = authority else {
+            return Ok(());
+        };
+        if authority.session_id() != &source.session_id {
+            return Err(session_authority_conflict(
+                runtime_id,
+                "store-owned WholeBlob predecessor differs from persisted runtime authority",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_in_progress_activation_marker(
+        runtime_id: &LogicalRuntimeId,
+        marker: &HeadCanonicalActivationMarker,
+        expected_session_id: &meerkat_core::types::SessionId,
+    ) -> Result<(), RuntimeStoreError> {
+        if marker.activation_version != HEAD_CANONICAL_ACTIVATION_VERSION
+            || marker.state != HeadCanonicalActivationState::InProgress
+            || marker.session_id != expected_session_id.to_string()
+            || marker.source_snapshot_token.is_some()
+            || marker.source_snapshot_bytes.is_some()
+            || marker.source_message_count.is_some()
+        {
+            return Err(session_authority_conflict(
+                runtime_id,
+                "in-progress head-canonical activation marker is not the exact marker-first shape",
+            ));
+        }
+        Ok(())
+    }
+
+    const LOAD_HEAD_CANONICAL_ACTIVATION_CANDIDATES_SQL: &str = r"
+SELECT runtime_id
+FROM runtime_head_canonical_activations
+WHERE state = 'in_progress'
+UNION
+SELECT runtime_id
+FROM runtime_head_canonical_activation_queue
+ORDER BY runtime_id";
+
+    fn head_canonical_activation_candidate_ids(
+        conn: &Connection,
+    ) -> Result<Vec<LogicalRuntimeId>, RuntimeStoreError> {
+        // A complete marker is an immutable migration receipt, not current
+        // authority. Ordinary boundaries advance runtime_session_authority
+        // after activation, so completed receipts and installed authorities
+        // must never be startup work. Migration v2 materializes the published
+        // v1 whole-BLOB set once; ordinary reopen therefore touches only
+        // queued work and interrupted activations, never retained history.
+        let mut statement = conn
+            .prepare(LOAD_HEAD_CANONICAL_ACTIVATION_CANDIDATES_SQL)
+            .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+        let runtime_ids = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+        Ok(runtime_ids.into_iter().map(LogicalRuntimeId::new).collect())
+    }
+
+    fn head_canonical_activation_error_class(error: &RuntimeStoreError) -> &'static str {
+        match error {
+            RuntimeStoreError::SessionPersistenceAuthorityConflict { .. } => "authority_conflict",
+            RuntimeStoreError::SchemaFromTheFuture { .. } => "schema_from_the_future",
+            RuntimeStoreError::MaintenanceFenceHeld { .. } => "maintenance_fence",
+            RuntimeStoreError::ReadFailed(_) => "read_failed",
+            RuntimeStoreError::WriteFailed(_) => "write_failed",
+            _ => "activation_failed",
+        }
+    }
+
+    fn activate_one_head_canonical_runtime(
+        conn: &mut Connection,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<(), RuntimeStoreError> {
+        let session_label = runtime_id
+            .session_id()
+            .map(|session_id| session_id.to_string())
+            .unwrap_or_else(|| "<unverified>".to_string());
+        tracing::info!(
+            runtime_id = %runtime_id,
+            session_id = %session_label,
+            phase = activation_phase_label(0),
+            "starting synchronous head-canonical profile activation"
+        );
+        let process_started = Instant::now();
+        let mut heartbeat =
+            match HeadCanonicalActivationHeartbeat::start(runtime_id, session_label.clone()) {
+                Ok(heartbeat) => heartbeat,
+                Err(error) => {
+                    tracing::error!(
+                        runtime_id = %runtime_id,
+                        session_id = %session_label,
+                        phase = activation_phase_label(0),
+                        source_message_count = ?Option::<i64>::None,
+                        boundary_message_count = ?Option::<i64>::None,
+                        physical_message_count = ?Option::<i64>::None,
+                        elapsed_ms = u64::try_from(process_started.elapsed().as_millis())
+                            .unwrap_or(u64::MAX),
+                        refusal_class = head_canonical_activation_error_class(&error),
+                        "refused synchronous head-canonical profile activation"
+                    );
+                    return Err(error);
+                }
+            };
+
+        let mut observed_session_id = None;
+        let mut observed_source_message_count = None;
+        let mut observed_boundary_message_count = None;
+        let mut observed_physical_message_count = None;
+        let result = (|| {
+            let expected_session_id = runtime_id.session_id().ok_or_else(|| {
+                session_authority_conflict(
+                    runtime_id,
+                    "head-canonical activation runtime id does not encode a session identity",
+                )
+            })?;
+            if &LogicalRuntimeId::for_session(&expected_session_id) != runtime_id {
+                return Err(session_authority_conflict(
+                    runtime_id,
+                    "head-canonical activation requires the canonical session runtime identity",
+                ));
+            }
+
+            // Commit the observable/fencing marker before touching document
+            // bytes. Its trigger freezes this runtime's predecessor row, so
+            // the one conversion transaction below can read and verify A
+            // exactly once without a marker-to-source race.
+            let started_at_ms = {
+                let tx = begin_runtime_transaction(conn)?;
+                let whole_blob_authority = load_whole_blob_store_authority(&tx, runtime_id)?
+                    .ok_or_else(|| {
+                        session_authority_conflict(
+                            runtime_id,
+                            "head-canonical activation requires store-owned WholeBlob authority",
+                        )
+                    })?;
+                if whole_blob_authority.session_id() != &expected_session_id {
+                    return Err(session_authority_conflict(
+                        runtime_id,
+                        "WholeBlob activation authority belongs to another session",
+                    ));
+                }
+                let authority = load_head_canonical_authority(&tx, runtime_id)?;
+                let authority_session_id =
+                    authority.as_ref().map(RuntimeSessionAuthority::session_id);
+                if authority_session_id.is_some_and(|session_id| session_id != &expected_session_id)
+                {
+                    return Err(session_authority_conflict(
+                        runtime_id,
+                        "persisted activation authority belongs to another session",
+                    ));
+                }
+                let marker = load_head_canonical_activation_marker(&tx, runtime_id)?;
+                let now_ms = unix_time_millis()?;
+                let started_at_ms = match marker {
+                    None => {
+                        tx.execute(
+                            r"
+                            INSERT INTO runtime_head_canonical_activations (
+                                runtime_id, activation_version, state, session_id,
+                                started_at_ms, updated_at_ms
+                            ) VALUES (?1, ?2, 'in_progress', ?3, ?4, ?4)
+                            ",
+                            params![
+                                runtime_id_text(runtime_id),
+                                HEAD_CANONICAL_ACTIVATION_VERSION,
+                                expected_session_id.to_string(),
+                                now_ms,
+                            ],
+                        )
+                        .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                        now_ms
+                    }
+                    Some(marker) => {
+                        if marker.state == HeadCanonicalActivationState::Complete {
+                            return Err(session_authority_conflict(
+                                runtime_id,
+                                "complete head-canonical activation marker has no exact authority",
+                            ));
+                        }
+                        validate_in_progress_activation_marker(
+                            runtime_id,
+                            &marker,
+                            &expected_session_id,
+                        )?;
+                        let changed = tx
+                            .execute(
+                                r"
+                                UPDATE runtime_head_canonical_activations
+                                SET updated_at_ms = ?2
+                                WHERE runtime_id = ?1 AND state = 'in_progress'
+                                ",
+                                params![
+                                    runtime_id_text(runtime_id),
+                                    now_ms.max(marker.started_at_ms),
+                                ],
+                            )
+                            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                        if changed != 1 {
+                            return Err(session_authority_conflict(
+                                runtime_id,
+                                "in-progress activation marker changed before retry admission",
+                            ));
+                        }
+                        marker.started_at_ms
+                    }
+                };
+                tx.commit()
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                started_at_ms
+            };
+
+            heartbeat.set_phase(runtime_id, &expected_session_id, 1, None);
+            let tx = begin_runtime_transaction(conn)?;
+            let current_source =
+                load_store_owned_head_canonical_activation_source_in_txn(&tx, runtime_id)?;
+            observed_session_id = Some(current_source.session_id.to_string());
+            observed_source_message_count = Some(current_source.message_count);
+            let source_message_count = Some(current_source.message_count);
+            let marker =
+                load_head_canonical_activation_marker(&tx, runtime_id)?.ok_or_else(|| {
+                    session_authority_conflict(
+                        runtime_id,
+                        "head-canonical activation marker disappeared before conversion",
+                    )
+                })?;
+            validate_in_progress_activation_marker(
+                runtime_id,
+                &marker,
+                &current_source.session_id,
+            )?;
+            let existing_authority = load_head_canonical_authority(&tx, runtime_id)?;
+            validate_activation_source_against_authority(
+                runtime_id,
+                &current_source,
+                existing_authority.as_ref(),
+            )?;
+            heartbeat.set_phase(
+                runtime_id,
+                &current_source.session_id,
+                2,
+                source_message_count,
+            );
+            let Some((physical_head, physical_head_token)) =
+                meerkat_store::sqlite_store::ensure_head_canonical_for_runtime_in_txn(
+                    &tx,
+                    &current_source.session_id,
+                )
+                .map_err(|error| map_head_canonical_session_store_error(runtime_id, error))?
+            else {
+                return Err(session_authority_conflict(
+                    runtime_id,
+                    "the co-tenant session store has no physical session to canonicalize",
+                ));
+            };
+            observed_physical_message_count = i64::try_from(physical_head.message_count).ok();
+
+            heartbeat.set_phase(
+                runtime_id,
+                &current_source.session_id,
+                3,
+                source_message_count,
+            );
+            let boundary_head =
+                meerkat_store::sqlite_store::derive_runtime_boundary_head_for_activation_in_txn(
+                    &tx,
+                    &current_source.session,
+                    &current_source.rewrite_prefix,
+                    &physical_head,
+                )
+                .map_err(|error| map_head_canonical_session_store_error(runtime_id, error))?;
+            observed_boundary_message_count = i64::try_from(boundary_head.message_count).ok();
+            if boundary_head.rewrite_prefix != current_source.rewrite_prefix {
+                return Err(session_authority_conflict(
+                    runtime_id,
+                    "derived runtime boundary rewrite authority differs from the store-owned predecessor",
+                ));
+            }
+            let successor_authority =
+                issue_head_canonical_authority_in_txn(&tx, runtime_id, boundary_head)?;
+            if let Some(existing) = existing_authority.as_ref()
+                && existing != &successor_authority
+            {
+                return Err(session_authority_conflict(
+                    runtime_id,
+                    "existing exact runtime authority differs from the reconstructed frozen boundary",
+                ));
+            }
+
+            heartbeat.set_phase(
+                runtime_id,
+                &current_source.session_id,
+                4,
+                source_message_count,
+            );
+            write_head_canonical_authority_in_txn(&tx, runtime_id, &successor_authority)?;
+            let runtime_state = load_runtime_session_catalog_entry_in_txn(&tx, runtime_id)?
+                .and_then(|entry| entry.runtime_state());
+            let catalog_entry = crate::store::RuntimeSessionCatalogEntry::from_head(
+                successor_authority
+                    .head_canonical()
+                    .ok_or_else(|| {
+                        session_authority_conflict(
+                            runtime_id,
+                            "activation successor authority is not HeadCanonical",
+                        )
+                    })?
+                    .boundary_head(),
+                RuntimeSessionPersistenceProfile::HeadCanonicalV1,
+                runtime_state,
+            )?;
+            upsert_runtime_session_catalog_entry_in_txn(&tx, runtime_id, &catalog_entry)?;
+            let completed_at_ms = unix_time_millis()?.max(started_at_ms);
+            let elapsed_ms = completed_at_ms.saturating_sub(started_at_ms);
+            let successor_boundary_head = successor_authority
+                .head_canonical()
+                .ok_or_else(|| {
+                    session_authority_conflict(
+                        runtime_id,
+                        "reconstructed authority is not HeadCanonical",
+                    )
+                })?
+                .boundary_head();
+            let boundary_message_count = i64::try_from(successor_boundary_head.message_count)
+                .map_err(|_| {
+                    session_authority_conflict(
+                        runtime_id,
+                        "runtime boundary row count exceeds SQLite INTEGER",
+                    )
+                })?;
+            let physical_message_count =
+                i64::try_from(physical_head.message_count).map_err(|_| {
+                    session_authority_conflict(
+                        runtime_id,
+                        "physical head row count exceeds SQLite INTEGER",
+                    )
+                })?;
+            let boundary_head_token = successor_authority
+                .head_canonical()
+                .ok_or_else(|| {
+                    session_authority_conflict(
+                        runtime_id,
+                        "reconstructed authority is not HeadCanonical",
+                    )
+                })?
+                .committed_head_token();
+            let changed = tx
+                .execute(
+                    r"
+                    UPDATE runtime_head_canonical_activations
+                    SET state = 'complete',
+                        updated_at_ms = ?2,
+                        completed_at_ms = ?2,
+                        elapsed_ms = ?3,
+                        source_snapshot_token = ?4,
+                        source_snapshot_bytes = ?5,
+                        source_message_count = ?6,
+                        boundary_message_count = ?7,
+                        physical_message_count = ?8,
+                        boundary_head_cas_token = ?9,
+                        physical_head_cas_token = ?10
+                    WHERE runtime_id = ?1
+                      AND state = 'in_progress'
+                      AND session_id = ?11
+                    ",
+                    params![
+                        runtime_id_text(runtime_id),
+                        completed_at_ms,
+                        elapsed_ms,
+                        current_source.snapshot_token,
+                        current_source.snapshot_bytes,
+                        current_source.message_count,
+                        boundary_message_count,
+                        physical_message_count,
+                        boundary_head_token,
+                        physical_head_token,
+                        current_source.session_id.to_string(),
+                    ],
+                )
+                .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+            if changed != 1 {
+                return Err(session_authority_conflict(
+                    runtime_id,
+                    "head-canonical activation marker changed before completion",
+                ));
+            }
+            tx.commit()
+                .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+            Ok((
+                current_source.session_id,
+                current_source.message_count,
+                boundary_message_count,
+                physical_message_count,
+                elapsed_ms,
+            ))
+        })();
+
+        heartbeat.stop();
+        match result {
+            Ok((
+                session_id,
+                source_message_count,
+                boundary_message_count,
+                physical_message_count,
+                elapsed_ms,
+            )) => {
+                tracing::info!(
+                    runtime_id = %runtime_id,
+                    session_id = %session_id,
+                    source_message_count,
+                    boundary_message_count,
+                    physical_message_count,
+                    elapsed_ms,
+                    "committed synchronous head-canonical profile activation"
+                );
+                Ok(())
+            }
+            Err(error) => {
+                tracing::error!(
+                    runtime_id = %runtime_id,
+                    session_id = %observed_session_id.as_deref().unwrap_or(&session_label),
+                    phase = activation_phase_label(heartbeat.phase.load(Ordering::Acquire)),
+                    source_message_count = ?observed_source_message_count,
+                    boundary_message_count = ?observed_boundary_message_count,
+                    physical_message_count = ?observed_physical_message_count,
+                    elapsed_ms = u64::try_from(process_started.elapsed().as_millis())
+                        .unwrap_or(u64::MAX),
+                    refusal_class = head_canonical_activation_error_class(&error),
+                    "refused synchronous head-canonical profile activation"
+                );
+                Err(error)
+            }
+        }
+    }
+
+    fn activate_head_canonical_profiles(conn: &mut Connection) -> Result<(), RuntimeStoreError> {
+        for runtime_id in head_canonical_activation_candidate_ids(conn)? {
+            let session_label = runtime_id
+                .session_id()
+                .map(|session_id| session_id.to_string())
+                .unwrap_or_else(|| "<unverified>".to_string());
+            let authority = load_head_canonical_authority(conn, &runtime_id).map_err(|error| {
+                tracing::error!(
+                    runtime_id = %runtime_id,
+                    session_id = %session_label,
+                    phase = "activation_preflight",
+                    source_message_count = ?Option::<i64>::None,
+                    boundary_message_count = ?Option::<i64>::None,
+                    physical_message_count = ?Option::<i64>::None,
+                    elapsed_ms = 0_u64,
+                    refusal_class = head_canonical_activation_error_class(&error),
+                    "refused synchronous head-canonical profile activation"
+                );
+                error
+            })?;
+            let marker =
+                load_head_canonical_activation_marker(conn, &runtime_id).map_err(|error| {
+                    tracing::error!(
+                        runtime_id = %runtime_id,
+                        session_id = %session_label,
+                        phase = "activation_preflight",
+                        source_message_count = ?Option::<i64>::None,
+                        boundary_message_count = ?Option::<i64>::None,
+                        physical_message_count = ?Option::<i64>::None,
+                        elapsed_ms = 0_u64,
+                        refusal_class = head_canonical_activation_error_class(&error),
+                        "refused synchronous head-canonical profile activation"
+                    );
+                    error
+                })?;
+            match (
+                authority.as_ref(),
+                marker.as_ref().map(|marker| marker.state),
+            ) {
+                (Some(_), None | Some(HeadCanonicalActivationState::Complete)) => continue,
+                (None, Some(HeadCanonicalActivationState::Complete)) => {
+                    return Err(session_authority_conflict(
+                        &runtime_id,
+                        "complete head-canonical activation receipt has no exact installed authority",
+                    ));
+                }
+                (Some(_), Some(HeadCanonicalActivationState::InProgress)) | (None, _) => {
+                    activate_one_head_canonical_runtime(conn, &runtime_id)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn load_boundary_receipt(
+        conn: &Connection,
+        runtime_id: &LogicalRuntimeId,
+        receipt: &RunBoundaryReceipt,
+    ) -> Result<Option<RunBoundaryReceipt>, RuntimeStoreError> {
+        conn.query_row(
+            r"
+            SELECT receipt_json
+            FROM runtime_boundary_receipts
+            WHERE runtime_id = ?1 AND run_id = ?2 AND sequence = ?3
+            ",
+            params![
+                runtime_id_text(runtime_id),
+                receipt.run_id.0.to_string(),
+                encode_receipt_sequence(receipt.sequence),
+            ],
+            |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
+        )
+        .optional()
+        .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?
+        .map(|bytes| {
+            serde_json::from_slice(&bytes)
+                .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))
+        })
+        .transpose()
+    }
+
+    #[derive(Debug, Clone)]
+    struct OrdinaryBoundaryWitness {
+        boundary_key: String,
+        request_digest: String,
+    }
+
+    fn hash_ordinary_boundary_component(hasher: &mut sha2::Sha256, label: &str, bytes: &[u8]) {
+        use sha2::Digest as _;
+
+        hasher.update((label.len() as u64).to_be_bytes());
+        hasher.update(label.as_bytes());
+        hasher.update((bytes.len() as u64).to_be_bytes());
+        hasher.update(bytes);
+    }
+
+    fn hash_ordinary_boundary_json<T: serde::Serialize>(
+        hasher: &mut sha2::Sha256,
+        label: &str,
+        value: &T,
+    ) -> Result<(), RuntimeStoreError> {
+        let bytes = serde_json::to_vec(value)
+            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+        hash_ordinary_boundary_component(hasher, label, &bytes);
+        Ok(())
+    }
+
+    fn prepare_ordinary_boundary_witness(
+        runtime_id: &LogicalRuntimeId,
+        prepared_session: Option<&PreparedHeadCanonicalSqliteSession>,
+        receipt: Option<&RunBoundaryReceipt>,
+        lifecycle_expected: Option<&MachineLifecycleExpectedVersion>,
+        lifecycle_snapshot: Option<&MachineLifecycleSnapshot>,
+        input_updates: &[(StoredInputState, Option<String>)],
+    ) -> Result<OrdinaryBoundaryWitness, RuntimeStoreError> {
+        use sha2::Digest as _;
+
+        let boundary_key = if let Some(receipt) = receipt {
+            format!(
+                "receipt:{}:{}",
+                receipt.run_id.0,
+                encode_receipt_sequence(receipt.sequence)
+            )
+        } else if let Some(prepared) = prepared_session {
+            format!("session-head:{}", prepared.mutation.successor_head_token())
+        } else {
+            return Err(session_authority_conflict(
+                runtime_id,
+                "ordinary boundary has neither session authority nor receipt identity",
+            ));
+        };
+
+        let mut hasher = sha2::Sha256::new();
+        hash_ordinary_boundary_component(
+            &mut hasher,
+            "witness-domain",
+            b"meerkat-runtime/sqlite/ordinary-boundary/v1",
+        );
+        hash_ordinary_boundary_component(
+            &mut hasher,
+            "runtime-id",
+            runtime_id_text(runtime_id).as_bytes(),
+        );
+        hash_ordinary_boundary_component(&mut hasher, "boundary-key", boundary_key.as_bytes());
+
+        match prepared_session {
+            Some(prepared) => {
+                hash_ordinary_boundary_component(&mut hasher, "session-present", b"1");
+                match prepared.mutation.predecessor_head() {
+                    Some(head) => {
+                        hash_ordinary_boundary_json(
+                            &mut hasher,
+                            "physical-predecessor-head",
+                            head,
+                        )?;
+                    }
+                    None => hash_ordinary_boundary_component(
+                        &mut hasher,
+                        "physical-predecessor-head",
+                        b"absent",
+                    ),
+                }
+                hash_ordinary_boundary_json(
+                    &mut hasher,
+                    "physical-successor-head",
+                    prepared.mutation.successor_head(),
+                )?;
+                hash_ordinary_boundary_component(
+                    &mut hasher,
+                    "physical-successor-token",
+                    prepared.mutation.successor_head_token().as_bytes(),
+                );
+                match &prepared.mutation {
+                    meerkat_core::lifecycle::core_executor::PreparedHeadCanonicalPhysicalMutation::Ordinary(
+                        mutation,
+                    ) => {
+                        hash_ordinary_boundary_component(
+                            &mut hasher,
+                            "suffix-base-seq",
+                            &mutation.base_seq().to_be_bytes(),
+                        );
+                        hash_ordinary_boundary_component(
+                            &mut hasher,
+                            "suffix-count",
+                            &(mutation.serialized_suffix().len() as u64).to_be_bytes(),
+                        );
+                        for row in mutation.serialized_suffix() {
+                            hash_ordinary_boundary_component(&mut hasher, "suffix-row", row);
+                        }
+                    }
+                    meerkat_core::lifecycle::core_executor::PreparedHeadCanonicalPhysicalMutation::Rewrite(
+                        mutation,
+                    ) => {
+                        hash_ordinary_boundary_component(
+                            &mut hasher,
+                            "physical-mutation-kind",
+                            b"rewrite",
+                        );
+                        for step in mutation.steps() {
+                            match step.parent_transition() {
+                                meerkat_core::session_store::PreparedHeadCanonicalParentTransition::ExactAppend => {
+                                    hash_ordinary_boundary_component(
+                                        &mut hasher,
+                                        "rewrite-parent-transition",
+                                        b"exact-append",
+                                    );
+                                }
+                                meerkat_core::session_store::PreparedHeadCanonicalParentTransition::ExactSplice(
+                                    splice,
+                                ) => {
+                                    hash_ordinary_boundary_component(
+                                        &mut hasher,
+                                        "rewrite-parent-transition",
+                                        b"exact-splice",
+                                    );
+                                    hash_ordinary_boundary_component(
+                                        &mut hasher,
+                                        "rewrite-parent-splice-source",
+                                        splice.source_strand().as_str().as_bytes(),
+                                    );
+                                    hash_ordinary_boundary_json(
+                                        &mut hasher,
+                                        "rewrite-parent-splice",
+                                        &splice.link_splice(),
+                                    )?;
+                                    for row in splice.serialized_replacement() {
+                                        hash_ordinary_boundary_component(
+                                            &mut hasher,
+                                            "rewrite-parent-splice-row",
+                                            row,
+                                        );
+                                    }
+                                }
+                            }
+                            hash_ordinary_boundary_json(
+                                &mut hasher,
+                                "rewrite-commit",
+                                step.commit(),
+                            )?;
+                            hash_ordinary_boundary_component(
+                                &mut hasher,
+                                "rewrite-parent-strand",
+                                step.parent_strand().as_str().as_bytes(),
+                            );
+                            hash_ordinary_boundary_component(
+                                &mut hasher,
+                                "rewrite-parent-base",
+                                &step.parent_base_seq().to_be_bytes(),
+                            );
+                            for row in step.serialized_parent_suffix() {
+                                hash_ordinary_boundary_component(
+                                    &mut hasher,
+                                    "rewrite-parent-row",
+                                    row,
+                                );
+                            }
+                            hash_ordinary_boundary_component(
+                                &mut hasher,
+                                "rewrite-strand",
+                                step.strand().as_str().as_bytes(),
+                            );
+                            hash_ordinary_boundary_json(
+                                &mut hasher,
+                                "rewrite-link-splice",
+                                &step.link_splice(),
+                            )?;
+                            for row in step.serialized_replacement() {
+                                hash_ordinary_boundary_component(
+                                    &mut hasher,
+                                    "rewrite-replacement-row",
+                                    row,
+                                );
+                            }
+                        }
+                        hash_ordinary_boundary_component(
+                            &mut hasher,
+                            "rewrite-tail-base",
+                            &mutation.tail_base_seq().to_be_bytes(),
+                        );
+                        for row in mutation.serialized_tail() {
+                            hash_ordinary_boundary_component(
+                                &mut hasher,
+                                "rewrite-tail-row",
+                                row,
+                            );
+                        }
+                    }
+                }
+                hash_ordinary_boundary_component(
+                    &mut hasher,
+                    "compaction-intent-count",
+                    &(prepared.compaction_intents.len() as u64).to_be_bytes(),
+                );
+                for intent in &prepared.compaction_intents {
+                    hash_ordinary_boundary_json(&mut hasher, "compaction-intent", intent)?;
+                }
+            }
+            None => {
+                hash_ordinary_boundary_component(&mut hasher, "session-present", b"0");
+            }
+        }
+
+        match receipt {
+            Some(receipt) => {
+                hash_ordinary_boundary_json(&mut hasher, "receipt", receipt)?;
+            }
+            None => {
+                hash_ordinary_boundary_component(&mut hasher, "receipt", b"absent");
+            }
+        }
+
+        match lifecycle_expected {
+            Some(MachineLifecycleExpectedVersion::Missing) => {
+                hash_ordinary_boundary_component(&mut hasher, "lifecycle-expected", b"missing-row");
+            }
+            Some(MachineLifecycleExpectedVersion::Version(version)) => {
+                hash_ordinary_boundary_component(
+                    &mut hasher,
+                    "lifecycle-expected",
+                    version.as_str().as_bytes(),
+                );
+            }
+            None => {
+                hash_ordinary_boundary_component(
+                    &mut hasher,
+                    "lifecycle-expected",
+                    b"not-applicable",
+                );
+            }
+        }
+        match lifecycle_snapshot {
+            Some(snapshot) => {
+                let bytes = MachineLifecycleStoreRecord::from_snapshot(snapshot).encode()?;
+                hash_ordinary_boundary_component(&mut hasher, "lifecycle-target", &bytes);
+            }
+            None => {
+                hash_ordinary_boundary_component(&mut hasher, "lifecycle-target", b"absent");
+            }
+        }
+
+        hash_ordinary_boundary_component(
+            &mut hasher,
+            "input-update-count",
+            &(input_updates.len() as u64).to_be_bytes(),
+        );
+        for (input, expected) in input_updates {
+            hash_ordinary_boundary_json(&mut hasher, "input-target", input)?;
+            hash_ordinary_boundary_component(
+                &mut hasher,
+                "input-expected",
+                expected.as_deref().unwrap_or("not-fenced").as_bytes(),
+            );
+        }
+
+        Ok(OrdinaryBoundaryWitness {
+            boundary_key,
+            request_digest: format!("sha256:{:x}", hasher.finalize()),
+        })
+    }
+
+    fn prepare_head_canonical_promotion_witness(
+        runtime_id: &LogicalRuntimeId,
+        authority: &HeadCanonicalProvisionalTailAuthority,
+        receipt: &RunBoundaryReceipt,
+        lifecycle_expected: Option<&MachineLifecycleExpectedVersion>,
+        lifecycle_snapshot: Option<&MachineLifecycleSnapshot>,
+        input_updates: &[(StoredInputState, Option<String>)],
+    ) -> Result<OrdinaryBoundaryWitness, RuntimeStoreError> {
+        use sha2::Digest as _;
+
+        let base = prepare_ordinary_boundary_witness(
+            runtime_id,
+            None,
+            Some(receipt),
+            lifecycle_expected,
+            lifecycle_snapshot,
+            input_updates,
+        )?;
+        let mut hasher = sha2::Sha256::new();
+        hash_ordinary_boundary_component(
+            &mut hasher,
+            "witness-domain",
+            b"meerkat-runtime/sqlite/head-canonical-promotion/v1",
+        );
+        hash_ordinary_boundary_component(
+            &mut hasher,
+            "ordinary-effects-digest",
+            base.request_digest.as_bytes(),
+        );
+        hash_ordinary_boundary_component(
+            &mut hasher,
+            "authority-version",
+            &authority.authority_version().to_be_bytes(),
+        );
+        hash_ordinary_boundary_component(
+            &mut hasher,
+            "session-id",
+            authority.session_id().to_string().as_bytes(),
+        );
+        hash_ordinary_boundary_component(
+            &mut hasher,
+            "base-store-revision",
+            &authority.base_store_revision().to_be_bytes(),
+        );
+        hash_ordinary_boundary_component(
+            &mut hasher,
+            "base-head-token",
+            authority.base_committed_head_token().as_bytes(),
+        );
+        hash_ordinary_boundary_component(
+            &mut hasher,
+            "physical-store-revision",
+            &authority.physical_store_revision().to_be_bytes(),
+        );
+        hash_ordinary_boundary_component(
+            &mut hasher,
+            "physical-head-token",
+            authority.physical_head_token().as_bytes(),
+        );
+        hash_ordinary_boundary_component(
+            &mut hasher,
+            "candidate-sequence",
+            &authority.candidate_sequence().to_be_bytes(),
+        );
+        Ok(OrdinaryBoundaryWitness {
+            boundary_key: base.boundary_key,
+            request_digest: format!("sha256:{:x}", hasher.finalize()),
+        })
+    }
+
+    fn load_ordinary_boundary_witness(
+        conn: &Connection,
+        runtime_id: &LogicalRuntimeId,
+        boundary_key: &str,
+    ) -> Result<Option<String>, RuntimeStoreError> {
+        conn.query_row(
+            r"
+            SELECT witness_version, request_digest
+            FROM runtime_session_boundary_witnesses
+            WHERE runtime_id = ?1 AND boundary_key = ?2
+            ",
+            params![runtime_id_text(runtime_id), boundary_key],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?
+        .map(|(version, digest)| {
+            if version != 1 {
+                return Err(session_authority_conflict(
+                    runtime_id,
+                    format!("unsupported ordinary boundary witness version {version}"),
+                ));
+            }
+            if digest.is_empty() {
+                return Err(session_authority_conflict(
+                    runtime_id,
+                    "ordinary boundary witness has an empty request digest",
+                ));
+            }
+            Ok(digest)
+        })
+        .transpose()
+    }
+
+    fn insert_ordinary_boundary_witness_in_txn(
+        tx: &Transaction<'_>,
+        runtime_id: &LogicalRuntimeId,
+        witness: &OrdinaryBoundaryWitness,
+    ) -> Result<(), RuntimeStoreError> {
+        tx.execute(
+            r"
+            INSERT INTO runtime_session_boundary_witnesses (
+                runtime_id, boundary_key, witness_version, request_digest
+            ) VALUES (?1, ?2, 1, ?3)
+            ",
+            params![
+                runtime_id_text(runtime_id),
+                witness.boundary_key,
+                witness.request_digest,
+            ],
+        )
+        .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+        Ok(())
+    }
+
+    fn load_released_0810_boundary_receipt_marker(
+        tx: &Transaction<'_>,
+        runtime_id: &LogicalRuntimeId,
+        receipt: &RunBoundaryReceipt,
+    ) -> Result<Option<String>, RuntimeStoreError> {
+        use sha2::Digest as _;
+
+        let marker = tx
+            .query_row(
+                r"
+                SELECT receipt_sha256
+                FROM runtime_released_0810_boundary_receipts
+                WHERE runtime_id = ?1 AND run_id = ?2 AND sequence = ?3
+                ",
+                params![
+                    runtime_id_text(runtime_id),
+                    receipt.run_id.0.to_string(),
+                    encode_receipt_sequence(receipt.sequence),
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+        let Some(marker) = marker else {
+            return Ok(None);
+        };
+        let current = tx
+            .query_row(
+                r"
+                SELECT receipt_json
+                FROM runtime_boundary_receipts
+                WHERE runtime_id = ?1 AND run_id = ?2 AND sequence = ?3
+                ",
+                params![
+                    runtime_id_text(runtime_id),
+                    receipt.run_id.0.to_string(),
+                    encode_receipt_sequence(receipt.sequence),
+                ],
+                |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
+            )
+            .optional()
+            .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+        let Some(current) = current else {
+            return Err(session_authority_conflict(
+                runtime_id,
+                "released boundary receipt marker has no current durable receipt",
+            ));
+        };
+        let current_sha256 = format!("sha256:{:x}", sha2::Sha256::digest(&current));
+        if current_sha256 != marker {
+            return Err(session_authority_conflict(
+                runtime_id,
+                "released boundary receipt marker differs from the current durable receipt bytes",
+            ));
+        }
+        let released: RunBoundaryReceipt = serde_json::from_slice(&current).map_err(|error| {
+            RuntimeStoreError::ReadFailed(format!(
+                "released-marked boundary receipt failed to decode: {error}"
+            ))
+        })?;
+        if released != *receipt {
+            return Err(session_authority_conflict(
+                runtime_id,
+                "released boundary receipt marker conflicts with the prepared receipt",
+            ));
+        }
+        Ok(Some(marker))
+    }
+
+    fn consume_released_0810_boundary_receipt_marker(
+        tx: &Transaction<'_>,
+        runtime_id: &LogicalRuntimeId,
+        receipt: &RunBoundaryReceipt,
+        marker: &str,
+    ) -> Result<(), RuntimeStoreError> {
+        let changed = tx
+            .execute(
+                r"
+                DELETE FROM runtime_released_0810_boundary_receipts
+                WHERE runtime_id = ?1
+                  AND run_id = ?2
+                  AND sequence = ?3
+                  AND receipt_sha256 = ?4
+                ",
+                params![
+                    runtime_id_text(runtime_id),
+                    receipt.run_id.0.to_string(),
+                    encode_receipt_sequence(receipt.sequence),
+                    marker,
+                ],
+            )
+            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+        if changed != 1 {
+            return Err(session_authority_conflict(
+                runtime_id,
+                "released boundary receipt marker changed before witness installation",
+            ));
+        }
+        Ok(())
+    }
+
+    fn verify_current_ordinary_boundary_effects(
+        tx: &Transaction<'_>,
+        runtime_id: &LogicalRuntimeId,
+        prepared_session: Option<&PreparedHeadCanonicalSqliteSession>,
+        lifecycle_snapshot: Option<&MachineLifecycleSnapshot>,
+        input_updates: &[(StoredInputState, Option<String>)],
+    ) -> Result<(), RuntimeStoreError> {
+        if let Some(snapshot) = lifecycle_snapshot {
+            let target = MachineLifecycleStoreRecord::from_snapshot(snapshot).encode()?;
+            let current = tx
+                .query_row(
+                    r"
+                    SELECT runtime_state_json
+                    FROM runtime_states
+                    WHERE runtime_id = ?1
+                    ",
+                    params![runtime_id_text(runtime_id)],
+                    |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
+                )
+                .optional()
+                .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+            if current.as_deref() != Some(target.as_slice()) {
+                return Err(session_authority_conflict(
+                    runtime_id,
+                    "ordinary boundary has a missing or divergent lifecycle target",
+                ));
+            }
+        }
+
+        for (input, _) in input_updates {
+            let target = serde_json::to_vec(input)
+                .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+            let current = tx
+                .query_row(
+                    r"
+                    SELECT state_json
+                    FROM runtime_input_states
+                    WHERE runtime_id = ?1 AND input_id = ?2
+                    ",
+                    params![
+                        runtime_id_text(runtime_id),
+                        input.state.input_id.to_string()
+                    ],
+                    |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
+                )
+                .optional()
+                .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+            if current.as_deref() != Some(target.as_slice()) {
+                return Err(session_authority_conflict(
+                    runtime_id,
+                    format!(
+                        "ordinary boundary has a missing or divergent input target {}",
+                        input.state.input_id
+                    ),
+                ));
+            }
+        }
+
+        if let Some(prepared) = prepared_session {
+            let quarantined = tx
+                .query_row(
+                    r"
+                    SELECT EXISTS(
+                        SELECT 1
+                        FROM runtime_projection_quarantine
+                        WHERE runtime_id = ?1
+                    )
+                    ",
+                    params![runtime_id_text(runtime_id)],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+            if quarantined {
+                return Err(session_authority_conflict(
+                    runtime_id,
+                    "ordinary boundary still has a quarantined runtime projection",
+                ));
+            }
+            for intent in &prepared.compaction_intents {
+                let current = tx
+                    .query_row(
+                        r"
+                        SELECT intent_json
+                        FROM runtime_compaction_projection_outbox
+                        WHERE runtime_id = ?1
+                          AND session_id = ?2
+                          AND parent_revision = ?3
+                          AND revision = ?4
+                          AND commit_fingerprint = ?5
+                        ",
+                        params![
+                            runtime_id_text(runtime_id),
+                            intent.projection.session_id().to_string(),
+                            intent.projection.parent_revision(),
+                            intent.projection.revision(),
+                            intent.projection.commit_fingerprint(),
+                        ],
+                        |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
+                    )
+                    .optional()
+                    .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+                let Some(current) = current else {
+                    return Err(session_authority_conflict(
+                        runtime_id,
+                        format!(
+                            "ordinary boundary is missing compaction intent {}",
+                            intent.projection.revision()
+                        ),
+                    ));
+                };
+                let decoded: meerkat_core::CompactionProjectionIntent =
+                    serde_json::from_slice(&current).map_err(|error| {
+                        RuntimeStoreError::ReadFailed(format!(
+                            "ordinary boundary compaction intent failed to decode: {error}"
+                        ))
+                    })?;
+                if decoded != *intent {
+                    return Err(session_authority_conflict(
+                        runtime_id,
+                        format!(
+                            "ordinary boundary has a divergent compaction intent {}",
+                            intent.projection.revision()
+                        ),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn verify_released_0810_boundary_effects_for_adoption(
+        tx: &Transaction<'_>,
+        runtime_id: &LogicalRuntimeId,
+        prepared_session: Option<&PreparedHeadCanonicalSqliteSession>,
+        lifecycle_expected: Option<&MachineLifecycleExpectedVersion>,
+        lifecycle_snapshot: Option<&MachineLifecycleSnapshot>,
+        input_updates: &[(StoredInputState, Option<String>)],
+    ) -> Result<(), RuntimeStoreError> {
+        // Exact 0.8.10 retained committed targets, but not the prior row
+        // versions against which a request may have been fenced. Do not mint a
+        // current exact-request witness when any unprovable CAS precondition is
+        // present.
+        if lifecycle_expected.is_some()
+            || input_updates.iter().any(|(_, expected)| expected.is_some())
+        {
+            return Err(session_authority_conflict(
+                runtime_id,
+                "released boundary cannot prove current lifecycle/input CAS preconditions",
+            ));
+        }
+        verify_current_ordinary_boundary_effects(
+            tx,
+            runtime_id,
+            prepared_session,
+            lifecycle_snapshot,
+            input_updates,
+        )
+    }
+
+    fn verify_prepared_suffix_rows_for_exact_retry(
+        tx: &Transaction<'_>,
+        runtime_id: &LogicalRuntimeId,
+        prepared: &PreparedHeadCanonicalSqliteSession,
+    ) -> Result<(), RuntimeStoreError> {
+        match &prepared.mutation {
+            meerkat_core::lifecycle::core_executor::PreparedHeadCanonicalPhysicalMutation::Ordinary(
+                mutation,
+            ) => meerkat_store::sqlite_store::verify_prepared_head_canonical_rows_for_exact_retry_in_txn(
+                tx,
+                mutation,
+            ),
+            meerkat_core::lifecycle::core_executor::PreparedHeadCanonicalPhysicalMutation::Rewrite(
+                mutation,
+            ) => meerkat_store::sqlite_store::verify_prepared_head_canonical_rewrite_rows_for_exact_retry_in_txn(
+                tx,
+                mutation,
+            ),
+        }
+        .map_err(|error| map_head_canonical_session_store_error(runtime_id, error))
+    }
+
+    fn apply_prepared_head_canonical_physical_mutation_in_txn(
+        tx: &Transaction<'_>,
+        runtime_id: &LogicalRuntimeId,
+        prepared: &PreparedHeadCanonicalSqliteSession,
+    ) -> Result<(), RuntimeStoreError> {
+        match &prepared.mutation {
+            meerkat_core::lifecycle::core_executor::PreparedHeadCanonicalPhysicalMutation::Ordinary(
+                mutation,
+            ) => meerkat_store::sqlite_store::apply_prepared_head_canonical_mutation_in_txn(
+                tx, mutation,
+            ),
+            meerkat_core::lifecycle::core_executor::PreparedHeadCanonicalPhysicalMutation::Rewrite(
+                mutation,
+            ) => meerkat_store::sqlite_store::apply_prepared_head_canonical_rewrite_mutation_in_txn(
+                tx, mutation,
+            ),
+        }
+        .map(|_outcome| ())
+        .map_err(|error| map_head_canonical_session_store_error(runtime_id, error))
+    }
+
+    fn load_recovery_boundary(
+        conn: &Connection,
+        runtime_id: &LogicalRuntimeId,
+        candidate_id: &str,
+    ) -> Result<Option<CommittedRecoveryBoundary>, RuntimeStoreError> {
+        let boundary = conn
+            .query_row(
+                r"
+                SELECT boundary_json
+                FROM runtime_recovery_boundaries
+                WHERE runtime_id = ?1 AND candidate_id = ?2
+                ",
+                params![runtime_id_text(runtime_id), candidate_id],
+                |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
+            )
+            .optional()
+            .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?
+            .map(|bytes| CommittedRecoveryBoundary::decode(&bytes))
+            .transpose()?;
+        let Some(boundary) = boundary else {
+            return Ok(None);
+        };
+        if boundary.evidence().candidate_id() != candidate_id {
+            return Err(session_authority_conflict(
+                runtime_id,
+                "committed recovery row key and encoded candidate identity differ",
+            ));
+        }
+        let owner = LogicalRuntimeId::for_session(boundary.evidence().session_id());
+        if &owner != runtime_id {
+            return Err(session_authority_conflict(
+                runtime_id,
+                format!(
+                    "committed recovery candidate belongs to runtime {owner}, not {runtime_id}"
+                ),
+            ));
+        }
+        match load_boundary_receipt(conn, runtime_id, boundary.receipt())? {
+            Some(receipt) if &receipt == boundary.receipt() => {}
+            Some(_) => {
+                return Err(session_authority_conflict(
+                    runtime_id,
+                    "committed recovery witness and boundary receipt differ",
+                ));
+            }
+            None => {
+                return Err(session_authority_conflict(
+                    runtime_id,
+                    "committed recovery witness has no atomic boundary receipt",
+                ));
+            }
+        }
+        Ok(Some(boundary))
+    }
+
+    fn insert_recovery_boundary_in_txn(
+        tx: &Transaction<'_>,
+        runtime_id: &LogicalRuntimeId,
+        boundary: &CommittedRecoveryBoundary,
+    ) -> Result<(), RuntimeStoreError> {
+        let bytes = boundary.encode()?;
+        tx.execute(
+            r"
+            INSERT INTO runtime_recovery_boundaries (
+                runtime_id, candidate_id, boundary_json
+            ) VALUES (?1, ?2, ?3)
+            ",
+            params![
+                runtime_id_text(runtime_id),
+                boundary.evidence().candidate_id(),
+                bytes,
+            ],
+        )
+        .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+        Ok(())
+    }
+
+    fn apply_recovery_receipt_digest_enrichments_in_txn(
+        tx: &Transaction<'_>,
+        runtime_id: &LogicalRuntimeId,
+        boundary: &CommittedRecoveryBoundary,
+    ) -> Result<(), RuntimeStoreError> {
+        for enrichment in boundary.evidence().receipt_digest_enrichments() {
+            let original = enrichment.original_receipt();
+            let current_bytes = tx
+                .query_row(
+                    r"
+                    SELECT receipt_json
+                    FROM runtime_boundary_receipts
+                    WHERE runtime_id = ?1 AND run_id = ?2 AND sequence = ?3
+                    ",
+                    params![
+                        runtime_id_text(runtime_id),
+                        original.run_id.0.to_string(),
+                        encode_receipt_sequence(original.sequence),
+                    ],
+                    |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
+                )
+                .optional()
+                .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?
+                .ok_or_else(|| {
+                    session_authority_conflict(
+                        runtime_id,
+                        format!(
+                            "recovery receipt enrichment source {}:{} is absent",
+                            original.run_id, original.sequence
+                        ),
+                    )
+                })?;
+            let source = PreparedRecoveryReceiptSource::from_serialized_row(&current_bytes)?;
+            if source.receipt() != original
+                || source.exact_row_token() != enrichment.original_exact_row_token()
+            {
+                return Err(session_authority_conflict(
+                    runtime_id,
+                    format!(
+                        "recovery receipt enrichment source {}:{} changed after classification",
+                        original.run_id, original.sequence
+                    ),
+                ));
+            }
+            let enriched = enrichment.enriched_receipt();
+            let enriched_bytes = serde_json::to_vec(&enriched)
+                .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+            let updated = tx
+                .execute(
+                    r"
+                    UPDATE runtime_boundary_receipts
+                    SET receipt_json = ?4
+                    WHERE runtime_id = ?1 AND run_id = ?2 AND sequence = ?3
+                    ",
+                    params![
+                        runtime_id_text(runtime_id),
+                        original.run_id.0.to_string(),
+                        encode_receipt_sequence(original.sequence),
+                        enriched_bytes,
+                    ],
+                )
+                .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+            if updated != 1 {
+                return Err(session_authority_conflict(
+                    runtime_id,
+                    "recovery receipt enrichment lost its exact source row",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn verify_recovery_receipt_digest_enrichments_in_txn(
+        tx: &Transaction<'_>,
+        runtime_id: &LogicalRuntimeId,
+        boundary: &CommittedRecoveryBoundary,
+    ) -> Result<(), RuntimeStoreError> {
+        for enrichment in boundary.evidence().receipt_digest_enrichments() {
+            let enriched = enrichment.enriched_receipt();
+            match load_boundary_receipt(tx, runtime_id, &enriched)? {
+                Some(current) if current == enriched => {}
+                Some(_) => {
+                    return Err(session_authority_conflict(
+                        runtime_id,
+                        format!(
+                            "committed recovery receipt enrichment {}:{} was superseded",
+                            enriched.run_id, enriched.sequence
+                        ),
+                    ));
+                }
+                None => {
+                    return Err(session_authority_conflict(
+                        runtime_id,
+                        format!(
+                            "committed recovery receipt enrichment {}:{} is absent",
+                            enriched.run_id, enriched.sequence
+                        ),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn verify_materialized_head_authority_in_txn(
+        tx: &Transaction<'_>,
+        runtime_id: &LogicalRuntimeId,
+        authority: &RuntimeSessionAuthority,
+    ) -> Result<(), RuntimeStoreError> {
+        let authority = authority.head_canonical().ok_or_else(|| {
+            session_authority_conflict(
+                runtime_id,
+                "materialized HeadCanonical verification received WholeBlob authority",
+            )
+        })?;
+        let head = authority.boundary_head();
+        let session =
+            meerkat_store::sqlite_store::materialize_runtime_boundary_head_canonical_in_txn(
+                tx, head,
+            )
+            .map_err(|error| map_head_canonical_session_store_error(runtime_id, error))?;
+        if session.id() != authority.session_id()
+            || session.messages().len() as u64 != head.message_count
+            || session.version() != head.version
+            || session.created_at() != head.created_at
+            || session.updated_at() != head.updated_at
+            || session.total_usage() != head.usage
+            || !head.matches_session_metadata(&session).map_err(|error| {
+                session_authority_conflict(
+                    runtime_id,
+                    format!("materialized boundary metadata is invalid: {error}"),
+                )
+            })?
+        {
+            return Err(session_authority_conflict(
+                runtime_id,
+                "materialized boundary head differs from runtime session authority",
+            ));
+        }
+        let token = meerkat_core::session_head_cas_token(head).map_err(|error| {
+            session_authority_conflict(
+                runtime_id,
+                format!("materialized boundary head token is invalid: {error}"),
+            )
+        })?;
+        if token != authority.committed_head_token() {
+            return Err(session_authority_conflict(
+                runtime_id,
+                "materialized boundary token differs from store authority",
+            ));
+        }
+        Ok(())
+    }
+
+    #[derive(Debug)]
+    struct PreparedHeadCanonicalSqliteSession {
+        mutation: meerkat_core::lifecycle::core_executor::PreparedHeadCanonicalPhysicalMutation,
+        successor_head: meerkat_core::session_store::SessionHead,
+        catalog_entry: crate::store::RuntimeSessionCatalogEntry,
+        compaction_intents: Vec<meerkat_core::CompactionProjectionIntent>,
+    }
+
+    fn prepare_head_canonical_sqlite_session(
+        runtime_id: &LogicalRuntimeId,
+        session_commit: &meerkat_core::lifecycle::core_executor::BoundSessionCommit,
+        session_store_key: Option<&meerkat_core::types::SessionId>,
+    ) -> Result<PreparedHeadCanonicalSqliteSession, RuntimeStoreError> {
+        let boundary = session_commit.head_canonical().ok_or_else(|| {
+            session_authority_conflict(
+                runtime_id,
+                "session boundary has no prepared ordinary head mutation; rewrite and unprepared snapshots are unsupported",
+            )
+        })?;
+        let session_id = boundary.mutation().session_id();
+        let owner = LogicalRuntimeId::for_session(session_id);
+        if &owner != runtime_id {
+            return Err(session_authority_conflict(
+                runtime_id,
+                format!("session {session_id} belongs to runtime {owner}, not {runtime_id}"),
+            ));
+        }
+        if let Some(expected) = session_store_key
+            && session_id != expected
+        {
+            return Err(RuntimeStoreError::SessionKeyMismatch {
+                expected: expected.clone(),
+                actual: session_id.clone(),
+            });
+        }
+        if let Some(predecessor) = boundary.mutation().predecessor_head() {
+            validate_exact_head_prefix_authority(
+                runtime_id,
+                predecessor,
+                "prepared physical predecessor head",
+            )?;
+        }
+        validate_exact_head_prefix_authority(
+            runtime_id,
+            boundary.mutation().successor_head(),
+            "prepared physical successor head",
+        )?;
+        let compaction_intents = boundary.compaction_projection_intents().to_vec();
+        let catalog_entry = crate::store::RuntimeSessionCatalogEntry::from_head_facts(
+            boundary.mutation().successor_head(),
+            boundary.catalog_labels().clone(),
+            boundary.catalog_lifecycle_terminal(),
+            RuntimeSessionPersistenceProfile::HeadCanonicalV1,
+            None,
+        )?;
+        Ok(PreparedHeadCanonicalSqliteSession {
+            mutation: boundary.mutation().clone(),
+            successor_head: boundary.mutation().successor_head().clone(),
+            catalog_entry,
+            compaction_intents,
+        })
+    }
+
+    fn validate_prepared_recovery_sqlite_session(
+        runtime_id: &LogicalRuntimeId,
+        session_commit: &meerkat_core::lifecycle::core_executor::BoundSessionCommit,
+        prepared: &PreparedHeadCanonicalSqliteSession,
+        boundary: &CommittedRecoveryBoundary,
+    ) -> Result<(), RuntimeStoreError> {
+        let evidence = boundary.evidence();
+        evidence.verify_head_canonical_boundary(session_commit, boundary.receipt())?;
+        if evidence.session_id() != prepared.mutation.session_id() {
+            return Err(session_authority_conflict(
+                runtime_id,
+                "prepared recovery head mutation and sealed session identity differ",
+            ));
+        }
+        let (
+            _committed_store_revision,
+            _committed_head_token,
+            _physical_store_revision,
+            physical_head_token,
+            recovered_head_token,
+        ) = evidence
+            .head_canonical_authority_transition()
+            .ok_or_else(|| {
+                session_authority_conflict(
+                    runtime_id,
+                    "prepared recovery evidence carries no HeadCanonical authority transition",
+                )
+            })?;
+        if prepared.mutation.predecessor_head().is_none()
+            || prepared.mutation.predecessor_head_token() != Some(physical_head_token)
+            || prepared.mutation.successor_head_token() != recovered_head_token
+        {
+            return Err(session_authority_conflict(
+                runtime_id,
+                "prepared recovery mutation does not bind the sealed physical/recovered store tokens",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_prepared_recovery_request_binding(
+        runtime_id: &LogicalRuntimeId,
+        session: &meerkat_core::lifecycle::core_executor::BoundSessionCommit,
+        evidence: &crate::store::PreparedRecoveryEvidence,
+        input_updates: &[InputStatePersistenceRecord],
+        receipt: &RunBoundaryReceipt,
+        lifecycle: &MachineLifecycleCommit,
+    ) -> Result<(), RuntimeStoreError> {
+        evidence.verify_head_canonical_boundary(session, receipt)?;
+        evidence.verify_input_updates(input_updates)?;
+        evidence.verify_request_effects(receipt, lifecycle)?;
+        Ok(())
+    }
+
     fn encode_u64(value: u64) -> [u8; 8] {
         value.to_be_bytes()
     }
@@ -320,712 +5006,6 @@ CREATE INDEX IF NOT EXISTS idx_runtime_delivery_inbox_sequence
         serde_json::from_slice(bytes).map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
     }
 
-    /// Outcome for one runtime row inspected by the explicit v0.6.34
-    /// completed-idle migrator.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-    #[serde(rename_all = "snake_case")]
-    pub enum LegacyV0_6_34MigrationDisposition {
-        WouldMigrate,
-        Migrated,
-        Current,
-        Blocked,
-    }
-
-    /// One deterministic row in a legacy-migration report.
-    #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-    pub struct LegacyV0_6_34MigrationItem {
-        pub runtime_id: String,
-        pub disposition: LegacyV0_6_34MigrationDisposition,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub detail: Option<String>,
-    }
-
-    /// Report returned by `rkat session migrate`. Dry-run is the default and
-    /// never creates or modifies SQLite state.
-    #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-    pub struct LegacyV0_6_34MigrationReport {
-        pub applied: bool,
-        pub items: Vec<LegacyV0_6_34MigrationItem>,
-    }
-
-    const CREATE_LEGACY_V0_6_34_AUDIT_SQL: &str = r"
-CREATE TABLE IF NOT EXISTS runtime_legacy_v0_6_34_audit (
-    runtime_id TEXT NOT NULL,
-    table_name TEXT NOT NULL,
-    row_key TEXT NOT NULL,
-    original_record BLOB NOT NULL,
-    migrated_record BLOB,
-    action TEXT NOT NULL CHECK (action IN ('replace', 'delete')),
-    PRIMARY KEY (runtime_id, table_name, row_key)
-);
-CREATE TRIGGER IF NOT EXISTS runtime_legacy_v0_6_34_audit_no_update
-BEFORE UPDATE ON runtime_legacy_v0_6_34_audit
-BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
-CREATE TRIGGER IF NOT EXISTS runtime_legacy_v0_6_34_audit_no_delete
-BEFORE DELETE ON runtime_legacy_v0_6_34_audit
-BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
-";
-
-    impl LegacyV0_6_34MigrationReport {
-        #[must_use]
-        pub fn migration_count(&self) -> usize {
-            self.items
-                .iter()
-                .filter(|item| {
-                    matches!(
-                        item.disposition,
-                        LegacyV0_6_34MigrationDisposition::WouldMigrate
-                            | LegacyV0_6_34MigrationDisposition::Migrated
-                    )
-                })
-                .count()
-        }
-
-        #[must_use]
-        pub fn blocked_count(&self) -> usize {
-            self.items
-                .iter()
-                .filter(|item| item.disposition == LegacyV0_6_34MigrationDisposition::Blocked)
-                .count()
-        }
-    }
-
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct LegacyV0_6_34InputState {
-        input_id: InputId,
-        current_state: InputLifecycleState,
-        #[serde(default, rename = "policy")]
-        _policy: Option<serde_json::Value>,
-        #[serde(default, rename = "runtime_semantics")]
-        _runtime_semantics: Option<serde_json::Value>,
-        #[serde(default)]
-        terminal_outcome: Option<InputTerminalOutcome>,
-        #[serde(default)]
-        durability: Option<crate::input::InputDurability>,
-        #[serde(default)]
-        idempotency_key: Option<crate::identifiers::IdempotencyKey>,
-        #[serde(default)]
-        attempt_count: u32,
-        #[serde(default)]
-        recovery_count: u32,
-        #[serde(default)]
-        history: Vec<InputStateHistoryEntry>,
-        #[serde(default, rename = "reconstruction_source")]
-        _reconstruction_source: Option<serde_json::Value>,
-        #[serde(default, rename = "persisted_input")]
-        _persisted_input: Option<serde_json::Value>,
-        #[serde(default)]
-        last_run_id: Option<RunId>,
-        #[serde(default)]
-        last_boundary_sequence: Option<u64>,
-        created_at: DateTime<Utc>,
-        updated_at: DateTime<Utc>,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct LegacyV0_6_34OpsSnapshot {
-        #[serde(rename = "epoch_id")]
-        _epoch_id: meerkat_core::RuntimeEpochId,
-        authority_state: LegacyV0_6_34OpsAuthority,
-        operation_specs: BTreeMap<String, serde_json::Value>,
-        completion_entries: Vec<serde_json::Value>,
-        cursors: LegacyV0_6_34OpsCursors,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct LegacyV0_6_34OpsAuthority {
-        operations: BTreeMap<String, serde_json::Value>,
-        completed_order: Vec<serde_json::Value>,
-        max_completed: usize,
-        max_concurrent: serde_json::Value,
-        active_count: usize,
-        wait_request_id: serde_json::Value,
-        wait_operation_ids: Vec<serde_json::Value>,
-        next_completion_seq: u64,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct LegacyV0_6_34OpsCursors {
-        agent_applied_cursor: u64,
-        runtime_observed_seq: u64,
-        runtime_last_injected_seq: u64,
-    }
-
-    struct PreparedLegacyInput {
-        input_id: String,
-        original_record: Vec<u8>,
-        migrated_record: Vec<u8>,
-    }
-
-    struct PreparedLegacyCheckpoint {
-        session_id: String,
-        original_runtime_snapshot: Vec<u8>,
-        original_session_projection: Option<Vec<u8>>,
-        migrated_snapshot: Vec<u8>,
-    }
-
-    struct PreparedLegacyRuntime {
-        runtime_id: String,
-        original_lifecycle: Vec<u8>,
-        migrated_lifecycle: Vec<u8>,
-        checkpoint: Option<PreparedLegacyCheckpoint>,
-        inputs: Vec<PreparedLegacyInput>,
-        zero_ops_record: Option<Vec<u8>>,
-    }
-
-    struct LegacyMigrationPreflight {
-        items: Vec<LegacyV0_6_34MigrationItem>,
-        runtimes: Vec<PreparedLegacyRuntime>,
-    }
-
-    fn sqlite_table_exists(conn: &Connection, table_name: &str) -> Result<bool, RuntimeStoreError> {
-        conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
-            params![table_name],
-            |row| row.get(0),
-        )
-        .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))
-    }
-
-    fn legacy_v0_6_34_terminal_input(bytes: &[u8]) -> Result<StoredInputState, String> {
-        let legacy: LegacyV0_6_34InputState = serde_json::from_slice(bytes)
-            .map_err(|error| format!("not a v0.6.34 input-state row: {error}"))?;
-        let terminal_pair = matches!(
-            (legacy.current_state, legacy.terminal_outcome.as_ref()),
-            (
-                InputLifecycleState::Consumed,
-                Some(InputTerminalOutcome::Consumed)
-            ) | (
-                InputLifecycleState::Superseded,
-                Some(InputTerminalOutcome::Superseded { .. })
-            ) | (
-                InputLifecycleState::Coalesced,
-                Some(InputTerminalOutcome::Coalesced { .. })
-            ) | (
-                InputLifecycleState::Abandoned,
-                Some(InputTerminalOutcome::Abandoned { .. })
-            )
-        );
-        if !terminal_pair {
-            return Err(format!(
-                "only terminal phase/outcome pairs are safe to migrate (observed {:?})",
-                legacy.current_state
-            ));
-        }
-        Ok(StoredInputState {
-            state: InputState {
-                input_id: legacy.input_id,
-                history: legacy.history,
-                updated_at: legacy.updated_at,
-                policy: None,
-                runtime_semantics: None,
-                durability: legacy.durability,
-                idempotency_key: legacy.idempotency_key,
-                recovery_count: legacy.recovery_count,
-                reconstruction_source: None,
-                interaction_terminal_outbox: None,
-                persisted_input: None,
-                created_at: legacy.created_at,
-            },
-            seed: InputStateSeed {
-                phase: legacy.current_state,
-                last_run_id: legacy.last_run_id,
-                last_boundary_sequence: legacy.last_boundary_sequence,
-                admission_sequence: None,
-                terminal_outcome: legacy.terminal_outcome,
-                attempt_count: legacy.attempt_count,
-                recovery_lane: None,
-            },
-        })
-    }
-
-    fn validate_zero_v0_6_34_ops(bytes: &[u8]) -> Result<(), String> {
-        let snapshot: LegacyV0_6_34OpsSnapshot = serde_json::from_slice(bytes)
-            .map_err(|error| format!("not a v0.6.34 ops snapshot: {error}"))?;
-        let authority = snapshot.authority_state;
-        let zero = authority.operations.is_empty()
-            && snapshot.operation_specs.is_empty()
-            && authority.completed_order.is_empty()
-            && snapshot.completion_entries.is_empty()
-            && authority.active_count == 0
-            && authority.wait_request_id.is_null()
-            && authority.wait_operation_ids.is_empty()
-            && authority.next_completion_seq == 0
-            && snapshot.cursors.agent_applied_cursor == 0
-            && snapshot.cursors.runtime_observed_seq == 0
-            && snapshot.cursors.runtime_last_injected_seq == 0;
-        if !zero {
-            return Err("ops snapshot contains live or completed operation authority".into());
-        }
-        if authority.max_completed != meerkat_core::ops_lifecycle::DEFAULT_MAX_COMPLETED
-            || !authority.max_concurrent.is_null()
-        {
-            return Err("ops snapshot contains nondefault capacity policy".into());
-        }
-        Ok(())
-    }
-
-    fn prepare_legacy_session_checkpoint(
-        conn: &Connection,
-        runtime_id: &LogicalRuntimeId,
-    ) -> Result<Option<PreparedLegacyCheckpoint>, String> {
-        if !sqlite_table_exists(conn, "runtime_session_snapshots").map_err(|e| e.to_string())? {
-            return Ok(None);
-        }
-        let bytes = conn
-            .query_row(
-                "SELECT session_snapshot FROM runtime_session_snapshots WHERE runtime_id = ?1",
-                params![runtime_id_text(runtime_id)],
-                |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
-            )
-            .optional()
-            .map_err(|error| error.to_string())?;
-        let Some(bytes) = bytes else {
-            return Ok(None);
-        };
-        let mut session: meerkat_core::Session =
-            serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
-        let owner = LogicalRuntimeId::for_session(session.id());
-        if owner != *runtime_id {
-            return Err(format!(
-                "session {} belongs to runtime {owner}, not {runtime_id}",
-                session.id()
-            ));
-        }
-        match session
-            .try_checkpoint_state()
-            .map_err(|error| format!("invalid legacy checkpoint evidence: {error}"))?
-        {
-            meerkat_core::SessionCheckpointState::Verified(_) => return Ok(None),
-            meerkat_core::SessionCheckpointState::LegacyUnverified { .. } => {}
-        }
-
-        let original_session_projection =
-            if sqlite_table_exists(conn, "sessions").map_err(|error| error.to_string())? {
-                let projection = conn
-                    .query_row(
-                        "SELECT session_json FROM sessions WHERE session_id = ?1",
-                        params![session.id().to_string()],
-                        |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
-                    )
-                    .optional()
-                    .map_err(|error| error.to_string())?;
-                if let Some(projection) = projection.as_ref()
-                    && projection != &bytes
-                {
-                    return Err(format!(
-                        "session-store row for {} is not byte-identical to its runtime checkpoint",
-                        session.id()
-                    ));
-                }
-                projection
-            } else {
-                None
-            };
-        let stamp = meerkat_core::SessionCheckpointStamp::recovery_migration(
-            &session,
-            &bytes,
-            meerkat_core::SessionGeneration::INITIAL,
-            meerkat_core::SessionCheckpointRevision::INITIAL,
-        )
-        .map_err(|error| format!("legacy checkpoint migration rejected: {error}"))?;
-        session
-            .install_checkpoint_stamp(stamp)
-            .map_err(|error| format!("legacy checkpoint stamp install failed: {error}"))?;
-        let migrated_snapshot = serde_json::to_vec(&session)
-            .map_err(|error| format!("legacy checkpoint encode failed: {error}"))?;
-        session
-            .try_checkpoint_state()
-            .map_err(|error| format!("migrated checkpoint verification failed: {error}"))?;
-        Ok(Some(PreparedLegacyCheckpoint {
-            session_id: session.id().to_string(),
-            original_runtime_snapshot: bytes,
-            original_session_projection,
-            migrated_snapshot,
-        }))
-    }
-
-    fn validate_legacy_receipts(
-        conn: &Connection,
-        runtime_id: &LogicalRuntimeId,
-    ) -> Result<(), String> {
-        if !sqlite_table_exists(conn, "runtime_boundary_receipts").map_err(|e| e.to_string())? {
-            return Ok(());
-        }
-        let mut statement = conn
-            .prepare(
-                "SELECT run_id, sequence, receipt_json FROM runtime_boundary_receipts WHERE runtime_id = ?1 ORDER BY run_id, sequence",
-            )
-            .map_err(|error| error.to_string())?;
-        let rows = statement
-            .query_map(params![runtime_id_text(runtime_id)], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, JsonColumnBytes>(2)?.into_bytes(),
-                ))
-            })
-            .map_err(|error| error.to_string())?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| error.to_string())?;
-        for (run_id, sequence, bytes) in rows {
-            let receipt: RunBoundaryReceipt =
-                serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
-            let payload_sequence = i64::try_from(receipt.sequence)
-                .map_err(|_| format!("receipt sequence {} is out of range", receipt.sequence))?;
-            if receipt.run_id.0.to_string() != run_id || payload_sequence != sequence {
-                return Err(format!(
-                    "receipt payload identity {}:{} does not match row {run_id}:{sequence}",
-                    receipt.run_id.0, payload_sequence
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    fn prepare_legacy_companions(
-        conn: &Connection,
-        runtime_id: &LogicalRuntimeId,
-    ) -> Result<
-        (
-            Option<PreparedLegacyCheckpoint>,
-            Vec<PreparedLegacyInput>,
-            Option<Vec<u8>>,
-        ),
-        String,
-    > {
-        let checkpoint = prepare_legacy_session_checkpoint(conn, runtime_id)?;
-        validate_legacy_receipts(conn, runtime_id)?;
-
-        let input_rows = if sqlite_table_exists(conn, "runtime_input_states")
-            .map_err(|e| e.to_string())?
-        {
-            let mut statement = conn
-                .prepare(
-                    "SELECT input_id, state_json FROM runtime_input_states WHERE runtime_id = ?1 ORDER BY input_id",
-                )
-                .map_err(|error| error.to_string())?;
-            statement
-                .query_map(params![runtime_id_text(runtime_id)], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, JsonColumnBytes>(1)?.into_bytes(),
-                    ))
-                })
-                .map_err(|error| error.to_string())?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|error| error.to_string())?
-        } else {
-            Vec::new()
-        };
-
-        let mut driver = crate::driver::EphemeralRuntimeDriver::new(runtime_id.clone());
-        let mut inputs = Vec::new();
-        for (input_id, bytes) in input_rows {
-            if deserialize_persisted_input_state(&bytes).is_ok() {
-                return Err(format!(
-                    "input {input_id}: mixed current-format companion under a bare v0.6.34 lifecycle is unsupported"
-                ));
-            }
-            let bundle = legacy_v0_6_34_terminal_input(&bytes)
-                .map_err(|detail| format!("input {input_id}: {detail}"))?;
-            if bundle.state.input_id.0.to_string() != input_id {
-                return Err(format!(
-                    "input {input_id}: payload id does not match row key"
-                ));
-            }
-            let record = driver
-                .recover_input_state_persistence_record(bundle)
-                .map_err(|error| {
-                    format!("input {input_id}: generated recovery rejected it: {error}")
-                })?;
-            let migrated_record = serde_json::to_vec(record.as_stored())
-                .map_err(|error| format!("input {input_id}: encode failed: {error}"))?;
-            deserialize_persisted_input_state(&migrated_record).map_err(|error| {
-                format!("input {input_id}: migrated record is invalid: {error}")
-            })?;
-            inputs.push(PreparedLegacyInput {
-                input_id,
-                original_record: bytes,
-                migrated_record,
-            });
-        }
-
-        let ops =
-            if sqlite_table_exists(conn, "runtime_ops_lifecycle").map_err(|e| e.to_string())? {
-                conn.query_row(
-                    "SELECT state_json FROM runtime_ops_lifecycle WHERE runtime_id = ?1",
-                    params![runtime_id_text(runtime_id)],
-                    |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
-                )
-                .optional()
-                .map_err(|error| error.to_string())?
-            } else {
-                None
-            };
-        let zero_ops_record = if let Some(bytes) = ops {
-            if serde_json::from_slice::<crate::ops_lifecycle::PersistedOpsSnapshot>(&bytes).is_ok()
-            {
-                return Err(
-                    "mixed current-format ops authority under a bare v0.6.34 lifecycle is unsupported"
-                        .into(),
-                );
-            }
-            validate_zero_v0_6_34_ops(&bytes)?;
-            Some(bytes)
-        } else {
-            None
-        };
-        Ok((checkpoint, inputs, zero_ops_record))
-    }
-
-    fn preflight_legacy_v0_6_34(
-        conn: &Connection,
-    ) -> Result<LegacyMigrationPreflight, RuntimeStoreError> {
-        if !sqlite_table_exists(conn, "runtime_states")? {
-            return Ok(LegacyMigrationPreflight {
-                items: Vec::new(),
-                runtimes: Vec::new(),
-            });
-        }
-        let rows = {
-            let mut statement = conn
-                .prepare(
-                    "SELECT runtime_id, runtime_state_json FROM runtime_states ORDER BY runtime_id",
-                )
-                .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
-            statement
-                .query_map([], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, JsonColumnBytes>(1)?.into_bytes(),
-                    ))
-                })
-                .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?
-        };
-
-        let mut items = Vec::with_capacity(rows.len());
-        let mut runtimes = Vec::new();
-        for (runtime_id, bytes) in rows {
-            if crate::store::decode_machine_lifecycle_store_record(&bytes).is_ok() {
-                items.push(LegacyV0_6_34MigrationItem {
-                    runtime_id,
-                    disposition: LegacyV0_6_34MigrationDisposition::Current,
-                    detail: None,
-                });
-                continue;
-            }
-            if bytes != b"\"idle\"" {
-                items.push(LegacyV0_6_34MigrationItem {
-                    runtime_id,
-                    disposition: LegacyV0_6_34MigrationDisposition::Blocked,
-                    detail: Some("not the exact v0.6.34 bare \"idle\" record".into()),
-                });
-                continue;
-            }
-
-            let logical_runtime_id = LogicalRuntimeId(runtime_id.clone());
-            let companions = prepare_legacy_companions(conn, &logical_runtime_id);
-            let (checkpoint, inputs, zero_ops_record) = match companions {
-                Ok(prepared) => prepared,
-                Err(detail) => {
-                    items.push(LegacyV0_6_34MigrationItem {
-                        runtime_id,
-                        disposition: LegacyV0_6_34MigrationDisposition::Blocked,
-                        detail: Some(detail),
-                    });
-                    continue;
-                }
-            };
-            let mut lifecycle_driver =
-                crate::driver::EphemeralRuntimeDriver::new(logical_runtime_id.clone());
-            let migrated_lifecycle = lifecycle_driver
-                .recover_v0_6_34_completed_idle_lifecycle_record()
-                .map_err(|error| RuntimeStoreError::Internal(error.to_string()))?
-                .encode()?;
-            items.push(LegacyV0_6_34MigrationItem {
-                runtime_id: runtime_id.clone(),
-                disposition: LegacyV0_6_34MigrationDisposition::WouldMigrate,
-                detail: None,
-            });
-            runtimes.push(PreparedLegacyRuntime {
-                runtime_id,
-                original_lifecycle: bytes,
-                migrated_lifecycle,
-                checkpoint,
-                inputs,
-                zero_ops_record,
-            });
-        }
-        Ok(LegacyMigrationPreflight { items, runtimes })
-    }
-
-    fn open_existing_legacy_database(
-        path: &Path,
-        apply: bool,
-    ) -> Result<Connection, RuntimeStoreError> {
-        // Maintenance profile: fail-fast zero busy timeout in both modes,
-        // never creates, never mutates pragmas on the legacy file. No open
-        // preflight: future-schema certification runs inside the apply
-        // path's exclusive transaction (`certify_runtime_domain_not_future`).
-        meerkat_sqlite::open(
-            path,
-            meerkat_sqlite::ConnectionProfile::Maintenance { write: apply },
-        )
-        .map_err(|error| {
-            if apply {
-                RuntimeStoreError::WriteFailed(error.to_string())
-            } else {
-                RuntimeStoreError::ReadFailed(error.to_string())
-            }
-        })
-    }
-
-    /// Ledger certification for the legacy migrator: refuse a runtime-store
-    /// domain stamped by a newer binary before any row is read or mutated —
-    /// the same fail-closed check `apply_domain_migrations` performs for the
-    /// ordinary opener. Takes the caller's connection so the apply path can
-    /// run it inside its exclusive transaction (a `Transaction` derefs to
-    /// `Connection`).
-    fn certify_runtime_domain_not_future(conn: &Connection) -> Result<(), RuntimeStoreError> {
-        let supported = RUNTIME_STORE_DOMAIN.supported_version();
-        match meerkat_sqlite::domain_version(conn, RUNTIME_STORE_DOMAIN.name)
-            .map_err(map_shared_sqlite_error)?
-        {
-            Some(found) if found > supported => Err(RuntimeStoreError::SchemaFromTheFuture {
-                domain: RUNTIME_STORE_DOMAIN.name.to_string(),
-                found,
-                supported,
-            }),
-            _ => Ok(()),
-        }
-    }
-
-    fn apply_legacy_v0_6_34(
-        path: &Path,
-    ) -> Result<LegacyV0_6_34MigrationReport, RuntimeStoreError> {
-        let mut conn = open_existing_legacy_database(path, true)?;
-        let tx = conn
-            .transaction_with_behavior(TransactionBehavior::Exclusive)
-            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
-        // Certify inside the exclusive transaction, before any row is read:
-        // a file migrated by a newer binary must be refused typed, not
-        // reinterpreted by this binary's legacy heuristics.
-        certify_runtime_domain_not_future(&tx)?;
-        let mut preflight = preflight_legacy_v0_6_34(&tx)?;
-        let blocked = preflight
-            .items
-            .iter()
-            .filter(|item| item.disposition == LegacyV0_6_34MigrationDisposition::Blocked)
-            .map(|item| item.runtime_id.as_str())
-            .collect::<Vec<_>>();
-        if !blocked.is_empty() {
-            return Err(RuntimeStoreError::ReadFailed(format!(
-                "legacy migration blocked for runtime(s): {}",
-                blocked.join(", ")
-            )));
-        }
-        if !preflight.runtimes.is_empty() {
-            tx.execute_batch(CREATE_LEGACY_V0_6_34_AUDIT_SQL)
-                .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
-        }
-        for runtime in &preflight.runtimes {
-            tx.execute(
-                "INSERT INTO runtime_legacy_v0_6_34_audit (runtime_id, table_name, row_key, original_record, migrated_record, action) VALUES (?1, 'runtime_states', 'singleton', ?2, ?3, 'replace')",
-                params![
-                    runtime.runtime_id,
-                    runtime.original_lifecycle,
-                    runtime.migrated_lifecycle,
-                ],
-            )
-            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
-            tx.execute(
-                "UPDATE runtime_states SET runtime_state_json = ?1 WHERE runtime_id = ?2",
-                params![runtime.migrated_lifecycle, runtime.runtime_id],
-            )
-            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
-            if let Some(checkpoint) = runtime.checkpoint.as_ref() {
-                tx.execute(
-                    "INSERT INTO runtime_legacy_v0_6_34_audit (runtime_id, table_name, row_key, original_record, migrated_record, action) VALUES (?1, 'runtime_session_snapshots', 'singleton', ?2, ?3, 'replace')",
-                    params![
-                        runtime.runtime_id,
-                        checkpoint.original_runtime_snapshot,
-                        checkpoint.migrated_snapshot,
-                    ],
-                )
-                .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
-                tx.execute(
-                    "UPDATE runtime_session_snapshots SET session_snapshot = ?1 WHERE runtime_id = ?2",
-                    params![checkpoint.migrated_snapshot, runtime.runtime_id],
-                )
-                .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
-                if let Some(original_projection) = checkpoint.original_session_projection.as_ref() {
-                    tx.execute(
-                        "INSERT INTO runtime_legacy_v0_6_34_audit (runtime_id, table_name, row_key, original_record, migrated_record, action) VALUES (?1, 'sessions', ?2, ?3, ?4, 'replace')",
-                        params![
-                            runtime.runtime_id,
-                            checkpoint.session_id,
-                            original_projection,
-                            checkpoint.migrated_snapshot,
-                        ],
-                    )
-                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
-                    tx.execute(
-                        "UPDATE sessions SET session_json = ?1 WHERE session_id = ?2",
-                        params![checkpoint.migrated_snapshot, checkpoint.session_id],
-                    )
-                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
-                }
-            }
-            for input in &runtime.inputs {
-                tx.execute(
-                    "INSERT INTO runtime_legacy_v0_6_34_audit (runtime_id, table_name, row_key, original_record, migrated_record, action) VALUES (?1, 'runtime_input_states', ?2, ?3, ?4, 'replace')",
-                    params![
-                        runtime.runtime_id,
-                        input.input_id,
-                        input.original_record,
-                        input.migrated_record,
-                    ],
-                )
-                .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
-                tx.execute(
-                    "UPDATE runtime_input_states SET state_json = ?1 WHERE runtime_id = ?2 AND input_id = ?3",
-                    params![input.migrated_record, runtime.runtime_id, input.input_id],
-                )
-                .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
-            }
-            if let Some(original_ops) = runtime.zero_ops_record.as_ref() {
-                tx.execute(
-                    "INSERT INTO runtime_legacy_v0_6_34_audit (runtime_id, table_name, row_key, original_record, migrated_record, action) VALUES (?1, 'runtime_ops_lifecycle', 'singleton', ?2, NULL, 'delete')",
-                    params![runtime.runtime_id, original_ops],
-                )
-                .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
-                tx.execute(
-                    "DELETE FROM runtime_ops_lifecycle WHERE runtime_id = ?1",
-                    params![runtime.runtime_id],
-                )
-                .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
-            }
-        }
-        tx.commit()
-            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
-        for item in &mut preflight.items {
-            if item.disposition == LegacyV0_6_34MigrationDisposition::WouldMigrate {
-                item.disposition = LegacyV0_6_34MigrationDisposition::Migrated;
-            }
-        }
-        Ok(LegacyV0_6_34MigrationReport {
-            applied: true,
-            items: preflight.items,
-        })
-    }
-
     /// Encode a `u64` boundary-receipt sequence into the durable `INTEGER`
     /// column as the reinterpreted two's-complement `i64` bit pattern.
     ///
@@ -1048,35 +5028,1198 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
         u64::from_ne_bytes(stored.to_ne_bytes())
     }
 
-    fn is_runtime_placeholder_session(session: &meerkat_core::Session) -> bool {
-        session.transcript_history_state().ok().flatten().is_none()
-            && matches!(
-                session.messages(),
-                [] | [meerkat_core::types::Message::System(_)]
+    const AUTH_OAUTH_FLOW_STATE_ID: &str = "auth_oauth_flow_state";
+
+    fn load_whole_blob_store_authority(
+        conn: &Connection,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<WholeBlobStoreAuthority>, RuntimeStoreError> {
+        let row = conn
+            .query_row(
+                r"
+                SELECT authority_version, session_id, store_revision, blob_sha256
+                FROM runtime_whole_blob_authority
+                WHERE runtime_id = ?1
+                ",
+                params![runtime_id_text(runtime_id)],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
             )
+            .optional()
+            .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+        let Some((version, session_id, revision, blob_sha256)) = row else {
+            return Ok(None);
+        };
+        if version != i64::from(WholeBlobStoreAuthority::VERSION) || revision <= 0 {
+            return Err(session_authority_conflict(
+                runtime_id,
+                "WholeBlob authority ledger has an unsupported version or revision",
+            ));
+        }
+        let session_id = meerkat_core::types::SessionId::parse(&session_id).map_err(|error| {
+            session_authority_conflict(
+                runtime_id,
+                format!("WholeBlob authority session id is invalid: {error}"),
+            )
+        })?;
+        if &LogicalRuntimeId::for_session(&session_id) != runtime_id {
+            return Err(session_authority_conflict(
+                runtime_id,
+                "WholeBlob authority session id does not own this runtime",
+            ));
+        }
+        WholeBlobStoreAuthority::issued(session_id, revision as u64, blob_sha256).map(Some)
     }
 
-    const AUTH_OAUTH_FLOW_STATE_ID: &str = "auth_oauth_flow_state";
+    fn whole_blob_body_sha256(bytes: &[u8]) -> String {
+        use sha2::Digest as _;
+        format!("row-sha256:{:x}", sha2::Sha256::digest(bytes))
+    }
+
+    fn catalog_system_time_millis(time: SystemTime, field: &str) -> Result<i64, RuntimeStoreError> {
+        let millis = time
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| {
+                RuntimeStoreError::WriteFailed(format!(
+                    "runtime session catalog {field} predates unix epoch: {error}"
+                ))
+            })?
+            .as_millis();
+        i64::try_from(millis).map_err(|_| {
+            RuntimeStoreError::WriteFailed(format!(
+                "runtime session catalog {field} exceeds SQLite INTEGER"
+            ))
+        })
+    }
+
+    fn upsert_runtime_session_catalog_entry_in_txn(
+        tx: &Transaction<'_>,
+        runtime_id: &LogicalRuntimeId,
+        entry: &crate::store::RuntimeSessionCatalogEntry,
+    ) -> Result<(), RuntimeStoreError> {
+        if &LogicalRuntimeId::for_session(entry.session_id()) != runtime_id {
+            return Err(session_authority_conflict(
+                runtime_id,
+                "runtime session catalog entry does not bind this runtime",
+            ));
+        }
+        let encoded = serde_json::to_vec(entry)
+            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+        tx.execute(
+            r"
+            INSERT INTO runtime_session_catalog
+                (runtime_id, session_id, created_at_ms, updated_at_ms, entry_json)
+            VALUES (?1, ?2, ?3, ?4, ?5)
+            ON CONFLICT(runtime_id) DO UPDATE SET
+                session_id = excluded.session_id,
+                created_at_ms = excluded.created_at_ms,
+                updated_at_ms = excluded.updated_at_ms,
+                entry_json = excluded.entry_json
+            ",
+            params![
+                runtime_id_text(runtime_id),
+                entry.session_id().to_string(),
+                catalog_system_time_millis(entry.created_at(), "created_at")?,
+                catalog_system_time_millis(entry.updated_at(), "updated_at")?,
+                encoded,
+            ],
+        )
+        .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+        Ok(())
+    }
+
+    fn decode_runtime_session_catalog_entry(
+        runtime_id: &LogicalRuntimeId,
+        stored_session_id: &str,
+        created_at_ms: i64,
+        updated_at_ms: i64,
+        encoded: &[u8],
+    ) -> Result<crate::store::RuntimeSessionCatalogEntry, RuntimeStoreError> {
+        let entry: crate::store::RuntimeSessionCatalogEntry = serde_json::from_slice(encoded)
+            .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+        if entry.session_id().to_string() != stored_session_id
+            || &LogicalRuntimeId::for_session(entry.session_id()) != runtime_id
+            || catalog_system_time_millis(entry.created_at(), "created_at")? != created_at_ms
+            || catalog_system_time_millis(entry.updated_at(), "updated_at")? != updated_at_ms
+        {
+            return Err(session_authority_conflict(
+                runtime_id,
+                "runtime session catalog indexed facts differ from encoded entry",
+            ));
+        }
+        Ok(entry)
+    }
+
+    fn load_runtime_session_catalog_entry_in_txn(
+        conn: &Connection,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<crate::store::RuntimeSessionCatalogEntry>, RuntimeStoreError> {
+        let row = conn
+            .query_row(
+                r"
+                SELECT session_id, created_at_ms, updated_at_ms, entry_json
+                FROM runtime_session_catalog
+                WHERE runtime_id = ?1
+                ",
+                params![runtime_id_text(runtime_id)],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, JsonColumnBytes>(3)?.into_bytes(),
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+        row.map(|(session_id, created_at_ms, updated_at_ms, encoded)| {
+            decode_runtime_session_catalog_entry(
+                runtime_id,
+                &session_id,
+                created_at_ms,
+                updated_at_ms,
+                &encoded,
+            )
+        })
+        .transpose()
+    }
+
+    fn list_runtime_session_catalog_entries_in_conn(
+        conn: &Connection,
+        filter: meerkat_core::SessionFilter,
+    ) -> Result<Vec<crate::store::RuntimeSessionCatalogEntry>, RuntimeStoreError> {
+        let created_after_ms = filter
+            .created_after
+            .map(|time| catalog_system_time_millis(time, "created_after"))
+            .transpose()?;
+        let updated_after_ms = filter
+            .updated_after
+            .map(|time| catalog_system_time_millis(time, "updated_after"))
+            .transpose()?;
+        let limit = filter
+            .limit
+            .map(|value| {
+                i64::try_from(value).map_err(|_| {
+                    RuntimeStoreError::ReadFailed(
+                        "runtime session catalog limit exceeds SQLite INTEGER".to_string(),
+                    )
+                })
+            })
+            .transpose()?
+            .unwrap_or(-1);
+        let offset = i64::try_from(filter.offset.unwrap_or(0)).map_err(|_| {
+            RuntimeStoreError::ReadFailed(
+                "runtime session catalog offset exceeds SQLite INTEGER".to_string(),
+            )
+        })?;
+        let mut statement = conn
+            .prepare(
+                r"
+                SELECT runtime_id, session_id, created_at_ms, updated_at_ms, entry_json
+                FROM runtime_session_catalog
+                WHERE (?1 IS NULL OR created_at_ms >= ?1)
+                  AND (?2 IS NULL OR updated_at_ms >= ?2)
+                ORDER BY updated_at_ms DESC, session_id ASC
+                LIMIT ?3 OFFSET ?4
+                ",
+            )
+            .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+        let rows = statement
+            .query_map(
+                params![created_after_ms, updated_after_ms, limit, offset],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, JsonColumnBytes>(4)?.into_bytes(),
+                    ))
+                },
+            )
+            .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+        rows.map(|row| {
+            let (runtime_id, session_id, created_at_ms, updated_at_ms, encoded) =
+                row.map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+            decode_runtime_session_catalog_entry(
+                &LogicalRuntimeId(runtime_id),
+                &session_id,
+                created_at_ms,
+                updated_at_ms,
+                &encoded,
+            )
+        })
+        .collect()
+    }
+
+    #[derive(Debug, Clone)]
+    struct StoredWholeBlobProvisionalMetadata {
+        authority: WholeBlobProvisionalTailAuthority,
+        conversation_digest: String,
+        message_count: u64,
+        catalog_entry: crate::store::RuntimeSessionCatalogEntry,
+        compaction_projection_intents: Vec<meerkat_core::CompactionProjectionIntent>,
+    }
+
+    fn load_whole_blob_provisional_metadata(
+        conn: &Connection,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<StoredWholeBlobProvisionalMetadata>, RuntimeStoreError> {
+        let row = conn
+            .query_row(
+                r"
+                SELECT authority_version, session_id, base_store_revision,
+                       base_blob_sha256, run_id, candidate_sequence,
+                       candidate_blob_sha256,
+                       EXISTS (
+                           SELECT 1 FROM runtime_whole_blob_bodies AS bodies
+                           WHERE bodies.blob_sha256 =
+                                 provisional.candidate_blob_sha256
+                       )
+                       , conversation_digest, message_count,
+                       catalog_json, compaction_intents_json
+                FROM runtime_whole_blob_provisional_tails AS provisional
+                WHERE provisional.runtime_id = ?1
+                ",
+                params![runtime_id_text(runtime_id)],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, i64>(7)?,
+                        row.get::<_, String>(8)?,
+                        row.get::<_, i64>(9)?,
+                        row.get::<_, JsonColumnBytes>(10)?.into_bytes(),
+                        row.get::<_, JsonColumnBytes>(11)?.into_bytes(),
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+        let Some((
+            version,
+            session_id,
+            base_revision,
+            base_blob_sha256,
+            run_id,
+            candidate_sequence,
+            candidate_blob_sha256,
+            candidate_body_exists,
+            conversation_digest,
+            message_count,
+            catalog_json,
+            compaction_intents_json,
+        )) = row
+        else {
+            return Ok(None);
+        };
+        if version != 1
+            || base_revision <= 0
+            || candidate_sequence <= 0
+            || candidate_body_exists != 1
+            || conversation_digest.is_empty()
+            || message_count < 0
+        {
+            return Err(session_authority_conflict(
+                runtime_id,
+                "WholeBlob provisional row has unsupported identity or a missing candidate body",
+            ));
+        }
+        let session_id = meerkat_core::types::SessionId::parse(&session_id).map_err(|error| {
+            session_authority_conflict(
+                runtime_id,
+                format!("WholeBlob provisional session id is invalid: {error}"),
+            )
+        })?;
+        let run_id = uuid::Uuid::parse_str(&run_id)
+            .map(RunId::from_uuid)
+            .map_err(|error| {
+                session_authority_conflict(
+                    runtime_id,
+                    format!("WholeBlob provisional run id is invalid: {error}"),
+                )
+            })?;
+        let authority = WholeBlobProvisionalTailAuthority::issued(
+            session_id,
+            base_revision as u64,
+            base_blob_sha256,
+            run_id,
+            candidate_blob_sha256,
+            candidate_sequence as u64,
+        )
+        .map_err(|error| session_authority_conflict(runtime_id, error.to_string()))?;
+        let catalog_entry: crate::store::RuntimeSessionCatalogEntry =
+            serde_json::from_slice(&catalog_json)
+                .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+        let compaction_projection_intents: Vec<meerkat_core::CompactionProjectionIntent> =
+            serde_json::from_slice(&compaction_intents_json)
+                .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+        if catalog_entry.session_id() != authority.session_id()
+            || catalog_entry.persistence_profile() != RuntimeSessionPersistenceProfile::WholeBlobV1
+            || u64::try_from(catalog_entry.message_count()).ok() != Some(message_count as u64)
+            || compaction_projection_intents
+                .iter()
+                .any(|intent| intent.projection.session_id() != authority.session_id())
+        {
+            return Err(session_authority_conflict(
+                runtime_id,
+                "WholeBlob provisional catalog/compaction facts do not bind candidate session",
+            ));
+        }
+        Ok(Some(StoredWholeBlobProvisionalMetadata {
+            authority,
+            conversation_digest,
+            message_count: message_count as u64,
+            catalog_entry,
+            compaction_projection_intents,
+        }))
+    }
+
+    fn load_whole_blob_provisional_authority(
+        conn: &Connection,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<WholeBlobProvisionalTailAuthority>, RuntimeStoreError> {
+        let row = conn
+            .query_row(
+                r"
+                SELECT authority_version, session_id, base_store_revision,
+                       base_blob_sha256, run_id, candidate_sequence,
+                       candidate_blob_sha256,
+                       EXISTS (
+                           SELECT 1 FROM runtime_whole_blob_bodies AS bodies
+                           WHERE bodies.blob_sha256 =
+                                 provisional.candidate_blob_sha256
+                       )
+                FROM runtime_whole_blob_provisional_tails AS provisional
+                WHERE provisional.runtime_id = ?1
+                ",
+                params![runtime_id_text(runtime_id)],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, i64>(7)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+        let Some((
+            version,
+            session_id,
+            base_revision,
+            base_blob_sha256,
+            run_id,
+            candidate_sequence,
+            candidate_blob_sha256,
+            candidate_body_exists,
+        )) = row
+        else {
+            return Ok(None);
+        };
+        if version != 1
+            || base_revision <= 0
+            || candidate_sequence <= 0
+            || candidate_body_exists != 1
+        {
+            return Err(session_authority_conflict(
+                runtime_id,
+                "WholeBlob provisional authority has unsupported identity or a missing candidate body",
+            ));
+        }
+        let session_id = meerkat_core::types::SessionId::parse(&session_id).map_err(|error| {
+            session_authority_conflict(
+                runtime_id,
+                format!("WholeBlob provisional session id is invalid: {error}"),
+            )
+        })?;
+        let run_id = uuid::Uuid::parse_str(&run_id)
+            .map(RunId::from_uuid)
+            .map_err(|error| {
+                session_authority_conflict(
+                    runtime_id,
+                    format!("WholeBlob provisional run id is invalid: {error}"),
+                )
+            })?;
+        WholeBlobProvisionalTailAuthority::issued(
+            session_id,
+            base_revision as u64,
+            base_blob_sha256,
+            run_id,
+            candidate_blob_sha256,
+            candidate_sequence as u64,
+        )
+        .map(Some)
+        .map_err(|error| session_authority_conflict(runtime_id, error.to_string()))
+    }
+
+    fn load_whole_blob_provisional_tail(
+        conn: &Connection,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<CommittedWholeBlobProvisionalTail>, RuntimeStoreError> {
+        let Some(authority) = load_whole_blob_provisional_authority(conn, runtime_id)? else {
+            return Ok(None);
+        };
+        let candidate_bytes = conn
+            .query_row(
+                r"
+                SELECT session_snapshot
+                FROM runtime_whole_blob_bodies
+                WHERE blob_sha256 = ?1
+                ",
+                params![authority.candidate_blob_sha256()],
+                |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
+            )
+            .optional()
+            .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?
+            .ok_or_else(|| {
+                session_authority_conflict(
+                    runtime_id,
+                    "WholeBlob provisional authority references a missing candidate body",
+                )
+            })?;
+        if whole_blob_body_sha256(&candidate_bytes) != authority.candidate_blob_sha256() {
+            return Err(session_authority_conflict(
+                runtime_id,
+                "WholeBlob provisional body digest differs from store authority",
+            ));
+        }
+        Ok(Some(CommittedWholeBlobProvisionalTail::new(
+            authority,
+            Arc::new(candidate_bytes),
+        )))
+    }
+
+    fn upsert_runtime_snapshot_issued(
+        tx: &Transaction<'_>,
+        runtime_id: &LogicalRuntimeId,
+        snapshot: &[u8],
+        session_id: &meerkat_core::types::SessionId,
+        blob_sha256: &str,
+        catalog_entry: &crate::store::RuntimeSessionCatalogEntry,
+    ) -> Result<WholeBlobStoreAuthority, RuntimeStoreError> {
+        if &LogicalRuntimeId::for_session(session_id) != runtime_id
+            || catalog_entry.session_id() != session_id
+            || catalog_entry.persistence_profile() != RuntimeSessionPersistenceProfile::WholeBlobV1
+        {
+            return Err(session_authority_conflict(
+                runtime_id,
+                format!("WholeBlob payload session {session_id} does not own this runtime"),
+            ));
+        }
+        let current = load_whole_blob_store_authority(tx, runtime_id)?;
+        if let Some(current) = current.as_ref()
+            && current.session_id() == session_id
+            && current.blob_sha256() == blob_sha256
+        {
+            let body_exists = tx
+                .query_row(
+                    "SELECT 1 FROM runtime_whole_blob_bodies WHERE blob_sha256 = ?1",
+                    params![blob_sha256],
+                    |_row| Ok(()),
+                )
+                .optional()
+                .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?
+                .is_some();
+            if !body_exists {
+                return Err(session_authority_conflict(
+                    runtime_id,
+                    "WholeBlob authority references a missing body",
+                ));
+            }
+            upsert_runtime_session_catalog_entry_in_txn(tx, runtime_id, catalog_entry)?;
+            clear_runtime_projection_quarantine(tx, runtime_id)?;
+            return Ok(current.clone());
+        }
+        if load_whole_blob_provisional_authority(tx, runtime_id)?.is_some() {
+            return Err(session_authority_conflict(
+                runtime_id,
+                "ordinary WholeBlob write cannot bypass a store-owned provisional candidate",
+            ));
+        }
+        if let Some(current) = current.as_ref() {
+            let body_exists = tx
+                .query_row(
+                    "SELECT 1 FROM runtime_whole_blob_bodies WHERE blob_sha256 = ?1",
+                    params![current.blob_sha256()],
+                    |_row| Ok(()),
+                )
+                .optional()
+                .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?
+                .is_some();
+            if !body_exists {
+                return Err(session_authority_conflict(
+                    runtime_id,
+                    "WholeBlob authority references a missing predecessor body",
+                ));
+            }
+        }
+        let next_revision = current
+            .as_ref()
+            .map(WholeBlobStoreAuthority::store_revision)
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(|| {
+                RuntimeStoreError::WriteFailed(format!(
+                    "WholeBlob store revision exhausted for runtime {runtime_id}"
+                ))
+            })?;
+        let next_revision_i64 = i64::try_from(next_revision).map_err(|_| {
+            RuntimeStoreError::WriteFailed(format!(
+                "WholeBlob store revision exceeds SQLite INTEGER for runtime {runtime_id}"
+            ))
+        })?;
+        tx.execute(
+            r"
+            INSERT INTO runtime_whole_blob_bodies (blob_sha256, session_snapshot)
+            VALUES (?1, ?2)
+            ON CONFLICT(blob_sha256) DO NOTHING
+            ",
+            params![blob_sha256, snapshot],
+        )
+        .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+        upsert_runtime_session_catalog_entry_in_txn(tx, runtime_id, catalog_entry)?;
+        tx.execute(
+            r"
+            INSERT INTO runtime_whole_blob_authority
+                (runtime_id, authority_version, session_id, store_revision, blob_sha256)
+            VALUES (?1, 1, ?2, ?3, ?4)
+            ON CONFLICT(runtime_id) DO UPDATE SET
+                authority_version = excluded.authority_version,
+                session_id = excluded.session_id,
+                store_revision = excluded.store_revision,
+                blob_sha256 = excluded.blob_sha256
+            ",
+            params![
+                runtime_id_text(runtime_id),
+                session_id.to_string(),
+                next_revision_i64,
+                blob_sha256
+            ],
+        )
+        .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+        tx.execute(
+            "DELETE FROM runtime_session_snapshots WHERE runtime_id = ?1",
+            params![runtime_id_text(runtime_id)],
+        )
+        .map_err(|error| map_runtime_snapshot_mutation_error(runtime_id, error))?;
+        if let Some(previous) = current.as_ref()
+            && previous.blob_sha256() != blob_sha256
+        {
+            tx.execute(
+                r"
+                DELETE FROM runtime_whole_blob_bodies
+                WHERE blob_sha256 = ?1
+                  AND NOT EXISTS (
+                      SELECT 1 FROM runtime_whole_blob_authority
+                      WHERE blob_sha256 = ?1
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM runtime_whole_blob_provisional_tails
+                      WHERE candidate_blob_sha256 = ?1
+                         OR base_blob_sha256 = ?1
+                  )
+                ",
+                params![previous.blob_sha256()],
+            )
+            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+        }
+        clear_runtime_projection_quarantine(tx, runtime_id)?;
+        WholeBlobStoreAuthority::issued(session_id.clone(), next_revision, blob_sha256.to_string())
+    }
 
     fn upsert_runtime_snapshot(
         tx: &Transaction<'_>,
         runtime_id: &LogicalRuntimeId,
         snapshot: &[u8],
     ) -> Result<(), RuntimeStoreError> {
+        let session = meerkat_core::Session::from_persisted_bytes(snapshot)
+            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+        let runtime_state = load_runtime_session_catalog_entry_in_txn(tx, runtime_id)?
+            .and_then(|entry| entry.runtime_state());
+        let catalog_entry = crate::store::RuntimeSessionCatalogEntry::from_session(
+            &session,
+            RuntimeSessionPersistenceProfile::WholeBlobV1,
+            runtime_state,
+        )?;
+        use sha2::Digest as _;
+        let blob_sha256 = format!("row-sha256:{:x}", sha2::Sha256::digest(snapshot));
+        upsert_runtime_snapshot_issued(
+            tx,
+            runtime_id,
+            snapshot,
+            session.id(),
+            &blob_sha256,
+            &catalog_entry,
+        )
+        .map(|_| ())
+    }
+
+    fn delete_whole_blob_state(
+        tx: &Transaction<'_>,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<(), RuntimeStoreError> {
+        let mut tokens = Vec::new();
+        if let Some(authority) = load_whole_blob_store_authority(tx, runtime_id)? {
+            tokens.push(authority.blob_sha256().to_string());
+        }
+        if let Some(provisional) = load_whole_blob_provisional_authority(tx, runtime_id)? {
+            tokens.push(provisional.candidate_blob_sha256().to_string());
+        }
+        tx.execute(
+            "DELETE FROM runtime_whole_blob_provisional_tails WHERE runtime_id = ?1",
+            params![runtime_id_text(runtime_id)],
+        )
+        .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+        tx.execute(
+            "DELETE FROM runtime_whole_blob_authority WHERE runtime_id = ?1",
+            params![runtime_id_text(runtime_id)],
+        )
+        .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+        tx.execute(
+            "DELETE FROM runtime_session_snapshots WHERE runtime_id = ?1",
+            params![runtime_id_text(runtime_id)],
+        )
+        .map_err(|error| map_runtime_snapshot_mutation_error(runtime_id, error))?;
+        tx.execute(
+            "DELETE FROM runtime_session_catalog WHERE runtime_id = ?1",
+            params![runtime_id_text(runtime_id)],
+        )
+        .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+        for token in tokens {
+            tx.execute(
+                r"
+                DELETE FROM runtime_whole_blob_bodies
+                WHERE blob_sha256 = ?1
+                  AND NOT EXISTS (
+                      SELECT 1 FROM runtime_whole_blob_authority
+                      WHERE blob_sha256 = ?1
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM runtime_whole_blob_provisional_tails
+                      WHERE candidate_blob_sha256 = ?1
+                  )
+                ",
+                params![token],
+            )
+            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+        }
+        Ok(())
+    }
+
+    fn promote_whole_blob_provisional_in_txn(
+        tx: &Transaction<'_>,
+        runtime_id: &LogicalRuntimeId,
+        expected: &WholeBlobProvisionalTailAuthority,
+        receipt: &RunBoundaryReceipt,
+        checkpoint_conversation_digest: &str,
+        checkpoint_message_count: u64,
+        runtime_state: Option<RuntimeState>,
+    ) -> Result<WholeBlobStoreAuthority, RuntimeStoreError> {
+        let stored = load_whole_blob_provisional_metadata(tx, runtime_id)?.ok_or_else(|| {
+            session_authority_conflict(
+                runtime_id,
+                "WholeBlob provisional promotion candidate is absent",
+            )
+        })?;
+        let current = load_whole_blob_store_authority(tx, runtime_id)?.ok_or_else(|| {
+            session_authority_conflict(
+                runtime_id,
+                "WholeBlob provisional promotion has no committed base",
+            )
+        })?;
+        if &stored.authority != expected
+            || expected.run_id() != &receipt.run_id
+            || current.session_id() != expected.session_id()
+            || current.store_revision() != expected.base_store_revision()
+            || current.blob_sha256() != expected.base_blob_sha256()
+        {
+            return Err(session_authority_conflict(
+                runtime_id,
+                "WholeBlob provisional promotion does not exactly match stored base/run/candidate",
+            ));
+        }
+        if stored.conversation_digest != checkpoint_conversation_digest
+            || stored.message_count != checkpoint_message_count
+            || receipt.conversation_digest.as_deref() != Some(stored.conversation_digest.as_str())
+            || u64::try_from(receipt.message_count).ok() != Some(stored.message_count)
+        {
+            return Err(session_authority_conflict(
+                runtime_id,
+                "WholeBlob final receipt does not bind the stored checkpoint count/digest",
+            ));
+        }
+        reject_finalized_compaction_projection_replays(
+            tx,
+            runtime_id,
+            &stored.compaction_projection_intents,
+        )?;
+        let mut catalog_entry = stored.catalog_entry;
+        if let Some(runtime_state) = runtime_state {
+            catalog_entry.set_runtime_state(Some(runtime_state));
+        } else if let Some(current_catalog) =
+            load_runtime_session_catalog_entry_in_txn(tx, runtime_id)?
+        {
+            catalog_entry.set_runtime_state(current_catalog.runtime_state());
+        }
+        let next_revision = current.store_revision().checked_add(1).ok_or_else(|| {
+            RuntimeStoreError::WriteFailed(format!(
+                "WholeBlob store revision exhausted for runtime {runtime_id}"
+            ))
+        })?;
+        let next_revision_i64 = i64::try_from(next_revision).map_err(|_| {
+            RuntimeStoreError::WriteFailed(format!(
+                "WholeBlob store revision exceeds SQLite INTEGER for runtime {runtime_id}"
+            ))
+        })?;
+        // The candidate body already lives in `runtime_whole_blob_bodies`.
+        // Promotion performs metadata-only indexed writes; it never reads,
+        // hashes, encodes, copies, or rewrites the accumulated document.
+        let updated = tx
+            .execute(
+                r"
+                UPDATE runtime_whole_blob_authority
+                SET session_id = ?2, store_revision = ?3, blob_sha256 = ?4
+                WHERE runtime_id = ?1
+                  AND session_id = ?2
+                  AND store_revision = ?5
+                  AND blob_sha256 = ?6
+                ",
+                params![
+                    runtime_id_text(runtime_id),
+                    expected.session_id().to_string(),
+                    next_revision_i64,
+                    expected.candidate_blob_sha256(),
+                    i64::try_from(current.store_revision()).map_err(|_| {
+                        RuntimeStoreError::WriteFailed(
+                            "WholeBlob current revision exceeds SQLite INTEGER".to_string(),
+                        )
+                    })?,
+                    current.blob_sha256(),
+                ],
+            )
+            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+        if updated != 1 {
+            return Err(session_authority_conflict(
+                runtime_id,
+                "WholeBlob provisional base changed during promotion",
+            ));
+        }
+        let deleted = tx
+            .execute(
+                r"
+                DELETE FROM runtime_whole_blob_provisional_tails
+                WHERE runtime_id = ?1
+                  AND session_id = ?2
+                  AND base_store_revision = ?3
+                  AND base_blob_sha256 = ?4
+                  AND run_id = ?5
+                  AND candidate_blob_sha256 = ?6
+                  AND candidate_sequence = ?7
+                ",
+                params![
+                    runtime_id_text(runtime_id),
+                    expected.session_id().to_string(),
+                    i64::try_from(expected.base_store_revision()).map_err(|_| {
+                        RuntimeStoreError::WriteFailed(
+                            "WholeBlob provisional base revision exceeds SQLite INTEGER"
+                                .to_string(),
+                        )
+                    })?,
+                    expected.base_blob_sha256(),
+                    expected.run_id().0.to_string(),
+                    expected.candidate_blob_sha256(),
+                    i64::try_from(expected.candidate_sequence()).map_err(|_| {
+                        RuntimeStoreError::WriteFailed(
+                            "WholeBlob provisional sequence exceeds SQLite INTEGER".to_string(),
+                        )
+                    })?,
+                ],
+            )
+            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+        if deleted != 1 {
+            return Err(session_authority_conflict(
+                runtime_id,
+                "WholeBlob provisional row changed during promotion",
+            ));
+        }
+        insert_compaction_projection_outbox_intents(
+            tx,
+            runtime_id,
+            &stored.compaction_projection_intents,
+        )?;
+        upsert_runtime_session_catalog_entry_in_txn(tx, runtime_id, &catalog_entry)?;
+        tx.execute(
+            "DELETE FROM runtime_session_snapshots WHERE runtime_id = ?1",
+            params![runtime_id_text(runtime_id)],
+        )
+        .map_err(|error| map_runtime_snapshot_mutation_error(runtime_id, error))?;
         tx.execute(
             r"
-            INSERT INTO runtime_session_snapshots (runtime_id, session_snapshot)
-            VALUES (?1, ?2)
-            ON CONFLICT(runtime_id) DO UPDATE SET session_snapshot = excluded.session_snapshot
+            DELETE FROM runtime_whole_blob_bodies
+            WHERE blob_sha256 = ?1
+              AND NOT EXISTS (
+                  SELECT 1 FROM runtime_whole_blob_authority
+                  WHERE blob_sha256 = ?1
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM runtime_whole_blob_provisional_tails
+                  WHERE candidate_blob_sha256 = ?1
+              )
             ",
-            params![runtime_id_text(runtime_id), snapshot],
+            params![current.blob_sha256()],
         )
-        .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
-        // A live snapshot write clears any standing projection-quarantine marker
-        // in the same atomic boundary: the runtime snapshot is authoritative
-        // again, so a store-only projection fallback is no longer permitted.
+        .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
         clear_runtime_projection_quarantine(tx, runtime_id)?;
-        Ok(())
+        WholeBlobStoreAuthority::issued(
+            expected.session_id().clone(),
+            next_revision,
+            expected.candidate_blob_sha256().to_string(),
+        )
+    }
+
+    fn install_repaired_whole_blob_recovery_in_txn(
+        tx: &Transaction<'_>,
+        runtime_id: &LogicalRuntimeId,
+        expected: &WholeBlobProvisionalTailAuthority,
+        repaired_bytes: &[u8],
+        recovered_blob_sha256: &str,
+        catalog_entry: &crate::store::RuntimeSessionCatalogEntry,
+        compaction_intents: &[meerkat_core::CompactionProjectionIntent],
+    ) -> Result<WholeBlobStoreAuthority, RuntimeStoreError> {
+        let stored = load_whole_blob_provisional_metadata(tx, runtime_id)?.ok_or_else(|| {
+            session_authority_conflict(
+                runtime_id,
+                "WholeBlob repaired recovery candidate is absent",
+            )
+        })?;
+        let current = load_whole_blob_store_authority(tx, runtime_id)?.ok_or_else(|| {
+            session_authority_conflict(
+                runtime_id,
+                "WholeBlob repaired recovery has no committed base",
+            )
+        })?;
+        if stored.authority != *expected
+            || current.session_id() != expected.session_id()
+            || current.store_revision() != expected.base_store_revision()
+            || current.blob_sha256() != expected.base_blob_sha256()
+            || recovered_blob_sha256 == expected.candidate_blob_sha256()
+            || catalog_entry.session_id() != expected.session_id()
+            || catalog_entry.persistence_profile() != RuntimeSessionPersistenceProfile::WholeBlobV1
+            || compaction_intents
+                .iter()
+                .any(|intent| intent.projection.session_id() != expected.session_id())
+        {
+            return Err(session_authority_conflict(
+                runtime_id,
+                "WholeBlob repaired recovery does not exactly bind its base/candidate/successor",
+            ));
+        }
+        reject_finalized_compaction_projection_replays(tx, runtime_id, compaction_intents)?;
+        let next_revision = current.store_revision().checked_add(1).ok_or_else(|| {
+            RuntimeStoreError::WriteFailed(format!(
+                "WholeBlob store revision exhausted for runtime {runtime_id}"
+            ))
+        })?;
+        let next_revision_i64 = i64::try_from(next_revision).map_err(|_| {
+            RuntimeStoreError::WriteFailed(format!(
+                "WholeBlob store revision exceeds SQLite INTEGER for runtime {runtime_id}"
+            ))
+        })?;
+        tx.execute(
+            r"
+            INSERT INTO runtime_whole_blob_bodies (blob_sha256, session_snapshot)
+            VALUES (?1, ?2)
+            ON CONFLICT(blob_sha256) DO NOTHING
+            ",
+            params![recovered_blob_sha256, repaired_bytes],
+        )
+        .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+        let repaired_body_matches = tx
+            .query_row(
+                r"
+                SELECT 1
+                FROM runtime_whole_blob_bodies
+                WHERE blob_sha256 = ?1 AND session_snapshot = ?2
+                ",
+                params![recovered_blob_sha256, repaired_bytes],
+                |_row| Ok(()),
+            )
+            .optional()
+            .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?
+            .is_some();
+        if !repaired_body_matches {
+            return Err(session_authority_conflict(
+                runtime_id,
+                "WholeBlob repaired digest already names different stored bytes",
+            ));
+        }
+        let updated = tx
+            .execute(
+                r"
+                UPDATE runtime_whole_blob_authority
+                SET session_id = ?2, store_revision = ?3, blob_sha256 = ?4
+                WHERE runtime_id = ?1
+                  AND session_id = ?2
+                  AND store_revision = ?5
+                  AND blob_sha256 = ?6
+                ",
+                params![
+                    runtime_id_text(runtime_id),
+                    expected.session_id().to_string(),
+                    next_revision_i64,
+                    recovered_blob_sha256,
+                    i64::try_from(current.store_revision()).map_err(|_| {
+                        RuntimeStoreError::WriteFailed(
+                            "WholeBlob current revision exceeds SQLite INTEGER".to_string(),
+                        )
+                    })?,
+                    current.blob_sha256(),
+                ],
+            )
+            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+        if updated != 1 {
+            return Err(session_authority_conflict(
+                runtime_id,
+                "WholeBlob repaired recovery base changed during commit",
+            ));
+        }
+        let deleted = tx
+            .execute(
+                r"
+                DELETE FROM runtime_whole_blob_provisional_tails
+                WHERE runtime_id = ?1
+                  AND session_id = ?2
+                  AND base_store_revision = ?3
+                  AND base_blob_sha256 = ?4
+                  AND run_id = ?5
+                  AND candidate_blob_sha256 = ?6
+                  AND candidate_sequence = ?7
+                ",
+                params![
+                    runtime_id_text(runtime_id),
+                    expected.session_id().to_string(),
+                    i64::try_from(expected.base_store_revision()).map_err(|_| {
+                        RuntimeStoreError::WriteFailed(
+                            "WholeBlob provisional base revision exceeds SQLite INTEGER"
+                                .to_string(),
+                        )
+                    })?,
+                    expected.base_blob_sha256(),
+                    expected.run_id().0.to_string(),
+                    expected.candidate_blob_sha256(),
+                    i64::try_from(expected.candidate_sequence()).map_err(|_| {
+                        RuntimeStoreError::WriteFailed(
+                            "WholeBlob provisional sequence exceeds SQLite INTEGER".to_string(),
+                        )
+                    })?,
+                ],
+            )
+            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+        if deleted != 1 {
+            return Err(session_authority_conflict(
+                runtime_id,
+                "WholeBlob repaired recovery provisional row changed during commit",
+            ));
+        }
+        insert_compaction_projection_outbox_intents(tx, runtime_id, compaction_intents)?;
+        upsert_runtime_session_catalog_entry_in_txn(tx, runtime_id, catalog_entry)?;
+        tx.execute(
+            "DELETE FROM runtime_session_snapshots WHERE runtime_id = ?1",
+            params![runtime_id_text(runtime_id)],
+        )
+        .map_err(|error| map_runtime_snapshot_mutation_error(runtime_id, error))?;
+        for obsolete_blob_sha256 in [current.blob_sha256(), expected.candidate_blob_sha256()] {
+            tx.execute(
+                r"
+                DELETE FROM runtime_whole_blob_bodies
+                WHERE blob_sha256 = ?1
+                  AND NOT EXISTS (
+                      SELECT 1 FROM runtime_whole_blob_authority
+                      WHERE blob_sha256 = ?1
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM runtime_whole_blob_provisional_tails
+                      WHERE candidate_blob_sha256 = ?1
+                  )
+                ",
+                params![obsolete_blob_sha256],
+            )
+            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+        }
+        clear_runtime_projection_quarantine(tx, runtime_id)?;
+        WholeBlobStoreAuthority::issued(
+            expected.session_id().clone(),
+            next_revision,
+            recovered_blob_sha256.to_string(),
+        )
+    }
+
+    fn promote_head_canonical_provisional_in_txn(
+        tx: &Transaction<'_>,
+        runtime_id: &LogicalRuntimeId,
+        expected: &HeadCanonicalProvisionalTailAuthority,
+        receipt: &RunBoundaryReceipt,
+        runtime_state: Option<RuntimeState>,
+    ) -> Result<HeadCanonicalStoreAuthority, RuntimeStoreError> {
+        let stored = load_head_canonical_provisional_tail(tx, runtime_id)?.ok_or_else(|| {
+            session_authority_conflict(
+                runtime_id,
+                "HeadCanonical provisional promotion candidate is absent",
+            )
+        })?;
+        let current = load_head_canonical_authority(tx, runtime_id)?
+            .and_then(|authority| authority.head_canonical().cloned())
+            .ok_or_else(|| {
+                session_authority_conflict(
+                    runtime_id,
+                    "HeadCanonical provisional promotion has no committed base",
+                )
+            })?;
+        if &stored.authority != expected
+            || expected.run_id() != &receipt.run_id
+            || current.session_id() != expected.session_id()
+            || current.store_revision() != expected.base_store_revision()
+            || current.committed_head_token() != expected.base_committed_head_token()
+        {
+            return Err(session_authority_conflict(
+                runtime_id,
+                "HeadCanonical provisional promotion does not exactly match stored base/run/physical target",
+            ));
+        }
+        if receipt.message_count != stored.candidate_message_count
+            || receipt.conversation_digest.as_deref()
+                != Some(stored.candidate_conversation_digest.as_str())
+        {
+            return Err(session_authority_conflict(
+                runtime_id,
+                "HeadCanonical final receipt does not bind the provisional candidate count/digest",
+            ));
+        }
+        let (physical_head, physical_head_token) =
+            meerkat_store::sqlite_store::load_head_canonical_for_runtime_in_txn(
+                tx,
+                expected.session_id(),
+            )
+            .map_err(|error| map_head_canonical_session_store_error(runtime_id, error))?
+            .ok_or_else(|| {
+                session_authority_conflict(
+                    runtime_id,
+                    "HeadCanonical provisional promotion has no physical target head",
+                )
+            })?;
+        if physical_head_token != expected.physical_head_token()
+            || physical_head.head_revision != stored.candidate_conversation_digest
+            || physical_head.message_count
+                != u64::try_from(stored.candidate_message_count).map_err(|_| {
+                    session_authority_conflict(
+                        runtime_id,
+                        "HeadCanonical provisional candidate message count exceeds u64",
+                    )
+                })?
+        {
+            return Err(session_authority_conflict(
+                runtime_id,
+                "HeadCanonical provisional promotion physical head differs from the exact candidate",
+            ));
+        }
+        validate_exact_head_prefix_authority(
+            runtime_id,
+            &physical_head,
+            "HeadCanonical provisional promotion physical head",
+        )?;
+        meerkat_store::sqlite_store::verify_head_rewrite_prefix_descent_in_txn(
+            tx,
+            current.boundary_head(),
+            &physical_head,
+        )
+        .map_err(|error| map_head_canonical_session_store_error(runtime_id, error))?;
+        reject_finalized_compaction_projection_replays(
+            tx,
+            runtime_id,
+            &stored.compaction_projection_intents,
+        )?;
+        let final_revision = expected
+            .physical_store_revision()
+            .checked_add(1)
+            .ok_or_else(|| {
+                session_authority_conflict(
+                    runtime_id,
+                    "HeadCanonical final promotion revision overflow",
+                )
+            })?;
+        let committed = HeadCanonicalStoreAuthority::issued(
+            expected.session_id().clone(),
+            final_revision,
+            physical_head,
+            physical_head_token,
+        )?;
+        write_head_canonical_authority_in_txn(
+            tx,
+            runtime_id,
+            &RuntimeSessionAuthority::HeadCanonical(committed.clone()),
+        )?;
+        insert_compaction_projection_outbox_intents(
+            tx,
+            runtime_id,
+            &stored.compaction_projection_intents,
+        )?;
+        let mut catalog_entry = stored.catalog_entry;
+        let runtime_state = match runtime_state {
+            Some(runtime_state) => Some(runtime_state),
+            None => load_runtime_session_catalog_entry_in_txn(tx, runtime_id)?
+                .and_then(|entry| entry.runtime_state()),
+        };
+        catalog_entry.set_runtime_state(runtime_state);
+        upsert_runtime_session_catalog_entry_in_txn(tx, runtime_id, &catalog_entry)?;
+        clear_runtime_projection_quarantine(tx, runtime_id)?;
+        Ok(committed)
+    }
+
+    fn commit_prepared_whole_blob_snapshot_in_txn(
+        tx: &Transaction<'_>,
+        runtime_id: &LogicalRuntimeId,
+        prepared: crate::store::PreparedWholeBlobSnapshot,
+    ) -> Result<WholeBlobStoreAuthority, RuntimeStoreError> {
+        let (session, serialized, candidate_blob_sha256) = prepared.into_parts();
+        if load_whole_blob_provisional_authority(tx, runtime_id)?.is_some() {
+            return Err(session_authority_conflict(
+                runtime_id,
+                "ordinary WholeBlob write cannot bypass or re-encode a store-owned provisional candidate; use exact metadata-only promotion",
+            ));
+        }
+        let runtime_state = load_runtime_session_catalog_entry_in_txn(tx, runtime_id)?
+            .and_then(|entry| entry.runtime_state());
+        let catalog_entry = crate::store::RuntimeSessionCatalogEntry::from_session(
+            session.as_ref(),
+            RuntimeSessionPersistenceProfile::WholeBlobV1,
+            runtime_state,
+        )?;
+        upsert_runtime_snapshot_issued(
+            tx,
+            runtime_id,
+            serialized.session_snapshot.as_ref(),
+            session.id(),
+            &candidate_blob_sha256,
+            &catalog_entry,
+        )
     }
 
     fn set_runtime_projection_quarantine(
@@ -1167,7 +6310,16 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
         runtime_id: &LogicalRuntimeId,
         session: &meerkat_core::Session,
     ) -> Result<(), RuntimeStoreError> {
-        for intent in crate::store::validated_compaction_projection_intents(session)? {
+        let intents = crate::store::validated_compaction_projection_intents(session)?;
+        ensure_compaction_intents_already_outboxed_list(tx, runtime_id, &intents)
+    }
+
+    fn ensure_compaction_intents_already_outboxed_list(
+        tx: &Transaction<'_>,
+        runtime_id: &LogicalRuntimeId,
+        intents: &[meerkat_core::CompactionProjectionIntent],
+    ) -> Result<(), RuntimeStoreError> {
+        for intent in intents {
             let (encoded, state) = tx
                 .query_row(
                     r"
@@ -1208,7 +6360,7 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             let existing: meerkat_core::CompactionProjectionIntent =
                 serde_json::from_slice(&encoded)
                     .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
-            if existing != intent {
+            if existing != *intent {
                 return Err(RuntimeStoreError::WriteFailed(format!(
                     "non-boundary snapshot conflicts with compaction outbox rewrite {}",
                     intent.projection.revision()
@@ -1284,6 +6436,303 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
         format!("sha256:{:x}", sha2::Sha256::digest(bytes))
     }
 
+    fn sqlite_text_evidence(
+        value: rusqlite::types::ValueRef<'_>,
+    ) -> (String, Option<&'static str>) {
+        match value {
+            rusqlite::types::ValueRef::Text(bytes) => match std::str::from_utf8(bytes) {
+                Ok(value) => (value.to_string(), None),
+                Err(_) => (
+                    format!("<non-UTF-8 TEXT {}>", input_row_version_digest(bytes)),
+                    Some("non-UTF-8 TEXT"),
+                ),
+            },
+            rusqlite::types::ValueRef::Blob(bytes) => (
+                format!("<BLOB {}>", input_row_version_digest(bytes)),
+                Some("BLOB"),
+            ),
+            rusqlite::types::ValueRef::Integer(value) => (value.to_string(), Some("INTEGER")),
+            rusqlite::types::ValueRef::Real(value) => (value.to_string(), Some("REAL")),
+            rusqlite::types::ValueRef::Null => ("<NULL>".to_string(), Some("NULL")),
+        }
+    }
+
+    fn load_recovery_input_set_revision(
+        conn: &Connection,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<RecoveryInputSetRevision, RuntimeStoreError> {
+        let revision = conn
+            .query_row(
+                r"
+                SELECT revision
+                FROM runtime_input_set_revisions
+                WHERE runtime_id = ?1
+                ",
+                params![runtime_id_text(runtime_id)],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+        let generation = match revision {
+            Some(revision) => u64::try_from(revision).map_err(|_| {
+                RuntimeStoreError::ReadFailed(format!(
+                    "input-set revision for runtime {runtime_id} is negative"
+                ))
+            })?,
+            None => 0,
+        };
+        Ok(RecoveryInputSetRevision::from_store_generation(generation))
+    }
+
+    fn load_recovery_nonterminal_input_snapshot(
+        conn: &Connection,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<PreparedRecoveryInputSnapshot, RuntimeStoreError> {
+        let revision = load_recovery_input_set_revision(conn, runtime_id)?;
+        let query = format!(
+            r"
+            SELECT input_id, state_json
+            FROM runtime_input_states
+                INDEXED BY idx_runtime_input_states_recovery_nonterminal
+            WHERE runtime_id = ?1
+              AND {RECOVERY_NONTERMINAL_INPUT_PREDICATE_SQL}
+            ORDER BY input_id ASC
+            "
+        );
+        let mut stmt = conn
+            .prepare(&query)
+            .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+        let raw_rows = stmt
+            .query_map(params![runtime_id_text(runtime_id)], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, JsonColumnBytes>(1)?.into_bytes(),
+                ))
+            })
+            .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+        let mut rows = Vec::with_capacity(raw_rows.len());
+        for (stored_input_id, bytes) in raw_rows {
+            let state = match deserialize_persisted_input_state(&bytes) {
+                Ok(state) => state,
+                Err(error) => {
+                    tracing::error!(
+                        runtime_id = %runtime_id,
+                        input_id = %stored_input_id,
+                        detail = %error,
+                        "exact durable-tail input observation found a forensic corrupt row; classifying the input evidence as unfenceable"
+                    );
+                    // `observe_candidate_run_inputs` maps Unsupported to the
+                    // generated machine's stable Unfenceable evidence class.
+                    // ReadFailed would instead enter RecoveryBackoff forever,
+                    // while excluding this row would mint false set absence.
+                    return Err(RuntimeStoreError::Unsupported(format!(
+                        "exact recovery input set for runtime {runtime_id} contains forensic corrupt row `{stored_input_id}`"
+                    )));
+                }
+            };
+            if state.state.input_id.to_string() != stored_input_id {
+                tracing::error!(
+                    runtime_id = %runtime_id,
+                    stored_input_id = %stored_input_id,
+                    decoded_input_id = %state.state.input_id,
+                    "exact durable-tail input observation found a row-key identity mismatch; classifying the input evidence as unfenceable"
+                );
+                return Err(RuntimeStoreError::Unsupported(format!(
+                    "exact recovery input set for runtime {runtime_id} contains row-key mismatch `{stored_input_id}`"
+                )));
+            }
+            rows.push((state, input_row_version_digest(&bytes)));
+        }
+        PreparedRecoveryInputSnapshot::from_exact_nonterminal_rows(
+            runtime_id.clone(),
+            revision,
+            rows,
+        )
+    }
+
+    fn enforce_recovery_input_set_authority(
+        tx: &Transaction<'_>,
+        runtime_id: &LogicalRuntimeId,
+        expected_revision: RecoveryInputSetRevision,
+        expected_exact_set_token: &str,
+    ) -> Result<(), RuntimeStoreError> {
+        let current = load_recovery_nonterminal_input_snapshot(tx, runtime_id)?;
+        if current.input_set_revision() != expected_revision
+            || current.exact_set_token() != expected_exact_set_token
+        {
+            return Err(RuntimeStoreError::RecoveryInputSetConflict {
+                runtime_id: runtime_id.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    enum SqliteRecoveryInputMutation {
+        Upsert {
+            replacement: StoredInputState,
+            target_bytes: Vec<u8>,
+        },
+        Delete {
+            input_id: InputId,
+        },
+    }
+
+    impl SqliteRecoveryInputMutation {
+        fn input_id(&self) -> &InputId {
+            match self {
+                Self::Upsert { replacement, .. } => &replacement.state.input_id,
+                Self::Delete { input_id } => input_id,
+            }
+        }
+    }
+
+    /// Release every target row's old idempotency mapping before applying the
+    /// first sibling mutation. SQLite enforces UNIQUE constraints immediately,
+    /// so updating A(x)->A(y) while B still owns y rejects a valid final-image
+    /// swap unless the complete target set relinquishes its prior mappings
+    /// first. The enclosing transaction keeps this release invisible and rolls
+    /// it back with any later write failure.
+    fn release_input_idempotency_keys_for_mutation_set(
+        tx: &Transaction<'_>,
+        runtime_id: &LogicalRuntimeId,
+        target_input_ids: impl IntoIterator<Item = String>,
+    ) -> Result<(), RuntimeStoreError> {
+        let mut unique_targets = HashSet::new();
+        for input_id in target_input_ids {
+            if !unique_targets.insert(input_id.clone()) {
+                return Err(RuntimeStoreError::WriteFailed(format!(
+                    "atomic input-state mutation set repeats input {input_id} in runtime {runtime_id}"
+                )));
+            }
+        }
+        for input_id in unique_targets {
+            tx.execute(
+                r"
+                DELETE FROM runtime_input_idempotency_keys
+                WHERE runtime_id = ?1 AND input_id = ?2
+                ",
+                params![runtime_id_text(runtime_id), input_id],
+            )
+            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+        }
+        Ok(())
+    }
+
+    fn prepare_current_sqlite_recovery_input_mutations(
+        tx: &Transaction<'_>,
+        runtime_id: &LogicalRuntimeId,
+        expected_revision: RecoveryInputSetRevision,
+        prepared: &[PreparedRecoveryInputStateMutation],
+    ) -> Result<Option<Vec<SqliteRecoveryInputMutation>>, RuntimeStoreError> {
+        if load_recovery_input_set_revision(tx, runtime_id)? != expected_revision {
+            return Ok(None);
+        }
+        let mut changed = Vec::new();
+        for mutation in prepared {
+            let current = tx
+                .query_row(
+                    r"
+                    SELECT state_json
+                    FROM runtime_input_states
+                    WHERE runtime_id = ?1 AND input_id = ?2
+                    ",
+                    params![runtime_id_text(runtime_id), mutation.input_id().to_string()],
+                    |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
+                )
+                .optional()
+                .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+            let Some(current) = current else {
+                return Ok(None);
+            };
+            if input_row_version_digest(&current) != mutation.expected_row_digest() {
+                return Ok(None);
+            }
+            match mutation {
+                PreparedRecoveryInputStateMutation::Upsert { replacement, .. } => {
+                    let target_bytes = serde_json::to_vec(replacement)
+                        .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                    if current != target_bytes {
+                        changed.push(SqliteRecoveryInputMutation::Upsert {
+                            replacement: replacement.clone(),
+                            target_bytes,
+                        });
+                    }
+                }
+                PreparedRecoveryInputStateMutation::Delete { input_id, .. } => {
+                    changed.push(SqliteRecoveryInputMutation::Delete {
+                        input_id: input_id.clone(),
+                    });
+                }
+            }
+        }
+        Ok(Some(changed))
+    }
+
+    fn apply_sqlite_recovery_input_mutations(
+        tx: &Transaction<'_>,
+        runtime_id: &LogicalRuntimeId,
+        mutations: &[SqliteRecoveryInputMutation],
+    ) -> Result<(), RuntimeStoreError> {
+        release_input_idempotency_keys_for_mutation_set(
+            tx,
+            runtime_id,
+            mutations
+                .iter()
+                .map(|mutation| mutation.input_id().to_string()),
+        )?;
+        for mutation in mutations {
+            match mutation {
+                SqliteRecoveryInputMutation::Upsert {
+                    replacement,
+                    target_bytes,
+                } => {
+                    tx.execute(
+                        r"
+                        INSERT INTO runtime_input_states (runtime_id, input_id, state_json)
+                        VALUES (?1, ?2, ?3)
+                        ON CONFLICT(runtime_id, input_id) DO UPDATE
+                        SET state_json = excluded.state_json
+                        ",
+                        params![
+                            runtime_id_text(runtime_id),
+                            replacement.state.input_id.to_string(),
+                            target_bytes,
+                        ],
+                    )
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                    update_pending_terminal_owner_index(tx, runtime_id, replacement)?;
+                }
+                SqliteRecoveryInputMutation::Delete { input_id } => {
+                    let deleted = tx
+                        .execute(
+                            r"
+                            DELETE FROM runtime_input_states
+                            WHERE runtime_id = ?1 AND input_id = ?2
+                            ",
+                            params![runtime_id_text(runtime_id), input_id.to_string()],
+                        )
+                        .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                    if deleted != 1 {
+                        return Err(RuntimeStoreError::InputRowVersionConflict {
+                            input_id: input_id.to_string(),
+                        });
+                    }
+                    tx.execute(
+                        r"
+                        DELETE FROM runtime_pending_terminal_owners
+                        WHERE runtime_id = ?1 AND owner_input_id = ?2
+                        ",
+                        params![runtime_id_text(runtime_id), input_id.to_string()],
+                    )
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Enforce a machine-lifecycle commit's expected prior row version inside
     /// the writing transaction. `Missing` demands the row still be absent; a
     /// concrete version demands the stored bytes still hash to it.
@@ -1321,10 +6770,11 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
         runtime_id: &LogicalRuntimeId,
         input_states: &[(StoredInputState, Option<String>)],
     ) -> Result<(), RuntimeStoreError> {
+        // Prove every fenced predecessor before releasing any old index key.
+        // The transaction would roll a failed proof back either way, but
+        // separating observation from realization gives this batch the same
+        // final-image semantics as the in-memory implementation.
         for (bundle, expected_row_digest) in input_states {
-            // A fenced update fails the whole transaction when the stored
-            // row no longer hashes to the digest the update was derived
-            // from — another writer advanced the input in the meantime.
             if let Some(expected) = expected_row_digest {
                 let existing = tx
                     .query_row(
@@ -1349,6 +6799,15 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
                     });
                 }
             }
+        }
+        release_input_idempotency_keys_for_mutation_set(
+            tx,
+            runtime_id,
+            input_states
+                .iter()
+                .map(|(bundle, _)| bundle.state.input_id.to_string()),
+        )?;
+        for (bundle, _) in input_states {
             let state_json = serde_json::to_vec(bundle)
                 .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
             tx.execute(
@@ -1364,8 +6823,43 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
                 ],
             )
             .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+            update_pending_terminal_owner_index(tx, runtime_id, bundle)?;
         }
         Ok(())
+    }
+
+    fn update_pending_terminal_owner_index(
+        tx: &Transaction<'_>,
+        runtime_id: &LogicalRuntimeId,
+        bundle: &StoredInputState,
+    ) -> Result<(), RuntimeStoreError> {
+        if crate::store::input_state_is_pending_terminal_owner(&bundle.state) {
+            tx.execute(
+                r"
+                INSERT INTO runtime_pending_terminal_owners
+                    (runtime_id, owner_input_id)
+                VALUES (?1, ?2)
+                ON CONFLICT(runtime_id, owner_input_id) DO NOTHING
+                ",
+                params![
+                    runtime_id_text(runtime_id),
+                    bundle.state.input_id.0.to_string()
+                ],
+            )
+        } else {
+            tx.execute(
+                r"
+                DELETE FROM runtime_pending_terminal_owners
+                WHERE runtime_id = ?1 AND owner_input_id = ?2
+                ",
+                params![
+                    runtime_id_text(runtime_id),
+                    bundle.state.input_id.0.to_string()
+                ],
+            )
+        }
+        .map(|_| ())
+        .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))
     }
 
     fn upsert_machine_lifecycle_snapshot(
@@ -1457,6 +6951,7 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
     /// SQLite-backed runtime store sharing the same sqlite file as `SqliteSessionStore`.
     pub struct SqliteRuntimeStore {
         path: PathBuf,
+        session_persistence_profile: RuntimeSessionPersistenceProfile,
         #[cfg(test)]
         unregister_finalization_fault: AtomicU8,
         /// Candidate bytes shipped into the snapshot byte-equality probe.
@@ -1466,12 +6961,29 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
     }
 
     impl SqliteRuntimeStore {
+        /// Open the compatibility whole-BLOB runtime store.
+        ///
+        /// New SQLite realm composition should choose
+        /// [`Self::new_head_canonical`] explicitly. This constructor preserves
+        /// the established public default for independent RuntimeStore files.
         pub fn new(path: impl Into<PathBuf>) -> Result<Self, RuntimeStoreError> {
+            Self::new_whole_blob(path)
+        }
+
+        /// Open an explicit whole-BLOB runtime authority.
+        pub fn new_whole_blob(path: impl Into<PathBuf>) -> Result<Self, RuntimeStoreError> {
             let path = path.into();
             let conn = open_runtime_connection(&path)?;
+            if head_canonical_profile_has_durable_claim(&conn)? {
+                return Err(RuntimeStoreError::Unsupported(
+                    "SQLite runtime database is irreversibly pinned to head_canonical_v1"
+                        .to_string(),
+                ));
+            }
             drop(conn);
             Ok(Self {
                 path,
+                session_persistence_profile: RuntimeSessionPersistenceProfile::WholeBlobV1,
                 #[cfg(test)]
                 unregister_finalization_fault: AtomicU8::new(0),
                 #[cfg(test)]
@@ -1481,36 +6993,63 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             })
         }
 
-        /// Inspect or atomically migrate the exact completed-idle persistence
-        /// shape emitted by v0.6.34. This is deliberately a concrete SQLite
-        /// maintenance API: ordinary RuntimeStore reads remain fail-closed and
-        /// other backends do not inherit a compatibility contract.
+        /// Open a head-canonical runtime authority co-located with the SQLite
+        /// session store in the same database file.
         ///
-        /// `apply = true` requires the caller to stop every process that can
-        /// access this database. The transaction is atomic, but it cannot
-        /// fence a pre-v0.8 process from writing legacy rows after commit.
-        /// Legacy session content is stamped once as a `RecoveryMigration`
-        /// root from its exact source bytes; the runtime snapshot and SQLite
-        /// session projection are replaced atomically with that same document.
-        pub fn migrate_v0_6_34_completed_idle(
-            path: impl AsRef<Path>,
-            apply: bool,
-        ) -> Result<LegacyV0_6_34MigrationReport, RuntimeStoreError> {
-            let path = path.as_ref();
-            if apply {
-                return apply_legacy_v0_6_34(path);
-            }
-            let conn = open_existing_legacy_database(path, false)?;
-            certify_runtime_domain_not_future(&conn)?;
-            let preflight = preflight_legacy_v0_6_34(&conn)?;
-            Ok(LegacyV0_6_34MigrationReport {
-                applied: false,
-                items: preflight.items,
+        /// This constructor is the explicit profile-activation boundary. It
+        /// synchronously converts every durable whole-BLOB predecessor before
+        /// returning; an `in_progress` activation is retried, and any
+        /// unverifiable source refuses construction rather than leaking an
+        /// O(document) migration into the first ordinary service boundary.
+        pub fn new_head_canonical(path: impl Into<PathBuf>) -> Result<Self, RuntimeStoreError> {
+            let path = path.into();
+            let mut conn = open_head_canonical_runtime_connection(&path)?;
+            pin_head_canonical_profile(&mut conn)?;
+            activate_head_canonical_profiles(&mut conn)?;
+            drop(conn);
+            Ok(Self {
+                path,
+                session_persistence_profile: RuntimeSessionPersistenceProfile::HeadCanonicalV1,
+                #[cfg(test)]
+                unregister_finalization_fault: AtomicU8::new(0),
+                #[cfg(test)]
+                snapshot_byte_probe_bytes: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
+                    0,
+                )),
             })
         }
 
         pub fn path(&self) -> &Path {
             &self.path
+        }
+
+        fn require_whole_blob_session_operation(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            operation: &str,
+        ) -> Result<(), RuntimeStoreError> {
+            if self.session_persistence_profile == RuntimeSessionPersistenceProfile::WholeBlobV1 {
+                return Ok(());
+            }
+            Err(session_authority_conflict(
+                runtime_id,
+                format!("{operation} is a whole-BLOB operation but this store is head-canonical"),
+            ))
+        }
+
+        fn require_head_canonical_session_operation(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            operation: &str,
+        ) -> Result<(), RuntimeStoreError> {
+            if self.session_persistence_profile == RuntimeSessionPersistenceProfile::HeadCanonicalV1
+            {
+                return Ok(());
+            }
+            Err(session_authority_conflict(
+                runtime_id,
+                format!("{operation} is a head-canonical operation but this store is whole-BLOB"),
+            ))
         }
 
         #[cfg(test)]
@@ -1527,16 +7066,11 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
                 .load(std::sync::atomic::Ordering::Relaxed)
         }
 
-        /// Shared body of the two snapshot-commit trait methods. `evidence`
-        /// is the caller-threaded evolved transcript graph for the one-time
-        /// legacy upgrade boundary; the guard consults it only when the
-        /// stored row still carries an inline graph and the incoming
-        /// snapshot is slim, and verifies it before trusting anything.
-        async fn commit_session_snapshot_with_optional_history_evidence(
+        /// Whole-BLOB snapshot commit with the ordinary continuity guard.
+        async fn commit_session_snapshot_checked(
             &self,
             runtime_id: &LogicalRuntimeId,
-            session_delta: SessionDelta,
-            evidence: Option<meerkat_core::TranscriptHistoryState>,
+            session_delta: SerializedSessionSnapshot,
         ) -> Result<(), RuntimeStoreError> {
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
@@ -1548,6 +7082,11 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
                         .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
+                refuse_whole_blob_write_under_head_authority(
+                    &tx,
+                    &runtime_id,
+                    "whole-BLOB session snapshot commit",
+                )?;
                 ensure_compaction_intents_already_outboxed(&tx, &runtime_id, &incoming)?;
                 // Byte equality requires equal lengths, and `length()` on a
                 // BLOB reads the record header, not the payload. Ordinary
@@ -1576,7 +7115,7 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
                             "SELECT 1 FROM runtime_session_snapshots WHERE runtime_id = ?1 AND session_snapshot = ?2",
                             params![
                                 runtime_id_text(&runtime_id),
-                                session_delta.session_snapshot.as_slice()
+                                session_delta.session_snapshot.as_ref()
                             ],
                             |row| row.get::<_, i64>(0),
                         )
@@ -1609,10 +7148,9 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
                     .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?
                     .map(|bytes| deserialize_persisted_session(&bytes))
                     .transpose()?;
-                meerkat_core::session_store::run_boundary_snapshot_save_guard_with_legacy_history_evidence(
+                meerkat_core::session_store::run_boundary_snapshot_save_guard(
                     &incoming,
                     previous.as_ref(),
-                    evidence.as_ref(),
                 )
                 .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
                 upsert_runtime_snapshot(&tx, &runtime_id, &session_delta.session_snapshot)?;
@@ -1623,10 +7161,2066 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             .await
             .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
         }
+
+        async fn commit_prepared_whole_blob_boundary(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            prepared_session: Option<crate::store::PreparedWholeBlobSnapshot>,
+            receipt: Option<RunBoundaryReceipt>,
+            machine_lifecycle: Option<MachineLifecycleCommit>,
+            input_updates: Vec<InputStatePersistenceRecord>,
+            session_store_key: Option<meerkat_core::types::SessionId>,
+        ) -> Result<Option<WholeBlobStoreAuthority>, RuntimeStoreError> {
+            self.require_whole_blob_session_operation(
+                runtime_id,
+                "commit_prepared_whole_blob_boundary",
+            )?;
+            let compaction_projection_intents = prepared_session
+                .as_ref()
+                .map(|prepared| {
+                    crate::store::validated_compaction_projection_intents(prepared.session())
+                })
+                .transpose()?
+                .unwrap_or_default();
+            if let Some(prepared) = prepared_session.as_ref() {
+                if &LogicalRuntimeId::for_session(prepared.session().id()) != runtime_id {
+                    return Err(session_authority_conflict(
+                        runtime_id,
+                        "prepared WholeBlob boundary does not bind this runtime/session",
+                    ));
+                }
+                if let Some(session_store_key) = session_store_key.as_ref()
+                    && prepared.session().id() != session_store_key
+                {
+                    return Err(RuntimeStoreError::SessionKeyMismatch {
+                        expected: session_store_key.clone(),
+                        actual: prepared.session().id().clone(),
+                    });
+                }
+            } else if let Some(session_store_key) = session_store_key.as_ref()
+                && &LogicalRuntimeId::for_session(session_store_key) != runtime_id
+            {
+                return Err(session_authority_conflict(
+                    runtime_id,
+                    format!(
+                        "receipt-only WholeBlob session key {session_store_key} does not own this runtime"
+                    ),
+                ));
+            }
+
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            let lifecycle_expected = machine_lifecycle
+                .as_ref()
+                .and_then(|commit| commit.expected_version().cloned());
+            let lifecycle_snapshot = machine_lifecycle.map(MachineLifecycleCommit::into_snapshot);
+            let input_updates = input_updates
+                .into_iter()
+                .map(InputStatePersistenceRecord::into_stored_and_expected)
+                .collect::<Vec<_>>();
+            tokio::task::spawn_blocking(move || {
+                let mut conn = open_runtime_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                refuse_whole_blob_write_under_head_authority(
+                    &tx,
+                    &runtime_id,
+                    "prepared WholeBlob boundary",
+                )?;
+                if let Some(expected) = lifecycle_expected.as_ref() {
+                    enforce_machine_lifecycle_expected_version(&tx, &runtime_id, expected)?;
+                }
+                reject_finalized_compaction_projection_replays(
+                    &tx,
+                    &runtime_id,
+                    &compaction_projection_intents,
+                )?;
+                let authority = match prepared_session {
+                    Some(prepared) => Some(commit_prepared_whole_blob_snapshot_in_txn(
+                        &tx,
+                        &runtime_id,
+                        prepared,
+                    )?),
+                    None => {
+                        if load_whole_blob_provisional_authority(&tx, &runtime_id)?.is_some() {
+                            return Err(session_authority_conflict(
+                                &runtime_id,
+                                "receipt-only boundary cannot bypass a store-owned WholeBlob candidate",
+                            ));
+                        }
+                        None
+                    }
+                };
+                insert_compaction_projection_outbox_intents(
+                    &tx,
+                    &runtime_id,
+                    &compaction_projection_intents,
+                )?;
+                if let Some(snapshot) = lifecycle_snapshot.as_ref() {
+                    upsert_machine_lifecycle_snapshot(&tx, &runtime_id, snapshot)?;
+                }
+                if let Some(receipt) = receipt.as_ref() {
+                    insert_receipt(&tx, &runtime_id, receipt)?;
+                }
+                upsert_input_states(&tx, &runtime_id, &input_updates)?;
+                tx.commit()
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                Ok(authority)
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
+        async fn commit_whole_blob_provisional_promotion(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            promotion: crate::store::PreparedWholeBlobProvisionalPromotion,
+            receipt: RunBoundaryReceipt,
+            machine_lifecycle: Option<MachineLifecycleCommit>,
+            input_updates: Vec<InputStatePersistenceRecord>,
+            session_store_key: meerkat_core::types::SessionId,
+        ) -> Result<WholeBlobStoreAuthority, RuntimeStoreError> {
+            self.require_whole_blob_session_operation(
+                runtime_id,
+                "commit_whole_blob_provisional_promotion",
+            )?;
+            let (authority, checkpoint_conversation_digest, checkpoint_message_count) =
+                promotion.into_parts();
+            if authority.session_id() != &session_store_key {
+                return Err(RuntimeStoreError::SessionKeyMismatch {
+                    expected: authority.session_id().clone(),
+                    actual: session_store_key,
+                });
+            }
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            let input_updates = input_updates
+                .into_iter()
+                .map(InputStatePersistenceRecord::into_stored_and_expected)
+                .collect::<Vec<_>>();
+            tokio::task::spawn_blocking(move || {
+                let lifecycle_expected = machine_lifecycle
+                    .as_ref()
+                    .and_then(|commit| commit.expected_version().cloned());
+                let runtime_state = machine_lifecycle
+                    .as_ref()
+                    .map(MachineLifecycleCommit::runtime_state);
+                let lifecycle_snapshot =
+                    machine_lifecycle.map(MachineLifecycleCommit::into_snapshot);
+                let mut conn = open_runtime_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                refuse_whole_blob_write_under_head_authority(
+                    &tx,
+                    &runtime_id,
+                    "whole-BLOB provisional promotion",
+                )?;
+                if let Some(expected) = &lifecycle_expected {
+                    enforce_machine_lifecycle_expected_version(&tx, &runtime_id, expected)?;
+                }
+                let committed = promote_whole_blob_provisional_in_txn(
+                    &tx,
+                    &runtime_id,
+                    &authority,
+                    &receipt,
+                    &checkpoint_conversation_digest,
+                    checkpoint_message_count,
+                    runtime_state,
+                )?;
+                if let Some(snapshot) = lifecycle_snapshot.as_ref() {
+                    upsert_machine_lifecycle_snapshot(&tx, &runtime_id, snapshot)?;
+                }
+                insert_receipt(&tx, &runtime_id, &receipt)?;
+                upsert_input_states(&tx, &runtime_id, &input_updates)?;
+                tx.commit()
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                Ok(committed)
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
+        async fn commit_whole_blob_recovery(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            promotion: crate::store::PreparedWholeBlobRecoveryPromotion,
+            evidence: crate::store::PreparedRecoveryEvidence,
+            receipt: RunBoundaryReceipt,
+            machine_lifecycle: MachineLifecycleCommit,
+            input_updates: Vec<InputStatePersistenceRecord>,
+            session_store_key: meerkat_core::types::SessionId,
+        ) -> Result<PreparedRuntimeSessionCommitResult, RuntimeStoreError> {
+            self.require_whole_blob_session_operation(runtime_id, "commit_whole_blob_recovery")?;
+            let (expected, repaired_snapshot) = promotion.into_parts();
+            if expected.session_id() != &session_store_key {
+                return Err(RuntimeStoreError::SessionKeyMismatch {
+                    expected: expected.session_id().clone(),
+                    actual: session_store_key,
+                });
+            }
+            evidence.verify_input_updates(&input_updates)?;
+            evidence.verify_request_effects(&receipt, &machine_lifecycle)?;
+            let recovery = CommittedRecoveryBoundary::from_prepared(&evidence, &receipt);
+            let (
+                _base_store_revision,
+                _base_blob_sha256,
+                candidate_blob_sha256,
+                _candidate_sequence,
+                recovered_blob_sha256,
+            ) = evidence.whole_blob_authority_transition().ok_or_else(|| {
+                session_authority_conflict(
+                    runtime_id,
+                    "WholeBlob recovery evidence has no WholeBlob authority transition",
+                )
+            })?;
+            if candidate_blob_sha256 != expected.candidate_blob_sha256() {
+                return Err(session_authority_conflict(
+                    runtime_id,
+                    "WholeBlob recovery candidate digest differs from its store authority",
+                ));
+            }
+            let recovered_blob_sha256 = recovered_blob_sha256.to_string();
+            let runtime_state = machine_lifecycle.runtime_state();
+            let lifecycle_expected =
+                machine_lifecycle
+                    .expected_version()
+                    .cloned()
+                    .ok_or_else(|| {
+                        session_authority_conflict(
+                            runtime_id,
+                            "WholeBlob recovery lifecycle has no exact predecessor fence",
+                        )
+                    })?;
+            let lifecycle_snapshot = machine_lifecycle.into_snapshot();
+            let lifecycle_target =
+                MachineLifecycleStoreRecord::from_snapshot(&lifecycle_snapshot).encode()?;
+            let repaired = repaired_snapshot
+                .map(|prepared| {
+                    let (session, serialized, blob_sha256) = prepared.into_parts();
+                    if session.id() != expected.session_id() || blob_sha256 != recovered_blob_sha256
+                    {
+                        return Err(session_authority_conflict(
+                            runtime_id,
+                            "WholeBlob repaired artifact differs from recovery evidence",
+                        ));
+                    }
+                    let mut catalog_entry = crate::store::RuntimeSessionCatalogEntry::from_session(
+                        session.as_ref(),
+                        RuntimeSessionPersistenceProfile::WholeBlobV1,
+                        Some(runtime_state),
+                    )?;
+                    catalog_entry.set_runtime_state(Some(runtime_state));
+                    let compaction_intents =
+                        crate::store::validated_compaction_projection_intents(session.as_ref())?;
+                    Ok((
+                        serialized.session_snapshot,
+                        catalog_entry,
+                        compaction_intents,
+                    ))
+                })
+                .transpose()?;
+            let input_updates = input_updates
+                .into_iter()
+                .map(InputStatePersistenceRecord::into_stored_and_expected)
+                .collect::<Vec<_>>();
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut conn = open_runtime_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                refuse_whole_blob_write_under_head_authority(
+                    &tx,
+                    &runtime_id,
+                    "whole-BLOB recovery",
+                )?;
+                if let Some(stored) =
+                    load_recovery_boundary(&tx, &runtime_id, evidence.candidate_id())?
+                {
+                    if stored != recovery {
+                        return Err(session_authority_conflict(
+                            &runtime_id,
+                            "a divergent recovery boundary already exists for this candidate",
+                        ));
+                    }
+                    let expected_current = WholeBlobStoreAuthority::issued(
+                        evidence.session_id().clone(),
+                        expected
+                            .base_store_revision()
+                            .checked_add(1)
+                            .ok_or_else(|| {
+                                session_authority_conflict(
+                                    &runtime_id,
+                                    "committed WholeBlob recovery revision overflow",
+                                )
+                            })?,
+                        recovered_blob_sha256.clone(),
+                    )?;
+                    if load_whole_blob_store_authority(&tx, &runtime_id)?
+                        != Some(expected_current.clone())
+                        || load_whole_blob_provisional_authority(&tx, &runtime_id)?.is_some()
+                    {
+                        return Err(session_authority_conflict(
+                            &runtime_id,
+                            "committed WholeBlob recovery authority was superseded",
+                        ));
+                    }
+                    let body_exists = tx
+                        .query_row(
+                            "SELECT 1 FROM runtime_whole_blob_bodies WHERE blob_sha256 = ?1",
+                            params![expected_current.blob_sha256()],
+                            |_row| Ok(()),
+                        )
+                        .optional()
+                        .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?
+                        .is_some();
+                    if !body_exists {
+                        return Err(session_authority_conflict(
+                            &runtime_id,
+                            "committed WholeBlob recovery body is absent",
+                        ));
+                    }
+                    let current_lifecycle = tx
+                        .query_row(
+                            r"
+                            SELECT runtime_state_json
+                            FROM runtime_states
+                            WHERE runtime_id = ?1
+                            ",
+                            params![runtime_id_text(&runtime_id)],
+                            |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
+                        )
+                        .optional()
+                        .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+                    if current_lifecycle.as_deref() != Some(lifecycle_target.as_slice())
+                        || load_boundary_receipt(&tx, &runtime_id, &receipt)?
+                            != Some(receipt.clone())
+                    {
+                        return Err(session_authority_conflict(
+                            &runtime_id,
+                            "committed WholeBlob recovery effects were superseded",
+                        ));
+                    }
+                    for (target, _) in &input_updates {
+                        let target_bytes = serde_json::to_vec(target)
+                            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                        let current = tx
+                            .query_row(
+                                r"
+                                SELECT state_json
+                                FROM runtime_input_states
+                                WHERE runtime_id = ?1 AND input_id = ?2
+                                ",
+                                params![
+                                    runtime_id_text(&runtime_id),
+                                    target.state.input_id.0.to_string(),
+                                ],
+                                |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
+                            )
+                            .optional()
+                            .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+                        if current.as_deref() != Some(target_bytes.as_slice()) {
+                            return Err(session_authority_conflict(
+                                &runtime_id,
+                                format!(
+                                    "committed recovery input {} was superseded",
+                                    target.state.input_id
+                                ),
+                            ));
+                        }
+                    }
+                    verify_recovery_receipt_digest_enrichments_in_txn(&tx, &runtime_id, &recovery)?;
+                    tx.commit()
+                        .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                    return Ok(PreparedRuntimeSessionCommitResult::recovery(
+                        RuntimeSessionAuthority::WholeBlob(expected_current),
+                        RecoveryCommitStatus::AlreadyCommittedExact,
+                    ));
+                }
+
+                enforce_recovery_input_set_authority(
+                    &tx,
+                    &runtime_id,
+                    evidence.predecessor_nonterminal_input_set_revision(),
+                    evidence.predecessor_nonterminal_input_set_token(),
+                )?;
+                enforce_machine_lifecycle_expected_version(&tx, &runtime_id, &lifecycle_expected)?;
+                let committed = if let Some((repaired_bytes, catalog_entry, compaction_intents)) =
+                    repaired.as_ref()
+                {
+                    install_repaired_whole_blob_recovery_in_txn(
+                        &tx,
+                        &runtime_id,
+                        &expected,
+                        repaired_bytes.as_ref(),
+                        &recovered_blob_sha256,
+                        catalog_entry,
+                        compaction_intents,
+                    )?
+                } else {
+                    let conversation_digest =
+                        receipt.conversation_digest.as_deref().ok_or_else(|| {
+                            session_authority_conflict(
+                                &runtime_id,
+                                "completed WholeBlob recovery receipt has no conversation digest",
+                            )
+                        })?;
+                    let message_count = u64::try_from(receipt.message_count).map_err(|_| {
+                        session_authority_conflict(
+                            &runtime_id,
+                            "completed WholeBlob recovery message count exceeds durable range",
+                        )
+                    })?;
+                    promote_whole_blob_provisional_in_txn(
+                        &tx,
+                        &runtime_id,
+                        &expected,
+                        &receipt,
+                        conversation_digest,
+                        message_count,
+                        Some(runtime_state),
+                    )?
+                };
+                upsert_machine_lifecycle_snapshot(&tx, &runtime_id, &lifecycle_snapshot)?;
+                apply_recovery_receipt_digest_enrichments_in_txn(&tx, &runtime_id, &recovery)?;
+                insert_receipt(&tx, &runtime_id, &receipt)?;
+                upsert_input_states(&tx, &runtime_id, &input_updates)?;
+                insert_recovery_boundary_in_txn(&tx, &runtime_id, &recovery)?;
+                tx.commit()
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                Ok(PreparedRuntimeSessionCommitResult::recovery(
+                    RuntimeSessionAuthority::WholeBlob(committed),
+                    RecoveryCommitStatus::Committed,
+                ))
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
+        async fn commit_head_canonical_provisional_promotion(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            promotion: crate::store::PreparedHeadCanonicalProvisionalPromotion,
+            receipt: RunBoundaryReceipt,
+            machine_lifecycle: Option<MachineLifecycleCommit>,
+            input_updates: Vec<InputStatePersistenceRecord>,
+            session_store_key: meerkat_core::types::SessionId,
+        ) -> Result<(HeadCanonicalStoreAuthority, bool), RuntimeStoreError> {
+            self.require_head_canonical_session_operation(
+                runtime_id,
+                "commit_head_canonical_provisional_promotion",
+            )?;
+            let checkpoint = promotion.into_checkpoint();
+            let authority = checkpoint
+                .head_canonical()
+                .expect("HeadCanonical promotion constructor seals the profile")
+                .clone();
+            if authority.session_id() != &session_store_key {
+                return Err(RuntimeStoreError::SessionKeyMismatch {
+                    expected: authority.session_id().clone(),
+                    actual: session_store_key,
+                });
+            }
+            if receipt.conversation_digest.as_deref() != Some(checkpoint.conversation_digest())
+                || u64::try_from(receipt.message_count).ok() != Some(checkpoint.message_count())
+            {
+                return Err(session_authority_conflict(
+                    runtime_id,
+                    "HeadCanonical terminal receipt differs from its exact checkpoint digest/count",
+                ));
+            }
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            let input_updates = input_updates
+                .into_iter()
+                .map(InputStatePersistenceRecord::into_stored_and_expected)
+                .collect::<Vec<_>>();
+            tokio::task::spawn_blocking(move || {
+                let lifecycle_expected = machine_lifecycle
+                    .as_ref()
+                    .and_then(|commit| commit.expected_version().cloned());
+                let runtime_state = machine_lifecycle
+                    .as_ref()
+                    .map(MachineLifecycleCommit::runtime_state);
+                let lifecycle_snapshot =
+                    machine_lifecycle.map(MachineLifecycleCommit::into_snapshot);
+                let mut conn = open_head_canonical_runtime_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                let witness = prepare_head_canonical_promotion_witness(
+                    &runtime_id,
+                    &authority,
+                    &receipt,
+                    lifecycle_expected.as_ref(),
+                    lifecycle_snapshot.as_ref(),
+                    &input_updates,
+                )?;
+                if let Some(stored_digest) =
+                    load_ordinary_boundary_witness(&tx, &runtime_id, &witness.boundary_key)?
+                {
+                    if stored_digest != witness.request_digest {
+                        return Err(session_authority_conflict(
+                            &runtime_id,
+                            "HeadCanonical promotion boundary identity belongs to a divergent request",
+                        ));
+                    }
+                    match load_boundary_receipt(&tx, &runtime_id, &receipt)? {
+                        Some(stored) if stored == receipt => {}
+                        _ => {
+                            return Err(session_authority_conflict(
+                                &runtime_id,
+                                "HeadCanonical promotion witness has no exact durable receipt",
+                            ));
+                        }
+                    }
+                    let current = load_head_canonical_authority(&tx, &runtime_id)?
+                        .and_then(|current| current.head_canonical().cloned())
+                        .ok_or_else(|| {
+                            session_authority_conflict(
+                                &runtime_id,
+                                "HeadCanonical promotion witness has no committed authority",
+                            )
+                        })?;
+                    let final_revision = authority
+                        .physical_store_revision()
+                        .checked_add(1)
+                        .ok_or_else(|| {
+                            session_authority_conflict(
+                                &runtime_id,
+                                "HeadCanonical promotion retry revision overflow",
+                            )
+                        })?;
+                    if current.session_id() != authority.session_id()
+                        || current.store_revision() != final_revision
+                        || current.committed_head_token() != authority.physical_head_token()
+                        || load_head_canonical_provisional_tail_authority(&tx, &runtime_id)?
+                            .is_some()
+                    {
+                        return Err(session_authority_conflict(
+                            &runtime_id,
+                            "HeadCanonical promotion witness has been superseded",
+                        ));
+                    }
+                    let (physical_head, physical_token) =
+                        meerkat_store::sqlite_store::load_head_canonical_for_runtime_in_txn(
+                            &tx,
+                            authority.session_id(),
+                        )
+                        .map_err(|error| {
+                            map_head_canonical_session_store_error(&runtime_id, error)
+                        })?
+                        .ok_or_else(|| {
+                            session_authority_conflict(
+                                &runtime_id,
+                                "HeadCanonical promotion retry has no physical head",
+                            )
+                        })?;
+                    if physical_token != authority.physical_head_token()
+                        || &physical_head != current.boundary_head()
+                    {
+                        return Err(session_authority_conflict(
+                            &runtime_id,
+                            "HeadCanonical promotion retry physical head was superseded",
+                        ));
+                    }
+                    verify_current_ordinary_boundary_effects(
+                        &tx,
+                        &runtime_id,
+                        None,
+                        lifecycle_snapshot.as_ref(),
+                        &input_updates,
+                    )?;
+                    let current_catalog =
+                        load_runtime_session_catalog_entry_in_txn(&tx, &runtime_id)?;
+                    let expected_runtime_state = runtime_state.or_else(|| {
+                        current_catalog
+                            .as_ref()
+                            .and_then(|entry| entry.runtime_state())
+                    });
+                    let expected_catalog = crate::store::RuntimeSessionCatalogEntry::from_head(
+                        &physical_head,
+                        RuntimeSessionPersistenceProfile::HeadCanonicalV1,
+                        expected_runtime_state,
+                    )?;
+                    if current_catalog != Some(expected_catalog) {
+                        return Err(session_authority_conflict(
+                            &runtime_id,
+                            "HeadCanonical promotion retry catalog was superseded",
+                        ));
+                    }
+                    tx.commit()
+                        .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                    return Ok((current, true));
+                }
+                if let Some(expected) = &lifecycle_expected {
+                    enforce_machine_lifecycle_expected_version(&tx, &runtime_id, expected)?;
+                }
+                let committed = promote_head_canonical_provisional_in_txn(
+                    &tx,
+                    &runtime_id,
+                    &authority,
+                    &receipt,
+                    runtime_state,
+                )?;
+                if let Some(snapshot) = lifecycle_snapshot.as_ref() {
+                    upsert_machine_lifecycle_snapshot(&tx, &runtime_id, snapshot)?;
+                }
+                insert_receipt(&tx, &runtime_id, &receipt)?;
+                upsert_input_states(&tx, &runtime_id, &input_updates)?;
+                insert_ordinary_boundary_witness_in_txn(&tx, &runtime_id, &witness)?;
+                tx.commit()
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                Ok((committed, false))
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
     }
 
     #[async_trait::async_trait]
     impl RuntimeStore for SqliteRuntimeStore {
+        fn session_persistence_profile(&self) -> RuntimeSessionPersistenceProfile {
+            self.session_persistence_profile
+        }
+
+        fn session_boundary_authority_read_cost(&self) -> RuntimeSessionAuthorityReadCost {
+            RuntimeSessionAuthorityReadCost::Bounded
+        }
+
+        fn input_state_batch_cas_implementation_profile(
+            &self,
+        ) -> InputStateBatchCasImplementationProfile {
+            InputStateBatchCasImplementationProfile::MultiWriter
+        }
+
+        async fn commit_prepared_session_boundary(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            request: PreparedRuntimeSessionCommit,
+        ) -> Result<PreparedRuntimeSessionCommitResult, RuntimeStoreError> {
+            if self.session_persistence_profile == RuntimeSessionPersistenceProfile::WholeBlobV1 {
+                let authority = match request.into_payload() {
+                    PreparedRuntimeSessionCommitPayload::SnapshotOnly { session } => {
+                        self.commit_prepared_whole_blob_boundary(
+                            runtime_id,
+                            Some(crate::store::prepared_whole_blob_snapshot(&session)?),
+                            None,
+                            None,
+                            Vec::new(),
+                            None,
+                        )
+                        .await?
+                    }
+                    PreparedRuntimeSessionCommitPayload::Success {
+                        session,
+                        receipt,
+                        input_updates,
+                        session_store_key,
+                    } => {
+                        let prepared = session
+                            .as_ref()
+                            .map(crate::store::prepared_whole_blob_snapshot)
+                            .transpose()?;
+                        self.commit_prepared_whole_blob_boundary(
+                            runtime_id,
+                            prepared,
+                            Some(receipt),
+                            None,
+                            input_updates,
+                            session_store_key,
+                        )
+                        .await?
+                    }
+                    PreparedRuntimeSessionCommitPayload::PromoteWholeBlobSuccess {
+                        promotion,
+                        receipt,
+                        input_updates,
+                        session_store_key,
+                    } => Some(
+                        self.commit_whole_blob_provisional_promotion(
+                            runtime_id,
+                            promotion,
+                            receipt,
+                            None,
+                            input_updates,
+                            session_store_key,
+                        )
+                        .await?,
+                    ),
+                    PreparedRuntimeSessionCommitPayload::ServiceTurnTerminal {
+                        session,
+                        receipt,
+                        machine_lifecycle,
+                        session_store_key,
+                    } => self
+                        .commit_prepared_whole_blob_boundary(
+                            runtime_id,
+                            Some(crate::store::prepared_whole_blob_snapshot(&session)?),
+                            Some(receipt),
+                            Some(machine_lifecycle),
+                            Vec::new(),
+                            Some(session_store_key),
+                        )
+                        .await?,
+                    PreparedRuntimeSessionCommitPayload::PromoteWholeBlobServiceTurnTerminal {
+                        promotion,
+                        receipt,
+                        machine_lifecycle,
+                        session_store_key,
+                    } => Some(
+                        self.commit_whole_blob_provisional_promotion(
+                            runtime_id,
+                            promotion,
+                            receipt,
+                            Some(machine_lifecycle),
+                            Vec::new(),
+                            session_store_key,
+                        )
+                        .await?,
+                    ),
+                    PreparedRuntimeSessionCommitPayload::MachineTerminal {
+                        session,
+                        receipt,
+                        machine_lifecycle,
+                        input_updates,
+                        session_store_key,
+                    } => self
+                        .commit_prepared_whole_blob_boundary(
+                            runtime_id,
+                            Some(crate::store::prepared_whole_blob_snapshot(&session)?),
+                            Some(receipt),
+                            Some(machine_lifecycle),
+                            input_updates,
+                            Some(session_store_key),
+                        )
+                        .await?,
+                    PreparedRuntimeSessionCommitPayload::PromoteWholeBlobMachineTerminal {
+                        promotion,
+                        receipt,
+                        machine_lifecycle,
+                        input_updates,
+                        session_store_key,
+                    } => Some(
+                        self.commit_whole_blob_provisional_promotion(
+                            runtime_id,
+                            promotion,
+                            receipt,
+                            Some(machine_lifecycle),
+                            input_updates,
+                            session_store_key,
+                        )
+                        .await?,
+                    ),
+                    PreparedRuntimeSessionCommitPayload::PromoteWholeBlobRecovery {
+                        promotion,
+                        evidence,
+                        receipt,
+                        machine_lifecycle,
+                        input_updates,
+                        session_store_key,
+                    } => {
+                        return self
+                            .commit_whole_blob_recovery(
+                                runtime_id,
+                                promotion,
+                                evidence,
+                                receipt,
+                                machine_lifecycle,
+                                input_updates,
+                                session_store_key,
+                            )
+                            .await;
+                    }
+                    PreparedRuntimeSessionCommitPayload::PromoteHeadCanonicalSuccess { .. }
+                    | PreparedRuntimeSessionCommitPayload::PromoteHeadCanonicalServiceTurnTerminal {
+                        ..
+                    }
+                    | PreparedRuntimeSessionCommitPayload::PromoteHeadCanonicalMachineTerminal {
+                        ..
+                    } => {
+                        return Err(session_authority_conflict(
+                            runtime_id,
+                            "HeadCanonical promotion cannot commit through a WholeBlob store",
+                        ));
+                    }
+                    PreparedRuntimeSessionCommitPayload::Recovery { .. } => {
+                        return Err(
+                            RuntimeStoreError::PreparedRecoveryRequiresAtomicPhysicalHeadCas {
+                                profile: RuntimeSessionPersistenceProfile::WholeBlobV1,
+                            },
+                        );
+                    }
+                };
+                return Ok(match authority {
+                    Some(authority) => PreparedRuntimeSessionCommitResult::committed(authority),
+                    None => PreparedRuntimeSessionCommitResult::receipt_only(
+                        RuntimeSessionPersistenceProfile::WholeBlobV1,
+                    ),
+                });
+            }
+
+            let payload = match request.into_payload() {
+                PreparedRuntimeSessionCommitPayload::PromoteHeadCanonicalSuccess {
+                    promotion,
+                    receipt,
+                    input_updates,
+                    session_store_key,
+                } => {
+                    let (authority, already_applied) = self
+                        .commit_head_canonical_provisional_promotion(
+                            runtime_id,
+                            promotion,
+                            receipt,
+                            None,
+                            input_updates,
+                            session_store_key,
+                        )
+                        .await?;
+                    let result = PreparedRuntimeSessionCommitResult::committed(
+                        RuntimeSessionAuthority::HeadCanonical(authority),
+                    );
+                    return Ok(if already_applied {
+                        result.already_applied_exact()
+                    } else {
+                        result
+                    });
+                }
+                PreparedRuntimeSessionCommitPayload::PromoteHeadCanonicalServiceTurnTerminal {
+                    promotion,
+                    receipt,
+                    machine_lifecycle,
+                    session_store_key,
+                } => {
+                    let (authority, already_applied) = self
+                        .commit_head_canonical_provisional_promotion(
+                            runtime_id,
+                            promotion,
+                            receipt,
+                            Some(machine_lifecycle),
+                            Vec::new(),
+                            session_store_key,
+                        )
+                        .await?;
+                    let result = PreparedRuntimeSessionCommitResult::committed(
+                        RuntimeSessionAuthority::HeadCanonical(authority),
+                    );
+                    return Ok(if already_applied {
+                        result.already_applied_exact()
+                    } else {
+                        result
+                    });
+                }
+                PreparedRuntimeSessionCommitPayload::PromoteHeadCanonicalMachineTerminal {
+                    promotion,
+                    receipt,
+                    machine_lifecycle,
+                    input_updates,
+                    session_store_key,
+                } => {
+                    let (authority, already_applied) = self
+                        .commit_head_canonical_provisional_promotion(
+                            runtime_id,
+                            promotion,
+                            receipt,
+                            Some(machine_lifecycle),
+                            input_updates,
+                            session_store_key,
+                        )
+                        .await?;
+                    let result = PreparedRuntimeSessionCommitResult::committed(
+                        RuntimeSessionAuthority::HeadCanonical(authority),
+                    );
+                    return Ok(if already_applied {
+                        result.already_applied_exact()
+                    } else {
+                        result
+                    });
+                }
+                PreparedRuntimeSessionCommitPayload::PromoteWholeBlobSuccess { .. }
+                | PreparedRuntimeSessionCommitPayload::PromoteWholeBlobServiceTurnTerminal {
+                    ..
+                }
+                | PreparedRuntimeSessionCommitPayload::PromoteWholeBlobMachineTerminal { .. }
+                | PreparedRuntimeSessionCommitPayload::PromoteWholeBlobRecovery { .. } => {
+                    return Err(session_authority_conflict(
+                        runtime_id,
+                        "WholeBlob promotion cannot commit through a HeadCanonical store",
+                    ));
+                }
+                payload => payload,
+            };
+
+            let (
+                prepared_session,
+                receipt,
+                input_updates,
+                lifecycle_expected,
+                lifecycle_snapshot,
+                recovery_boundary,
+            ) = match payload {
+                PreparedRuntimeSessionCommitPayload::SnapshotOnly { session } => (
+                    Some(prepare_head_canonical_sqlite_session(
+                        runtime_id, &session, None,
+                    )?),
+                    None,
+                    Vec::new(),
+                    None,
+                    None,
+                    None,
+                ),
+                PreparedRuntimeSessionCommitPayload::Success {
+                    session,
+                    receipt,
+                    input_updates,
+                    session_store_key,
+                } => (
+                    session
+                        .as_ref()
+                        .map(|session| {
+                            prepare_head_canonical_sqlite_session(
+                                runtime_id,
+                                session,
+                                session_store_key.as_ref(),
+                            )
+                        })
+                        .transpose()?,
+                    Some(receipt),
+                    input_updates
+                        .into_iter()
+                        .map(InputStatePersistenceRecord::into_stored_and_expected)
+                        .collect(),
+                    None,
+                    None,
+                    None,
+                ),
+                PreparedRuntimeSessionCommitPayload::ServiceTurnTerminal {
+                    session,
+                    receipt,
+                    machine_lifecycle,
+                    session_store_key,
+                } => {
+                    let expected = machine_lifecycle.expected_version().cloned();
+                    let snapshot = machine_lifecycle.into_snapshot();
+                    (
+                        Some(prepare_head_canonical_sqlite_session(
+                            runtime_id,
+                            &session,
+                            Some(&session_store_key),
+                        )?),
+                        Some(receipt),
+                        Vec::new(),
+                        expected,
+                        Some(snapshot),
+                        None,
+                    )
+                }
+                PreparedRuntimeSessionCommitPayload::MachineTerminal {
+                    session,
+                    receipt,
+                    machine_lifecycle,
+                    input_updates,
+                    session_store_key,
+                } => {
+                    let expected = machine_lifecycle.expected_version().cloned();
+                    let snapshot = machine_lifecycle.into_snapshot();
+                    (
+                        Some(prepare_head_canonical_sqlite_session(
+                            runtime_id,
+                            &session,
+                            Some(&session_store_key),
+                        )?),
+                        Some(receipt),
+                        input_updates
+                            .into_iter()
+                            .map(InputStatePersistenceRecord::into_stored_and_expected)
+                            .collect(),
+                        expected,
+                        Some(snapshot),
+                        None,
+                    )
+                }
+                PreparedRuntimeSessionCommitPayload::Recovery {
+                    session,
+                    evidence,
+                    receipt,
+                    machine_lifecycle,
+                    input_updates,
+                    session_store_key,
+                } => {
+                    let prepared = prepare_head_canonical_sqlite_session(
+                        runtime_id,
+                        &session,
+                        Some(&session_store_key),
+                    )?;
+                    validate_prepared_recovery_request_binding(
+                        runtime_id,
+                        &session,
+                        &evidence,
+                        &input_updates,
+                        &receipt,
+                        &machine_lifecycle,
+                    )?;
+                    let recovery = CommittedRecoveryBoundary::from_prepared(&evidence, &receipt);
+                    validate_prepared_recovery_sqlite_session(
+                        runtime_id, &session, &prepared, &recovery,
+                    )?;
+                    let expected = machine_lifecycle.expected_version().cloned();
+                    let snapshot = machine_lifecycle.into_snapshot();
+                    (
+                        Some(prepared),
+                        Some(receipt),
+                        input_updates
+                            .into_iter()
+                            .map(InputStatePersistenceRecord::into_stored_and_expected)
+                            .collect(),
+                        expected,
+                        Some(snapshot),
+                        Some(recovery),
+                    )
+                }
+                PreparedRuntimeSessionCommitPayload::PromoteWholeBlobSuccess { .. }
+                | PreparedRuntimeSessionCommitPayload::PromoteHeadCanonicalSuccess { .. }
+                | PreparedRuntimeSessionCommitPayload::PromoteWholeBlobServiceTurnTerminal {
+                    ..
+                }
+                | PreparedRuntimeSessionCommitPayload::PromoteHeadCanonicalServiceTurnTerminal {
+                    ..
+                }
+                | PreparedRuntimeSessionCommitPayload::PromoteWholeBlobMachineTerminal { .. }
+                | PreparedRuntimeSessionCommitPayload::PromoteHeadCanonicalMachineTerminal {
+                    ..
+                }
+                | PreparedRuntimeSessionCommitPayload::PromoteWholeBlobRecovery { .. } => {
+                    unreachable!(
+                        "profile-specific promotion payloads return from the dispatch match above"
+                    )
+                }
+            };
+
+            let ordinary_witness = if recovery_boundary.is_none() {
+                Some(prepare_ordinary_boundary_witness(
+                    runtime_id,
+                    prepared_session.as_ref(),
+                    receipt.as_ref(),
+                    lifecycle_expected.as_ref(),
+                    lifecycle_snapshot.as_ref(),
+                    &input_updates,
+                )?)
+            } else {
+                None
+            };
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut conn = open_head_canonical_runtime_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                let mut newly_installed_head_authority = None;
+                let successor_authority = prepared_session
+                    .as_ref()
+                    .map(|prepared| {
+                        issue_head_canonical_authority_in_txn(
+                            &tx,
+                            &runtime_id,
+                            prepared.successor_head.clone(),
+                        )
+                    })
+                    .transpose()?;
+                let result = match successor_authority.as_ref() {
+                    Some(authority) => {
+                        PreparedRuntimeSessionCommitResult::committed(authority.clone())
+                    }
+                    None => PreparedRuntimeSessionCommitResult::receipt_only(
+                        RuntimeSessionPersistenceProfile::HeadCanonicalV1,
+                    ),
+                };
+
+                if let Some(recovery) = recovery_boundary.as_ref() {
+                    let prepared = prepared_session.as_ref().ok_or_else(|| {
+                        session_authority_conflict(
+                            &runtime_id,
+                            "prepared recovery has no head-canonical session mutation",
+                        )
+                    })?;
+                    let successor_authority = successor_authority.as_ref().ok_or_else(|| {
+                        session_authority_conflict(
+                            &runtime_id,
+                            "prepared recovery has no issued HeadCanonical successor authority",
+                        )
+                    })?;
+                    let receipt = receipt.as_ref().ok_or_else(|| {
+                        session_authority_conflict(
+                            &runtime_id,
+                            "prepared recovery has no exact boundary receipt",
+                        )
+                    })?;
+                    let lifecycle_expected =
+                        lifecycle_expected.as_ref().ok_or_else(|| {
+                            session_authority_conflict(
+                                &runtime_id,
+                                "prepared recovery lifecycle is not fenced on an exact observed row",
+                            )
+                        })?;
+                    let lifecycle_snapshot =
+                        lifecycle_snapshot.as_ref().ok_or_else(|| {
+                            session_authority_conflict(
+                                &runtime_id,
+                                "prepared recovery has no machine lifecycle target",
+                            )
+                        })?;
+                    let evidence = recovery.evidence();
+
+                    if let Some(stored) = load_recovery_boundary(
+                        &tx,
+                        &runtime_id,
+                        evidence.candidate_id(),
+                    )? {
+                        if stored != *recovery {
+                            return Err(session_authority_conflict(
+                                &runtime_id,
+                                "a divergent recovery boundary already exists for this candidate",
+                            ));
+                        }
+                        let current_authority =
+                            load_head_canonical_authority(&tx, &runtime_id)?
+                                .ok_or_else(|| {
+                                    session_authority_conflict(
+                                        &runtime_id,
+                                        "committed recovery witness has no current runtime authority",
+                                    )
+                                })?;
+                        if &current_authority != successor_authority {
+                            return Err(session_authority_conflict(
+                                &runtime_id,
+                                "committed recovery boundary has been superseded by newer runtime authority",
+                            ));
+                        }
+                        let (physical_head, physical_token) =
+                            meerkat_store::sqlite_store::load_head_canonical_for_runtime_in_txn(
+                                &tx,
+                                prepared.mutation.session_id(),
+                            )
+                            .map_err(|error| {
+                                map_head_canonical_session_store_error(
+                                    &runtime_id,
+                                    error,
+                                )
+                            })?
+                            .ok_or_else(|| {
+                                session_authority_conflict(
+                                    &runtime_id,
+                                    "committed recovery witness has no current physical head",
+                                )
+                            })?;
+                        if &physical_head
+                            != prepared.mutation.successor_head()
+                            || physical_token
+                                != prepared
+                                    .mutation
+                                    .successor_head_token()
+                        {
+                            return Err(session_authority_conflict(
+                                &runtime_id,
+                                "committed recovery boundary has been superseded by a newer physical head",
+                            ));
+                        }
+                        verify_prepared_suffix_rows_for_exact_retry(
+                            &tx,
+                            &runtime_id,
+                            prepared,
+                        )?;
+                        let lifecycle_target =
+                            MachineLifecycleStoreRecord::from_snapshot(
+                                lifecycle_snapshot,
+                            )
+                            .encode()?;
+                        let current_lifecycle = tx
+                            .query_row(
+                                r"
+                                SELECT runtime_state_json
+                                FROM runtime_states
+                                WHERE runtime_id = ?1
+                                ",
+                                params![runtime_id_text(&runtime_id)],
+                                |row| {
+                                    Ok(row
+                                        .get::<_, JsonColumnBytes>(0)?
+                                        .into_bytes())
+                                },
+                            )
+                            .optional()
+                            .map_err(|error| {
+                                RuntimeStoreError::ReadFailed(
+                                    error.to_string(),
+                                )
+                            })?;
+                        if current_lifecycle.as_deref()
+                            != Some(lifecycle_target.as_slice())
+                        {
+                            return Err(session_authority_conflict(
+                                &runtime_id,
+                                "committed recovery lifecycle target has been superseded",
+                            ));
+                        }
+                        for (input, _) in &input_updates {
+                            let target =
+                                serde_json::to_vec(input).map_err(|error| {
+                                    RuntimeStoreError::WriteFailed(
+                                        error.to_string(),
+                                    )
+                                })?;
+                            let current = tx
+                                .query_row(
+                                    r"
+                                    SELECT state_json
+                                    FROM runtime_input_states
+                                    WHERE runtime_id = ?1 AND input_id = ?2
+                                    ",
+                                    params![
+                                        runtime_id_text(&runtime_id),
+                                        input.state.input_id.0.to_string(),
+                                    ],
+                                    |row| {
+                                        Ok(row
+                                            .get::<_, JsonColumnBytes>(0)?
+                                            .into_bytes())
+                                    },
+                                )
+                                .optional()
+                                .map_err(|error| {
+                                    RuntimeStoreError::ReadFailed(
+                                        error.to_string(),
+                                    )
+                                })?;
+                            if current.as_deref()
+                                != Some(target.as_slice())
+                            {
+                                return Err(session_authority_conflict(
+                                    &runtime_id,
+                                    format!(
+                                        "committed recovery input {} has been superseded",
+                                        input.state.input_id
+                                    ),
+                                ));
+                            }
+                        }
+                        verify_recovery_receipt_digest_enrichments_in_txn(
+                            &tx,
+                            &runtime_id,
+                            recovery,
+                        )?;
+                        tx.commit().map_err(|error| {
+                            RuntimeStoreError::WriteFailed(error.to_string())
+                        })?;
+                        return Ok(PreparedRuntimeSessionCommitResult::recovery(
+                            successor_authority.clone(),
+                            RecoveryCommitStatus::AlreadyCommittedExact,
+                        ));
+                    }
+
+                    let current_authority =
+                        load_head_canonical_authority(&tx, &runtime_id)?
+                            .ok_or_else(|| {
+                                session_authority_conflict(
+                                    &runtime_id,
+                                    "prepared recovery requires existing head-canonical runtime authority",
+                                )
+                            })?;
+                    let (
+                        committed_store_revision,
+                        committed_head_token,
+                        physical_store_revision,
+                        physical_head_token,
+                        recovered_head_token,
+                    ) = evidence.head_canonical_authority_transition().ok_or_else(|| {
+                        session_authority_conflict(
+                            &runtime_id,
+                            "HeadCanonical recovery evidence carries no HeadCanonical authority transition",
+                        )
+                    })?;
+                    let committed_authority =
+                        current_authority.head_canonical().ok_or_else(|| {
+                            session_authority_conflict(
+                                &runtime_id,
+                                "current recovery authority is not HeadCanonical",
+                            )
+                        })?;
+                    if committed_authority.session_id() != evidence.session_id()
+                        || committed_authority.store_revision() != committed_store_revision
+                        || committed_authority.committed_head_token() != committed_head_token
+                    {
+                        return Err(session_authority_conflict(
+                            &runtime_id,
+                            "current runtime authority does not match the sealed recovery predecessor",
+                        ));
+                    }
+                    // Fence the small, indexed classification surface before
+                    // re-materializing either session document. BEGIN
+                    // IMMEDIATE already excludes a concurrent writer, so one
+                    // exact check here remains valid through commit.
+                    enforce_recovery_input_set_authority(
+                        &tx,
+                        &runtime_id,
+                        evidence.predecessor_nonterminal_input_set_revision(),
+                        evidence.predecessor_nonterminal_input_set_token(),
+                    )?;
+                    verify_materialized_head_authority_in_txn(
+                        &tx,
+                        &runtime_id,
+                        &current_authority,
+                    )?;
+                    let provisional =
+                        load_head_canonical_provisional_tail_authority(&tx, &runtime_id)?
+                            .ok_or_else(|| {
+                                session_authority_conflict(
+                                    &runtime_id,
+                                    "prepared recovery has no provisional HeadCanonical authority",
+                                )
+                            })?;
+                    if provisional.session_id() != committed_authority.session_id()
+                        || provisional.base_store_revision() != committed_store_revision
+                        || provisional.base_committed_head_token() != committed_head_token
+                        || provisional.physical_store_revision() != physical_store_revision
+                        || provisional.physical_head_token() != physical_head_token
+                        || provisional.run_id() != evidence.candidate_run_id()
+                    {
+                        return Err(session_authority_conflict(
+                            &runtime_id,
+                            "provisional HeadCanonical authority differs from sealed recovery evidence",
+                        ));
+                    }
+
+                    let (physical_head, physical_token) =
+                        meerkat_store::sqlite_store::load_head_canonical_for_runtime_in_txn(
+                            &tx,
+                            evidence.session_id(),
+                        )
+                        .map_err(|error| {
+                            map_head_canonical_session_store_error(
+                                &runtime_id,
+                                error,
+                            )
+                        })?
+                        .ok_or_else(|| {
+                            session_authority_conflict(
+                                &runtime_id,
+                                "prepared recovery physical head is absent",
+                            )
+                        })?;
+                    if Some(&physical_head)
+                        != prepared.mutation.predecessor_head()
+                        || physical_token != physical_head_token
+                    {
+                        return Err(session_authority_conflict(
+                            &runtime_id,
+                            "current physical head differs from sealed recovery evidence",
+                        ));
+                    }
+                    let runtime_head = committed_authority.boundary_head();
+                    meerkat_store::sqlite_store::verify_head_rewrite_prefix_descent_in_txn(
+                        &tx,
+                        runtime_head,
+                        &physical_head,
+                    )
+                    .map_err(|error| {
+                        map_head_canonical_session_store_error(&runtime_id, error)
+                    })?;
+                    let successor = successor_authority.head_canonical().ok_or_else(|| {
+                        session_authority_conflict(
+                            &runtime_id,
+                            "prepared recovery successor is not HeadCanonical",
+                        )
+                    })?;
+                    if successor.store_revision()
+                        != physical_store_revision.checked_add(1).ok_or_else(|| {
+                            session_authority_conflict(
+                                &runtime_id,
+                                "physical HeadCanonical store revision overflow",
+                            )
+                        })?
+                        || successor.committed_head_token() != recovered_head_token
+                    {
+                        return Err(session_authority_conflict(
+                            &runtime_id,
+                            "prepared recovery successor differs from sealed HeadCanonical authority evidence",
+                        ));
+                    }
+
+                    enforce_machine_lifecycle_expected_version(
+                        &tx,
+                        &runtime_id,
+                        lifecycle_expected,
+                    )?;
+                    reject_finalized_compaction_projection_replays(
+                        &tx,
+                        &runtime_id,
+                        &prepared.compaction_intents,
+                    )?;
+                    apply_prepared_head_canonical_physical_mutation_in_txn(
+                        &tx,
+                        &runtime_id,
+                        prepared,
+                    )?;
+                    write_head_canonical_authority_in_txn(
+                        &tx,
+                        &runtime_id,
+                        successor_authority,
+                    )?;
+                    clear_runtime_projection_quarantine(&tx, &runtime_id)?;
+                    insert_compaction_projection_outbox_intents(
+                        &tx,
+                        &runtime_id,
+                        &prepared.compaction_intents,
+                    )?;
+                    let mut catalog_entry = prepared.catalog_entry.clone();
+                    catalog_entry.set_runtime_state(Some(lifecycle_snapshot.runtime_state()));
+                    upsert_runtime_session_catalog_entry_in_txn(
+                        &tx,
+                        &runtime_id,
+                        &catalog_entry,
+                    )?;
+                    upsert_machine_lifecycle_snapshot(
+                        &tx,
+                        &runtime_id,
+                        lifecycle_snapshot,
+                    )?;
+                    apply_recovery_receipt_digest_enrichments_in_txn(
+                        &tx,
+                        &runtime_id,
+                        recovery,
+                    )?;
+                    insert_receipt(&tx, &runtime_id, receipt)?;
+                    upsert_input_states(&tx, &runtime_id, &input_updates)?;
+                    insert_recovery_boundary_in_txn(
+                        &tx,
+                        &runtime_id,
+                        recovery,
+                    )?;
+                    tx.commit().map_err(|error| {
+                        RuntimeStoreError::WriteFailed(error.to_string())
+                    })?;
+                    return Ok(PreparedRuntimeSessionCommitResult::recovery(
+                        successor_authority.clone(),
+                        RecoveryCommitStatus::Committed,
+                    ));
+                }
+
+                let witness = ordinary_witness.as_ref().ok_or_else(|| {
+                    session_authority_conflict(
+                        &runtime_id,
+                        "ordinary boundary has no exact request witness",
+                    )
+                })?;
+                if let Some(stored_digest) = load_ordinary_boundary_witness(
+                    &tx,
+                    &runtime_id,
+                    &witness.boundary_key,
+                )? {
+                    if stored_digest != witness.request_digest {
+                        return Err(session_authority_conflict(
+                            &runtime_id,
+                            "ordinary boundary identity already belongs to a divergent request",
+                        ));
+                    }
+                    if let Some(receipt) = receipt.as_ref() {
+                        match load_boundary_receipt(&tx, &runtime_id, receipt)? {
+                            Some(stored) if stored == *receipt => {}
+                            Some(_) => {
+                                return Err(session_authority_conflict(
+                                    &runtime_id,
+                                    "ordinary boundary witness and durable receipt differ",
+                                ));
+                            }
+                            None => {
+                                return Err(session_authority_conflict(
+                                    &runtime_id,
+                                    "ordinary boundary witness has no atomic durable receipt",
+                                ));
+                            }
+                        }
+                    }
+                    if let Some(prepared) = prepared_session.as_ref() {
+                        let prepared_successor =
+                            successor_authority.as_ref().ok_or_else(|| {
+                                session_authority_conflict(
+                                    &runtime_id,
+                                    "ordinary boundary has no issued HeadCanonical successor",
+                                )
+                            })?;
+                        let current =
+                            load_head_canonical_authority(&tx, &runtime_id)?
+                                .ok_or_else(|| {
+                                    session_authority_conflict(
+                                        &runtime_id,
+                                        "ordinary boundary witness has no current runtime session authority",
+                                    )
+                                })?;
+                        if current.session_id() != prepared_successor.session_id() {
+                            return Err(session_authority_conflict(
+                                &runtime_id,
+                                "ordinary boundary witness belongs to a different current session",
+                            ));
+                        }
+                        if &current == prepared_successor {
+                            // While this boundary remains current, recheck
+                            // only its delta rows. After a later rewrite, the
+                            // session store may legally prune the superseded
+                            // strand; the atomic durable witness then remains
+                            // the historical proof that this exact request
+                            // committed.
+                            verify_prepared_suffix_rows_for_exact_retry(
+                                &tx,
+                                &runtime_id,
+                                prepared,
+                            )?;
+                        }
+                    }
+                    tx.commit().map_err(|error| {
+                        RuntimeStoreError::WriteFailed(error.to_string())
+                    })?;
+                    return Ok(result.already_applied_exact());
+                }
+
+                // Supported-floor adoption: exact 0.8.10 could atomically
+                // commit receipt/session/lifecycle/input effects before the
+                // current request-witness table existed. Only a receipt copied
+                // into the migration allowlist may enter this path. Current
+                // stores missing a witness fail closed instead of being
+                // mistaken for legacy state.
+                if let Some(receipt) = receipt.as_ref() {
+                    match load_boundary_receipt(&tx, &runtime_id, receipt)? {
+                        Some(stored) if stored == *receipt => {
+                            let marker = load_released_0810_boundary_receipt_marker(
+                                &tx,
+                                &runtime_id,
+                                receipt,
+                            )?
+                            .ok_or_else(|| {
+                                session_authority_conflict(
+                                    &runtime_id,
+                                    "boundary receipt has no request witness and no exact released 0.8.10 migration marker",
+                                )
+                            })?;
+                            if let Some(prepared) = prepared_session.as_ref() {
+                                let prepared_successor =
+                                    successor_authority.as_ref().ok_or_else(|| {
+                                        session_authority_conflict(
+                                            &runtime_id,
+                                            "released boundary has no issued HeadCanonical successor",
+                                        )
+                                    })?;
+                                let current =
+                                    load_head_canonical_authority(&tx, &runtime_id)?
+                                        .ok_or_else(|| {
+                                            session_authority_conflict(
+                                                &runtime_id,
+                                                "released boundary has no current runtime session authority",
+                                            )
+                                        })?;
+                                if &current != prepared_successor {
+                                    return Err(session_authority_conflict(
+                                        &runtime_id,
+                                        "released boundary cannot prove the prepared session successor is still current",
+                                    ));
+                                }
+                                verify_prepared_suffix_rows_for_exact_retry(
+                                    &tx,
+                                    &runtime_id,
+                                    prepared,
+                                )?;
+                            }
+                            // Released receipts bind the committed boundary but
+                            // do not retain prior lifecycle/input CAS tokens.
+                            // Reject unprovable fences, then verify every
+                            // surviving effect exactly; the migration marker
+                            // authorizes selecting this request as the one
+                            // current witnessed form.
+                            verify_released_0810_boundary_effects_for_adoption(
+                                &tx,
+                                &runtime_id,
+                                prepared_session.as_ref(),
+                                lifecycle_expected.as_ref(),
+                                lifecycle_snapshot.as_ref(),
+                                &input_updates,
+                            )?;
+                            insert_ordinary_boundary_witness_in_txn(
+                                &tx,
+                                &runtime_id,
+                                witness,
+                            )?;
+                            consume_released_0810_boundary_receipt_marker(
+                                &tx,
+                                &runtime_id,
+                                receipt,
+                                &marker,
+                            )?;
+                            tx.commit().map_err(|error| {
+                                RuntimeStoreError::WriteFailed(error.to_string())
+                            })?;
+                            return Ok(result.already_applied_released_equivalent());
+                        }
+                        Some(_) => {
+                            return Err(session_authority_conflict(
+                                &runtime_id,
+                                "boundary receipt conflicts with the prepared request",
+                            ));
+                        }
+                        None => {}
+                    }
+                }
+
+                if let Some(prepared) = prepared_session.as_ref() {
+                    let prepared_successor =
+                        successor_authority.as_ref().ok_or_else(|| {
+                            session_authority_conflict(
+                                &runtime_id,
+                                "prepared ordinary boundary has no issued HeadCanonical successor",
+                            )
+                        })?;
+                    let current_authority =
+                        load_head_canonical_authority(&tx, &runtime_id)?;
+                    if current_authority.as_ref() == Some(prepared_successor) {
+                        verify_prepared_suffix_rows_for_exact_retry(
+                            &tx,
+                            &runtime_id,
+                            prepared,
+                        )?;
+                        if let Some(receipt) = receipt.as_ref() {
+                            match load_boundary_receipt(
+                                &tx,
+                                &runtime_id,
+                                receipt,
+                            )? {
+                                Some(stored) if stored == *receipt => {
+                                    return Err(session_authority_conflict(
+                                        &runtime_id,
+                                        "a boundary receipt exists without its exact request witness",
+                                    ));
+                                }
+                                Some(_) => {
+                                    return Err(session_authority_conflict(
+                                        &runtime_id,
+                                        "successor authority exists but its boundary receipt conflicts",
+                                    ));
+                                }
+                                None => {
+                                    return Err(session_authority_conflict(
+                                        &runtime_id,
+                                        "successor authority exists without its atomic boundary receipt",
+                                    ));
+                                }
+                            }
+                        } else {
+                            insert_ordinary_boundary_witness_in_txn(
+                                &tx,
+                                &runtime_id,
+                                witness,
+                            )?;
+                            tx.commit().map_err(|error| {
+                                RuntimeStoreError::WriteFailed(error.to_string())
+                            })?;
+                            return Ok(result.already_applied_exact());
+                        }
+                    }
+
+                    match current_authority.as_ref() {
+                        Some(current) => {
+                            if prepared.mutation.predecessor_head().is_none() {
+                                return Err(session_authority_conflict(
+                                    &runtime_id,
+                                    "existing head-canonical authority cannot be replaced by a root mutation",
+                                ));
+                            }
+                            let current = current.head_canonical().ok_or_else(|| {
+                                session_authority_conflict(
+                                    &runtime_id,
+                                    "stored authority is not HeadCanonical",
+                                )
+                            })?;
+                            let runtime_head = current.boundary_head();
+                            let physical_predecessor =
+                                prepared.mutation.predecessor_head().ok_or_else(|| {
+                                    session_authority_conflict(
+                                        &runtime_id,
+                                        "successor mutation has no physical predecessor head",
+                                    )
+                                })?;
+                            if current.session_id() != prepared_successor.session_id() {
+                                return Err(session_authority_conflict(
+                                    &runtime_id,
+                                    "stored runtime authority belongs to a different prepared session",
+                                ));
+                            }
+                            meerkat_store::sqlite_store::verify_head_rewrite_prefix_descent_in_txn(
+                                &tx,
+                                runtime_head,
+                                physical_predecessor,
+                            )
+                            .map_err(|error| {
+                                map_head_canonical_session_store_error(&runtime_id, error)
+                            })?;
+                        }
+                        None => {
+                            let whole_blob_authority_exists =
+                                load_whole_blob_store_authority(&tx, &runtime_id)?.is_some();
+                            let activation_marker =
+                                load_head_canonical_activation_marker(&tx, &runtime_id)?;
+                            if whole_blob_authority_exists
+                                || prepared
+                                    .mutation
+                                    .predecessor_head()
+                                    .is_some()
+                                || activation_marker.is_some()
+                            {
+                                return Err(
+                                    RuntimeStoreError::HeadCanonicalActivationRequired {
+                                        runtime_id: runtime_id_text(&runtime_id).to_owned(),
+                                        state: if let Some(marker) = activation_marker {
+                                            match marker.state {
+                                                HeadCanonicalActivationState::InProgress => {
+                                                    "in_progress".to_string()
+                                                }
+                                                HeadCanonicalActivationState::Complete => {
+                                                    "complete marker is missing runtime authority"
+                                                        .to_string()
+                                                }
+                                            }
+                                        } else if whole_blob_authority_exists {
+                                            "not_started: store-owned WholeBlob predecessor exists"
+                                                .to_string()
+                                        } else {
+                                            "not_started: prepared boundary names a legacy predecessor"
+                                                .to_string()
+                                        },
+                                    },
+                                );
+                            }
+                            tracing::info!(
+                                runtime_id = %runtime_id,
+                                session_id = %prepared.mutation.session_id(),
+                                "starting new head-canonical runtime authority installation"
+                            );
+                            newly_installed_head_authority =
+                                Some(prepared.mutation.session_id().clone());
+                        }
+                    }
+
+                    reject_finalized_compaction_projection_replays(
+                        &tx,
+                        &runtime_id,
+                        &prepared.compaction_intents,
+                    )?;
+                    apply_prepared_head_canonical_physical_mutation_in_txn(
+                        &tx,
+                        &runtime_id,
+                        prepared,
+                    )?;
+                    write_head_canonical_authority_in_txn(
+                        &tx,
+                        &runtime_id,
+                        prepared_successor,
+                    )?;
+                    clear_runtime_projection_quarantine(&tx, &runtime_id)?;
+                    insert_compaction_projection_outbox_intents(
+                        &tx,
+                        &runtime_id,
+                        &prepared.compaction_intents,
+                    )?;
+                    let mut catalog_entry = prepared.catalog_entry.clone();
+                    let runtime_state = match lifecycle_snapshot.as_ref() {
+                        Some(snapshot) => Some(snapshot.runtime_state()),
+                        None => load_runtime_session_catalog_entry_in_txn(&tx, &runtime_id)?
+                            .and_then(|entry| entry.runtime_state()),
+                    };
+                    catalog_entry.set_runtime_state(runtime_state);
+                    upsert_runtime_session_catalog_entry_in_txn(
+                        &tx,
+                        &runtime_id,
+                        &catalog_entry,
+                    )?;
+                }
+
+                if let Some(expected) = lifecycle_expected.as_ref() {
+                    enforce_machine_lifecycle_expected_version(
+                        &tx,
+                        &runtime_id,
+                        expected,
+                    )?;
+                }
+                if let Some(snapshot) = lifecycle_snapshot.as_ref() {
+                    upsert_machine_lifecycle_snapshot(
+                        &tx,
+                        &runtime_id,
+                        snapshot,
+                    )?;
+                }
+                if let Some(receipt) = receipt.as_ref() {
+                    insert_receipt(&tx, &runtime_id, receipt)?;
+                }
+                upsert_input_states(&tx, &runtime_id, &input_updates)?;
+                insert_ordinary_boundary_witness_in_txn(
+                    &tx,
+                    &runtime_id,
+                    witness,
+                )?;
+                tx.commit().map_err(|error| {
+                    RuntimeStoreError::WriteFailed(error.to_string())
+                })?;
+                if let Some(session_id) = newly_installed_head_authority {
+                    tracing::info!(
+                        runtime_id = %runtime_id,
+                        %session_id,
+                        "committed new head-canonical runtime authority installation"
+                    );
+                }
+                Ok(result)
+            })
+            .await
+            .map_err(|error| {
+                RuntimeStoreError::Internal(format!("Task join failed: {error}"))
+            })?
+        }
+
+        async fn load_session_boundary_authority(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Option<RuntimeSessionAuthority>, RuntimeStoreError> {
+            if self.session_persistence_profile == RuntimeSessionPersistenceProfile::WholeBlobV1 {
+                return self
+                    .load_whole_blob_store_authority(runtime_id)
+                    .await
+                    .map(|authority| authority.map(RuntimeSessionAuthority::WholeBlob));
+            }
+
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            tokio::task::spawn_blocking(move || {
+                let conn = open_runtime_connection(&path)?;
+                load_head_canonical_authority(&conn, &runtime_id)
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
+        async fn load_durable_tail_recovery_source(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Option<PreparedDurableTailRecoverySource>, RuntimeStoreError> {
+            if self.session_persistence_profile != RuntimeSessionPersistenceProfile::HeadCanonicalV1
+            {
+                return Err(
+                    RuntimeStoreError::PreparedRecoveryRequiresAtomicPhysicalHeadCas {
+                        profile: self.session_persistence_profile,
+                    },
+                );
+            }
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut conn = open_head_canonical_runtime_connection(&path)?;
+                let tx = conn
+                    .transaction()
+                    .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+                let Some(authority) =
+                    load_head_canonical_authority(&tx, &runtime_id)?
+                else {
+                    if load_whole_blob_store_authority(&tx, &runtime_id)?.is_some() {
+                        return Err(session_authority_conflict(
+                            &runtime_id,
+                            "durable-tail recovery requires activation of the store-owned WholeBlob predecessor",
+                        ));
+                    }
+                    if let Some(session_id) = runtime_id.session_id()
+                        && meerkat_store::sqlite_store::load_head_canonical_for_runtime_in_txn(
+                            &tx,
+                            &session_id,
+                        )
+                        .map_err(|error| {
+                            map_head_canonical_session_store_error(
+                                &runtime_id,
+                                error,
+                            )
+                        })?
+                        .is_some()
+                    {
+                        return Err(session_authority_conflict(
+                            &runtime_id,
+                            "physical canonical head exists without runtime session authority",
+                        ));
+                    }
+                    tx.commit().map_err(|error| {
+                        RuntimeStoreError::ReadFailed(error.to_string())
+                    })?;
+                    return Ok(None);
+                };
+                let committed_authority = authority.head_canonical().ok_or_else(|| {
+                    session_authority_conflict(
+                        &runtime_id,
+                        "durable-tail recovery source requires HeadCanonical authority",
+                    )
+                })?;
+                let boundary_head = committed_authority.boundary_head();
+                let provisional =
+                    load_head_canonical_provisional_tail_authority(&tx, &runtime_id)?;
+                let committed =
+                    meerkat_store::sqlite_store::verify_runtime_boundary_head_canonical_in_txn(
+                        &tx,
+                        boundary_head,
+                    )
+                    .map_err(|error| {
+                        map_head_canonical_session_store_error(
+                            &runtime_id,
+                            error,
+                        )
+                    })?;
+                let (physical_head, physical_token) =
+                    meerkat_store::sqlite_store::load_head_canonical_for_runtime_in_txn(
+                        &tx,
+                        authority.session_id(),
+                    )
+                    .map_err(|error| {
+                        map_head_canonical_session_store_error(
+                            &runtime_id,
+                            error,
+                        )
+                    })?
+                    .ok_or_else(|| {
+                        session_authority_conflict(
+                            &runtime_id,
+                            "runtime authority exists without a physical canonical head",
+                        )
+                    })?;
+                if &physical_head == boundary_head {
+                    if committed_authority.committed_head_token() != physical_token {
+                        return Err(session_authority_conflict(
+                            &runtime_id,
+                            "aligned runtime and physical heads carry divergent committed authority",
+                        ));
+                    }
+                    let source = PreparedDurableTailRecoverySource::new(
+                        authority,
+                        provisional,
+                        committed.clone(),
+                        committed,
+                    )?;
+                    tx.commit().map_err(|error| {
+                        RuntimeStoreError::ReadFailed(error.to_string())
+                    })?;
+                    return Ok(Some(source));
+                }
+                let physical =
+                    meerkat_store::sqlite_store::verify_physical_head_retains_boundary_prefix_for_runtime_in_txn(
+                        &tx,
+                        boundary_head,
+                        &physical_head,
+                    )
+                    .map_err(|error| {
+                        map_head_canonical_session_store_error(
+                            &runtime_id,
+                            error,
+                        )
+                    })?;
+                let source =
+                    PreparedDurableTailRecoverySource::new(
+                        authority,
+                        provisional,
+                        committed,
+                        physical,
+                    )?;
+                tx.commit().map_err(|error| {
+                    RuntimeStoreError::ReadFailed(error.to_string())
+                })?;
+                Ok(Some(source))
+            })
+            .await
+            .map_err(|error| {
+                RuntimeStoreError::Internal(format!("Task join failed: {error}"))
+            })?
+        }
+
+        async fn load_durable_tail_recovery_receipts(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            run_id: &RunId,
+        ) -> Result<Vec<PreparedRecoveryReceiptSource>, RuntimeStoreError> {
+            let profile = self.session_persistence_profile;
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            let run_id = run_id.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut conn = match profile {
+                    RuntimeSessionPersistenceProfile::WholeBlobV1 => {
+                        open_runtime_connection(&path)?
+                    }
+                    RuntimeSessionPersistenceProfile::HeadCanonicalV1 => {
+                        open_head_canonical_runtime_connection(&path)?
+                    }
+                };
+                let tx = conn
+                    .transaction()
+                    .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+                let mut statement = tx
+                    .prepare(
+                        r"
+                        SELECT sequence, receipt_json
+                        FROM runtime_boundary_receipts
+                        WHERE runtime_id = ?1 AND run_id = ?2
+                        ",
+                    )
+                    .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+                let rows = statement
+                    .query_map(
+                        params![runtime_id_text(&runtime_id), run_id.0.to_string(),],
+                        |row| {
+                            Ok((
+                                row.get::<_, i64>(0)?,
+                                row.get::<_, JsonColumnBytes>(1)?.into_bytes(),
+                            ))
+                        },
+                    )
+                    .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+                let mut receipts = Vec::new();
+                for row in rows {
+                    let (stored_sequence, bytes) =
+                        row.map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+                    let source = PreparedRecoveryReceiptSource::from_serialized_row(&bytes)?;
+                    if source.receipt().run_id != run_id
+                        || encode_receipt_sequence(source.receipt().sequence) != stored_sequence
+                    {
+                        return Err(session_authority_conflict(
+                            &runtime_id,
+                            "recovery receipt row key differs from its exact encoded identity",
+                        ));
+                    }
+                    receipts.push(source);
+                }
+                drop(statement);
+                receipts.sort_by_key(|source| source.receipt().sequence);
+                tx.commit()
+                    .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+                Ok(receipts)
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
+        async fn load_committed_recovery_boundary(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            candidate_id: &str,
+        ) -> Result<Option<CommittedRecoveryBoundary>, RuntimeStoreError> {
+            if candidate_id.is_empty() {
+                return Err(session_authority_conflict(
+                    runtime_id,
+                    "recovery candidate id is empty",
+                ));
+            }
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            let candidate_id = candidate_id.to_string();
+            tokio::task::spawn_blocking(move || {
+                let conn = open_runtime_connection(&path)?;
+                load_recovery_boundary(&conn, &runtime_id, &candidate_id)
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
         fn supports_compaction_projection_outbox(&self) -> bool {
             true
         }
@@ -1901,48 +9495,63 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
         async fn commit_session_snapshot(
             &self,
             runtime_id: &LogicalRuntimeId,
-            session_delta: SessionDelta,
+            session_delta: SerializedSessionSnapshot,
         ) -> Result<(), RuntimeStoreError> {
-            self.commit_session_snapshot_with_optional_history_evidence(
-                runtime_id,
-                session_delta,
-                None,
-            )
-            .await
+            self.require_whole_blob_session_operation(runtime_id, "commit_session_snapshot")?;
+            self.commit_session_snapshot_checked(runtime_id, session_delta)
+                .await
         }
 
-        async fn commit_session_snapshot_with_legacy_history_evidence(
+        async fn commit_prepared_whole_blob_rewrite_boundary(
             &self,
             runtime_id: &LogicalRuntimeId,
-            session_delta: SessionDelta,
-            evidence: meerkat_core::TranscriptHistoryState,
-        ) -> Result<(), RuntimeStoreError> {
-            self.commit_session_snapshot_with_optional_history_evidence(
+            boundary: PreparedWholeBlobRewriteStoreParts,
+        ) -> Result<RuntimeSessionAuthority, RuntimeStoreError> {
+            self.require_whole_blob_session_operation(
                 runtime_id,
-                session_delta,
-                Some(evidence),
-            )
-            .await
-        }
-
-        async fn commit_session_transcript_rewrite_snapshot(
-            &self,
-            runtime_id: &LogicalRuntimeId,
-            session_delta: SessionDelta,
-            commit: &meerkat_core::TranscriptRewriteCommit,
-        ) -> Result<(), RuntimeStoreError> {
+                "commit_prepared_whole_blob_rewrite_boundary",
+            )?;
+            let (expected, successor, successor_bytes, compaction_projection_intents) =
+                boundary.into_tuple();
+            if expected.profile() != RuntimeSessionPersistenceProfile::WholeBlobV1
+                || successor.profile() != RuntimeSessionPersistenceProfile::WholeBlobV1
+                || expected.session_id() != successor.session_id()
+                || &LogicalRuntimeId::for_session(successor.session_id()) != runtime_id
+            {
+                return Err(session_authority_conflict(
+                    runtime_id,
+                    "prepared WholeBlob rewrite authorities do not bind this runtime/session",
+                ));
+            }
+            let expected_token = expected
+                .whole_blob_document_token()
+                .ok_or_else(|| {
+                    session_authority_conflict(
+                        runtime_id,
+                        "prepared WholeBlob predecessor has no document token",
+                    )
+                })?
+                .to_string();
+            let successor_token = successor
+                .whole_blob_document_token()
+                .ok_or_else(|| {
+                    session_authority_conflict(
+                        runtime_id,
+                        "prepared WholeBlob successor has no document token",
+                    )
+                })?
+                .to_string();
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
-            let commit = commit.clone();
             tokio::task::spawn_blocking(move || {
-                let incoming = meerkat_core::Session::from_persisted_bytes(
-                    &session_delta.session_snapshot,
-                )
-                .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
-                ensure_compaction_intents_already_outboxed(&tx, &runtime_id, &incoming)?;
-                let previous = tx
+                refuse_whole_blob_write_under_head_authority(
+                    &tx,
+                    &runtime_id,
+                    "whole-BLOB transcript rewrite commit",
+                )?;
+                let current = tx
                     .query_row(
                         "SELECT session_snapshot FROM runtime_session_snapshots WHERE runtime_id = ?1",
                         params![runtime_id_text(&runtime_id)],
@@ -1950,23 +9559,40 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
                     )
                     .optional()
                     .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?
-                    .map(|bytes| deserialize_persisted_session(&bytes))
-                    .transpose()?;
-                meerkat_core::session_store::transcript_rewrite_save_guard(
-                    &incoming,
-                    previous.as_ref(),
-                    &commit,
-                )
-                .map_err(|err| match err {
-                    meerkat_core::SessionStoreError::TranscriptRevisionConflict {
-                        expected, actual, ..
-                    } => RuntimeStoreError::TranscriptRevisionConflict { expected, actual },
-                    other => RuntimeStoreError::WriteFailed(other.to_string()),
-                })?;
-                upsert_runtime_snapshot(&tx, &runtime_id, &session_delta.session_snapshot)?;
+                    .ok_or_else(|| {
+                        session_authority_conflict(
+                            &runtime_id,
+                            "prepared WholeBlob predecessor is absent",
+                        )
+                    })?;
+                use sha2::Digest as _;
+                let current_token =
+                    format!("row-sha256:{:x}", sha2::Sha256::digest(&current));
+                ensure_compaction_intents_already_outboxed_list(
+                    &tx,
+                    &runtime_id,
+                    &compaction_projection_intents,
+                )?;
+                if current_token == successor_token {
+                    return Ok(successor);
+                }
+                if current_token != expected_token {
+                    return Err(session_authority_conflict(
+                        &runtime_id,
+                        format!(
+                            "prepared WholeBlob predecessor token {expected_token} does not match current {current_token}"
+                        ),
+                    ));
+                }
+                // The non-constructible prepared carrier already paired this
+                // exact shared byte slice with `successor_token` using the one
+                // final-document hash. Re-hashing it inside the transaction
+                // would add another O(document) pass; the transaction-owned
+                // check is the current predecessor/successor token above.
+                upsert_runtime_snapshot(&tx, &runtime_id, successor_bytes.as_ref())?;
                 tx.commit()
                     .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
-                Ok(())
+                Ok(successor)
             })
             .await
             .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
@@ -1975,31 +9601,12 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
         async fn atomic_apply(
             &self,
             runtime_id: &LogicalRuntimeId,
-            session_delta: Option<SessionDelta>,
+            session_delta: Option<SerializedSessionSnapshot>,
             receipt: RunBoundaryReceipt,
             input_updates: Vec<InputStatePersistenceRecord>,
             session_store_key: Option<meerkat_core::types::SessionId>,
         ) -> Result<(), RuntimeStoreError> {
-            self.atomic_apply_with_legacy_history_evidence(
-                runtime_id,
-                session_delta,
-                receipt,
-                input_updates,
-                session_store_key,
-                None,
-            )
-            .await
-        }
-
-        async fn atomic_apply_with_legacy_history_evidence(
-            &self,
-            runtime_id: &LogicalRuntimeId,
-            session_delta: Option<SessionDelta>,
-            receipt: RunBoundaryReceipt,
-            input_updates: Vec<InputStatePersistenceRecord>,
-            session_store_key: Option<meerkat_core::types::SessionId>,
-            evidence: Option<meerkat_core::TranscriptHistoryState>,
-        ) -> Result<(), RuntimeStoreError> {
+            self.require_whole_blob_session_operation(runtime_id, "atomic_apply")?;
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
             let input_updates = input_updates
@@ -2007,102 +9614,47 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
                 .map(InputStatePersistenceRecord::into_stored_and_expected)
                 .collect::<Vec<_>>();
             tokio::task::spawn_blocking(move || {
-                let session_snapshot = session_delta
+                let prepared_session = session_delta.map(parsed_whole_blob_snapshot).transpose()?;
+                let compaction_intents = prepared_session
                     .as_ref()
-                    .map(|delta| {
-                        meerkat_core::Session::from_persisted_bytes(&delta.session_snapshot)
-                            .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))
+                    .map(|prepared| {
+                        crate::store::validated_compaction_projection_intents(prepared.session())
                     })
-                    .transpose()?;
-                let compaction_intents = session_snapshot
-                    .as_ref()
-                    .map(crate::store::validated_compaction_projection_intents)
                     .transpose()?
                     .unwrap_or_default();
-                if let (Some(session), Some(session_store_key)) =
-                    (session_snapshot.as_ref(), session_store_key.as_ref())
-                    && session.id() != session_store_key
+                if let (Some(prepared), Some(session_store_key)) =
+                    (prepared_session.as_ref(), session_store_key.as_ref())
+                    && prepared.session().id() != session_store_key
                 {
                     return Err(RuntimeStoreError::SessionKeyMismatch {
                         expected: session_store_key.clone(),
-                        actual: session.id().clone(),
+                        actual: prepared.session().id().clone(),
                     });
                 }
 
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
+                refuse_whole_blob_write_under_head_authority(
+                    &tx,
+                    &runtime_id,
+                    "whole-BLOB atomic run boundary",
+                )?;
                 reject_finalized_compaction_projection_replays(
                     &tx,
                     &runtime_id,
                     &compaction_intents,
                 )?;
 
-                // The supersession verdict keys the entire commit: if the
-                // incoming session snapshot is classified as superseded (the
-                // persisted head is already a valid append-extension of it),
-                // the snapshot write is skipped AND so are the receipt + input
-                // writes, so receipt/input ordering identity never advances
-                // past the retained session truth.
-                let mut session_snapshot_superseded = false;
-                if let Some(session) = session_snapshot.as_ref() {
-                    let mut persist_session_snapshot = true;
-                    let previous = tx
-                        .query_row(
-                            "SELECT session_snapshot FROM runtime_session_snapshots WHERE runtime_id = ?1",
-                            params![runtime_id_text(&runtime_id)],
-                            |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
-                        )
-                        .optional()
-                        .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?
-                        .map(|bytes| deserialize_persisted_session(&bytes))
-                        .transpose()?;
-                    if let Err(err) =
-                        meerkat_core::session_store::run_boundary_snapshot_save_guard_with_legacy_history_evidence(
-                            session,
-                            previous.as_ref(),
-                            evidence.as_ref(),
-                        )
-                    {
-                        if previous.as_ref().is_some_and(is_runtime_placeholder_session) {
-                            persist_session_snapshot = true;
-                        } else if previous.as_ref().is_some_and(|previous| {
-                            meerkat_core::session_store::run_boundary_snapshot_save_guard(
-                                previous,
-                                Some(session),
-                            )
-                            .is_ok()
-                        }) {
-                            persist_session_snapshot = false;
-                            session_snapshot_superseded = true;
-                        } else {
-                            return Err(RuntimeStoreError::WriteFailed(err.to_string()));
-                        }
-                    }
-                    if persist_session_snapshot
-                        && let Some(delta) = session_delta.as_ref()
-                    {
-                        upsert_runtime_snapshot(&tx, &runtime_id, &delta.session_snapshot)?;
-                    }
+                if let Some(prepared) = prepared_session {
+                    commit_prepared_whole_blob_snapshot_in_txn(&tx, &runtime_id, prepared)?;
+                } else if load_whole_blob_provisional_authority(&tx, &runtime_id)?.is_some() {
+                    return Err(session_authority_conflict(
+                        &runtime_id,
+                        "receipt-only boundary cannot bypass a store-owned WholeBlob candidate",
+                    ));
                 }
 
-                // When the session snapshot was superseded and skipped, the
-                // boundary receipt and input-state updates must also be skipped:
-                // advancing them against a retained (older) session snapshot
-                // would split receipt/input ordering identity from session
-                // truth. Rejecting here drops and rolls back the untouched
-                // transaction, releasing its lock without publishing a false
-                // success to the stale writer.
-                if session_snapshot_superseded {
-                    return Err(RuntimeStoreError::SessionSnapshotSuperseded {
-                        runtime_id: runtime_id_text(&runtime_id).to_owned(),
-                    });
-                }
-
-                insert_compaction_projection_outbox_intents(
-                    &tx,
-                    &runtime_id,
-                    &compaction_intents,
-                )?;
+                insert_compaction_projection_outbox_intents(&tx, &runtime_id, &compaction_intents)?;
                 insert_receipt(&tx, &runtime_id, &receipt)?;
                 upsert_input_states(&tx, &runtime_id, &input_updates)?;
                 tx.commit()
@@ -2116,35 +9668,16 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
         async fn atomic_apply_with_machine_lifecycle(
             &self,
             runtime_id: &LogicalRuntimeId,
-            session_delta: SessionDelta,
+            session_delta: SerializedSessionSnapshot,
             receipt: RunBoundaryReceipt,
             machine_lifecycle: MachineLifecycleCommit,
             input_updates: Vec<InputStatePersistenceRecord>,
             session_store_key: meerkat_core::types::SessionId,
         ) -> Result<(), RuntimeStoreError> {
-            self.atomic_apply_with_machine_lifecycle_and_legacy_history_evidence(
+            self.require_whole_blob_session_operation(
                 runtime_id,
-                session_delta,
-                receipt,
-                machine_lifecycle,
-                input_updates,
-                session_store_key,
-                None,
-            )
-            .await
-        }
-
-        #[allow(clippy::too_many_arguments)]
-        async fn atomic_apply_with_machine_lifecycle_and_legacy_history_evidence(
-            &self,
-            runtime_id: &LogicalRuntimeId,
-            session_delta: SessionDelta,
-            receipt: RunBoundaryReceipt,
-            machine_lifecycle: MachineLifecycleCommit,
-            input_updates: Vec<InputStatePersistenceRecord>,
-            session_store_key: meerkat_core::types::SessionId,
-            evidence: Option<meerkat_core::TranscriptHistoryState>,
-        ) -> Result<(), RuntimeStoreError> {
+                "atomic_apply_with_machine_lifecycle",
+            )?;
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
             let lifecycle_expected = machine_lifecycle.expected_version().cloned();
@@ -2154,12 +9687,10 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
                 .map(InputStatePersistenceRecord::into_stored_and_expected)
                 .collect::<Vec<_>>();
             tokio::task::spawn_blocking(move || {
-                let session = meerkat_core::Session::from_persisted_bytes(
-                    &session_delta.session_snapshot,
-                )
-                .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                let prepared = parsed_whole_blob_snapshot(session_delta)?;
+                let session = prepared.session();
                 let compaction_intents =
-                    crate::store::validated_compaction_projection_intents(&session)?;
+                    crate::store::validated_compaction_projection_intents(session)?;
                 if session.id() != &session_store_key {
                     return Err(RuntimeStoreError::SessionKeyMismatch {
                         expected: session_store_key,
@@ -2169,56 +9700,22 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
 
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
+                refuse_whole_blob_write_under_head_authority(
+                    &tx,
+                    &runtime_id,
+                    "whole-BLOB machine-terminal boundary",
+                )?;
                 reject_finalized_compaction_projection_replays(
                     &tx,
                     &runtime_id,
                     &compaction_intents,
                 )?;
-                let previous = tx
-                    .query_row(
-                        "SELECT session_snapshot FROM runtime_session_snapshots WHERE runtime_id = ?1",
-                        params![runtime_id_text(&runtime_id)],
-                        |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
-                    )
-                    .optional()
-                    .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?
-                    .map(|bytes| deserialize_persisted_session(&bytes))
-                    .transpose()?;
-                if let Err(err) =
-                    meerkat_core::session_store::run_boundary_snapshot_save_guard_with_legacy_history_evidence(
-                        &session,
-                        previous.as_ref(),
-                        evidence.as_ref(),
-                    )
-                {
-                    if previous.as_ref().is_some_and(is_runtime_placeholder_session) {
-                        // The generated snapshot replaces the placeholder in
-                        // the same terminal transaction.
-                    } else if previous.as_ref().is_some_and(|previous| {
-                        meerkat_core::session_store::run_boundary_snapshot_save_guard(
-                            previous,
-                            Some(&session),
-                        )
-                        .is_ok()
-                    }) {
-                        return Err(RuntimeStoreError::SessionSnapshotSuperseded {
-                            runtime_id: runtime_id_text(&runtime_id).to_owned(),
-                        });
-                    } else {
-                        return Err(RuntimeStoreError::WriteFailed(err.to_string()));
-                    }
-                }
-
-                upsert_runtime_snapshot(&tx, &runtime_id, &session_delta.session_snapshot)?;
+                commit_prepared_whole_blob_snapshot_in_txn(&tx, &runtime_id, prepared)?;
                 if let Some(expected) = &lifecycle_expected {
                     enforce_machine_lifecycle_expected_version(&tx, &runtime_id, expected)?;
                 }
                 upsert_machine_lifecycle_snapshot(&tx, &runtime_id, &lifecycle_snapshot)?;
-                insert_compaction_projection_outbox_intents(
-                    &tx,
-                    &runtime_id,
-                    &compaction_intents,
-                )?;
+                insert_compaction_projection_outbox_intents(&tx, &runtime_id, &compaction_intents)?;
                 insert_receipt(&tx, &runtime_id, &receipt)?;
                 upsert_input_states(&tx, &runtime_id, &input_updates)?;
                 tx.commit()
@@ -2269,12 +9766,290 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             runtime_id: &LogicalRuntimeId,
             projection: &meerkat_core::CompactionProjectionId,
         ) -> Result<(), RuntimeStoreError> {
+            if self.session_persistence_profile == RuntimeSessionPersistenceProfile::HeadCanonicalV1
+            {
+                let path = self.path.clone();
+                let runtime_id = runtime_id.clone();
+                let projection = projection.clone();
+                return tokio::task::spawn_blocking(move || {
+                    let mut conn =
+                        open_head_canonical_runtime_connection(&path)?;
+                    let tx = begin_runtime_transaction(&mut conn)?;
+                    let outbox = tx
+                        .query_row(
+                            r"
+                            SELECT intent_json, state
+                            FROM runtime_compaction_projection_outbox
+                            WHERE runtime_id = ?1 AND session_id = ?2
+                              AND parent_revision = ?3 AND revision = ?4
+                              AND commit_fingerprint = ?5
+                            ",
+                            params![
+                                runtime_id_text(&runtime_id),
+                                projection.session_id().to_string(),
+                                projection.parent_revision(),
+                                projection.revision(),
+                                projection.commit_fingerprint(),
+                            ],
+                            |row| {
+                                Ok((
+                                    row.get::<_, JsonColumnBytes>(0)?
+                                        .into_bytes(),
+                                    row.get::<_, String>(1)?,
+                                ))
+                            },
+                        )
+                        .optional()
+                        .map_err(|error| {
+                            RuntimeStoreError::ReadFailed(error.to_string())
+                        })?
+                        .ok_or_else(|| {
+                            RuntimeStoreError::NotFound(format!(
+                                "compaction outbox rewrite {}",
+                                projection.revision()
+                            ))
+                        })?;
+                    let stored_intent: meerkat_core::CompactionProjectionIntent =
+                        serde_json::from_slice(&outbox.0).map_err(|error| {
+                            RuntimeStoreError::ReadFailed(error.to_string())
+                        })?;
+                    if stored_intent.projection != projection {
+                        return Err(session_authority_conflict(
+                            &runtime_id,
+                            "compaction outbox key and encoded projection identity differ",
+                        ));
+                    }
+                    if outbox.1 == "finalized" {
+                        tx.commit().map_err(|error| {
+                            RuntimeStoreError::WriteFailed(
+                                error.to_string(),
+                            )
+                        })?;
+                        return Ok(());
+                    }
+                    if outbox.1 != "pending" {
+                        return Err(session_authority_conflict(
+                            &runtime_id,
+                            format!(
+                                "compaction outbox has unsupported state '{}'",
+                                outbox.1
+                            ),
+                        ));
+                    }
+
+                    let authority =
+                        load_head_canonical_authority(&tx, &runtime_id)?
+                            .ok_or_else(|| {
+                                session_authority_conflict(
+                                    &runtime_id,
+                                    "pending compaction projection has no head-canonical runtime authority",
+                                )
+                            })?;
+                    if authority.session_id() != projection.session_id() {
+                        return Err(session_authority_conflict(
+                            &runtime_id,
+                            "pending compaction projection belongs to a different runtime session",
+                        ));
+                    }
+                    let committed_authority = authority.head_canonical().ok_or_else(|| {
+                        session_authority_conflict(
+                            &runtime_id,
+                            "compaction projection authority is not HeadCanonical",
+                        )
+                    })?;
+                    let boundary_head = committed_authority.boundary_head();
+                    let (physical_head, physical_token) =
+                        meerkat_store::sqlite_store::load_head_canonical_for_runtime_in_txn(
+                            &tx,
+                            authority.session_id(),
+                        )
+                        .map_err(|error| {
+                            map_head_canonical_session_store_error(
+                                &runtime_id,
+                                error,
+                            )
+                        })?
+                        .ok_or_else(|| {
+                            session_authority_conflict(
+                                &runtime_id,
+                                "pending compaction projection has no physical canonical head",
+                            )
+                        })?;
+                    if &physical_head != boundary_head
+                        || committed_authority.committed_head_token() != physical_token
+                    {
+                        return Err(session_authority_conflict(
+                            &runtime_id,
+                            "compaction finalization requires exact runtime and physical head equality",
+                        ));
+                    }
+
+                    tracing::info!(
+                        runtime_id = %runtime_id,
+                        session_id = %authority.session_id(),
+                        rewrite = %projection.revision(),
+                        "starting head-canonical compaction projection finalization"
+                    );
+                    let verified =
+                        meerkat_store::sqlite_store::verify_runtime_boundary_head_canonical_in_txn(
+                            &tx,
+                            boundary_head,
+                        )
+                        .map_err(|error| {
+                            map_head_canonical_session_store_error(
+                                &runtime_id,
+                                error,
+                            )
+                        })?;
+                    let mut session = verified.session().as_ref().clone();
+                    let current_intents =
+                        crate::store::validated_compaction_projection_intents(
+                            &session,
+                        )?;
+                    let current_intent = current_intents
+                        .iter()
+                        .find(|intent| intent.projection == projection)
+                        .ok_or_else(|| {
+                            session_authority_conflict(
+                                &runtime_id,
+                                "pending outbox projection is absent from the authoritative session checkpoint",
+                            )
+                        })?;
+                    if current_intent != &stored_intent {
+                        return Err(session_authority_conflict(
+                            &runtime_id,
+                            "pending outbox projection differs from the authoritative session intent",
+                        ));
+                    }
+                    complete_compaction_projection_intent(
+                        &mut session,
+                        &projection,
+                    )?;
+                    if crate::store::validated_compaction_projection_intents(
+                        &session,
+                    )?
+                    .iter()
+                    .any(|intent| intent.projection == projection)
+                    {
+                        return Err(session_authority_conflict(
+                            &runtime_id,
+                            "compaction finalization did not clear the authoritative session intent",
+                        ));
+                    }
+                    let mutation =
+                        meerkat_core::session_store::PreparedHeadCanonicalMutation::prepare(
+                            &session,
+                            Some(physical_head.clone()),
+                        )
+                        .map_err(|error| {
+                            map_head_canonical_session_store_error(
+                                &runtime_id,
+                                error,
+                            )
+                        })?;
+                    if !mutation.serialized_suffix().is_empty()
+                        || mutation.base_seq()
+                            != physical_head.message_count
+                        || mutation.successor_head().message_count
+                            != physical_head.message_count
+                        || mutation.successor_head().strand
+                            != physical_head.strand
+                        || mutation.successor_head().rewrite_count
+                            != physical_head.rewrite_count
+                        || mutation.successor_head().rewrite_prefix
+                            != physical_head.rewrite_prefix
+                    {
+                        return Err(session_authority_conflict(
+                            &runtime_id,
+                            "compaction finalization prepared a non-metadata canonical mutation",
+                        ));
+                    }
+                    validate_exact_head_prefix_authority(
+                        &runtime_id,
+                        mutation.successor_head(),
+                        "compaction-finalized successor head",
+                    )?;
+                    let successor_authority = issue_head_canonical_authority_in_txn(
+                        &tx,
+                        &runtime_id,
+                        mutation.successor_head().clone(),
+                    )?;
+                    meerkat_store::sqlite_store::apply_prepared_head_canonical_mutation_in_txn(
+                        &tx,
+                        &mutation,
+                    )
+                    .map_err(|error| {
+                        map_head_canonical_session_store_error(
+                            &runtime_id,
+                            error,
+                        )
+                    })?;
+                    write_head_canonical_authority_in_txn(
+                        &tx,
+                        &runtime_id,
+                        &successor_authority,
+                    )?;
+                    let updated = tx
+                        .execute(
+                            r"
+                            UPDATE runtime_compaction_projection_outbox
+                            SET state = 'finalized'
+                            WHERE runtime_id = ?1 AND session_id = ?2
+                              AND parent_revision = ?3 AND revision = ?4
+                              AND commit_fingerprint = ?5
+                              AND state = 'pending'
+                            ",
+                            params![
+                                runtime_id_text(&runtime_id),
+                                projection.session_id().to_string(),
+                                projection.parent_revision(),
+                                projection.revision(),
+                                projection.commit_fingerprint(),
+                            ],
+                        )
+                        .map_err(|error| {
+                            RuntimeStoreError::WriteFailed(error.to_string())
+                        })?;
+                    if updated != 1 {
+                        return Err(session_authority_conflict(
+                            &runtime_id,
+                            "pending compaction outbox row changed during finalization",
+                        ));
+                    }
+                    tx.commit().map_err(|error| {
+                        RuntimeStoreError::WriteFailed(error.to_string())
+                    })?;
+                    tracing::info!(
+                        runtime_id = %runtime_id,
+                        session_id = %successor_authority.session_id(),
+                        rewrite = %projection.revision(),
+                        "committed head-canonical compaction projection finalization"
+                    );
+                    Ok(())
+                })
+                .await
+                .map_err(|error| {
+                    RuntimeStoreError::Internal(format!(
+                        "Task join failed: {error}"
+                    ))
+                })?;
+            }
+
+            self.require_whole_blob_session_operation(
+                runtime_id,
+                "mark_compaction_projection_finalized",
+            )?;
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
             let projection = projection.clone();
             tokio::task::spawn_blocking(move || {
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
+                refuse_whole_blob_write_under_head_authority(
+                    &tx,
+                    &runtime_id,
+                    "whole-BLOB compaction finalization",
+                )?;
                 let exists = tx
                     .query_row(
                         r"
@@ -2311,7 +10086,7 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
                     .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?
                 {
                     let mut session = deserialize_persisted_session(&snapshot)?;
-                    complete_compaction_projection_checkpoint(&mut session, &projection)?;
+                    complete_compaction_projection_intent(&mut session, &projection)?;
                     let cleaned = serde_json::to_vec(&session)
                         .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
                     upsert_runtime_snapshot(&tx, &runtime_id, &cleaned)?;
@@ -2390,43 +10165,18 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
         async fn load_input_states_with_versions(
             &self,
             runtime_id: &LogicalRuntimeId,
-        ) -> Result<Vec<(StoredInputState, String)>, RuntimeStoreError> {
+        ) -> Result<PreparedRecoveryInputSnapshot, RuntimeStoreError> {
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
             tokio::task::spawn_blocking(move || {
-                let conn = open_runtime_connection(&path)?;
-                let mut stmt = conn
-                    .prepare(
-                        r"
-                        SELECT input_id, state_json
-                        FROM runtime_input_states
-                        WHERE runtime_id = ?1
-                        ORDER BY input_id ASC
-                        ",
-                    )
-                    .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?;
-                let rows = stmt
-                    .query_map(params![runtime_id_text(&runtime_id)], |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, JsonColumnBytes>(1)?.into_bytes(),
-                        ))
-                    })
-                    .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?;
-                rows.map(|row| {
-                    let (input_id, bytes) =
-                        row.map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?;
-                    // This is the strict projection: recovery must see every
-                    // row exactly or hold, so one undecodable row fails the
-                    // load with its identity.
-                    let state = deserialize_persisted_input_state(&bytes).map_err(|err| {
-                        RuntimeStoreError::ReadFailed(format!(
-                            "input state row `{input_id}` failed to decode: {err}"
-                        ))
-                    })?;
-                    Ok((state, input_row_version_digest(&bytes)))
-                })
-                .collect()
+                let mut conn = open_runtime_connection(&path)?;
+                let tx = conn
+                    .transaction()
+                    .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+                let snapshot = load_recovery_nonterminal_input_snapshot(&tx, &runtime_id)?;
+                tx.commit()
+                    .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+                Ok(snapshot)
             })
             .await
             .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
@@ -2513,11 +10263,23 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
         async fn load_session_snapshot(
             &self,
             runtime_id: &LogicalRuntimeId,
-        ) -> Result<Option<Vec<u8>>, RuntimeStoreError> {
+        ) -> Result<Option<Arc<Vec<u8>>>, RuntimeStoreError> {
+            if self.session_persistence_profile == RuntimeSessionPersistenceProfile::WholeBlobV1 {
+                return self
+                    .load_committed_whole_blob_snapshot(runtime_id)
+                    .await
+                    .map(|snapshot| snapshot.map(|snapshot| snapshot.bytes_arc()));
+            }
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
-            tokio::task::spawn_blocking(move || {
+            let snapshot = tokio::task::spawn_blocking(move || {
                 let conn = open_runtime_connection(&path)?;
+                if load_head_canonical_authority(&conn, &runtime_id)?.is_some() {
+                    return Err(session_authority_conflict(
+                        &runtime_id,
+                        "whole-BLOB load refused because the row is a frozen migration predecessor",
+                    ));
+                }
                 conn.query_row(
                     "SELECT session_snapshot FROM runtime_session_snapshots WHERE runtime_id = ?1",
                     params![runtime_id_text(&runtime_id)],
@@ -2527,23 +10289,635 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
                 .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
             })
             .await
-            .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
+            .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))??;
+            Ok(snapshot.map(Arc::new))
         }
 
-        async fn clear_session_snapshot(
+        async fn load_whole_blob_store_authority(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Option<WholeBlobStoreAuthority>, RuntimeStoreError> {
+            self.require_whole_blob_session_operation(
+                runtime_id,
+                "load_whole_blob_store_authority",
+            )?;
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            tokio::task::spawn_blocking(move || {
+                let conn = open_runtime_connection(&path)?;
+                load_whole_blob_store_authority(&conn, &runtime_id)
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
+        async fn delete_runtime_session_catalog_entry(
             &self,
             runtime_id: &LogicalRuntimeId,
         ) -> Result<(), RuntimeStoreError> {
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
             tokio::task::spawn_blocking(move || {
-                let mut conn = open_runtime_connection(&path)?;
-                let tx = begin_runtime_transaction(&mut conn)?;
-                tx.execute(
-                    "DELETE FROM runtime_session_snapshots WHERE runtime_id = ?1",
+                let conn = open_runtime_connection(&path)?;
+                conn.execute(
+                    "DELETE FROM runtime_session_catalog WHERE runtime_id = ?1",
                     params![runtime_id_text(&runtime_id)],
                 )
-                .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                Ok(())
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
+        async fn load_runtime_session_catalog_entry(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Option<crate::store::RuntimeSessionCatalogEntry>, RuntimeStoreError> {
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            tokio::task::spawn_blocking(move || {
+                let conn = open_runtime_connection(&path)?;
+                load_runtime_session_catalog_entry_in_txn(&conn, &runtime_id)
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
+        async fn list_runtime_session_catalog_entries(
+            &self,
+            filter: meerkat_core::SessionFilter,
+        ) -> Result<Vec<crate::store::RuntimeSessionCatalogEntry>, RuntimeStoreError> {
+            let path = self.path.clone();
+            tokio::task::spawn_blocking(move || {
+                let conn = open_runtime_connection(&path)?;
+                list_runtime_session_catalog_entries_in_conn(&conn, filter)
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
+        async fn load_committed_whole_blob_snapshot(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Option<CommittedWholeBlobSnapshot>, RuntimeStoreError> {
+            self.require_whole_blob_session_operation(
+                runtime_id,
+                "load_committed_whole_blob_snapshot",
+            )?;
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut conn = open_runtime_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                let authority = load_whole_blob_store_authority(&tx, &runtime_id)?;
+                let observed = match authority {
+                    None => None,
+                    Some(authority) => {
+                        let bytes = tx
+                            .query_row(
+                                "SELECT session_snapshot FROM runtime_whole_blob_bodies WHERE blob_sha256 = ?1",
+                                params![authority.blob_sha256()],
+                                |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
+                            )
+                            .optional()
+                            .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?
+                            .ok_or_else(|| {
+                                session_authority_conflict(
+                                    &runtime_id,
+                                    "WholeBlob authority references a missing body",
+                                )
+                            })?;
+                        Some(CommittedWholeBlobSnapshot::new(
+                            Arc::new(bytes),
+                            authority,
+                        )?)
+                    }
+                };
+                tx.commit()
+                    .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+                Ok(observed)
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
+        async fn commit_prepared_whole_blob_snapshot_cas(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            prepared: PreparedWholeBlobSnapshotCas,
+        ) -> Result<WholeBlobSnapshotCasOutcome, RuntimeStoreError> {
+            self.require_whole_blob_session_operation(
+                runtime_id,
+                "commit_prepared_whole_blob_snapshot_cas",
+            )?;
+            let (expected, candidate_session, candidate_bytes, candidate_blob_sha256) =
+                prepared.into_parts();
+            if &LogicalRuntimeId::for_session(candidate_session.id()) != runtime_id
+                || candidate_session.id() != expected.session_id()
+            {
+                return Err(session_authority_conflict(
+                    runtime_id,
+                    "prepared WholeBlob snapshot CAS does not bind this runtime/session",
+                ));
+            }
+            let compaction_projection_intents =
+                crate::store::validated_compaction_projection_intents(candidate_session.as_ref())?;
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut conn = open_runtime_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                refuse_whole_blob_write_under_head_authority(
+                    &tx,
+                    &runtime_id,
+                    "typed WholeBlob snapshot CAS",
+                )?;
+                let Some(current) = load_whole_blob_store_authority(&tx, &runtime_id)? else {
+                    return Ok(WholeBlobSnapshotCasOutcome::Conflict);
+                };
+                if current != expected {
+                    return Ok(WholeBlobSnapshotCasOutcome::Conflict);
+                }
+                if current.blob_sha256() == candidate_blob_sha256 {
+                    return Ok(WholeBlobSnapshotCasOutcome::Committed(current));
+                }
+                if load_whole_blob_provisional_authority(&tx, &runtime_id)?.is_some() {
+                    return Err(session_authority_conflict(
+                        &runtime_id,
+                        "snapshot CAS cannot bypass a store-owned WholeBlob provisional candidate",
+                    ));
+                }
+                ensure_compaction_intents_already_outboxed_list(
+                    &tx,
+                    &runtime_id,
+                    &compaction_projection_intents,
+                )?;
+                let runtime_state = load_runtime_session_catalog_entry_in_txn(&tx, &runtime_id)?
+                    .and_then(|entry| entry.runtime_state());
+                let catalog_entry = crate::store::RuntimeSessionCatalogEntry::from_session(
+                    candidate_session.as_ref(),
+                    RuntimeSessionPersistenceProfile::WholeBlobV1,
+                    runtime_state,
+                )?;
+                let authority = upsert_runtime_snapshot_issued(
+                    &tx,
+                    &runtime_id,
+                    candidate_bytes.as_ref(),
+                    candidate_session.id(),
+                    &candidate_blob_sha256,
+                    &catalog_entry,
+                )?;
+                tx.commit()
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                Ok(WholeBlobSnapshotCasOutcome::Committed(authority))
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
+        async fn write_prepared_whole_blob_provisional_tail(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            prepared: PreparedWholeBlobProvisionalTail,
+        ) -> Result<WholeBlobProvisionalTailAuthority, RuntimeStoreError> {
+            self.require_whole_blob_session_operation(
+                runtime_id,
+                "write_prepared_whole_blob_provisional_tail",
+            )?;
+            let (
+                authority,
+                candidate_artifact,
+                conversation_digest,
+                message_count,
+                catalog_entry,
+                compaction_projection_intents,
+            ) = prepared.into_parts();
+            let candidate_bytes = candidate_artifact.bytes_arc();
+            if &LogicalRuntimeId::for_session(authority.session_id()) != runtime_id
+                || catalog_entry.session_id() != authority.session_id()
+                || catalog_entry.persistence_profile()
+                    != RuntimeSessionPersistenceProfile::WholeBlobV1
+                || u64::try_from(catalog_entry.message_count()).ok() != Some(message_count)
+                || candidate_artifact.row_sha256_token() != authority.candidate_blob_sha256()
+            {
+                return Err(session_authority_conflict(
+                    runtime_id,
+                    "WholeBlob provisional artifact/catalog does not bind this runtime/session authority",
+                ));
+            }
+            let catalog_json = serde_json::to_vec(&catalog_entry)
+                .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+            let compaction_intents_json = serde_json::to_vec(&compaction_projection_intents)
+                .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut conn = open_runtime_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                let current =
+                    load_whole_blob_store_authority(&tx, &runtime_id)?.ok_or_else(|| {
+                        session_authority_conflict(
+                            &runtime_id,
+                            "WholeBlob provisional candidate has no committed base",
+                        )
+                    })?;
+                if current.session_id() != authority.session_id()
+                    || current.store_revision() != authority.base_store_revision()
+                    || current.blob_sha256() != authority.base_blob_sha256()
+                {
+                    return Err(session_authority_conflict(
+                        &runtime_id,
+                        "WholeBlob provisional candidate base is stale",
+                    ));
+                }
+                let existing = load_whole_blob_provisional_metadata(&tx, &runtime_id)?;
+                if let Some(existing) = existing.as_ref() {
+                    if existing.authority == authority {
+                        if existing.conversation_digest != conversation_digest
+                            || existing.message_count != message_count
+                        {
+                            return Err(session_authority_conflict(
+                                &runtime_id,
+                                "WholeBlob provisional retry changes bounded candidate facts",
+                            ));
+                        }
+                        return Ok(authority);
+                    }
+                    let required_sequence = existing
+                        .authority
+                        .candidate_sequence()
+                        .checked_add(1)
+                        .ok_or_else(|| {
+                            RuntimeStoreError::WriteFailed(
+                                "WholeBlob provisional candidate sequence exhausted".to_string(),
+                            )
+                        })?;
+                    if existing.authority.session_id() != authority.session_id()
+                        || existing.authority.base_store_revision()
+                            != authority.base_store_revision()
+                        || existing.authority.base_blob_sha256()
+                            != authority.base_blob_sha256()
+                        || existing.authority.run_id() != authority.run_id()
+                        || authority.candidate_sequence() != required_sequence
+                    {
+                        return Err(session_authority_conflict(
+                            &runtime_id,
+                            "WholeBlob provisional replacement is stale or skips sequence",
+                        ));
+                    }
+                } else if authority.candidate_sequence() != 1 {
+                    return Err(session_authority_conflict(
+                        &runtime_id,
+                        "first WholeBlob provisional candidate sequence must be one",
+                    ));
+                }
+                let base_revision = i64::try_from(authority.base_store_revision()).map_err(|_| {
+                    RuntimeStoreError::WriteFailed(format!(
+                        "WholeBlob provisional base revision exceeds SQLite INTEGER for runtime {runtime_id}"
+                    ))
+                })?;
+                let message_count = i64::try_from(message_count).map_err(|_| {
+                    RuntimeStoreError::WriteFailed(format!(
+                        "WholeBlob provisional message count exceeds SQLite INTEGER for runtime {runtime_id}"
+                    ))
+                })?;
+                tx.execute(
+                    r"
+                    INSERT INTO runtime_whole_blob_bodies (blob_sha256, session_snapshot)
+                    VALUES (?1, ?2)
+                    ON CONFLICT(blob_sha256) DO NOTHING
+                    ",
+                    params![authority.candidate_blob_sha256(), candidate_bytes.as_ref()],
+                )
+                .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                if let Some(existing) = existing {
+                    let updated = tx
+                        .execute(
+                            r"
+                            UPDATE runtime_whole_blob_provisional_tails
+                            SET candidate_sequence = ?7,
+                                candidate_blob_sha256 = ?8,
+                                conversation_digest = ?9,
+                                message_count = ?10,
+                                catalog_json = ?11,
+                                compaction_intents_json = ?12
+                            WHERE runtime_id = ?1
+                              AND session_id = ?2
+                              AND base_store_revision = ?3
+                              AND base_blob_sha256 = ?4
+                              AND run_id = ?5
+                              AND candidate_sequence = ?6
+                            ",
+                            params![
+                                runtime_id_text(&runtime_id),
+                                authority.session_id().to_string(),
+                                base_revision,
+                                authority.base_blob_sha256(),
+                                authority.run_id().0.to_string(),
+                                i64::try_from(existing.authority.candidate_sequence()).map_err(
+                                    |_| RuntimeStoreError::WriteFailed(
+                                        "WholeBlob provisional sequence exceeds SQLite INTEGER"
+                                            .to_string(),
+                                    ),
+                                )?,
+                                i64::try_from(authority.candidate_sequence()).map_err(|_| {
+                                    RuntimeStoreError::WriteFailed(
+                                        "WholeBlob provisional sequence exceeds SQLite INTEGER"
+                                            .to_string(),
+                                    )
+                                })?,
+                                authority.candidate_blob_sha256(),
+                                conversation_digest,
+                                message_count,
+                                catalog_json,
+                                compaction_intents_json,
+                            ],
+                        )
+                        .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                    if updated != 1 {
+                        return Err(session_authority_conflict(
+                            &runtime_id,
+                            "WholeBlob provisional candidate changed during replacement",
+                        ));
+                    }
+                    if existing.authority.candidate_blob_sha256()
+                        != authority.candidate_blob_sha256()
+                    {
+                        tx.execute(
+                            r"
+                            DELETE FROM runtime_whole_blob_bodies
+                            WHERE blob_sha256 = ?1
+                              AND NOT EXISTS (
+                                  SELECT 1 FROM runtime_whole_blob_authority
+                                  WHERE blob_sha256 = ?1
+                              )
+                              AND NOT EXISTS (
+                                  SELECT 1 FROM runtime_whole_blob_provisional_tails
+                                  WHERE candidate_blob_sha256 = ?1
+                              )
+                            ",
+                            params![existing.authority.candidate_blob_sha256()],
+                        )
+                        .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                    }
+                } else {
+                    tx.execute(
+                        r"
+                        INSERT INTO runtime_whole_blob_provisional_tails
+                            (runtime_id, authority_version, session_id, base_store_revision,
+                             base_blob_sha256, run_id, candidate_sequence,
+                             candidate_blob_sha256, conversation_digest, message_count,
+                             catalog_json, compaction_intents_json)
+                        VALUES (?1, 1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                        ",
+                        params![
+                            runtime_id_text(&runtime_id),
+                            authority.session_id().to_string(),
+                            base_revision,
+                            authority.base_blob_sha256(),
+                            authority.run_id().0.to_string(),
+                            i64::try_from(authority.candidate_sequence()).map_err(|_| {
+                                RuntimeStoreError::WriteFailed(
+                                    "WholeBlob provisional sequence exceeds SQLite INTEGER"
+                                        .to_string(),
+                                )
+                            })?,
+                            authority.candidate_blob_sha256(),
+                            conversation_digest,
+                            message_count,
+                            catalog_json,
+                            compaction_intents_json,
+                        ],
+                    )
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                }
+                tx.commit()
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                Ok(authority)
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
+        async fn load_whole_blob_provisional_tail(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Option<CommittedWholeBlobProvisionalTail>, RuntimeStoreError> {
+            self.require_whole_blob_session_operation(
+                runtime_id,
+                "load_whole_blob_provisional_tail",
+            )?;
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut conn = open_runtime_connection(&path)?;
+                let tx = conn
+                    .transaction()
+                    .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+                let observed = load_whole_blob_provisional_tail(&tx, &runtime_id)?;
+                tx.commit()
+                    .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+                Ok(observed)
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
+        async fn discard_whole_blob_provisional_tail(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            expected: &WholeBlobProvisionalTailAuthority,
+        ) -> Result<bool, RuntimeStoreError> {
+            self.require_whole_blob_session_operation(
+                runtime_id,
+                "discard_whole_blob_provisional_tail",
+            )?;
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            let expected = expected.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut conn = open_runtime_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                let deleted = tx
+                    .execute(
+                        r"
+                        DELETE FROM runtime_whole_blob_provisional_tails
+                        WHERE runtime_id = ?1
+                          AND session_id = ?2
+                          AND base_store_revision = ?3
+                          AND base_blob_sha256 = ?4
+                          AND run_id = ?5
+                          AND candidate_blob_sha256 = ?6
+                          AND candidate_sequence = ?7
+                        ",
+                        params![
+                            runtime_id_text(&runtime_id),
+                            expected.session_id().to_string(),
+                            i64::try_from(expected.base_store_revision()).map_err(|_| {
+                                RuntimeStoreError::WriteFailed(
+                                    "WholeBlob provisional base revision exceeds SQLite INTEGER"
+                                        .to_string(),
+                                )
+                            })?,
+                            expected.base_blob_sha256(),
+                            expected.run_id().0.to_string(),
+                            expected.candidate_blob_sha256(),
+                            i64::try_from(expected.candidate_sequence()).map_err(|_| {
+                                RuntimeStoreError::WriteFailed(
+                                    "WholeBlob provisional sequence exceeds SQLite INTEGER"
+                                        .to_string(),
+                                )
+                            })?,
+                        ],
+                    )
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                if deleted == 1 {
+                    tx.execute(
+                        r"
+                        DELETE FROM runtime_whole_blob_bodies
+                        WHERE blob_sha256 = ?1
+                          AND NOT EXISTS (
+                              SELECT 1 FROM runtime_whole_blob_authority
+                              WHERE blob_sha256 = ?1
+                          )
+                          AND NOT EXISTS (
+                              SELECT 1 FROM runtime_whole_blob_provisional_tails
+                              WHERE candidate_blob_sha256 = ?1
+                          )
+                        ",
+                        params![expected.candidate_blob_sha256()],
+                    )
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                }
+                tx.commit()
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                Ok(deleted == 1)
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
+        async fn write_prepared_head_canonical_provisional_tail(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            prepared: PreparedHeadCanonicalProvisionalTail,
+        ) -> Result<HeadCanonicalProvisionalTailAuthority, RuntimeStoreError> {
+            self.require_head_canonical_session_operation(
+                runtime_id,
+                "write_prepared_head_canonical_provisional_tail",
+            )?;
+            if &LogicalRuntimeId::for_session(prepared.committed().session_id()) != runtime_id
+                || &prepared.successor_head().id != prepared.committed().session_id()
+            {
+                return Err(session_authority_conflict(
+                    runtime_id,
+                    "HeadCanonical provisional intent does not bind this runtime/session",
+                ));
+            }
+            let derived_successor_token = meerkat_core::session_head_cas_token(
+                prepared.successor_head(),
+            )
+            .map_err(|error| {
+                session_authority_conflict(
+                    runtime_id,
+                    format!("HeadCanonical provisional successor is invalid: {error}"),
+                )
+            })?;
+            if derived_successor_token.as_str() != prepared.successor_head_token() {
+                return Err(session_authority_conflict(
+                    runtime_id,
+                    "HeadCanonical provisional successor token differs from its exact head",
+                ));
+            }
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut conn = open_head_canonical_runtime_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                let authority = issue_head_canonical_provisional_tail_authority_in_txn(
+                    &tx,
+                    &runtime_id,
+                    prepared.committed(),
+                    prepared.run_id(),
+                    prepared.successor_head(),
+                    prepared.successor_head_token(),
+                    prepared.candidate_message_count(),
+                    prepared.candidate_conversation_digest(),
+                    prepared.catalog_entry(),
+                    prepared.compaction_projection_intents(),
+                )?;
+                tx.commit()
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                Ok(authority)
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
+        async fn load_head_canonical_provisional_tail(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Option<HeadCanonicalProvisionalTailAuthority>, RuntimeStoreError> {
+            self.require_head_canonical_session_operation(
+                runtime_id,
+                "load_head_canonical_provisional_tail",
+            )?;
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            tokio::task::spawn_blocking(move || {
+                let conn = open_head_canonical_runtime_connection(&path)?;
+                load_head_canonical_provisional_tail_authority(&conn, &runtime_id)
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
+        async fn discard_head_canonical_provisional_tail(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            expected: &HeadCanonicalProvisionalTailAuthority,
+        ) -> Result<bool, RuntimeStoreError> {
+            self.require_head_canonical_session_operation(
+                runtime_id,
+                "discard_head_canonical_provisional_tail",
+            )?;
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            let expected = expected.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut conn = open_head_canonical_runtime_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                let discarded = discard_head_canonical_provisional_tail_authority_in_txn(
+                    &tx,
+                    &runtime_id,
+                    &expected,
+                )?;
+                tx.commit()
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                Ok(discarded)
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
+        async fn clear_session_snapshot(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<(), RuntimeStoreError> {
+            self.require_whole_blob_session_operation(runtime_id, "clear_session_snapshot")?;
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut conn = open_runtime_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                if load_head_canonical_authority(&tx, &runtime_id)?.is_some() {
+                    return Err(session_authority_conflict(
+                        &runtime_id,
+                        "whole-BLOB clear refused because head-canonical authority is installed",
+                    ));
+                }
+                delete_whole_blob_state(&tx, &runtime_id)?;
                 tx.commit()
                     .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
                 Ok(())
@@ -2558,15 +10932,25 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             expected_current: &[u8],
             replacement: Vec<u8>,
         ) -> Result<bool, RuntimeStoreError> {
-            let replacement_session: meerkat_core::Session =
-                serde_json::from_slice(&replacement)
-                    .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+            self.require_whole_blob_session_operation(
+                runtime_id,
+                "replace_session_snapshot_if_current",
+            )?;
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
             let expected_current = expected_current.to_vec();
             tokio::task::spawn_blocking(move || {
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
+                if load_head_canonical_authority(&tx, &runtime_id)?.is_some() {
+                    return Err(session_authority_conflict(
+                        &runtime_id,
+                        "whole-BLOB replacement refused because head-canonical authority is installed",
+                    ));
+                }
+                let replacement_session: meerkat_core::Session =
+                    serde_json::from_slice(&replacement)
+                        .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
                 let current = tx
                     .query_row(
                         "SELECT session_snapshot FROM runtime_session_snapshots WHERE runtime_id = ?1",
@@ -2597,12 +10981,22 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             runtime_id: &LogicalRuntimeId,
             expected_current: &[u8],
         ) -> Result<bool, RuntimeStoreError> {
+            self.require_whole_blob_session_operation(
+                runtime_id,
+                "clear_session_snapshot_if_current",
+            )?;
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
             let expected_current = expected_current.to_vec();
             tokio::task::spawn_blocking(move || {
                 let mut conn = open_runtime_connection(&path)?;
                 let tx = begin_runtime_transaction(&mut conn)?;
+                if load_head_canonical_authority(&tx, &runtime_id)?.is_some() {
+                    return Err(session_authority_conflict(
+                        &runtime_id,
+                        "whole-BLOB conditional clear refused because head-canonical authority is installed",
+                    ));
+                }
                 let current = tx
                     .query_row(
                         "SELECT session_snapshot FROM runtime_session_snapshots WHERE runtime_id = ?1",
@@ -2618,7 +11012,7 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
                     "DELETE FROM runtime_session_snapshots WHERE runtime_id = ?1",
                     params![runtime_id_text(&runtime_id)],
                 )
-                .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                .map_err(|error| map_runtime_snapshot_mutation_error(&runtime_id, error))?;
                 // Record the durable quarantine marker in the SAME transaction
                 // that deletes the rejected runtime snapshot, so the fact
                 // survives a process restart.
@@ -2752,6 +11146,11 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
                     return Ok(InputStateBatchCasOutcome::Stale);
                 }
 
+                release_input_idempotency_keys_for_mutation_set(
+                    &tx,
+                    &runtime_id,
+                    prepared.iter().map(|row| row.input_id.to_string()),
+                )?;
                 for row in &prepared {
                     tx.execute(
                         r"
@@ -2767,6 +11166,7 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
                         ],
                     )
                     .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                    update_pending_terminal_owner_index(&tx, &runtime_id, &row.replacement)?;
                 }
                 tx.commit()
                     .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
@@ -2830,6 +11230,11 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
                             )
                         })?;
                         if !all_replacements {
+                            release_input_idempotency_keys_for_mutation_set(
+                                tx,
+                                &runtime_id,
+                                prepared.iter().map(|row| row.input_id.to_string()),
+                            )?;
                             for row in &prepared {
                                 tx.execute(
                                     r"
@@ -2848,6 +11253,11 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
                                 .map_err(|error| {
                                     RuntimeStoreError::WriteFailed(error.to_string())
                                 })?;
+                                update_pending_terminal_owner_index(
+                                    tx,
+                                    &runtime_id,
+                                    &row.replacement,
+                                )?;
                             }
                         }
                         tx_slot
@@ -2855,6 +11265,95 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
                             .ok_or_else(|| {
                                 RuntimeStoreError::Internal(
                                     "SQLite input recovery fence consumed its transaction twice"
+                                        .to_string(),
+                                )
+                            })?
+                            .commit()
+                            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))
+                    })?;
+                match fence_outcome {
+                    RuntimeStoreWriteFenceOutcome::Applied => {
+                        Ok(FencedInputStateBatchCasOutcome::Swapped)
+                    }
+                    RuntimeStoreWriteFenceOutcome::Conflict { reason } => {
+                        Ok(FencedInputStateBatchCasOutcome::FenceConflict { reason })
+                    }
+                    RuntimeStoreWriteFenceOutcome::Backoff { reason } => {
+                        Ok(FencedInputStateBatchCasOutcome::FenceBackoff { reason })
+                    }
+                }
+            })
+            .await
+            .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
+        }
+
+        async fn compare_and_swap_recovery_input_states_atomically(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            expected_revision: RecoveryInputSetRevision,
+            mutations: &[RecoveryInputStateMutation],
+        ) -> Result<InputStateBatchCasOutcome, RuntimeStoreError> {
+            let prepared = prepare_recovery_input_state_mutations(mutations)?;
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut conn = open_runtime_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                let Some(changed) = prepare_current_sqlite_recovery_input_mutations(
+                    &tx,
+                    &runtime_id,
+                    expected_revision,
+                    &prepared,
+                )?
+                else {
+                    return Ok(InputStateBatchCasOutcome::Stale);
+                };
+                apply_sqlite_recovery_input_mutations(&tx, &runtime_id, &changed)?;
+                tx.commit()
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                Ok(InputStateBatchCasOutcome::Swapped)
+            })
+            .await
+            .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
+        }
+
+        async fn compare_and_swap_recovery_input_states_atomically_with_fence(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            expected_revision: RecoveryInputSetRevision,
+            mutations: &[RecoveryInputStateMutation],
+            write_fence: Arc<dyn RuntimeStoreWriteFence>,
+        ) -> Result<FencedInputStateBatchCasOutcome, RuntimeStoreError> {
+            let prepared = prepare_recovery_input_state_mutations(mutations)?;
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut conn = open_runtime_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                let Some(changed) = prepare_current_sqlite_recovery_input_mutations(
+                    &tx,
+                    &runtime_id,
+                    expected_revision,
+                    &prepared,
+                )?
+                else {
+                    return Ok(FencedInputStateBatchCasOutcome::Stale);
+                };
+
+                let mut tx_slot = Some(tx);
+                let fence_outcome =
+                    execute_runtime_store_write_fence(write_fence.as_ref(), || {
+                        let tx = tx_slot.as_ref().ok_or_else(|| {
+                            RuntimeStoreError::Internal(
+                                "SQLite recovery input fence lost its transaction".to_string(),
+                            )
+                        })?;
+                        apply_sqlite_recovery_input_mutations(tx, &runtime_id, &changed)?;
+                        tx_slot
+                            .take()
+                            .ok_or_else(|| {
+                                RuntimeStoreError::Internal(
+                                    "SQLite recovery input fence consumed its transaction twice"
                                         .to_string(),
                                 )
                             })?
@@ -2900,6 +11399,336 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
                 .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?
                 .map(|bytes| deserialize_persisted_input_state(&bytes))
                 .transpose()
+            })
+            .await
+            .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
+        }
+
+        async fn load_input_state_by_idempotency_key(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            key: &IdempotencyKey,
+        ) -> Result<Option<ExactInputStateObservation>, RuntimeStoreError> {
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            let key = key.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut conn = open_runtime_connection(&path)?;
+                // Completeness evidence and the keyed row must come from one
+                // SQLite snapshot. Separate autocommit reads can interleave
+                // with a corrupt-row repair and manufacture a miss that no
+                // single database state ever authorized.
+                let tx = conn
+                    .transaction()
+                    .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+                let uncertain = |evidence_input_id: String, reason: String| {
+                    RuntimeStoreError::InputIdempotencyIndexUncertain {
+                        runtime_id: runtime_id.to_string(),
+                        key: key.to_string(),
+                        evidence_input_id,
+                        reason,
+                    }
+                };
+                let unindexable_row = tx
+                    .query_row(
+                        r"
+                        SELECT input_id, reason
+                        FROM runtime_input_idempotency_unindexable_rows
+                        WHERE runtime_id = ?1
+                        ORDER BY input_id
+                        LIMIT 1
+                        ",
+                        params![runtime_id_text(&runtime_id)],
+                        |row| {
+                            let (input_id, invalid_input_id_storage) =
+                                sqlite_text_evidence(row.get_ref(0)?);
+                            let (reason, invalid_reason_storage) =
+                                sqlite_text_evidence(row.get_ref(1)?);
+                            Ok((
+                                input_id,
+                                invalid_input_id_storage,
+                                reason,
+                                invalid_reason_storage,
+                            ))
+                        },
+                    )
+                    .optional()
+                    .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+                if let Some((
+                    evidence_input_id,
+                    invalid_input_id_storage,
+                    reason,
+                    invalid_reason_storage,
+                )) = unindexable_row
+                {
+                    if let Some(storage_class) = invalid_input_id_storage {
+                        return Err(uncertain(
+                            evidence_input_id,
+                            format!(
+                                "unindexable-row evidence input_id has invalid SQLite \
+                                 representation {storage_class}"
+                            ),
+                        ));
+                    }
+                    if let Some(storage_class) = invalid_reason_storage {
+                        return Err(uncertain(
+                            evidence_input_id,
+                            format!(
+                                "unindexable-row evidence reason has invalid SQLite representation \
+                                 {storage_class}"
+                            ),
+                        ));
+                    }
+                    return Err(uncertain(evidence_input_id, reason));
+                }
+
+                let row = tx
+                    .query_row(
+                        r"
+                        SELECT indexed.input_id, states.state_json
+                        FROM runtime_input_idempotency_keys AS indexed
+                        LEFT JOIN runtime_input_states AS states
+                          ON states.runtime_id = indexed.runtime_id
+                         AND states.input_id = indexed.input_id
+                        WHERE indexed.runtime_id = ?1
+                          AND indexed.idempotency_key = ?2
+                        ",
+                        params![runtime_id_text(&runtime_id), &key.0],
+                        |row| {
+                            let (indexed_input_id, invalid_owner_storage_class) =
+                                sqlite_text_evidence(row.get_ref(0)?);
+                            let (bytes, invalid_storage_class) = match row.get_ref(1)? {
+                                rusqlite::types::ValueRef::Null => (None, None),
+                                rusqlite::types::ValueRef::Text(bytes)
+                                | rusqlite::types::ValueRef::Blob(bytes) => {
+                                    (Some(bytes.to_vec()), None)
+                                }
+                                rusqlite::types::ValueRef::Integer(_) => (None, Some("INTEGER")),
+                                rusqlite::types::ValueRef::Real(_) => (None, Some("REAL")),
+                            };
+                            Ok((
+                                indexed_input_id,
+                                invalid_owner_storage_class,
+                                bytes,
+                                invalid_storage_class,
+                            ))
+                        },
+                    )
+                    .optional()
+                    .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+                let Some((
+                    indexed_input_id,
+                    invalid_owner_storage_class,
+                    bytes,
+                    invalid_storage_class,
+                )) = row
+                else {
+                    tx.commit()
+                        .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+                    return Ok(None);
+                };
+                if let Some(storage_class) = invalid_owner_storage_class {
+                    return Err(uncertain(
+                        indexed_input_id,
+                        format!(
+                            "indexed owner input_id has invalid SQLite representation \
+                             {storage_class}"
+                        ),
+                    ));
+                }
+                if let Some(storage_class) = invalid_storage_class {
+                    return Err(uncertain(
+                        indexed_input_id,
+                        format!(
+                            "indexed source state_json has non-JSON SQLite storage class \
+                             {storage_class}"
+                        ),
+                    ));
+                }
+                let bytes = bytes.ok_or_else(|| {
+                    uncertain(
+                        indexed_input_id.clone(),
+                        "index names a missing source input row".to_string(),
+                    )
+                })?;
+                let state = deserialize_persisted_input_state(&bytes).map_err(|error| {
+                    uncertain(
+                        indexed_input_id.clone(),
+                        format!("indexed source input row is not a valid stored state: {error}"),
+                    )
+                })?;
+                if state.state.input_id.to_string() != indexed_input_id
+                    || state.state.idempotency_key.as_ref() != Some(&key)
+                {
+                    return Err(uncertain(
+                        indexed_input_id.clone(),
+                        format!(
+                            "index owner differs from decoded source identity/key \
+                             (decoded input {}, decoded key {:?})",
+                            state.state.input_id, state.state.idempotency_key
+                        ),
+                    ));
+                }
+                crate::meerkat_machine::authorize_stored_input_state_seed(
+                    &state.state.input_id,
+                    &state.seed,
+                )
+                .map_err(|error| {
+                    uncertain(
+                        indexed_input_id.clone(),
+                        format!(
+                            "indexed source input row has a non-authoritative machine seed: {error}"
+                        ),
+                    )
+                })?;
+                let observation = ExactInputStateObservation::from_exact_stored_row(
+                    state,
+                    input_row_version_digest(&bytes),
+                )
+                .map_err(|error| {
+                    uncertain(
+                        indexed_input_id,
+                        format!(
+                            "indexed source row could not produce an exact observation: {error}"
+                        ),
+                    )
+                })?;
+                tx.commit()
+                    .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+                Ok(Some(observation))
+            })
+            .await
+            .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
+        }
+
+        async fn load_input_states_by_ids(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            input_ids: &[InputId],
+        ) -> Result<Vec<Option<StoredInputState>>, RuntimeStoreError> {
+            validate_input_state_batch_read_ids(input_ids)?;
+            if input_ids.is_empty() {
+                return Ok(Vec::new());
+            }
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            let input_ids = input_ids.to_vec();
+            tokio::task::spawn_blocking(move || {
+                let conn = open_runtime_connection(&path)?;
+                let placeholders = (0..input_ids.len())
+                    .map(|index| format!("?{}", index + 2))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let sql = format!(
+                    "SELECT input_id, state_json \
+                     FROM runtime_input_states \
+                     WHERE runtime_id = ?1 AND input_id IN ({placeholders})"
+                );
+                let mut values = Vec::with_capacity(input_ids.len() + 1);
+                values.push(rusqlite::types::Value::Text(
+                    runtime_id_text(&runtime_id).to_owned(),
+                ));
+                values.extend(
+                    input_ids
+                        .iter()
+                        .map(|input_id| rusqlite::types::Value::Text(input_id.0.to_string())),
+                );
+                let mut statement = conn
+                    .prepare(&sql)
+                    .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+                let rows = statement
+                    .query_map(rusqlite::params_from_iter(values.iter()), |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, JsonColumnBytes>(1)?.into_bytes(),
+                        ))
+                    })
+                    .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+                let mut by_id = HashMap::with_capacity(input_ids.len());
+                for row in rows {
+                    let (stored_key, bytes) =
+                        row.map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+                    let decoded = deserialize_persisted_input_state(&bytes)?;
+                    if decoded.state.input_id.0.to_string() != stored_key {
+                        return Err(RuntimeStoreError::ReadFailed(format!(
+                            "input state row key `{stored_key}` differs from its encoded identity"
+                        )));
+                    }
+                    if by_id.insert(stored_key.clone(), decoded).is_some() {
+                        return Err(RuntimeStoreError::ReadFailed(format!(
+                            "duplicate input state row `{stored_key}`"
+                        )));
+                    }
+                }
+                Ok(input_ids
+                    .iter()
+                    .map(|input_id| by_id.remove(&input_id.0.to_string()))
+                    .collect())
+            })
+            .await
+            .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
+        }
+
+        async fn load_pending_terminal_owner_ids_page(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            after: Option<&InputId>,
+            limit: usize,
+        ) -> Result<Vec<InputId>, RuntimeStoreError> {
+            crate::store::validate_pending_terminal_owner_page(after, limit, &[])?;
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            let after = after.map(|input_id| input_id.0.to_string());
+            tokio::task::spawn_blocking(move || {
+                let conn = open_runtime_connection(&path)?;
+                let sql_limit = i64::try_from(limit).map_err(|_| {
+                    RuntimeStoreError::ReadFailed(
+                        "pending-terminal owner page limit exceeds SQLite INTEGER".to_string(),
+                    )
+                })?;
+                let encoded_owner_input_ids = if let Some(after) = after.as_deref() {
+                    let mut statement = conn
+                        .prepare(LOAD_PENDING_TERMINAL_OWNER_CONTINUATION_PAGE_SQL)
+                        .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+                    statement
+                        .query_map(
+                            params![runtime_id_text(&runtime_id), after, sql_limit],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?
+                } else {
+                    let mut statement = conn
+                        .prepare(LOAD_PENDING_TERMINAL_OWNER_FIRST_PAGE_SQL)
+                        .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+                    statement
+                        .query_map(params![runtime_id_text(&runtime_id), sql_limit], |row| {
+                            row.get::<_, String>(0)
+                        })
+                        .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?
+                };
+                let mut owner_input_ids = Vec::new();
+                for encoded in encoded_owner_input_ids {
+                    let input_id = encoded.parse::<uuid::Uuid>().map_err(|error| {
+                        RuntimeStoreError::ReadFailed(format!(
+                            "pending-terminal owner id `{encoded}` is malformed: {error}"
+                        ))
+                    })?;
+                    owner_input_ids.push(InputId::from_uuid(input_id));
+                }
+                let after = after
+                    .as_deref()
+                    .and_then(|encoded| encoded.parse::<uuid::Uuid>().ok())
+                    .map(InputId::from_uuid);
+                crate::store::validate_pending_terminal_owner_page(
+                    after.as_ref(),
+                    limit,
+                    &owner_input_ids,
+                )?;
+                Ok(owner_input_ids)
             })
             .await
             .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
@@ -3683,12 +12512,520 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
         use tempfile::TempDir;
 
         use super::*;
+
+        #[tokio::test]
+        async fn pending_terminal_owner_index_satisfies_store_contract() {
+            let tempdir = tempfile::TempDir::new().unwrap();
+            let store = SqliteRuntimeStore::new(tempdir.path().join("runtime.sqlite3")).unwrap();
+            crate::store::assert_pending_terminal_owner_index_contract(&store).await;
+        }
+
+        #[tokio::test]
+        async fn recovery_input_revision_rejects_a_phantom_insert_after_empty_observation() {
+            let tempdir = tempfile::TempDir::new().unwrap();
+            let store = SqliteRuntimeStore::new(tempdir.path().join("runtime.sqlite3")).unwrap();
+            let runtime_id = LogicalRuntimeId::new("recovery-input-set-race");
+            let observed = store
+                .load_input_states_with_versions(&runtime_id)
+                .await
+                .unwrap();
+            assert!(observed.exact_set_token().starts_with("sha256:"));
+            let observed_revision = observed.input_set_revision();
+            let observed_token = observed.exact_set_token().to_string();
+
+            store
+                .persist_input_state(
+                    &runtime_id,
+                    &InputStatePersistenceRecord::from_machine_snapshot(
+                        StoredInputState::new_accepted(InputId::new()),
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            let mut conn = open_runtime_connection(store.path()).unwrap();
+            let tx = begin_runtime_transaction(&mut conn).unwrap();
+            let error = enforce_recovery_input_set_authority(
+                &tx,
+                &runtime_id,
+                observed_revision,
+                &observed_token,
+            )
+            .unwrap_err();
+            assert!(matches!(
+                error,
+                RuntimeStoreError::RecoveryInputSetConflict {
+                    runtime_id: conflicted
+                } if conflicted == runtime_id.to_string()
+            ));
+        }
+
+        #[tokio::test]
+        async fn recovery_input_authority_rejects_token_mismatch_at_same_revision() {
+            let tempdir = tempfile::TempDir::new().unwrap();
+            let store = SqliteRuntimeStore::new(tempdir.path().join("runtime.sqlite3")).unwrap();
+            let runtime_id = LogicalRuntimeId::new("recovery-input-set-token-mismatch");
+            let observed = store
+                .load_input_states_with_versions(&runtime_id)
+                .await
+                .unwrap();
+
+            let mut conn = open_runtime_connection(store.path()).unwrap();
+            let tx = begin_runtime_transaction(&mut conn).unwrap();
+            let error = enforce_recovery_input_set_authority(
+                &tx,
+                &runtime_id,
+                observed.input_set_revision(),
+                "sha256:wrong-input-set-token",
+            )
+            .unwrap_err();
+            assert!(matches!(
+                error,
+                RuntimeStoreError::RecoveryInputSetConflict {
+                    runtime_id: conflicted
+                } if conflicted == runtime_id.to_string()
+            ));
+        }
+
+        #[test]
+        fn runtime_v2_migrates_published_v1_rows_to_current_schema() {
+            let mut conn = Connection::open_in_memory().unwrap();
+            let tx = conn.transaction().unwrap();
+            migration_0001_runtime_schema(&tx).unwrap();
+            let released_session = include_bytes!(
+                "../../../meerkat-core/tests/fixtures/v0_8_10_ob3_recovery_migration_session.json"
+            );
+            let imported = meerkat_core::import_released_0810_session(released_session).unwrap();
+            let runtime_id = LogicalRuntimeId::for_session(imported.receipt().session_id());
+            let expected_session = imported.session().clone();
+            let input_id = InputId::new();
+            let (mut stored, _) =
+                crate::store::pending_terminal_owner_fixture(input_id.clone(), false);
+            stored.state.persisted_input = Some(crate::input::Input::Prompt(
+                crate::input::PromptInput::new("pending directed payload", None),
+            ));
+            stored.seed.phase = crate::input_state::InputLifecycleState::Consumed;
+            stored.seed.terminal_outcome = Some(crate::input_state::InputTerminalOutcome::Consumed);
+            stored.seed.recovery_lane = None;
+            let mut pending_json = serde_json::to_value(&stored).unwrap();
+            pending_json["stored_input_state_version"] = serde_json::json!(4);
+            let state_json = serde_json::to_vec(&pending_json).unwrap();
+            tx.execute(
+                r"
+                INSERT INTO runtime_input_states (runtime_id, input_id, state_json)
+                VALUES (?1, ?2, ?3)
+                ",
+                params![
+                    runtime_id_text(&runtime_id),
+                    input_id.0.to_string(),
+                    state_json
+                ],
+            )
+            .unwrap();
+            let insert_released_context_row =
+                |tx: &rusqlite::Transaction<'_>,
+                 runtime_id: &LogicalRuntimeId,
+                 input: crate::input::Input,
+                 semantics: crate::ingress_types::RuntimeInputSemantics,
+                 context_key: &str,
+                 context_text: &str| {
+                    let input_id = input.id().clone();
+                    let mut stored = StoredInputState::new_accepted(input_id.clone());
+                    stored.state.runtime_semantics = Some(semantics);
+                    stored.state.persisted_input = Some(input);
+                    let mut encoded = serde_json::to_value(&stored).unwrap();
+                    encoded["stored_input_state_version"] = serde_json::json!(4);
+                    encoded["persisted_input"]["context_append"] = serde_json::json!({
+                        "key": context_key,
+                        "content": {
+                            "type": "text",
+                            "text": context_text,
+                        },
+                    });
+                    let bytes = serde_json::to_vec(&encoded).unwrap();
+                    tx.execute(
+                        "INSERT INTO runtime_input_states (runtime_id, input_id, state_json)
+                         VALUES (?1, ?2, ?3)",
+                        params![runtime_id_text(runtime_id), input_id.0.to_string(), bytes],
+                    )
+                    .unwrap();
+                    input_id
+                };
+            let steer_continuation =
+                crate::input::Input::Continuation(crate::input::ContinuationInput {
+                    header: crate::input::InputHeader {
+                        id: InputId::new(),
+                        timestamp: chrono::Utc::now(),
+                        source: crate::input::InputOrigin::System,
+                        durability: crate::input::InputDurability::Durable,
+                        visibility: crate::input::InputVisibility::default(),
+                        idempotency_key: None,
+                        supersession_key: None,
+                        correlation_id: None,
+                    },
+                    reason: "released active steer".to_string(),
+                    continuation_kind: crate::input::ContinuationKind::Ordinary,
+                    handling_mode: meerkat_core::types::HandlingMode::Steer,
+                    request_id: None,
+                    turn_tool_overlay: None,
+                    turn_append: None,
+                });
+            let steer_semantics = crate::ingress_types::RuntimeInputSemantics {
+                boundary: RunApplyBoundary::RunCheckpoint,
+                execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
+                execution_handling_mode: None,
+                peer_response_terminal_apply_intent: None,
+                live_interrupt_required: true,
+            };
+            let released_steer_id = insert_released_context_row(
+                &tx,
+                &runtime_id,
+                steer_continuation,
+                steer_semantics,
+                "released:steer:one",
+                "  exact steer bytes  ",
+            );
+            let instruction_continuation =
+                crate::input::Input::Continuation(crate::input::ContinuationInput {
+                    header: crate::input::InputHeader {
+                        id: InputId::new(),
+                        timestamp: chrono::Utc::now(),
+                        source: crate::input::InputOrigin::System,
+                        durability: crate::input::InputDurability::Durable,
+                        visibility: crate::input::InputVisibility::default(),
+                        idempotency_key: None,
+                        supersession_key: None,
+                        correlation_id: None,
+                    },
+                    reason: "released instruction continuation".to_string(),
+                    continuation_kind: crate::input::ContinuationKind::WorkgraphAttention,
+                    handling_mode: meerkat_core::types::HandlingMode::Queue,
+                    request_id: None,
+                    turn_tool_overlay: None,
+                    turn_append: None,
+                });
+            let instruction_semantics = crate::ingress_types::RuntimeInputSemantics {
+                boundary: RunApplyBoundary::RunStart,
+                execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+                execution_handling_mode: None,
+                peer_response_terminal_apply_intent: None,
+                live_interrupt_required: false,
+            };
+            let released_instruction_id = insert_released_context_row(
+                &tx,
+                &runtime_id,
+                instruction_continuation,
+                instruction_semantics,
+                "released:instruction:one",
+                "  legacy instruction  ",
+            );
+            let terminal_input = crate::input::Input::Prompt(crate::input::PromptInput::new(
+                "released terminal payload",
+                None,
+            ));
+            let terminal_input_id = terminal_input.id().clone();
+            let mut terminal = StoredInputState::new_accepted(terminal_input_id.clone());
+            terminal.state.persisted_input = Some(terminal_input);
+            terminal.seed.phase = crate::input_state::InputLifecycleState::Consumed;
+            terminal.seed.terminal_outcome =
+                Some(crate::input_state::InputTerminalOutcome::Consumed);
+            terminal.seed.recovery_lane = None;
+            let mut terminal_json = serde_json::to_value(&terminal).unwrap();
+            terminal_json["stored_input_state_version"] = serde_json::json!(4);
+            let terminal_state_json = serde_json::to_vec(&terminal_json).unwrap();
+            tx.execute(
+                r"
+                INSERT INTO runtime_input_states (runtime_id, input_id, state_json)
+                VALUES (?1, ?2, ?3)
+                ",
+                params![
+                    runtime_id_text(&runtime_id),
+                    terminal_input_id.0.to_string(),
+                    terminal_state_json
+                ],
+            )
+            .unwrap();
+            tx.execute(
+                r#"
+                INSERT INTO runtime_input_states (runtime_id, input_id, state_json)
+                VALUES (
+                    'unindexable-runtime',
+                    'duplicate-key-row',
+                    '{"idempotency_key":"first-key","idempotency_key":"second-key"}'
+                )
+                "#,
+                [],
+            )
+            .unwrap();
+            tx.execute(
+                r"
+                INSERT INTO runtime_session_snapshots (runtime_id, session_snapshot)
+                VALUES (?1, ?2)
+                ",
+                params![runtime_id_text(&runtime_id), released_session.as_slice()],
+            )
+            .unwrap();
+            let released_receipt = RunBoundaryReceipt {
+                run_id: RunId::new(),
+                boundary: RunApplyBoundary::Immediate,
+                contributing_input_ids: vec![input_id.clone()],
+                conversation_digest: None,
+                message_count: expected_session.messages().len(),
+                sequence: 7,
+            };
+            let released_receipt_json = serde_json::to_vec(&released_receipt).unwrap();
+            tx.execute(
+                r"
+                INSERT INTO runtime_boundary_receipts (
+                    runtime_id, run_id, sequence, receipt_json
+                ) VALUES (?1, ?2, ?3, ?4)
+                ",
+                params![
+                    runtime_id_text(&runtime_id),
+                    released_receipt.run_id.0.to_string(),
+                    encode_receipt_sequence(released_receipt.sequence),
+                    &released_receipt_json,
+                ],
+            )
+            .unwrap();
+
+            migration_0002_current_runtime_schema(&tx).unwrap();
+
+            let (authority_session_id, store_revision, blob_sha256, body) = tx
+                .query_row(
+                    r"
+                    SELECT authority.session_id, authority.store_revision,
+                           authority.blob_sha256, body.session_snapshot
+                    FROM runtime_whole_blob_authority AS authority
+                    JOIN runtime_whole_blob_bodies AS body
+                      ON body.blob_sha256 = authority.blob_sha256
+                    WHERE authority.runtime_id = ?1
+                    ",
+                    params![runtime_id_text(&runtime_id)],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, JsonColumnBytes>(3)?.into_bytes(),
+                        ))
+                    },
+                )
+                .unwrap();
+            assert_eq!(authority_session_id, expected_session.id().to_string());
+            assert_eq!(store_revision, 1);
+            assert_eq!(blob_sha256, whole_blob_body_sha256(&body));
+            assert_eq!(body, expected_session.to_persisted_bytes().unwrap());
+            let decoded = meerkat_core::Session::from_persisted_bytes(&body).unwrap();
+            assert_eq!(decoded.id(), expected_session.id());
+            assert_eq!(decoded.messages(), expected_session.messages());
+            assert_eq!(
+                tx.query_row(
+                    r"
+                    SELECT receipt_sha256
+                    FROM runtime_released_0810_boundary_receipts
+                    WHERE runtime_id = ?1 AND run_id = ?2 AND sequence = ?3
+                    ",
+                    params![
+                        runtime_id_text(&runtime_id),
+                        released_receipt.run_id.0.to_string(),
+                        encode_receipt_sequence(released_receipt.sequence),
+                    ],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+                input_row_version_digest(&released_receipt_json),
+                "v1 -> v2 activation must bind exact released receipt bytes in its one-time allowlist"
+            );
+
+            let catalog = load_runtime_session_catalog_entry_in_txn(&tx, &runtime_id)
+                .unwrap()
+                .expect("migrated WholeBlob session is cataloged");
+            assert_eq!(catalog.session_id(), expected_session.id());
+            assert_eq!(
+                catalog.persistence_profile(),
+                RuntimeSessionPersistenceProfile::WholeBlobV1
+            );
+            assert_eq!(catalog.created_at(), expected_session.created_at());
+            assert_eq!(catalog.updated_at(), expected_session.updated_at());
+            assert_eq!(catalog.message_count(), expected_session.messages().len());
+            assert_eq!(catalog.total_tokens(), expected_session.total_tokens());
+            assert_eq!(catalog.runtime_state(), None);
+            assert_eq!(
+                list_runtime_session_catalog_entries_in_conn(
+                    &tx,
+                    meerkat_core::SessionFilter::default(),
+                )
+                .unwrap(),
+                vec![catalog],
+                "migrated WholeBlob state must be immediately listable"
+            );
+
+            assert_eq!(
+                tx.query_row(
+                    r"
+                    SELECT owner_input_id
+                    FROM runtime_pending_terminal_owners
+                    WHERE runtime_id = ?1
+                    ",
+                    params![runtime_id_text(&runtime_id)],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+                input_id.0.to_string()
+            );
+            let migrated_pending = tx
+                .query_row(
+                    "SELECT state_json
+                     FROM runtime_input_states
+                     WHERE runtime_id = ?1 AND input_id = ?2",
+                    params![runtime_id_text(&runtime_id), input_id.0.to_string()],
+                    |row| row.get::<_, JsonColumnBytes>(0),
+                )
+                .map(JsonColumnBytes::into_bytes)
+                .map(|bytes| deserialize_persisted_input_state(&bytes))
+                .unwrap()
+                .unwrap();
+            assert!(
+                migrated_pending.state.persisted_input.is_some(),
+                "pending terminal outbox retains its exact retry payload during activation"
+            );
+            let migrated_terminal = tx
+                .query_row(
+                    "SELECT state_json
+                     FROM runtime_input_states
+                     WHERE runtime_id = ?1 AND input_id = ?2",
+                    params![
+                        runtime_id_text(&runtime_id),
+                        terminal_input_id.0.to_string()
+                    ],
+                    |row| row.get::<_, JsonColumnBytes>(0),
+                )
+                .map(JsonColumnBytes::into_bytes)
+                .map(|bytes| deserialize_persisted_input_state(&bytes))
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                migrated_terminal.seed.phase,
+                crate::input_state::InputLifecycleState::Consumed
+            );
+            assert_eq!(
+                migrated_terminal.seed.terminal_outcome,
+                Some(crate::input_state::InputTerminalOutcome::Consumed)
+            );
+            assert!(
+                migrated_terminal.state.persisted_input.is_none(),
+                "exact v1 -> v2 activation retires closed terminal payload bytes"
+            );
+            for (input_id, expected_role, expected_text, expected_key) in [
+                (
+                    released_steer_id,
+                    meerkat_core::lifecycle::run_primitive::ConversationAppendRole::User,
+                    "  exact steer bytes  ",
+                    None,
+                ),
+                (
+                    released_instruction_id,
+                    meerkat_core::lifecycle::run_primitive::ConversationAppendRole::System,
+                    "[Runtime System Context]\nsource: released:instruction:one\n\nlegacy instruction",
+                    Some("released:instruction:one"),
+                ),
+            ] {
+                let (bytes, migrated) = tx
+                    .query_row(
+                        "SELECT state_json
+                         FROM runtime_input_states
+                         WHERE runtime_id = ?1 AND input_id = ?2",
+                        params![runtime_id_text(&runtime_id), input_id.0.to_string()],
+                        |row| row.get::<_, JsonColumnBytes>(0),
+                    )
+                    .map(JsonColumnBytes::into_bytes)
+                    .map(|bytes| {
+                        let migrated = deserialize_persisted_input_state(&bytes).unwrap();
+                        (bytes, migrated)
+                    })
+                    .unwrap();
+                assert!(
+                    !String::from_utf8_lossy(&bytes).contains("context_append"),
+                    "current row must not retain the released sidecar field"
+                );
+                let Some(crate::input::Input::Continuation(continuation)) =
+                    migrated.state.persisted_input
+                else {
+                    panic!("migrated context row must retain its continuation input");
+                };
+                let append = continuation
+                    .turn_append
+                    .expect("released context must become an ordinary turn append");
+                assert_eq!(append.role, expected_role);
+                assert_eq!(append.content.render_text(), expected_text);
+                assert_eq!(
+                    append
+                        .identity
+                        .as_ref()
+                        .and_then(|identity| identity.source.as_deref()),
+                    expected_key
+                );
+                assert_eq!(
+                    append
+                        .identity
+                        .as_ref()
+                        .and_then(|identity| identity.idempotency_key.as_deref()),
+                    expected_key
+                );
+            }
+            assert_eq!(
+                tx.query_row(
+                    r"
+                    SELECT revision
+                    FROM runtime_input_set_revisions
+                    WHERE runtime_id = ?1
+                    ",
+                    params![runtime_id_text(&runtime_id)],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+                1,
+                "published v1 input rows must receive one exact initial set revision"
+            );
+            assert_eq!(
+                tx.query_row(
+                    r"
+                    SELECT reason
+                    FROM runtime_input_idempotency_unindexable_rows
+                    WHERE runtime_id = 'unindexable-runtime'
+                      AND input_id = 'duplicate-key-row'
+                    ",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+                "idempotency_key appears more than once"
+            );
+            assert_eq!(
+                tx.query_row(
+                    "SELECT runtime_id FROM runtime_head_canonical_activation_queue",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+                runtime_id_text(&runtime_id)
+            );
+            assert!(
+                !LOAD_HEAD_CANONICAL_ACTIVATION_CANDIDATES_SQL
+                    .contains("runtime_session_snapshots"),
+                "ordinary reopen must not rescan retained whole-BLOB history"
+            );
+        }
+
         use crate::identifiers::LogicalRuntimeId;
         use crate::runtime_state::RuntimeState;
         use crate::traits::RuntimeDriver as _;
+        use meerkat_core::lifecycle::core_executor::BoundSessionCommit;
         use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
         use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunId};
-        use meerkat_core::session_store::SessionStore as _;
+        use meerkat_core::session_store::{PreparedHeadCanonicalMutation, SessionStore as _};
         use meerkat_core::types::{
             AssistantBlock, BlockAssistantMessage, Message, StopReason, UserMessage,
         };
@@ -3769,6 +13106,1305 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             let mut session = Session::new();
             session.push(Message::User(UserMessage::text(content.to_string())));
             session
+        }
+
+        fn input_state_with_idempotency_key(input_id: InputId, key: &str) -> StoredInputState {
+            let mut state = StoredInputState::new_accepted(input_id);
+            state.state.idempotency_key = Some(IdempotencyKey::new(key));
+            state
+        }
+
+        #[tokio::test]
+        async fn sqlite_input_idempotency_mutations_use_complete_final_image() {
+            let (_dir, store) = temp_store();
+            crate::store::assert_input_idempotency_final_image_contract(&store).await;
+        }
+
+        #[tokio::test]
+        async fn unindexable_input_row_refuses_idempotency_presence_absence_and_exact_recovery() {
+            let (_dir, store) = temp_store();
+            let runtime_id = LogicalRuntimeId::new("unindexable-input-row");
+            let corrupt_input_id = "corrupt-input-row";
+            let indexed = input_state_with_idempotency_key(InputId::new(), "visible-key");
+            store
+                .persist_input_state(&runtime_id, &persistable(indexed))
+                .await
+                .unwrap();
+            let conn = Connection::open(store.path()).unwrap();
+            conn.execute(
+                r"
+                INSERT INTO runtime_input_states (runtime_id, input_id, state_json)
+                VALUES (?1, ?2, ?3)
+                ",
+                params![
+                    runtime_id_text(&runtime_id),
+                    corrupt_input_id,
+                    b"{not-json".as_slice()
+                ],
+            )
+            .unwrap();
+            assert_eq!(
+                conn.query_row(
+                    r"
+                    SELECT reason
+                    FROM runtime_input_idempotency_unindexable_rows
+                    WHERE runtime_id = ?1 AND input_id = ?2
+                    ",
+                    params![runtime_id_text(&runtime_id), corrupt_input_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+                "state_json is not valid JSON"
+            );
+            drop(conn);
+
+            assert!(matches!(
+                store
+                    .load_input_state_by_idempotency_key(
+                        &runtime_id,
+                        &IdempotencyKey::new("possibly-hidden-key"),
+                    )
+                    .await,
+                Err(RuntimeStoreError::InputIdempotencyIndexUncertain {
+                    evidence_input_id,
+                    ..
+                }) if evidence_input_id == corrupt_input_id
+            ));
+            assert!(matches!(
+                store
+                    .load_input_state_by_idempotency_key(
+                        &runtime_id,
+                        &IdempotencyKey::new("visible-key"),
+                    )
+                    .await,
+                Err(RuntimeStoreError::InputIdempotencyIndexUncertain {
+                    evidence_input_id,
+                    ..
+                }) if evidence_input_id == corrupt_input_id
+            ));
+            assert!(matches!(
+                store.load_input_states_with_versions(&runtime_id).await,
+                Err(RuntimeStoreError::Unsupported(detail))
+                    if detail.contains(corrupt_input_id)
+            ));
+            let recoverable = crate::store::load_input_states_for_recovery(&store, &runtime_id)
+                .await
+                .unwrap();
+            assert_eq!(
+                recoverable.len(),
+                1,
+                "ordinary compatibility recovery preserves and skips only the forensic corrupt row"
+            );
+            assert_eq!(
+                recoverable[0]
+                    .state
+                    .idempotency_key
+                    .as_ref()
+                    .map(|key| key.0.as_str()),
+                Some("visible-key"),
+                "the independent decodable row remains recoverable"
+            );
+            let conn = Connection::open(store.path()).unwrap();
+            assert_eq!(
+                conn.query_row(
+                    r"
+                    SELECT state_json
+                    FROM runtime_input_states
+                    WHERE runtime_id = ?1 AND input_id = ?2
+                    ",
+                    params![runtime_id_text(&runtime_id), corrupt_input_id],
+                    |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
+                )
+                .unwrap(),
+                b"{not-json"
+            );
+        }
+
+        #[tokio::test]
+        async fn duplicate_idempotency_members_refuse_both_extracted_keys() {
+            let (_dir, store) = temp_store();
+            let runtime_id = LogicalRuntimeId::new("duplicate-idempotency-members");
+            let duplicate_input_id = InputId::new();
+            let stored = input_state_with_idempotency_key(duplicate_input_id.clone(), "first-key");
+            let canonical_json = serde_json::to_string(&stored).unwrap();
+            let duplicate_json = canonical_json.replacen(
+                r#""idempotency_key":"first-key""#,
+                r#""idempotency_key":"first-key","idempotency_key":"second-key""#,
+                1,
+            );
+            assert_ne!(
+                duplicate_json, canonical_json,
+                "fixture must insert a duplicate top-level idempotency member"
+            );
+            let conn = Connection::open(store.path()).unwrap();
+            conn.execute(
+                r"
+                INSERT INTO runtime_input_states (runtime_id, input_id, state_json)
+                VALUES (?1, ?2, ?3)
+                ",
+                params![
+                    runtime_id_text(&runtime_id),
+                    duplicate_input_id.to_string(),
+                    duplicate_json.as_bytes(),
+                ],
+            )
+            .unwrap();
+            assert_eq!(
+                conn.query_row(
+                    r"
+                    SELECT reason
+                    FROM runtime_input_idempotency_unindexable_rows
+                    WHERE runtime_id = ?1 AND input_id = ?2
+                    ",
+                    params![runtime_id_text(&runtime_id), duplicate_input_id.to_string()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+                "idempotency_key appears more than once"
+            );
+            drop(conn);
+
+            for key in ["first-key", "second-key"] {
+                assert!(matches!(
+                    store
+                        .load_input_state_by_idempotency_key(
+                            &runtime_id,
+                            &IdempotencyKey::new(key),
+                        )
+                        .await,
+                    Err(RuntimeStoreError::InputIdempotencyIndexUncertain {
+                        evidence_input_id,
+                        ..
+                    }) if evidence_input_id == duplicate_input_id.to_string()
+                ));
+            }
+        }
+
+        #[tokio::test]
+        async fn corrupt_indexed_hits_are_typed_non_authoritative_evidence() {
+            let (_dir, store) = temp_store();
+            let conn = Connection::open(store.path()).unwrap();
+            let mut cases = Vec::new();
+
+            let dangling_runtime = LogicalRuntimeId::new("dangling-index-owner");
+            let dangling_input_id = InputId::new().to_string();
+            conn.execute(
+                r"
+                INSERT INTO runtime_input_idempotency_keys
+                    (runtime_id, idempotency_key, input_id)
+                VALUES (?1, 'dangling-key', ?2)
+                ",
+                params![runtime_id_text(&dangling_runtime), &dangling_input_id],
+            )
+            .unwrap();
+            cases.push((
+                dangling_runtime,
+                IdempotencyKey::new("dangling-key"),
+                dangling_input_id,
+                "missing source input row",
+            ));
+
+            let invalid_sentinel_input_runtime =
+                LogicalRuntimeId::new("invalid-sentinel-input-storage");
+            let invalid_sentinel_input_bytes = b"blob-sentinel-owner";
+            conn.execute(
+                r"
+                INSERT INTO runtime_input_idempotency_unindexable_rows
+                    (runtime_id, input_id, reason)
+                VALUES (?1, ?2, 'forged evidence')
+                ",
+                params![
+                    runtime_id_text(&invalid_sentinel_input_runtime),
+                    invalid_sentinel_input_bytes.as_slice()
+                ],
+            )
+            .unwrap();
+            cases.push((
+                invalid_sentinel_input_runtime,
+                IdempotencyKey::new("sentinel-probe"),
+                format!(
+                    "<BLOB {}>",
+                    input_row_version_digest(invalid_sentinel_input_bytes.as_slice())
+                ),
+                "evidence input_id has invalid SQLite representation BLOB",
+            ));
+
+            let invalid_sentinel_reason_runtime =
+                LogicalRuntimeId::new("invalid-sentinel-reason-storage");
+            let invalid_sentinel_reason_input_id = InputId::new().to_string();
+            conn.execute(
+                r"
+                INSERT INTO runtime_input_idempotency_unindexable_rows
+                    (runtime_id, input_id, reason)
+                VALUES (?1, ?2, ?3)
+                ",
+                params![
+                    runtime_id_text(&invalid_sentinel_reason_runtime),
+                    &invalid_sentinel_reason_input_id,
+                    b"blob-sentinel-reason".as_slice()
+                ],
+            )
+            .unwrap();
+            cases.push((
+                invalid_sentinel_reason_runtime,
+                IdempotencyKey::new("sentinel-probe"),
+                invalid_sentinel_reason_input_id,
+                "evidence reason has invalid SQLite representation BLOB",
+            ));
+
+            let invalid_owner_runtime = LogicalRuntimeId::new("invalid-index-owner-storage");
+            let invalid_owner_bytes = b"blob-index-owner";
+            conn.execute(
+                r"
+                INSERT INTO runtime_input_idempotency_keys
+                    (runtime_id, idempotency_key, input_id)
+                VALUES (?1, 'invalid-owner-key', ?2)
+                ",
+                params![
+                    runtime_id_text(&invalid_owner_runtime),
+                    invalid_owner_bytes.as_slice()
+                ],
+            )
+            .unwrap();
+            cases.push((
+                invalid_owner_runtime,
+                IdempotencyKey::new("invalid-owner-key"),
+                format!(
+                    "<BLOB {}>",
+                    input_row_version_digest(invalid_owner_bytes.as_slice())
+                ),
+                "invalid SQLite representation BLOB",
+            ));
+
+            let invalid_storage_runtime = LogicalRuntimeId::new("invalid-indexed-storage");
+            let invalid_storage_input_id = InputId::new().to_string();
+            conn.execute(
+                r"
+                INSERT INTO runtime_input_states (runtime_id, input_id, state_json)
+                VALUES (?1, ?2, 42)
+                ",
+                params![
+                    runtime_id_text(&invalid_storage_runtime),
+                    &invalid_storage_input_id
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                r"
+                INSERT INTO runtime_input_idempotency_keys
+                    (runtime_id, idempotency_key, input_id)
+                VALUES (?1, 'invalid-storage-key', ?2)
+                ",
+                params![
+                    runtime_id_text(&invalid_storage_runtime),
+                    &invalid_storage_input_id
+                ],
+            )
+            .unwrap();
+            cases.push((
+                invalid_storage_runtime,
+                IdempotencyKey::new("invalid-storage-key"),
+                invalid_storage_input_id,
+                "storage class INTEGER",
+            ));
+
+            let invalid_shape_runtime = LogicalRuntimeId::new("invalid-indexed-state-shape");
+            let invalid_shape_input_id = InputId::new();
+            let mut invalid_shape_json = serde_json::to_value(input_state_with_idempotency_key(
+                invalid_shape_input_id.clone(),
+                "invalid-shape-key",
+            ))
+            .unwrap();
+            invalid_shape_json
+                .as_object_mut()
+                .unwrap()
+                .remove("stored_input_state_version");
+            conn.execute(
+                r"
+                INSERT INTO runtime_input_states (runtime_id, input_id, state_json)
+                VALUES (?1, ?2, ?3)
+                ",
+                params![
+                    runtime_id_text(&invalid_shape_runtime),
+                    invalid_shape_input_id.to_string(),
+                    serde_json::to_vec(&invalid_shape_json).unwrap(),
+                ],
+            )
+            .unwrap();
+            cases.push((
+                invalid_shape_runtime,
+                IdempotencyKey::new("invalid-shape-key"),
+                invalid_shape_input_id.to_string(),
+                "not a valid stored state",
+            ));
+
+            let invalid_seed_runtime = LogicalRuntimeId::new("invalid-indexed-machine-seed");
+            let invalid_seed_input_id = InputId::new();
+            let mut invalid_seed =
+                input_state_with_idempotency_key(invalid_seed_input_id.clone(), "invalid-seed-key");
+            invalid_seed.seed.terminal_outcome =
+                Some(crate::input_state::InputTerminalOutcome::Consumed);
+            conn.execute(
+                r"
+                INSERT INTO runtime_input_states (runtime_id, input_id, state_json)
+                VALUES (?1, ?2, ?3)
+                ",
+                params![
+                    runtime_id_text(&invalid_seed_runtime),
+                    invalid_seed_input_id.to_string(),
+                    serde_json::to_vec(&invalid_seed).unwrap(),
+                ],
+            )
+            .unwrap();
+            cases.push((
+                invalid_seed_runtime,
+                IdempotencyKey::new("invalid-seed-key"),
+                invalid_seed_input_id.to_string(),
+                "non-authoritative machine seed",
+            ));
+
+            let mismatched_identity_runtime =
+                LogicalRuntimeId::new("mismatched-indexed-input-identity");
+            let indexed_input_id = InputId::new();
+            let encoded_input_id = InputId::new();
+            let mismatched_identity_json = serde_json::to_vec(&input_state_with_idempotency_key(
+                encoded_input_id,
+                "mismatched-identity-key",
+            ))
+            .unwrap();
+            conn.execute(
+                r"
+                INSERT INTO runtime_input_states (runtime_id, input_id, state_json)
+                VALUES (?1, ?2, ?3)
+                ",
+                params![
+                    runtime_id_text(&mismatched_identity_runtime),
+                    indexed_input_id.to_string(),
+                    mismatched_identity_json,
+                ],
+            )
+            .unwrap();
+            cases.push((
+                mismatched_identity_runtime,
+                IdempotencyKey::new("mismatched-identity-key"),
+                indexed_input_id.to_string(),
+                "differs from decoded source identity/key",
+            ));
+
+            let mismatched_key_runtime = LogicalRuntimeId::new("mismatched-indexed-key");
+            let mismatched_key_input_id = InputId::new();
+            let mismatched_key_json = serde_json::to_vec(&input_state_with_idempotency_key(
+                mismatched_key_input_id.clone(),
+                "encoded-key",
+            ))
+            .unwrap();
+            conn.execute(
+                r"
+                INSERT INTO runtime_input_states (runtime_id, input_id, state_json)
+                VALUES (?1, ?2, ?3)
+                ",
+                params![
+                    runtime_id_text(&mismatched_key_runtime),
+                    mismatched_key_input_id.to_string(),
+                    mismatched_key_json,
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                r"
+                UPDATE runtime_input_idempotency_keys
+                SET idempotency_key = 'forged-index-key'
+                WHERE runtime_id = ?1 AND input_id = ?2
+                ",
+                params![
+                    runtime_id_text(&mismatched_key_runtime),
+                    mismatched_key_input_id.to_string()
+                ],
+            )
+            .unwrap();
+            cases.push((
+                mismatched_key_runtime,
+                IdempotencyKey::new("forged-index-key"),
+                mismatched_key_input_id.to_string(),
+                "differs from decoded source identity/key",
+            ));
+            drop(conn);
+
+            for (runtime_id, key, expected_input_id, expected_reason) in cases {
+                match store
+                    .load_input_state_by_idempotency_key(&runtime_id, &key)
+                    .await
+                {
+                    Err(RuntimeStoreError::InputIdempotencyIndexUncertain {
+                        evidence_input_id,
+                        reason,
+                        ..
+                    }) => {
+                        assert_eq!(evidence_input_id, expected_input_id);
+                        assert!(
+                            reason.contains(expected_reason),
+                            "unexpected typed corruption reason for {runtime_id}/{key}: {reason}"
+                        );
+                    }
+                    other => panic!(
+                        "corrupt indexed hit for {runtime_id}/{key} must be typed uncertainty, got \
+                         {other:?}"
+                    ),
+                }
+            }
+        }
+
+        #[test]
+        fn activation_refuses_noncurrent_authority_without_candidate_repair() {
+            let (_dir, store) = temp_store();
+            let session = session_with_user("noncurrent authority");
+            let session_id = session.id().clone();
+            let runtime_id = LogicalRuntimeId::for_session(&session_id);
+            let mut boundary_head = meerkat_core::session_store::SessionHead::from_session(
+                &session,
+                meerkat_core::session_store::TranscriptStrandId::root(),
+                0,
+            )
+            .unwrap();
+            boundary_head.message_row_prefix = None;
+            let boundary_head_token = meerkat_core::session_head_cas_token(&boundary_head).unwrap();
+            let boundary_head_json = serde_json::to_vec(&boundary_head).unwrap();
+            let session_snapshot = serde_json::to_vec(&session).unwrap();
+
+            let mut conn = open_runtime_connection(store.path()).unwrap();
+            let tx = begin_runtime_transaction(&mut conn).unwrap();
+            upsert_runtime_snapshot_issued(
+                &tx,
+                &runtime_id,
+                &session_snapshot,
+                &session_id,
+                &format!(
+                    "row-sha256:{:x}",
+                    <sha2::Sha256 as sha2::Digest>::digest(&session_snapshot)
+                ),
+            )
+            .unwrap();
+            tx.execute(
+                r"
+                INSERT INTO runtime_session_authority (
+                    runtime_id, authority_version, session_id, store_revision,
+                    boundary_head_json, committed_head_token
+                ) VALUES (?1, 1, ?2, 1, ?3, ?4)
+                ",
+                params![
+                    runtime_id_text(&runtime_id),
+                    session_id.to_string(),
+                    boundary_head_json,
+                    boundary_head_token,
+                ],
+            )
+            .unwrap();
+            tx.execute(
+                r"
+                INSERT INTO runtime_head_canonical_activations (
+                    runtime_id, activation_version, state, session_id,
+                    started_at_ms, updated_at_ms
+                ) VALUES (?1, 1, 'in_progress', ?2, 1, 1)
+                ",
+                params![runtime_id_text(&runtime_id), session_id.to_string()],
+            )
+            .unwrap();
+            tx.commit().unwrap();
+
+            assert!(matches!(
+                activate_head_canonical_profiles(&mut conn),
+                Err(RuntimeStoreError::SessionPersistenceAuthorityConflict { detail, .. })
+                    if detail.contains("has no exact message-row prefix authority")
+            ));
+        }
+
+        #[tokio::test]
+        async fn marker_first_activation_resumes_current_shape() {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("marker-first-activation.sqlite3");
+            let whole_blob = SqliteRuntimeStore::new_whole_blob(&path).unwrap();
+            let physical_store = SqliteSessionStore::open(path.clone()).unwrap();
+            let session = session_with_user("marker-first activation");
+            let session_id = session.id().clone();
+            let runtime_id = LogicalRuntimeId::for_session(&session_id);
+            physical_store.save(&session).await.unwrap();
+            whole_blob
+                .commit_session_snapshot(
+                    &runtime_id,
+                    SerializedSessionSnapshot {
+                        session_snapshot: serde_json::to_vec(&session).unwrap().into(),
+                    },
+                )
+                .await
+                .unwrap();
+            drop(physical_store);
+            drop(whole_blob);
+
+            let mut conn = open_runtime_connection(&path).unwrap();
+            let tx = begin_runtime_transaction(&mut conn).unwrap();
+            tx.execute(
+                r"
+                INSERT INTO runtime_head_canonical_activations (
+                    runtime_id, activation_version, state, session_id,
+                    started_at_ms, updated_at_ms
+                ) VALUES (?1, 1, 'in_progress', ?2, 1, 1)
+                ",
+                params![runtime_id_text(&runtime_id), session_id.to_string()],
+            )
+            .unwrap();
+            tx.commit().unwrap();
+            drop(conn);
+
+            let activated = SqliteRuntimeStore::new_head_canonical(&path).unwrap();
+            let conn = Connection::open(activated.path()).unwrap();
+            assert_eq!(
+                conn.query_row(
+                    r"
+                    SELECT state
+                    FROM runtime_head_canonical_activations
+                    WHERE runtime_id = ?1
+                    ",
+                    params![runtime_id_text(&runtime_id)],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+                "complete"
+            );
+            assert!(
+                load_head_canonical_authority(&conn, &runtime_id)
+                    .unwrap()
+                    .is_some(),
+                "marker-first retry must install the exact current authority"
+            );
+        }
+
+        #[test]
+        fn completed_activation_receipt_is_not_a_current_authority_candidate() {
+            let (_dir, store) = temp_store();
+            let session_id = Session::new().id().clone();
+            let runtime_id = LogicalRuntimeId::for_session(&session_id);
+            let mut conn = open_runtime_connection(store.path()).unwrap();
+            let tx = begin_runtime_transaction(&mut conn).unwrap();
+            tx.execute(
+                r"
+                INSERT INTO runtime_session_snapshots (runtime_id, session_snapshot)
+                VALUES (?1, X'7B7D')
+                ",
+                params![runtime_id_text(&runtime_id)],
+            )
+            .unwrap();
+            tx.execute(
+                r"
+                INSERT INTO runtime_session_authority (
+                    runtime_id, authority_version, session_id, store_revision,
+                    boundary_head_json, committed_head_token
+                ) VALUES (?1, 1, ?2, 1, X'7B7D', 'current-authority-token')
+                ",
+                params![runtime_id_text(&runtime_id), session_id.to_string()],
+            )
+            .unwrap();
+            tx.execute(
+                r"
+                INSERT INTO runtime_head_canonical_activations (
+                    runtime_id, activation_version, state, session_id,
+                    source_snapshot_token, source_snapshot_bytes,
+                    source_message_count, started_at_ms, updated_at_ms,
+                    completed_at_ms, elapsed_ms, boundary_message_count,
+                    physical_message_count, boundary_head_cas_token,
+                    physical_head_cas_token
+                ) VALUES (
+                    ?1, 1, 'complete', ?2, 'source-token', 2, 1, 1, 2,
+                    2, 1, 1, 1, 'historical-boundary-token',
+                    'historical-physical-token'
+                )
+                ",
+                params![runtime_id_text(&runtime_id), session_id.to_string()],
+            )
+            .unwrap();
+            tx.commit().unwrap();
+
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM runtime_head_canonical_activation_queue",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+                0,
+                "installing current authority must retire the one-time activation work item"
+            );
+            assert!(
+                head_canonical_activation_candidate_ids(&conn)
+                    .unwrap()
+                    .is_empty(),
+                "completed migration receipts and current authorities are historical, not startup work"
+            );
+            activate_head_canonical_profiles(&mut conn).unwrap();
+        }
+
+        #[tokio::test]
+        async fn ordinary_append_after_activation_reopens_past_historical_receipt() {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("activation-then-append.sqlite3");
+            let whole_blob = SqliteRuntimeStore::new_whole_blob(&path).unwrap();
+            let physical_store = SqliteSessionStore::open(path.clone()).unwrap();
+            let session = session_with_user("legacy boundary");
+            let session_id = session.id().clone();
+            let runtime_id = LogicalRuntimeId::for_session(&session_id);
+            physical_store.save(&session).await.unwrap();
+            whole_blob
+                .commit_session_snapshot(
+                    &runtime_id,
+                    SerializedSessionSnapshot {
+                        session_snapshot: serde_json::to_vec(&session).unwrap().into(),
+                    },
+                )
+                .await
+                .unwrap();
+            drop(physical_store);
+            drop(whole_blob);
+
+            let activated = SqliteRuntimeStore::new_head_canonical(&path).unwrap();
+            let conn = Connection::open(&path).unwrap();
+            let activated_authority = load_head_canonical_authority(&conn, &runtime_id)
+                .unwrap()
+                .expect("activation authority");
+            let activated_authority = activated_authority
+                .head_canonical()
+                .expect("HeadCanonical activation authority");
+            let activated_store_revision = activated_authority.store_revision();
+            drop(conn);
+
+            let physical_store = SqliteSessionStore::open(path.clone()).unwrap();
+            let observed_head = physical_store
+                .load_head(&session_id)
+                .await
+                .unwrap()
+                .expect("activated physical head");
+            let mut resumed_session = physical_store
+                .load(&session_id)
+                .await
+                .unwrap()
+                .expect("activated physical session");
+            resumed_session.push(Message::User(UserMessage::text("ordinary append")));
+            let mutation =
+                PreparedHeadCanonicalMutation::prepare(&resumed_session, Some(observed_head))
+                    .unwrap();
+            let appended_head = mutation.successor_head().clone();
+            let appended_head_token = mutation.successor_head_token().to_string();
+            let boundary =
+                BoundSessionCommit::head_canonical_from_session(&resumed_session, mutation)
+                    .unwrap();
+            activated
+                .commit_prepared_session_boundary(
+                    &runtime_id,
+                    PreparedRuntimeSessionCommit::snapshot_only(boundary),
+                )
+                .await
+                .unwrap();
+            drop(physical_store);
+            drop(activated);
+
+            let reopened = SqliteRuntimeStore::new_head_canonical(&path)
+                .expect("historical activation receipt must not block reopen");
+            let conn = Connection::open(reopened.path()).unwrap();
+            let current = load_head_canonical_authority(&conn, &runtime_id)
+                .unwrap()
+                .expect("current runtime authority");
+            let current = current
+                .head_canonical()
+                .expect("current HeadCanonical authority");
+            assert_eq!(
+                current.store_revision(),
+                activated_store_revision + 1,
+                "ordinary append must issue exactly one successor store revision"
+            );
+            assert_eq!(
+                current.boundary_head(),
+                &appended_head,
+                "reopen must preserve the ordinary append head, not revalidate the historical activation boundary"
+            );
+            assert_eq!(
+                current.committed_head_token(),
+                appended_head_token,
+                "reopen must preserve the store-issued append token"
+            );
+            assert!(
+                head_canonical_activation_candidate_ids(&conn)
+                    .unwrap()
+                    .is_empty(),
+                "completed activation plus valid append must leave no startup work"
+            );
+        }
+
+        #[tokio::test]
+        async fn head_canonical_provisional_chain_advances_each_physical_checkpoint_then_commits() {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("head-authority-revisions.sqlite3");
+            let runtime_store = SqliteRuntimeStore::new_head_canonical(&path).unwrap();
+            let physical_store = SqliteSessionStore::open(path.clone()).unwrap();
+            let session = session_with_user("committed base");
+            let session_id = session.id().clone();
+            let runtime_id = LogicalRuntimeId::for_session(&session_id);
+
+            let root = PreparedHeadCanonicalMutation::prepare_root(&session).unwrap();
+            physical_store
+                .apply_prepared_head_canonical_mutation(&root)
+                .await
+                .unwrap();
+            let committed = {
+                let mut conn = open_head_canonical_runtime_connection(&path).unwrap();
+                let tx = begin_runtime_transaction(&mut conn).unwrap();
+                let issued = issue_head_canonical_authority_in_txn(
+                    &tx,
+                    &runtime_id,
+                    root.successor_head().clone(),
+                )
+                .unwrap();
+                write_head_canonical_authority_in_txn(&tx, &runtime_id, &issued).unwrap();
+                tx.commit().unwrap();
+                issued
+                    .head_canonical()
+                    .expect("root HeadCanonical authority")
+                    .clone()
+            };
+
+            let observed_head = physical_store
+                .load_head(&session_id)
+                .await
+                .unwrap()
+                .expect("root physical head");
+            let mut resumed = physical_store
+                .load(&session_id)
+                .await
+                .unwrap()
+                .expect("root physical session");
+            resumed.push(Message::User(UserMessage::text("provisional tail")));
+            let tail =
+                PreparedHeadCanonicalMutation::prepare(&resumed, Some(observed_head)).unwrap();
+            let run_id = RunId::new();
+            let prepared = PreparedHeadCanonicalProvisionalTail::prepare(
+                committed.clone(),
+                run_id.clone(),
+                tail.successor_head(),
+                tail.successor_head_token(),
+                &resumed,
+            )
+            .unwrap();
+            let provisional = runtime_store
+                .write_prepared_head_canonical_provisional_tail(&runtime_id, prepared)
+                .await
+                .unwrap();
+            assert_eq!(
+                provisional.base_store_revision(),
+                committed.store_revision()
+            );
+            assert_eq!(
+                provisional.physical_store_revision(),
+                committed.store_revision() + 1
+            );
+            assert_eq!(provisional.candidate_sequence(), 1);
+            assert_eq!(
+                runtime_store
+                    .load_head_canonical_provisional_tail(&runtime_id)
+                    .await
+                    .unwrap()
+                    .as_ref(),
+                Some(&provisional)
+            );
+
+            physical_store
+                .apply_prepared_head_canonical_mutation(&tail)
+                .await
+                .unwrap();
+            let observed_head = physical_store
+                .load_head(&session_id)
+                .await
+                .unwrap()
+                .expect("first provisional physical head");
+            let mut resumed = physical_store
+                .load(&session_id)
+                .await
+                .unwrap()
+                .expect("first provisional physical session");
+            resumed.push(Message::User(UserMessage::text("second provisional tail")));
+            let second_tail =
+                PreparedHeadCanonicalMutation::prepare(&resumed, Some(observed_head)).unwrap();
+            let second_candidate = resumed.clone();
+            let second_prepared = PreparedHeadCanonicalProvisionalTail::prepare(
+                committed.clone(),
+                run_id.clone(),
+                second_tail.successor_head(),
+                second_tail.successor_head_token(),
+                &resumed,
+            )
+            .unwrap();
+            let second_provisional = runtime_store
+                .write_prepared_head_canonical_provisional_tail(&runtime_id, second_prepared)
+                .await
+                .unwrap();
+            assert_eq!(
+                second_provisional.physical_store_revision(),
+                provisional.physical_store_revision() + 1
+            );
+            assert_eq!(second_provisional.candidate_sequence(), 2);
+            assert_eq!(
+                runtime_store
+                    .write_prepared_head_canonical_provisional_tail(
+                        &runtime_id,
+                        PreparedHeadCanonicalProvisionalTail::prepare(
+                            committed.clone(),
+                            run_id.clone(),
+                            second_tail.successor_head(),
+                            second_tail.successor_head_token(),
+                            &resumed,
+                        )
+                        .unwrap(),
+                    )
+                    .await
+                    .unwrap(),
+                second_provisional,
+                "same-run same-head retry must return the exact latest provisional authority"
+            );
+            physical_store
+                .apply_prepared_head_canonical_mutation(&second_tail)
+                .await
+                .unwrap();
+            let observed_head = physical_store
+                .load_head(&session_id)
+                .await
+                .unwrap()
+                .expect("second provisional physical head");
+            let mut resumed = physical_store
+                .load(&session_id)
+                .await
+                .unwrap()
+                .expect("second provisional physical session");
+            resumed.push(Message::User(UserMessage::text("incomplete third intent")));
+            let incomplete_tail =
+                PreparedHeadCanonicalMutation::prepare(&resumed, Some(observed_head)).unwrap();
+            let incomplete = runtime_store
+                .write_prepared_head_canonical_provisional_tail(
+                    &runtime_id,
+                    PreparedHeadCanonicalProvisionalTail::prepare(
+                        committed.clone(),
+                        run_id.clone(),
+                        incomplete_tail.successor_head(),
+                        incomplete_tail.successor_head_token(),
+                        &resumed,
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                incomplete.physical_store_revision(),
+                second_provisional.physical_store_revision() + 1
+            );
+            assert_eq!(incomplete.candidate_sequence(), 3);
+            assert!(
+                runtime_store
+                    .discard_head_canonical_provisional_tail(&runtime_id, &incomplete)
+                    .await
+                    .unwrap(),
+                "discarding an incomplete later intent must roll back one provisional revision"
+            );
+            assert_eq!(
+                runtime_store
+                    .load_head_canonical_provisional_tail(&runtime_id)
+                    .await
+                    .unwrap()
+                    .as_ref(),
+                Some(&second_provisional),
+                "incomplete later intent rollback must retain the last applied physical authority"
+            );
+            let receipt = RunBoundaryReceipt {
+                run_id: run_id.clone(),
+                boundary: RunApplyBoundary::Immediate,
+                contributing_input_ids: Vec::new(),
+                conversation_digest: Some(second_candidate.transcript_content_digest().unwrap()),
+                message_count: second_candidate.messages().len(),
+                sequence: 1,
+            };
+            let checkpoint = meerkat_core::RunCheckpointReceipt::issued(
+                meerkat_core::RunCheckpointAuthority::HeadCanonical(second_provisional.clone()),
+                second_candidate.transcript_content_digest().unwrap(),
+                second_candidate.messages().len() as u64,
+            )
+            .unwrap();
+            let mut divergent_receipt = receipt.clone();
+            divergent_receipt.conversation_digest = Some("sha256:divergent".to_string());
+            assert!(
+                PreparedRuntimeSessionCommit::promote_head_canonical_success(
+                    crate::store::PreparedHeadCanonicalProvisionalPromotion::prepare(
+                        checkpoint.clone(),
+                        &run_id,
+                    )
+                    .unwrap(),
+                    divergent_receipt,
+                    Vec::new(),
+                    session_id.clone(),
+                )
+                .is_err(),
+                "HeadCanonical promotion preparation must bind the terminal receipt to the exact checkpoint digest/count"
+            );
+            let promotion = crate::store::PreparedHeadCanonicalProvisionalPromotion::prepare(
+                checkpoint, &run_id,
+            )
+            .unwrap();
+            let successor = runtime_store
+                .commit_prepared_session_boundary(
+                    &runtime_id,
+                    PreparedRuntimeSessionCommit::promote_head_canonical_success(
+                        promotion,
+                        receipt.clone(),
+                        Vec::new(),
+                        session_id.clone(),
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            let successor = successor
+                .authority()
+                .and_then(RuntimeSessionAuthority::head_canonical)
+                .expect("successor HeadCanonical authority")
+                .clone();
+            assert_eq!(
+                successor.store_revision(),
+                second_provisional.physical_store_revision() + 1
+            );
+            assert_eq!(
+                successor.committed_head_token(),
+                second_provisional.physical_head_token()
+            );
+            let retry_checkpoint = meerkat_core::RunCheckpointReceipt::issued(
+                meerkat_core::RunCheckpointAuthority::HeadCanonical(second_provisional.clone()),
+                second_candidate.transcript_content_digest().unwrap(),
+                second_candidate.messages().len() as u64,
+            )
+            .unwrap();
+            let retry = runtime_store
+                .commit_prepared_session_boundary(
+                    &runtime_id,
+                    PreparedRuntimeSessionCommit::promote_head_canonical_success(
+                        crate::store::PreparedHeadCanonicalProvisionalPromotion::prepare(
+                            retry_checkpoint,
+                            &run_id,
+                        )
+                        .unwrap(),
+                        receipt,
+                        Vec::new(),
+                        session_id.clone(),
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                retry.outcome(),
+                crate::store::PreparedRuntimeSessionCommitOutcome::AlreadyAppliedExact
+            );
+            assert!(
+                runtime_store
+                    .load_head_canonical_provisional_tail(&runtime_id)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "final authority must atomically clear the promoted provisional tail"
+            );
+            let catalog = runtime_store
+                .load_runtime_session_catalog_entry(&runtime_id)
+                .await
+                .unwrap()
+                .expect("promoted HeadCanonical catalog");
+            assert_eq!(
+                catalog.persistence_profile(),
+                RuntimeSessionPersistenceProfile::HeadCanonicalV1
+            );
+            assert_eq!(catalog.message_count(), second_candidate.messages().len());
+
+            let observed_head = physical_store
+                .load_head(&session_id)
+                .await
+                .unwrap()
+                .expect("promoted physical head");
+            let mut next_run_candidate = physical_store
+                .load(&session_id)
+                .await
+                .unwrap()
+                .expect("promoted physical session");
+            next_run_candidate.push(Message::User(UserMessage::text("next run checkpoint")));
+            let next_run_tail =
+                PreparedHeadCanonicalMutation::prepare(&next_run_candidate, Some(observed_head))
+                    .unwrap();
+            let next_run = runtime_store
+                .write_prepared_head_canonical_provisional_tail(
+                    &runtime_id,
+                    PreparedHeadCanonicalProvisionalTail::prepare(
+                        successor.clone(),
+                        RunId::new(),
+                        next_run_tail.successor_head(),
+                        next_run_tail.successor_head_token(),
+                        &next_run_candidate,
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                next_run.physical_store_revision(),
+                successor.store_revision() + 1,
+                "the first checkpoint of the next run must consume the revision immediately after final promotion"
+            );
+            assert_eq!(next_run.candidate_sequence(), 1);
+        }
+
+        #[test]
+        fn head_canonical_provisional_schema_rejects_partial_predecessor_projection() {
+            let (_dir, store) = temp_store();
+            let session_id = Session::new().id().clone();
+            let runtime_id = LogicalRuntimeId::for_session(&session_id);
+            let conn = open_runtime_connection(store.path()).unwrap();
+            let result = conn.execute(
+                r"
+                INSERT INTO runtime_head_canonical_provisional_tails (
+                    runtime_id, authority_version, session_id,
+                    base_store_revision, base_committed_head_token,
+                    physical_store_revision, physical_head_token,
+                    run_id, candidate_sequence,
+                    candidate_message_count, candidate_conversation_digest,
+                    catalog_json, compaction_intents_json,
+                    predecessor_candidate_message_count
+                ) VALUES (
+                    ?1, 1, ?2, 1, 'base-token',
+                    2, 'physical-token', ?3, 1,
+                    0, 'sha256:candidate', X'7B7D', X'5B5D', 0
+                )
+                ",
+                params![
+                    runtime_id_text(&runtime_id),
+                    session_id.to_string(),
+                    RunId::new().to_string(),
+                ],
+            );
+            assert!(
+                result.is_err(),
+                "SQLite must reject every partially populated predecessor projection bundle"
+            );
+        }
+
+        #[test]
+        fn pending_owner_continuation_query_exposes_composite_key_range() {
+            assert!(!LOAD_PENDING_TERMINAL_OWNER_CONTINUATION_PAGE_SQL.contains(" IS NULL OR "));
+            assert!(
+                LOAD_PENDING_TERMINAL_OWNER_CONTINUATION_PAGE_SQL.contains("owner_input_id > ?2")
+            );
+            let (_dir, store) = temp_store();
+            let conn = open_runtime_connection(store.path()).unwrap();
+            let explain =
+                format!("EXPLAIN QUERY PLAN {LOAD_PENDING_TERMINAL_OWNER_CONTINUATION_PAGE_SQL}");
+            let detail = conn
+                .query_row(&explain, params!["runtime", "after", 16_i64], |row| {
+                    row.get::<_, String>(3)
+                })
+                .unwrap();
+            assert!(
+                detail.contains("runtime_id=? AND owner_input_id>?"),
+                "continuation must use the composite primary-key range: {detail}"
+            );
+        }
+
+        #[tokio::test]
+        async fn only_migration_marked_released_receipt_can_adopt_missing_witness() {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("released-receipt-ack-loss.sqlite3");
+            let store = SqliteRuntimeStore::new_head_canonical(&path).unwrap();
+
+            let session = session_with_user("supported-floor boundary");
+            let session_id = session.id().clone();
+            let runtime_id = LogicalRuntimeId::for_session(&session_id);
+            let mutation = PreparedHeadCanonicalMutation::prepare(&session, None).unwrap();
+            let document = || {
+                BoundSessionCommit::sealed(Arc::new(session.clone()))
+                    .unwrap()
+                    .with_head_canonical_mutation(mutation.clone())
+                    .unwrap()
+            };
+
+            let input_id = InputId::new();
+            let mut input = StoredInputState::new_accepted(input_id.clone());
+            input.state.idempotency_key =
+                Some(crate::identifiers::IdempotencyKey::new("floor-ack-loss"));
+            let input = persistable(input);
+            let lifecycle = lifecycle_commit(&runtime_id, RuntimeState::Idle, 41, 9);
+            let receipt = RunBoundaryReceipt {
+                run_id: RunId::new(),
+                boundary: RunApplyBoundary::Immediate,
+                contributing_input_ids: vec![input_id],
+                conversation_digest: Some(session.transcript_content_digest().unwrap()),
+                message_count: session.messages().len(),
+                sequence: 1,
+            };
+
+            let first = store
+                .commit_prepared_session_boundary(
+                    &runtime_id,
+                    PreparedRuntimeSessionCommit::machine_terminal(
+                        document(),
+                        receipt.clone(),
+                        lifecycle.clone(),
+                        vec![input.clone()],
+                        session_id.clone(),
+                    ),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                first.outcome(),
+                crate::store::PreparedRuntimeSessionCommitOutcome::Applied
+            );
+
+            // A missing witness on current state is corruption, not evidence
+            // that this receipt came from the released v1 schema.
+            let conn = Connection::open(&path).unwrap();
+            assert_eq!(
+                conn.execute(
+                    "DELETE FROM runtime_session_boundary_witnesses \
+                     WHERE runtime_id = ?1",
+                    params![runtime_id_text(&runtime_id)],
+                )
+                .unwrap(),
+                1
+            );
+            drop(conn);
+
+            let unmarked = store
+                .commit_prepared_session_boundary(
+                    &runtime_id,
+                    PreparedRuntimeSessionCommit::machine_terminal(
+                        document(),
+                        receipt.clone(),
+                        lifecycle.clone(),
+                        vec![input.clone()],
+                        session_id.clone(),
+                    ),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(
+                unmarked
+                    .to_string()
+                    .contains("no request witness and no exact released 0.8.10 migration marker"),
+                true,
+                "current missing-witness state must fail closed: {unmarked}"
+            );
+
+            // Model the exact marker created only by v1 -> v2 activation.
+            let conn = Connection::open(&path).unwrap();
+            let receipt_json = serde_json::to_vec(&receipt).unwrap();
+            assert_eq!(
+                conn.execute(
+                    r"
+                    INSERT INTO runtime_released_0810_boundary_receipts (
+                        runtime_id, run_id, sequence, receipt_sha256
+                    )
+                    VALUES (?1, ?2, ?3, ?4)
+                    ",
+                    params![
+                        runtime_id_text(&runtime_id),
+                        receipt.run_id.0.to_string(),
+                        encode_receipt_sequence(receipt.sequence),
+                        input_row_version_digest(&receipt_json),
+                    ],
+                )
+                .unwrap(),
+                1
+            );
+            drop(conn);
+
+            let fenced_input = input
+                .clone()
+                .with_expected_row_digest("sha256:unprovable-released-precondition".to_string());
+            let fenced = store
+                .commit_prepared_session_boundary(
+                    &runtime_id,
+                    PreparedRuntimeSessionCommit::machine_terminal(
+                        document(),
+                        receipt.clone(),
+                        lifecycle.clone(),
+                        vec![fenced_input],
+                        session_id.clone(),
+                    ),
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                fenced
+                    .to_string()
+                    .contains("cannot prove current lifecycle/input CAS preconditions"),
+                "released receipt must not certify an unretained prior-row fence: {fenced}"
+            );
+
+            let adopted = store
+                .commit_prepared_session_boundary(
+                    &runtime_id,
+                    PreparedRuntimeSessionCommit::machine_terminal(
+                        document(),
+                        receipt.clone(),
+                        lifecycle.clone(),
+                        vec![input.clone()],
+                        session_id.clone(),
+                    ),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                adopted.outcome(),
+                crate::store::PreparedRuntimeSessionCommitOutcome::AlreadyAppliedReleasedEquivalent
+            );
+            let conn = Connection::open(&path).unwrap();
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM runtime_session_boundary_witnesses \
+                     WHERE runtime_id = ?1",
+                    params![runtime_id_text(&runtime_id)],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+                1,
+                "adoption must install the exact request witness atomically"
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM runtime_released_0810_boundary_receipts \
+                     WHERE runtime_id = ?1",
+                    params![runtime_id_text(&runtime_id)],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+                0,
+                "adoption must consume the released migration marker atomically"
+            );
+            drop(conn);
+
+            let exact_retry = store
+                .commit_prepared_session_boundary(
+                    &runtime_id,
+                    PreparedRuntimeSessionCommit::machine_terminal(
+                        document(),
+                        receipt,
+                        lifecycle,
+                        vec![input],
+                        session_id,
+                    ),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                exact_retry.outcome(),
+                crate::store::PreparedRuntimeSessionCommitOutcome::AlreadyAppliedExact
+            );
         }
 
         fn session_with_compaction_intent() -> (Session, meerkat_core::CompactionProjectionIntent) {
@@ -3858,8 +14494,8 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
                 store
                     .atomic_apply(
                         &runtime_id,
-                        Some(SessionDelta {
-                            session_snapshot: snapshot.clone(),
+                        Some(SerializedSessionSnapshot {
+                            session_snapshot: snapshot.clone().into(),
                         }),
                         RunBoundaryReceipt {
                             run_id: RunId::new(),
@@ -3876,7 +14512,7 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
                     .unwrap();
                 assert_eq!(
                     store.load_session_snapshot(&runtime_id).await.unwrap(),
-                    Some(snapshot)
+                    Some(Arc::new(snapshot))
                 );
             }
 
@@ -3934,14 +14570,6 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             let runtime_id = runtime_id();
             let (session, intent) = session_with_compaction_intent();
             let replay_snapshot = serde_json::to_vec(&session).unwrap();
-            let commit = session
-                .transcript_history_state()
-                .unwrap()
-                .unwrap()
-                .commits
-                .last()
-                .unwrap()
-                .clone();
             let receipt = |run_id, sequence| RunBoundaryReceipt {
                 run_id,
                 boundary: RunApplyBoundary::RunStart,
@@ -3953,8 +14581,8 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             store
                 .atomic_apply(
                     &runtime_id,
-                    Some(SessionDelta {
-                        session_snapshot: replay_snapshot.clone(),
+                    Some(SerializedSessionSnapshot {
+                        session_snapshot: replay_snapshot.clone().into(),
                     }),
                     receipt(RunId::new(), 80),
                     vec![],
@@ -3976,8 +14604,8 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             let error = store
                 .atomic_apply(
                     &runtime_id,
-                    Some(SessionDelta {
-                        session_snapshot: replay_snapshot.clone(),
+                    Some(SerializedSessionSnapshot {
+                        session_snapshot: replay_snapshot.clone().into(),
                     }),
                     receipt(replay_run_id.clone(), 81),
                     vec![],
@@ -3998,20 +14626,9 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             let error = store
                 .commit_session_snapshot(
                     &runtime_id,
-                    SessionDelta {
-                        session_snapshot: replay_snapshot.clone(),
+                    SerializedSessionSnapshot {
+                        session_snapshot: replay_snapshot.clone().into(),
                     },
-                )
-                .await
-                .unwrap_err();
-            assert!(error.to_string().contains("finalized compaction intent"));
-            let error = store
-                .commit_session_transcript_rewrite_snapshot(
-                    &runtime_id,
-                    SessionDelta {
-                        session_snapshot: replay_snapshot.clone(),
-                    },
-                    &commit,
                 )
                 .await
                 .unwrap_err();
@@ -4050,11 +14667,12 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             let error = store
                 .atomic_apply(
                     &runtime_id,
-                    Some(SessionDelta {
+                    Some(SerializedSessionSnapshot {
                         session_snapshot: snapshot_with_raw_intents(
                             &session,
                             &[original, conflicting],
-                        ),
+                        )
+                        .into(),
                     }),
                     RunBoundaryReceipt {
                         run_id: RunId::new(),
@@ -4090,8 +14708,9 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
                 let error = store
                     .atomic_apply(
                         &runtime_id,
-                        Some(SessionDelta {
-                            session_snapshot: snapshot_with_raw_intents(&session, &[invalid]),
+                        Some(SerializedSessionSnapshot {
+                            session_snapshot: snapshot_with_raw_intents(&session, &[invalid])
+                                .into(),
                         }),
                         RunBoundaryReceipt {
                             run_id: RunId::new(),
@@ -4135,8 +14754,8 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             store
                 .commit_session_snapshot(
                     &runtime_id,
-                    SessionDelta {
-                        session_snapshot: current_snapshot.clone(),
+                    SerializedSessionSnapshot {
+                        session_snapshot: current_snapshot.clone().into(),
                     },
                 )
                 .await
@@ -4144,8 +14763,8 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             let error = store
                 .atomic_apply(
                     &runtime_id,
-                    Some(SessionDelta {
-                        session_snapshot: serde_json::to_vec(&incoming).unwrap(),
+                    Some(SerializedSessionSnapshot {
+                        session_snapshot: serde_json::to_vec(&incoming).unwrap().into(),
                     }),
                     RunBoundaryReceipt {
                         run_id: RunId::new(),
@@ -4166,7 +14785,7 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             ));
             assert_eq!(
                 store.load_session_snapshot(&runtime_id).await.unwrap(),
-                Some(current_snapshot)
+                Some(Arc::new(current_snapshot))
             );
             assert!(
                 store
@@ -4194,8 +14813,8 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             store
                 .atomic_apply(
                     &runtime_id,
-                    Some(SessionDelta {
-                        session_snapshot: original_snapshot.clone(),
+                    Some(SerializedSessionSnapshot {
+                        session_snapshot: original_snapshot.clone().into(),
                     }),
                     receipt(70),
                     vec![],
@@ -4210,8 +14829,9 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             let error = store
                 .atomic_apply(
                     &runtime_id,
-                    Some(SessionDelta {
-                        session_snapshot: snapshot_with_raw_intents(&advanced, &[conflicting]),
+                    Some(SerializedSessionSnapshot {
+                        session_snapshot: snapshot_with_raw_intents(&advanced, &[conflicting])
+                            .into(),
                     }),
                     receipt(71),
                     vec![],
@@ -4222,7 +14842,7 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             assert!(matches!(error, RuntimeStoreError::WriteFailed(_)));
             assert_eq!(
                 store.load_session_snapshot(&runtime_id).await.unwrap(),
-                Some(original_snapshot)
+                Some(Arc::new(original_snapshot))
             );
             assert_eq!(
                 store
@@ -4239,33 +14859,13 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             let runtime_id = runtime_id();
             let (session, _intent) = session_with_compaction_intent();
             let snapshot = serde_json::to_vec(&session).unwrap();
-            let commit = session
-                .transcript_history_state()
-                .unwrap()
-                .unwrap()
-                .commits
-                .last()
-                .unwrap()
-                .clone();
             assert!(
                 store
                     .commit_session_snapshot(
                         &runtime_id,
-                        SessionDelta {
-                            session_snapshot: snapshot.clone(),
+                        SerializedSessionSnapshot {
+                            session_snapshot: snapshot.clone().into(),
                         },
-                    )
-                    .await
-                    .is_err()
-            );
-            assert!(
-                store
-                    .commit_session_transcript_rewrite_snapshot(
-                        &runtime_id,
-                        SessionDelta {
-                            session_snapshot: snapshot.clone(),
-                        },
-                        &commit,
                     )
                     .await
                     .is_err()
@@ -4275,8 +14875,8 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             store
                 .commit_session_snapshot(
                     &runtime_id,
-                    SessionDelta {
-                        session_snapshot: clean_snapshot.clone(),
+                    SerializedSessionSnapshot {
+                        session_snapshot: clean_snapshot.clone().into(),
                     },
                 )
                 .await
@@ -4289,7 +14889,7 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             );
             assert_eq!(
                 store.load_session_snapshot(&runtime_id).await.unwrap(),
-                Some(clean_snapshot)
+                Some(Arc::new(clean_snapshot))
             );
             assert!(
                 store
@@ -4328,8 +14928,8 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             store
                 .atomic_apply(
                     &runtime_id,
-                    Some(SessionDelta {
-                        session_snapshot: session.clone(),
+                    Some(SerializedSessionSnapshot {
+                        session_snapshot: session.clone().into(),
                     }),
                     receipt.clone(),
                     vec![input_state()],
@@ -4522,8 +15122,8 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             store
                 .commit_session_snapshot(
                     &runtime_id,
-                    SessionDelta {
-                        session_snapshot: session,
+                    SerializedSessionSnapshot {
+                        session_snapshot: session.into(),
                     },
                 )
                 .await
@@ -4566,8 +15166,8 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             store
                 .commit_session_snapshot(
                     &runtime_id,
-                    SessionDelta {
-                        session_snapshot: snapshot.clone(),
+                    SerializedSessionSnapshot {
+                        session_snapshot: snapshot.clone().into(),
                     },
                 )
                 .await
@@ -4589,8 +15189,8 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             store
                 .commit_session_snapshot(
                     &runtime_id,
-                    SessionDelta {
-                        session_snapshot: snapshot.clone(),
+                    SerializedSessionSnapshot {
+                        session_snapshot: snapshot.clone().into(),
                     },
                 )
                 .await
@@ -4598,7 +15198,7 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
 
             assert_eq!(
                 store.load_session_snapshot(&runtime_id).await.unwrap(),
-                Some(snapshot)
+                Some(Arc::new(snapshot))
             );
         }
 
@@ -4625,8 +15225,8 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             store
                 .commit_session_snapshot(
                     &runtime_id,
-                    SessionDelta {
-                        session_snapshot: serde_json::to_vec(&session).unwrap(),
+                    SerializedSessionSnapshot {
+                        session_snapshot: serde_json::to_vec(&session).unwrap().into(),
                     },
                 )
                 .await
@@ -4640,8 +15240,8 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             store
                 .commit_session_snapshot(
                     &runtime_id,
-                    SessionDelta {
-                        session_snapshot: grown.clone(),
+                    SerializedSessionSnapshot {
+                        session_snapshot: grown.clone().into(),
                     },
                 )
                 .await
@@ -4656,7 +15256,7 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             );
             assert_eq!(
                 store.load_session_snapshot(&runtime_id).await.unwrap(),
-                Some(grown)
+                Some(Arc::new(grown))
             );
         }
 
@@ -4678,8 +15278,8 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             store
                 .commit_session_snapshot(
                     &runtime_id,
-                    SessionDelta {
-                        session_snapshot: first,
+                    SerializedSessionSnapshot {
+                        session_snapshot: first.into(),
                     },
                 )
                 .await
@@ -4688,8 +15288,8 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             store
                 .commit_session_snapshot(
                     &runtime_id,
-                    SessionDelta {
-                        session_snapshot: second.clone(),
+                    SerializedSessionSnapshot {
+                        session_snapshot: second.clone().into(),
                     },
                 )
                 .await
@@ -4702,7 +15302,7 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             );
             assert_eq!(
                 store.load_session_snapshot(&runtime_id).await.unwrap(),
-                Some(second),
+                Some(Arc::new(second)),
                 "length-equal but different content must be written, not \
                  treated as unchanged"
             );
@@ -4720,8 +15320,8 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             store
                 .commit_session_snapshot(
                     &runtime_id,
-                    SessionDelta {
-                        session_snapshot: serde_json::to_vec(&session).unwrap(),
+                    SerializedSessionSnapshot {
+                        session_snapshot: serde_json::to_vec(&session).unwrap().into(),
                     },
                 )
                 .await
@@ -4755,8 +15355,8 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             store
                 .commit_session_snapshot(
                     &runtime_id,
-                    SessionDelta {
-                        session_snapshot: accepted_snapshot.clone(),
+                    SerializedSessionSnapshot {
+                        session_snapshot: accepted_snapshot.clone().into(),
                     },
                 )
                 .await
@@ -4765,8 +15365,8 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             let err = store
                 .commit_session_snapshot(
                     &runtime_id,
-                    SessionDelta {
-                        session_snapshot: serde_json::to_vec(&stale).unwrap(),
+                    SerializedSessionSnapshot {
+                        session_snapshot: serde_json::to_vec(&stale).unwrap().into(),
                     },
                 )
                 .await
@@ -4775,7 +15375,7 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             assert!(matches!(err, RuntimeStoreError::WriteFailed(_)));
             assert_eq!(
                 store.load_session_snapshot(&runtime_id).await.unwrap(),
-                Some(accepted_snapshot)
+                Some(Arc::new(accepted_snapshot))
             );
         }
 
@@ -4807,8 +15407,8 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             store
                 .commit_session_snapshot(
                     &runtime_id,
-                    SessionDelta {
-                        session_snapshot: current_snapshot.clone(),
+                    SerializedSessionSnapshot {
+                        session_snapshot: current_snapshot.clone().into(),
                     },
                 )
                 .await
@@ -4817,8 +15417,8 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             let error = store
                 .atomic_apply(
                     &runtime_id,
-                    Some(SessionDelta {
-                        session_snapshot: serde_json::to_vec(&incoming).unwrap(),
+                    Some(SerializedSessionSnapshot {
+                        session_snapshot: serde_json::to_vec(&incoming).unwrap().into(),
                     }),
                     receipt.clone(),
                     vec![input_state()],
@@ -4833,7 +15433,7 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
 
             assert_eq!(
                 store.load_session_snapshot(&runtime_id).await.unwrap(),
-                Some(current_snapshot)
+                Some(Arc::new(current_snapshot))
             );
             // The session snapshot was classified superseded and skipped, so the
             // boundary receipt + input-state writes must NOT advance against the
@@ -4859,9 +15459,9 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             let (_dir, store) = temp_store();
             let runtime_id = runtime_id();
             let mut placeholder = Session::new();
-            placeholder.set_system_prompt("base system".to_string());
+            placeholder.append_system_message("base system".to_string());
             let mut incoming = Session::with_id(placeholder.id().clone());
-            incoming.set_system_prompt("base system".to_string());
+            incoming.append_system_message("base system".to_string());
             incoming.push(Message::User(UserMessage::text(
                 "verbose first turn".to_string(),
             )));
@@ -4890,8 +15490,8 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             store
                 .commit_session_snapshot(
                     &runtime_id,
-                    SessionDelta {
-                        session_snapshot: serde_json::to_vec(&placeholder).unwrap(),
+                    SerializedSessionSnapshot {
+                        session_snapshot: serde_json::to_vec(&placeholder).unwrap().into(),
                     },
                 )
                 .await
@@ -4900,8 +15500,8 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             store
                 .atomic_apply(
                     &runtime_id,
-                    Some(SessionDelta {
-                        session_snapshot: incoming_snapshot.clone(),
+                    Some(SerializedSessionSnapshot {
+                        session_snapshot: incoming_snapshot.clone().into(),
                     }),
                     receipt.clone(),
                     vec![],
@@ -4912,7 +15512,7 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
 
             assert_eq!(
                 store.load_session_snapshot(&runtime_id).await.unwrap(),
-                Some(incoming_snapshot)
+                Some(Arc::new(incoming_snapshot))
             );
             assert_eq!(
                 store
@@ -4928,7 +15528,7 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             let (_dir, store) = temp_store();
             let runtime_id = runtime_id();
             let mut previous = Session::new();
-            previous.set_system_prompt("runtime system before context refresh".to_string());
+            previous.append_system_message("runtime system before context refresh".to_string());
             previous.push(Message::User(UserMessage::text(
                 "Turn 1 request".to_string(),
             )));
@@ -4943,7 +15543,7 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             }));
 
             let mut incoming = Session::with_id(previous.id().clone());
-            incoming.set_system_prompt("runtime system after context refresh".to_string());
+            incoming.append_system_message("runtime system after context refresh".to_string());
             incoming.push(Message::User(UserMessage::text(
                 "Verbose context that will be compacted".to_string(),
             )));
@@ -4984,8 +15584,8 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             store
                 .commit_session_snapshot(
                     &runtime_id,
-                    SessionDelta {
-                        session_snapshot: serde_json::to_vec(&previous).unwrap(),
+                    SerializedSessionSnapshot {
+                        session_snapshot: serde_json::to_vec(&previous).unwrap().into(),
                     },
                 )
                 .await
@@ -4994,8 +15594,8 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             store
                 .atomic_apply(
                     &runtime_id,
-                    Some(SessionDelta {
-                        session_snapshot: incoming_snapshot.clone(),
+                    Some(SerializedSessionSnapshot {
+                        session_snapshot: incoming_snapshot.clone().into(),
                     }),
                     receipt.clone(),
                     vec![],
@@ -5006,7 +15606,7 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
 
             assert_eq!(
                 store.load_session_snapshot(&runtime_id).await.unwrap(),
-                Some(incoming_snapshot)
+                Some(Arc::new(incoming_snapshot))
             );
             assert_eq!(
                 store
@@ -5018,15 +15618,16 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
         }
 
         #[tokio::test]
-        async fn transcript_rewrite_snapshot_rejects_stale_runtime_parent() {
+        async fn prepared_transcript_rewrite_boundary_rejects_stale_runtime_parent() {
             let (_dir, store) = temp_store();
-            let runtime_id = runtime_id();
             let original = session_with_one_turn();
+            let runtime_id = LogicalRuntimeId::for_session(original.id());
+            let original_snapshot = serde_json::to_vec(&original).unwrap();
             store
                 .commit_session_snapshot(
                     &runtime_id,
-                    SessionDelta {
-                        session_snapshot: serde_json::to_vec(&original).unwrap(),
+                    SerializedSessionSnapshot {
+                        session_snapshot: original_snapshot.clone().into(),
                     },
                 )
                 .await
@@ -5051,18 +15652,8 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
                     Some(parent_revision.clone()),
                 )
                 .unwrap();
-            store
-                .commit_session_transcript_rewrite_snapshot(
-                    &runtime_id,
-                    SessionDelta {
-                        session_snapshot: serde_json::to_vec(&first_rewrite).unwrap(),
-                    },
-                    &first_commit,
-                )
-                .await
-                .unwrap();
 
-            let mut stale_rewrite = original;
+            let mut stale_rewrite = original.clone();
             let stale_commit = stale_rewrite
                 .commit_transcript_rewrite(
                     TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
@@ -5080,19 +15671,47 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
                     Some(parent_revision),
                 )
                 .unwrap();
-            let err = store
-                .commit_session_transcript_rewrite_snapshot(
+
+            let committed = store
+                .load_committed_whole_blob_snapshot(&runtime_id)
+                .await
+                .unwrap()
+                .unwrap();
+            let expected = crate::store::VerifiedCommittedWholeBlobPayload::from_committed(
+                original.id(),
+                committed,
+            )
+            .unwrap();
+            let first_boundary = crate::store::PreparedWholeBlobRewriteBoundary::prepare(
+                expected.clone(),
+                first_rewrite,
+                std::slice::from_ref(&first_commit),
+            )
+            .unwrap();
+            let stale_boundary = crate::store::PreparedWholeBlobRewriteBoundary::prepare(
+                expected,
+                stale_rewrite,
+                std::slice::from_ref(&stale_commit),
+            )
+            .unwrap();
+
+            store
+                .commit_prepared_whole_blob_rewrite_boundary(
                     &runtime_id,
-                    SessionDelta {
-                        session_snapshot: serde_json::to_vec(&stale_rewrite).unwrap(),
-                    },
-                    &stale_commit,
+                    first_boundary.store_parts(),
+                )
+                .await
+                .unwrap();
+            let err = store
+                .commit_prepared_whole_blob_rewrite_boundary(
+                    &runtime_id,
+                    stale_boundary.store_parts(),
                 )
                 .await
                 .expect_err("stale rewrite parent should be rejected atomically");
             assert!(matches!(
                 err,
-                RuntimeStoreError::TranscriptRevisionConflict { .. }
+                RuntimeStoreError::SessionPersistenceAuthorityConflict { .. }
             ));
 
             let stored = store
@@ -5132,8 +15751,8 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             let err = store
                 .atomic_apply(
                     &runtime_id,
-                    Some(SessionDelta {
-                        session_snapshot: session,
+                    Some(SerializedSessionSnapshot {
+                        session_snapshot: session.into(),
                     }),
                     receipt,
                     vec![input_state()],
@@ -5181,8 +15800,8 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             let error = store
                 .atomic_apply_with_machine_lifecycle(
                     &runtime_id,
-                    SessionDelta {
-                        session_snapshot: serde_json::to_vec(&session).unwrap(),
+                    SerializedSessionSnapshot {
+                        session_snapshot: serde_json::to_vec(&session).unwrap().into(),
                     },
                     receipt,
                     MachineLifecycleCommit::new_with_binding(
@@ -5240,8 +15859,8 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             store
                 .atomic_apply_with_machine_lifecycle(
                     &runtime_id,
-                    SessionDelta {
-                        session_snapshot: encoded.clone(),
+                    SerializedSessionSnapshot {
+                        session_snapshot: encoded.clone().into(),
                     },
                     receipt(0),
                     MachineLifecycleCommit::new_with_binding(
@@ -5269,8 +15888,8 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             let error = store
                 .atomic_apply_with_machine_lifecycle(
                     &runtime_id,
-                    SessionDelta {
-                        session_snapshot: encoded,
+                    SerializedSessionSnapshot {
+                        session_snapshot: encoded.into(),
                     },
                     receipt(1),
                     MachineLifecycleCommit::new_with_binding(
@@ -5303,8 +15922,8 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             store
                 .commit_session_snapshot(
                     &runtime_id,
-                    SessionDelta {
-                        session_snapshot: durable_snapshot.clone(),
+                    SerializedSessionSnapshot {
+                        session_snapshot: durable_snapshot.clone().into(),
                     },
                 )
                 .await
@@ -5321,8 +15940,8 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             let error = store
                 .atomic_apply_with_machine_lifecycle(
                     &runtime_id,
-                    SessionDelta {
-                        session_snapshot: serde_json::to_vec(&incoming).unwrap(),
+                    SerializedSessionSnapshot {
+                        session_snapshot: serde_json::to_vec(&incoming).unwrap().into(),
                     },
                     receipt.clone(),
                     MachineLifecycleCommit::new_with_binding(
@@ -5341,7 +15960,7 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             ));
             assert_eq!(
                 store.load_session_snapshot(&runtime_id).await.unwrap(),
-                Some(durable_snapshot)
+                Some(Arc::new(durable_snapshot))
             );
             assert_eq!(
                 crate::store::load_runtime_state(&store, &runtime_id)
@@ -5376,8 +15995,8 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             let err = store
                 .atomic_apply(
                     &runtime_id,
-                    Some(SessionDelta {
-                        session_snapshot: snapshot,
+                    Some(SerializedSessionSnapshot {
+                        session_snapshot: snapshot.into(),
                     }),
                     RunBoundaryReceipt {
                         run_id: RunId(uuid::Uuid::new_v4()),
@@ -6030,205 +16649,6 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             }
         }
 
-        /// Seed the 0.8.8 -> 0.8.9 upgrade shape: the runtime row holds an
-        /// INLINE one-rewrite session (adopted through the real first-save
-        /// branch), while the graph evolved by a resume-time rewrite the row
-        /// never saw. Returns the slim evolved boundary snapshot a machine
-        /// commit would carry plus the record-reconstructed evolved graph
-        /// (the caller-threaded evidence shape). SQLite twin of the
-        /// memory-store fixture.
-        async fn seed_legacy_upgrade_row(
-            store: &SqliteRuntimeStore,
-            rid: &LogicalRuntimeId,
-        ) -> (
-            meerkat_core::types::SessionId,
-            Vec<u8>,
-            meerkat_core::TranscriptHistoryState,
-        ) {
-            let mut previous = Session::new();
-            previous.push(Message::User(UserMessage::text(
-                "the codeword is birch seventeen".to_string(),
-            )));
-            let parent = previous.transcript_revision().unwrap();
-            previous
-                .commit_transcript_rewrite(
-                    TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
-                    vec![Message::User(UserMessage::text(
-                        "edited context".to_string(),
-                    ))],
-                    TranscriptRewriteReason::new("unit-test-edit"),
-                    Some("runtime-store-test".to_string()),
-                    Some(parent),
-                )
-                .unwrap();
-            store
-                .commit_session_snapshot(
-                    rid,
-                    SessionDelta {
-                        session_snapshot: serde_json::to_vec(&previous).unwrap(),
-                    },
-                )
-                .await
-                .unwrap();
-
-            let mut evolved = previous.clone();
-            let parent = evolved.transcript_revision().unwrap();
-            evolved
-                .commit_transcript_rewrite(
-                    TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
-                    vec![Message::User(UserMessage::text(
-                        "resume-refreshed context".to_string(),
-                    ))],
-                    TranscriptRewriteReason::new("resume-system-prompt-refresh"),
-                    Some("agent-factory/resume".to_string()),
-                    Some(parent),
-                )
-                .unwrap();
-            let state = evolved.transcript_history_state().unwrap().unwrap();
-            let head = meerkat_core::session_store::SessionHead::from_session(
-                &evolved,
-                meerkat_core::session_store::TranscriptStrandId::root(),
-                state.commits.len() as u64,
-            )
-            .unwrap();
-            let mut incoming = head.into_session(evolved.messages().to_vec()).unwrap();
-            incoming.push(Message::User(UserMessage::text(
-                "first post-upgrade question".to_string(),
-            )));
-            let mut records = Vec::new();
-            for commit in &state.commits {
-                let parent_body = evolved
-                    .transcript_revision_body(&commit.parent_revision)
-                    .unwrap()
-                    .unwrap();
-                let revision_body = evolved
-                    .transcript_revision_body(&commit.revision)
-                    .unwrap()
-                    .unwrap();
-                records.push(
-                    meerkat_core::TranscriptRewriteRecord::new(
-                        commit.clone(),
-                        parent_body,
-                        revision_body,
-                    )
-                    .unwrap(),
-                );
-            }
-            let evidence = meerkat_core::TranscriptHistoryState::from_rewrite_records(records)
-                .unwrap()
-                .unwrap();
-            (
-                incoming.id().clone(),
-                serde_json::to_vec(&incoming).unwrap(),
-                evidence,
-            )
-        }
-
-        /// SQLite twin of the memory-store pair: the plain atomic commit
-        /// refuses the slim evolved snapshot over the inline row; the
-        /// evidence variant verifies the caller-threaded graph inside the
-        /// same transaction and replaces the row with the slim
-        /// representation.
-        #[tokio::test]
-        async fn atomic_apply_with_legacy_history_evidence_migrates_inline_row() {
-            let (_dir, store) = temp_store();
-            let rid = runtime_id();
-            let (session_id, snapshot, evidence) = seed_legacy_upgrade_row(&store, &rid).await;
-
-            store
-                .atomic_apply(
-                    &rid,
-                    Some(SessionDelta {
-                        session_snapshot: snapshot.clone(),
-                    }),
-                    receipt_with_sequence(RunId::new(), 1),
-                    vec![],
-                    Some(session_id.clone()),
-                )
-                .await
-                .unwrap_err();
-
-            store
-                .atomic_apply_with_legacy_history_evidence(
-                    &rid,
-                    Some(SessionDelta {
-                        session_snapshot: snapshot.clone(),
-                    }),
-                    receipt_with_sequence(RunId::new(), 2),
-                    vec![],
-                    Some(session_id),
-                    Some(evidence),
-                )
-                .await
-                .unwrap();
-
-            let migrated: meerkat_core::Session =
-                serde_json::from_slice(&store.load_session_snapshot(&rid).await.unwrap().unwrap())
-                    .unwrap();
-            assert!(
-                !migrated
-                    .metadata()
-                    .contains_key(meerkat_core::SESSION_TRANSCRIPT_HISTORY_STATE_KEY),
-                "the migrated runtime row must be the slim representation"
-            );
-        }
-
-        /// Machine-terminal SQLite twin of
-        /// `atomic_apply_with_legacy_history_evidence_migrates_inline_row`.
-        #[tokio::test]
-        async fn atomic_apply_with_machine_lifecycle_and_legacy_history_evidence_migrates_inline_row()
-         {
-            let (_dir, store) = temp_store();
-            let rid = runtime_id();
-            let (session_id, snapshot, evidence) = seed_legacy_upgrade_row(&store, &rid).await;
-            let lifecycle = || {
-                MachineLifecycleCommit::new_with_binding(
-                    RuntimeState::Idle,
-                    crate::store::MachineLifecycleBindingFacts::default(),
-                    crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
-                )
-            };
-
-            store
-                .atomic_apply_with_machine_lifecycle(
-                    &rid,
-                    SessionDelta {
-                        session_snapshot: snapshot.clone(),
-                    },
-                    receipt_with_sequence(RunId::new(), 1),
-                    lifecycle(),
-                    Vec::new(),
-                    session_id.clone(),
-                )
-                .await
-                .unwrap_err();
-
-            store
-                .atomic_apply_with_machine_lifecycle_and_legacy_history_evidence(
-                    &rid,
-                    SessionDelta {
-                        session_snapshot: snapshot.clone(),
-                    },
-                    receipt_with_sequence(RunId::new(), 2),
-                    lifecycle(),
-                    Vec::new(),
-                    session_id,
-                    Some(evidence),
-                )
-                .await
-                .unwrap();
-
-            let migrated: meerkat_core::Session =
-                serde_json::from_slice(&store.load_session_snapshot(&rid).await.unwrap().unwrap())
-                    .unwrap();
-            assert!(
-                !migrated
-                    .metadata()
-                    .contains_key(meerkat_core::SESSION_TRANSCRIPT_HISTORY_STATE_KEY),
-                "the migrated runtime row must be the slim representation"
-            );
-        }
-
         #[tokio::test]
         async fn boundary_receipts_straddling_i64_max_persist_and_read_distinctly() {
             let (_dir, store) = temp_store();
@@ -6344,8 +16764,8 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             let err = store
                 .commit_session_snapshot(
                     &runtime_id,
-                    SessionDelta {
-                        session_snapshot: serde_json::to_vec(&incoming).unwrap(),
+                    SerializedSessionSnapshot {
+                        session_snapshot: serde_json::to_vec(&incoming).unwrap().into(),
                     },
                 )
                 .await
@@ -6436,8 +16856,8 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
                 store
                     .commit_session_snapshot(
                         &runtime_id,
-                        SessionDelta {
-                            session_snapshot: rejected_snapshot.clone(),
+                        SerializedSessionSnapshot {
+                            session_snapshot: rejected_snapshot.clone().into(),
                         },
                     )
                     .await
@@ -6475,8 +16895,8 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
                 restarted
                     .commit_session_snapshot(
                         &runtime_id,
-                        SessionDelta {
-                            session_snapshot: serde_json::to_vec(&revived).unwrap(),
+                        SerializedSessionSnapshot {
+                            session_snapshot: serde_json::to_vec(&revived).unwrap().into(),
                         },
                     )
                     .await
@@ -6516,8 +16936,8 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             store
                 .commit_session_snapshot(
                     &runtime_id,
-                    SessionDelta {
-                        session_snapshot: snapshot.clone(),
+                    SerializedSessionSnapshot {
+                        session_snapshot: snapshot.clone().into(),
                     },
                 )
                 .await
@@ -6539,7 +16959,11 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
                 .await
                 .expect("load over TEXT snapshot must not fail")
                 .expect("snapshot present");
-            assert_eq!(carried, snapshot, "TEXT snapshot bytes must round-trip");
+            assert_eq!(
+                carried.as_ref(),
+                &snapshot,
+                "TEXT snapshot bytes must round-trip"
+            );
         }
 
         #[tokio::test]
@@ -6747,397 +17171,6 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             }
         }
 
-        fn legacy_fixture(name: &str) -> Vec<u8> {
-            let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("tests/fixtures/v0_6_34_completed_idle")
-                .join(name);
-            let mut bytes = std::fs::read(path).unwrap();
-            // Repository text fixtures end with LF, while v0.6.34 persisted
-            // the exact compact bytes emitted by `serde_json::to_vec`.
-            if bytes.last() == Some(&b'\n') {
-                bytes.pop();
-            }
-            bytes
-        }
-
-        #[derive(Deserialize)]
-        struct LegacySessionRow {
-            session_id: String,
-            created_at_ms: i64,
-            updated_at_ms: i64,
-            message_count: i64,
-            total_tokens: i64,
-            metadata_json: String,
-        }
-
-        fn create_complete_v0_6_34_realm_database(path: &Path) -> LogicalRuntimeId {
-            let conn = Connection::open(path).unwrap();
-            conn.execute_batch(include_str!(
-                "../../tests/fixtures/v0_6_34_completed_idle/schema.sql"
-            ))
-            .unwrap();
-            let session: LegacySessionRow =
-                serde_json::from_slice(&legacy_fixture("session_row.json")).unwrap();
-            let runtime_id = LogicalRuntimeId(format!("rt:session:{}", session.session_id));
-            conn.execute(
-                "INSERT INTO sessions (session_id, created_at_ms, updated_at_ms, message_count, total_tokens, metadata_json, session_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![
-                    session.session_id,
-                    session.created_at_ms,
-                    session.updated_at_ms,
-                    session.message_count,
-                    session.total_tokens,
-                    session.metadata_json,
-                    legacy_fixture("session_snapshot.json"),
-                ],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO runtime_states (runtime_id, runtime_state_json) VALUES (?1, ?2)",
-                params![runtime_id.0, legacy_fixture("runtime_state.json")],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO runtime_session_snapshots (runtime_id, session_snapshot) VALUES (?1, ?2)",
-                params![runtime_id.0, legacy_fixture("session_snapshot.json")],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO runtime_input_states (runtime_id, input_id, state_json) VALUES (?1, ?2, ?3)",
-                params![
-                    runtime_id.0,
-                    "018f0000-0000-7000-8000-000000000002",
-                    legacy_fixture("input_state_consumed.json"),
-                ],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO runtime_boundary_receipts (runtime_id, run_id, sequence, receipt_json) VALUES (?1, ?2, 1, ?3)",
-                params![
-                    runtime_id.0,
-                    "018f0000-0000-7000-8000-000000000003",
-                    legacy_fixture("boundary_receipt.json"),
-                ],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO runtime_ops_lifecycle (runtime_id, state_json) VALUES (?1, ?2)",
-                params![runtime_id.0, legacy_fixture("ops_lifecycle_empty.json")],
-            )
-            .unwrap();
-            drop(conn);
-            runtime_id
-        }
-
-        fn raw_fixture_row(path: &Path, table: &str, column: &str, runtime_id: &str) -> Vec<u8> {
-            let conn = Connection::open(path).unwrap();
-            conn.query_row(
-                &format!("SELECT {column} FROM {table} WHERE runtime_id = ?1"),
-                params![runtime_id],
-                |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
-            )
-            .unwrap()
-        }
-
-        fn raw_audit_row(
-            path: &Path,
-            runtime_id: &str,
-            table_name: &str,
-            row_key: &str,
-        ) -> Vec<u8> {
-            let conn = Connection::open(path).unwrap();
-            conn.query_row(
-                "SELECT original_record FROM runtime_legacy_v0_6_34_audit WHERE runtime_id = ?1 AND table_name = ?2 AND row_key = ?3",
-                params![runtime_id, table_name, row_key],
-                |row| row.get(0),
-            )
-            .unwrap()
-        }
-
-        fn raw_session_store_row(path: &Path, session_id: &str) -> Vec<u8> {
-            let conn = Connection::open(path).unwrap();
-            conn.query_row(
-                "SELECT session_json FROM sessions WHERE session_id = ?1",
-                params![session_id],
-                |row| row.get(0),
-            )
-            .unwrap()
-        }
-
-        #[tokio::test]
-        async fn explicit_v0_6_34_completed_idle_migration_is_atomic_and_idempotent() {
-            let dir = TempDir::new().unwrap();
-            let path = dir.path().join("sessions.sqlite3");
-            let runtime_id = create_complete_v0_6_34_realm_database(&path);
-            let original_session = raw_fixture_row(
-                &path,
-                "runtime_session_snapshots",
-                "session_snapshot",
-                &runtime_id.0,
-            );
-            let original_session_store =
-                raw_session_store_row(&path, "018f0000-0000-7000-8000-000000000001");
-            let original_receipt = raw_fixture_row(
-                &path,
-                "runtime_boundary_receipts",
-                "receipt_json",
-                &runtime_id.0,
-            );
-
-            let ordinary = SqliteRuntimeStore::new(&path).unwrap();
-            assert!(
-                crate::store::load_runtime_state(&ordinary, &runtime_id)
-                    .await
-                    .is_err()
-            );
-            drop(ordinary);
-
-            let dry_run = SqliteRuntimeStore::migrate_v0_6_34_completed_idle(&path, false).unwrap();
-            assert!(!dry_run.applied);
-            assert_eq!(dry_run.migration_count(), 1, "{:?}", dry_run.items);
-            assert_eq!(
-                raw_fixture_row(&path, "runtime_states", "runtime_state_json", &runtime_id.0,),
-                b"\"idle\""
-            );
-
-            let applied = SqliteRuntimeStore::migrate_v0_6_34_completed_idle(&path, true).unwrap();
-            assert!(applied.applied);
-            assert_eq!(applied.migration_count(), 1);
-            assert_eq!(
-                raw_audit_row(
-                    &path,
-                    &runtime_id.0,
-                    "runtime_input_states",
-                    "018f0000-0000-7000-8000-000000000002",
-                ),
-                legacy_fixture("input_state_consumed.json")
-            );
-            assert_eq!(
-                raw_audit_row(&path, &runtime_id.0, "runtime_states", "singleton"),
-                legacy_fixture("runtime_state.json")
-            );
-            assert_eq!(
-                raw_audit_row(&path, &runtime_id.0, "runtime_ops_lifecycle", "singleton",),
-                legacy_fixture("ops_lifecycle_empty.json")
-            );
-            let audit_conn = Connection::open(&path).unwrap();
-            assert!(
-                audit_conn
-                    .execute(
-                        "DELETE FROM runtime_legacy_v0_6_34_audit WHERE runtime_id = ?1",
-                        params![runtime_id.0],
-                    )
-                    .is_err(),
-                "migration audit rows must reject deletion"
-            );
-            drop(audit_conn);
-            assert_eq!(
-                raw_audit_row(
-                    &path,
-                    &runtime_id.0,
-                    "runtime_session_snapshots",
-                    "singleton",
-                ),
-                original_session
-            );
-            assert_eq!(
-                raw_audit_row(
-                    &path,
-                    &runtime_id.0,
-                    "sessions",
-                    "018f0000-0000-7000-8000-000000000001",
-                ),
-                original_session_store
-            );
-            let migrated_session_store =
-                raw_session_store_row(&path, "018f0000-0000-7000-8000-000000000001");
-            let migrated_runtime_snapshot = raw_fixture_row(
-                &path,
-                "runtime_session_snapshots",
-                "session_snapshot",
-                &runtime_id.0,
-            );
-            assert_eq!(
-                migrated_session_store, migrated_runtime_snapshot,
-                "migration must install one exact checkpoint document in both stores"
-            );
-            assert_ne!(migrated_runtime_snapshot, original_session);
-            let migrated_session: meerkat_core::Session =
-                serde_json::from_slice(&migrated_runtime_snapshot).unwrap();
-            assert!(matches!(
-                migrated_session.try_checkpoint_state().unwrap(),
-                meerkat_core::SessionCheckpointState::Verified(stamp)
-                    if stamp.provenance()
-                        == meerkat_core::SessionCheckpointProvenance::RecoveryMigration
-            ));
-            let original_decoded: meerkat_core::Session =
-                serde_json::from_slice(&original_session).unwrap();
-            assert_eq!(migrated_session.id(), original_decoded.id());
-            assert_eq!(migrated_session.messages(), original_decoded.messages());
-            assert_eq!(
-                raw_fixture_row(
-                    &path,
-                    "runtime_boundary_receipts",
-                    "receipt_json",
-                    &runtime_id.0,
-                ),
-                original_receipt
-            );
-            let reopened = SqliteRuntimeStore::new(&path).unwrap();
-            assert_eq!(
-                crate::store::load_runtime_state(&reopened, &runtime_id)
-                    .await
-                    .unwrap(),
-                Some(RuntimeState::Idle)
-            );
-            assert_eq!(
-                reopened
-                    .load_input_states_strict(&runtime_id)
-                    .await
-                    .unwrap()
-                    .len(),
-                1
-            );
-            assert!(
-                reopened
-                    .load_ops_lifecycle(&runtime_id)
-                    .await
-                    .unwrap()
-                    .is_none()
-            );
-            drop(reopened);
-            let runtime_store: std::sync::Arc<dyn RuntimeStore> =
-                std::sync::Arc::new(SqliteRuntimeStore::new(&path).unwrap());
-            let blob_store: std::sync::Arc<dyn meerkat_core::BlobStore> =
-                std::sync::Arc::new(meerkat_store::MemoryBlobStore::new());
-            let mut recovered_driver = crate::driver::PersistentRuntimeDriver::new(
-                runtime_id.clone(),
-                runtime_store,
-                blob_store,
-            );
-            recovered_driver
-                .recover()
-                .await
-                .expect("migrated image must pass the real persistent recovery boundary");
-            assert_eq!(recovered_driver.runtime_state(), RuntimeState::Idle);
-
-            let session_store = SqliteSessionStore::open(&path).unwrap();
-            let sessions = session_store.list(Default::default()).await.unwrap();
-            assert_eq!(
-                sessions.len(),
-                1,
-                "the complete legacy sessions row survives"
-            );
-
-            let repeated = SqliteRuntimeStore::migrate_v0_6_34_completed_idle(&path, true).unwrap();
-            assert_eq!(repeated.migration_count(), 0);
-            assert_eq!(
-                repeated.items[0].disposition,
-                LegacyV0_6_34MigrationDisposition::Current
-            );
-        }
-
-        #[test]
-        fn legacy_migration_refuses_nonterminal_input_without_writes() {
-            let dir = TempDir::new().unwrap();
-            let path = dir.path().join("sessions.sqlite3");
-            let runtime_id = create_complete_v0_6_34_realm_database(&path);
-            let conn = Connection::open(&path).unwrap();
-            let mut value: serde_json::Value =
-                serde_json::from_slice(&legacy_fixture("input_state_consumed.json")).unwrap();
-            value["current_state"] = serde_json::json!("accepted");
-            value["terminal_outcome"] = serde_json::Value::Null;
-            conn.execute(
-                "UPDATE runtime_input_states SET state_json = ?1 WHERE runtime_id = ?2",
-                params![serde_json::to_vec(&value).unwrap(), runtime_id.0],
-            )
-            .unwrap();
-            drop(conn);
-
-            let before =
-                raw_fixture_row(&path, "runtime_states", "runtime_state_json", &runtime_id.0);
-            let dry_run = SqliteRuntimeStore::migrate_v0_6_34_completed_idle(&path, false).unwrap();
-            assert_eq!(dry_run.blocked_count(), 1);
-            assert!(SqliteRuntimeStore::migrate_v0_6_34_completed_idle(&path, true).is_err());
-            assert_eq!(
-                raw_fixture_row(&path, "runtime_states", "runtime_state_json", &runtime_id.0,),
-                before
-            );
-        }
-
-        #[test]
-        fn legacy_migration_refuses_mixed_current_input_without_writes() {
-            let dir = TempDir::new().unwrap();
-            let path = dir.path().join("sessions.sqlite3");
-            let runtime_id = create_complete_v0_6_34_realm_database(&path);
-            let current = StoredInputState::new_accepted(InputId::new());
-            let conn = Connection::open(&path).unwrap();
-            conn.execute(
-                "UPDATE runtime_input_states SET state_json = ?1 WHERE runtime_id = ?2",
-                params![serde_json::to_vec(&current).unwrap(), runtime_id.0],
-            )
-            .unwrap();
-            drop(conn);
-
-            let before =
-                raw_fixture_row(&path, "runtime_states", "runtime_state_json", &runtime_id.0);
-            let dry_run = SqliteRuntimeStore::migrate_v0_6_34_completed_idle(&path, false).unwrap();
-            assert_eq!(dry_run.blocked_count(), 1);
-            assert!(
-                dry_run.items[0]
-                    .detail
-                    .as_deref()
-                    .is_some_and(|detail| detail.contains("mixed current-format companion"))
-            );
-            assert!(SqliteRuntimeStore::migrate_v0_6_34_completed_idle(&path, true).is_err());
-            assert_eq!(
-                raw_fixture_row(&path, "runtime_states", "runtime_state_json", &runtime_id.0,),
-                before
-            );
-        }
-
-        #[test]
-        fn legacy_migration_refuses_a_future_runtime_store_domain_without_writes() {
-            let dir = TempDir::new().unwrap();
-            let path = dir.path().join("sessions.sqlite3");
-            let runtime_id = create_complete_v0_6_34_realm_database(&path);
-            // A newer binary already migrated this file: its ledger stamp is
-            // ahead of what this binary supports.
-            let conn = Connection::open(&path).unwrap();
-            conn.execute_batch(
-                "CREATE TABLE meerkat_schema (domain TEXT PRIMARY KEY, version INTEGER NOT NULL)",
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO meerkat_schema (domain, version) VALUES (?1, ?2)",
-                params![
-                    RUNTIME_STORE_DOMAIN.name,
-                    RUNTIME_STORE_DOMAIN.supported_version() + 1
-                ],
-            )
-            .unwrap();
-            drop(conn);
-
-            let before =
-                raw_fixture_row(&path, "runtime_states", "runtime_state_json", &runtime_id.0);
-            for apply in [false, true] {
-                let err = SqliteRuntimeStore::migrate_v0_6_34_completed_idle(&path, apply)
-                    .expect_err("future runtime-store domain must be refused");
-                assert!(
-                    matches!(
-                        err,
-                        RuntimeStoreError::SchemaFromTheFuture { ref domain, .. }
-                            if domain == RUNTIME_STORE_DOMAIN.name
-                    ),
-                    "unexpected error: {err:?}"
-                );
-            }
-            assert_eq!(
-                raw_fixture_row(&path, "runtime_states", "runtime_state_json", &runtime_id.0),
-                before
-            );
-        }
-
         #[tokio::test]
         async fn lifecycle_observation_and_cas_survive_sqlite_reopen() {
             let (dir, store) = temp_store();
@@ -7257,27 +17290,136 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
 
         // ── upgrade/rollback ledger contract for the delivery domain ──────
         //
-        // v0.8.7 supports exactly `runtime-store@1` and refuses any higher
-        // version at every realm open (`SchemaFromTheFuture`, no downgrade
-        // verb), while never reading foreign ledger domains. These tests pin
-        // the resulting contract: opening a realm with this binary leaves
-        // the file byte-compatible for v0.8.7; only durable-delivery WRITES
-        // stamp the new lazily-provisioned `runtime-delivery` domain.
+        // Head-canonical runtime authority intentionally advances the released
+        // v1 runtime domain to v2: older binaries do not understand the frozen-BLOB
+        // ownership split and must refuse rather than resume writing it.
+        // Durable delivery remains a separate lazily provisioned domain;
+        // merely opening or reading a realm never stamps that domain.
 
         #[test]
-        fn opening_the_runtime_store_stamps_only_runtime_store_v1() {
+        fn opening_the_runtime_store_stamps_current_runtime_store_only() {
             let (_dir, store) = temp_store();
             let conn = Connection::open(store.path()).unwrap();
             assert_eq!(
                 meerkat_sqlite::domain_version(&conn, "runtime-store").unwrap(),
-                Some(1),
-                "runtime-store must stay at the version every deployed binary supports"
+                Some(2),
+                "runtime-store must install the complete head-canonical authority contract"
             );
             assert_eq!(
                 meerkat_sqlite::domain_version(&conn, "runtime-delivery").unwrap(),
                 None,
                 "opening a realm must not stamp the delivery domain"
             );
+            for (object_type, object_name) in [
+                ("table", "runtime_session_authority"),
+                ("table", "runtime_head_canonical_provisional_tails"),
+                ("trigger", "runtime_session_authority_after_delete"),
+                ("table", "runtime_head_canonical_profile_pin"),
+                ("table", "runtime_head_canonical_activations"),
+                ("table", "runtime_head_canonical_activation_queue"),
+                ("trigger", "runtime_head_canonical_profile_pin_no_update"),
+                ("trigger", "runtime_head_canonical_profile_pin_no_delete"),
+                (
+                    "trigger",
+                    "runtime_session_snapshots_hc_activation_no_insert",
+                ),
+                (
+                    "trigger",
+                    "runtime_session_snapshots_hc_activation_no_update",
+                ),
+                (
+                    "trigger",
+                    "runtime_session_snapshots_hc_activation_no_delete",
+                ),
+                ("index", "idx_runtime_input_states_recovery_nonterminal"),
+                ("table", "runtime_input_set_revisions"),
+                ("table", "runtime_input_idempotency_keys"),
+                ("table", "runtime_input_idempotency_unindexable_rows"),
+                ("trigger", "runtime_input_states_revision_after_insert"),
+                ("trigger", "runtime_input_states_revision_after_update_old"),
+                ("trigger", "runtime_input_states_revision_after_update_new"),
+                ("trigger", "runtime_input_states_revision_after_delete"),
+                ("trigger", "runtime_input_idempotency_after_insert"),
+                ("trigger", "runtime_input_idempotency_after_update"),
+                ("trigger", "runtime_input_idempotency_after_delete"),
+                (
+                    "trigger",
+                    "runtime_input_idempotency_unindexable_after_insert",
+                ),
+                (
+                    "trigger",
+                    "runtime_input_idempotency_unindexable_after_update",
+                ),
+                (
+                    "trigger",
+                    "runtime_input_idempotency_unindexable_after_delete",
+                ),
+                (
+                    "trigger",
+                    "runtime_whole_blob_authority_activation_queue_after_insert",
+                ),
+                (
+                    "trigger",
+                    "runtime_whole_blob_authority_activation_queue_after_update",
+                ),
+                (
+                    "trigger",
+                    "runtime_whole_blob_authority_activation_queue_after_delete",
+                ),
+                (
+                    "trigger",
+                    "runtime_session_authority_activation_queue_after_insert",
+                ),
+                (
+                    "trigger",
+                    "runtime_session_authority_activation_queue_after_update",
+                ),
+                (
+                    "trigger",
+                    "runtime_head_canonical_activations_queue_after_complete_insert",
+                ),
+                (
+                    "trigger",
+                    "runtime_head_canonical_activations_queue_after_complete_update",
+                ),
+            ] {
+                assert_eq!(
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM sqlite_master WHERE type = ?1 AND name = ?2",
+                        params![object_type, object_name],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap(),
+                    1,
+                    "current runtime-store schema must install {object_type} {object_name}"
+                );
+            }
+        }
+
+        #[test]
+        fn head_canonical_constructor_pins_the_database_against_profile_mixing() {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("sessions.sqlite3");
+            let store = SqliteRuntimeStore::new_head_canonical(&path).unwrap();
+            drop(store);
+
+            let conn = Connection::open(&path).unwrap();
+            assert_eq!(
+                conn.query_row(
+                    "SELECT persistence_profile FROM runtime_head_canonical_profile_pin WHERE singleton = 1",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+                RuntimeSessionPersistenceProfile::HeadCanonicalV1.to_string()
+            );
+            drop(conn);
+
+            assert!(matches!(
+                SqliteRuntimeStore::new_whole_blob(&path),
+                Err(RuntimeStoreError::Unsupported(detail))
+                    if detail.contains("irreversibly pinned")
+            ));
         }
 
         #[tokio::test]
@@ -7342,7 +17484,7 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
             );
             assert_eq!(
                 meerkat_sqlite::domain_version(&conn, "runtime-store").unwrap(),
-                Some(1),
+                Some(2),
                 "delivery use must not move the runtime-store domain"
             );
             drop(conn);
@@ -7409,7 +17551,4 @@ BEGIN SELECT RAISE(ABORT, 'legacy migration audit rows are append-only'); END;
 }
 
 #[cfg(feature = "sqlite-store")]
-pub use inner::{
-    LegacyV0_6_34MigrationDisposition, LegacyV0_6_34MigrationItem, LegacyV0_6_34MigrationReport,
-    SqliteRuntimeStore,
-};
+pub use inner::SqliteRuntimeStore;

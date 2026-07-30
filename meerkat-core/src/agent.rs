@@ -55,7 +55,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 pub use builder::{AgentBuildPolicyError, AgentBuilder, DefaultSystemPromptPolicy};
-pub use runner::{AgentRunner, SnapshotProjectionError, SystemContextStateError};
+pub use runner::{AgentControlStateError, AgentRunner, SnapshotProjectionError};
 
 /// Trait for LLM clients that can be used with the agent
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -70,6 +70,23 @@ pub trait AgentLlmClient: Send + Sync {
         temperature: Option<f32>,
         provider_params: Option<&ProviderParamsOverride>,
     ) -> Result<LlmStreamResult, AgentError>;
+
+    /// Measure the exact provider-lowered JSON request body for this invocation.
+    ///
+    /// The default is deliberately unavailable. Provider adapters that can
+    /// reproduce their stream request lowering return a witness; custom
+    /// clients retain existing behavior without pretending an estimate is
+    /// exact.
+    fn request_pressure(
+        &self,
+        _messages: &[Message],
+        _tools: &[Arc<ToolDef>],
+        _max_tokens: u32,
+        _temperature: Option<f32>,
+        _provider_params: Option<&ProviderParamsOverride>,
+    ) -> Result<Option<crate::ProviderRequestPressure>, AgentError> {
+        Ok(None)
+    }
 
     /// Get the typed catalog provider identity for this client.
     ///
@@ -1878,6 +1895,14 @@ where
     pub(crate) last_input_tokens: u64,
     /// Session-scoped compaction cadence tracked across runs.
     pub(crate) compaction_cadence: SessionCompactionCadence,
+    /// Machine-issued compaction check parked until the request has been fully
+    /// composed, blob-hydrated, tool-scoped, and provider-lowered.
+    pub(crate) pending_compaction_boundary_index: Option<u64>,
+    /// Exact pressure witness attached to the parked compaction check.
+    pub(crate) pending_compaction_request_pressure: Option<crate::ProviderRequestPressure>,
+    /// Pre-compaction pressure retained until the rebuilt request proves that
+    /// compaction both decreased the body and brought it below the hard cap.
+    pub(crate) post_compaction_pressure_check: Option<crate::ProviderRequestPressure>,
     /// Optional memory store for indexing compaction discards.
     pub(crate) memory_store: Option<Arc<dyn crate::memory::MemoryStore>>,
     /// Runtime-owned resultful handoff for durable transcript+memory
@@ -1901,17 +1926,22 @@ where
     pub pending_skill_references: Option<Vec<crate::skills::SkillKey>>,
     /// Per-interaction event tap for streaming events to subscribers.
     pub(crate) event_tap: crate::event_tap::EventTap,
-    /// Shared control state for runtime system-context appends.
-    pub(crate) system_context_state: crate::session::SystemContextStateHandle,
+    /// Request-only exact-boundary context coordinator for this live actor.
+    pub(crate) transient_turn_context_state: crate::session::TransientTurnContextStateHandle,
     /// Optional default event channel configured at build time.
     /// Used by run methods when no per-call event channel is provided.
     pub(crate) default_event_tx: Option<tokio::sync::mpsc::Sender<crate::event::AgentEvent>>,
     /// Optional session checkpointer for keep-alive persistence.
     ///
     /// Wired by `AgentBuilder::with_checkpointer`, installed by
-    /// `PersistentSessionService`, and consumed by
-    /// `Agent::checkpoint_current_session`.
-    pub(crate) checkpointer: Option<Arc<dyn crate::checkpoint::SessionCheckpointer>>,
+    /// `PersistentSessionService`, and consumed only by active-run persistence.
+    pub(crate) checkpointer: Option<Arc<dyn crate::SessionCheckpointer>>,
+    /// Latest successful provisional physical write for the active run.
+    ///
+    /// This is actor-local transport state, never Session domain state. The
+    /// actor removes it before each checkpoint await and installs only the
+    /// exact returned successor.
+    pub(crate) latest_run_checkpoint_receipt: Option<crate::RunCheckpointReceipt>,
     /// Optional blob store used to hydrate image refs at execution seams.
     pub(crate) blob_store: Option<Arc<dyn crate::BlobStore>>,
     /// Original error detail preserved from `terminalize_fatal_error` so
@@ -1990,6 +2020,12 @@ where
         Option<Result<crate::TurnErrorMetadata, crate::error::AgentError>>,
     /// Stable transcript identity for the active runtime-owned turn.
     pub(crate) active_transcript_identity: Option<crate::types::TranscriptMessageIdentity>,
+    /// Request-only host context for the active runtime-owned logical turn.
+    ///
+    /// This value is never appended to `session`; request composition projects
+    /// it immediately before the admitted conversational user message.
+    pub(crate) active_turn_request_contexts:
+        Vec<crate::lifecycle::run_primitive::TurnRequestContext>,
     /// Runtime-backed external tool-surface diagnostic handle, when provided
     /// by the session runtime bindings.
     pub(crate) external_tool_surface_handle: Option<Arc<dyn crate::ExternalToolSurfaceHandle>>,

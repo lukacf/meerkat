@@ -88,9 +88,9 @@ When updating architecture docs or reviewing current code, do not stop at the
   dense-mob delivery, autonomous member injector validation, spawn boundary
   customization, mob task-workflow guidance preloads, peer wake fixes, and safer
   active-turn retirement/respawn behavior.
-- Runtime-store checkpointing and runtime-committed session projection saves,
+- RuntimeStore-owned session authority and atomic catalog projection,
   preserving explicit broken/lost states and keeping MobKit/UnifiedRuntime
-  projections in sync after the machine commit succeeds.
+  observations in sync with the physical commit.
 - Active-turn live-boundary steer injection is a two-owner transaction:
   session services may stage boundary context, but the runtime machine remains
   the delivery authority. If the machine/runtime-store commit fails after
@@ -122,9 +122,16 @@ Since the PR #759 dogma campaign (and its follow-up lanes), additionally:
   seam-inventory) — old shell-script scanners deleted.
 - Net legacy elimination: migration shims, JSON codecs for machine payloads
   (`OpTerminalPayload` is a domain type), the comms-agent runtime, and the
-  `MemberState` mirror were deleted; fail-closed v2-only persisted session
+  `MemberState` mirror were deleted; fail-closed v3-only current Session
   versions are enforced by the generated
   `SessionPersistenceVersionAuthority`.
+- Meerkat 0.8.11 sets the durable-state compatibility floor at 0.8.10. Store
+  activation has one explicit importer for the exact released v2 envelope:
+  historically stamped documents run the frozen 0.8.10 verifier once;
+  unstamped documents require same-transaction proof of the released physical
+  schema and exact source row/blob. Both become domain-only v3 state under
+  newly issued store authority. Older state must be migrated with an older
+  binary before a deployment repins.
 
 Since 0.7.12 (PR #821, the MobKit upstream asks):
 
@@ -257,8 +264,10 @@ Since 0.8.4 (PR #912, the storage unification arc):
   renders the shape-stable `StorageMigrator::diagnose` seam
   (meerkat-core/src/storage_diagnostics.rs; disk impl
   meerkat-store/src/doctor.rs). Migrate is dry-run by default, fenced under
-  `--apply`, refuses split-brain without `--adopt-root`, and adopts legacy
-  checkpoints in bulk (`PersistentSessionService::adopt_legacy_checkpoints`).
+  `--apply`, refuses split-brain without `--adopt-root`, and runs structural
+  store/ledger migrations only. The exact 0.8.10 Session conversion belongs
+  to store activation, where the source row identity and authority replacement
+  can be one transaction; the offline migrator never fabricates that evidence.
   Prune deletes registered `*.pre-<version>-<timestamp>` /
   `*.corrupt-<timestamp>` artifacts only, aged by the name's embedded
   timestamp.
@@ -280,22 +289,16 @@ Since 0.8.4 (PR #912, the storage unification arc):
   `ForceCancelRunning` arm emits `FlowTerminalized` and authorizes the
   mechanical interrupt. A roster-unknown identity answers `MemberNotFound`
   before machine admission.
-- **Checkpointer-gate wedge fix** — a cancelled per-session checkpointer
-  gate now fails the SessionStore projection with a retryable error instead
-  of silently skipping it, so the terminal-recovery drain re-projects the
-  committed RuntimeStore snapshot on restart and the two checkpoint
-  authorities reconverge (the authority-conflict error names both stamps).
-
 Since 0.8.8 (PR #917, the 0.8.9 durable-tail recovery release):
 
-- **Machine-owned durable-tail recovery** — the intra-turn checkpointer can
-  leave a durable session-store tail (up to a fully completed turn) whose
+- **Machine-owned durable-tail recovery** — the intra-turn persistence hook
+  can leave a durable physical tail (up to a fully completed turn) whose
   runtime boundary commit lost a shutdown race. Recovery is never-discard
-  and splits three ways: `SessionDocumentMachine` CLASSIFIES (typed cold-read
-  source via `ResolveRuntimeSnapshotReadSource`; `ClassifyDurableTail` →
-  `CompletedCandidate` / `InterruptedRepairableCandidate` / `Ambiguous`;
-  `ResolveRuntimeProjectionConflict` resolves a verified strict descendant to
-  `RetainForRecovery` — `RebuildToAuthority` is deleted), `MeerkatMachine`
+  and splits three ways: `RuntimeStore` RETAINS under store-issued
+  provisional-tail authority, `SessionDocumentMachine` CLASSIFIES
+  (`ClassifyDurableTail` → `CompletedCandidate` /
+  `InterruptedRepairableCandidate` / `Ambiguous`),
+  `MeerkatMachine`
   AUTHORIZES (`AuthorizeDurableTailRecovery` judges the PERSISTED lifecycle
   row + current-run fact, the prior-commit receipt comparison
   (`DurableRecoveryPriorCommit` — an already-landed recovery refuses instead
@@ -329,21 +332,38 @@ Since 0.8.8 (PR #917, the 0.8.9 durable-tail recovery release):
   writing transaction; typed conflicts `InputRowVersionConflict` /
   `MachineLifecycleVersionConflict`. Run→input bindings persist at staging,
   BEFORE execution, so a mid-run crash leaves durable identity evidence.
-- **Checkpoint stamp schema v2** — per-record version selection from
-  provenance: ordinary stamps write v1, recovered stamps
-  (`RecoveredRunBoundaryCommit` / `RecoveredInterruptedBoundary`) write v2
-  (`SESSION_CHECKPOINT_STAMP_SCHEMA_VERSION_RECOVERED`); refusal is typed in
-  both directions (future version, mis-advertised provenance).
-- **Verification memos bind exact bytes** — the transcript-graph decode memo
-  stores the proven graph object with `digest_format` and per-body
-  `created_at` pinned into its key; the process-global stamp-verification
-  cache is a per-`Session` seal cleared by every content mutation.
-  Transcript-history mechanics extracted from `session.rs` into
-  `meerkat-core/src/session/transcript_history/`.
 - **`meerkat_runtime::stack_relief`** — child-agent construction runs on a
   fresh task, never nested in the parent's poll stack; the agent loop's
   polling arm is split per-phase; the mob stack-budget gate is un-ignored at
   2 MiB / opt-level 0.
+
+Since 0.8.11 (checkpoint-free session persistence):
+
+- **System is an ordinary ordered transcript role.** `Message::System` is
+  repeatable and legal at any position. A turn may atomically append one or
+  more Systems at its admitted boundary; no row is a singleton prompt slot.
+  Resume preserves the prefix, compaction retains every System in relative
+  order, and provider adapters lower the complete ordered instruction
+  sequence. There is no host-injection ledger: materialization and resume do
+  not compare host configuration with transcript content or synthesize a
+  replacement System.
+- **Session is domain-only.** The v3 envelope carries conversation, metadata,
+  usage, and compact rewrite history. It carries no physical currentness,
+  migration authorization, or recovery authority.
+- **Stores issue the singular physical authority.** WholeBlob uses
+  `{session_id, store_revision, blob_sha256}`. HeadCanonical uses
+  `{session_id, store_revision, boundary_head, committed_head_token}`, with
+  exact row, rewrite, graph, component, and metadata prefixes in the head.
+  `RuntimeStore` updates the small body-free session catalog in the same
+  commit; SessionStore is not a second WholeBlob body projection.
+- **Provisional work is explicit and monotonic.** `RunCheckpointReceipt`
+  identifies one run's exact provisional candidate and contiguous sequence.
+  A later candidate presents the preceding receipt; the final boundary
+  promotes the latest receipt. WholeBlob reuses already-written candidate
+  bytes, and HeadCanonical promotes the exact applied physical head.
+- **Released-state handling is isolated.** Only the exact 0.8.10 importer may
+  interpret historical proof fields. It strips them before issuing a current
+  Session, and no live write path can mint them again.
 
 ## Runtime Dogma (first review lens)
 
@@ -524,18 +544,18 @@ DSL/machine domain. Key files: `meerkat-core/src/connection.rs` (`RealmChain`,
 |-------|------|-----------|
 | `meerkat-sqlite` | Shared SQLite mechanics: named connection profiles (DDL-free opens), `meerkat_schema` migration ledger (pinned concurrent-open protocol, typed `SchemaFromTheFuture` refusal), `JsonColumnBytes`, per-operation maintenance-fence guards, error classification (rusqlite only, no meerkat deps) | — |
 | `meerkat-models` | Canonical provider model catalog/capabilities data; exposes `canonical()` `ModelCatalog` (core stays provider-free) | meerkat-core |
-| `meerkat-core` | Agent loop, core types, session-store contract, ALL trait contracts, DSL handle traits, `StorageLayout` path authority + realm-id-first dual-root resolution, `DurabilityClass` vocabulary, `StorageMigrator` diagnose seam | `AgentLlmClient`, `AgentToolDispatcher`, `AgentSessionStore`, `SessionStore`, `SessionService`, `CommsRuntime`, `HookEngine`, `OpsLifecycleRegistry`, `StorageMigrator`, `TurnStateHandle`, `CommsDrainHandle`, `ExternalToolSurfaceHandle`, `PeerCommsHandle`, `SessionAdmissionHandle`, `ModelRoutingHandle`, `AuthLeaseHandle`, `McpServerLifecycleHandle`, `PeerInteractionHandle`, `SessionContextHandle`, `SessionClaimHandle`, `InteractionStreamHandle` |
-| `meerkat-store-conformance` | Published storage conformance harness: per-trait capability profiles (baseline / incremental / guarded-projection), capability-discovery, append-only media, legacy-data, blob/artifact chapters | Consumes meerkat-core contracts |
+| `meerkat-core` | Agent loop, domain-only `Session`, session-store and provisional-receipt contracts, exact released-state importer, ALL trait contracts, DSL handle traits, `StorageLayout` path authority + realm-id-first dual-root resolution, `DurabilityClass` vocabulary, `StorageMigrator` diagnose seam | `AgentLlmClient`, `AgentToolDispatcher`, `AgentSessionStore`, `SessionStore`, `SessionCheckpointer`, `SessionService`, `CommsRuntime`, `HookEngine`, `OpsLifecycleRegistry`, `StorageMigrator`, `TurnStateHandle`, `CommsDrainHandle`, `ExternalToolSurfaceHandle`, `PeerCommsHandle`, `SessionAdmissionHandle`, `ModelRoutingHandle`, `AuthLeaseHandle`, `McpServerLifecycleHandle`, `PeerInteractionHandle`, `SessionContextHandle`, `SessionClaimHandle`, `InteractionStreamHandle` |
+| `meerkat-store-conformance` | Published storage conformance harness: per-trait capability profiles (baseline / incremental / guarded-projection), capability-discovery, append-only media, blob/artifact chapters | Consumes meerkat-core contracts |
 | `meerkat-contracts` | Wire types, catalogs, stable error codes, generated surface schemas, **supervisor bridge protocol (`BridgeCommand`, `BridgeReply`, `BridgePeerSpec`, `BridgeSupervisorPayload`)** | — |
 | `meerkat-client` | Compatibility client shim that re-exports provider surfaces | Compatibility exports only |
 | `meerkat-auth-core` | Shared auth primitives, token stores, OAuth helpers, MCP OAuth discovery/DCR/PKCE/refresh, cloud authorizers | — |
 | `meerkat-providers` | Compatibility provider-runtime/auth shim surface | — |
 | `meerkat-anthropic` / `meerkat-openai` / `meerkat-gemini` | Provider-specific client/runtime implementations | Implements `AgentLlmClient` via provider-specific crates |
-| `meerkat-store` | Session-store implementations and adapters (SQLite, Jsonl, Memory), realm manifest v2 pinning + cross-candidate first-start reservation, disk doctor/migrate (`doctor.rs`, `migrate.rs`) | Implements `SessionStore`, `StorageMigrator` |
+| `meerkat-store` | Session-store implementations and adapters (SQLite, Jsonl, Memory), HeadCanonical rows and exact activation import, realm manifest v2 pinning + cross-candidate first-start reservation, disk doctor/migrate (`doctor.rs`, `migrate.rs`) | Implements `SessionStore`, `StorageMigrator` |
 | `meerkat-tools` | Tool registry, builtins, shell, session-scoped task store | Implements `AgentToolDispatcher` |
 | `meerkat-mcp` | MCP client, protocol transport, router mechanics (routes to `ExternalToolSurfaceHandle`; asks injected auth resolver for bearer tokens but does not own OAuth lifecycle) | — |
 | `meerkat-session` | Session orchestration (Ephemeral, Persistent), turn admission slot (shell) | Implements `SessionService` |
-| `meerkat-runtime` | Runtime control plane, policy engine, completion-feed wake, DSL handle impls | `RuntimeControlPlane`, `RuntimeDriver`, `MeerkatMachine` |
+| `meerkat-runtime` | Runtime control plane, store-issued session authority, WholeBlob bodies, body-free session catalog, durable-tail recovery, policy engine, completion-feed wake, DSL handle impls | `RuntimeControlPlane`, `RuntimeDriver`, `RuntimeStore`, `MeerkatMachine` |
 | `meerkat-comms` | Inter-agent messaging (inproc, TCP, UDS, Ed25519), peer identity claims, pure peer data types | Implements `CommsRuntime` |
 | `meerkat-hooks` | Hook runtimes (in-process, command, HTTP) | Implements `HookEngine` |
 | `meerkat-skills` | Skill loading (filesystem, git, HTTP, embedded) | Implements `SkillEngine` |

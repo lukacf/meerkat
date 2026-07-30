@@ -1,14 +1,9 @@
-//! Live-waiter gate parity for the sqlite schedule store (2026-07 P0).
+//! Exact lease-witness evidence for the SQLite schedule store.
 //!
-//! The claim scan treats an expired lease as "the deliverer is dead" — but a
-//! delivery whose waiter is verifiably alive in the calling process is not
-//! dead, only late on renewal. `ClaimDueRequest.live_waiter_occurrence_ids`
-//! carries the driver's waiter registry snapshot; rows in that set must be
-//! neither reclaimed (`LeaseExpired` + attempt+1: a duplicate turn) nor
-//! misfired (the Skip-policy false-misfire arm). Post-crash the set is empty
-//! and today's reclaim/misfire behavior stands. Rule 8: one semantic
-//! condition, one terminal shape across backends — this mirrors the memory
-//! store's gate tests in `meerkat-schedule`.
+//! Two independently opened store handles model separate hosts. Renewal is
+//! authorized only by the durable `{ occurrence, attempt, claim_token }`
+//! witness and store time; there is no process-local waiter registry that can
+//! suppress another host's reclaim decision.
 
 #![cfg(feature = "sqlite")]
 #![allow(clippy::expect_used, clippy::unwrap_used)]
@@ -18,12 +13,12 @@ use meerkat_core::{ContentInput, SessionId};
 use meerkat_schedule::{
     ClaimDueRequest, CreateScheduleRequest, DeliveryReceiptStage, MisfirePolicy,
     MissingTargetPolicy, Occurrence, OccurrenceLifecycleInput, OccurrenceOrdinal, OccurrencePhase,
-    OverlapPolicy, Schedule, ScheduleLifecycleInput, ScheduleStore, ScheduledSessionAction,
-    SessionTargetBinding, TargetBinding, TriggerSpec,
+    OverlapPolicy, RenewOccurrenceLeaseOutcome, RenewOccurrenceLeaseRequest, Schedule,
+    ScheduleLifecycleInput, ScheduleStore, ScheduledSessionAction, SessionTargetBinding,
+    TargetBinding, TriggerSpec,
 };
 use meerkat_store::SqliteScheduleStore;
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 
 fn sample_schedule_request(name: &str) -> CreateScheduleRequest {
     CreateScheduleRequest {
@@ -80,24 +75,21 @@ async fn commit_occurrence_due_at(
     occurrence
 }
 
-fn claim_request(
-    lease: Duration,
-    live: BTreeSet<meerkat_schedule::OccurrenceId>,
-) -> ClaimDueRequest {
+fn claim_request(owner_id: &str, lease_duration: Duration) -> ClaimDueRequest {
     ClaimDueRequest {
-        owner_id: "gate-test".to_string(),
+        owner_id: owner_id.to_string(),
         limit: 8,
-        lease_duration: lease,
-        live_waiter_occurrence_ids: live,
+        lease_duration,
     }
 }
 
-/// Claim + dispatch + await through the occurrence authority, with no waiter
-/// task and no renewal in this process — the durable footprint of a
-/// deliverer from another (possibly crashed) process.
-async fn claim_and_dispatch(store: &SqliteScheduleStore, lease: Duration) -> Occurrence {
+async fn claim_and_dispatch(
+    store: &SqliteScheduleStore,
+    owner_id: &str,
+    lease: Duration,
+) -> Occurrence {
     let claimed = store
-        .claim_due_occurrences(claim_request(lease, BTreeSet::new()))
+        .claim_due_occurrences(claim_request(owner_id, lease))
         .await
         .expect("claim due occurrences");
     let occurrence = claimed
@@ -107,7 +99,7 @@ async fn claim_and_dispatch(store: &SqliteScheduleStore, lease: Duration) -> Occ
         .expect("a due occurrence should be claimed");
     let dispatch_mutator = occurrence
         .apply(OccurrenceLifecycleInput::DispatchStarted {
-            correlation_id: Some("gate-test-dispatch".into()),
+            correlation_id: Some(format!("{owner_id}-dispatch")),
             at_utc: claimed.store_now_utc,
         })
         .expect("dispatch should pass generated authority");
@@ -130,58 +122,124 @@ async fn claim_and_dispatch(store: &SqliteScheduleStore, lease: Duration) -> Occ
 }
 
 #[tokio::test]
-async fn live_waiter_gate_blocks_expiry_reclaim_in_sqlite() {
+async fn sqlite_lease_renewal_is_multi_host_and_exact_claim_authoritative() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("schedules.sqlite3");
-    let store = SqliteScheduleStore::open(&path).expect("open store");
+    let host_a = SqliteScheduleStore::open(&path).expect("open host A store");
+    let host_b = SqliteScheduleStore::open(&path).expect("open host B store");
 
-    let schedule = commit_schedule(&store, "gate-expiry").await;
+    let schedule = commit_schedule(&host_a, "multi-host-renewal").await;
     let occurrence =
-        commit_occurrence_due_at(&store, &schedule, Utc::now() - Duration::seconds(1)).await;
-    let awaiting = claim_and_dispatch(&store, Duration::milliseconds(25)).await;
+        commit_occurrence_due_at(&host_a, &schedule, Utc::now() - Duration::seconds(1)).await;
+    let awaiting = claim_and_dispatch(&host_a, "host-a", Duration::milliseconds(200)).await;
     assert_eq!(awaiting.occurrence_id, occurrence.occurrence_id);
+    let original_expiry = awaiting
+        .lease_expires_at_utc
+        .expect("claimed occurrence has a lease");
+    let original_claim_token = awaiting.claim_token().expect("claim token");
 
-    tokio::time::sleep(std::time::Duration::from_millis(35)).await;
-
-    // Gate on: the expired lease with a live in-process waiter is untouched.
-    let gated = store
-        .claim_due_occurrences(claim_request(
-            Duration::milliseconds(25),
-            [occurrence.occurrence_id.clone()].into_iter().collect(),
-        ))
+    // A separately opened store handle can renew host A's exact durable
+    // claim. This proves renewal is store authority rather than an in-process
+    // waiter exemption.
+    let renewal_request = RenewOccurrenceLeaseRequest {
+        occurrence_id: occurrence.occurrence_id.clone(),
+        expected_attempt: awaiting.attempt_count,
+        claim_token: original_claim_token,
+        expected_owner_id: "host-a".to_string(),
+        lease_duration: Duration::milliseconds(500),
+    };
+    let wrong_owner = host_b
+        .renew_occurrence_lease_if_current(RenewOccurrenceLeaseRequest {
+            expected_owner_id: "host-b".to_string(),
+            ..renewal_request.clone()
+        })
         .await
-        .expect("gated claim");
-    assert!(
-        gated.claimed.is_empty(),
-        "an expired lease with a live in-process waiter must not be reclaimed"
-    );
-    let current = store
+        .expect("wrong-owner evidence is a typed outcome");
+    assert!(matches!(
+        wrong_owner.outcome,
+        RenewOccurrenceLeaseOutcome::StaleClaim
+    ));
+    let after_wrong_owner = host_a
         .get_occurrence(&occurrence.occurrence_id)
         .await
-        .expect("get occurrence")
-        .expect("occurrence should exist");
-    assert_eq!(current.phase, OccurrencePhase::AwaitingCompletion);
-    assert_eq!(current.attempt_count, 1);
-    let receipts = store
-        .list_receipts(&occurrence.occurrence_id)
-        .await
-        .expect("list receipts");
-    assert!(
-        !receipts
-            .iter()
-            .any(|receipt| receipt.stage == DeliveryReceiptStage::LeaseExpired),
-        "the gate must prevent the lease-expired receipt while the waiter lives"
+        .expect("get occurrence after wrong-owner renewal")
+        .expect("occurrence exists");
+    assert_eq!(
+        after_wrong_owner.lease_expires_at_utc,
+        Some(original_expiry),
+        "wrong-owner renewal must not mutate the durable lease"
     );
 
-    // Gate off (post-crash): the reclaim proceeds with attempt+1 and the
-    // lease-expired receipt, exactly as before.
-    let reclaimed = store
-        .claim_due_occurrences(claim_request(Duration::milliseconds(25), BTreeSet::new()))
+    let renewed = host_b
+        .renew_occurrence_lease_if_current(renewal_request.clone())
         .await
-        .expect("reclaim");
+        .expect("host B renews exact host A claim");
+    let renewed = match renewed.outcome {
+        RenewOccurrenceLeaseOutcome::Renewed(renewed) => renewed,
+        RenewOccurrenceLeaseOutcome::StaleClaim => {
+            panic!("the exact durable claim witness must renew across hosts")
+        }
+    };
+    let renewed_expiry = renewed
+        .lease_expires_at_utc
+        .expect("renewed occurrence has a lease");
+    assert!(renewed_expiry > original_expiry);
+    assert_eq!(renewed.attempt_count, 1);
+
+    // Past the original expiry but before the renewed expiry, another host's
+    // claim scan must observe the durable extension and leave attempt 1 live.
+    tokio::time::sleep(std::time::Duration::from_millis(240)).await;
+    let before_renewed_expiry = host_a
+        .claim_due_occurrences(claim_request("host-a", Duration::milliseconds(200)))
+        .await
+        .expect("claim scan before renewed expiry");
+    assert!(
+        before_renewed_expiry.claimed.is_empty(),
+        "durable cross-host renewal must prevent premature reclaim"
+    );
+    let still_awaiting = host_a
+        .get_occurrence(&occurrence.occurrence_id)
+        .await
+        .expect("get renewed occurrence")
+        .expect("renewed occurrence exists");
+    assert_eq!(still_awaiting.phase, OccurrencePhase::AwaitingCompletion);
+    assert_eq!(still_awaiting.attempt_count, 1);
+
+    // Once the renewed lease truly expires, another host reclaims it. The old
+    // attempt's renewal request must then return typed StaleClaim and must not
+    // extend or otherwise mutate attempt 2.
+    let remaining = renewed_expiry.signed_duration_since(Utc::now());
+    if let Ok(remaining) = remaining.to_std() {
+        tokio::time::sleep(remaining + std::time::Duration::from_millis(25)).await;
+    }
+    let reclaimed = host_b
+        .claim_due_occurrences(claim_request("host-b", Duration::seconds(2)))
+        .await
+        .expect("claim after renewed lease expiry");
     assert_eq!(reclaimed.claimed.len(), 1);
     assert_eq!(reclaimed.claimed[0].attempt_count, 2);
-    let receipts = store
+    let attempt_two_expiry = reclaimed.claimed[0].lease_expires_at_utc;
+
+    let stale = host_a
+        .renew_occurrence_lease_if_current(renewal_request)
+        .await
+        .expect("stale renewal is a typed outcome, not a store error");
+    assert!(matches!(
+        stale.outcome,
+        RenewOccurrenceLeaseOutcome::StaleClaim
+    ));
+    let current = host_a
+        .get_occurrence(&occurrence.occurrence_id)
+        .await
+        .expect("get reclaimed occurrence")
+        .expect("reclaimed occurrence exists");
+    assert_eq!(current.attempt_count, 2);
+    assert_eq!(
+        current.lease_expires_at_utc, attempt_two_expiry,
+        "stale attempt 1 renewal must not mutate attempt 2"
+    );
+
+    let receipts = host_a
         .list_receipts(&occurrence.occurrence_id)
         .await
         .expect("list receipts");
@@ -189,51 +247,6 @@ async fn live_waiter_gate_blocks_expiry_reclaim_in_sqlite() {
         receipts
             .iter()
             .any(|receipt| receipt.stage == DeliveryReceiptStage::LeaseExpired),
-        "reclaiming a dead deliverer must still mint the lease-expired receipt"
+        "real expiry and reclaim must remain durably observable"
     );
-}
-
-#[tokio::test]
-async fn live_waiter_gate_blocks_false_misfire_in_sqlite() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("schedules.sqlite3");
-    let store = SqliteScheduleStore::open(&path).expect("open store");
-
-    let schedule = commit_schedule(&store, "gate-misfire").await;
-    // Pending and past the Skip policy's 30s misfire grace: misfire-required.
-    let occurrence =
-        commit_occurrence_due_at(&store, &schedule, Utc::now() - Duration::seconds(40)).await;
-
-    // Gate on: a misfire-required row with a live in-process waiter is not
-    // terminalized (the delivery is still actually running).
-    let gated = store
-        .claim_due_occurrences(claim_request(
-            Duration::seconds(30),
-            [occurrence.occurrence_id.clone()].into_iter().collect(),
-        ))
-        .await
-        .expect("gated claim");
-    assert!(gated.claimed.is_empty());
-    let current = store
-        .get_occurrence(&occurrence.occurrence_id)
-        .await
-        .expect("get occurrence")
-        .expect("occurrence should exist");
-    assert_eq!(
-        current.phase,
-        OccurrencePhase::Pending,
-        "a live delivery must not be false-misfired while its waiter is registered"
-    );
-
-    // Gate off (post-crash): the misfire proceeds as before.
-    store
-        .claim_due_occurrences(claim_request(Duration::seconds(30), BTreeSet::new()))
-        .await
-        .expect("misfire claim");
-    let misfired = store
-        .get_occurrence(&occurrence.occurrence_id)
-        .await
-        .expect("get occurrence")
-        .expect("occurrence should exist");
-    assert_eq!(misfired.phase, OccurrencePhase::Misfired);
 }

@@ -11,14 +11,10 @@ use std::sync::Arc;
 use meerkat_core::lifecycle::core_executor::{
     CoreApplyOutput, CoreApplyTerminal, CoreExecutorTeardownReason,
 };
-use meerkat_core::lifecycle::run_primitive::ConversationContextAppend;
 use meerkat_core::service::{CreateSessionRequest, SessionError, SessionService, StartTurnRequest};
 use meerkat_core::types::RunResult;
 use meerkat_core::types::SessionId;
-use meerkat_core::{
-    ContentInput, InputId, PendingSystemContextAppend, RunApplyBoundary, RunId, Session,
-    SessionSystemContextState,
-};
+use meerkat_core::{ContentInput, InputId, RunApplyBoundary, RunId};
 use meerkat_runtime::MeerkatMachine;
 
 use meerkat_session::{
@@ -120,45 +116,10 @@ async fn materialize_attached_actor_under_runtime_turn_boundary(
 /// the moved free functions stay surface-agnostic.
 pub type BoxFut<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
-/// Replay callback fired by [`spawn_pending_create_and_apply_runtime_turn_with_admission_guard`]
-/// when finishing a successful promotion. Surfaces translate the
-/// per-surface error into a stringly message for tracing.
-pub type ReplayPromotedSystemContextFn = Arc<
-    dyn Fn(
-            SessionId,
-            SessionSystemContextState,
-            SessionSystemContextState,
-        ) -> BoxFut<'static, Result<(), String>>
-        + Send
-        + Sync,
->;
-
 /// Test-only pre-turn hook fired by the staged-promotion helpers right
 /// before the underlying turn is dispatched. Surfaces wrap their RPC
 /// hook slot into this callback shape.
 pub type PreTurnHookFn = Arc<dyn Fn() -> BoxFut<'static, ()> + Send + Sync>;
-
-/// Convert a slice of [`ConversationContextAppend`] entries into the
-/// runtime-side [`PendingSystemContextAppend`] vector that staged
-/// promotion replays into the session service after a turn commits.
-#[must_use]
-pub fn pending_system_context_appends(
-    appends: &[ConversationContextAppend],
-) -> Vec<PendingSystemContextAppend> {
-    let accepted_at = meerkat_core::time_compat::SystemTime::now();
-    appends
-        .iter()
-        .map(|append| PendingSystemContextAppend {
-            content: append.content.clone(),
-            source: Some(append.key.clone()),
-            idempotency_key: Some(append.key.clone()),
-            // Durable keyed conversation context append — not a transient steer.
-            source_kind: meerkat_core::session::SystemContextSource::Normal,
-            accepted_at,
-            peer_response_terminal: None,
-        })
-        .collect()
-}
 
 /// Awaiter result shape for the staged-session apply-runtime-turn
 /// helpers; surfaces translate `Err(StagedTaskJoinError)` onto their
@@ -281,41 +242,12 @@ pub async fn pending_live_first_turn_is_still_deferred_under_runtime_turn_bounda
         .await
 }
 
-/// Replay any promoted system-context state captured during staged
-/// promotion back onto the session service after a successful turn.
-///
-/// `replay_promoted_system_context_on_service` is owned by SessionRuntime
-/// (it returns the RPC `RpcError`), so this helper takes a `replay`
-/// closure that the caller wires up with the right error mapping. The
-/// replay only fires when there's a pending promoting state to reap.
-///
-/// Surfaces that don't need a custom replay closure can pass a no-op,
-/// but the staged promotion paths in `meerkat-rpc` rely on the side
-/// effect — preserving the contract is the caller's responsibility.
-pub async fn finish_pending_promotion_after_service_turn<R, F, E>(
+/// Finish a successful staged-session promotion.
+pub async fn finish_pending_promotion_after_service_turn(
     staged_sessions: &StagedSessionRegistry,
     session_id: &SessionId,
-    operation: &'static str,
-    replay: R,
-) where
-    R: FnOnce(SessionSystemContextState, SessionSystemContextState) -> F,
-    F: std::future::Future<Output = Result<(), E>>,
-    E: std::fmt::Display,
-{
-    let Some((starting_system_context_state, current_system_context_state)) = staged_sessions
-        .take_promoting_system_context_state(session_id)
-        .await
-    else {
-        return;
-    };
-    if let Err(err) = replay(starting_system_context_state, current_system_context_state).await {
-        tracing::warn!(
-            session_id = %session_id,
-            error = %err,
-            operation,
-            "failed to replay promoted system-context state after service turn"
-        );
-    }
+) {
+    let _ = staged_sessions.finish_promotion(session_id).await;
 }
 
 /// Pure predicate: should the staged slot be restored after a runtime
@@ -448,8 +380,6 @@ pub type CommsContextRefreshFn = Arc<dyn Fn(SessionId) -> BoxFut<'static, ()> + 
 /// failures separately from typed post-handoff teardown requests; surfaces
 /// translate both onto their runtime-owned error seam.
 ///
-/// `replay_promoted_system_context` runs after a successful turn to
-/// replay any system-context state captured during staged promotion.
 /// `comms_context_refresh` re-syncs the comms ingress context after a
 /// successful create. `pre_turn_hook` is a test-only hook fired between
 /// create-success and the apply-runtime-turn dispatch.
@@ -458,7 +388,6 @@ pub fn spawn_pending_create_and_apply_runtime_turn_with_admission_guard(
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
     staged_sessions: Arc<StagedSessionRegistry>,
     runtime_adapter: Arc<MeerkatMachine>,
-    replay_promoted_system_context: ReplayPromotedSystemContextFn,
     comms_context_refresh: CommsContextRefreshFn,
     pre_turn_hook: Option<PreTurnHookFn>,
     session_id: SessionId,
@@ -548,14 +477,6 @@ pub fn spawn_pending_create_and_apply_runtime_turn_with_admission_guard(
                         finish_pending_promotion_after_service_turn(
                             staged_sessions.as_ref(),
                             &session_id,
-                            "create_session",
-                            |starting, current| {
-                                (replay_promoted_system_context)(
-                                    session_id.clone(),
-                                    starting,
-                                    current,
-                                )
-                            },
                         )
                         .await;
                     }
@@ -606,14 +527,6 @@ pub fn spawn_pending_create_and_apply_runtime_turn_with_admission_guard(
                             finish_pending_promotion_after_service_turn(
                                 staged_sessions.as_ref(),
                                 &session_id,
-                                "create_session",
-                                |starting, current| {
-                                    (replay_promoted_system_context)(
-                                        session_id.clone(),
-                                        starting,
-                                        current,
-                                    )
-                                },
                             )
                             .await;
                         } else {
@@ -751,15 +664,7 @@ pub fn spawn_pending_create_and_apply_runtime_turn_with_admission_guard(
             return;
         }
 
-        finish_pending_promotion_after_service_turn(
-            staged_sessions.as_ref(),
-            &session_id,
-            "apply_runtime_turn",
-            |starting, current| {
-                (replay_promoted_system_context)(session_id.clone(), starting, current)
-            },
-        )
-        .await;
+        finish_pending_promotion_after_service_turn(staged_sessions.as_ref(), &session_id).await;
         promotion_cleanup.disarm();
         let _ = result_tx.send(result.map_err(StagedApplyRuntimeTurnError::from));
     });
@@ -882,7 +787,6 @@ pub fn spawn_pending_create_and_start_turn_with_admission_guard(
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
     staged_sessions: Arc<StagedSessionRegistry>,
     runtime_adapter: Arc<MeerkatMachine>,
-    replay_promoted_system_context: ReplayPromotedSystemContextFn,
     pre_turn_hook: Option<PreTurnHookFn>,
     session_id: SessionId,
     create_req: CreateSessionRequest,
@@ -958,14 +862,6 @@ pub fn spawn_pending_create_and_start_turn_with_admission_guard(
                         finish_pending_promotion_after_service_turn(
                             staged_sessions.as_ref(),
                             &session_id,
-                            "create_session",
-                            |starting, current| {
-                                (replay_promoted_system_context)(
-                                    session_id.clone(),
-                                    starting,
-                                    current,
-                                )
-                            },
                         )
                         .await;
                     }
@@ -1008,14 +904,6 @@ pub fn spawn_pending_create_and_start_turn_with_admission_guard(
                             finish_pending_promotion_after_service_turn(
                                 staged_sessions.as_ref(),
                                 &session_id,
-                                "create_session",
-                                |starting, current| {
-                                    (replay_promoted_system_context)(
-                                        session_id.clone(),
-                                        starting,
-                                        current,
-                                    )
-                                },
                             )
                             .await;
                         } else {
@@ -1147,15 +1035,7 @@ pub fn spawn_pending_create_and_start_turn_with_admission_guard(
             return;
         }
 
-        finish_pending_promotion_after_service_turn(
-            staged_sessions.as_ref(),
-            &session_id,
-            "start_turn",
-            |starting, current| {
-                (replay_promoted_system_context)(session_id.clone(), starting, current)
-            },
-        )
-        .await;
+        finish_pending_promotion_after_service_turn(staged_sessions.as_ref(), &session_id).await;
         promotion_cleanup.disarm();
         let _ = result_tx.send(result);
     });
@@ -1274,8 +1154,7 @@ impl PendingPromotionCleanup {
         Ok(())
     }
 
-    /// Abort restore when no admission is available; reaps promoting
-    /// metadata and disarms.
+    /// Abort restore when no admission is available and disarm.
     pub async fn abort_restore_without_capacity(&mut self) {
         tracing::warn!(
             session_id = %self.session_id,
@@ -1283,7 +1162,7 @@ impl PendingPromotionCleanup {
         );
         let _ = self
             .staged_sessions
-            .take_promoting_system_context_state(&self.session_id)
+            .finish_promotion(&self.session_id)
             .await;
         self.armed = false;
     }
@@ -1297,7 +1176,7 @@ impl PendingPromotionCleanup {
         }
         let _ = self
             .staged_sessions
-            .take_promoting_system_context_state(&self.session_id)
+            .finish_promotion(&self.session_id)
             .await;
         let _ = self.staged_sessions.abandon(&self.session_id).await;
         self.build_config = None;
@@ -1380,15 +1259,14 @@ impl PendingPromotionCleanup {
         Ok(())
     }
 
-    /// Reap promoting state and disarm after a successful machine
-    /// archive.
+    /// Finish promoting state and disarm after a successful machine archive.
     pub async fn finish_after_machine_archive(&mut self) {
         if !self.armed {
             return;
         }
         let _ = self
             .staged_sessions
-            .take_promoting_system_context_state(&self.session_id)
+            .finish_promotion(&self.session_id)
             .await;
         let _ = self.staged_sessions.abandon(&self.session_id).await;
         self.build_config = None;
@@ -1420,47 +1298,16 @@ impl PendingPromotionCleanup {
         }
     }
 
-    /// Copy the current promoting system-context state into
-    /// `build_config` so a re-stage preserves it.
-    pub async fn preserve_promoting_system_context_state(
-        staged_sessions: &StagedSessionRegistry,
-        session_id: &SessionId,
-        build_config: &mut AgentBuildConfig,
-    ) {
-        let Some((_starting_system_context_state, current_system_context_state)) = staged_sessions
-            .promoting_system_context_state(session_id)
-            .await
-        else {
-            return;
-        };
-        let session = build_config
-            .resume_session
-            .get_or_insert_with(|| Session::with_id(session_id.clone()));
-        if let Err(err) = session.set_system_context_state(current_system_context_state) {
-            tracing::warn!(
-                session_id = %session_id,
-                error = %err,
-                "failed to preserve promoting system-context state while restoring staged session"
-            );
-        }
-    }
-
     /// Synchronously restore the staged session and return its
     /// admission to the staged-capacity ledger.
     pub async fn restore_now(&mut self) {
         if !self.armed {
             return;
         }
-        let Some(mut build_config) = self.build_config.take() else {
+        let Some(build_config) = self.build_config.take() else {
             self.armed = false;
             return;
         };
-        Self::preserve_promoting_system_context_state(
-            &self.staged_sessions,
-            &self.session_id,
-            &mut build_config,
-        )
-        .await;
         let Some(admission) = self.staged_capacity_admission.take() else {
             self.abort_restore_without_capacity().await;
             return;
@@ -1487,16 +1334,13 @@ impl PendingPromotionCleanup {
         self.armed = false;
     }
 
-    /// Reap promoting system-context state synchronously when in
-    /// `Finish` mode; returns the (starting, current) pair if any.
-    pub async fn finish_now(
-        &mut self,
-    ) -> Option<(SessionSystemContextState, SessionSystemContextState)> {
+    /// Finish the promoting registry slot synchronously in `Finish` mode.
+    pub async fn finish_now(&mut self) -> bool {
         if !self.armed || self.mode != PendingPromotionCleanupMode::Finish {
-            return None;
+            return false;
         }
         self.staged_sessions
-            .take_promoting_system_context_state(&self.session_id)
+            .finish_promotion(&self.session_id)
             .await
     }
 
@@ -1519,7 +1363,7 @@ impl Drop for PendingPromotionCleanup {
         let session_id = self.session_id.clone();
         match self.mode {
             PendingPromotionCleanupMode::Restore => {
-                let Some(mut build_config) = self.build_config.take() else {
+                let Some(build_config) = self.build_config.take() else {
                     return;
                 };
                 let staged_capacity_admission = self.staged_capacity_admission.take();
@@ -1534,17 +1378,9 @@ impl Drop for PendingPromotionCleanup {
                             session_id = %session_id,
                             "aborting staged-session drop restore without a capacity admission"
                         );
-                        let _ = staged_sessions
-                            .take_promoting_system_context_state(&session_id)
-                            .await;
+                        let _ = staged_sessions.finish_promotion(&session_id).await;
                         return;
                     };
-                    Self::preserve_promoting_system_context_state(
-                        staged_sessions.as_ref(),
-                        &session_id,
-                        &mut build_config,
-                    )
-                    .await;
                     let restored = staged_sessions
                         .abandon_promotion(
                             session_id.clone(),
@@ -1567,9 +1403,7 @@ impl Drop for PendingPromotionCleanup {
             }
             PendingPromotionCleanupMode::Finish => {
                 tokio::spawn(async move {
-                    let _ = staged_sessions
-                        .take_promoting_system_context_state(&session_id)
-                        .await;
+                    let _ = staged_sessions.finish_promotion(&session_id).await;
                 });
             }
         }

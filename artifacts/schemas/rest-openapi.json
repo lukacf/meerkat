@@ -11389,7 +11389,7 @@
         "type": "string"
       },
       "RestAppendSystemContextRequest": {
-        "description": "`POST /sessions/{id}/system_context` — append runtime system context.\n\nThe body is the typed [`CoreRenderable`] owner rather than a bare `text`\nstring; a plain-text client payload still deserializes via\n`CoreRenderable`'s tagged `text` variant.",
+        "description": "`POST /sessions/{id}/system_context` — append one ordinary durable ordered\nSystem message at the admitted transcript boundary.\n\nThe body is the typed [`CoreRenderable`] owner rather than a bare `text`\nstring; a plain-text client payload still deserializes via\n`CoreRenderable`'s tagged `text` variant. The rendered string is preserved\nexactly, including empty and whitespace-only content.",
         "properties": {
           "content": {
             "$ref": "#/components/schemas/CoreRenderable"
@@ -11531,6 +11531,14 @@
             },
             "type": [
               "array",
+              "null"
+            ]
+          },
+          "transient_turn_context": {
+            "description": "Host-regenerated text projected only into provider requests for this logical turn; never appended to Session history.",
+            "minLength": 1,
+            "type": [
+              "string",
               "null"
             ]
           },
@@ -11754,6 +11762,14 @@
             },
             "type": [
               "array",
+              "null"
+            ]
+          },
+          "transient_turn_context": {
+            "description": "Host-regenerated text projected only into provider requests for the first logical turn. It is persisted with the pending runtime input for crash retry, but never appended to Session history.",
+            "minLength": 1,
+            "type": [
+              "string",
               "null"
             ]
           },
@@ -18219,6 +18235,16 @@
               "role": {
                 "const": "system",
                 "type": "string"
+              },
+              "identity": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/WireSystemMessageIdentity"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -19441,12 +19467,31 @@
           "failed"
         ],
         "type": "string"
+      },
+      "WireSystemMessageIdentity": {
+        "description": "Public wire projection of one ordinary System message optional control-ingress identity.",
+        "properties": {
+          "idempotency_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "title": "WireSystemMessageIdentity",
+        "type": "object"
       }
     }
   },
   "info": {
     "title": "Meerkat REST API",
-    "version": "0.8.10"
+    "version": "0.8.11"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -21841,7 +21886,7 @@
             "description": "Error response"
           }
         },
-        "summary": "Append system context to a session"
+        "summary": "Append one ordinary durable ordered System message to a session"
       }
     },
     "/skills": {

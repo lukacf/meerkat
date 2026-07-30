@@ -481,7 +481,7 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
             ),
             RpcMethodDescriptor::typed(
                 "session/inject_context",
-                "Stage runtime system context for application at the next LLM boundary",
+                "Append one ordinary durable ordered System message at the admitted transcript boundary",
                 "InjectSystemContextParams",
                 "InjectSystemContextResult",
             ),

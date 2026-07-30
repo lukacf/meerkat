@@ -1838,7 +1838,7 @@ describe("Session wrappers", () => {
     const client = new MeerkatClient();
     client.request = async (method, params) => {
       calls.push({ method, params });
-      return { status: "staged" };
+      return { status: "applied" };
     };
     const session = new Session(
       client,
@@ -1855,8 +1855,8 @@ describe("Session wrappers", () => {
     const a = await session.injectContext("ctx", { source: "test", idempotencyKey: "k1" });
     const b = await deferred.injectContext("ctx2");
 
-    assert.equal(a.status, "staged");
-    assert.equal(b.status, "staged");
+    assert.equal(a.status, "applied");
+    assert.equal(b.status, "applied");
     assert.deepEqual(calls, [
       {
         method: "session/inject_context",
@@ -3129,7 +3129,7 @@ describe("Parity wrappers", () => {
         };
       }
       if (method === "mob/append_system_context") {
-        return { status: "staged", mob_id: params.mob_id, agent_identity: params.agent_identity };
+        return { status: "applied", mob_id: params.mob_id, agent_identity: params.agent_identity };
       }
       if (method === "mob/spawn_many") {
         return {

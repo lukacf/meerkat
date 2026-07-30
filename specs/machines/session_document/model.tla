@@ -3,7 +3,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated semantic machine model for SessionDocumentMachine.
 
-CONSTANTS BooleanValues, CheckpointProvenanceClassValues, DurableHeadRelationValues, DurableHeadStampEraValues, DurableTailExecutionEvidenceValues, DurableTailRecoveryClassValues, DurableTailStopReasonValues, LegacyCheckpointLifecycleMergeValues, LegacyCheckpointMigrationDispositionValues, LegacyCheckpointTranscriptRelationValues, LiveSessionAuthorityKindValues, LiveSessionAuthorityReasonValues, NatValues, ObservedSessionTailKindValues, PendingContinuationDispositionValues, PendingContinuationPublicTerminalValues, RealtimeTranscriptLaneKindValues, RealtimeTranscriptMaterializeDecisionValues, RealtimeTranscriptRoleKindValues, RealtimeTranscriptStopReasonKindValues, RealtimeUserContentBlobFinalizeDispositionValues, RealtimeUserContentBlobRecoveryDispositionValues, RealtimeUserContentBlobStageDispositionValues, RealtimeUserContentIdentityDispositionValues, RecoveryCandidateIdValues, ResumeOverrideRejectionValues, ResumeProviderSelectionValues, ResumeSelfHostedSelectionValues, RunIdCardinalityValues, RuntimeCheckpointProjectionDispositionValues, RuntimeProjectionConflictDispositionValues, RuntimeSnapshotReadDispositionValues, SessionArchiveDispositionValues, SessionArchiveRuntimeObservationValues, SessionDocumentLifecycleValues, SessionFirstTurnPhaseValues, SessionIdValues, SessionInitialPromptStageDecisionValues, SessionSystemPromptSourceValues, SystemContextAppendDecisionValues, SystemContextPersistAppendAdmissionValues, SystemContextSourceValues, TranscriptEditKindValues
+CONSTANTS BooleanValues, DurableHeadRelationValues, DurableTailRecoveryClassValues, DurableTailStopReasonValues, LiveSessionAuthorityKindValues, LiveSessionAuthorityReasonValues, NatValues, ObservedSessionTailKindValues, PendingContinuationDispositionValues, PendingContinuationPublicTerminalValues, RealtimeTranscriptLaneKindValues, RealtimeTranscriptMaterializeDecisionValues, RealtimeTranscriptRoleKindValues, RealtimeTranscriptStopReasonKindValues, RealtimeUserContentBlobFinalizeDispositionValues, RealtimeUserContentBlobRecoveryDispositionValues, RealtimeUserContentBlobStageDispositionValues, RealtimeUserContentIdentityDispositionValues, RecoveryCandidateIdValues, ResumeOverrideRejectionValues, ResumeProviderSelectionValues, ResumeSelfHostedSelectionValues, RunIdCardinalityValues, RuntimeCheckpointProjectionDispositionValues, SessionArchiveDispositionValues, SessionArchiveRuntimeObservationValues, SessionDocumentLifecycleMergeValues, SessionDocumentLifecycleValues, SessionFirstTurnPhaseValues, SessionIdValues, SessionInitialPromptStageDecisionValues, TranscriptEditKindValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -41,11 +41,6 @@ realtime_stop_reason_discards(stop_reason) == (stop_reason = "Cancelled")
 realtime_should_mark_ready_after_write(response_completed, text_after_write_present) == (response_completed /\ text_after_write_present)
 realtime_lane_accepts(item_has_text, current_lane, requested_lane) == (IF (current_lane = requested_lane) THEN TRUE ELSE (item_has_text = FALSE))
 realtime_delta_is_duplicate(delta_id_present, delta_id_seen) == (delta_id_present /\ delta_id_seen)
-persist_append_is_admissible(has_previous, content_identical, content_extends_previous, appended_starts_with_separator, incoming_is_runtime_context_append) == (IF (has_previous /\ content_identical) THEN TRUE ELSE (IF (has_previous /\ content_extends_previous /\ appended_starts_with_separator /\ incoming_is_runtime_context_append) THEN TRUE ELSE ((has_previous = FALSE) /\ incoming_is_runtime_context_append)))
-append_is_new(idempotency_key_present, existing_key_matches, existing_key_conflicts) == (IF (idempotency_key_present = FALSE) THEN TRUE ELSE ((existing_key_matches = FALSE) /\ (existing_key_conflicts = FALSE)))
-append_is_duplicate(idempotency_key_present, existing_key_matches, existing_key_conflicts) == (idempotency_key_present /\ existing_key_matches /\ (existing_key_conflicts = FALSE))
-append_is_conflict(idempotency_key_present, existing_key_conflicts) == (idempotency_key_present /\ existing_key_conflicts)
-append_is_empty(trimmed_text_byte_count) == (trimmed_text_byte_count = 0)
 should_store_initial_prompt(arg_phase, prompt_has_content) == ((arg_phase = "Pending") /\ prompt_has_content)
 phase_allows_initial_turn_overrides(arg_phase) == (arg_phase = "Pending")
 resume_reject_build_only_after_first_turn(has_build_only_overrides, first_turn_phase) == (has_build_only_overrides /\ (phase_allows_initial_turn_overrides(first_turn_phase) = FALSE))
@@ -206,94 +201,6 @@ RecoverSessionFirstTurnPhase(session_id, arg_phase, pending_initial_prompt_prese
     /\ session_pending_initial_prompt_present' = MapSet(session_pending_initial_prompt_present, session_id, pending_initial_prompt_present)
     /\ session_pending_tool_results_count' = MapSet(session_pending_tool_results_count, session_id, pending_tool_result_message_count)
     /\ UNCHANGED << session_lifecycle_terminal >>
-
-
-ResolveSystemContextAppendEmpty(trimmed_text_byte_count, idempotency_key_present, existing_key_matches, existing_key_conflicts, active_turn_scoped) ==
-    /\ phase = "Ready"
-    /\ append_is_empty(trimmed_text_byte_count)
-    /\ phase' = "Ready"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
-
-
-ResolveSystemContextAppendConflict(trimmed_text_byte_count, idempotency_key_present, existing_key_matches, existing_key_conflicts, active_turn_scoped) ==
-    /\ phase = "Ready"
-    /\ ((append_is_empty(trimmed_text_byte_count) = FALSE) /\ append_is_conflict(idempotency_key_present, existing_key_conflicts))
-    /\ phase' = "Ready"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
-
-
-ResolveSystemContextAppendDuplicate(trimmed_text_byte_count, idempotency_key_present, existing_key_matches, existing_key_conflicts, active_turn_scoped) ==
-    /\ phase = "Ready"
-    /\ ((append_is_empty(trimmed_text_byte_count) = FALSE) /\ append_is_duplicate(idempotency_key_present, existing_key_matches, existing_key_conflicts))
-    /\ phase' = "Ready"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
-
-
-ResolveSystemContextAppendNew(trimmed_text_byte_count, idempotency_key_present, existing_key_matches, existing_key_conflicts, active_turn_scoped) ==
-    /\ phase = "Ready"
-    /\ ((append_is_empty(trimmed_text_byte_count) = FALSE) /\ append_is_new(idempotency_key_present, existing_key_matches, existing_key_conflicts))
-    /\ phase' = "Ready"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
-
-
-ResolveSystemContextPersistAppendAdmissionAdmit(has_previous, content_identical, content_extends_previous, appended_starts_with_separator, incoming_is_runtime_context_append) ==
-    /\ phase = "Ready"
-    /\ persist_append_is_admissible(has_previous, content_identical, content_extends_previous, appended_starts_with_separator, incoming_is_runtime_context_append)
-    /\ phase' = "Ready"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
-
-
-ResolveSystemContextPersistAppendAdmissionReject(has_previous, content_identical, content_extends_previous, appended_starts_with_separator, incoming_is_runtime_context_append) ==
-    /\ phase = "Ready"
-    /\ (persist_append_is_admissible(has_previous, content_identical, content_extends_previous, appended_starts_with_separator, incoming_is_runtime_context_append) = FALSE)
-    /\ phase' = "Ready"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
-
-
-ResolveSystemContextPendingApplyItemRuntimeSteer(source_kind) ==
-    /\ phase = "Ready"
-    /\ (source_kind = "RuntimeSteer")
-    /\ phase' = "Ready"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
-
-
-ResolveSystemContextPendingApplyItemNormal(source_kind) ==
-    /\ phase = "Ready"
-    /\ (source_kind = "Normal")
-    /\ phase' = "Ready"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
-
-
-ResolveSystemContextSteerCleanupItemRuntimeSteer(source_kind) ==
-    /\ phase = "Ready"
-    /\ (source_kind = "RuntimeSteer")
-    /\ phase' = "Ready"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
-
-
-ResolveSystemContextSteerCleanupItemNormal(source_kind) ==
-    /\ phase = "Ready"
-    /\ (source_kind = "Normal")
-    /\ phase' = "Ready"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
-
-
-RestoreSystemContextSnapshot(active_turn_membership_is_consistent, seen_keys_match_known_appends) ==
-    /\ phase = "Ready"
-    /\ (active_turn_membership_is_consistent /\ seen_keys_match_known_appends)
-    /\ phase' = "Ready"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
 
 
 ResolveRealtimeItemObservedDiscardedAssistant(role, response_discarded) ==
@@ -694,14 +601,6 @@ RestoreSessionBuildState ==
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
 
 
-AuthorizeSystemPromptMutation(source, prompt_present, prompt_byte_count, replacing_existing) ==
-    /\ phase = "Ready"
-    /\ (IF (prompt_present = TRUE) THEN TRUE ELSE (prompt_byte_count = 0))
-    /\ phase' = "Ready"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
-
-
 ResolvePendingContinuationWithBoundary(session_tail, staged_tool_result_count) ==
     /\ phase = "Ready"
     /\ has_effective_pending_boundary(session_tail, staged_tool_result_count)
@@ -782,15 +681,15 @@ AuthorizeSessionResumeOverridesAcceptRetainStoredWithSelfHostedOverride(provider
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
 
 
-ClassifyLiveSessionAuthorityLive(stored_transcript_diverged, live_has_uncommitted_transcript, runtime_system_context_diverged, stored_is_archived) ==
+ClassifyLiveSessionAuthorityLive(stored_transcript_diverged, live_has_uncommitted_transcript, stored_is_archived) ==
     /\ phase = "Ready"
-    /\ ((stored_transcript_diverged = FALSE) /\ (live_has_uncommitted_transcript = FALSE) /\ (runtime_system_context_diverged = FALSE) /\ (stored_is_archived = FALSE))
+    /\ ((stored_transcript_diverged = FALSE) /\ (live_has_uncommitted_transcript = FALSE) /\ (stored_is_archived = FALSE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
 
 
-ClassifyLiveSessionAuthorityDurableArchived(stored_transcript_diverged, live_has_uncommitted_transcript, runtime_system_context_diverged, stored_is_archived) ==
+ClassifyLiveSessionAuthorityDurableArchived(stored_transcript_diverged, live_has_uncommitted_transcript, stored_is_archived) ==
     /\ phase = "Ready"
     /\ (stored_is_archived = TRUE)
     /\ phase' = "Ready"
@@ -798,7 +697,7 @@ ClassifyLiveSessionAuthorityDurableArchived(stored_transcript_diverged, live_has
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
 
 
-ClassifyLiveSessionAuthorityDurableUncommitted(stored_transcript_diverged, live_has_uncommitted_transcript, runtime_system_context_diverged, stored_is_archived) ==
+ClassifyLiveSessionAuthorityDurableUncommitted(stored_transcript_diverged, live_has_uncommitted_transcript, stored_is_archived) ==
     /\ phase = "Ready"
     /\ ((stored_is_archived = FALSE) /\ (live_has_uncommitted_transcript = TRUE))
     /\ phase' = "Ready"
@@ -806,17 +705,9 @@ ClassifyLiveSessionAuthorityDurableUncommitted(stored_transcript_diverged, live_
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
 
 
-ClassifyLiveSessionAuthorityDurableSystemContext(stored_transcript_diverged, live_has_uncommitted_transcript, runtime_system_context_diverged, stored_is_archived) ==
+ClassifyLiveSessionAuthorityDurableRevision(stored_transcript_diverged, live_has_uncommitted_transcript, stored_is_archived) ==
     /\ phase = "Ready"
-    /\ ((stored_is_archived = FALSE) /\ (live_has_uncommitted_transcript = FALSE) /\ (runtime_system_context_diverged = TRUE))
-    /\ phase' = "Ready"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
-
-
-ClassifyLiveSessionAuthorityDurableRevision(stored_transcript_diverged, live_has_uncommitted_transcript, runtime_system_context_diverged, stored_is_archived) ==
-    /\ phase = "Ready"
-    /\ ((stored_is_archived = FALSE) /\ (live_has_uncommitted_transcript = FALSE) /\ (runtime_system_context_diverged = FALSE) /\ (stored_transcript_diverged = TRUE))
+    /\ ((stored_is_archived = FALSE) /\ (live_has_uncommitted_transcript = FALSE) /\ (stored_transcript_diverged = TRUE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
@@ -838,47 +729,7 @@ RecoverSessionFromStoreUnrecoverable(session_id, has_metadata, has_build_state, 
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
 
 
-ResolveRuntimeSnapshotReadSourceCommittedHead(session_id, relation, store_provenance, session_is_live, tail_execution, head_stamp_era) ==
-    /\ phase = "Ready"
-    /\ ((relation = "VerifiedStrictDescendant") /\ (store_provenance = "Committed"))
-    /\ phase' = "Ready"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
-
-
-ResolveRuntimeSnapshotReadSourceRecoveryRequired(session_id, relation, store_provenance, session_is_live, tail_execution, head_stamp_era) ==
-    /\ phase = "Ready"
-    /\ ((relation = "VerifiedStrictDescendant") /\ (store_provenance # "Committed") /\ (session_is_live = FALSE) /\ (tail_execution = "BoundExecution"))
-    /\ phase' = "Ready"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
-
-
-ResolveRuntimeSnapshotReadSourceLegacyRecoveryRequired(session_id, relation, store_provenance, session_is_live, tail_execution, head_stamp_era) ==
-    /\ phase = "Ready"
-    /\ ((relation = "VerifiedStrictDescendant") /\ (store_provenance = "IntraTurn") /\ (session_is_live = FALSE) /\ (tail_execution = "UnboundExecution") /\ (head_stamp_era = "PreWitnessV3"))
-    /\ phase' = "Ready"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
-
-
-ResolveRuntimeSnapshotReadSourceQuarantine(session_id, relation, store_provenance, session_is_live, tail_execution, head_stamp_era) ==
-    /\ phase = "Ready"
-    /\ (IF ((relation = "Diverged") /\ (store_provenance # "IntraTurn")) THEN TRUE ELSE (IF (relation = "Unverifiable") THEN TRUE ELSE ((relation = "VerifiedStrictDescendant") /\ (store_provenance # "Committed") /\ (session_is_live = FALSE) /\ (tail_execution = "UnboundExecution") /\ (IF (store_provenance # "IntraTurn") THEN TRUE ELSE (head_stamp_era # "PreWitnessV3")))))
-    /\ phase' = "Ready"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
-
-
-ResolveRuntimeSnapshotReadSourceSnapshot(session_id, relation, store_provenance, session_is_live, tail_execution, head_stamp_era) ==
-    /\ phase = "Ready"
-    /\ ((relation # "Unverifiable") /\ (IF (relation # "Diverged") THEN TRUE ELSE (store_provenance = "IntraTurn")) /\ (IF (relation # "VerifiedStrictDescendant") THEN TRUE ELSE ((store_provenance # "Committed") /\ (IF (session_is_live = TRUE) THEN TRUE ELSE (tail_execution = "NoExecutionContent")))))
-    /\ phase' = "Ready"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
-
-
-ClassifyDurableTailCompleted(session_id, candidate_id, relation, run_id_cardinality, terminal_stop_reason, dangling_tool_use_count, orphan_tool_result_count, messages_after_terminal, head_stamp_era) ==
+ClassifyDurableTailCompleted(session_id, candidate_id, relation, run_id_cardinality, terminal_stop_reason, dangling_tool_use_count, orphan_tool_result_count, messages_after_terminal) ==
     /\ phase = "Ready"
     /\ ((relation = "VerifiedStrictDescendant") /\ (run_id_cardinality = "SingleRunId") /\ (terminal_stop_reason = "EndTurn") /\ (dangling_tool_use_count = 0) /\ (orphan_tool_result_count = 0) /\ (messages_after_terminal = FALSE))
     /\ phase' = "Ready"
@@ -886,15 +737,7 @@ ClassifyDurableTailCompleted(session_id, candidate_id, relation, run_id_cardinal
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
 
 
-ClassifyDurableTailLegacyCompleted(session_id, candidate_id, relation, run_id_cardinality, terminal_stop_reason, dangling_tool_use_count, orphan_tool_result_count, messages_after_terminal, head_stamp_era) ==
-    /\ phase = "Ready"
-    /\ ((relation = "VerifiedStrictDescendant") /\ (run_id_cardinality = "NoRunId") /\ (terminal_stop_reason = "EndTurn") /\ (dangling_tool_use_count = 0) /\ (orphan_tool_result_count = 0) /\ (messages_after_terminal = FALSE) /\ (head_stamp_era = "PreWitnessV3"))
-    /\ phase' = "Ready"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
-
-
-ClassifyDurableTailRepairable(session_id, candidate_id, relation, run_id_cardinality, terminal_stop_reason, dangling_tool_use_count, orphan_tool_result_count, messages_after_terminal, head_stamp_era) ==
+ClassifyDurableTailRepairable(session_id, candidate_id, relation, run_id_cardinality, terminal_stop_reason, dangling_tool_use_count, orphan_tool_result_count, messages_after_terminal) ==
     /\ phase = "Ready"
     /\ ((relation = "VerifiedStrictDescendant") /\ (run_id_cardinality = "SingleRunId") /\ (dangling_tool_use_count = 0) /\ (orphan_tool_result_count = 0) /\ (messages_after_terminal = FALSE) /\ (IF (terminal_stop_reason = "ToolUse") THEN TRUE ELSE (terminal_stop_reason = "Absent")))
     /\ phase' = "Ready"
@@ -902,33 +745,9 @@ ClassifyDurableTailRepairable(session_id, candidate_id, relation, run_id_cardina
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
 
 
-ClassifyDurableTailAmbiguous(session_id, candidate_id, relation, run_id_cardinality, terminal_stop_reason, dangling_tool_use_count, orphan_tool_result_count, messages_after_terminal, head_stamp_era) ==
+ClassifyDurableTailAmbiguous(session_id, candidate_id, relation, run_id_cardinality, terminal_stop_reason, dangling_tool_use_count, orphan_tool_result_count, messages_after_terminal) ==
     /\ phase = "Ready"
-    /\ ((IF (relation # "VerifiedStrictDescendant") THEN TRUE ELSE (IF (run_id_cardinality # "SingleRunId") THEN TRUE ELSE (IF (orphan_tool_result_count # 0) THEN TRUE ELSE (IF (messages_after_terminal = TRUE) THEN TRUE ELSE (IF (terminal_stop_reason = "Other") THEN TRUE ELSE (dangling_tool_use_count # 0)))))) /\ (IF (relation # "VerifiedStrictDescendant") THEN TRUE ELSE (IF (run_id_cardinality # "NoRunId") THEN TRUE ELSE (IF (terminal_stop_reason # "EndTurn") THEN TRUE ELSE (IF (dangling_tool_use_count # 0) THEN TRUE ELSE (IF (orphan_tool_result_count # 0) THEN TRUE ELSE (IF (messages_after_terminal = TRUE) THEN TRUE ELSE (head_stamp_era # "PreWitnessV3"))))))))
-    /\ phase' = "Ready"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
-
-
-ResolveRuntimeProjectionConflictRetain(session_id, relation, row_provenance, authority_supersedes_row) ==
-    /\ phase = "Ready"
-    /\ (relation = "VerifiedStrictDescendant")
-    /\ phase' = "Ready"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
-
-
-ResolveRuntimeProjectionConflictConverge(session_id, relation, row_provenance, authority_supersedes_row) ==
-    /\ phase = "Ready"
-    /\ ((relation # "VerifiedStrictDescendant") /\ (row_provenance = "IntraTurn") /\ (authority_supersedes_row = TRUE))
-    /\ phase' = "Ready"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
-
-
-ResolveRuntimeProjectionConflictReject(session_id, relation, row_provenance, authority_supersedes_row) ==
-    /\ phase = "Ready"
-    /\ ((relation # "VerifiedStrictDescendant") /\ (IF (authority_supersedes_row = FALSE) THEN TRUE ELSE (row_provenance # "IntraTurn")))
+    /\ (IF (relation # "VerifiedStrictDescendant") THEN TRUE ELSE (IF (run_id_cardinality # "SingleRunId") THEN TRUE ELSE (IF (orphan_tool_result_count # 0) THEN TRUE ELSE (IF (messages_after_terminal = TRUE) THEN TRUE ELSE (IF (terminal_stop_reason = "Other") THEN TRUE ELSE (dangling_tool_use_count # 0))))))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
@@ -950,113 +769,17 @@ ResolveRuntimeCheckpointProjectionArchived(session_id) ==
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
 
 
-ResolveLegacyCheckpointMigrationSnapshotIdenticalProjection(session_id, runtime_snapshot_present, runtime_snapshot_legacy, store_row_present, store_row_legacy, transcript_relation) ==
+ResolveSessionDocumentLifecycleMergeArchivedAbsorbing(session_id, authority_archived, candidate_archived) ==
     /\ phase = "Ready"
-    /\ ((runtime_snapshot_present = TRUE) /\ (runtime_snapshot_legacy = TRUE) /\ (store_row_present = TRUE) /\ (store_row_legacy = TRUE) /\ (transcript_relation = "Identical"))
+    /\ (IF (authority_archived = TRUE) THEN TRUE ELSE (candidate_archived = TRUE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
 
 
-ResolveLegacyCheckpointMigrationSnapshotAheadOfProjection(session_id, runtime_snapshot_present, runtime_snapshot_legacy, store_row_present, store_row_legacy, transcript_relation) ==
+ResolveSessionDocumentLifecycleMergeAuthority(session_id, authority_archived, candidate_archived) ==
     /\ phase = "Ready"
-    /\ ((runtime_snapshot_present = TRUE) /\ (runtime_snapshot_legacy = TRUE) /\ (store_row_present = TRUE) /\ (store_row_legacy = TRUE) /\ (transcript_relation = "SnapshotExtendsProjection"))
-    /\ phase' = "Ready"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
-
-
-ResolveLegacyCheckpointMigrationProjectionExtension(session_id, runtime_snapshot_present, runtime_snapshot_legacy, store_row_present, store_row_legacy, transcript_relation) ==
-    /\ phase = "Ready"
-    /\ ((runtime_snapshot_present = TRUE) /\ (runtime_snapshot_legacy = TRUE) /\ (store_row_present = TRUE) /\ (store_row_legacy = TRUE) /\ (transcript_relation = "ProjectionExtendsSnapshot"))
-    /\ phase' = "Ready"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
-
-
-ResolveLegacyCheckpointMigrationDivergentCopies(session_id, runtime_snapshot_present, runtime_snapshot_legacy, store_row_present, store_row_legacy, transcript_relation) ==
-    /\ phase = "Ready"
-    /\ ((runtime_snapshot_present = TRUE) /\ (runtime_snapshot_legacy = TRUE) /\ (store_row_present = TRUE) /\ (store_row_legacy = TRUE) /\ (transcript_relation = "Divergent"))
-    /\ phase' = "Ready"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
-
-
-ResolveLegacyCheckpointMigrationSnapshotOnly(session_id, runtime_snapshot_present, runtime_snapshot_legacy, store_row_present, store_row_legacy, transcript_relation) ==
-    /\ phase = "Ready"
-    /\ ((runtime_snapshot_present = TRUE) /\ (runtime_snapshot_legacy = TRUE) /\ (store_row_present = FALSE))
-    /\ phase' = "Ready"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
-
-
-ResolveLegacyCheckpointMigrationStoreRowOnly(session_id, runtime_snapshot_present, runtime_snapshot_legacy, store_row_present, store_row_legacy, transcript_relation) ==
-    /\ phase = "Ready"
-    /\ ((runtime_snapshot_present = FALSE) /\ (store_row_present = TRUE) /\ (store_row_legacy = TRUE))
-    /\ phase' = "Ready"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
-
-
-ResolveLegacyCheckpointMigrationTypedSnapshotLegacyProjection(session_id, runtime_snapshot_present, runtime_snapshot_legacy, store_row_present, store_row_legacy, transcript_relation) ==
-    /\ phase = "Ready"
-    /\ ((runtime_snapshot_present = TRUE) /\ (runtime_snapshot_legacy = FALSE) /\ (store_row_present = TRUE) /\ (store_row_legacy = TRUE))
-    /\ phase' = "Ready"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
-
-
-ResolveLegacyCheckpointMigrationSnapshotIdenticalTypedProjection(session_id, runtime_snapshot_present, runtime_snapshot_legacy, store_row_present, store_row_legacy, transcript_relation) ==
-    /\ phase = "Ready"
-    /\ ((runtime_snapshot_present = TRUE) /\ (runtime_snapshot_legacy = TRUE) /\ (store_row_present = TRUE) /\ (store_row_legacy = FALSE) /\ (transcript_relation = "Identical"))
-    /\ phase' = "Ready"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
-
-
-ResolveLegacyCheckpointMigrationTypedProjectionExtension(session_id, runtime_snapshot_present, runtime_snapshot_legacy, store_row_present, store_row_legacy, transcript_relation) ==
-    /\ phase = "Ready"
-    /\ ((runtime_snapshot_present = TRUE) /\ (runtime_snapshot_legacy = TRUE) /\ (store_row_present = TRUE) /\ (store_row_legacy = FALSE) /\ (transcript_relation = "ProjectionExtendsSnapshot"))
-    /\ phase' = "Ready"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
-
-
-ResolveLegacyCheckpointMigrationSnapshotAheadOfTypedProjection(session_id, runtime_snapshot_present, runtime_snapshot_legacy, store_row_present, store_row_legacy, transcript_relation) ==
-    /\ phase = "Ready"
-    /\ ((runtime_snapshot_present = TRUE) /\ (runtime_snapshot_legacy = TRUE) /\ (store_row_present = TRUE) /\ (store_row_legacy = FALSE) /\ (transcript_relation = "SnapshotExtendsProjection"))
-    /\ phase' = "Ready"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
-
-
-ResolveLegacyCheckpointMigrationDivergentFromTypedProjection(session_id, runtime_snapshot_present, runtime_snapshot_legacy, store_row_present, store_row_legacy, transcript_relation) ==
-    /\ phase = "Ready"
-    /\ ((runtime_snapshot_present = TRUE) /\ (runtime_snapshot_legacy = TRUE) /\ (store_row_present = TRUE) /\ (store_row_legacy = FALSE) /\ (transcript_relation = "Divergent"))
-    /\ phase' = "Ready"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
-
-
-ResolveLegacyCheckpointMigrationTypedProjectionNotComparable(session_id, runtime_snapshot_present, runtime_snapshot_legacy, store_row_present, store_row_legacy, transcript_relation) ==
-    /\ phase = "Ready"
-    /\ ((runtime_snapshot_present = TRUE) /\ (runtime_snapshot_legacy = TRUE) /\ (store_row_present = TRUE) /\ (store_row_legacy = FALSE) /\ (transcript_relation = "NotComparable"))
-    /\ phase' = "Ready"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
-
-
-ResolveLegacyCheckpointMigrationLifecycleArchivedAbsorbing(session_id, runtime_copy_archived, store_row_archived) ==
-    /\ phase = "Ready"
-    /\ (IF (runtime_copy_archived = TRUE) THEN TRUE ELSE (store_row_archived = TRUE))
-    /\ phase' = "Ready"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
-
-
-ResolveLegacyCheckpointMigrationLifecycleElected(session_id, runtime_copy_archived, store_row_archived) ==
-    /\ phase = "Ready"
-    /\ ((runtime_copy_archived = FALSE) /\ (store_row_archived = FALSE))
+    /\ ((authority_archived = FALSE) /\ (candidate_archived = FALSE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
@@ -1147,17 +870,6 @@ Next ==
     \/ \E session_id \in SessionIdValues : \E pending_initial_prompt_present \in BOOLEAN : \E pending_tool_result_message_count \in 0..2 : RestoreSessionConsumedInputs(session_id, TRUE, pending_initial_prompt_present, pending_tool_result_message_count)
     \/ \E session_id \in SessionIdValues : \E pending_initial_prompt_present \in BOOLEAN : \E pending_tool_result_message_count \in 0..2 : RestoreSessionConsumedInputsNoPhaseRollback(session_id, FALSE, pending_initial_prompt_present, pending_tool_result_message_count)
     \/ \E session_id \in SessionIdValues : \E arg_phase \in SessionFirstTurnPhaseValues : \E pending_initial_prompt_present \in BOOLEAN : \E pending_tool_result_message_count \in 0..2 : RecoverSessionFirstTurnPhase(session_id, arg_phase, pending_initial_prompt_present, pending_tool_result_message_count)
-    \/ \E trimmed_text_byte_count \in 0..2 : \E idempotency_key_present \in BOOLEAN : \E existing_key_matches \in BOOLEAN : \E existing_key_conflicts \in BOOLEAN : \E active_turn_scoped \in BOOLEAN : ResolveSystemContextAppendEmpty(trimmed_text_byte_count, idempotency_key_present, existing_key_matches, existing_key_conflicts, active_turn_scoped)
-    \/ \E trimmed_text_byte_count \in 0..2 : \E idempotency_key_present \in BOOLEAN : \E existing_key_matches \in BOOLEAN : \E existing_key_conflicts \in BOOLEAN : \E active_turn_scoped \in BOOLEAN : ResolveSystemContextAppendConflict(trimmed_text_byte_count, idempotency_key_present, existing_key_matches, existing_key_conflicts, active_turn_scoped)
-    \/ \E trimmed_text_byte_count \in 0..2 : \E idempotency_key_present \in BOOLEAN : \E existing_key_matches \in BOOLEAN : \E existing_key_conflicts \in BOOLEAN : \E active_turn_scoped \in BOOLEAN : ResolveSystemContextAppendDuplicate(trimmed_text_byte_count, idempotency_key_present, existing_key_matches, existing_key_conflicts, active_turn_scoped)
-    \/ \E trimmed_text_byte_count \in 0..2 : \E idempotency_key_present \in BOOLEAN : \E existing_key_matches \in BOOLEAN : \E existing_key_conflicts \in BOOLEAN : \E active_turn_scoped \in BOOLEAN : ResolveSystemContextAppendNew(trimmed_text_byte_count, idempotency_key_present, existing_key_matches, existing_key_conflicts, active_turn_scoped)
-    \/ \E has_previous \in BOOLEAN : \E content_identical \in BOOLEAN : \E content_extends_previous \in BOOLEAN : \E appended_starts_with_separator \in BOOLEAN : \E incoming_is_runtime_context_append \in BOOLEAN : ResolveSystemContextPersistAppendAdmissionAdmit(has_previous, content_identical, content_extends_previous, appended_starts_with_separator, incoming_is_runtime_context_append)
-    \/ \E has_previous \in BOOLEAN : \E content_identical \in BOOLEAN : \E content_extends_previous \in BOOLEAN : \E appended_starts_with_separator \in BOOLEAN : \E incoming_is_runtime_context_append \in BOOLEAN : ResolveSystemContextPersistAppendAdmissionReject(has_previous, content_identical, content_extends_previous, appended_starts_with_separator, incoming_is_runtime_context_append)
-    \/ \E source_kind \in SystemContextSourceValues : ResolveSystemContextPendingApplyItemRuntimeSteer(source_kind)
-    \/ \E source_kind \in SystemContextSourceValues : ResolveSystemContextPendingApplyItemNormal(source_kind)
-    \/ \E source_kind \in SystemContextSourceValues : ResolveSystemContextSteerCleanupItemRuntimeSteer(source_kind)
-    \/ \E source_kind \in SystemContextSourceValues : ResolveSystemContextSteerCleanupItemNormal(source_kind)
-    \/ RestoreSystemContextSnapshot(TRUE, TRUE)
     \/ \E role \in RealtimeTranscriptRoleKindValues : ResolveRealtimeItemObservedDiscardedAssistant(role, TRUE)
     \/ \E role \in RealtimeTranscriptRoleKindValues : \E response_discarded \in BOOLEAN : ResolveRealtimeItemObservedPresent(role, response_discarded)
     \/ ResolveRealtimeItemSkipped
@@ -1208,7 +920,6 @@ Next ==
     \/ \E schema_version \in 0..2 : AuthorizeSessionMetadataPersist(schema_version, TRUE)
     \/ \E mob_tool_authority_context_present \in BOOLEAN : \E mob_tool_authority_context_generated \in BOOLEAN : AuthorizeSessionBuildStatePersist(mob_tool_authority_context_present, mob_tool_authority_context_generated)
     \/ RestoreSessionBuildState
-    \/ \E source \in SessionSystemPromptSourceValues : \E prompt_present \in BOOLEAN : \E prompt_byte_count \in 0..2 : \E replacing_existing \in BOOLEAN : AuthorizeSystemPromptMutation(source, prompt_present, prompt_byte_count, replacing_existing)
     \/ \E session_tail \in ObservedSessionTailKindValues : \E staged_tool_result_count \in 0..2 : ResolvePendingContinuationWithBoundary(session_tail, staged_tool_result_count)
     \/ \E session_tail \in ObservedSessionTailKindValues : \E staged_tool_result_count \in 0..2 : ResolvePendingContinuationWithoutBoundary(session_tail, staged_tool_result_count)
     \/ \E provider_override_present \in BOOLEAN : \E model_override_present \in BOOLEAN : \E self_hosted_server_override_present \in BOOLEAN : \E has_build_only_overrides \in BOOLEAN : \E first_turn_phase \in SessionFirstTurnPhaseValues : AuthorizeSessionResumeOverridesRejectProviderRequiresModel(provider_override_present, model_override_present, self_hosted_server_override_present, has_build_only_overrides, first_turn_phase)
@@ -1219,41 +930,19 @@ Next ==
     \/ \E model_override_present \in BOOLEAN : \E has_build_only_overrides \in BOOLEAN : \E first_turn_phase \in SessionFirstTurnPhaseValues : AuthorizeSessionResumeOverridesAcceptUseOverrideWithSelfHostedOverride(TRUE, model_override_present, TRUE, has_build_only_overrides, first_turn_phase)
     \/ \E model_override_present \in BOOLEAN : \E has_build_only_overrides \in BOOLEAN : \E first_turn_phase \in SessionFirstTurnPhaseValues : AuthorizeSessionResumeOverridesAcceptRetainStored(FALSE, model_override_present, FALSE, has_build_only_overrides, first_turn_phase)
     \/ \E model_override_present \in BOOLEAN : \E has_build_only_overrides \in BOOLEAN : \E first_turn_phase \in SessionFirstTurnPhaseValues : AuthorizeSessionResumeOverridesAcceptRetainStoredWithSelfHostedOverride(FALSE, model_override_present, TRUE, has_build_only_overrides, first_turn_phase)
-    \/ ClassifyLiveSessionAuthorityLive(FALSE, FALSE, FALSE, FALSE)
-    \/ \E stored_transcript_diverged \in BOOLEAN : \E live_has_uncommitted_transcript \in BOOLEAN : \E runtime_system_context_diverged \in BOOLEAN : ClassifyLiveSessionAuthorityDurableArchived(stored_transcript_diverged, live_has_uncommitted_transcript, runtime_system_context_diverged, TRUE)
-    \/ \E stored_transcript_diverged \in BOOLEAN : \E runtime_system_context_diverged \in BOOLEAN : ClassifyLiveSessionAuthorityDurableUncommitted(stored_transcript_diverged, TRUE, runtime_system_context_diverged, FALSE)
-    \/ \E stored_transcript_diverged \in BOOLEAN : ClassifyLiveSessionAuthorityDurableSystemContext(stored_transcript_diverged, FALSE, TRUE, FALSE)
-    \/ ClassifyLiveSessionAuthorityDurableRevision(TRUE, FALSE, FALSE, FALSE)
+    \/ ClassifyLiveSessionAuthorityLive(FALSE, FALSE, FALSE)
+    \/ \E stored_transcript_diverged \in BOOLEAN : \E live_has_uncommitted_transcript \in BOOLEAN : ClassifyLiveSessionAuthorityDurableArchived(stored_transcript_diverged, live_has_uncommitted_transcript, TRUE)
+    \/ \E stored_transcript_diverged \in BOOLEAN : ClassifyLiveSessionAuthorityDurableUncommitted(stored_transcript_diverged, TRUE, FALSE)
+    \/ ClassifyLiveSessionAuthorityDurableRevision(TRUE, FALSE, FALSE)
     \/ \E session_id \in SessionIdValues : \E has_metadata \in BOOLEAN : \E has_build_state \in BOOLEAN : \E runtime_projection_quarantined \in BOOLEAN : RecoverSessionFromStoreAuthorized(session_id, has_metadata, has_build_state, runtime_projection_quarantined)
     \/ \E session_id \in SessionIdValues : \E has_metadata \in BOOLEAN : \E has_build_state \in BOOLEAN : \E runtime_projection_quarantined \in BOOLEAN : RecoverSessionFromStoreUnrecoverable(session_id, has_metadata, has_build_state, runtime_projection_quarantined)
-    \/ \E session_id \in SessionIdValues : \E relation \in DurableHeadRelationValues : \E store_provenance \in CheckpointProvenanceClassValues : \E session_is_live \in BOOLEAN : \E tail_execution \in DurableTailExecutionEvidenceValues : \E head_stamp_era \in DurableHeadStampEraValues : ResolveRuntimeSnapshotReadSourceCommittedHead(session_id, relation, store_provenance, session_is_live, tail_execution, head_stamp_era)
-    \/ \E session_id \in SessionIdValues : \E relation \in DurableHeadRelationValues : \E store_provenance \in CheckpointProvenanceClassValues : \E tail_execution \in DurableTailExecutionEvidenceValues : \E head_stamp_era \in DurableHeadStampEraValues : ResolveRuntimeSnapshotReadSourceRecoveryRequired(session_id, relation, store_provenance, FALSE, tail_execution, head_stamp_era)
-    \/ \E session_id \in SessionIdValues : \E relation \in DurableHeadRelationValues : \E store_provenance \in CheckpointProvenanceClassValues : \E tail_execution \in DurableTailExecutionEvidenceValues : \E head_stamp_era \in DurableHeadStampEraValues : ResolveRuntimeSnapshotReadSourceLegacyRecoveryRequired(session_id, relation, store_provenance, FALSE, tail_execution, head_stamp_era)
-    \/ \E session_id \in SessionIdValues : \E relation \in DurableHeadRelationValues : \E store_provenance \in CheckpointProvenanceClassValues : \E session_is_live \in BOOLEAN : \E tail_execution \in DurableTailExecutionEvidenceValues : \E head_stamp_era \in DurableHeadStampEraValues : ResolveRuntimeSnapshotReadSourceQuarantine(session_id, relation, store_provenance, session_is_live, tail_execution, head_stamp_era)
-    \/ \E session_id \in SessionIdValues : \E relation \in DurableHeadRelationValues : \E store_provenance \in CheckpointProvenanceClassValues : \E session_is_live \in BOOLEAN : \E tail_execution \in DurableTailExecutionEvidenceValues : \E head_stamp_era \in DurableHeadStampEraValues : ResolveRuntimeSnapshotReadSourceSnapshot(session_id, relation, store_provenance, session_is_live, tail_execution, head_stamp_era)
-    \/ \E session_id \in SessionIdValues : \E candidate_id \in RecoveryCandidateIdValues : \E relation \in DurableHeadRelationValues : \E run_id_cardinality \in RunIdCardinalityValues : \E terminal_stop_reason \in DurableTailStopReasonValues : \E dangling_tool_use_count \in 0..2 : \E orphan_tool_result_count \in 0..2 : \E head_stamp_era \in DurableHeadStampEraValues : ClassifyDurableTailCompleted(session_id, candidate_id, relation, run_id_cardinality, terminal_stop_reason, dangling_tool_use_count, orphan_tool_result_count, FALSE, head_stamp_era)
-    \/ \E session_id \in SessionIdValues : \E candidate_id \in RecoveryCandidateIdValues : \E relation \in DurableHeadRelationValues : \E run_id_cardinality \in RunIdCardinalityValues : \E terminal_stop_reason \in DurableTailStopReasonValues : \E dangling_tool_use_count \in 0..2 : \E orphan_tool_result_count \in 0..2 : \E head_stamp_era \in DurableHeadStampEraValues : ClassifyDurableTailLegacyCompleted(session_id, candidate_id, relation, run_id_cardinality, terminal_stop_reason, dangling_tool_use_count, orphan_tool_result_count, FALSE, head_stamp_era)
-    \/ \E session_id \in SessionIdValues : \E candidate_id \in RecoveryCandidateIdValues : \E relation \in DurableHeadRelationValues : \E run_id_cardinality \in RunIdCardinalityValues : \E terminal_stop_reason \in DurableTailStopReasonValues : \E dangling_tool_use_count \in 0..2 : \E orphan_tool_result_count \in 0..2 : \E head_stamp_era \in DurableHeadStampEraValues : ClassifyDurableTailRepairable(session_id, candidate_id, relation, run_id_cardinality, terminal_stop_reason, dangling_tool_use_count, orphan_tool_result_count, FALSE, head_stamp_era)
-    \/ \E session_id \in SessionIdValues : \E candidate_id \in RecoveryCandidateIdValues : \E relation \in DurableHeadRelationValues : \E run_id_cardinality \in RunIdCardinalityValues : \E terminal_stop_reason \in DurableTailStopReasonValues : \E dangling_tool_use_count \in 0..2 : \E orphan_tool_result_count \in 0..2 : \E messages_after_terminal \in BOOLEAN : \E head_stamp_era \in DurableHeadStampEraValues : ClassifyDurableTailAmbiguous(session_id, candidate_id, relation, run_id_cardinality, terminal_stop_reason, dangling_tool_use_count, orphan_tool_result_count, messages_after_terminal, head_stamp_era)
-    \/ \E session_id \in SessionIdValues : \E relation \in DurableHeadRelationValues : \E row_provenance \in CheckpointProvenanceClassValues : \E authority_supersedes_row \in BOOLEAN : ResolveRuntimeProjectionConflictRetain(session_id, relation, row_provenance, authority_supersedes_row)
-    \/ \E session_id \in SessionIdValues : \E relation \in DurableHeadRelationValues : \E row_provenance \in CheckpointProvenanceClassValues : ResolveRuntimeProjectionConflictConverge(session_id, relation, row_provenance, TRUE)
-    \/ \E session_id \in SessionIdValues : \E relation \in DurableHeadRelationValues : \E row_provenance \in CheckpointProvenanceClassValues : \E authority_supersedes_row \in BOOLEAN : ResolveRuntimeProjectionConflictReject(session_id, relation, row_provenance, authority_supersedes_row)
+    \/ \E session_id \in SessionIdValues : \E candidate_id \in RecoveryCandidateIdValues : \E relation \in DurableHeadRelationValues : \E run_id_cardinality \in RunIdCardinalityValues : \E terminal_stop_reason \in DurableTailStopReasonValues : \E dangling_tool_use_count \in 0..2 : \E orphan_tool_result_count \in 0..2 : ClassifyDurableTailCompleted(session_id, candidate_id, relation, run_id_cardinality, terminal_stop_reason, dangling_tool_use_count, orphan_tool_result_count, FALSE)
+    \/ \E session_id \in SessionIdValues : \E candidate_id \in RecoveryCandidateIdValues : \E relation \in DurableHeadRelationValues : \E run_id_cardinality \in RunIdCardinalityValues : \E terminal_stop_reason \in DurableTailStopReasonValues : \E dangling_tool_use_count \in 0..2 : \E orphan_tool_result_count \in 0..2 : ClassifyDurableTailRepairable(session_id, candidate_id, relation, run_id_cardinality, terminal_stop_reason, dangling_tool_use_count, orphan_tool_result_count, FALSE)
+    \/ \E session_id \in SessionIdValues : \E candidate_id \in RecoveryCandidateIdValues : \E relation \in DurableHeadRelationValues : \E run_id_cardinality \in RunIdCardinalityValues : \E terminal_stop_reason \in DurableTailStopReasonValues : \E dangling_tool_use_count \in 0..2 : \E orphan_tool_result_count \in 0..2 : \E messages_after_terminal \in BOOLEAN : ClassifyDurableTailAmbiguous(session_id, candidate_id, relation, run_id_cardinality, terminal_stop_reason, dangling_tool_use_count, orphan_tool_result_count, messages_after_terminal)
     \/ \E session_id \in SessionIdValues : ResolveRuntimeCheckpointProjectionActive(session_id)
     \/ \E session_id \in SessionIdValues : ResolveRuntimeCheckpointProjectionArchived(session_id)
-    \/ \E session_id \in SessionIdValues : \E transcript_relation \in LegacyCheckpointTranscriptRelationValues : ResolveLegacyCheckpointMigrationSnapshotIdenticalProjection(session_id, TRUE, TRUE, TRUE, TRUE, transcript_relation)
-    \/ \E session_id \in SessionIdValues : \E transcript_relation \in LegacyCheckpointTranscriptRelationValues : ResolveLegacyCheckpointMigrationSnapshotAheadOfProjection(session_id, TRUE, TRUE, TRUE, TRUE, transcript_relation)
-    \/ \E session_id \in SessionIdValues : \E transcript_relation \in LegacyCheckpointTranscriptRelationValues : ResolveLegacyCheckpointMigrationProjectionExtension(session_id, TRUE, TRUE, TRUE, TRUE, transcript_relation)
-    \/ \E session_id \in SessionIdValues : \E transcript_relation \in LegacyCheckpointTranscriptRelationValues : ResolveLegacyCheckpointMigrationDivergentCopies(session_id, TRUE, TRUE, TRUE, TRUE, transcript_relation)
-    \/ \E session_id \in SessionIdValues : \E store_row_legacy \in BOOLEAN : \E transcript_relation \in LegacyCheckpointTranscriptRelationValues : ResolveLegacyCheckpointMigrationSnapshotOnly(session_id, TRUE, TRUE, FALSE, store_row_legacy, transcript_relation)
-    \/ \E session_id \in SessionIdValues : \E runtime_snapshot_legacy \in BOOLEAN : \E transcript_relation \in LegacyCheckpointTranscriptRelationValues : ResolveLegacyCheckpointMigrationStoreRowOnly(session_id, FALSE, runtime_snapshot_legacy, TRUE, TRUE, transcript_relation)
-    \/ \E session_id \in SessionIdValues : \E transcript_relation \in LegacyCheckpointTranscriptRelationValues : ResolveLegacyCheckpointMigrationTypedSnapshotLegacyProjection(session_id, TRUE, FALSE, TRUE, TRUE, transcript_relation)
-    \/ \E session_id \in SessionIdValues : \E transcript_relation \in LegacyCheckpointTranscriptRelationValues : ResolveLegacyCheckpointMigrationSnapshotIdenticalTypedProjection(session_id, TRUE, TRUE, TRUE, FALSE, transcript_relation)
-    \/ \E session_id \in SessionIdValues : \E transcript_relation \in LegacyCheckpointTranscriptRelationValues : ResolveLegacyCheckpointMigrationTypedProjectionExtension(session_id, TRUE, TRUE, TRUE, FALSE, transcript_relation)
-    \/ \E session_id \in SessionIdValues : \E transcript_relation \in LegacyCheckpointTranscriptRelationValues : ResolveLegacyCheckpointMigrationSnapshotAheadOfTypedProjection(session_id, TRUE, TRUE, TRUE, FALSE, transcript_relation)
-    \/ \E session_id \in SessionIdValues : \E transcript_relation \in LegacyCheckpointTranscriptRelationValues : ResolveLegacyCheckpointMigrationDivergentFromTypedProjection(session_id, TRUE, TRUE, TRUE, FALSE, transcript_relation)
-    \/ \E session_id \in SessionIdValues : \E transcript_relation \in LegacyCheckpointTranscriptRelationValues : ResolveLegacyCheckpointMigrationTypedProjectionNotComparable(session_id, TRUE, TRUE, TRUE, FALSE, transcript_relation)
-    \/ \E session_id \in SessionIdValues : \E runtime_copy_archived \in BOOLEAN : \E store_row_archived \in BOOLEAN : ResolveLegacyCheckpointMigrationLifecycleArchivedAbsorbing(session_id, runtime_copy_archived, store_row_archived)
-    \/ \E session_id \in SessionIdValues : ResolveLegacyCheckpointMigrationLifecycleElected(session_id, FALSE, FALSE)
+    \/ \E session_id \in SessionIdValues : \E authority_archived \in BOOLEAN : \E candidate_archived \in BOOLEAN : ResolveSessionDocumentLifecycleMergeArchivedAbsorbing(session_id, authority_archived, candidate_archived)
+    \/ \E session_id \in SessionIdValues : ResolveSessionDocumentLifecycleMergeAuthority(session_id, FALSE, FALSE)
     \/ \E session_id \in SessionIdValues : \E result_count \in 0..2 : ApplyPendingToolResults(session_id, result_count)
     \/ \E session_id \in SessionIdValues : \E fork_or_rewrite_directive \in TranscriptEditKindValues : TranscriptEditFork(session_id, fork_or_rewrite_directive)
     \/ \E session_id \in SessionIdValues : \E fork_or_rewrite_directive \in TranscriptEditKindValues : TranscriptEditRewrite(session_id, fork_or_rewrite_directive)

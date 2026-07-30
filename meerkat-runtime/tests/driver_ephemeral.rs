@@ -701,10 +701,6 @@ async fn accept_peer_response_terminal_defers_context_projection_to_machine_batc
         "terminal peer response must carry its typed comms notice append so the mandatory \
          requester reaction turn has model-visible content"
     );
-    assert!(
-        projection.context_append.is_none(),
-        "terminal peer response context must be projected by the machine-selected runtime batch"
-    );
     Ok(())
 }
 

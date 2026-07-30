@@ -40,11 +40,9 @@ impl MeerkatMachine {
                 // supervisor-cleanup drain backed by closed durable authority;
                 // the shell must not pre-classify terminal admission here.
 
-                let gate = self.session_mutation_gate(&session_id).await;
-                let _gate_guard = match gate {
-                    Some(ref g) => Some(g.lock().await),
-                    None => None,
-                };
+                let _gate_guard = self
+                    .lock_current_durability_ready_session_mutation_gate(&session_id)
+                    .await?;
 
                 if let Some(expected) = expected_attachment.as_ref() {
                     let exact_attachment = if let Some(gate) = gate.as_ref() {
@@ -308,11 +306,9 @@ impl MeerkatMachine {
                     return Ok(MeerkatMachineCommandResult::Unit);
                 }
 
-                let gate = self.session_mutation_gate(&session_id).await;
-                let _gate_guard = match gate {
-                    Some(ref g) => Some(g.lock().await),
-                    None => None,
-                };
+                let _gate_guard = self
+                    .lock_current_durability_ready_session_mutation_gate(&session_id)
+                    .await?;
 
                 // Stage-first: NotifyDrainExited is not declared from
                 // Destroyed (DrainBindingInvariant); the machine rejects it
@@ -395,6 +391,9 @@ impl MeerkatMachine {
                 if let Some(handle) = handle {
                     let _ = handle.await;
                 }
+                let _gate_guard = self
+                    .lock_current_durability_ready_session_mutation_gate(&session_id)
+                    .await?;
                 // Re-read post-await to safety-net a panicked task that
                 // never notified the authority. The generated
                 // `NotifyDrainExited { Failed }` transition owns the

@@ -327,13 +327,13 @@ impl std::fmt::Display for AdmissionInputOriginKind {
 )]
 pub enum AdmissionPeerResponseTerminalApplyIntent {
     #[default]
-    #[serde(rename = "AppendContextAndRun")]
-    AppendContextAndRun,
+    #[serde(rename = "AppendContentAndRun")]
+    AppendContentAndRun,
 }
 impl AdmissionPeerResponseTerminalApplyIntent {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::AppendContextAndRun => "AppendContextAndRun",
+            Self::AppendContentAndRun => "AppendContentAndRun",
         }
     }
 }
@@ -341,7 +341,7 @@ impl std::convert::TryFrom<&str> for AdmissionPeerResponseTerminalApplyIntent {
     type Error = String;
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         match value {
-            "AppendContextAndRun" => Ok(Self::AppendContextAndRun),
+            "AppendContentAndRun" => Ok(Self::AppendContentAndRun),
             other => Err(format!(
                 "invalid AdmissionPeerResponseTerminalApplyIntent value `{other}`"
             )),
@@ -1219,16 +1219,10 @@ pub enum ContentShape {
     #[default]
     #[serde(rename = "conversation")]
     Conversation,
-    #[serde(rename = "conversation+context")]
-    ConversationAndContext,
-    #[serde(rename = "context")]
-    Context,
     #[serde(rename = "empty")]
     Empty,
     #[serde(rename = "immediate_append")]
     ImmediateAppend,
-    #[serde(rename = "immediate_context")]
-    ImmediateContext,
 }
 impl ContentShape {
     pub fn as_str(&self) -> &'static str {
@@ -1236,17 +1230,9 @@ impl ContentShape {
             Self::Conversation => {
                 meerkat_core::turn_execution_authority::ContentShape::Conversation.as_str()
             }
-            Self::ConversationAndContext => {
-                meerkat_core::turn_execution_authority::ContentShape::ConversationAndContext
-                    .as_str()
-            }
-            Self::Context => meerkat_core::turn_execution_authority::ContentShape::Context.as_str(),
             Self::Empty => meerkat_core::turn_execution_authority::ContentShape::Empty.as_str(),
             Self::ImmediateAppend => {
                 meerkat_core::turn_execution_authority::ContentShape::ImmediateAppend.as_str()
-            }
-            Self::ImmediateContext => {
-                meerkat_core::turn_execution_authority::ContentShape::ImmediateContext.as_str()
             }
         }
     }
@@ -1256,11 +1242,8 @@ impl std::convert::TryFrom<&str> for ContentShape {
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         match value {
             "conversation" => Ok(Self::Conversation),
-            "conversation+context" => Ok(Self::ConversationAndContext),
-            "context" => Ok(Self::Context),
             "empty" => Ok(Self::Empty),
             "immediate_append" => Ok(Self::ImmediateAppend),
-            "immediate_context" => Ok(Self::ImmediateContext),
             other => Err(format!("invalid ContentShape value `{other}`")),
         }
     }
@@ -1706,8 +1689,6 @@ pub enum DurableTailRecoveryClass {
     CompletedCandidate,
     #[serde(rename = "InterruptedRepairableCandidate")]
     InterruptedRepairableCandidate,
-    #[serde(rename = "LegacyCompletedCandidate")]
-    LegacyCompletedCandidate,
     #[serde(rename = "Ambiguous")]
     Ambiguous,
 }
@@ -1716,7 +1697,6 @@ impl DurableTailRecoveryClass {
         match self {
             Self::CompletedCandidate => "CompletedCandidate",
             Self::InterruptedRepairableCandidate => "InterruptedRepairableCandidate",
-            Self::LegacyCompletedCandidate => "LegacyCompletedCandidate",
             Self::Ambiguous => "Ambiguous",
         }
     }
@@ -1727,7 +1707,6 @@ impl std::convert::TryFrom<&str> for DurableTailRecoveryClass {
         match value {
             "CompletedCandidate" => Ok(Self::CompletedCandidate),
             "InterruptedRepairableCandidate" => Ok(Self::InterruptedRepairableCandidate),
-            "LegacyCompletedCandidate" => Ok(Self::LegacyCompletedCandidate),
             "Ambiguous" => Ok(Self::Ambiguous),
             other => Err(format!("invalid DurableTailRecoveryClass value `{other}`")),
         }
@@ -1766,10 +1745,8 @@ pub enum DurableTailRecoveryDisposition {
     CommitCompleted,
     #[serde(rename = "RepairAndCommitInterrupted")]
     RepairAndCommitInterrupted,
-    #[serde(rename = "CommitLegacyCompleted")]
-    CommitLegacyCompleted,
-    #[serde(rename = "CommitLegacyCompletedRetainInputs")]
-    CommitLegacyCompletedRetainInputs,
+    #[serde(rename = "CommitCompletedRetainInputs")]
+    CommitCompletedRetainInputs,
     #[serde(rename = "HoldIntact")]
     HoldIntact,
 }
@@ -1779,8 +1756,7 @@ impl DurableTailRecoveryDisposition {
             Self::RefuseRecovery => "RefuseRecovery",
             Self::CommitCompleted => "CommitCompleted",
             Self::RepairAndCommitInterrupted => "RepairAndCommitInterrupted",
-            Self::CommitLegacyCompleted => "CommitLegacyCompleted",
-            Self::CommitLegacyCompletedRetainInputs => "CommitLegacyCompletedRetainInputs",
+            Self::CommitCompletedRetainInputs => "CommitCompletedRetainInputs",
             Self::HoldIntact => "HoldIntact",
         }
     }
@@ -1792,8 +1768,7 @@ impl std::convert::TryFrom<&str> for DurableTailRecoveryDisposition {
             "RefuseRecovery" => Ok(Self::RefuseRecovery),
             "CommitCompleted" => Ok(Self::CommitCompleted),
             "RepairAndCommitInterrupted" => Ok(Self::RepairAndCommitInterrupted),
-            "CommitLegacyCompleted" => Ok(Self::CommitLegacyCompleted),
-            "CommitLegacyCompletedRetainInputs" => Ok(Self::CommitLegacyCompletedRetainInputs),
+            "CommitCompletedRetainInputs" => Ok(Self::CommitCompletedRetainInputs),
             "HoldIntact" => Ok(Self::HoldIntact),
             other => Err(format!(
                 "invalid DurableTailRecoveryDisposition value `{other}`"
@@ -6122,13 +6097,13 @@ impl std::fmt::Display for RecoveredInputRecoveryDisposition {
 )]
 pub enum RecoveredPeerResponseTerminalApplyIntent {
     #[default]
-    #[serde(rename = "AppendContextAndRun")]
-    AppendContextAndRun,
+    #[serde(rename = "AppendContentAndRun")]
+    AppendContentAndRun,
 }
 impl RecoveredPeerResponseTerminalApplyIntent {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::AppendContextAndRun => "AppendContextAndRun",
+            Self::AppendContentAndRun => "AppendContentAndRun",
         }
     }
 }
@@ -6136,7 +6111,7 @@ impl std::convert::TryFrom<&str> for RecoveredPeerResponseTerminalApplyIntent {
     type Error = String;
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         match value {
-            "AppendContextAndRun" => Ok(Self::AppendContextAndRun),
+            "AppendContentAndRun" => Ok(Self::AppendContentAndRun),
             other => Err(format!(
                 "invalid RecoveredPeerResponseTerminalApplyIntent value `{other}`"
             )),
@@ -10574,8 +10549,6 @@ pub enum TurnPrimitiveKind {
     ConversationTurn,
     #[serde(rename = "ImmediateAppend")]
     ImmediateAppend,
-    #[serde(rename = "ImmediateContextAppend")]
-    ImmediateContextAppend,
 }
 impl TurnPrimitiveKind {
     pub fn as_str(&self) -> &'static str {
@@ -10583,7 +10556,6 @@ impl TurnPrimitiveKind {
             Self::None => "None",
             Self::ConversationTurn => "ConversationTurn",
             Self::ImmediateAppend => "ImmediateAppend",
-            Self::ImmediateContextAppend => "ImmediateContextAppend",
         }
     }
 }
@@ -10594,7 +10566,6 @@ impl std::convert::TryFrom<&str> for TurnPrimitiveKind {
             "None" => Ok(Self::None),
             "ConversationTurn" => Ok(Self::ConversationTurn),
             "ImmediateAppend" => Ok(Self::ImmediateAppend),
-            "ImmediateContextAppend" => Ok(Self::ImmediateContextAppend),
             other => Err(format!("invalid TurnPrimitiveKind value `{other}`")),
         }
     }
@@ -11686,10 +11657,6 @@ pub mod inputs {
         pub llm_identity: SessionLlmIdentity,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct AuthorizeDeferredSessionSystemContextAppend {
-        pub session_id: SessionId,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct BeginDeferredSessionPromotion {
         pub session_id: SessionId,
     }
@@ -12025,6 +11992,10 @@ pub mod inputs {
         pub input_id: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveBoundaryUnavailable {
+        pub input_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveAdmissionPlan {
         pub input_id: String,
         pub input_kind: AdmissionInputKind,
@@ -12184,10 +12155,6 @@ pub mod inputs {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct StartImmediateAppend {
-        pub run_id: RunId,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct StartImmediateContext {
         pub run_id: RunId,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -13194,9 +13161,6 @@ pub enum Input {
     StageDeferredSession(inputs::StageDeferredSession),
     UpdateDeferredSessionKeepAlive(inputs::UpdateDeferredSessionKeepAlive),
     UpdateDeferredSessionLlmIdentity(inputs::UpdateDeferredSessionLlmIdentity),
-    AuthorizeDeferredSessionSystemContextAppend(
-        inputs::AuthorizeDeferredSessionSystemContextAppend,
-    ),
     BeginDeferredSessionPromotion(inputs::BeginDeferredSessionPromotion),
     AuthorizeDeferredSessionMachineArchivedResume(
         inputs::AuthorizeDeferredSessionMachineArchivedResume,
@@ -13257,6 +13221,7 @@ pub enum Input {
     AcceptWithCompletion(inputs::AcceptWithCompletion),
     AcceptWithoutWake(inputs::AcceptWithoutWake),
     ResolveLiveBoundaryContextReceipt(inputs::ResolveLiveBoundaryContextReceipt),
+    LiveBoundaryUnavailable(inputs::LiveBoundaryUnavailable),
     ResolveAdmissionPlan(inputs::ResolveAdmissionPlan),
     ResolveAdmissionValidation(inputs::ResolveAdmissionValidation),
     ResolveAdmissionIdempotency(inputs::ResolveAdmissionIdempotency),
@@ -13285,7 +13250,6 @@ pub enum Input {
     Recycle(inputs::Recycle),
     StartConversationRun(inputs::StartConversationRun),
     StartImmediateAppend(inputs::StartImmediateAppend),
-    StartImmediateContext(inputs::StartImmediateContext),
     PrimitiveApplied(inputs::PrimitiveApplied),
     LlmReturnedToolCalls(inputs::LlmReturnedToolCalls),
     CallbackPending(inputs::CallbackPending),
@@ -13516,9 +13480,6 @@ impl Input {
             Self::UpdateDeferredSessionLlmIdentity(_) => {
                 InputKind::UpdateDeferredSessionLlmIdentity
             }
-            Self::AuthorizeDeferredSessionSystemContextAppend(_) => {
-                InputKind::AuthorizeDeferredSessionSystemContextAppend
-            }
             Self::BeginDeferredSessionPromotion(_) => InputKind::BeginDeferredSessionPromotion,
             Self::AuthorizeDeferredSessionMachineArchivedResume(_) => {
                 InputKind::AuthorizeDeferredSessionMachineArchivedResume
@@ -13599,6 +13560,7 @@ impl Input {
             Self::ResolveLiveBoundaryContextReceipt(_) => {
                 InputKind::ResolveLiveBoundaryContextReceipt
             }
+            Self::LiveBoundaryUnavailable(_) => InputKind::LiveBoundaryUnavailable,
             Self::ResolveAdmissionPlan(_) => InputKind::ResolveAdmissionPlan,
             Self::ResolveAdmissionValidation(_) => InputKind::ResolveAdmissionValidation,
             Self::ResolveAdmissionIdempotency(_) => InputKind::ResolveAdmissionIdempotency,
@@ -13637,7 +13599,6 @@ impl Input {
             Self::Recycle(_) => InputKind::Recycle,
             Self::StartConversationRun(_) => InputKind::StartConversationRun,
             Self::StartImmediateAppend(_) => InputKind::StartImmediateAppend,
-            Self::StartImmediateContext(_) => InputKind::StartImmediateContext,
             Self::PrimitiveApplied(_) => InputKind::PrimitiveApplied,
             Self::LlmReturnedToolCalls(_) => InputKind::LlmReturnedToolCalls,
             Self::CallbackPending(_) => InputKind::CallbackPending,
@@ -13895,7 +13856,6 @@ pub enum InputKind {
     StageDeferredSession,
     UpdateDeferredSessionKeepAlive,
     UpdateDeferredSessionLlmIdentity,
-    AuthorizeDeferredSessionSystemContextAppend,
     BeginDeferredSessionPromotion,
     AuthorizeDeferredSessionMachineArchivedResume,
     AbandonDeferredSessionPromotion,
@@ -13954,6 +13914,7 @@ pub enum InputKind {
     AcceptWithCompletion,
     AcceptWithoutWake,
     ResolveLiveBoundaryContextReceipt,
+    LiveBoundaryUnavailable,
     ResolveAdmissionPlan,
     ResolveAdmissionValidation,
     ResolveAdmissionIdempotency,
@@ -13982,7 +13943,6 @@ pub enum InputKind {
     Recycle,
     StartConversationRun,
     StartImmediateAppend,
-    StartImmediateContext,
     PrimitiveApplied,
     LlmReturnedToolCalls,
     CallbackPending,
@@ -14272,6 +14232,12 @@ pub mod effects {
         pub input_id: String,
         pub boundary: AdmissionRunApplyBoundary,
         pub boundary_sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveBoundaryUnavailableNormalized {
+        pub input_id: String,
+        pub execution_handling_mode: InputLane,
+        pub live_interrupt_required: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct TurnRunCompleted {
@@ -15138,6 +15104,7 @@ pub enum Effect {
     TurnRunStarted(effects::TurnRunStarted),
     TurnBoundaryApplied(effects::TurnBoundaryApplied),
     LiveBoundaryContextReceiptResolved(effects::LiveBoundaryContextReceiptResolved),
+    LiveBoundaryUnavailableNormalized(effects::LiveBoundaryUnavailableNormalized),
     TurnRunCompleted(effects::TurnRunCompleted),
     DurableTailRecoveryAuthorized(effects::DurableTailRecoveryAuthorized),
     DurableTailRecoveryCommitAuthorized(effects::DurableTailRecoveryCommitAuthorized),
@@ -15310,6 +15277,7 @@ pub enum EffectKind {
     TurnRunStarted,
     TurnBoundaryApplied,
     LiveBoundaryContextReceiptResolved,
+    LiveBoundaryUnavailableNormalized,
     TurnRunCompleted,
     DurableTailRecoveryAuthorized,
     DurableTailRecoveryCommitAuthorized,
@@ -15879,10 +15847,8 @@ pub enum TransitionId {
     AuthorizeDurableTailRecoveryCommitRetired,
     AuthorizeDurableTailRecoveryRepairIdle,
     AuthorizeDurableTailRecoveryRepairRetired,
-    AuthorizeDurableTailRecoveryCommitLegacyIdle,
-    AuthorizeDurableTailRecoveryCommitLegacyRetired,
-    AuthorizeDurableTailRecoveryCommitLegacyRetainInputsIdle,
-    AuthorizeDurableTailRecoveryCommitLegacyRetainInputsRetired,
+    AuthorizeDurableTailRecoveryCommitCompletedRetainInputsIdle,
+    AuthorizeDurableTailRecoveryCommitCompletedRetainInputsRetired,
     AuthorizeDurableTailRecoveryHoldIdle,
     AuthorizeDurableTailRecoveryHoldRetired,
     AuthorizeDurableTailRecoveryRefusePriorCommitIdle,
@@ -15913,8 +15879,6 @@ pub enum TransitionId {
     UpdateDeferredSessionKeepAlive,
     BeginDeferredSessionPromotion,
     UpdateDeferredSessionLlmIdentity,
-    AuthorizeDeferredSessionSystemContextAppendStaged,
-    AuthorizeDeferredSessionSystemContextAppendPromoting,
     AuthorizeDeferredSessionMachineArchivedResume,
     AbandonDeferredSessionPromotion,
     FinishDeferredSessionPromotion,
@@ -16689,9 +16653,6 @@ pub enum TransitionId {
     StartImmediateAppendInitializing,
     StartImmediateAppendAttached,
     StartImmediateAppendRunning,
-    StartImmediateContextInitializing,
-    StartImmediateContextAttached,
-    StartImmediateContextRunning,
     PrimitiveAppliedConversation,
     PrimitiveAppliedImmediateCompleted,
     PrimitiveAppliedImmediateCancelled,
@@ -16876,6 +16837,7 @@ pub enum TransitionId {
     MarkAppliedPendingConsumptionRetired,
     MarkAppliedPendingConsumptionStopped,
     ResolveLiveBoundaryContextReceiptRunning,
+    LiveBoundaryUnavailableRunning,
     ConsumeOnAcceptIdle,
     ConsumeOnAcceptAttached,
     ConsumeOnAcceptRunning,

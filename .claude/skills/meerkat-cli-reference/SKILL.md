@@ -369,7 +369,7 @@ resolution: they take no realm leases and create no realm — so they run
 against split-brain realms the normal resolver refuses. Doctor, prune, and
 migrate's default dry run open no persistence bundle; `migrate --apply` does
 open each swept realm's bundle (under the exclusive maintenance fence) to
-stamp ledgers and run bulk checkpoint adoption.
+run structural store migrations and stamp ledgers.
 `--isolated` and `--default-model` are usage errors with `rkat storage`; scope
 the sweep with `--realm`/`--root` instead.
 
@@ -392,8 +392,9 @@ id (split-brain twins for it are still detected across all swept roots).
 `storage doctor` is read-only and safe against live realms: takes no leases,
 opens databases read-only, creates nothing. Reports per-root realm inventory,
 manifest state, schema-ledger versions per database, dual-root split-brain
-twins, a checkpoint-evidence census (verified vs legacy-unverified sessions),
-dangling session→blob references, and orphaned lock/lease/backup artifacts.
+twins, persisted-session structural decode failures, transcript-history
+footprint, dangling session→blob references, and orphaned
+lock/lease/backup artifacts.
 Exit 0 = no error-severity findings; exit 1 = errors found.
 
 `storage migrate` is the offline migration framework, dry-run by default;
@@ -406,9 +407,11 @@ lie; (3) split-brain reconciliation — a realm id under 2+ swept roots is a
 fail-closed refusal unless `--apply --adopt-root <PATH>` names the swept root
 to keep, in which case every other copy is archived read-only under the
 registered `*.pre-<version>-<timestamp>` backup naming (no merging, no
-synthesis); (4) checkpoint-evidence adoption — bulk machine-owned stamping of
-legacy pre-typed session checkpoints (sqlite realms; jsonl realms heal lazily
-and are reported as skipped); (5) deprecated leftovers — report-only.
+synthesis); (4) deprecated leftovers — report-only. Unsupported unstamped
+session state is never adopted or laundered by this verb. The 0.8.11
+compatibility floor is Meerkat 0.8.10; state from older releases must be
+migrated offline with the older binary before repinning. There is no separate
+`rkat session migrate` compatibility command.
 `--adopt-root` without `--apply` is a usage error. Credential stores are never
 read, moved, or reported. Exit 1 = errors or fail-closed refusals (including
 split-brain without `--adopt-root` and an unacquirable maintenance fence).

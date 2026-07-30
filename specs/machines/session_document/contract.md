@@ -21,11 +21,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RestoreSessionConsumedInputs`(session_id: SessionId, restore_first_turn_pending: Bool, pending_initial_prompt_present: Bool, pending_tool_result_message_count: u64)
 - `RecoverSessionFirstTurnPhase`(session_id: SessionId, phase: SessionFirstTurnPhase, pending_initial_prompt_present: Bool, pending_tool_result_message_count: u64)
 - `ResolveSessionFirstTurnOverridesAllowed`(session_id: SessionId)
-- `ResolveSystemContextAppend`(trimmed_text_byte_count: u64, idempotency_key_present: Bool, existing_key_matches: Bool, existing_key_conflicts: Bool, active_turn_scoped: Bool)
-- `ResolveSystemContextPendingApplyItem`(source_kind: SystemContextSource)
-- `ResolveSystemContextSteerCleanupItem`(source_kind: SystemContextSource)
-- `RestoreSystemContextSnapshot`(active_turn_membership_is_consistent: Bool, seen_keys_match_known_appends: Bool)
-- `ResolveSystemContextPersistAppendAdmission`(has_previous: Bool, content_identical: Bool, content_extends_previous: Bool, appended_starts_with_separator: Bool, incoming_is_runtime_context_append: Bool)
 - `ResolveRealtimeItemObserved`(role: RealtimeTranscriptRoleKind, response_discarded: Bool)
 - `ResolveRealtimeItemSkipped`
 - `ResolveRealtimeUserTranscriptFinal`(text_present: Bool, segment_empty: Bool, segment_matches: Bool)
@@ -43,17 +38,13 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AuthorizeSessionMetadataPersist`(schema_version: u64, model_present: Bool)
 - `AuthorizeSessionBuildStatePersist`(mob_tool_authority_context_present: Bool, mob_tool_authority_context_generated: Bool)
 - `RestoreSessionBuildState`
-- `AuthorizeSystemPromptMutation`(source: SessionSystemPromptSource, prompt_present: Bool, prompt_byte_count: u64, replacing_existing: Bool)
 - `ResolvePendingContinuation`(session_tail: ObservedSessionTailKind, staged_tool_result_count: u64)
 - `AuthorizeSessionResumeOverrides`(provider_override_present: Bool, model_override_present: Bool, self_hosted_server_override_present: Bool, has_build_only_overrides: Bool, first_turn_phase: SessionFirstTurnPhase)
-- `ClassifyLiveSessionAuthority`(stored_transcript_diverged: Bool, live_has_uncommitted_transcript: Bool, runtime_system_context_diverged: Bool, stored_is_archived: Bool)
+- `ClassifyLiveSessionAuthority`(stored_transcript_diverged: Bool, live_has_uncommitted_transcript: Bool, stored_is_archived: Bool)
 - `RecoverSessionFromStore`(session_id: SessionId, has_metadata: Bool, has_build_state: Bool, runtime_projection_quarantined: Bool)
-- `ResolveRuntimeProjectionConflict`(session_id: SessionId, relation: DurableHeadRelation, row_provenance: CheckpointProvenanceClass, authority_supersedes_row: Bool)
 - `ResolveRuntimeCheckpointProjection`(session_id: SessionId)
-- `ResolveLegacyCheckpointMigration`(session_id: SessionId, runtime_snapshot_present: Bool, runtime_snapshot_legacy: Bool, store_row_present: Bool, store_row_legacy: Bool, transcript_relation: LegacyCheckpointTranscriptRelation)
-- `ResolveLegacyCheckpointMigrationLifecycle`(session_id: SessionId, runtime_copy_archived: Bool, store_row_archived: Bool)
-- `ResolveRuntimeSnapshotReadSource`(session_id: SessionId, relation: DurableHeadRelation, store_provenance: CheckpointProvenanceClass, session_is_live: Bool, tail_execution: DurableTailExecutionEvidence, head_stamp_era: DurableHeadStampEra)
-- `ClassifyDurableTail`(session_id: SessionId, candidate_id: RecoveryCandidateId, relation: DurableHeadRelation, run_id_cardinality: RunIdCardinality, terminal_stop_reason: DurableTailStopReason, dangling_tool_use_count: u64, orphan_tool_result_count: u64, messages_after_terminal: Bool, head_stamp_era: DurableHeadStampEra)
+- `ResolveSessionDocumentLifecycleMerge`(session_id: SessionId, authority_archived: Bool, candidate_archived: Bool)
+- `ClassifyDurableTail`(session_id: SessionId, candidate_id: RecoveryCandidateId, relation: DurableHeadRelation, run_id_cardinality: RunIdCardinality, terminal_stop_reason: DurableTailStopReason, dangling_tool_use_count: u64, orphan_tool_result_count: u64, messages_after_terminal: Bool)
 - `ApplyPendingToolResults`(session_id: SessionId, result_count: u64)
 - `TranscriptEdit`(session_id: SessionId, fork_or_rewrite_directive: TranscriptEditKind)
 - `RecoverSessionLifecycleTerminal`(session_id: SessionId, terminal: SessionDocumentLifecycle)
@@ -69,11 +60,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SessionToolResultsStageResolved`(accepted_count: u64)
 - `SessionConsumedInputsRestoreResolved`(restore_first_turn_pending: Bool, restore_initial_prompt: Bool, restore_tool_results: Bool)
 - `SessionFirstTurnPhaseRecovered`
-- `SystemContextAppendResolved`(decision: SystemContextAppendDecision, active_turn_scoped: Bool)
-- `SystemContextPendingApplyItemResolved`(promote_to_applied: Bool, mark_seen_applied: Bool, remove_seen: Bool)
-- `SystemContextSteerCleanupItemResolved`(discard: Bool)
-- `SystemContextSnapshotRestoreAuthorized`
-- `SystemContextPersistAppendAdmissionResolved`(admission: SystemContextPersistAppendAdmission)
 - `RealtimeTranscriptEventResolved`(observe_item: Bool, observe_skipped: Bool, write_user_segment: Bool, append_assistant_segment: Bool, replace_assistant_segment: Bool, promote_lane: Bool, mark_item_ready: Bool, record_delta_id: Bool, remove_completion: Bool, record_completion: Bool, discard_response: Bool, discard_response_by_lane: Bool, mark_response_ready: Bool, materialize_ready_items: Bool)
 - `RealtimeMaterializeCandidateResolved`(decision: RealtimeTranscriptMaterializeDecision, consume_usage: Bool)
 - `RealtimeUserContentIdentityResolved`(disposition: RealtimeUserContentIdentityDisposition)
@@ -84,18 +70,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SessionMetadataPersistAuthorized`
 - `SessionBuildStatePersistAuthorized`
 - `SessionBuildStateRestoreAuthorized`
-- `SystemPromptMutationAuthorized`
 - `PendingContinuationResolved`(disposition: PendingContinuationDisposition)
 - `PendingContinuationPublicTerminalResolved`(terminal: PendingContinuationPublicTerminal)
 - `SessionResumeOverridesAuthorized`(provider_selection: ResumeProviderSelection, self_hosted_selection: ResumeSelfHostedSelection, provider_overridden: Bool)
 - `SessionResumeOverridesRejected`(reason: ResumeOverrideRejection)
 - `LiveSessionAuthorityClassified`(authority: LiveSessionAuthorityKind, reason: LiveSessionAuthorityReason)
 - `SessionStoreRecoverySourceResolved`(recoverable: Bool)
-- `RuntimeProjectionConflictResolved`(disposition: RuntimeProjectionConflictDisposition)
 - `RuntimeCheckpointProjectionResolved`(disposition: RuntimeCheckpointProjectionDisposition)
-- `LegacyCheckpointMigrationResolved`(disposition: LegacyCheckpointMigrationDisposition)
-- `LegacyCheckpointMigrationLifecycleResolved`(merge: LegacyCheckpointLifecycleMerge)
-- `RuntimeSnapshotReadSourceResolved`(disposition: RuntimeSnapshotReadDisposition)
+- `SessionDocumentLifecycleMergeResolved`(merge: SessionDocumentLifecycleMerge)
 - `DurableTailClassified`(candidate_id: RecoveryCandidateId, class: DurableTailRecoveryClass)
 - `SessionToolResultsApplied`(session_id: SessionId, applied_count: u64)
 - `TranscriptRewriteCommitted`(kind: TranscriptEditKind, success: Bool)
@@ -110,7 +92,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `append_is_conflict`(idempotency_key_present: Bool, existing_key_conflicts: Bool) -> `Bool`
 - `append_is_duplicate`(idempotency_key_present: Bool, existing_key_matches: Bool, existing_key_conflicts: Bool) -> `Bool`
 - `append_is_new`(idempotency_key_present: Bool, existing_key_matches: Bool, existing_key_conflicts: Bool) -> `Bool`
-- `persist_append_is_admissible`(has_previous: Bool, content_identical: Bool, content_extends_previous: Bool, appended_starts_with_separator: Bool, incoming_is_runtime_context_append: Bool) -> `Bool`
 - `realtime_delta_is_duplicate`(delta_id_present: Bool, delta_id_seen: Bool) -> `Bool`
 - `realtime_lane_accepts`(item_has_text: Bool, current_lane: RealtimeTranscriptLaneKind, requested_lane: RealtimeTranscriptLaneKind) -> `Bool`
 - `realtime_should_mark_ready_after_write`(response_completed: Bool, text_after_write_present: Bool) -> `Bool`
@@ -255,94 +236,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - ``
 - Emits: `SessionFirstTurnPhaseRecovered`
-- To: `Ready`
-
-### `ResolveSystemContextAppendEmpty`
-- From: `Ready`
-- On: `ResolveSystemContextAppend`(trimmed_text_byte_count, idempotency_key_present, existing_key_matches, existing_key_conflicts, active_turn_scoped)
-- Guards:
-  - ``
-- Emits: `SystemContextAppendResolved`
-- To: `Ready`
-
-### `ResolveSystemContextAppendConflict`
-- From: `Ready`
-- On: `ResolveSystemContextAppend`(trimmed_text_byte_count, idempotency_key_present, existing_key_matches, existing_key_conflicts, active_turn_scoped)
-- Guards:
-  - ``
-- Emits: `SystemContextAppendResolved`
-- To: `Ready`
-
-### `ResolveSystemContextAppendDuplicate`
-- From: `Ready`
-- On: `ResolveSystemContextAppend`(trimmed_text_byte_count, idempotency_key_present, existing_key_matches, existing_key_conflicts, active_turn_scoped)
-- Guards:
-  - ``
-- Emits: `SystemContextAppendResolved`
-- To: `Ready`
-
-### `ResolveSystemContextAppendNew`
-- From: `Ready`
-- On: `ResolveSystemContextAppend`(trimmed_text_byte_count, idempotency_key_present, existing_key_matches, existing_key_conflicts, active_turn_scoped)
-- Guards:
-  - ``
-- Emits: `SystemContextAppendResolved`
-- To: `Ready`
-
-### `ResolveSystemContextPersistAppendAdmissionAdmit`
-- From: `Ready`
-- On: `ResolveSystemContextPersistAppendAdmission`(has_previous, content_identical, content_extends_previous, appended_starts_with_separator, incoming_is_runtime_context_append)
-- Guards:
-  - ``
-- Emits: `SystemContextPersistAppendAdmissionResolved`
-- To: `Ready`
-
-### `ResolveSystemContextPersistAppendAdmissionReject`
-- From: `Ready`
-- On: `ResolveSystemContextPersistAppendAdmission`(has_previous, content_identical, content_extends_previous, appended_starts_with_separator, incoming_is_runtime_context_append)
-- Guards:
-  - ``
-- Emits: `SystemContextPersistAppendAdmissionResolved`
-- To: `Ready`
-
-### `ResolveSystemContextPendingApplyItemRuntimeSteer`
-- From: `Ready`
-- On: `ResolveSystemContextPendingApplyItem`(source_kind)
-- Guards:
-  - ``
-- Emits: `SystemContextPendingApplyItemResolved`
-- To: `Ready`
-
-### `ResolveSystemContextPendingApplyItemNormal`
-- From: `Ready`
-- On: `ResolveSystemContextPendingApplyItem`(source_kind)
-- Guards:
-  - ``
-- Emits: `SystemContextPendingApplyItemResolved`
-- To: `Ready`
-
-### `ResolveSystemContextSteerCleanupItemRuntimeSteer`
-- From: `Ready`
-- On: `ResolveSystemContextSteerCleanupItem`(source_kind)
-- Guards:
-  - ``
-- Emits: `SystemContextSteerCleanupItemResolved`
-- To: `Ready`
-
-### `ResolveSystemContextSteerCleanupItemNormal`
-- From: `Ready`
-- On: `ResolveSystemContextSteerCleanupItem`(source_kind)
-- Guards:
-  - ``
-- Emits: `SystemContextSteerCleanupItemResolved`
-- To: `Ready`
-
-### `RestoreSystemContextSnapshot`
-- From: `Ready`
-- On: `RestoreSystemContextSnapshot`(active_turn_membership_is_consistent, seen_keys_match_known_appends)
-- Guards:
-  - ``
-- Emits: `SystemContextSnapshotRestoreAuthorized`
 - To: `Ready`
 
 ### `ResolveRealtimeItemObservedDiscardedAssistant`
@@ -741,14 +634,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `SessionBuildStateRestoreAuthorized`
 - To: `Ready`
 
-### `AuthorizeSystemPromptMutation`
-- From: `Ready`
-- On: `AuthorizeSystemPromptMutation`(source, prompt_present, prompt_byte_count, replacing_existing)
-- Guards:
-  - ``
-- Emits: `SystemPromptMutationAuthorized`
-- To: `Ready`
-
 ### `ResolvePendingContinuationWithBoundary`
 - From: `Ready`
 - On: `ResolvePendingContinuation`(session_tail, staged_tool_result_count)
@@ -831,7 +716,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyLiveSessionAuthorityLive`
 - From: `Ready`
-- On: `ClassifyLiveSessionAuthority`(stored_transcript_diverged, live_has_uncommitted_transcript, runtime_system_context_diverged, stored_is_archived)
+- On: `ClassifyLiveSessionAuthority`(stored_transcript_diverged, live_has_uncommitted_transcript, stored_is_archived)
 - Guards:
   - ``
 - Emits: `LiveSessionAuthorityClassified`
@@ -839,7 +724,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyLiveSessionAuthorityDurableArchived`
 - From: `Ready`
-- On: `ClassifyLiveSessionAuthority`(stored_transcript_diverged, live_has_uncommitted_transcript, runtime_system_context_diverged, stored_is_archived)
+- On: `ClassifyLiveSessionAuthority`(stored_transcript_diverged, live_has_uncommitted_transcript, stored_is_archived)
 - Guards:
   - ``
 - Emits: `LiveSessionAuthorityClassified`
@@ -847,15 +732,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyLiveSessionAuthorityDurableUncommitted`
 - From: `Ready`
-- On: `ClassifyLiveSessionAuthority`(stored_transcript_diverged, live_has_uncommitted_transcript, runtime_system_context_diverged, stored_is_archived)
-- Guards:
-  - ``
-- Emits: `LiveSessionAuthorityClassified`
-- To: `Ready`
-
-### `ClassifyLiveSessionAuthorityDurableSystemContext`
-- From: `Ready`
-- On: `ClassifyLiveSessionAuthority`(stored_transcript_diverged, live_has_uncommitted_transcript, runtime_system_context_diverged, stored_is_archived)
+- On: `ClassifyLiveSessionAuthority`(stored_transcript_diverged, live_has_uncommitted_transcript, stored_is_archived)
 - Guards:
   - ``
 - Emits: `LiveSessionAuthorityClassified`
@@ -863,7 +740,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyLiveSessionAuthorityDurableRevision`
 - From: `Ready`
-- On: `ClassifyLiveSessionAuthority`(stored_transcript_diverged, live_has_uncommitted_transcript, runtime_system_context_diverged, stored_is_archived)
+- On: `ClassifyLiveSessionAuthority`(stored_transcript_diverged, live_has_uncommitted_transcript, stored_is_archived)
 - Guards:
   - ``
 - Emits: `LiveSessionAuthorityClassified`
@@ -885,57 +762,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `SessionStoreRecoverySourceResolved`
 - To: `Ready`
 
-### `ResolveRuntimeSnapshotReadSourceCommittedHead`
-- From: `Ready`
-- On: `ResolveRuntimeSnapshotReadSource`(session_id, relation, store_provenance, session_is_live, tail_execution, head_stamp_era)
-- Guards:
-  - ``
-- Emits: `RuntimeSnapshotReadSourceResolved`
-- To: `Ready`
-
-### `ResolveRuntimeSnapshotReadSourceRecoveryRequired`
-- From: `Ready`
-- On: `ResolveRuntimeSnapshotReadSource`(session_id, relation, store_provenance, session_is_live, tail_execution, head_stamp_era)
-- Guards:
-  - ``
-- Emits: `RuntimeSnapshotReadSourceResolved`
-- To: `Ready`
-
-### `ResolveRuntimeSnapshotReadSourceLegacyRecoveryRequired`
-- From: `Ready`
-- On: `ResolveRuntimeSnapshotReadSource`(session_id, relation, store_provenance, session_is_live, tail_execution, head_stamp_era)
-- Guards:
-  - ``
-- Emits: `RuntimeSnapshotReadSourceResolved`
-- To: `Ready`
-
-### `ResolveRuntimeSnapshotReadSourceQuarantine`
-- From: `Ready`
-- On: `ResolveRuntimeSnapshotReadSource`(session_id, relation, store_provenance, session_is_live, tail_execution, head_stamp_era)
-- Guards:
-  - ``
-- Emits: `RuntimeSnapshotReadSourceResolved`
-- To: `Ready`
-
-### `ResolveRuntimeSnapshotReadSourceSnapshot`
-- From: `Ready`
-- On: `ResolveRuntimeSnapshotReadSource`(session_id, relation, store_provenance, session_is_live, tail_execution, head_stamp_era)
-- Guards:
-  - ``
-- Emits: `RuntimeSnapshotReadSourceResolved`
-- To: `Ready`
-
 ### `ClassifyDurableTailCompleted`
 - From: `Ready`
-- On: `ClassifyDurableTail`(session_id, candidate_id, relation, run_id_cardinality, terminal_stop_reason, dangling_tool_use_count, orphan_tool_result_count, messages_after_terminal, head_stamp_era)
-- Guards:
-  - ``
-- Emits: `DurableTailClassified`
-- To: `Ready`
-
-### `ClassifyDurableTailLegacyCompleted`
-- From: `Ready`
-- On: `ClassifyDurableTail`(session_id, candidate_id, relation, run_id_cardinality, terminal_stop_reason, dangling_tool_use_count, orphan_tool_result_count, messages_after_terminal, head_stamp_era)
+- On: `ClassifyDurableTail`(session_id, candidate_id, relation, run_id_cardinality, terminal_stop_reason, dangling_tool_use_count, orphan_tool_result_count, messages_after_terminal)
 - Guards:
   - ``
 - Emits: `DurableTailClassified`
@@ -943,7 +772,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyDurableTailRepairable`
 - From: `Ready`
-- On: `ClassifyDurableTail`(session_id, candidate_id, relation, run_id_cardinality, terminal_stop_reason, dangling_tool_use_count, orphan_tool_result_count, messages_after_terminal, head_stamp_era)
+- On: `ClassifyDurableTail`(session_id, candidate_id, relation, run_id_cardinality, terminal_stop_reason, dangling_tool_use_count, orphan_tool_result_count, messages_after_terminal)
 - Guards:
   - ``
 - Emits: `DurableTailClassified`
@@ -951,34 +780,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyDurableTailAmbiguous`
 - From: `Ready`
-- On: `ClassifyDurableTail`(session_id, candidate_id, relation, run_id_cardinality, terminal_stop_reason, dangling_tool_use_count, orphan_tool_result_count, messages_after_terminal, head_stamp_era)
+- On: `ClassifyDurableTail`(session_id, candidate_id, relation, run_id_cardinality, terminal_stop_reason, dangling_tool_use_count, orphan_tool_result_count, messages_after_terminal)
 - Guards:
   - ``
 - Emits: `DurableTailClassified`
-- To: `Ready`
-
-### `ResolveRuntimeProjectionConflictRetain`
-- From: `Ready`
-- On: `ResolveRuntimeProjectionConflict`(session_id, relation, row_provenance, authority_supersedes_row)
-- Guards:
-  - ``
-- Emits: `RuntimeProjectionConflictResolved`
-- To: `Ready`
-
-### `ResolveRuntimeProjectionConflictConverge`
-- From: `Ready`
-- On: `ResolveRuntimeProjectionConflict`(session_id, relation, row_provenance, authority_supersedes_row)
-- Guards:
-  - ``
-- Emits: `RuntimeProjectionConflictResolved`
-- To: `Ready`
-
-### `ResolveRuntimeProjectionConflictReject`
-- From: `Ready`
-- On: `ResolveRuntimeProjectionConflict`(session_id, relation, row_provenance, authority_supersedes_row)
-- Guards:
-  - ``
-- Emits: `RuntimeProjectionConflictResolved`
 - To: `Ready`
 
 ### `ResolveRuntimeCheckpointProjectionActive`
@@ -997,116 +802,20 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `RuntimeCheckpointProjectionResolved`
 - To: `Ready`
 
-### `ResolveLegacyCheckpointMigrationSnapshotIdenticalProjection`
+### `ResolveSessionDocumentLifecycleMergeArchivedAbsorbing`
 - From: `Ready`
-- On: `ResolveLegacyCheckpointMigration`(session_id, runtime_snapshot_present, runtime_snapshot_legacy, store_row_present, store_row_legacy, transcript_relation)
+- On: `ResolveSessionDocumentLifecycleMerge`(session_id, authority_archived, candidate_archived)
 - Guards:
   - ``
-- Emits: `LegacyCheckpointMigrationResolved`
+- Emits: `SessionDocumentLifecycleMergeResolved`
 - To: `Ready`
 
-### `ResolveLegacyCheckpointMigrationSnapshotAheadOfProjection`
+### `ResolveSessionDocumentLifecycleMergeAuthority`
 - From: `Ready`
-- On: `ResolveLegacyCheckpointMigration`(session_id, runtime_snapshot_present, runtime_snapshot_legacy, store_row_present, store_row_legacy, transcript_relation)
+- On: `ResolveSessionDocumentLifecycleMerge`(session_id, authority_archived, candidate_archived)
 - Guards:
   - ``
-- Emits: `LegacyCheckpointMigrationResolved`
-- To: `Ready`
-
-### `ResolveLegacyCheckpointMigrationProjectionExtension`
-- From: `Ready`
-- On: `ResolveLegacyCheckpointMigration`(session_id, runtime_snapshot_present, runtime_snapshot_legacy, store_row_present, store_row_legacy, transcript_relation)
-- Guards:
-  - ``
-- Emits: `LegacyCheckpointMigrationResolved`
-- To: `Ready`
-
-### `ResolveLegacyCheckpointMigrationDivergentCopies`
-- From: `Ready`
-- On: `ResolveLegacyCheckpointMigration`(session_id, runtime_snapshot_present, runtime_snapshot_legacy, store_row_present, store_row_legacy, transcript_relation)
-- Guards:
-  - ``
-- Emits: `LegacyCheckpointMigrationResolved`
-- To: `Ready`
-
-### `ResolveLegacyCheckpointMigrationSnapshotOnly`
-- From: `Ready`
-- On: `ResolveLegacyCheckpointMigration`(session_id, runtime_snapshot_present, runtime_snapshot_legacy, store_row_present, store_row_legacy, transcript_relation)
-- Guards:
-  - ``
-- Emits: `LegacyCheckpointMigrationResolved`
-- To: `Ready`
-
-### `ResolveLegacyCheckpointMigrationStoreRowOnly`
-- From: `Ready`
-- On: `ResolveLegacyCheckpointMigration`(session_id, runtime_snapshot_present, runtime_snapshot_legacy, store_row_present, store_row_legacy, transcript_relation)
-- Guards:
-  - ``
-- Emits: `LegacyCheckpointMigrationResolved`
-- To: `Ready`
-
-### `ResolveLegacyCheckpointMigrationTypedSnapshotLegacyProjection`
-- From: `Ready`
-- On: `ResolveLegacyCheckpointMigration`(session_id, runtime_snapshot_present, runtime_snapshot_legacy, store_row_present, store_row_legacy, transcript_relation)
-- Guards:
-  - ``
-- Emits: `LegacyCheckpointMigrationResolved`
-- To: `Ready`
-
-### `ResolveLegacyCheckpointMigrationSnapshotIdenticalTypedProjection`
-- From: `Ready`
-- On: `ResolveLegacyCheckpointMigration`(session_id, runtime_snapshot_present, runtime_snapshot_legacy, store_row_present, store_row_legacy, transcript_relation)
-- Guards:
-  - ``
-- Emits: `LegacyCheckpointMigrationResolved`
-- To: `Ready`
-
-### `ResolveLegacyCheckpointMigrationTypedProjectionExtension`
-- From: `Ready`
-- On: `ResolveLegacyCheckpointMigration`(session_id, runtime_snapshot_present, runtime_snapshot_legacy, store_row_present, store_row_legacy, transcript_relation)
-- Guards:
-  - ``
-- Emits: `LegacyCheckpointMigrationResolved`
-- To: `Ready`
-
-### `ResolveLegacyCheckpointMigrationSnapshotAheadOfTypedProjection`
-- From: `Ready`
-- On: `ResolveLegacyCheckpointMigration`(session_id, runtime_snapshot_present, runtime_snapshot_legacy, store_row_present, store_row_legacy, transcript_relation)
-- Guards:
-  - ``
-- Emits: `LegacyCheckpointMigrationResolved`
-- To: `Ready`
-
-### `ResolveLegacyCheckpointMigrationDivergentFromTypedProjection`
-- From: `Ready`
-- On: `ResolveLegacyCheckpointMigration`(session_id, runtime_snapshot_present, runtime_snapshot_legacy, store_row_present, store_row_legacy, transcript_relation)
-- Guards:
-  - ``
-- Emits: `LegacyCheckpointMigrationResolved`
-- To: `Ready`
-
-### `ResolveLegacyCheckpointMigrationTypedProjectionNotComparable`
-- From: `Ready`
-- On: `ResolveLegacyCheckpointMigration`(session_id, runtime_snapshot_present, runtime_snapshot_legacy, store_row_present, store_row_legacy, transcript_relation)
-- Guards:
-  - ``
-- Emits: `LegacyCheckpointMigrationResolved`
-- To: `Ready`
-
-### `ResolveLegacyCheckpointMigrationLifecycleArchivedAbsorbing`
-- From: `Ready`
-- On: `ResolveLegacyCheckpointMigrationLifecycle`(session_id, runtime_copy_archived, store_row_archived)
-- Guards:
-  - ``
-- Emits: `LegacyCheckpointMigrationLifecycleResolved`
-- To: `Ready`
-
-### `ResolveLegacyCheckpointMigrationLifecycleElected`
-- From: `Ready`
-- On: `ResolveLegacyCheckpointMigrationLifecycle`(session_id, runtime_copy_archived, store_row_archived)
-- Guards:
-  - ``
-- Emits: `LegacyCheckpointMigrationLifecycleResolved`
+- Emits: `SessionDocumentLifecycleMergeResolved`
 - To: `Ready`
 
 ### `ApplyPendingToolResults`
@@ -1175,15 +884,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Coverage
 ### Code Anchors
-- `session_document_authority` (machine `SessionDocumentMachine`): `meerkat-core/src/generated/session_document.rs` — generated SessionDocumentMachine owner for MarkSessionInitialTurnPendingInactiveOrPending, MarkSessionInitialTurnPendingConsumed, StartSessionInitialTurnPending, StartSessionInitialTurnInactive, StartSessionInitialTurnConsumed, ResolveSessionFirstTurnOverridesAllowed, ResolveSessionFirstTurnOverridesDenied, StageSessionInitialPromptStore, StageSessionInitialPromptClear, StageSessionToolResults, ConsumeSessionDeferredInputsPending, ConsumeSessionDeferredInputsInactive, ConsumeSessionDeferredInputsConsumed, RestoreSessionConsumedInputs, RestoreSessionConsumedInputsNoPhaseRollback, RecoverSessionFirstTurnPhase, ResolveSystemContextAppendEmpty, ResolveSystemContextAppendConflict, ResolveSystemContextAppendDuplicate, ResolveSystemContextAppendNew, ResolveSystemContextPendingApplyItemRuntimeSteer, ResolveSystemContextPendingApplyItemNormal, ResolveSystemContextSteerCleanupItemRuntimeSteer, ResolveSystemContextSteerCleanupItemNormal, RestoreSystemContextSnapshot, ResolveRealtimeItemObservedDiscardedAssistant, ResolveRealtimeItemObservedPresent, ResolveRealtimeItemSkipped, ResolveRealtimeUserTranscriptFinalEmpty, ResolveRealtimeUserTranscriptFinalStore, ResolveRealtimeUserTranscriptFinalReplayOrConflict, ResolveRealtimeAssistantDeltaInvalidOrDuplicate, ResolveRealtimeAssistantDeltaDiscarded, ResolveRealtimeAssistantDeltaLaneConflict, ResolveRealtimeAssistantDeltaAccepted, ResolveRealtimeAssistantReplacementInvalid, ResolveRealtimeAssistantReplacementDiscarded, ResolveRealtimeAssistantReplacementLocked, ResolveRealtimeAssistantReplacementLaneConflict, ResolveRealtimeAssistantReplacementAccepted, ResolveRealtimeAssistantTurnCompletedInvalid, ResolveRealtimeAssistantTurnCompletedDiscard, ResolveRealtimeAssistantTurnCompletedToolUse, ResolveRealtimeAssistantTurnCompletedRecord, ResolveRealtimeAssistantTurnInterruptedInvalid, ResolveRealtimeAssistantTurnInterruptedValid, ResolveRealtimeMaterializeAlreadyDone, ResolveRealtimeMaterializeWaitForPredecessor, ResolveRealtimeMaterializeSkipped, ResolveRealtimeMaterializeWaitForReadyText, ResolveRealtimeMaterializeUser, ResolveRealtimeMaterializeAssistant, ResolveRealtimeMaterializeAssistantMissingCompletion, AuthorizeRestoreRealtimeTranscriptState, SessionFirstTurnPhaseResolved, SessionFirstTurnOverridesResolved, SessionInitialPromptStageResolved, SessionToolResultsStageResolved, SessionConsumedInputsRestoreResolved, SessionFirstTurnPhaseRecovered, SystemContextAppendResolved, SystemContextPendingApplyItemResolved, SystemContextSteerCleanupItemResolved, SystemContextSnapshotRestoreAuthorized, RealtimeTranscriptEventResolved, RealtimeMaterializeCandidateResolved, RealtimeTranscriptSnapshotRestoreAuthorized, AuthorizeSessionMetadataPersist, AuthorizeSessionBuildStatePersist, RestoreSessionBuildState, AuthorizeSystemPromptMutation, SessionMetadataPersistAuthorized, SessionBuildStatePersistAuthorized, SessionBuildStateRestoreAuthorized, and SystemPromptMutationAuthorized
+- `session_document_authority` (machine `SessionDocumentMachine`): `meerkat-core/src/generated/session_document.rs` — generated SessionDocumentMachine owner for MarkSessionInitialTurnPendingInactiveOrPending, MarkSessionInitialTurnPendingConsumed, StartSessionInitialTurnPending, StartSessionInitialTurnInactive, StartSessionInitialTurnConsumed, ResolveSessionFirstTurnOverridesAllowed, ResolveSessionFirstTurnOverridesDenied, StageSessionInitialPromptStore, StageSessionInitialPromptClear, StageSessionToolResults, ConsumeSessionDeferredInputsPending, ConsumeSessionDeferredInputsInactive, ConsumeSessionDeferredInputsConsumed, RestoreSessionConsumedInputs, RestoreSessionConsumedInputsNoPhaseRollback, RecoverSessionFirstTurnPhase, ResolveRealtimeItemObservedDiscardedAssistant, ResolveRealtimeItemObservedPresent, ResolveRealtimeItemSkipped, ResolveRealtimeUserTranscriptFinalEmpty, ResolveRealtimeUserTranscriptFinalStore, ResolveRealtimeUserTranscriptFinalReplayOrConflict, ResolveRealtimeAssistantDeltaInvalidOrDuplicate, ResolveRealtimeAssistantDeltaDiscarded, ResolveRealtimeAssistantDeltaLaneConflict, ResolveRealtimeAssistantDeltaAccepted, ResolveRealtimeAssistantReplacementInvalid, ResolveRealtimeAssistantReplacementDiscarded, ResolveRealtimeAssistantReplacementLocked, ResolveRealtimeAssistantReplacementLaneConflict, ResolveRealtimeAssistantReplacementAccepted, ResolveRealtimeAssistantTurnCompletedInvalid, ResolveRealtimeAssistantTurnCompletedDiscard, ResolveRealtimeAssistantTurnCompletedToolUse, ResolveRealtimeAssistantTurnCompletedRecord, ResolveRealtimeAssistantTurnInterruptedInvalid, ResolveRealtimeAssistantTurnInterruptedValid, ResolveRealtimeMaterializeAlreadyDone, ResolveRealtimeMaterializeWaitForPredecessor, ResolveRealtimeMaterializeSkipped, ResolveRealtimeMaterializeWaitForReadyText, ResolveRealtimeMaterializeUser, ResolveRealtimeMaterializeAssistant, ResolveRealtimeMaterializeAssistantMissingCompletion, AuthorizeRestoreRealtimeTranscriptState, SessionFirstTurnPhaseResolved, SessionFirstTurnOverridesResolved, SessionInitialPromptStageResolved, SessionToolResultsStageResolved, SessionConsumedInputsRestoreResolved, SessionFirstTurnPhaseRecovered, RealtimeTranscriptEventResolved, RealtimeMaterializeCandidateResolved, RealtimeTranscriptSnapshotRestoreAuthorized, AuthorizeSessionMetadataPersist, AuthorizeSessionBuildStatePersist, RestoreSessionBuildState, SessionMetadataPersistAuthorized, SessionBuildStatePersistAuthorized, and SessionBuildStateRestoreAuthorized
 
 ### Scenarios
 - `session_first_turn_pending_consume` — MarkSessionInitialTurnPendingInactiveOrPending, MarkSessionInitialTurnPendingConsumed, StartSessionInitialTurnPending, StartSessionInitialTurnInactive, StartSessionInitialTurnConsumed, ConsumeSessionDeferredInputsPending, ConsumeSessionDeferredInputsInactive, and ConsumeSessionDeferredInputsConsumed own the per-session first-turn phase registry and emit SessionFirstTurnPhaseResolved without handwritten phase mutation
 - `session_initial_inputs_stage` — StageSessionInitialPromptStore, StageSessionInitialPromptClear, StageSessionToolResults, ResolveSessionFirstTurnOverridesAllowed, and ResolveSessionFirstTurnOverridesDenied resolve initial-prompt and tool-results staging plus build-override legality from the machine-owned phase map under SessionInitialPromptStageResolved, SessionToolResultsStageResolved, and SessionFirstTurnOverridesResolved
 - `session_first_turn_restore_recover` — RestoreSessionConsumedInputs, RestoreSessionConsumedInputsNoPhaseRollback, and RecoverSessionFirstTurnPhase rehydrate the per-session phase and presence/count registry from consumed-input rollback and durable snapshots under SessionConsumedInputsRestoreResolved and SessionFirstTurnPhaseRecovered
-- `session_system_context_append_resolve` — ResolveSystemContextAppendEmpty, ResolveSystemContextAppendConflict, ResolveSystemContextAppendDuplicate, and ResolveSystemContextAppendNew decide the runtime system-context append disposition from typed key-present/matches/conflicts observations under SystemContextAppendResolved without the shell deciding
-- `session_system_context_apply_discard` — ResolveSystemContextPendingApplyItemRuntimeSteer, ResolveSystemContextPendingApplyItemNormal, ResolveSystemContextSteerCleanupItemRuntimeSteer, and ResolveSystemContextSteerCleanupItemNormal decide per-append apply/discard from the typed SystemContextSource marker (not a runtime:steer string prefix) under SystemContextPendingApplyItemResolved and SystemContextSteerCleanupItemResolved
-- `session_system_context_snapshot_restore` — RestoreSystemContextSnapshot authorizes a durable system-context snapshot only when key-independent active-turn pending membership and its keyed rollback projection are consistent and seen keys match known appends under SystemContextSnapshotRestoreAuthorized
 - `session_realtime_transcript_event_resolve` — ResolveRealtimeItemObservedDiscardedAssistant, ResolveRealtimeItemObservedPresent, ResolveRealtimeItemSkipped, ResolveRealtimeUserTranscriptFinalEmpty, ResolveRealtimeUserTranscriptFinalStore, ResolveRealtimeUserTranscriptFinalReplayOrConflict, ResolveRealtimeAssistantDeltaInvalidOrDuplicate, ResolveRealtimeAssistantDeltaDiscarded, ResolveRealtimeAssistantDeltaLaneConflict, ResolveRealtimeAssistantDeltaAccepted, ResolveRealtimeAssistantReplacementInvalid, ResolveRealtimeAssistantReplacementDiscarded, ResolveRealtimeAssistantReplacementLocked, ResolveRealtimeAssistantReplacementLaneConflict, ResolveRealtimeAssistantReplacementAccepted, ResolveRealtimeAssistantTurnCompletedInvalid, ResolveRealtimeAssistantTurnCompletedDiscard, ResolveRealtimeAssistantTurnCompletedToolUse, ResolveRealtimeAssistantTurnInterruptedInvalid, and ResolveRealtimeAssistantTurnInterruptedValid resolve the realtime-transcript action vector from typed raw observations (set membership, segment concat emptiness, lane, completion) under RealtimeTranscriptEventResolved without the shell deciding; the shell mirrors the emitted action vector onto its bulky SessionRealtimeTranscriptState
 - `session_realtime_transcript_materialize_and_restore` — ResolveRealtimeAssistantTurnCompletedRecord, ResolveRealtimeMaterializeAlreadyDone, ResolveRealtimeMaterializeWaitForPredecessor, ResolveRealtimeMaterializeSkipped, ResolveRealtimeMaterializeWaitForReadyText, ResolveRealtimeMaterializeUser, ResolveRealtimeMaterializeAssistant, ResolveRealtimeMaterializeAssistantMissingCompletion, and AuthorizeRestoreRealtimeTranscriptState resolve the per-item materialize verdict and durable snapshot-restore legality under RealtimeMaterializeCandidateResolved and RealtimeTranscriptSnapshotRestoreAuthorized; the shell performs only the topological ordering and message assembly
-- `session_durable_config_authorize_restore` — AuthorizeSessionMetadataPersist, AuthorizeSessionBuildStatePersist, RestoreSessionBuildState, and AuthorizeSystemPromptMutation decide durable-config persist/restore/system-prompt admission from typed presence/count/kind observations the meerkat-core shell extracts from SessionMetadata and SessionBuildState under SessionMetadataPersistAuthorized, SessionBuildStatePersistAuthorized, SessionBuildStateRestoreAuthorized, and SystemPromptMutationAuthorized; a rejected request matches no transition and surfaces as Err, and the shell mirrors the verdict and passes the original typed value through unchanged
+- `session_durable_config_authorize_restore` — AuthorizeSessionMetadataPersist, AuthorizeSessionBuildStatePersist, and RestoreSessionBuildState decide durable-config persist/restore admission from typed presence/count/kind observations the meerkat-core shell extracts from SessionMetadata and SessionBuildState under SessionMetadataPersistAuthorized, SessionBuildStatePersistAuthorized, and SessionBuildStateRestoreAuthorized; a rejected request matches no transition and surfaces as Err, and the shell mirrors the verdict and passes the original typed value through unchanged

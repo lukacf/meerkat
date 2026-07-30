@@ -186,20 +186,33 @@ fn validate_compaction_rebuild(
             summary.rebuilt_offset
         )));
     }
-    let expected_summary_offset = usize::from(matches!(messages.first(), Some(Message::System(_))));
+    let first_discarded_source_offset = discarded[0].source_offset;
+    let expected_summary_offset = retained
+        .iter()
+        .take_while(|retention| retention.source_offset < first_discarded_source_offset)
+        .count();
     if summary_offset != expected_summary_offset {
         return Err(CompactionError::InvalidRebuild(format!(
-            "summary must be at rebuilt offset {expected_summary_offset}, found {summary_offset}"
+            "summary must replace the first discarded source position at rebuilt offset {expected_summary_offset}, found {summary_offset}"
         )));
     }
-    if matches!(messages.first(), Some(Message::System(_)))
-        && !retained
+    for (source_offset, message) in messages.iter().enumerate() {
+        if !matches!(message, Message::System(_)) {
+            continue;
+        }
+        let source_offset = u64::try_from(source_offset).map_err(|_| {
+            CompactionError::InvalidRebuild(
+                "source System offset exceeds the compaction mapping range".to_string(),
+            )
+        })?;
+        if !retained
             .iter()
-            .any(|retention| retention.source_offset == 0 && retention.rebuilt_offset == 0)
-    {
-        return Err(CompactionError::InvalidRebuild(
-            "leading system message must be retained at rebuilt offset 0".to_string(),
-        ));
+            .any(|retention| retention.source_offset == source_offset)
+        {
+            return Err(CompactionError::InvalidRebuild(format!(
+                "ordered System message at source offset {source_offset} must be retained verbatim"
+            )));
+        }
     }
     let Message::User(summary_user) = &summary.message else {
         return Err(CompactionError::InvalidRebuild(
@@ -429,6 +442,7 @@ pub fn estimate_request_bytes(messages: &[Message]) -> Result<u64, CompactionErr
 pub fn build_compaction_context(
     messages: &[Message],
     last_input_tokens: u64,
+    provider_request_pressure: Option<crate::ProviderRequestPressure>,
     last_compaction_boundary_index: Option<u64>,
     session_boundary_index: u64,
 ) -> CompactionContext {
@@ -446,6 +460,7 @@ pub fn build_compaction_context(
         message_count: messages.len(),
         estimated_history_tokens,
         estimated_request_bytes,
+        provider_request_pressure,
         last_compaction_boundary_index,
         session_boundary_index,
     }
@@ -997,7 +1012,7 @@ mod tests {
     #[test]
     fn build_compaction_context_populates_request_byte_estimate() {
         let messages = vec![Message::User(UserMessage::text("hello bytes"))];
-        let ctx = build_compaction_context(&messages, 42, None, 7);
+        let ctx = build_compaction_context(&messages, 42, None, None, 7);
         assert_eq!(
             ctx.estimated_request_bytes,
             estimate_request_bytes(&messages).unwrap(),
@@ -1091,6 +1106,55 @@ mod tests {
             &source, &rebuilt, &summary, "summary", &retained, &discarded,
         )
         .expect("explicit source and rebuilt offsets make duplicate provenance exact");
+    }
+
+    #[test]
+    fn compaction_rebuild_rejects_discarding_mid_thread_system() {
+        let old = Message::User(UserMessage::text("old turn"));
+        let current = Message::System(crate::types::SystemMessage::new("current prompt"));
+        let recent = Message::User(UserMessage::text("recent turn"));
+        let source = vec![old.clone(), current.clone(), recent.clone()];
+        let (summary_message, summary) = valid_summary("summary");
+        let rebuilt = vec![summary_message, recent.clone()];
+        let retained = vec![CompactionRetained::new(2, 1, recent)];
+        let discarded = vec![
+            CompactionDiscard::new(0, old),
+            CompactionDiscard::new(1, current),
+        ];
+
+        let error = validate_compaction_rebuild(
+            &source, &rebuilt, &summary, "summary", &retained, &discarded,
+        )
+        .expect_err("every ordered System must survive compaction");
+
+        assert!(error.to_string().contains("must be retained verbatim"));
+    }
+
+    #[test]
+    fn compaction_rebuild_rejects_summary_inside_retained_system_prefix() {
+        let system_a = Message::System(crate::types::SystemMessage::new("system A"));
+        let system_b = Message::System(crate::types::SystemMessage::new("system B"));
+        let old = Message::User(UserMessage::text("old turn"));
+        let source = vec![system_a.clone(), system_b.clone(), old.clone()];
+        let (summary_message, _) = valid_summary("summary");
+        let summary = CompactionSummary::new(1, summary_message.clone());
+        let rebuilt = vec![system_a.clone(), summary_message, system_b.clone()];
+        let retained = vec![
+            CompactionRetained::new(0, 0, system_a),
+            CompactionRetained::new(1, 2, system_b),
+        ];
+        let discarded = vec![CompactionDiscard::new(2, old)];
+
+        let error = validate_compaction_rebuild(
+            &source, &rebuilt, &summary, "summary", &retained, &discarded,
+        )
+        .expect_err("summary must not split the exact retained source prefix");
+
+        assert!(
+            error
+                .to_string()
+                .contains("replace the first discarded source position")
+        );
     }
 
     #[test]

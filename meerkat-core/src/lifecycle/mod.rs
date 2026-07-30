@@ -30,7 +30,7 @@ pub use core_executor::{
 pub use identifiers::{InputId, RunId, WaitRequestId};
 pub use run_event::RunEvent;
 pub use run_primitive::{
-    ConversationAppend, ConversationAppendRole, ConversationContextAppend, CoreRenderable,
-    RunApplyBoundary, RunPrimitive, RuntimeExecutionKind, StagedRunInput,
+    ConversationAppend, ConversationAppendRole, CoreRenderable, RunApplyBoundary, RunPrimitive,
+    RuntimeExecutionKind, StagedRunInput, TurnRequestContext,
 };
 pub use run_receipt::{RunBoundaryReceipt, RunBoundaryReceiptDraft};

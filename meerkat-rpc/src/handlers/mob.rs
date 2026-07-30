@@ -1159,8 +1159,6 @@ pub async fn handle_append_system_context(
                 content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(params.text),
                 source: params.source,
                 idempotency_key: params.idempotency_key,
-                source_kind: meerkat_core::session::SystemContextSource::Normal,
-                peer_response_terminal: None,
             },
         )
         .await
@@ -1887,6 +1885,9 @@ pub async fn handle_submit_work(
     };
     let mut spec =
         meerkat_mob::WorkSpec::new(content, origin).with_injected_context(injected_context);
+    if let Some(context) = params.transient_turn_context {
+        spec = spec.with_transient_turn_context(context);
+    }
     if let Some(objective_id) = objective_id {
         spec = spec.with_objective_id(objective_id);
     }
@@ -2468,6 +2469,7 @@ pub async fn handle_mob_turn_start(
         provider_params: lower_turn_metadata_override(mob_params.provider_params),
         auth_binding: lower_turn_metadata_override(mob_params.auth_binding),
         injected_context,
+        transient_turn_context: mob_params.transient_turn_context,
     };
 
     super::turn::start_turn_with_params(
@@ -3800,6 +3802,7 @@ mod tests {
             provider_params: lower_turn_metadata_override(mob_params.provider_params),
             auth_binding: lower_turn_metadata_override(mob_params.auth_binding),
             injected_context: None,
+            transient_turn_context: mob_params.transient_turn_context,
         };
 
         assert_eq!(turn_params.session_id, "resolved-session-123");

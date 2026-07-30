@@ -8,8 +8,8 @@
 //!   `create: false` it is the no-create writer variant previously
 //!   hand-rolled for identity databases. WAL establishment is verified
 //!   against the mode SQLite reports back, and the journal-mode conversion
-//!   only runs after the [`OpenOptions::schema_preflight`] ledger check, so
-//!   an old binary refuses a future file before mutating it.
+//!   only runs after the [`OpenOptions::schema_preflight`] eligibility check,
+//!   so an ineligible file is refused before mutation.
 //! - [`ConnectionProfile::ReadOnly`]: passive observation
 //!   (`SQLITE_OPEN_READ_ONLY | URI | NO_MUTEX`, shared busy timeout, no
 //!   pragma mutation — a reader must not convert a foreign file's journal
@@ -131,20 +131,20 @@ pub struct OpenOptions {
     /// opener. Values beyond SQLite's `int` millisecond range are clamped to
     /// `i32::MAX` milliseconds.
     pub busy_timeout: Option<Duration>,
-    /// Schema domains checked against the file's `meerkat_schema` ledger
-    /// BEFORE any mutating pragma runs. A file whose ledger records a
-    /// version newer than a listed domain supports is refused
-    /// ([`SqliteStoreError::SchemaFromTheFuture`]) with its logical content
-    /// unmodified — sidecars may still be touched, because reading the
+    /// Schema domains whose version and exact owned catalog are checked
+    /// BEFORE any mutating pragma runs. Future, pre-floor, gap,
+    /// unledgered-owned, and fingerprint-mismatched shapes are refused with
+    /// logical content unmodified — sidecars may still be touched because
+    /// reading the
     /// ledger of a WAL-mode file over a read-write connection contacts its
     /// `-wal`/`-shm` files (see [`WriteContact::ReadOnlyWalSidecars`]).
-    /// Without the preflight, a Primary open by an old binary would convert
-    /// a future database's journal mode before the ledger refusal in
+    /// Without the preflight, a Primary open would convert an ineligible
+    /// database's journal mode before the ledger refusal in
     /// [`crate::ledger::apply_domain_migrations`] ever fires. The check runs
     /// unconditionally after every open — never gated on a pre-open
-    /// filesystem probe, which a concurrent creator could race — and passes
-    /// trivially on files with no ledger table (fresh creates, pre-ledger
-    /// files). Empty (the default) skips the preflight.
+    /// filesystem probe, which a concurrent creator could race. A missing
+    /// ledger row passes only for a fresh domain with zero owned objects.
+    /// Empty (the default) skips the preflight.
     pub schema_preflight: &'static [&'static SchemaDomain],
 }
 
@@ -188,15 +188,15 @@ pub fn open_with(
         .min(MAX_BUSY_TIMEOUT);
     conn.busy_timeout(busy)?;
 
-    // The future-schema preflight runs before any mutating pragma: a refusal
-    // leaves a foreign (newer) file's logical content unmodified (WAL-mode
+    // Schema eligibility preflight runs before any mutating pragma: a refusal
+    // leaves the database's logical content unmodified (WAL-mode
     // files may see sidecar contact from the ledger read). It is not gated
     // on a pre-open filesystem probe — a database created by another process
     // between such a probe and the open would dodge the check. A fresh
     // create carries no ledger table and passes inside
-    // `refuse_future_schema` itself.
+    // `preflight_schema_eligibility` itself.
     for domain in options.schema_preflight {
-        crate::ledger::refuse_future_schema(&conn, domain)?;
+        crate::ledger::preflight_schema_eligibility(&conn, domain)?;
     }
 
     if let ConnectionProfile::Primary { .. } = profile {
@@ -410,6 +410,14 @@ mod tests {
             name: "base",
             apply: preflight_base,
         }],
+        initialize_current: preflight_base,
+        allowed_existing_versions: &[1],
+        released_predecessors: &[],
+        owned_objects: &[crate::ledger::SchemaObject {
+            kind: crate::ledger::SchemaObjectKind::Table,
+            name: "preflight_t",
+        }],
+        retired_objects: &[],
     };
 
     #[test]
@@ -473,6 +481,43 @@ mod tests {
         drop(conn);
         open_with(&path, ConnectionProfile::PRIMARY, options)
             .expect("current file passes preflight");
+    }
+
+    #[test]
+    fn schema_preflight_refuses_current_fingerprint_mismatch_before_wal_conversion() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("partial.sqlite3");
+        {
+            let conn = Connection::open(&path).expect("create raw");
+            conn.execute_batch(
+                "CREATE TABLE preflight_t (x INTEGER, candidate_only TEXT);
+                 CREATE TABLE meerkat_schema (
+                     domain TEXT PRIMARY KEY,
+                     version INTEGER NOT NULL
+                 );
+                 INSERT INTO meerkat_schema VALUES ('preflight-domain', 1);",
+            )
+            .expect("seed partial current");
+        }
+        let err = open_with(
+            &path,
+            ConnectionProfile::PRIMARY,
+            OpenOptions {
+                schema_preflight: &[&PREFLIGHT_DOMAIN],
+                ..OpenOptions::default()
+            },
+        )
+        .expect_err("partial current must be refused");
+        assert!(matches!(
+            err,
+            SqliteStoreError::SchemaFingerprintMismatch { version: 1, .. }
+        ));
+        let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("reopen raw");
+        let journal: String = conn
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .expect("journal mode");
+        assert_eq!(journal, "delete");
     }
 
     #[test]

@@ -58,7 +58,7 @@ async fn create_when_absent(
     store: &dyn SessionStore,
 ) -> Result<(), ConformanceFailure> {
     const STEP: &str = "create_when_absent";
-    let session = fixtures::session_with_texts(&["projected turn"]);
+    let session = fixtures::session_with_texts(&["projected turn"])?;
 
     // expected = None means "no row may exist yet".
     steps.wrap(
@@ -78,7 +78,7 @@ async fn create_when_absent(
     // may exist yet", never "unconditional upsert". A backend that treats it
     // as an upsert silently clobbers a projection another writer committed.
     let mut clobber = loaded.clone();
-    fixtures::push_text(&mut clobber, "create-over-existing clobber");
+    fixtures::push_text(&mut clobber, "create-over-existing clobber")?;
     match store
         .save_authoritative_projection_if_current_revision(&clobber, None)
         .await
@@ -108,7 +108,7 @@ async fn create_when_absent(
     )?;
 
     // expected = Some(token) against an ABSENT row must be rejected.
-    let absent = fixtures::session_with_texts(&["never persisted"]);
+    let absent = fixtures::session_with_texts(&["never persisted"])?;
     let bogus_token = steps.wrap(STEP, session_projection_cas_token(&absent))?;
     match store
         .save_authoritative_projection_if_current_revision(&absent, Some(bogus_token))
@@ -136,7 +136,7 @@ async fn create_when_absent(
 
 async fn cas_semantics(steps: &Steps, store: &dyn SessionStore) -> Result<(), ConformanceFailure> {
     const STEP: &str = "cas_semantics";
-    let session = fixtures::session_with_texts(&["base"]);
+    let session = fixtures::session_with_texts(&["base"])?;
     steps.wrap(
         STEP,
         store
@@ -147,7 +147,7 @@ async fn cas_semantics(steps: &Steps, store: &dyn SessionStore) -> Result<(), Co
     // Advance with the current row's token.
     let (current, token) = load_current(steps, STEP, store, &session).await?;
     let mut advanced = current;
-    fixtures::push_text(&mut advanced, "advanced");
+    fixtures::push_text(&mut advanced, "advanced")?;
     steps.wrap(
         STEP,
         store
@@ -157,7 +157,7 @@ async fn cas_semantics(steps: &Steps, store: &dyn SessionStore) -> Result<(), Co
 
     // Replaying the consumed token must be rejected, and the row unchanged.
     let mut stale = advanced.clone();
-    fixtures::push_text(&mut stale, "stale writer");
+    fixtures::push_text(&mut stale, "stale writer")?;
     match store
         .save_authoritative_projection_if_current_revision(&stale, Some(token))
         .await
@@ -188,7 +188,7 @@ async fn recovery_protocol(
     store: &dyn SessionStore,
 ) -> Result<(), ConformanceFailure> {
     const STEP: &str = "recovery_protocol";
-    let session = fixtures::session_with_texts(&["audited base"]);
+    let session = fixtures::session_with_texts(&["audited base"])?;
     steps.wrap(
         STEP,
         store
@@ -201,7 +201,7 @@ async fn recovery_protocol(
 
     // 1. Guarded projection save succeeds...
     let mut rewritten = audited.clone();
-    fixtures::push_text(&mut rewritten, "unaudited projection write");
+    fixtures::push_text(&mut rewritten, "unaudited projection write")?;
     steps.wrap(
         STEP,
         store
@@ -237,7 +237,7 @@ async fn recovery_protocol(
     //    deletes the unaudited row if (and only if) it is still current.
     let (current, current_token) = load_current(steps, STEP, store, &session).await?;
     let mut unauditable = current;
-    fixtures::push_text(&mut unauditable, "unauditable projection write");
+    fixtures::push_text(&mut unauditable, "unauditable projection write")?;
     steps.wrap(
         STEP,
         store

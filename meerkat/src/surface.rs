@@ -54,7 +54,8 @@ pub use request_execution::{
     PublishOutcome, RequestAdmissionError, RequestAsyncAction, RequestContext, RequestTerminal,
     RequestTerminalResolution, RequestTransitionError, SurfaceRequestExecution,
     SurfaceRequestExecutor, SurfaceRequestPhase, SurfaceRequestSemantics,
-    SurfaceRequestTerminalPolicy, noop_request_action, prepare_surface_session, request_action,
+    SurfaceRequestTerminalPolicy, noop_request_action, prepare_surface_session,
+    prepare_surface_session_with_id, request_action,
 };
 #[cfg(all(feature = "session-store", feature = "comms"))]
 pub use runtime_backed::configure_peer_ingress;
@@ -80,13 +81,13 @@ pub use runtime_schedule_host::{
     spawn_runtime_backed_schedule_host, spawn_runtime_backed_schedule_host_with_mobs,
 };
 pub use schedule_host::{
-    AcceptedScheduledInput, AcceptedScheduledInputCompletion,
-    MobMemberCurrentSessionScheduleResolver, NoopScheduleMobHost, ScheduleHostHandle,
-    ScheduledPromptDispatch, SharedScheduleTargetAdapter, SurfaceScheduleMobHost,
-    SurfaceScheduleSessionHost, async_completion_dispatch, build_dispatch_from_accepted,
-    immediate_completed_dispatch, immediate_delivery_failure, mob_member_schedule_identity,
-    parse_mob_member_schedule_identity, recover_mob_member_identity_from_session_target,
-    schedule_delivery_idempotency_key, schedule_host_supported, spawn_schedule_host,
+    AcceptedScheduledInput, MobMemberCurrentSessionScheduleResolver, NoopScheduleMobHost,
+    ScheduleHostHandle, ScheduledPromptDispatch, SharedScheduleTargetAdapter,
+    SurfaceScheduleMobHost, SurfaceScheduleSessionHost, async_completion_dispatch,
+    build_dispatch_from_accepted, immediate_completed_dispatch, immediate_delivery_failure,
+    mob_member_schedule_identity, parse_mob_member_schedule_identity,
+    recover_mob_member_identity_from_session_target, schedule_delivery_idempotency_key,
+    schedule_host_supported, spawn_schedule_host,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use stdio_json::{StdioJsonWriter, spawn_stdio_json_writer};

@@ -126,6 +126,7 @@ async fn schedule_redelivery_ensures_one_job_per_occurrence_and_returns_after_ac
     let invocation = HostRunnableInvocation {
         occurrence_id: OccurrenceId::new(),
         schedule_id: ScheduleId::new(),
+        delivery_idempotency_key: "scheduled-job-test:one-occurrence".to_string(),
         runnable: HostRunnableName::parse("long-scan").expect("runnable name"),
         trigger_time: Utc::now(),
         params: None,

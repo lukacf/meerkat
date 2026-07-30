@@ -28,6 +28,11 @@ pub struct MachineToolVisibilityOwner {
     /// staging trait method — the owner refuses staging calls in that
     /// state rather than falling back to any shadow counter.
     dsl_authority: StdRwLock<Option<Arc<std::sync::Mutex<super::dsl::MeerkatMachineAuthority>>>>,
+    /// Same fail-closed durability authority carried by the persistent driver
+    /// and runtime entry. Tool-visibility traits are synchronous and cannot
+    /// acquire the Tokio session mutation gate, so they preflight this handle
+    /// before touching the shared DSL authority.
+    durability_health: StdRwLock<Option<super::DurabilityHealthHandle>>,
     #[cfg(test)]
     lock_order_probe: std::sync::OnceLock<Arc<VisibilityLockOrderProbe>>,
 }
@@ -98,6 +103,30 @@ impl MachineToolVisibilityOwner {
         *slot = Some(authority);
     }
 
+    pub(crate) fn bind_durability_health(
+        &self,
+        durability_health: Option<super::DurabilityHealthHandle>,
+    ) {
+        let mut slot = self
+            .durability_health
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *slot = durability_health;
+    }
+
+    fn require_durability_ready(&self) -> Result<(), String> {
+        let slot = self
+            .durability_health
+            .read()
+            .map_err(|_| "machine visibility durability-health slot lock poisoned".to_string())?;
+        match slot.as_ref() {
+            Some(health) => health
+                .require_ready()
+                .map_err(|required| required.to_string()),
+            None => Ok(()),
+        }
+    }
+
     #[cfg(test)]
     pub(super) fn install_lock_order_probe(
         &self,
@@ -110,6 +139,8 @@ impl MachineToolVisibilityOwner {
         &self,
     ) -> Result<Arc<std::sync::Mutex<super::dsl::MeerkatMachineAuthority>>, ToolScopeStageError>
     {
+        self.require_durability_ready()
+            .map_err(|message| ToolScopeStageError::Owner { message })?;
         let slot = self
             .dsl_authority
             .read()
@@ -131,6 +162,8 @@ impl MachineToolVisibilityOwner {
         &self,
     ) -> Result<Arc<std::sync::Mutex<super::dsl::MeerkatMachineAuthority>>, ToolScopeApplyError>
     {
+        self.require_durability_ready()
+            .map_err(|message| ToolScopeApplyError::Owner { message })?;
         let slot = self
             .dsl_authority
             .read()
@@ -281,6 +314,12 @@ impl MachineToolVisibilityOwner {
         expected: &super::dsl::MeerkatMachineAuthoritySnapshot,
         input: super::dsl::MeerkatMachineInput,
     ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+        self.require_durability_ready().map_err(|reason| {
+            meerkat_core::handles::DslTransitionError::guard_rejected(
+                "ModelRoutingHandle::stage_sticky_model_fallback/commit",
+                reason,
+            )
+        })?;
         let mut projection = self
             .state
             .write()

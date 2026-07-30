@@ -345,6 +345,9 @@ impl MeerkatMachine {
         channel_id: &meerkat_live::LiveChannelId,
         llm_identity: &meerkat_core::SessionLlmIdentity,
     ) -> Result<LiveOpenAdmissionAuthority, RuntimeDriverError> {
+        let _mutation_guard = self
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await?;
         let channel_id_string = channel_id.to_string();
         let (_, effects) = self
             .apply_session_dsl_input(
@@ -417,6 +420,9 @@ impl MeerkatMachine {
         session_id: &SessionId,
         channel_id: &meerkat_live::LiveChannelId,
     ) -> Result<(), RuntimeDriverError> {
+        let _mutation_guard = self
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await?;
         self.apply_session_dsl_input(
             session_id,
             crate::meerkat_machine::dsl::MeerkatMachineInput::AbandonLiveOpenAdmission {
@@ -572,6 +578,9 @@ impl MeerkatMachine {
         session_id: &SessionId,
         acceptance: &meerkat_live::LiveRefreshQueueAcceptance,
     ) -> Result<LiveRefreshResultAuthority, RuntimeDriverError> {
+        let _mutation_guard = self
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await?;
         let channel_id = acceptance.channel_id().to_string();
         let (_, effects) = self
             .apply_session_dsl_input(
@@ -614,6 +623,9 @@ impl MeerkatMachine {
         session_id: &SessionId,
         observation: &meerkat_live::LiveChannelCloseObservation,
     ) -> Result<LiveCloseResultAuthority, RuntimeDriverError> {
+        let _mutation_guard = self
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await?;
         let channel_id = observation.channel_id().to_string();
         let (_, effects) = self
             .apply_session_dsl_input(
@@ -660,6 +672,9 @@ impl MeerkatMachine {
         session_id: &SessionId,
         acceptance: &meerkat_live::LiveCommandQueueAcceptance,
     ) -> Result<LiveCommandResultAuthority, RuntimeDriverError> {
+        let _mutation_guard = self
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await?;
         let channel_id = acceptance.channel_id().to_string();
         let command = dsl_live_command_kind(acceptance.kind());
         let (_, effects) = self
@@ -711,6 +726,9 @@ impl MeerkatMachine {
         command: crate::meerkat_machine::dsl::LiveCommandPublicKind,
         error: &meerkat_live::LiveAdapterHostError,
     ) -> Result<LiveCommandRejectionAuthority, RuntimeDriverError> {
+        let _mutation_guard = self
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await?;
         let channel_id = channel_id.to_string();
         let rejection = dsl_live_command_rejection_reason(error);
         let (_, effects) = self
@@ -830,6 +848,9 @@ impl MeerkatMachine {
         request: crate::meerkat_machine::dsl::LiveChannelRequestPublicKind,
         rejection: crate::meerkat_machine::dsl::LiveChannelRequestRejectionReason,
     ) -> Result<LiveChannelRequestRejectionAuthority, RuntimeDriverError> {
+        let _mutation_guard = self
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await?;
         let channel_id = channel_id.to_string();
         let (_, effects) = self
             .apply_session_dsl_input(
@@ -933,6 +954,9 @@ impl MeerkatMachine {
         issued_at_ms: u64,
         ttl_ms: u64,
     ) -> Result<LiveWebrtcTokenAuthority, RuntimeDriverError> {
+        let _mutation_guard = self
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await?;
         let channel_id = channel_id.to_string();
         let token = token.to_string();
         let (_, effects) = self
@@ -987,6 +1011,9 @@ impl MeerkatMachine {
         token: &str,
         observed_at_ms: u64,
     ) -> Result<LiveWebrtcAnswerAdmissionAuthority, RuntimeDriverError> {
+        let _mutation_guard = self
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await?;
         let channel_id = channel_id.to_string();
         let token = token.to_string();
         let (_, effects) = self
@@ -1042,6 +1069,9 @@ impl MeerkatMachine {
         channel_id: &meerkat_live::LiveChannelId,
         answer_observation_sequence: u64,
     ) -> Result<LiveWebrtcAnswerResultAuthority, RuntimeDriverError> {
+        let _mutation_guard = self
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await?;
         let channel_id = channel_id.to_string();
         let (_, effects) = self
             .apply_session_dsl_input(
@@ -1094,6 +1124,9 @@ impl MeerkatMachine {
         issued_at_ms: u64,
         ttl_ms: u64,
     ) -> Result<LiveWebsocketTokenAuthority, RuntimeDriverError> {
+        let _mutation_guard = self
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await?;
         let channel_id = channel_id.to_string();
         let token = token.to_string();
         let (_, effects) = self
@@ -1148,6 +1181,9 @@ impl MeerkatMachine {
         token: &str,
         observed_at_ms: u64,
     ) -> Result<LiveWebsocketTokenAdmissionAuthority, RuntimeDriverError> {
+        let _mutation_guard = self
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await?;
         let channel_id = channel_id.to_string();
         let token = token.to_string();
         let (_, effects) = self
@@ -1209,6 +1245,9 @@ impl MeerkatMachine {
         session_id: &SessionId,
         observation: &meerkat_live::LiveChannelStatusObservation,
     ) -> Result<LiveChannelStatusAuthority, RuntimeDriverError> {
+        let _mutation_guard = self
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await?;
         let channel_id = observation.channel_id().to_string();
         let (status, degradation_reason, degradation_detail) =
             dsl_live_channel_status_from_observation(observation.status());
@@ -1306,15 +1345,29 @@ impl MeerkatMachine {
                     None => None,
                 }
             };
-            let captured_session_gate = match &member_lease {
-                Some(lease) => Arc::clone(&lease.session_mutation_gate),
-                None => self.session_mutation_gate(session_id).await.ok_or(
-                    RuntimeDriverError::NotReady {
-                        state: RuntimeState::Destroyed,
-                    },
-                )?,
+            let (captured_session_gate, preacquired_gate_guard) = match &member_lease {
+                Some(lease) => (Arc::clone(&lease.session_mutation_gate), None),
+                None => {
+                    let guard = self
+                        .lock_current_durability_ready_session_mutation_gate(session_id)
+                        .await?;
+                    let gate = {
+                        let sessions = self.sessions.read().await;
+                        let entry =
+                            sessions
+                                .get(session_id)
+                                .ok_or(RuntimeDriverError::NotReady {
+                                    state: RuntimeState::Destroyed,
+                                })?;
+                        Arc::clone(&entry.mutation_gate)
+                    };
+                    (gate, Some(guard))
+                }
             };
-            let held_mutation_gate = Arc::clone(&captured_session_gate).lock_owned().await;
+            let held_mutation_gate = match preacquired_gate_guard {
+                Some(guard) => guard,
+                None => Arc::clone(&captured_session_gate).lock_owned().await,
+            };
             let captured_dsl_authority = {
                 let sessions = self.sessions.read().await;
                 let Some(entry) = sessions.get(session_id) else {
@@ -1333,6 +1386,12 @@ impl MeerkatMachine {
                         reason: "boundary-cancel runtime session was replaced".to_string(),
                     });
                 }
+                entry.require_durability_ready().map_err(|required| {
+                    RuntimeDriverError::RecoveryRepairBlocked {
+                        evidence_digest: None,
+                        reason: required.to_string(),
+                    }
+                })?;
                 Arc::clone(&entry.dsl_authority)
             };
             let state = self
@@ -2204,9 +2263,14 @@ impl MeerkatMachine {
         generation: u64,
     ) -> Result<(), RuntimeBindingsError> {
         let _mutation_guard = self
-            .lock_current_session_mutation_gate(&session_id)
+            .lock_current_durability_ready_session_mutation_gate(&session_id)
             .await
-            .ok_or_else(|| RuntimeBindingsError::SessionNotFound(session_id.clone()))?;
+            .map_err(|error| match error {
+                RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                } => RuntimeBindingsError::SessionNotFound(session_id.clone()),
+                error => RuntimeBindingsError::PrepareFailed(session_id.clone(), error.to_string()),
+            })?;
         let (driver_handle, epoch_id) = {
             let sessions = self.sessions.read().await;
             let entry = sessions

@@ -80,7 +80,7 @@ async fn range_read_capability(
     let (session, head, token) = seed(steps, STEP, inc, &["range one", "range two"]).await?;
 
     // Absent session: None, not an error, for both verbs.
-    let absent = fixtures::session_with_texts(&["never persisted"]);
+    let absent = fixtures::session_with_texts(&["never persisted"])?;
     steps.ensure(
         STEP,
         steps
@@ -186,7 +186,7 @@ async fn range_read_capability(
         STEP,
         TranscriptRewriteRecord::new(commit.clone(), parent_body, revision_body),
     )?;
-    let next = steps.wrap(
+    let mechanical_next = steps.wrap(
         STEP,
         inc.commit_rewrite(
             session.id(),
@@ -194,6 +194,14 @@ async fn range_read_capability(
             SessionHeadCas::IfToken(token.clone()),
         )
         .await,
+    )?;
+    let next = steps.wrap(
+        STEP,
+        SessionHead::from_session(
+            &rewritten,
+            mechanical_next.strand,
+            mechanical_next.rewrite_count,
+        ),
     )?;
 
     // Recorded but NOT adopted: served by neither view.
@@ -243,15 +251,15 @@ async fn range_read_capability(
 
 /// Chained rewrites that share NO prefix with the transcript they replace.
 ///
-/// Every round here replaces message 0 and preserves every later message —
-/// the field shape (a per-resume system-prompt refresh). Prefix addressing
-/// buys a backend nothing on this shape, so a durable store must express the
-/// superseded transcript as a delta of its successor. The contract this pins
-/// is reconstruction, not layout: after N chained rewrites, every retained
-/// body must still come back EXACTLY, the live transcript must still be the
-/// last revision, and all of it must survive reopen. A backend that keeps
-/// whole revisions materialized passes too — this chapter refuses to encode
-/// any one storage strategy, only the fidelity every strategy owes.
+/// Every round here replaces message 0 and preserves every later message.
+/// Prefix addressing buys a backend nothing on this deliberately adversarial
+/// rewrite shape, so a durable store must express the superseded transcript
+/// as a delta of its successor. The contract this pins is reconstruction, not
+/// layout: after N chained rewrites, every retained body must still come back
+/// EXACTLY, the live transcript must still be the last revision, and all of it
+/// must survive reopen. A backend that keeps whole revisions materialized
+/// passes too — this chapter refuses to encode any one storage strategy, only
+/// the fidelity every strategy owes.
 async fn chained_prefix_rewrites(
     steps: &Steps,
     factory: &dyn SessionStoreFactory,
@@ -289,7 +297,7 @@ async fn chained_prefix_rewrites(
             STEP,
             TranscriptRewriteRecord::new(commit, parent_body, revision_body),
         )?;
-        let next = steps.wrap(
+        let mechanical_next = steps.wrap(
             STEP,
             inc.commit_rewrite(
                 session.id(),
@@ -297,6 +305,10 @@ async fn chained_prefix_rewrites(
                 SessionHeadCas::IfToken(token.clone()),
             )
             .await,
+        )?;
+        let next = steps.wrap(
+            STEP,
+            SessionHead::from_session(&live, mechanical_next.strand, mechanical_next.rewrite_count),
         )?;
         steps.wrap(
             STEP,
@@ -382,7 +394,7 @@ async fn seed(
     inc: &dyn IncrementalSessionStore,
     texts: &[&str],
 ) -> Result<(Session, SessionHead, String), ConformanceFailure> {
-    let session = fixtures::session_with_texts(texts);
+    let session = fixtures::session_with_texts(texts)?;
     let root = TranscriptStrandId::root();
     steps.wrap(
         step,
@@ -461,7 +473,7 @@ async fn append_contract(
     let root = TranscriptStrandId::root();
 
     // O(delta) append: only the new row travels.
-    fixtures::push_text(&mut session, "three");
+    fixtures::push_text(&mut session, "three")?;
     let delta = &session.messages()[2..];
     steps.wrap(
         STEP,
@@ -579,7 +591,7 @@ async fn save_head_cas(
     }
 
     // Advance once so `token` goes stale.
-    fixtures::push_text(&mut session, "three");
+    fixtures::push_text(&mut session, "three")?;
     steps.wrap(
         STEP,
         inc.append_messages(session.id(), &root, 2, &session.messages()[2..])
@@ -596,7 +608,7 @@ async fn save_head_cas(
     )?;
 
     // A stale token must conflict.
-    fixtures::push_text(&mut session, "four");
+    fixtures::push_text(&mut session, "four")?;
     steps.wrap(
         STEP,
         inc.append_messages(session.id(), &root, 3, &session.messages()[3..])
@@ -699,7 +711,7 @@ async fn rewrite_commit_and_adoption(
     }
 
     // Correct token: the commit is recorded but NOT adopted until save_head.
-    let next = steps.wrap(
+    let mechanical_next = steps.wrap(
         STEP,
         inc.commit_rewrite(
             session.id(),
@@ -707,6 +719,14 @@ async fn rewrite_commit_and_adoption(
             SessionHeadCas::IfToken(token.clone()),
         )
         .await,
+    )?;
+    let next = steps.wrap(
+        STEP,
+        SessionHead::from_session(
+            &rewritten,
+            mechanical_next.strand,
+            mechanical_next.rewrite_count,
+        ),
     )?;
     steps.ensure(
         STEP,

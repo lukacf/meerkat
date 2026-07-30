@@ -11,9 +11,7 @@ use meerkat_core::service::{CreateSessionRequest, SessionError, TurnToolOverlay}
 use meerkat_core::types::{
     ContentInput, HandlingMode, RenderMetadata, RunResult, SessionId, Usage,
 };
-use meerkat_core::{
-    InteractionId, PlainEventSource, Provider, Session, SessionLlmIdentity, SystemContextStateError,
-};
+use meerkat_core::{InteractionId, PlainEventSource, Provider, Session, SessionLlmIdentity};
 use meerkat_mob::{
     AgentIdentity, MobBackendKind, MobBuilder, MobDefinition, MobId, MobRuntimeMode, MobStorage,
     SpawnMemberSpec,
@@ -31,11 +29,11 @@ struct MockSessionAgentBuilder {
 struct MockSessionAgent {
     session: Session,
     llm_identity: SessionLlmIdentity,
+    transient_turn_context_state: meerkat_core::TransientTurnContextStateHandle,
     comms_runtime: Arc<meerkat_comms::CommsRuntime>,
     keep_alive: bool,
     start_turn_calls: Arc<AtomicU64>,
     inject_calls: Arc<AtomicU64>,
-    system_context_state: meerkat_core::SystemContextStateHandle,
 }
 
 impl MockSessionAgent {
@@ -87,14 +85,6 @@ impl SessionAgentBuilder for MockSessionAgentBuilder {
             .as_ref()
             .and_then(|build| build.resume_session.clone())
             .unwrap_or_else(|| Session::with_id(requested_session_id.unwrap_or_default()));
-        let system_context_state = meerkat_core::SystemContextStateHandle::new(
-            session.system_context_state().unwrap_or_default(),
-        )
-        .map_err(|error| {
-            SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                "failed to restore phase2 test system-context state: {error}"
-            )))
-        })?;
         let build = req.build.as_ref();
         let comms_name = build
             .and_then(|build| build.comms_name.as_deref())
@@ -125,11 +115,11 @@ impl SessionAgentBuilder for MockSessionAgentBuilder {
                 provider_params: build.and_then(|build| build.provider_params.clone()),
                 auth_binding: build.and_then(|build| build.auth_binding.clone()),
             },
+            transient_turn_context_state: meerkat_core::TransientTurnContextStateHandle::new(),
             comms_runtime,
             keep_alive: build.is_some_and(|build| build.keep_alive),
             start_turn_calls: Arc::clone(&self.start_turn_calls),
             inject_calls: Arc::clone(&self.inject_calls),
-            system_context_state,
         })
     }
 }
@@ -189,12 +179,8 @@ impl SessionAgent for MockSessionAgent {
         }
     }
 
-    fn session_clone(&self) -> Result<Session, SystemContextStateError> {
-        let mut session = self.session.clone();
-        session
-            .set_system_context_state(self.system_context_state.snapshot())
-            .map_err(SystemContextStateError::SystemContext)?;
-        Ok(session)
+    fn session_clone(&self) -> Result<Session, meerkat_core::error::AgentError> {
+        Ok(self.session.clone())
     }
 
     fn durable_llm_identity(&self) -> Option<SessionLlmIdentity> {
@@ -205,22 +191,12 @@ impl SessionAgent for MockSessionAgent {
         meerkat_core::pending_continuation::observe_session_tail(self.session.messages())
     }
 
+    fn transient_turn_context_state(&self) -> meerkat_core::TransientTurnContextStateHandle {
+        self.transient_turn_context_state.clone()
+    }
+
     fn update_keep_alive(&mut self, keep_alive: bool) {
         self.keep_alive = keep_alive;
-    }
-
-    fn apply_runtime_system_context(
-        &mut self,
-        appends: &[meerkat_core::PendingSystemContextAppend],
-    ) {
-        self.session.append_system_context_blocks(appends);
-        let _ = self.system_context_state.replace_from_generated_restore(
-            self.session.system_context_state().unwrap_or_default(),
-        );
-    }
-
-    fn system_context_state(&self) -> meerkat_core::SystemContextStateHandle {
-        self.system_context_state.clone()
     }
 
     fn event_injector(&self) -> Option<Arc<dyn EventInjector>> {

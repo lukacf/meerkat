@@ -17,15 +17,16 @@
 use std::collections::BTreeMap;
 
 use meerkat::surface::{
-    async_completion_dispatch, immediate_completed_dispatch, immediate_delivery_failure,
+    ScheduleAdmissionOutcome, async_completion_dispatch, immediate_completed_dispatch,
+    immediate_completed_dispatch_with_admission_outcome, immediate_delivery_failure,
     schedule_delivery_idempotency_key,
 };
 use meerkat_core::{ContentInput, SessionId};
 use meerkat_schedule::{
     CreateScheduleRequest, DeliveryFailureReason, DeliveryReceiptStage, DeliveryTerminal,
     IntervalTriggerSpec, MisfirePolicy, MissingTargetPolicy, Occurrence, OccurrenceOrdinal,
-    OccurrencePhase, OverlapPolicy, Schedule, ScheduledSessionAction, SessionTargetBinding,
-    TargetBinding, TriggerSpec,
+    OccurrencePhase, OverlapPolicy, RuntimeDeliveryOutcome, Schedule, ScheduledSessionAction,
+    SessionTargetBinding, TargetBinding, TriggerSpec,
 };
 
 fn sample_occurrence(attempt_count: u32) -> Occurrence {
@@ -155,6 +156,10 @@ async fn immediate_completed_dispatch_maps_to_accepted_stage_and_completes() {
         dispatch.receipt.correlation_id.as_deref(),
         Some("corr-immediate"),
     );
+    assert_eq!(
+        dispatch.receipt.runtime_outcome,
+        Some(RuntimeDeliveryOutcome::AdmissionAccepted),
+    );
     assert!(
         dispatch.materialized_session_id.is_none(),
         "immediate_completed_dispatch does not rematerialize; got {:?}",
@@ -168,6 +173,25 @@ async fn immediate_completed_dispatch_maps_to_accepted_stage_and_completes() {
         terminal.phase,
     );
     assert!(terminal.detail.is_none());
+}
+
+#[test]
+fn deduplicated_immediate_dispatch_stamps_truthful_admission_outcome() {
+    let occ = sample_occurrence(2);
+    let dispatch = immediate_completed_dispatch_with_admission_outcome(
+        &occ,
+        Some("corr-deduplicated".to_string()),
+        ScheduleAdmissionOutcome::Deduplicated,
+    );
+
+    assert_eq!(
+        dispatch.receipt.runtime_outcome,
+        Some(RuntimeDeliveryOutcome::AdmissionDeduplicated),
+    );
+    assert_eq!(
+        dispatch.receipt.correlation_id.as_deref(),
+        Some("corr-deduplicated"),
+    );
 }
 
 #[tokio::test]
@@ -195,6 +219,10 @@ async fn async_completion_dispatch_threads_correlation_and_custom_future() {
         dispatch.receipt.stage,
         DeliveryReceiptStage::DispatchAccepted,
         "async dispatch is already-accepted; completion lands later",
+    );
+    assert_eq!(
+        dispatch.receipt.runtime_outcome,
+        Some(RuntimeDeliveryOutcome::AdmissionAccepted),
     );
     assert_eq!(dispatch.correlation_id, correlation);
 

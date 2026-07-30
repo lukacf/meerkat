@@ -382,7 +382,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `StageDeferredSession`(session_id: SessionId, keep_alive: Bool, has_comms_name: Bool, llm_identity: SessionLlmIdentity, machine_archived_resume_authorized: Bool)
 - `UpdateDeferredSessionKeepAlive`(session_id: SessionId, keep_alive: Bool, has_comms_name: Bool)
 - `UpdateDeferredSessionLlmIdentity`(session_id: SessionId, llm_identity: SessionLlmIdentity)
-- `AuthorizeDeferredSessionSystemContextAppend`(session_id: SessionId)
 - `BeginDeferredSessionPromotion`(session_id: SessionId)
 - `AuthorizeDeferredSessionMachineArchivedResume`(session_id: SessionId)
 - `AbandonDeferredSessionPromotion`(session_id: SessionId)
@@ -414,6 +413,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RequestUntilChangedSwitchTurn`(request_id: String, target_model: String, target_realtime_capable: Bool, requires_approval: Bool, approval_available: Bool, approval_denied: Bool, approval_reason: Option<RoutingSwitchApprovalReason>, realtime_detach_allowed: Bool)
 - `CompleteUntilChangedSwitchTurnReconfigure`(request_id: String)
 - `ResolveLiveBoundaryContextReceipt`(run_id: RunId, input_id: String)
+- `LiveBoundaryUnavailable`(input_id: String)
 - `ResolveAdmissionPlan`(input_id: String, input_kind: AdmissionInputKind, requested_lane: Option<InputLane>, continuation_kind: AdmissionContinuationKind, silent_intent_match: Bool, existing_superseded_input_id: Option<String>, runtime_running: Bool, active_turn_boundary_available: Bool, without_wake: Bool)
 - `ResolveAdmissionValidation`(input_id: String, input_kind: AdmissionInputKind, input_origin: AdmissionInputOriginKind, durability: InputDurabilityKind, peer_handling_mode_valid: Bool, peer_response_terminal_structurally_valid: Bool, peer_response_terminal_observed_status: PeerResponseTerminalObservedStatus)
 - `ResolveAdmissionIdempotency`(input_id: String, idempotency_key: Option<String>)
@@ -441,7 +441,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RollbackRun`(run_id: RunId)
 - `StartConversationRun`(run_id: RunId, primitive_kind: TurnPrimitiveKind, admitted_content_shape: ContentShape, vision_enabled: Bool, image_tool_results_enabled: Bool, max_extraction_retries: u64)
 - `StartImmediateAppend`(run_id: RunId)
-- `StartImmediateContext`(run_id: RunId)
 - `PrimitiveApplied`(run_id: RunId)
 - `LlmReturnedToolCalls`(run_id: RunId, tool_count: u64)
 - `CallbackPending`(run_id: RunId)
@@ -639,6 +638,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `TurnRunStarted`(run_id: RunId)
 - `TurnBoundaryApplied`(run_id: RunId, boundary_sequence: u64)
 - `LiveBoundaryContextReceiptResolved`(run_id: RunId, input_id: String, boundary: AdmissionRunApplyBoundary, boundary_sequence: u64)
+- `LiveBoundaryUnavailableNormalized`(input_id: String, execution_handling_mode: InputLane, live_interrupt_required: Bool)
 - `TurnRunCompleted`(run_id: RunId, outcome: TurnTerminalOutcome)
 - `DurableTailRecoveryAuthorized`(candidate_id: String, disposition: DurableTailRecoveryDisposition)
 - `DurableTailRecoveryCommitAuthorized`(candidate_id: String, disposition: DurableTailRecoveryDisposition, boundary_sequence: u64)
@@ -1111,35 +1111,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `DurableTailRecoveryCommitAuthorized`
 - To: `Retired`
 
-### `AuthorizeDurableTailRecoveryCommitLegacyIdle`
-- From: `Idle`
-- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence)
-- Guards:
-  - `no_current_run`
-  - `candidate_run_not_terminalized`
-  - `persisted_quiescent`
-  - `persisted_no_current_run`
-  - `prior_commit_admits_recovery`
-  - `inputs_attributable`
-  - `legacy_completed_class`
-- Emits: `DurableTailRecoveryCommitAuthorized`
-- To: `Idle`
-
-### `AuthorizeDurableTailRecoveryCommitLegacyRetired`
-- From: `Retired`
-- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence)
-- Guards:
-  - `no_current_run`
-  - `candidate_run_not_terminalized`
-  - `persisted_quiescent`
-  - `persisted_no_current_run`
-  - `prior_commit_admits_recovery`
-  - `inputs_attributable`
-  - `legacy_completed_class`
-- Emits: `DurableTailRecoveryCommitAuthorized`
-- To: `Retired`
-
-### `AuthorizeDurableTailRecoveryCommitLegacyRetainInputsIdle`
+### `AuthorizeDurableTailRecoveryCommitCompletedRetainInputsIdle`
 - From: `Idle`
 - On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence)
 - Guards:
@@ -1153,7 +1125,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `DurableTailRecoveryCommitAuthorized`
 - To: `Idle`
 
-### `AuthorizeDurableTailRecoveryCommitLegacyRetainInputsRetired`
+### `AuthorizeDurableTailRecoveryCommitCompletedRetainInputsRetired`
 - From: `Retired`
 - On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence)
 - Guards:
@@ -1430,22 +1402,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `UpdateDeferredSessionLlmIdentity`(session_id, llm_identity)
 - Guards:
   - `staged_or_promoting`
-  - `session_matches`
-- To: `Initializing`
-
-### `AuthorizeDeferredSessionSystemContextAppendStaged`
-- From: `Initializing`
-- On: `AuthorizeDeferredSessionSystemContextAppend`(session_id)
-- Guards:
-  - `staged`
-  - `session_matches`
-- To: `Initializing`
-
-### `AuthorizeDeferredSessionSystemContextAppendPromoting`
-- From: `Initializing`
-- On: `AuthorizeDeferredSessionSystemContextAppend`(session_id)
-- Guards:
-  - `promoting`
   - `session_matches`
 - To: `Initializing`
 
@@ -8868,30 +8824,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `TurnRunStarted`
 - To: `Running`
 
-### `StartImmediateContextInitializing`
-- From: `Initializing`
-- On: `StartImmediateContext`(run_id)
-- Guards:
-  - `turn_resettable`
-- Emits: `TurnRunStarted`
-- To: `Running`
-
-### `StartImmediateContextAttached`
-- From: `Attached`
-- On: `StartImmediateContext`(run_id)
-- Guards:
-  - `turn_resettable`
-- Emits: `TurnRunStarted`
-- To: `Running`
-
-### `StartImmediateContextRunning`
-- From: `Running`
-- On: `StartImmediateContext`(run_id)
-- Guards:
-  - `turn_resettable`
-- Emits: `TurnRunStarted`
-- To: `Running`
-
 ### `PrimitiveAppliedConversation`
 - From: `Running`
 - On: `PrimitiveApplied`(run_id)
@@ -10569,6 +10501,15 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `current_run_matches`
   - `input_tracked`
 - Emits: `LiveBoundaryContextReceiptResolved`
+- To: `Running`
+
+### `LiveBoundaryUnavailableRunning`
+- From: `Running`
+- On: `LiveBoundaryUnavailable`(input_id)
+- Guards:
+  - `input_tracked`
+  - `input_is_queued_steer`
+- Emits: `LiveBoundaryUnavailableNormalized`
 - To: `Running`
 
 ### `ConsumeOnAcceptIdle`

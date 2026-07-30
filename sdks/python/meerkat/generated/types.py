@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """Generated wire types for Meerkat SDK.
 
-Contract version: 0.8.10
+Contract version: 0.8.11
 """
 
 from dataclasses import dataclass, field
@@ -11,7 +11,7 @@ from typing import Any, Literal, NotRequired, Optional, Required, TypedDict
 from .errors import MeerkatError
 
 
-CONTRACT_VERSION = "0.8.10"
+CONTRACT_VERSION = "0.8.11"
 
 
 Value = Any
@@ -853,7 +853,7 @@ deserializes via `CoreRenderable`'s tagged `text` variant."""
 @dataclass
 class InjectSystemContextResult:
     """Result for `session/inject_context`."""
-    status: Literal['applied', 'staged', 'duplicate']
+    status: Literal['applied', 'duplicate']
 
 
 @dataclass
@@ -1929,7 +1929,7 @@ class MobAppendSystemContextResult:
     """Response payload for `mob/append_system_context`."""
     agent_identity: str
     mob_id: str
-    status: Literal['applied', 'staged', 'duplicate']
+    status: Literal['applied', 'duplicate']
 
 
 @dataclass
@@ -2076,6 +2076,7 @@ retired `clear_*` split wire form) fail closed at the serde boundary via
     skill_refs: Optional[list[SkillKey]] = None
     structured_output_retries: Optional[int] = None
     system_prompt: Optional[str] = None
+    transient_turn_context: Optional[str] = None
     turn_tool_overlay: Optional[PublicTurnToolOverlay] = None
 
 
@@ -2149,6 +2150,7 @@ server resolves against the live roster — callers do not pass
     injected_context: Optional[list[WireContentInput]] = None
     objective_id: Optional[str] = None
     origin: Optional[Literal['external', 'internal']] = None
+    transient_turn_context: Optional[str] = None
     work_ref: Optional[str] = None
 
 
@@ -3326,6 +3328,7 @@ class BridgeDeliveryPayload:
     objective_id: Optional[str] = None
     outcome_tracking: Optional[Literal['interaction']] = None
     transcript_interaction_id: Optional[str] = None
+    transient_turn_context: Optional[str] = None
     turn: Optional[BridgeTurnDirective] = None
 
 
@@ -6368,6 +6371,7 @@ class BridgeCommandDeliverMemberInput(TypedDict, total=False):
     protocol_version: Required[BridgeProtocolVersion]
     supervisor: Required[BridgePeerSpec]
     transcript_interaction_id: NotRequired[Optional[str]]
+    transient_turn_context: NotRequired[Optional[str]]
     turn: NotRequired[Optional[BridgeTurnDirective]]
 
 class BridgeCommandObserveMember(TypedDict, total=False):
@@ -7080,9 +7084,15 @@ SendTaintOverride = dict[str, SenderContentTaint] | Literal['undeclared']
 # Not `PartialEq`: the `BlockAssistant.blocks` variant carries
 # `WireAssistantBlock`s which hold opaque tool-call args as
 # `Box<RawValue>`. See `WireAssistantBlock` doc.
+class WireSystemMessageIdentity(TypedDict, total=False):
+    """Optional control-ingress identity carried by one durable System message."""
+    idempotency_key: NotRequired[Optional[str]]
+    source: NotRequired[Optional[str]]
+
 class WireSessionMessageSystem(TypedDict, total=False):
     content: Required[str]
     created_at: Required[str]
+    identity: NotRequired[Optional[WireSystemMessageIdentity]]
     role: Required[Literal['system']]
 
 class WireSessionMessageSystemNotice(TypedDict, total=False):

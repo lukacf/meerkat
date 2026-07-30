@@ -3,15 +3,14 @@
 //! SQLite uses WAL mode with no exclusive file lock,
 //! allowing the same database to be reopened after drop within the same process.
 
-use super::in_memory::{
-    IdentityAuthorityState, apply_identity_declaration_locked, validate_manifest_replay_state,
-};
 use super::realm_profile::{RealmProfileStore, StoredRealmProfile};
 use super::{
     BeginPlacedSpawnResult, CommitPlacedSpawnResult, DeletePlacedSpawnResult,
     ExternalBindingOverlayRecord, IdentityMemberEventCommitOutcome,
     IdentityMemberTargetObservation, IdentityMemberTargetState, IdentityWiringEventCommitOutcome,
     IdentityWiringTargetObservation, IdentityWiringTargetState, MobEventStore,
+    MobExternalDeliveryBeginOutcome, MobExternalDeliveryCompleteOutcome, MobExternalDeliveryIntent,
+    MobExternalDeliveryPhase, MobExternalDeliveryRecord, MobExternalDeliveryTerminal,
     MobHostAuthorityDeletionAuthority, MobHostAuthorityPersistenceAuthority,
     MobHostAuthorityRecord, MobIdentityMemberStore, MobIdentityStatusStore, MobIdentityStore,
     MobIdentityStoreClock, MobMemberEventCursorRecord, MobMemberLiveCleanupRecord,
@@ -25,8 +24,8 @@ use super::{
     SupervisorAuthorityDeletionAuthority, SupervisorAuthorityPersistenceAuthority,
     SupervisorAuthorityRecord, SystemMobIdentityStoreClock, identity_member_target_state,
     identity_structural_projection_is_anchor, identity_wiring_target_state, private,
-    step_failed_event_identity, terminal_event_identity,
-    validate_identity_declaration_replay_request, validate_identity_member_commit_authority,
+    step_failed_event_identity, terminal_event_identity, validate_external_delivery_record,
+    validate_external_delivery_terminal, validate_identity_member_commit_authority,
     validate_identity_wiring_commit_authority, validate_mob_event_write_authority,
 };
 #[cfg(feature = "runtime-adapter")]
@@ -42,12 +41,9 @@ use crate::event::{
 #[cfg(feature = "runtime-adapter")]
 use crate::identity::DesiredSessionTarget;
 use crate::identity::{
-    IDENTITY_DECLARATION_SCOPE_SCHEMA_VERSION, IDENTITY_INTENT_SCHEMA_VERSION,
-    IDENTITY_LEASE_MAX_TTL_MS, IDENTITY_LEASE_SCHEMA_VERSION,
+    IDENTITY_INTENT_SCHEMA_VERSION, IDENTITY_LEASE_MAX_TTL_MS, IDENTITY_LEASE_SCHEMA_VERSION,
     IDENTITY_OPERATION_RECEIPT_SCHEMA_VERSION, IdentityActuationPermit, IdentityActuatorTarget,
-    IdentityConvergenceStatus, IdentityDeclarationApplyPlan,
-    IdentityDeclarationManifestApplyOutcome, IdentityDeclarationScopeHead,
-    IdentityDeclarationScopeId, IdentityIntent, IdentityIntentError, IdentityIntentRecord,
+    IdentityConvergenceStatus, IdentityIntent, IdentityIntentError, IdentityIntentRecord,
     IdentityLeaseClaim, IdentityLeaseClaimOutcome, IdentityLeaseRecord, IdentityOperationKind,
     IdentityOperationReceipt, IdentityOperationReceiptInsertOutcome,
     IdentityOperationReceiptPayload, IdentityOperationSlot, IdentityOperationSubject,
@@ -76,16 +72,182 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
 const EVENT_SUBSCRIPTION_CHANNEL_CAPACITY: usize = 4096;
 const EVENT_WATCH_CATCH_UP_LIMIT: usize = 1024;
-const EVENT_WATCH_POLL_FALLBACK_MS: u64 = 250;
+const EVENT_WATCH_SAFETY_SWEEP_MS: u64 = 5_000;
+const EVENT_WATCH_RECOVERY_BACKOFF_MIN_MS: u64 = 100;
+const EVENT_WATCH_RECOVERY_BACKOFF_MAX_MS: u64 = 30_000;
 const IDENTITY_STORE_INSTANCE_KEY: &str = "store_instance_id";
 const IDENTITY_RECEIPT_SLOT_KEY_VERSION: i64 = 1;
 
 const CREATE_SCHEMA_SQL: &str = r"
+CREATE TABLE IF NOT EXISTS mob_events (
+    cursor INTEGER PRIMARY KEY,
+    mob_id TEXT,
+    event_json BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS mob_event_meta (
+    key TEXT PRIMARY KEY,
+    value INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS mob_external_deliveries (
+    mob_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    record_json BLOB NOT NULL,
+    PRIMARY KEY (mob_id, idempotency_key)
+);
+CREATE TABLE IF NOT EXISTS mob_runs (
+    run_id TEXT PRIMARY KEY,
+    run_json BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS mob_run_remote_turn_intents (
+    run_id TEXT NOT NULL,
+    dispatch_sequence BLOB NOT NULL,
+    intent_json BLOB NOT NULL,
+    PRIMARY KEY (run_id, dispatch_sequence)
+);
+CREATE TABLE IF NOT EXISTS mob_run_remote_turn_receipts (
+    run_id TEXT NOT NULL,
+    dispatch_sequence BLOB NOT NULL,
+    receipt_json BLOB NOT NULL,
+    PRIMARY KEY (run_id, dispatch_sequence)
+);
+CREATE TABLE IF NOT EXISTS mob_specs (
+    mob_id TEXT PRIMARY KEY,
+    spec_json BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS mob_runtime_supervisors (
+    mob_id TEXT PRIMARY KEY,
+    record_json BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS mob_runtime_host_authorities (
+    mob_id TEXT NOT NULL,
+    host_id TEXT NOT NULL,
+    record_json BLOB NOT NULL,
+    PRIMARY KEY (mob_id, host_id)
+);
+CREATE TABLE IF NOT EXISTS mob_runtime_host_binding_generation_highwaters (
+    mob_id TEXT NOT NULL,
+    host_id TEXT NOT NULL,
+    binding_generation BLOB NOT NULL,
+    PRIMARY KEY (mob_id, host_id)
+);
+CREATE TABLE IF NOT EXISTS mob_runtime_member_operator_requests (
+    mob_id TEXT NOT NULL,
+    agent_identity TEXT NOT NULL,
+    generation BLOB NOT NULL,
+    fence_token BLOB NOT NULL,
+    host_id TEXT NOT NULL,
+    binding_generation BLOB NOT NULL,
+    member_session_id TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    record_json BLOB NOT NULL,
+    PRIMARY KEY (mob_id, agent_identity, generation, fence_token, host_id, binding_generation, member_session_id, request_id)
+);
+CREATE TABLE IF NOT EXISTS mob_runtime_placed_spawns (
+    mob_id TEXT NOT NULL,
+    agent_identity TEXT NOT NULL,
+    record_json BLOB NOT NULL,
+    PRIMARY KEY (mob_id, agent_identity)
+);
+CREATE TABLE IF NOT EXISTS mob_runtime_operator_grants (
+    mob_id TEXT NOT NULL,
+    principal TEXT NOT NULL,
+    record_json BLOB NOT NULL,
+    PRIMARY KEY (mob_id, principal)
+);
+CREATE TABLE IF NOT EXISTS mob_runtime_member_event_cursors (
+    mob_id TEXT NOT NULL,
+    agent_identity TEXT NOT NULL,
+    record_json BLOB NOT NULL,
+    PRIMARY KEY (mob_id, agent_identity)
+);
+CREATE TABLE IF NOT EXISTS mob_runtime_member_live_cleanups (
+    mob_id TEXT NOT NULL,
+    cleanup_id TEXT NOT NULL,
+    record_json BLOB NOT NULL,
+    PRIMARY KEY (mob_id, cleanup_id)
+);
+CREATE TABLE IF NOT EXISTS mob_runtime_binding_overlays (
+    mob_id TEXT NOT NULL,
+    agent_identity TEXT NOT NULL,
+    generation INTEGER NOT NULL,
+    record_json BLOB NOT NULL,
+    PRIMARY KEY (mob_id, agent_identity, generation)
+);
+CREATE TABLE IF NOT EXISTS mob_identity_store_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS mob_identity_intents (
+    mob_id TEXT NOT NULL,
+    agent_identity TEXT NOT NULL,
+    declaration_scope TEXT,
+    session_id TEXT,
+    lineage_id TEXT,
+    record_json BLOB NOT NULL,
+    PRIMARY KEY (mob_id, agent_identity)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS mob_identity_intents_session
+    ON mob_identity_intents (session_id)
+    WHERE session_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS mob_identity_intents_lineage
+    ON mob_identity_intents (lineage_id)
+    WHERE lineage_id IS NOT NULL;
+CREATE TABLE IF NOT EXISTS mob_identity_leases (
+    mob_id TEXT NOT NULL,
+    agent_identity TEXT NOT NULL,
+    epoch_highwater BLOB NOT NULL,
+    active_holder_id TEXT,
+    active_incarnation_id TEXT,
+    active_epoch BLOB,
+    active_renewed_at_ms BLOB,
+    active_expires_at_ms BLOB,
+    authority_digest TEXT NOT NULL,
+    record_json BLOB NOT NULL,
+    PRIMARY KEY (mob_id, agent_identity)
+);
+CREATE TABLE IF NOT EXISTS mob_identity_operation_receipts (
+    mob_id TEXT NOT NULL,
+    subject_kind TEXT NOT NULL,
+    subject_id TEXT NOT NULL,
+    slot_kind TEXT NOT NULL,
+    slot_key_version INTEGER NOT NULL,
+    slot_digest TEXT NOT NULL,
+    subject_json BLOB NOT NULL,
+    slot_json BLOB NOT NULL,
+    subject_identity TEXT,
+    effect_kind TEXT NOT NULL,
+    receipt_json BLOB NOT NULL,
+    PRIMARY KEY (
+        mob_id, subject_kind, subject_id, slot_kind,
+        slot_key_version, slot_digest
+    )
+);
+CREATE INDEX IF NOT EXISTS mob_identity_receipts_identity
+    ON mob_identity_operation_receipts (mob_id, subject_identity);
+CREATE TABLE IF NOT EXISTS mob_identity_statuses (
+    mob_id TEXT NOT NULL,
+    agent_identity TEXT NOT NULL,
+    status_json BLOB NOT NULL,
+    PRIMARY KEY (mob_id, agent_identity)
+);
+CREATE TABLE IF NOT EXISTS realm_profiles (
+    name TEXT PRIMARY KEY,
+    profile_json BLOB NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+)";
+
+// Literal released 0.8.10 base DDL. This is intentionally independent of
+// `CREATE_SCHEMA_SQL`: the current initializer has the direct v4 shape, while
+// a ledger-v3 predecessor must be proven against the exact released catalog
+// before the one supported v3 -> v4 transition runs.
+const RELEASED_0_8_10_CREATE_SCHEMA_SQL: &str = r"
 CREATE TABLE IF NOT EXISTS mob_events (
     cursor INTEGER PRIMARY KEY,
     mob_id TEXT,
@@ -456,7 +618,6 @@ fn identity_intent_physical_key_matches(
 
 fn identity_operation_kind_key(kind: IdentityOperationKind) -> &'static str {
     match kind {
-        IdentityOperationKind::ApplyDeclarationManifest => "apply_declaration_manifest",
         IdentityOperationKind::SessionCreationConsumed => "session_creation_consumed",
         IdentityOperationKind::RetirementProven => "retirement_proven",
         IdentityOperationKind::ExternalBinding => "external_binding",
@@ -480,13 +641,9 @@ fn identity_receipt_keys(
     ))
 }
 
-fn identity_receipt_subject_projection(
-    subject: &IdentityOperationSubject,
-) -> (Option<&str>, Option<&str>) {
-    match subject {
-        IdentityOperationSubject::DeclarationScope { scope_id } => (Some(scope_id.as_str()), None),
-        IdentityOperationSubject::Identity { identity } => (None, Some(identity.as_str())),
-    }
+fn identity_receipt_subject_identity(subject: &IdentityOperationSubject) -> &str {
+    let IdentityOperationSubject::Identity { identity } = subject;
+    identity.as_str()
 }
 
 fn identity_receipt_sql_key(
@@ -499,14 +656,7 @@ fn identity_receipt_sql_key(
         version: i64,
         slot: &'a IdentityOperationSlot,
     }
-    let (subject_kind, subject_id) = match subject {
-        IdentityOperationSubject::DeclarationScope { scope_id } => {
-            ("declaration_scope", scope_id.as_str().to_string())
-        }
-        IdentityOperationSubject::Identity { identity } => {
-            ("identity", identity.as_str().to_string())
-        }
-    };
+    let subject_id = identity_receipt_subject_identity(subject).to_string();
     let slot_kind = identity_operation_kind_key(slot.kind());
     let material = serde_json::to_vec(&SlotDigestMaterial {
         domain: "meerkat.identity.operation_slot_key.v1",
@@ -515,7 +665,7 @@ fn identity_receipt_sql_key(
     })
     .map_err(|error| MobStoreError::Serialization(error.to_string()))?;
     Ok((
-        subject_kind,
+        "identity",
         subject_id,
         slot_kind,
         IDENTITY_RECEIPT_SLOT_KEY_VERSION,
@@ -561,7 +711,6 @@ fn identity_receipt_target(receipt: &IdentityOperationReceipt) -> Option<Identit
         IdentityOperationKind::InitialDelivery => {
             Some(IdentityActuatorTarget::InitialDeliveryReceipt)
         }
-        IdentityOperationKind::ApplyDeclarationManifest => None,
     }
 }
 
@@ -580,16 +729,15 @@ fn identity_actuator_receipt_matches_intent(
                 lineage_id,
                 lineage_generation,
             },
-            Payload::SessionCreationConsumed { checkpoint },
+            Payload::SessionCreationConsumed { authority },
             IdentityIntent::Present { session, .. },
         ) => {
             *tombstone_generation == normalized_tombstone
                 && session_id == &session.session_id
                 && lineage_id == &session.lineage_id
                 && *lineage_generation == session.lineage_generation
-                && checkpoint.session_id() == &session.session_id
-                && checkpoint.lineage_id() == &session.lineage_id
-                && checkpoint.generation() == session.lineage_generation
+                && authority.session_id() == &session.session_id
+                && authority.validate().is_ok()
         }
         (
             IdentityOperationSlot::RetirementProven {
@@ -868,16 +1016,212 @@ fn migration_0003_member_operator_execution_fence(
     Ok(())
 }
 
+/// Lift the released 0.8.10 v3 schema directly to the first 0.8.11 shape.
+///
+/// The external-delivery-only v4 and declaration-facade-pruning v5 shapes
+/// existed only on the unreleased development branch. They are deliberately
+/// not part of the published migration ledger: supported stores move from the
+/// released v3 authority to this complete v4 authority in one transaction.
+fn migration_0004_release_0_8_11_schema(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+    tx.execute_batch(
+        "CREATE TABLE mob_external_deliveries (
+             mob_id TEXT NOT NULL,
+             idempotency_key TEXT NOT NULL,
+             record_json BLOB NOT NULL,
+             PRIMARY KEY (mob_id, idempotency_key)
+         );
+         DROP INDEX mob_identity_intents_scope;
+         DROP INDEX mob_identity_receipts_scope;
+         DROP TABLE mob_identity_declaration_scopes;
+         DROP INDEX mob_identity_receipts_identity;
+         ALTER TABLE mob_identity_operation_receipts
+             RENAME TO mob_identity_operation_receipts_v3;
+         CREATE TABLE mob_identity_operation_receipts (
+             mob_id TEXT NOT NULL,
+             subject_kind TEXT NOT NULL,
+             subject_id TEXT NOT NULL,
+             slot_kind TEXT NOT NULL,
+             slot_key_version INTEGER NOT NULL,
+             slot_digest TEXT NOT NULL,
+             subject_json BLOB NOT NULL,
+             slot_json BLOB NOT NULL,
+             subject_identity TEXT,
+             effect_kind TEXT NOT NULL,
+             receipt_json BLOB NOT NULL,
+             PRIMARY KEY (
+                 mob_id, subject_kind, subject_id, slot_kind,
+                 slot_key_version, slot_digest
+             )
+         );
+         INSERT INTO mob_identity_operation_receipts (
+             mob_id, subject_kind, subject_id, slot_kind, slot_key_version,
+             slot_digest, subject_json, slot_json, subject_identity,
+             effect_kind, receipt_json
+         )
+         SELECT
+             mob_id, subject_kind, subject_id, slot_kind, slot_key_version,
+             slot_digest, subject_json, slot_json, subject_identity,
+             effect_kind, receipt_json
+         FROM mob_identity_operation_receipts_v3
+         WHERE subject_kind = 'identity'
+           AND subject_identity IS NOT NULL;
+         DROP TABLE mob_identity_operation_receipts_v3;
+         CREATE INDEX mob_identity_receipts_identity
+             ON mob_identity_operation_receipts (mob_id, subject_identity);",
+    )?;
+    Ok(())
+}
+
 fn migration_0001_mob_schema(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
     tx.execute_batch(CREATE_SCHEMA_SQL)
 }
 
+fn initialize_current_mob_schema(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+    // CREATE_SCHEMA_SQL is the direct current v4 shape. The two historical
+    // probes still install the released event index and verify/complete the
+    // member-operator request table, but v4's destructive v3 transition must
+    // never be replayed on this fresh shape.
+    migration_0001_mob_schema(tx)?;
+    migration_0002_event_route(tx)?;
+    migration_0003_member_operator_execution_fence(tx)
+}
+
+fn build_released_0_8_10_mob_schema(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+    tx.execute_batch(RELEASED_0_8_10_CREATE_SCHEMA_SQL)?;
+    migration_0002_event_route(tx)?;
+    migration_0003_member_operator_execution_fence(tx)
+}
+
+const RELEASED_0_8_10_MOB_OBJECTS: &[meerkat_sqlite::SchemaObject] = &[
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_events",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_event_meta",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runs",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_run_remote_turn_intents",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_run_remote_turn_receipts",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_specs",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_supervisors",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_host_authorities",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_host_binding_generation_highwaters",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_member_operator_requests",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_placed_spawns",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_operator_grants",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_member_event_cursors",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_member_live_cleanups",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_binding_overlays",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_identity_declaration_scopes",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_identity_store_meta",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_identity_intents",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_identity_leases",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_identity_operation_receipts",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_identity_statuses",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "realm_profiles",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Index,
+        name: "mob_events_mob_cursor",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Index,
+        name: "mob_identity_intents_session",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Index,
+        name: "mob_identity_intents_lineage",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Index,
+        name: "mob_identity_intents_scope",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Index,
+        name: "mob_identity_receipts_scope",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Index,
+        name: "mob_identity_receipts_identity",
+    },
+];
+
+fn verify_released_0_8_10_mob_schema(conn: &Connection) -> Result<(), String> {
+    meerkat_sqlite::verify_released_schema_fingerprint(
+        conn,
+        &MOB_DOMAIN,
+        RELEASED_0_8_10_MOB_OBJECTS,
+        build_released_0_8_10_mob_schema,
+    )
+}
+
 /// The mob store bundle's schema domain in the per-file migration ledger.
 ///
-/// Migrations 0002/0003 lift the historical per-open upgrade functions
-/// (event-route column backfill, member-operator fence-table rebuild) into
-/// once-per-file migrations; their internal shape probes keep them
-/// convergent on files of any vintage.
+/// The only historical transition admitted by this binary is the exact
+/// released v3 -> v4 step. Migrations 0002/0003 remain as frozen history and
+/// as pieces of the direct current/released schema builders; their lower
+/// ledger versions are not eligible predecessors.
 pub const MOB_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::SchemaDomain {
     name: "mob",
     migrations: &[
@@ -896,8 +1240,199 @@ pub const MOB_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::SchemaDomai
             name: "member-operator-execution-fence",
             apply: migration_0003_member_operator_execution_fence,
         },
+        meerkat_sqlite::Migration {
+            version: 4,
+            name: "release-0.8.11-schema",
+            apply: migration_0004_release_0_8_11_schema,
+        },
+    ],
+    initialize_current: initialize_current_mob_schema,
+    allowed_existing_versions: &[3, 4],
+    released_predecessors: &[meerkat_sqlite::SchemaPredecessor {
+        version: 3,
+        verify: verify_released_0_8_10_mob_schema,
+    }],
+    owned_objects: &[
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "mob_events",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "mob_event_meta",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "mob_external_deliveries",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "mob_runs",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "mob_run_remote_turn_intents",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "mob_run_remote_turn_receipts",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "mob_specs",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "mob_runtime_supervisors",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "mob_runtime_host_authorities",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "mob_runtime_host_binding_generation_highwaters",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "mob_runtime_member_operator_requests",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "mob_runtime_placed_spawns",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "mob_runtime_operator_grants",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "mob_runtime_member_event_cursors",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "mob_runtime_member_live_cleanups",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "mob_runtime_binding_overlays",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "mob_identity_store_meta",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "mob_identity_intents",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "mob_identity_leases",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "mob_identity_operation_receipts",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "mob_identity_statuses",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "realm_profiles",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Index,
+            name: "mob_events_mob_cursor",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Index,
+            name: "mob_identity_intents_session",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Index,
+            name: "mob_identity_intents_lineage",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Index,
+            name: "mob_identity_receipts_identity",
+        },
+    ],
+    // Released-only names remain owned forever so an unledgered or partial
+    // candidate shape cannot masquerade as a fresh v4 domain.
+    retired_objects: &[
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "mob_identity_declaration_scopes",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Index,
+            name: "mob_identity_intents_scope",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Index,
+            name: "mob_identity_receipts_scope",
+        },
     ],
 };
+
+#[cfg(test)]
+mod schema_floor_tests {
+    use super::*;
+
+    fn released_v3() -> Connection {
+        let mut conn = Connection::open_in_memory().expect("open");
+        let tx = conn.transaction().expect("tx");
+        build_released_0_8_10_mob_schema(&tx).expect("released schema");
+        tx.commit().expect("commit");
+        conn.execute_batch(
+            "CREATE TABLE meerkat_schema (
+                 domain TEXT PRIMARY KEY,
+                 version INTEGER NOT NULL
+             );
+             INSERT INTO meerkat_schema VALUES ('mob', 3);",
+        )
+        .expect("ledger");
+        conn
+    }
+
+    #[test]
+    fn exact_released_v3_upgrades_to_current() {
+        let mut conn = released_v3();
+        let report =
+            meerkat_sqlite::apply_domain_migrations(&mut conn, &MOB_DOMAIN).expect("upgrade");
+        assert_eq!(report.from_version, 3);
+        assert_eq!(report.to_version, 4);
+    }
+
+    #[test]
+    fn released_v3_external_table_and_pruned_candidate_shapes_are_refused_unmutated() {
+        for candidate in [
+            "CREATE TABLE mob_external_deliveries (
+                 mob_id TEXT NOT NULL,
+                 idempotency_key TEXT NOT NULL,
+                 record_json BLOB NOT NULL,
+                 PRIMARY KEY (mob_id, idempotency_key)
+             )",
+            "DROP INDEX mob_identity_intents_scope;
+             DROP INDEX mob_identity_receipts_scope;
+             DROP TABLE mob_identity_declaration_scopes",
+        ] {
+            let mut conn = released_v3();
+            conn.execute_batch(candidate).expect("candidate shape");
+            let err = meerkat_sqlite::apply_domain_migrations(&mut conn, &MOB_DOMAIN)
+                .expect_err("refuse candidate");
+            assert!(matches!(
+                err,
+                meerkat_sqlite::SqliteStoreError::SchemaFingerprintMismatch { version: 3, .. }
+            ));
+            assert_eq!(
+                meerkat_sqlite::domain_version(&conn, MOB_DOMAIN.name).expect("ledger"),
+                Some(3)
+            );
+        }
+    }
+}
 
 /// Per-operation connection: fence guard lives exactly as long as the
 /// connection it admits.
@@ -925,7 +1460,7 @@ fn open_connection(path: &Path) -> Result<MobConn, MobStoreError> {
         path,
         meerkat_sqlite::ConnectionProfile::PRIMARY,
         meerkat_sqlite::OpenOptions {
-            // Future-schema refusal precedes the Primary profile's WAL
+            // Schema-eligibility refusal precedes the Primary profile's WAL
             // conversion.
             schema_preflight: &[&MOB_DOMAIN],
             ..meerkat_sqlite::OpenOptions::default()
@@ -1281,10 +1816,15 @@ impl SqliteMobEventBus {
         let thread_bus = Arc::downgrade(self);
         let thread_builder = thread::Builder::new().name("sqlite-mob-event-watch".to_string());
         if let Err(error) = thread_builder.spawn(move || {
+            let recovery_backoff_min = Duration::from_millis(EVENT_WATCH_RECOVERY_BACKOFF_MIN_MS);
+            let recovery_backoff_max = Duration::from_millis(EVENT_WATCH_RECOVERY_BACKOFF_MAX_MS);
+            let mut recovery_backoff = recovery_backoff_min;
+            let mut recovery_deadline = None;
             loop {
-                let received_wake = match wake_rx
-                    .recv_timeout(Duration::from_millis(EVENT_WATCH_POLL_FALLBACK_MS))
-                {
+                let wait = recovery_deadline
+                    .map(|deadline: Instant| deadline.saturating_duration_since(Instant::now()))
+                    .unwrap_or_else(|| Duration::from_millis(EVENT_WATCH_SAFETY_SWEEP_MS));
+                let received_wake = match wake_rx.recv_timeout(wait) {
                     Ok(()) => true,
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => false,
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
@@ -1296,15 +1836,34 @@ impl SqliteMobEventBus {
                 let Some(bus) = thread_bus.upgrade() else {
                     break;
                 };
-                if !received_wake && bus.event_tx.receiver_count() == 0 {
+                if recovery_deadline.is_some_and(|deadline| Instant::now() < deadline) {
+                    // Filesystem notification storms must not bypass a failed
+                    // storage read's recovery deadline. The next loop still
+                    // waits on the same absolute deadline while coalescing
+                    // every intervening causal wake.
                     continue;
                 }
-                if let Err(error) = bus.publish_available_from_storage() {
-                    tracing::warn!(
-                        error = %error,
-                        path = %bus.path.display(),
-                        "sqlite mob event watch catch-up failed",
-                    );
+                if !received_wake && bus.event_tx.receiver_count() == 0 {
+                    recovery_deadline = None;
+                    recovery_backoff = recovery_backoff_min;
+                    continue;
+                }
+                match bus.publish_available_from_storage() {
+                    Ok(()) => {
+                        recovery_deadline = None;
+                        recovery_backoff = recovery_backoff_min;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            path = %bus.path.display(),
+                            retry_after_ms = recovery_backoff.as_millis(),
+                            "sqlite mob event watch catch-up failed",
+                        );
+                        recovery_deadline = Some(Instant::now() + recovery_backoff);
+                        recovery_backoff =
+                            recovery_backoff.saturating_mul(2).min(recovery_backoff_max);
+                    }
                 }
             }
         }) {
@@ -1642,39 +2201,6 @@ fn sqlite_identity_write_error(error: rusqlite::Error, context: &str) -> MobStor
     } else {
         MobStoreError::WriteFailed(format!("{context}: {error}"))
     }
-}
-
-fn query_identity_scope_observation(
-    conn: &Connection,
-    mob_id: &MobId,
-    scope_id: &IdentityDeclarationScopeId,
-) -> Result<IdentityStoredObservation<IdentityDeclarationScopeHead>, MobStoreError> {
-    let row: Option<(String, Vec<u8>)> = conn
-        .query_row(
-            "SELECT typeof(head_json), CAST(head_json AS BLOB)
-             FROM mob_identity_declaration_scopes
-             WHERE mob_id = ?1 AND scope_id = ?2",
-            params![mob_id.as_str(), scope_id.as_str()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()
-        .map_err(se)?;
-    let Some((storage_type, bytes)) = row else {
-        return Ok(IdentityStoredObservation::Missing);
-    };
-    Ok(classify_identity_blob(
-        &storage_type,
-        &bytes,
-        Some(IDENTITY_DECLARATION_SCOPE_SCHEMA_VERSION),
-        IdentityDeclarationScopeHead::validate,
-        |head| {
-            if head.mob_id == *mob_id && head.scope_id == *scope_id {
-                Ok(())
-            } else {
-                Err("identity declaration scope head does not match its physical key".to_string())
-            }
-        },
-    ))
 }
 
 fn query_identity_intent_observation(
@@ -2170,7 +2696,6 @@ fn query_identity_receipt_observation(
         String,
         Vec<u8>,
         Option<String>,
-        Option<String>,
         String,
         String,
         Vec<u8>,
@@ -2178,7 +2703,7 @@ fn query_identity_receipt_observation(
         .query_row(
             "SELECT typeof(subject_json), CAST(subject_json AS BLOB),
                     typeof(slot_json), CAST(slot_json AS BLOB),
-                    subject_scope_id, subject_identity, effect_kind,
+                    subject_identity, effect_kind,
                     typeof(receipt_json), CAST(receipt_json AS BLOB)
              FROM mob_identity_operation_receipts
              WHERE mob_id = ?1
@@ -2202,7 +2727,6 @@ fn query_identity_receipt_observation(
                     row.get(5)?,
                     row.get(6)?,
                     row.get(7)?,
-                    row.get(8)?,
                 ))
             },
         )
@@ -2213,7 +2737,6 @@ fn query_identity_receipt_observation(
         stored_subject_key,
         slot_type,
         stored_slot_key,
-        subject_scope_id,
         subject_identity,
         effect_kind,
         receipt_type,
@@ -2232,7 +2755,7 @@ fn query_identity_receipt_observation(
             detail: "identity operation receipt key is not canonical blob JSON".to_string(),
         });
     }
-    let (expected_scope, expected_identity) = identity_receipt_subject_projection(subject);
+    let expected_identity = identity_receipt_subject_identity(subject);
     Ok(classify_identity_blob(
         &receipt_type,
         &receipt_bytes,
@@ -2243,8 +2766,7 @@ fn query_identity_receipt_observation(
                 || receipt.subject != *subject
                 || receipt.slot != *slot
                 || receipt.effect_kind != slot.kind()
-                || subject_scope_id.as_deref() != expected_scope
-                || subject_identity.as_deref() != expected_identity
+                || subject_identity.as_deref() != Some(expected_identity)
                 || effect_kind != identity_operation_kind_key(receipt.effect_kind)
             {
                 Err("identity operation receipt does not match its physical key".to_string())
@@ -2286,24 +2808,6 @@ fn query_identity_status_observation(
             }
         },
     ))
-}
-
-fn write_identity_scope_head(
-    tx: &Transaction<'_>,
-    head: &IdentityDeclarationScopeHead,
-) -> Result<(), MobStoreError> {
-    tx.execute(
-        "INSERT INTO mob_identity_declaration_scopes (mob_id, scope_id, head_json)
-         VALUES (?1, ?2, ?3)
-         ON CONFLICT(mob_id, scope_id) DO UPDATE SET head_json = excluded.head_json",
-        params![
-            head.mob_id.as_str(),
-            head.scope_id.as_str(),
-            encode_json(head)?
-        ],
-    )
-    .map_err(|error| sqlite_identity_write_error(error, "write identity scope head"))?;
-    Ok(())
 }
 
 fn write_identity_intent(
@@ -2402,14 +2906,13 @@ fn insert_identity_receipt(
     let (_, _, subject_key, slot_key) = identity_receipt_keys(&receipt.subject, &receipt.slot)?;
     let (subject_kind, subject_id, slot_kind, slot_key_version, slot_digest) =
         identity_receipt_sql_key(&receipt.subject, &receipt.slot)?;
-    let (subject_scope_id, subject_identity) =
-        identity_receipt_subject_projection(&receipt.subject);
+    let subject_identity = identity_receipt_subject_identity(&receipt.subject);
     tx.execute(
         "INSERT INTO mob_identity_operation_receipts
              (mob_id, subject_kind, subject_id, slot_kind, slot_key_version, slot_digest,
-              subject_json, slot_json, subject_scope_id, subject_identity, effect_kind,
+              subject_json, slot_json, subject_identity, effect_kind,
               receipt_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             receipt.mob_id.as_str(),
             subject_kind,
@@ -2419,7 +2922,6 @@ fn insert_identity_receipt(
             slot_digest,
             subject_key,
             slot_key,
-            subject_scope_id,
             subject_identity,
             identity_operation_kind_key(receipt.effect_kind),
             encode_json(receipt)?,
@@ -2427,347 +2929,6 @@ fn insert_identity_receipt(
     )
     .map_err(|error| sqlite_identity_write_error(error, "insert identity operation receipt"))?;
     Ok(())
-}
-
-fn load_identity_authority_state_for_manifest(
-    tx: &Transaction<'_>,
-    mob_id: &MobId,
-    plan: &IdentityDeclarationApplyPlan,
-) -> Result<IdentityAuthorityState, MobStoreError> {
-    let mut state = IdentityAuthorityState::default();
-    if let Some(head) = require_identity_authority(
-        query_identity_scope_observation(tx, mob_id, plan.scope_id())?,
-        "identity declaration scope head",
-    )? {
-        state
-            .scope_heads
-            .insert((mob_id.clone(), plan.scope_id().clone()), head);
-    }
-
-    let declared_identities = plan.members.keys().cloned().collect::<BTreeSet<_>>();
-    let candidate_session_ids = plan
-        .members
-        .values()
-        .map(|member| member.candidate_session_target().session_id.to_string())
-        .chain(
-            plan.legacy_imports()
-                .values()
-                .map(|legacy_import| legacy_import.session().session_id.to_string()),
-        )
-        .collect::<BTreeSet<_>>();
-    let candidate_lineage_ids = plan
-        .members
-        .values()
-        .map(|member| {
-            member
-                .candidate_session_target()
-                .lineage_id
-                .as_str()
-                .to_string()
-        })
-        .chain(
-            plan.legacy_imports()
-                .values()
-                .map(|legacy_import| legacy_import.session().lineage_id.as_str().to_string()),
-        )
-        .collect::<BTreeSet<_>>();
-    let mut stmt = tx
-        .prepare(
-            "SELECT typeof(agent_identity), CAST(agent_identity AS BLOB),
-                    typeof(declaration_scope), CAST(declaration_scope AS BLOB),
-                    typeof(session_id), CAST(session_id AS BLOB),
-                    typeof(lineage_id), CAST(lineage_id AS BLOB),
-                    typeof(record_json), CAST(record_json AS BLOB)
-             FROM mob_identity_intents
-             WHERE mob_id = ?1",
-        )
-        .map_err(se)?;
-    let rows = stmt
-        .query_map(params![mob_id.as_str()], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Vec<u8>>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, Option<Vec<u8>>>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, Option<Vec<u8>>>(5)?,
-                row.get::<_, String>(6)?,
-                row.get::<_, Option<Vec<u8>>>(7)?,
-                row.get::<_, String>(8)?,
-                row.get::<_, Vec<u8>>(9)?,
-            ))
-        })
-        .map_err(se)?;
-    for row in rows {
-        let (
-            identity_type,
-            identity_bytes,
-            declaration_scope_type,
-            declaration_scope_bytes,
-            session_id_type,
-            session_id_bytes,
-            lineage_id_type,
-            lineage_id_bytes,
-            storage_type,
-            bytes,
-        ) = row.map_err(se)?;
-        let identity_key =
-            decode_required_identity_text(&identity_type, identity_bytes.clone(), "agent_identity");
-        let identity_key_error = identity_key.as_ref().err().cloned();
-        let identity = AgentIdentity::from(identity_key.unwrap_or_else(|_| {
-            format!(
-                "malformed-physical-identity:{}",
-                identity_raw_evidence_digest(&identity_bytes)
-            )
-        }));
-        let declaration_scope = decode_optional_identity_text(
-            &declaration_scope_type,
-            declaration_scope_bytes,
-            "identity intent declaration_scope",
-        );
-        let session_id = decode_optional_identity_text(
-            &session_id_type,
-            session_id_bytes,
-            "identity intent session_id",
-        );
-        let lineage_id = decode_optional_identity_text(
-            &lineage_id_type,
-            lineage_id_bytes,
-            "identity intent lineage_id",
-        );
-        let projection_error = identity_key_error
-            .or_else(|| declaration_scope.as_ref().err().cloned())
-            .or_else(|| session_id.as_ref().err().cloned())
-            .or_else(|| lineage_id.as_ref().err().cloned());
-        let declaration_scope = declaration_scope.unwrap_or(None);
-        let session_id = session_id.unwrap_or(None);
-        let lineage_id = lineage_id.unwrap_or(None);
-        let observation = classify_identity_blob(
-            &storage_type,
-            &bytes,
-            Some(IDENTITY_INTENT_SCHEMA_VERSION),
-            IdentityIntentRecord::validate,
-            |record| {
-                if let Some(detail) = projection_error {
-                    return Err(detail);
-                }
-                identity_intent_physical_key_matches(
-                    record,
-                    mob_id,
-                    &identity,
-                    declaration_scope.as_deref(),
-                    session_id.as_deref(),
-                    lineage_id.as_deref(),
-                )
-            },
-        );
-        match observation {
-            IdentityStoredObservation::Valid(record) => {
-                state.intents.insert((mob_id.clone(), identity), record);
-            }
-            IdentityStoredObservation::Unsupported {
-                evidence_digest,
-                detail,
-            }
-            | IdentityStoredObservation::Malformed {
-                evidence_digest,
-                detail,
-            } => {
-                let relevant = declared_identities.contains(&identity)
-                    || declaration_scope.as_deref() == Some(plan.scope_id().as_str())
-                    || session_id
-                        .as_ref()
-                        .is_some_and(|value| candidate_session_ids.contains(value))
-                    || lineage_id
-                        .as_ref()
-                        .is_some_and(|value| candidate_lineage_ids.contains(value));
-                if relevant {
-                    return Err(identity_authority_blocked(
-                        Some(evidence_digest),
-                        format!("relevant identity intent row '{identity}' is unsafe: {detail}"),
-                    ));
-                }
-            }
-            IdentityStoredObservation::Missing => unreachable!("query row cannot be missing"),
-        }
-    }
-    drop(stmt);
-
-    let relevant_identities = state
-        .intents
-        .iter()
-        .filter_map(|((stored_mob_id, identity), record)| {
-            (stored_mob_id == mob_id
-                && (declared_identities.contains(identity)
-                    || record.declaration_scope.as_ref() == Some(plan.scope_id())))
-            .then_some(identity.clone())
-        })
-        .chain(declared_identities.iter().cloned())
-        .collect::<BTreeSet<_>>();
-    let mut stmt = tx
-        .prepare(
-            "SELECT subject_kind, subject_id, slot_kind, slot_key_version, slot_digest,
-                    typeof(subject_json), CAST(subject_json AS BLOB),
-                    typeof(slot_json), CAST(slot_json AS BLOB),
-                    subject_scope_id, subject_identity, effect_kind,
-                    typeof(receipt_json), CAST(receipt_json AS BLOB)
-             FROM mob_identity_operation_receipts
-             WHERE mob_id = ?1",
-        )
-        .map_err(se)?;
-    let rows = stmt
-        .query_map(params![mob_id.as_str()], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, i64>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, String>(5)?,
-                row.get::<_, Vec<u8>>(6)?,
-                row.get::<_, String>(7)?,
-                row.get::<_, Vec<u8>>(8)?,
-                row.get::<_, Option<String>>(9)?,
-                row.get::<_, Option<String>>(10)?,
-                row.get::<_, String>(11)?,
-                row.get::<_, String>(12)?,
-                row.get::<_, Vec<u8>>(13)?,
-            ))
-        })
-        .map_err(se)?;
-    for row in rows {
-        let (
-            subject_kind,
-            subject_id,
-            slot_kind,
-            slot_key_version,
-            slot_digest,
-            subject_type,
-            subject_bytes,
-            slot_type,
-            slot_bytes,
-            subject_scope_id,
-            subject_identity,
-            effect_kind,
-            receipt_type,
-            receipt_bytes,
-        ) = row.map_err(se)?;
-        let relevant = (subject_kind == "declaration_scope"
-            && subject_id == plan.scope_id().as_str())
-            || (subject_kind == "identity"
-                && relevant_identities.contains(&AgentIdentity::from(subject_id.as_str())))
-            || subject_scope_id.as_deref() == Some(plan.scope_id().as_str())
-            || subject_identity.as_ref().is_some_and(|value| {
-                relevant_identities.contains(&AgentIdentity::from(value.as_str()))
-            });
-        let subject = serde_json::from_slice::<IdentityOperationSubject>(&subject_bytes);
-        let slot = serde_json::from_slice::<IdentityOperationSlot>(&slot_bytes);
-        let (Ok(subject), Ok(slot)) = (subject, slot) else {
-            if relevant {
-                return Err(identity_authority_blocked(
-                    Some(identity_raw_evidence_digest(&receipt_bytes)),
-                    "relevant identity receipt has a malformed physical subject/slot key",
-                ));
-            }
-            continue;
-        };
-        let canonical_subject = serde_json::to_vec(&subject).map_err(se)?;
-        let canonical_slot = serde_json::to_vec(&slot).map_err(se)?;
-        let (expected_scope, expected_identity) = identity_receipt_subject_projection(&subject);
-        let (
-            expected_subject_kind,
-            expected_subject_id,
-            expected_slot_kind,
-            expected_slot_key_version,
-            expected_slot_digest,
-        ) = identity_receipt_sql_key(&subject, &slot)?;
-        let observation = if subject_type != "blob"
-            || slot_type != "blob"
-            || subject_bytes != canonical_subject
-            || slot_bytes != canonical_slot
-            || subject_kind != expected_subject_kind
-            || subject_id != expected_subject_id
-            || slot_kind != expected_slot_kind
-            || slot_key_version != expected_slot_key_version
-            || slot_digest != expected_slot_digest
-        {
-            IdentityStoredObservation::Malformed {
-                evidence_digest: identity_raw_evidence_digest(&receipt_bytes),
-                detail: "identity receipt has a noncanonical physical subject/slot key".to_string(),
-            }
-        } else {
-            classify_identity_blob(
-                &receipt_type,
-                &receipt_bytes,
-                Some(IDENTITY_OPERATION_RECEIPT_SCHEMA_VERSION),
-                IdentityOperationReceipt::validate,
-                |receipt| {
-                    if receipt.mob_id != *mob_id
-                        || receipt.subject != subject
-                        || receipt.slot != slot
-                        || receipt.effect_kind != slot.kind()
-                        || subject_scope_id.as_deref() != expected_scope
-                        || subject_identity.as_deref() != expected_identity
-                        || effect_kind != identity_operation_kind_key(receipt.effect_kind)
-                    {
-                        Err("identity receipt does not match its physical key".to_string())
-                    } else {
-                        Ok(())
-                    }
-                },
-            )
-        };
-        match observation {
-            IdentityStoredObservation::Valid(receipt) => {
-                let (subject_key, slot_key, _, _) =
-                    identity_receipt_keys(&receipt.subject, &receipt.slot)?;
-                state
-                    .receipts
-                    .insert((mob_id.clone(), subject_key, slot_key), receipt);
-            }
-            IdentityStoredObservation::Unsupported {
-                evidence_digest,
-                detail,
-            }
-            | IdentityStoredObservation::Malformed {
-                evidence_digest,
-                detail,
-            } if relevant => {
-                return Err(identity_authority_blocked(
-                    Some(evidence_digest),
-                    format!("relevant identity operation receipt is unsafe: {detail}"),
-                ));
-            }
-            IdentityStoredObservation::Unsupported { .. }
-            | IdentityStoredObservation::Malformed { .. } => {}
-            IdentityStoredObservation::Missing => unreachable!("query row cannot be missing"),
-        }
-    }
-
-    let manifest_receipt_already_exists = state.receipts.values().any(|receipt| {
-        matches!(
-            (&receipt.subject, &receipt.slot),
-            (
-                IdentityOperationSubject::DeclarationScope { scope_id },
-                IdentityOperationSlot::ApplyDeclarationManifest {
-                    scope_id: slot_scope,
-                    mutation_id,
-                },
-            ) if scope_id == plan.scope_id()
-                && slot_scope == plan.scope_id()
-                && mutation_id == plan.operation_id()
-        )
-    });
-    if !manifest_receipt_already_exists {
-        for identity in plan.legacy_imports().keys() {
-            if let Some(lease) = query_identity_lease_authority(tx, mob_id, identity)? {
-                state
-                    .leases
-                    .insert((mob_id.clone(), identity.clone()), lease);
-            }
-        }
-    }
-    Ok(state)
 }
 
 #[async_trait]
@@ -2787,22 +2948,6 @@ impl MobIdentityStore for SqliteMobIdentityStore {
             permit,
             expected_session,
         }))
-    }
-
-    async fn observe_identity_declaration_scope(
-        &self,
-        mob_id: &MobId,
-        scope_id: &IdentityDeclarationScopeId,
-    ) -> Result<IdentityStoredObservation<IdentityDeclarationScopeHead>, MobStoreError> {
-        let path = self.path.clone();
-        let store_instance_id = self.store_instance_id.clone();
-        let mob_id = mob_id.clone();
-        let scope_id = scope_id.clone();
-        run_sqlite_task(move || {
-            let conn = open_existing_identity_read_connection(&path, &store_instance_id)?;
-            query_identity_scope_observation(&conn, &mob_id, &scope_id)
-        })
-        .await
     }
 
     async fn observe_identity_intent(
@@ -2883,7 +3028,7 @@ impl MobIdentityStore for SqliteMobIdentityStore {
                 let identity_key_error = identity_key.as_ref().err().cloned();
                 let identity = AgentIdentity::from(identity_key.unwrap_or_else(|_| {
                     format!(
-                        "malformed-physical-identity:{}",
+                        "malformed-physical-identity:{identity_type}:{}",
                         identity_raw_evidence_digest(&identity_bytes)
                     )
                 }));
@@ -2935,131 +3080,167 @@ impl MobIdentityStore for SqliteMobIdentityStore {
         .await
     }
 
-    async fn replay_identity_declaration(
+    async fn scan_identity_intents_page(
         &self,
         mob_id: &MobId,
-        scope_id: &IdentityDeclarationScopeId,
-        operation_id: &meerkat_core::ops::OperationId,
-        request_digest: &str,
-    ) -> Result<Option<IdentityDeclarationManifestApplyOutcome>, MobStoreError> {
-        validate_identity_declaration_replay_request(
-            mob_id,
-            scope_id,
-            operation_id,
-            request_digest,
-        )?;
+        after: Option<&super::IdentityIntentScanCursor>,
+        limit: usize,
+    ) -> Result<super::IdentityIntentScanPage, MobStoreError> {
+        if limit == 0 || limit > super::IDENTITY_INTENT_SCAN_PAGE_MAX {
+            return Err(MobStoreError::Internal(format!(
+                "identity intent scan limit must be in 1..={}, got {limit}",
+                super::IDENTITY_INTENT_SCAN_PAGE_MAX
+            )));
+        }
         let path = self.path.clone();
         let store_instance_id = self.store_instance_id.clone();
         let mob_id = mob_id.clone();
-        let scope_id = scope_id.clone();
-        let operation_id = operation_id.clone();
-        let request_digest = request_digest.to_string();
+        let after = after.cloned();
         run_sqlite_task(move || {
-            let mut conn = open_existing_identity_read_connection(&path, &store_instance_id)?;
-            let tx = conn.transaction().map_err(se)?;
-            let subject = IdentityOperationSubject::DeclarationScope {
-                scope_id: scope_id.clone(),
-            };
-            let slot = IdentityOperationSlot::ApplyDeclarationManifest {
-                scope_id: scope_id.clone(),
-                mutation_id: operation_id.clone(),
-            };
-            let Some(receipt) = require_identity_authority(
-                query_identity_receipt_observation(&tx, &mob_id, &subject, &slot)?,
-                "identity declaration replay receipt",
-            )?
-            else {
-                tx.commit().map_err(se)?;
-                return Ok(None);
-            };
-            let IdentityOperationReceiptPayload::ApplyDeclarationManifest { outcome } =
-                receipt.payload
-            else {
-                return Err(identity_authority_blocked(
-                    None,
-                    "identity declaration replay slot contains a non-manifest receipt",
-                ));
-            };
-            if outcome.request_digest != request_digest {
-                return Err(MobStoreError::CasConflict(format!(
-                    "identity declaration operation '{operation_id}' was reused with different content"
-                )));
+            let conn = open_existing_identity_read_connection(&path, &store_instance_id)?;
+            let after_storage_class = after
+                .as_ref()
+                .map(super::IdentityIntentScanCursor::storage_class);
+            let after_identity = after
+                .as_ref()
+                .map(super::IdentityIntentScanCursor::physical_identity);
+            let fetch_limit = i64::try_from(limit.saturating_add(1)).map_err(|_| {
+                MobStoreError::Internal("identity intent scan limit overflow".to_string())
+            })?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT typeof(agent_identity), CAST(agent_identity AS BLOB),
+                            typeof(declaration_scope), CAST(declaration_scope AS BLOB),
+                            typeof(session_id), CAST(session_id AS BLOB),
+                            typeof(lineage_id), CAST(lineage_id AS BLOB),
+                            typeof(record_json), CAST(record_json AS BLOB)
+                     FROM mob_identity_intents
+                     WHERE mob_id = ?1
+                       AND (
+                           ?2 IS NULL
+                           OR typeof(agent_identity) > ?2
+                           OR (
+                               typeof(agent_identity) = ?2
+                               AND CAST(agent_identity AS BLOB) > ?3
+                           )
+                       )
+                     ORDER BY typeof(agent_identity), CAST(agent_identity AS BLOB)
+                     LIMIT ?4",
+                )
+                .map_err(se)?;
+            let rows = stmt
+                .query_map(
+                    params![
+                        mob_id.as_str(),
+                        after_storage_class,
+                        after_identity,
+                        fetch_limit
+                    ],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Vec<u8>>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, Option<Vec<u8>>>(3)?,
+                            row.get::<_, String>(4)?,
+                            row.get::<_, Option<Vec<u8>>>(5)?,
+                            row.get::<_, String>(6)?,
+                            row.get::<_, Option<Vec<u8>>>(7)?,
+                            row.get::<_, String>(8)?,
+                            row.get::<_, Vec<u8>>(9)?,
+                        ))
+                    },
+                )
+                .map_err(se)?;
+            let mut selected = rows.collect::<Result<Vec<_>, _>>().map_err(se)?;
+            let has_more = selected.len() > limit;
+            if has_more {
+                selected.pop();
             }
+            let next = if has_more {
+                let Some((identity_type, identity_bytes, ..)) = selected.last() else {
+                    return Err(MobStoreError::Internal(
+                        "identity intent scan continuation has no returned row".to_string(),
+                    ));
+                };
+                Some(super::IdentityIntentScanCursor::new(
+                    identity_type.clone(),
+                    identity_bytes.clone(),
+                ))
+            } else {
+                None
+            };
 
-            let mut state = IdentityAuthorityState::default();
-            if let Some(head) = require_identity_authority(
-                query_identity_scope_observation(&tx, &mob_id, &scope_id)?,
-                "identity declaration replay scope head",
-            )? {
-                state
-                    .scope_heads
-                    .insert((mob_id.clone(), scope_id.clone()), head);
+            let mut observations = BTreeMap::new();
+            for (
+                identity_type,
+                identity_bytes,
+                declaration_scope_type,
+                declaration_scope_bytes,
+                session_id_type,
+                session_id_bytes,
+                lineage_id_type,
+                lineage_id_bytes,
+                storage_type,
+                bytes,
+            ) in selected
+            {
+                let identity_key = decode_required_identity_text(
+                    &identity_type,
+                    identity_bytes.clone(),
+                    "agent_identity",
+                );
+                let identity_key_error = identity_key.as_ref().err().cloned();
+                let identity = AgentIdentity::from(identity_key.unwrap_or_else(|_| {
+                    format!(
+                        "malformed-physical-identity:{identity_type}:{}",
+                        identity_raw_evidence_digest(&identity_bytes)
+                    )
+                }));
+                let declaration_scope = decode_optional_identity_text(
+                    &declaration_scope_type,
+                    declaration_scope_bytes,
+                    "identity intent declaration_scope",
+                );
+                let session_id = decode_optional_identity_text(
+                    &session_id_type,
+                    session_id_bytes,
+                    "identity intent session_id",
+                );
+                let lineage_id = decode_optional_identity_text(
+                    &lineage_id_type,
+                    lineage_id_bytes,
+                    "identity intent lineage_id",
+                );
+                let projection_error = identity_key_error
+                    .or_else(|| declaration_scope.as_ref().err().cloned())
+                    .or_else(|| session_id.as_ref().err().cloned())
+                    .or_else(|| lineage_id.as_ref().err().cloned());
+                let declaration_scope = declaration_scope.unwrap_or(None);
+                let session_id = session_id.unwrap_or(None);
+                let lineage_id = lineage_id.unwrap_or(None);
+                let observation = classify_identity_blob(
+                    &storage_type,
+                    &bytes,
+                    Some(IDENTITY_INTENT_SCHEMA_VERSION),
+                    IdentityIntentRecord::validate,
+                    |record| {
+                        if let Some(detail) = projection_error {
+                            return Err(detail);
+                        }
+                        identity_intent_physical_key_matches(
+                            record,
+                            &mob_id,
+                            &identity,
+                            declaration_scope.as_deref(),
+                            session_id.as_deref(),
+                            lineage_id.as_deref(),
+                        )
+                    },
+                );
+                observations.insert(identity, observation);
             }
-            for identity in outcome.identities.keys() {
-                if let Some(record) = require_identity_authority(
-                    query_identity_intent_observation(&tx, &mob_id, identity)?,
-                    "identity declaration replay intent",
-                )? {
-                    state
-                        .intents
-                        .insert((mob_id.clone(), identity.clone()), record);
-                }
-            }
-            validate_manifest_replay_state(&state, &mob_id, &outcome)?;
-            tx.commit().map_err(se)?;
-            Ok(Some(outcome))
-        })
-        .await
-    }
-
-    async fn apply_identity_declaration(
-        &self,
-        mob_id: &MobId,
-        plan: &IdentityDeclarationApplyPlan,
-    ) -> Result<IdentityDeclarationManifestApplyOutcome, MobStoreError> {
-        let path = self.path.clone();
-        let store_instance_id = self.store_instance_id.clone();
-        let mob_id = mob_id.clone();
-        let plan = plan.clone();
-        run_sqlite_task(move || {
-            let mut conn = open_existing_identity_write_connection(&path, &store_instance_id)?;
-            let tx = begin_identity_immediate(&mut conn, &store_instance_id)?;
-            let mut state = load_identity_authority_state_for_manifest(&tx, &mob_id, &plan)?;
-            let prior_scope_heads = state.scope_heads.clone();
-            let prior_intents = state.intents.clone();
-            let prior_leases = state.leases.clone();
-            let prior_receipts = state.receipts.clone();
-            let outcome = apply_identity_declaration_locked(&mut state, &mob_id, &plan)?;
-
-            for ((stored_mob_id, identity), record) in &state.intents {
-                if stored_mob_id == &mob_id
-                    && prior_intents.get(&(stored_mob_id.clone(), identity.clone())) != Some(record)
-                {
-                    write_identity_intent(&tx, &mob_id, identity, record)?;
-                }
-            }
-            for ((stored_mob_id, identity), record) in &state.leases {
-                if stored_mob_id == &mob_id
-                    && prior_leases.get(&(stored_mob_id.clone(), identity.clone())) != Some(record)
-                {
-                    write_identity_lease(&tx, &mob_id, identity, record)?;
-                }
-            }
-            for ((stored_mob_id, _), head) in &state.scope_heads {
-                if stored_mob_id == &mob_id
-                    && prior_scope_heads.get(&(stored_mob_id.clone(), head.scope_id.clone()))
-                        != Some(head)
-                {
-                    write_identity_scope_head(&tx, head)?;
-                }
-            }
-            for (key, receipt) in &state.receipts {
-                if key.0 == mob_id && prior_receipts.get(key) != Some(receipt) {
-                    insert_identity_receipt(&tx, receipt)?;
-                }
-            }
-            tx.commit().map_err(se)?;
-            Ok(outcome)
+            Ok(super::IdentityIntentScanPage { observations, next })
         })
         .await
     }
@@ -3325,19 +3506,13 @@ impl MobIdentityStore for SqliteMobIdentityStore {
                     "identity receipt insertion permit is no longer current: {error}"
                 ))
             })?;
-            let IdentityOperationSubject::Identity { identity } = &receipt.subject else {
-                return Err(MobStoreError::WriteFailed(
-                    "declaration/apply receipts must be inserted by their owning desired-state transaction"
-                        .to_string(),
-                ));
-            };
+            let IdentityOperationSubject::Identity { identity } = &receipt.subject;
             if receipt.mob_id != permit.mob_id
                 || identity != &permit.identity
                 || identity_receipt_target(&receipt) != Some(permit.target)
                 || receipt.intent_revision != Some(permit.intent_revision)
                 || receipt.intent_digest.as_ref() != Some(&permit.intent_digest)
-                || receipt.intent_authority_digest.as_ref()
-                    != Some(&permit.intent_authority_digest)
+                || receipt.intent_authority_digest.as_ref() != Some(&permit.intent_authority_digest)
                 || !matches!(
                     permit.target_observation,
                     IdentityTargetObservationVersion::InsertIfAbsent
@@ -3372,11 +3547,11 @@ impl MobIdentityStore for SqliteMobIdentityStore {
             }
 
             let lease = query_identity_lease_authority(&tx, &receipt.mob_id, identity)?
-            .ok_or_else(|| {
-                MobStoreError::CasConflict(
-                    "identity receipt insertion observed no current lease".to_string(),
-                )
-            })?;
+                .ok_or_else(|| {
+                    MobStoreError::CasConflict(
+                        "identity receipt insertion observed no current lease".to_string(),
+                    )
+                })?;
             let active = lease.active.ok_or_else(|| {
                 MobStoreError::CasConflict(
                     "identity receipt insertion observed no active lease".to_string(),
@@ -5485,6 +5660,266 @@ impl private::MobEventStoreSealed for SqliteMobEventStore {}
 
 #[async_trait]
 impl MobEventStore for SqliteMobEventStore {
+    async fn begin_external_delivery(
+        &self,
+        intent: &MobExternalDeliveryIntent,
+    ) -> Result<MobExternalDeliveryBeginOutcome, MobStoreError> {
+        intent.validate()?;
+        let path = self.path.clone();
+        let intent = intent.clone();
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            let existing = tx
+                .query_row(
+                    "SELECT CAST(record_json AS BLOB)
+                     FROM mob_external_deliveries
+                     WHERE mob_id = ?1 AND idempotency_key = ?2",
+                    params![
+                        intent.mob_id.as_str(),
+                        intent.identity.idempotency_key.as_str()
+                    ],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
+                .optional()
+                .map_err(se)?
+                .map(|bytes| decode_json::<MobExternalDeliveryRecord>(&bytes))
+                .transpose()?;
+            if let Some(existing) = existing {
+                validate_external_delivery_record(
+                    &existing,
+                    &intent.mob_id,
+                    &intent.identity.idempotency_key,
+                )?;
+                if existing.intent != intent {
+                    return Err(MobStoreError::ExternalDeliveryConflict {
+                        mob_id: intent.mob_id,
+                        idempotency_key: intent.identity.idempotency_key,
+                        detail: "stored correlation, target kind, or action digest differs"
+                            .to_string(),
+                    });
+                }
+                tx.commit().map_err(se)?;
+                return Ok(match existing.phase {
+                    MobExternalDeliveryPhase::Begun { repair } => {
+                        MobExternalDeliveryBeginOutcome::ExistingBegun { repair }
+                    }
+                    MobExternalDeliveryPhase::Terminal { terminal } => {
+                        MobExternalDeliveryBeginOutcome::ExistingTerminal(terminal)
+                    }
+                });
+            }
+            let record = MobExternalDeliveryRecord {
+                intent: intent.clone(),
+                phase: MobExternalDeliveryPhase::Begun {
+                    repair: MobExternalDeliveryRepairState::default(),
+                },
+            };
+            tx.execute(
+                "INSERT INTO mob_external_deliveries
+                     (mob_id, idempotency_key, record_json)
+                 VALUES (?1, ?2, ?3)",
+                params![
+                    intent.mob_id.as_str(),
+                    intent.identity.idempotency_key.as_str(),
+                    encode_json(&record)?
+                ],
+            )
+            .map_err(se)?;
+            tx.commit().map_err(se)?;
+            Ok(MobExternalDeliveryBeginOutcome::Begun)
+        })
+        .await
+    }
+
+    async fn complete_external_delivery(
+        &self,
+        intent: &MobExternalDeliveryIntent,
+        terminal: &MobExternalDeliveryTerminal,
+    ) -> Result<MobExternalDeliveryCompleteOutcome, MobStoreError> {
+        intent.validate()?;
+        validate_external_delivery_terminal(terminal)?;
+        let path = self.path.clone();
+        let intent = intent.clone();
+        let terminal = terminal.clone();
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            let bytes = tx
+                .query_row(
+                    "SELECT CAST(record_json AS BLOB)
+                     FROM mob_external_deliveries
+                     WHERE mob_id = ?1 AND idempotency_key = ?2",
+                    params![
+                        intent.mob_id.as_str(),
+                        intent.identity.idempotency_key.as_str()
+                    ],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
+                .optional()
+                .map_err(se)?
+                .ok_or_else(|| {
+                    MobStoreError::NotFound(format!(
+                        "mob external delivery '{}'",
+                        intent.identity.idempotency_key
+                    ))
+                })?;
+            let mut record = decode_json::<MobExternalDeliveryRecord>(&bytes)?;
+            validate_external_delivery_record(
+                &record,
+                &intent.mob_id,
+                &intent.identity.idempotency_key,
+            )?;
+            if record.intent != intent {
+                return Err(MobStoreError::ExternalDeliveryConflict {
+                    mob_id: intent.mob_id,
+                    idempotency_key: intent.identity.idempotency_key,
+                    detail: "terminal authority does not match stored admission".to_string(),
+                });
+            }
+            let outcome = match &record.phase {
+                MobExternalDeliveryPhase::Begun { .. } => {
+                    record.phase = MobExternalDeliveryPhase::Terminal {
+                        terminal: terminal.clone(),
+                    };
+                    MobExternalDeliveryCompleteOutcome::Completed
+                }
+                MobExternalDeliveryPhase::Terminal { terminal: existing }
+                    if existing == &terminal =>
+                {
+                    MobExternalDeliveryCompleteOutcome::AlreadyCompleted
+                }
+                MobExternalDeliveryPhase::Terminal { .. } => {
+                    return Err(MobStoreError::ExternalDeliveryConflict {
+                        mob_id: intent.mob_id,
+                        idempotency_key: intent.identity.idempotency_key,
+                        detail: "a different terminal is already committed".to_string(),
+                    });
+                }
+            };
+            if outcome == MobExternalDeliveryCompleteOutcome::Completed {
+                tx.execute(
+                    "UPDATE mob_external_deliveries
+                     SET record_json = ?3
+                     WHERE mob_id = ?1 AND idempotency_key = ?2",
+                    params![
+                        intent.mob_id.as_str(),
+                        intent.identity.idempotency_key.as_str(),
+                        encode_json(&record)?
+                    ],
+                )
+                .map_err(se)?;
+            }
+            tx.commit().map_err(se)?;
+            Ok(outcome)
+        })
+        .await
+    }
+
+    async fn schedule_external_delivery_repair(
+        &self,
+        intent: &MobExternalDeliveryIntent,
+    ) -> Result<MobExternalDeliveryRepairOutcome, MobStoreError> {
+        intent.validate()?;
+        let path = self.path.clone();
+        let intent = intent.clone();
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            let bytes = tx
+                .query_row(
+                    "SELECT CAST(record_json AS BLOB)
+                     FROM mob_external_deliveries
+                     WHERE mob_id = ?1 AND idempotency_key = ?2",
+                    params![
+                        intent.mob_id.as_str(),
+                        intent.identity.idempotency_key.as_str()
+                    ],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
+                .optional()
+                .map_err(se)?
+                .ok_or_else(|| {
+                    MobStoreError::NotFound(format!(
+                        "mob external delivery '{}'",
+                        intent.identity.idempotency_key
+                    ))
+                })?;
+            let mut record = decode_json::<MobExternalDeliveryRecord>(&bytes)?;
+            validate_external_delivery_record(
+                &record,
+                &intent.mob_id,
+                &intent.identity.idempotency_key,
+            )?;
+            if record.intent != intent {
+                return Err(MobStoreError::ExternalDeliveryConflict {
+                    mob_id: intent.mob_id,
+                    idempotency_key: intent.identity.idempotency_key,
+                    detail: "repair authority does not match stored admission".to_string(),
+                });
+            }
+            let outcome = match &mut record.phase {
+                MobExternalDeliveryPhase::Begun { repair } => {
+                    *repair = next_external_delivery_repair_state(
+                        *repair,
+                        external_delivery_repair_now_ms()?,
+                    );
+                    MobExternalDeliveryRepairOutcome::Scheduled(*repair)
+                }
+                MobExternalDeliveryPhase::Terminal { terminal } => {
+                    tx.commit().map_err(se)?;
+                    return Ok(MobExternalDeliveryRepairOutcome::ExistingTerminal(
+                        terminal.clone(),
+                    ));
+                }
+            };
+            tx.execute(
+                "UPDATE mob_external_deliveries
+                 SET record_json = ?3
+                 WHERE mob_id = ?1 AND idempotency_key = ?2",
+                params![
+                    intent.mob_id.as_str(),
+                    intent.identity.idempotency_key.as_str(),
+                    encode_json(&record)?
+                ],
+            )
+            .map_err(se)?;
+            tx.commit().map_err(se)?;
+            Ok(outcome)
+        })
+        .await
+    }
+
+    async fn load_external_delivery(
+        &self,
+        mob_id: &MobId,
+        idempotency_key: &str,
+    ) -> Result<Option<MobExternalDeliveryRecord>, MobStoreError> {
+        let path = self.path.clone();
+        let mob_id = mob_id.clone();
+        let idempotency_key = idempotency_key.to_string();
+        run_sqlite_task(move || {
+            let conn = open_connection(&path)?;
+            let record = conn
+                .query_row(
+                    "SELECT CAST(record_json AS BLOB)
+                     FROM mob_external_deliveries
+                     WHERE mob_id = ?1 AND idempotency_key = ?2",
+                    params![mob_id.as_str(), idempotency_key.as_str()],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
+                .optional()
+                .map_err(se)?
+                .map(|bytes| decode_json::<MobExternalDeliveryRecord>(&bytes))
+                .transpose()?;
+            if let Some(record) = &record {
+                validate_external_delivery_record(record, &mob_id, &idempotency_key)?;
+            }
+            Ok(record)
+        })
+        .await
+    }
+
     async fn append(&self, event: NewMobEvent) -> Result<MobEvent, MobStoreError> {
         validate_mob_event_write_authority(&event.kind)?;
 
@@ -7352,13 +7787,6 @@ mod tests {
     use super::*;
     use crate::definition::{BackendConfig, FlowSpec, WiringRules};
     use crate::event::{MemberRef, MobEventKind};
-    use crate::identity::{
-        DesiredMemberMaterial, DesiredMemberOverlay, DesiredSessionAuthorityPolicy,
-        IDENTITY_OPERATION_RECEIPT_SCHEMA_VERSION, IdentityDeclarationManifest,
-        IdentityDeclarationMemberPlan, IdentityDeclarationScopePrecondition,
-        IdentityMemberDeclaration, IdentityMemberMaterialDeclaration,
-        IdentityOperationReceiptPayload,
-    };
     use crate::ids::{AgentIdentity, Generation, ProfileName};
     use crate::profile::{Profile, ProfileBinding, ToolConfig};
     use crate::run::StepRunStatus;
@@ -7368,9 +7796,7 @@ mod tests {
     use meerkat_contracts::wire::{
         PortableDefinitionExtract, PortableProfile, PortableSystemPrompt,
     };
-    use meerkat_core::lifecycle::InputId;
     use meerkat_core::ops::OperationId;
-    use meerkat_core::{ContentInput, Provider, SessionId, SessionLineageId};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     #[derive(Debug)]
@@ -7396,155 +7822,73 @@ mod tests {
         }
     }
 
-    fn sqlite_identity_material(model: &str) -> DesiredMemberMaterial {
-        DesiredMemberMaterial {
-            profile_name: ProfileName::from("default"),
-            profile: PortableProfile {
-                model: model.to_string(),
-                provider: Provider::OpenAI,
-                self_hosted_server_id: None,
-                image_generation_provider: None,
-                auto_compact_threshold: None,
-                resume_overrides: Vec::new(),
-                skills: Vec::new(),
-                tools: Default::default(),
-                peer_description: String::new(),
-                external_addressable: false,
-                runtime_mode: Default::default(),
-                max_inline_peer_notifications: None,
-                output_schema: None,
-                provider_params: None,
-            },
-            definition_extract: PortableDefinitionExtract {
-                profile_names: vec!["default".to_string()],
-                ..PortableDefinitionExtract::default()
-            },
-            overlay: DesiredMemberOverlay {
-                context: None,
-                labels: None,
-                additional_instructions: None,
-                system_prompt: PortableSystemPrompt::Disable,
-                tool_access_policy: None,
-                auth_binding: None,
-                budget_limits: None,
-                runtime_mode: Default::default(),
-            },
-            required_env_keys: Vec::new(),
-            required_local_callback_tools: Vec::new(),
-            execution: crate::identity::DesiredExecution::ControllingSession,
-        }
+    fn sqlite_external_delivery_intent(key: &str, action: &str) -> MobExternalDeliveryIntent {
+        MobExternalDeliveryIntent::new(
+            MobId::from("mob"),
+            MobExternalDeliveryIdentity::new(
+                key,
+                uuid::Uuid::from_u128(0xD311_0000_0000_0000_0000_0000_0000_0002).to_string(),
+            )
+            .expect("valid external delivery identity"),
+            MobExternalDeliveryTargetKind::Flow,
+            action.as_bytes(),
+        )
+        .expect("valid external delivery intent")
     }
 
-    fn sqlite_identity_plan(
-        scope: &str,
-        operation_id: OperationId,
-        expected_scope: IdentityDeclarationScopePrecondition,
-        members: Vec<(AgentIdentity, DesiredMemberMaterial, Option<ContentInput>)>,
-    ) -> IdentityDeclarationApplyPlan {
-        let mut declarations = BTreeMap::new();
-        let mut compiled = BTreeMap::new();
-        for (identity, material, initial_message) in members {
-            declarations.insert(
-                identity.clone(),
-                IdentityMemberDeclaration {
-                    material: IdentityMemberMaterialDeclaration::Resolved {
-                        material: material.clone(),
-                    },
-                    session_authority_policy: DesiredSessionAuthorityPolicy::CreateIfAbsent,
-                    initial_message: initial_message.clone(),
-                    legacy_import: None,
-                },
+    #[tokio::test]
+    async fn sqlite_external_delivery_ledger_survives_reopen_and_rejects_action_conflict() {
+        let (_dir, path) = temp_db_path();
+        let intent = sqlite_external_delivery_intent("schedule:sqlite", "action-a");
+        let terminal = MobExternalDeliveryTerminal::Completed;
+        {
+            let stores = SqliteMobStores::open(&path).unwrap();
+            let events = stores.event_store();
+            assert_eq!(
+                events.begin_external_delivery(&intent).await.unwrap(),
+                MobExternalDeliveryBeginOutcome::Begun
             );
-            compiled.insert(
-                identity,
-                IdentityDeclarationMemberPlan {
-                    material,
-                    session_authority_policy: DesiredSessionAuthorityPolicy::CreateIfAbsent,
-                    initial_message: initial_message.clone(),
-                    candidate_session_id: SessionId::new(),
-                    candidate_lineage_id: SessionLineageId::new(format!(
-                        "sqlite-identity-lineage-{}",
-                        uuid::Uuid::new_v4()
-                    ))
+            assert!(matches!(
+                events
+                    .schedule_external_delivery_repair(&intent)
+                    .await
                     .unwrap(),
-                    candidate_initial_delivery_id: initial_message.map(|_| InputId::new()),
-                },
+                MobExternalDeliveryRepairOutcome::Scheduled(MobExternalDeliveryRepairState {
+                    attempt: 1,
+                    ..
+                })
+            ));
+        }
+
+        {
+            let stores = SqliteMobStores::open(&path).unwrap();
+            let events = stores.event_store();
+            assert!(matches!(
+                events.begin_external_delivery(&intent).await.unwrap(),
+                MobExternalDeliveryBeginOutcome::ExistingBegun {
+                    repair: MobExternalDeliveryRepairState { attempt: 1, .. }
+                }
+            ));
+            assert_eq!(
+                events
+                    .complete_external_delivery(&intent, &terminal)
+                    .await
+                    .unwrap(),
+                MobExternalDeliveryCompleteOutcome::Completed
             );
         }
-        let manifest = IdentityDeclarationManifest {
-            scope_id: IdentityDeclarationScopeId::new(scope).unwrap(),
-            operation_id,
-            expected_scope,
-            members: declarations,
-            wiring: BTreeSet::new(),
-        };
-        IdentityDeclarationApplyPlan::from_compiled_manifest(&manifest, compiled).unwrap()
-    }
 
-    fn sqlite_initial_delivery_receipt(
-        mob_id: &MobId,
-        record: &IdentityIntentRecord,
-    ) -> IdentityOperationReceipt {
-        let IdentityIntent::Present {
-            identity,
-            session,
-            member,
-            ..
-        } = &record.intent
-        else {
-            panic!("initial delivery fixture requires a present intent");
-        };
-        let delivery = member.initial_delivery.as_ref().unwrap();
-        let mut receipt = IdentityOperationReceipt {
-            schema_version: IDENTITY_OPERATION_RECEIPT_SCHEMA_VERSION,
-            mob_id: mob_id.clone(),
-            subject: IdentityOperationSubject::Identity {
-                identity: identity.clone(),
-            },
-            effect_kind: IdentityOperationKind::InitialDelivery,
-            slot: IdentityOperationSlot::InitialDelivery {
-                tombstone_generation: record.tombstone_generation.unwrap_or(0),
-                session_id: session.session_id.clone(),
-                lineage_id: session.lineage_id.clone(),
-                lineage_generation: session.lineage_generation,
-                delivery_generation: delivery.delivery_generation,
-            },
-            receipt_id: OperationId::new(),
-            intent_revision: Some(record.intent_revision),
-            intent_digest: Some(record.intent_digest.clone()),
-            intent_authority_digest: Some(record.authority_digest.clone()),
-            tombstone_generation: record.tombstone_generation,
-            audit_lease_epoch: None,
-            request_digest: String::new(),
-            payload: IdentityOperationReceiptPayload::InitialDelivery {
-                delivery_generation: delivery.delivery_generation,
-                delivery_id: delivery.delivery_id.clone(),
-                message_digest: delivery.message_digest.clone(),
-            },
-        };
-        receipt.request_digest = receipt.canonical_request_digest().unwrap();
-        receipt.validate().unwrap();
-        receipt
-    }
-
-    fn sqlite_receipt_permit(
-        mob_id: &MobId,
-        record: &IdentityIntentRecord,
-        claim: &IdentityLeaseClaim,
-    ) -> IdentityActuationPermit {
-        IdentityActuationPermit {
-            mob_id: mob_id.clone(),
-            identity: record.intent.identity().clone(),
-            target: IdentityActuatorTarget::InitialDeliveryReceipt,
-            intent_revision: record.intent_revision,
-            intent_digest: record.intent_digest.clone(),
-            intent_authority_digest: record.authority_digest.clone(),
-            lease_epoch: claim.epoch,
-            lease_holder_id: claim.holder_id.clone(),
-            lease_incarnation_id: claim.incarnation_id.clone(),
-            lease_expires_at_ms: claim.expires_at_ms,
-            target_observation: IdentityTargetObservationVersion::InsertIfAbsent,
-        }
+        let stores = SqliteMobStores::open(&path).unwrap();
+        let events = stores.event_store();
+        assert_eq!(
+            events.begin_external_delivery(&intent).await.unwrap(),
+            MobExternalDeliveryBeginOutcome::ExistingTerminal(terminal)
+        );
+        let conflict = sqlite_external_delivery_intent("schedule:sqlite", "action-b");
+        assert!(matches!(
+            events.begin_external_delivery(&conflict).await,
+            Err(MobStoreError::ExternalDeliveryConflict { .. })
+        ));
     }
 
     fn default_bridge_protocol_version()
@@ -7556,6 +7900,118 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("mob.db");
         (dir, path)
+    }
+
+    #[test]
+    fn released_v3_migrates_directly_to_canonical_v4_schema() {
+        let (_dir, path) = temp_db_path();
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            let tx = conn.transaction().unwrap();
+            build_released_0_8_10_mob_schema(&tx).unwrap();
+            tx.execute_batch(
+                "CREATE TABLE meerkat_schema (
+                     domain TEXT PRIMARY KEY,
+                     version INTEGER NOT NULL
+                 );
+                 INSERT INTO meerkat_schema VALUES ('mob', 3);
+                 INSERT INTO mob_identity_operation_receipts (
+                     mob_id, subject_kind, subject_id, slot_kind,
+                     slot_key_version, slot_digest, subject_json, slot_json,
+                     subject_identity, effect_kind, receipt_json,
+                     subject_scope_id
+                 ) VALUES (
+                     'mob', 'identity', 'member-a', 'ensure', 1, 'digest',
+                     X'7b7d', X'7b7d', 'member-a', 'completed', X'7b7d',
+                     'obsolete-scope'
+                 );
+                 INSERT INTO mob_identity_operation_receipts (
+                     mob_id, subject_kind, subject_id, slot_kind,
+                     slot_key_version, slot_digest, subject_json, slot_json,
+                     subject_identity, effect_kind, receipt_json,
+                     subject_scope_id
+                 ) VALUES (
+                     'mob', 'declaration_scope', 'obsolete-scope',
+                     'apply_declaration_manifest', 1, 'obsolete-digest',
+                     X'7b7d', X'7b7d', NULL, 'apply_declaration_manifest',
+                     X'7b7d', 'obsolete-scope'
+                 );",
+            )
+            .unwrap();
+            tx.commit().unwrap();
+        }
+
+        drop(SqliteMobStores::open(&path).unwrap());
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT version FROM meerkat_schema WHERE domain = 'mob'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            4
+        );
+        for retired in [
+            "mob_identity_declaration_scopes",
+            "mob_identity_receipts_scope",
+            "mob_identity_intents_scope",
+        ] {
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE name = ?1",
+                    [retired],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+                0,
+                "{retired} must not survive the released-v3 migration"
+            );
+        }
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = 'mob_external_deliveries'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1
+        );
+        assert!(
+            !conn
+                .prepare("PRAGMA table_info(mob_identity_operation_receipts)")
+                .unwrap()
+                .query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+                .iter()
+                .any(|column| column == "subject_scope_id")
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT subject_identity, receipt_json
+                 FROM mob_identity_operation_receipts
+                 WHERE mob_id = 'mob'",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )
+            .unwrap(),
+            ("member-a".to_string(), b"{}".to_vec())
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*)
+                 FROM mob_identity_operation_receipts
+                 WHERE subject_kind = 'declaration_scope'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            0,
+            "retired declaration-facade receipts must not become undecodable poison rows"
+        );
     }
 
     fn operator_request(
@@ -7672,96 +8128,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sqlite_identity_empty_scope_reopens_and_replays_exact_outcome() {
-        let (_dir, path) = temp_db_path();
-        let mob_id = MobId::from("sqlite-identity-empty-scope");
-        let first = sqlite_identity_plan(
-            "provider-a",
-            OperationId::new(),
-            IdentityDeclarationScopePrecondition::Missing,
-            Vec::new(),
-        );
-        let stores = SqliteMobStores::open(&path).unwrap();
-        let first_outcome = stores
-            .identity_store()
-            .apply_identity_declaration(&mob_id, &first)
-            .await
-            .unwrap();
-        assert_eq!(first_outcome.scope_revision, 1);
-        drop(stores);
-
-        let reopened = SqliteMobStores::open(&path).unwrap().identity_store();
-        assert_eq!(
-            reopened
-                .apply_identity_declaration(&mob_id, &first)
-                .await
-                .unwrap(),
-            first_outcome
-        );
-        let second = sqlite_identity_plan(
-            "provider-a",
-            OperationId::new(),
-            IdentityDeclarationScopePrecondition::Revision { revision: 1 },
-            Vec::new(),
-        );
-        assert_eq!(
-            reopened
-                .apply_identity_declaration(&mob_id, &second)
-                .await
-                .unwrap()
-                .scope_revision,
-            2
-        );
-    }
-
-    #[tokio::test]
-    async fn sqlite_identity_session_and_lineage_allocation_is_global_to_database() {
-        let (_dir, path) = temp_db_path();
-        let store = SqliteMobStores::open(&path).unwrap().identity_store();
-        let first_identity = AgentIdentity::from("member-a");
-        let first = sqlite_identity_plan(
-            "provider-a",
-            OperationId::new(),
-            IdentityDeclarationScopePrecondition::Missing,
-            vec![(
-                first_identity.clone(),
-                sqlite_identity_material("model-a"),
-                None,
-            )],
-        );
-        let first_outcome = store
-            .apply_identity_declaration(&MobId::from("mob-a"), &first)
-            .await
-            .unwrap();
-        let IdentityIntent::Present { session, .. } =
-            &first_outcome.identities[&first_identity].intent
-        else {
-            panic!("present intent");
-        };
-
-        let second_identity = AgentIdentity::from("member-b");
-        let mut second = sqlite_identity_plan(
-            "provider-b",
-            OperationId::new(),
-            IdentityDeclarationScopePrecondition::Missing,
-            vec![(
-                second_identity.clone(),
-                sqlite_identity_material("model-b"),
-                None,
-            )],
-        );
-        let member = second.members.get_mut(&second_identity).unwrap();
-        member.candidate_session_id = session.session_id.clone();
-        member.candidate_lineage_id = session.lineage_id.clone();
-        assert!(matches!(
-            store
-                .apply_identity_declaration(&MobId::from("mob-b"), &second)
-                .await,
-            Err(MobStoreError::CasConflict(_))
-        ));
-    }
-
-    #[tokio::test]
     async fn sqlite_identity_live_handle_never_recreates_a_deleted_database() {
         let (_dir, path) = temp_db_path();
         let stores = SqliteMobStores::open(&path).unwrap();
@@ -7781,55 +8147,6 @@ mod tests {
             !path.exists(),
             "identity read must not recreate the database"
         );
-    }
-
-    #[tokio::test]
-    async fn sqlite_identity_unrelated_malformed_row_is_total_and_does_not_block_allocation() {
-        let (_dir, path) = temp_db_path();
-        let stores = SqliteMobStores::open(&path).unwrap();
-        let mob_id = MobId::from("sqlite-identity-malformed");
-        let malformed_bytes = b"{".to_vec();
-        {
-            let conn = open_connection(&stores.path).unwrap();
-            conn.execute(
-                "INSERT INTO mob_identity_intents
-                     (mob_id, agent_identity, declaration_scope, session_id, lineage_id, record_json)
-                 VALUES (?1, ?2, ?3, NULL, NULL, ?4)",
-                params![mob_id.as_str(), "unrelated-garbage", "other-scope", malformed_bytes],
-            )
-            .unwrap();
-        }
-        let identity = AgentIdentity::from("member-a");
-        let plan = sqlite_identity_plan(
-            "provider-a",
-            OperationId::new(),
-            IdentityDeclarationScopePrecondition::Missing,
-            vec![(identity.clone(), sqlite_identity_material("model-a"), None)],
-        );
-        stores
-            .identity_store()
-            .apply_identity_declaration(&mob_id, &plan)
-            .await
-            .unwrap();
-        assert!(matches!(
-            stores
-                .identity_store()
-                .observe_identity_intent(&mob_id, &identity)
-                .await
-                .unwrap(),
-            IdentityStoredObservation::Valid(_)
-        ));
-        match stores
-            .identity_store()
-            .observe_identity_intent(&mob_id, &AgentIdentity::from("unrelated-garbage"))
-            .await
-            .unwrap()
-        {
-            IdentityStoredObservation::Malformed {
-                evidence_digest, ..
-            } => assert_eq!(evidence_digest, identity_raw_evidence_digest(b"{")),
-            other => panic!("expected malformed raw row, got {other:?}"),
-        }
     }
 
     #[tokio::test]
@@ -7862,6 +8179,119 @@ mod tests {
             ),
             other => panic!("expected unsupported future schema, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn sqlite_identity_intent_scan_is_keyset_paged_and_strictly_bounded() {
+        let (_dir, path) = temp_db_path();
+        let stores = SqliteMobStores::open(&path).unwrap();
+        let mob_id = MobId::from("sqlite-identity-page");
+        {
+            let conn = open_connection(&stores.path).unwrap();
+            for identity in ["member-c", "member-a", "member-e", "member-b", "member-d"] {
+                conn.execute(
+                    "INSERT INTO mob_identity_intents
+                         (mob_id, agent_identity, declaration_scope, session_id, lineage_id, record_json)
+                     VALUES (?1, ?2, NULL, NULL, NULL, ?3)",
+                    params![
+                        mob_id.as_str(),
+                        identity,
+                        br#"{"schema_version":2,"future_shape":true}"#.as_slice()
+                    ],
+                )
+                .unwrap();
+            }
+        }
+
+        let store = stores.identity_store();
+        let first = store
+            .scan_identity_intents_page(&mob_id, None, 2)
+            .await
+            .unwrap();
+        assert_eq!(
+            first
+                .observations
+                .keys()
+                .map(AgentIdentity::as_str)
+                .collect::<Vec<_>>(),
+            ["member-a", "member-b"]
+        );
+        let second = store
+            .scan_identity_intents_page(&mob_id, first.next.as_ref(), 2)
+            .await
+            .unwrap();
+        assert_eq!(
+            second
+                .observations
+                .keys()
+                .map(AgentIdentity::as_str)
+                .collect::<Vec<_>>(),
+            ["member-c", "member-d"]
+        );
+        let third = store
+            .scan_identity_intents_page(&mob_id, second.next.as_ref(), 2)
+            .await
+            .unwrap();
+        assert_eq!(
+            third
+                .observations
+                .keys()
+                .map(AgentIdentity::as_str)
+                .collect::<Vec<_>>(),
+            ["member-e"]
+        );
+        assert!(third.next.is_none());
+    }
+
+    #[tokio::test]
+    async fn sqlite_identity_intent_scan_advances_past_malformed_physical_keys() {
+        let (_dir, path) = temp_db_path();
+        let stores = SqliteMobStores::open(&path).unwrap();
+        let mob_id = MobId::from("sqlite-identity-malformed-key-page");
+        {
+            let conn = open_connection(&stores.path).unwrap();
+            for identity in [
+                rusqlite::types::Value::Blob(b"member-blob".to_vec()),
+                rusqlite::types::Value::Text("member-text".to_string()),
+            ] {
+                conn.execute(
+                    "INSERT INTO mob_identity_intents
+                         (mob_id, agent_identity, declaration_scope, session_id, lineage_id, record_json)
+                     VALUES (?1, ?2, NULL, NULL, NULL, ?3)",
+                    params![
+                        mob_id.as_str(),
+                        identity,
+                        br#"{"schema_version":2,"future_shape":true}"#.as_slice()
+                    ],
+                )
+                .unwrap();
+            }
+        }
+
+        let store = stores.identity_store();
+        let malformed = store
+            .scan_identity_intents_page(&mob_id, None, 1)
+            .await
+            .unwrap();
+        assert_eq!(malformed.observations.len(), 1);
+        assert!(
+            malformed
+                .observations
+                .keys()
+                .next()
+                .is_some_and(|identity| identity
+                    .as_str()
+                    .starts_with("malformed-physical-identity:blob:"))
+        );
+        let valid = store
+            .scan_identity_intents_page(&mob_id, malformed.next.as_ref(), 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            valid.observations.keys().next().map(AgentIdentity::as_str),
+            Some("member-text")
+        );
+        assert!(valid.next.is_none());
     }
 
     #[tokio::test]
@@ -7958,230 +8388,6 @@ mod tests {
                 .await
                 .unwrap(),
             IdentityStoredObservation::Malformed { .. }
-        ));
-    }
-
-    #[tokio::test]
-    async fn sqlite_identity_receipt_insert_fences_stale_intent_and_holder_but_replays() {
-        let (_dir, path) = temp_db_path();
-        let stores = SqliteMobStores::open(&path).unwrap();
-        let clock = Arc::new(TestIdentityClock::new(100));
-        let store = SqliteMobIdentityStore::with_clock(
-            stores.path.clone(),
-            stores.identity_store_instance_id.clone(),
-            clock.clone(),
-        );
-        let mob_id = MobId::from("sqlite-identity-receipt-fence");
-        let identity = AgentIdentity::from("member-a");
-        let first = sqlite_identity_plan(
-            "provider-a",
-            OperationId::new(),
-            IdentityDeclarationScopePrecondition::Missing,
-            vec![(
-                identity.clone(),
-                sqlite_identity_material("model-a"),
-                Some(ContentInput::from("deliver once")),
-            )],
-        );
-        store
-            .apply_identity_declaration(&mob_id, &first)
-            .await
-            .unwrap();
-        let first_record = match store
-            .observe_identity_intent(&mob_id, &identity)
-            .await
-            .unwrap()
-        {
-            IdentityStoredObservation::Valid(record) => record,
-            other => panic!("expected intent, got {other:?}"),
-        };
-        let claim_a = match store
-            .claim_or_renew_identity_lease(&mob_id, &identity, "controller", "inc-a", 10)
-            .await
-            .unwrap()
-        {
-            IdentityLeaseClaimOutcome::Acquired(claim) => claim,
-            other => panic!("expected acquire, got {other:?}"),
-        };
-        let stale_intent_receipt = sqlite_initial_delivery_receipt(&mob_id, &first_record);
-        let stale_intent_permit = sqlite_receipt_permit(&mob_id, &first_record, &claim_a);
-
-        let update = sqlite_identity_plan(
-            "provider-a",
-            OperationId::new(),
-            IdentityDeclarationScopePrecondition::Revision { revision: 1 },
-            vec![(
-                identity.clone(),
-                sqlite_identity_material("model-b"),
-                Some(ContentInput::from("deliver once")),
-            )],
-        );
-        store
-            .apply_identity_declaration(&mob_id, &update)
-            .await
-            .unwrap();
-        assert!(matches!(
-            store
-                .insert_identity_operation_receipt_if_absent(
-                    &stale_intent_receipt,
-                    &stale_intent_permit,
-                )
-                .await,
-            Err(MobStoreError::CasConflict(_))
-        ));
-
-        let current_record = match store
-            .observe_identity_intent(&mob_id, &identity)
-            .await
-            .unwrap()
-        {
-            IdentityStoredObservation::Valid(record) => record,
-            other => panic!("expected current intent, got {other:?}"),
-        };
-        clock.set(claim_a.expires_at_ms);
-        let claim_b = match store
-            .claim_or_renew_identity_lease(&mob_id, &identity, "controller", "inc-b", 10)
-            .await
-            .unwrap()
-        {
-            IdentityLeaseClaimOutcome::Acquired(claim) => claim,
-            other => panic!("expected takeover, got {other:?}"),
-        };
-        let receipt = sqlite_initial_delivery_receipt(&mob_id, &current_record);
-        let stale_lease_permit = sqlite_receipt_permit(&mob_id, &current_record, &claim_a);
-        assert!(matches!(
-            store
-                .insert_identity_operation_receipt_if_absent(&receipt, &stale_lease_permit)
-                .await,
-            Err(MobStoreError::CasConflict(_))
-        ));
-        let current_permit = sqlite_receipt_permit(&mob_id, &current_record, &claim_b);
-        assert!(matches!(
-            store
-                .insert_identity_operation_receipt_if_absent(&receipt, &current_permit)
-                .await
-                .unwrap(),
-            IdentityOperationReceiptInsertOutcome::Inserted(_)
-        ));
-        clock.set(claim_b.expires_at_ms);
-        let _ = store
-            .claim_or_renew_identity_lease(&mob_id, &identity, "controller", "inc-c", 10)
-            .await
-            .unwrap();
-        assert!(matches!(
-            store
-                .insert_identity_operation_receipt_if_absent(&receipt, &stale_lease_permit)
-                .await
-                .unwrap(),
-            IdentityOperationReceiptInsertOutcome::ExistingExact(_)
-        ));
-    }
-
-    #[tokio::test]
-    async fn sqlite_identity_cross_mob_transplant_is_malformed_and_cannot_authorize_cleanup() {
-        let (_dir, path) = temp_db_path();
-        let stores = SqliteMobStores::open(&path).unwrap();
-        let store = stores.identity_store();
-        let donor_mob = MobId::from("sqlite-identity-donor");
-        let recipient_mob = MobId::from("sqlite-identity-recipient");
-        let identity = AgentIdentity::from("member-a");
-        let present = sqlite_identity_plan(
-            "provider-a",
-            OperationId::new(),
-            IdentityDeclarationScopePrecondition::Missing,
-            vec![(identity.clone(), sqlite_identity_material("model-a"), None)],
-        );
-        store
-            .apply_identity_declaration(&donor_mob, &present)
-            .await
-            .unwrap();
-        let absent = sqlite_identity_plan(
-            "provider-a",
-            OperationId::new(),
-            IdentityDeclarationScopePrecondition::Revision { revision: 1 },
-            Vec::new(),
-        );
-        store
-            .apply_identity_declaration(&donor_mob, &absent)
-            .await
-            .unwrap();
-        let donor_record = match store
-            .observe_identity_intent(&donor_mob, &identity)
-            .await
-            .unwrap()
-        {
-            IdentityStoredObservation::Valid(record) => record,
-            other => panic!("expected donor tombstone, got {other:?}"),
-        };
-        assert!(matches!(donor_record.intent, IdentityIntent::Absent { .. }));
-        assert!(matches!(
-            donor_record.retirement_plan,
-            IdentityRetirementPlan::Targets { .. }
-        ));
-
-        {
-            let conn = Connection::open(&path).unwrap();
-            conn.execute(
-                "UPDATE mob_identity_intents SET mob_id = ?1
-                 WHERE mob_id = ?2 AND agent_identity = ?3",
-                params![
-                    recipient_mob.as_str(),
-                    donor_mob.as_str(),
-                    identity.as_str()
-                ],
-            )
-            .unwrap();
-        }
-
-        let transplanted = store
-            .observe_identity_intent(&recipient_mob, &identity)
-            .await
-            .unwrap();
-        assert!(matches!(
-            transplanted,
-            IdentityStoredObservation::Malformed { .. }
-        ));
-        assert!(matches!(
-            store
-                .list_identity_intents(&recipient_mob)
-                .await
-                .unwrap()
-                .get(&identity),
-            Some(IdentityStoredObservation::Malformed { .. })
-        ));
-
-        let claim = match store
-            .claim_or_renew_identity_lease(
-                &recipient_mob,
-                &identity,
-                "controller",
-                "recipient-incarnation",
-                1_000,
-            )
-            .await
-            .unwrap()
-        {
-            IdentityLeaseClaimOutcome::Acquired(claim) => claim,
-            other => panic!("expected recipient lease claim, got {other:?}"),
-        };
-        let permit = IdentityActuationPermit {
-            mob_id: recipient_mob,
-            identity,
-            target: IdentityActuatorTarget::Wiring,
-            intent_revision: donor_record.intent_revision,
-            intent_digest: donor_record.intent_digest,
-            intent_authority_digest: donor_record.authority_digest,
-            lease_epoch: claim.epoch,
-            lease_holder_id: claim.holder_id,
-            lease_incarnation_id: claim.incarnation_id,
-            lease_expires_at_ms: claim.expires_at_ms,
-            target_observation: IdentityTargetObservationVersion::Absent {
-                absence_version: identity_raw_evidence_digest(b"recipient-wiring-absent"),
-            },
-        };
-        assert!(matches!(
-            store.validate_identity_actuation_permit(&permit).await,
-            Err(MobStoreError::IdentityAuthorityBlocked { .. })
         ));
     }
 
@@ -9064,7 +9270,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sqlite_migrates_pre_execution_fence_ledger_by_dropping_ambiguous_rows() {
+    async fn sqlite_refuses_unledgered_pre_execution_fence_shape_without_mutation() {
         let (_dir, path) = temp_db_path();
         {
             let conn = Connection::open(&path).expect("open legacy member-operator database");
@@ -9098,18 +9304,24 @@ mod tests {
             .expect("seed ambiguous pre-fence row");
         }
 
-        let stores = SqliteMobStores::open(&path).expect("open and migrate legacy ledger");
+        let err = match SqliteMobStores::open(&path) {
+            Ok(_) => panic!("unledgered owned shape must be refused"),
+            Err(error) => error,
+        };
         assert!(
-            stores
-                .runtime_metadata_store()
-                .list_member_operator_requests(&MobId::from("legacy-mob"))
-                .await
-                .expect("list migrated ledger")
-                .is_empty(),
-            "a pre-fence row cannot be safely attributed and must not replay"
+            err.to_string().contains("no ledger row"),
+            "unexpected refusal: {err}"
         );
 
-        let conn = Connection::open(&path).expect("inspect migrated ledger schema");
+        let conn = Connection::open(&path).expect("inspect refused legacy schema");
+        let row_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM mob_runtime_member_operator_requests",
+                [],
+                |row| row.get(0),
+            )
+            .expect("legacy row remains");
+        assert_eq!(row_count, 1, "refusal mutated legacy rows");
         let mut statement = conn
             .prepare("PRAGMA table_info(mob_runtime_member_operator_requests)")
             .expect("prepare table-info inspection");
@@ -9117,17 +9329,21 @@ mod tests {
             .query_map([], |row| {
                 Ok((row.get::<_, String>(1)?, row.get::<_, i64>(5)?))
             })
-            .expect("read migrated table info")
-            .map(|row| row.expect("read migrated column"))
+            .expect("read legacy table info")
+            .map(|row| row.expect("read legacy column"))
             .collect::<std::collections::BTreeMap<_, _>>();
-        assert_eq!(columns.get("host_id"), Some(&5));
-        assert_eq!(columns.get("binding_generation"), Some(&6));
-        assert_eq!(columns.get("member_session_id"), Some(&7));
-        assert_eq!(columns.get("request_id"), Some(&8));
+        assert!(!columns.contains_key("host_id"));
+        assert!(!columns.contains_key("binding_generation"));
+        assert!(!columns.contains_key("member_session_id"));
+        assert_eq!(columns.get("request_id"), Some(&5));
+        assert_eq!(
+            meerkat_sqlite::domain_version(&conn, MOB_DOMAIN.name).expect("ledger"),
+            None
+        );
     }
 
     #[tokio::test]
-    async fn sqlite_rebuilds_execution_fence_columns_when_they_are_not_in_the_primary_key() {
+    async fn sqlite_refuses_unledgered_malformed_execution_fence_key_without_mutation() {
         let (_dir, path) = temp_db_path();
         {
             let conn = Connection::open(&path).expect("open malformed member-operator database");
@@ -9168,27 +9384,33 @@ mod tests {
             .expect("seed row under malformed execution-fence key");
         }
 
-        let stores = SqliteMobStores::open(&path).expect("open and rebuild malformed ledger");
+        let err = match SqliteMobStores::open(&path) {
+            Ok(_) => panic!("unledgered malformed key shape must be refused"),
+            Err(error) => error,
+        };
         assert!(
-            stores
-                .runtime_metadata_store()
-                .list_member_operator_requests(&MobId::from("malformed-key-mob"))
-                .await
-                .expect("list rebuilt malformed ledger")
-                .is_empty(),
-            "rows written without the full tuple in the primary key are ambiguous and must drop"
+            err.to_string().contains("no ledger row"),
+            "unexpected refusal: {err}"
         );
 
-        let conn = Connection::open(&path).expect("inspect rebuilt malformed ledger schema");
+        let conn = Connection::open(&path).expect("inspect refused malformed schema");
+        let row_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM mob_runtime_member_operator_requests",
+                [],
+                |row| row.get(0),
+            )
+            .expect("malformed-key row remains");
+        assert_eq!(row_count, 1, "refusal mutated malformed-key rows");
         let mut statement = conn
             .prepare("PRAGMA table_info(mob_runtime_member_operator_requests)")
-            .expect("prepare rebuilt table-info inspection");
+            .expect("prepare malformed table-info inspection");
         let primary_key = statement
             .query_map([], |row| {
                 Ok((row.get::<_, i64>(5)?, row.get::<_, String>(1)?))
             })
-            .expect("read rebuilt table info")
-            .map(|row| row.expect("read rebuilt column"))
+            .expect("read malformed table info")
+            .map(|row| row.expect("read malformed column"))
             .filter(|(position, _)| *position > 0)
             .collect::<std::collections::BTreeMap<_, _>>();
         assert_eq!(
@@ -9198,11 +9420,12 @@ mod tests {
                 "agent_identity",
                 "generation",
                 "fence_token",
-                "host_id",
-                "binding_generation",
-                "member_session_id",
                 "request_id",
             ],
+        );
+        assert_eq!(
+            meerkat_sqlite::domain_version(&conn, MOB_DOMAIN.name).expect("ledger"),
+            None
         );
     }
 

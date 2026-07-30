@@ -99,6 +99,12 @@ impl MeerkatMachine {
                     ),
                 });
             }
+            entry.require_durability_ready().map_err(|required| {
+                RuntimeDriverError::RecoveryRepairBlocked {
+                    evidence_digest: None,
+                    reason: required.to_string(),
+                }
+            })?;
         }
 
         let driver = witness.driver.lock().await;
@@ -223,6 +229,57 @@ impl MeerkatMachine {
     /// Once an exact run exists, only typed `Unavailable` leaves the input queued;
     /// `Stale` and `Fault` converge the exact accepted input to a durable terminal
     /// before surfacing failure.
+    async fn finalize_live_boundary_completion_owned(
+        driver: &SharedDriver,
+        completions: &SharedCompletionRegistry,
+        input_id: InputId,
+        run_id: RunId,
+        finalization: crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation,
+        finalization_error: Option<meerkat_core::TurnErrorMetadata>,
+    ) -> Result<(), RuntimeDriverError> {
+        let driver = Arc::clone(driver);
+        let completions = Arc::clone(completions);
+        crate::tokio::spawn(async move {
+            let mut driver_guard = driver.lock_owned().await;
+            let completion_guard = completions.lock_owned().await;
+            let terminal_completion_witness = driver_guard
+                .input_terminal_completion_authorization_witness(std::slice::from_ref(&input_id))?;
+            let authority =
+                crate::meerkat_machine::driver::machine_resolve_runtime_completion_result(
+                    &driver_guard,
+                    Some(&run_id),
+                    crate::meerkat_machine::dsl::RuntimeCompletionTerminalObservation::NoResult,
+                    finalization,
+                )?;
+            let bundle = crate::completion::authorize_runtime_terminal_bundle(
+                &[],
+                None,
+                authority,
+                terminal_completion_witness,
+                finalization_error,
+                None,
+            )
+            .map_err(|error| {
+                RuntimeDriverError::Internal(format!(
+                    "live-boundary completion projection failed: {error}"
+                ))
+            })?;
+            driver_guard
+                .finalize_input_terminal_completion_batch(bundle.terminal_completion())
+                .await?;
+            let _driver_guard = driver_guard;
+            let mut completion_guard = completion_guard;
+            completion_guard.resolve_authorized_runtime_terminal_bundle([input_id], bundle);
+            Ok::<(), RuntimeDriverError>(())
+        })
+        .await
+        .map_err(|error| {
+            RuntimeDriverError::Internal(format!(
+                "owned live-boundary completion task ended before publishing its outcome: {error}"
+            ))
+        })?
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn commit_live_boundary_input_if_available(
         &self,
@@ -262,21 +319,44 @@ impl MeerkatMachine {
                     .await;
                 return Err(error);
             };
-            let appends =
-                crate::input::projection_to_pending_system_context_appends(input_id, &projection);
-            if appends.is_empty() {
+            let Some(semantics) = driver.driver_ingress().runtime_semantics(input_id) else {
+                let error = RuntimeDriverError::Internal(format!(
+                    "accepted live-boundary input {input_id} has no runtime semantics"
+                ));
+                drop(driver);
+                let error = self
+                    .finish_live_boundary_failure(
+                        session_id,
+                        witness,
+                        completions,
+                        publication_handle,
+                        input_id,
+                        error,
+                        fallback_wake,
+                    )
+                    .await;
+                return Err(error);
+            };
+            let contexts =
+                crate::input::projection_to_transient_turn_context(&projection, semantics)
+                    .into_iter()
+                    .collect::<Vec<_>>();
+            if contexts.is_empty() {
+                // Idle-normalized steers and peer-terminal facts are ordinary
+                // queued transcript work. Leave the fallback armed so the
+                // runtime loop realizes that durable path.
                 return Ok((held_mutation_gate, false));
             }
-            (run_id, appends)
+            (run_id, contexts)
         };
-        let (run_id, appends) = live_boundary_plan;
+        let (run_id, contexts) = live_boundary_plan;
 
         tracing::debug!(
             session_id = %session_id,
             run_id = %run_id,
             input_id = %input_id,
-            append_count = appends.len(),
-            "preparing exact parked live-boundary context"
+            context_count = contexts.len(),
+            "preparing exact parked live-boundary request context"
         );
 
         // The boundary callback may re-enter MeerkatMachine. Drop M before its
@@ -284,7 +364,7 @@ impl MeerkatMachine {
         drop(held_mutation_gate);
         let prepared = witness
             .boundary_handle
-            .prepare_system_context_at_boundary(&run_id, appends)
+            .prepare_transient_turn_context_at_boundary(&run_id, contexts)
             .await;
         let held_mutation_gate = Arc::clone(&witness.mutation_gate).lock_owned().await;
 
@@ -310,12 +390,32 @@ impl MeerkatMachine {
         let prepared = match prepared {
             Ok(prepared) => prepared,
             Err(meerkat_core::lifecycle::CoreBoundaryStageError::Unavailable { reason }) => {
+                let normalization = witness
+                    .driver
+                    .lock()
+                    .await
+                    .machine_normalize_live_boundary_unavailable(input_id)
+                    .await;
+                if let Err(error) = normalization {
+                    let error = self
+                        .finish_live_boundary_failure(
+                            session_id,
+                            witness,
+                            completions,
+                            publication_handle,
+                            input_id,
+                            error,
+                            fallback_wake,
+                        )
+                        .await;
+                    return Err(error);
+                }
                 tracing::debug!(
                     session_id = %session_id,
                     run_id = %run_id,
                     input_id = %input_id,
                     reason = %reason,
-                    "exact live boundary unavailable; retaining queued fallback"
+                    "exact live boundary unavailable; normalized durable queued fallback"
                 );
                 return Ok((held_mutation_gate, false));
             }
@@ -395,25 +495,41 @@ impl MeerkatMachine {
         if let Err(error) = prepared.commit() {
             // The durable realization already consumed the input. A wake can
             // no longer recover it and must not be mistaken for queued
-            // fallback; this branch represents a violated exact-witness
-            // invariant and remains an explicit hard failure.
+            // fallback. Persist the exact finalization-failure result before
+            // returning the violated-witness error.
             fallback_wake.disarm();
-            return Err(RuntimeDriverError::Internal(format!(
+            let detail = format!(
                 "durable live-boundary commit for input {input_id} lost its exact session publication authority: {error}"
-            )));
+            );
+            let finalization_error =
+                meerkat_core::TurnErrorMetadata::runtime_apply_failure(detail.clone());
+            return match Self::finalize_live_boundary_completion_owned(
+                &witness.driver,
+                completions,
+                input_id.clone(),
+                run_id,
+                crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Failed,
+                Some(finalization_error),
+            )
+            .await
+            {
+                Ok(()) => Err(RuntimeDriverError::Internal(detail)),
+                Err(receipt_error) => Err(RuntimeDriverError::Internal(format!(
+                    "{detail}; exact completion receipt finalization also failed: {receipt_error}"
+                ))),
+            };
         }
         fallback_wake.disarm();
 
-        let result_class =
-            crate::meerkat_machine::driver::machine_resolve_runtime_completed_without_result(
-                &witness.driver,
-                &run_id,
-            )
-            .await?;
-        completions
-            .lock()
-            .await
-            .resolve_without_result_authorized(input_id, result_class);
+        Self::finalize_live_boundary_completion_owned(
+            &witness.driver,
+            completions,
+            input_id.clone(),
+            run_id,
+            crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Succeeded,
+            None,
+        )
+        .await?;
         Ok((held_mutation_gate, true))
     }
 
@@ -645,23 +761,25 @@ impl MeerkatMachine {
                     input_id = %input.id(),
                     "MeerkatMachine::AcceptWithCompletion resolving mutation gate"
                 );
-                let gate = match &_member_residency_lease {
-                    Some(lease) => Some(Arc::clone(&lease.session_mutation_gate)),
-                    None => self.session_mutation_gate(&session_id).await,
-                }
-                .ok_or_else(|| {
-                    if expected_attachment.is_some() || _member_residency_lease.is_some() {
-                        RuntimeDriverError::StaleAuthority {
-                            reason: format!(
-                                "runtime session disappeared before input admission for session '{session_id}'"
-                            ),
-                        }
-                    } else {
-                        RuntimeDriverError::NotReady {
-                            state: RuntimeState::Destroyed,
-                        }
+                let (gate, preacquired_gate_guard) = match &_member_residency_lease {
+                    Some(lease) => (Arc::clone(&lease.session_mutation_gate), None),
+                    None => {
+                        let guard = self
+                            .lock_current_durability_ready_session_mutation_gate(&session_id)
+                            .await?;
+                        let gate = {
+                            let sessions = self.sessions.read().await;
+                            let entry =
+                                sessions
+                                    .get(&session_id)
+                                    .ok_or(RuntimeDriverError::NotReady {
+                                        state: RuntimeState::Destroyed,
+                                    })?;
+                            Arc::clone(&entry.mutation_gate)
+                        };
+                        (gate, Some(guard))
                     }
-                })?;
+                };
                 #[cfg(test)]
                 if _member_residency_lease.is_some() {
                     let test_gate = self
@@ -680,7 +798,10 @@ impl MeerkatMachine {
                     has_gate = true,
                     "MeerkatMachine::AcceptWithCompletion resolved mutation gate"
                 );
-                let mut gate_guard = Some(Arc::clone(&gate).lock_owned().await);
+                let mut gate_guard = match preacquired_gate_guard {
+                    Some(guard) => Some(guard),
+                    None => Some(Arc::clone(&gate).lock_owned().await),
+                };
                 let (
                     wake_tx,
                     effect_tx,
@@ -707,6 +828,12 @@ impl MeerkatMachine {
                             ),
                         });
                     }
+                    entry.require_durability_ready().map_err(|required| {
+                        RuntimeDriverError::RecoveryRepairBlocked {
+                            evidence_digest: None,
+                            reason: required.to_string(),
+                        }
+                    })?;
                     if let Some(expected_attachment) = expected_attachment.as_ref() {
                         let exact_attachment = entry.epoch_id == expected_attachment.epoch_id
                             && matches!(
@@ -768,7 +895,7 @@ impl MeerkatMachine {
                 // This observation selects the generated live-boundary plan;
                 // it is not authority to publish. The exact post-admission
                 // transaction below revalidates the attachment, run, and
-                // queued input before committing the context append.
+                // queued input before committing request-only turn context.
                 let active_turn_boundary_available =
                     Self::active_turn_boundary_candidate_available(
                         &driver,

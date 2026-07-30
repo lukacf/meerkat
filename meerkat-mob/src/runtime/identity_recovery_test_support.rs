@@ -9,8 +9,6 @@ use std::sync::{Arc, Mutex, OnceLock};
 /// A durable-write frontier exercised by the cross-process recovery matrix.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IdentityRecoveryFailStopPoint {
-    ManifestCommittedBeforeReply,
-    ManifestReplySent,
     LeaseAcquired,
     RuntimeCasApplied,
     MemberEventApplied,

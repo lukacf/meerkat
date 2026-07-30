@@ -29,6 +29,50 @@ pub enum SqliteStoreError {
         supported: i64,
     },
 
+    /// The ledger records a real domain version, but that version is not one
+    /// of the exact released predecessors this binary is willing to upgrade.
+    /// This covers both versions below the compatibility floor and gaps
+    /// between an allowed predecessor and the current schema. Refusal happens
+    /// before schema or ledger mutation.
+    #[error(
+        "schema for domain `{domain}` is not a supported predecessor: file has version {found}, \
+         this binary supports version {supported} and accepts existing versions {allowed:?}"
+    )]
+    UnsupportedSchemaPredecessor {
+        domain: String,
+        found: i64,
+        supported: i64,
+        allowed: Vec<i64>,
+    },
+
+    /// A ledger row names an otherwise allowed current or released version,
+    /// but the domain-owned catalog does not exactly match that version's
+    /// frozen schema fingerprint. The row alone is not authority to
+    /// reinterpret a candidate or partially migrated schema.
+    #[error(
+        "schema fingerprint for domain `{domain}` version {version} does not match the \
+         allowed schema: {detail}"
+    )]
+    SchemaFingerprintMismatch {
+        domain: String,
+        version: i64,
+        detail: String,
+    },
+
+    /// A file has no ledger row for a domain but already contains one or more
+    /// objects owned by that domain. At the 0.8.10 compatibility floor this
+    /// is neither a fresh domain nor an authenticated released predecessor:
+    /// silently running idempotent DDL over it would bless an unknown or
+    /// unreleased candidate schema.
+    #[error(
+        "schema domain `{domain}` has no ledger row but already owns objects {objects:?}; \
+         refusing to infer or stamp an unversioned schema"
+    )]
+    UnledgeredDomainObjects {
+        domain: String,
+        objects: Vec<String>,
+    },
+
     /// A registered migration failed while being applied. The surrounding
     /// transaction is rolled back; the file is left at its prior version.
     #[error("migration {version} (`{name}`) for domain `{domain}` failed: {source}")]

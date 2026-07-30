@@ -13,8 +13,8 @@
 //! catches sit directly on the session-service create path that mob
 //! provisioning transactions await, so a swallowed payload here leaves the
 //! same furnace invisible. Every catch must therefore (a) recover and log
-//! the payload — once per distinct payload per boundary+session, never per
-//! iteration — and (b) carry the payload inside the typed error so it
+//! the payload immediately and then at bounded repeat checkpoints per
+//! boundary+session, never per iteration — and (b) carry the payload inside the typed error so it
 //! survives even where logs are filtered.
 //!
 //! panic=abort compatibility: `catch_unwind` observes nothing there; this
@@ -47,12 +47,14 @@ pub(crate) fn run_boundary_guarded<T>(
         }
         Err(payload) => {
             let detail = panic_payload_detail(payload.as_ref());
-            if gate.first_sighting(&gate_key, &detail) {
+            let log_decision = gate.observe(&gate_key, &detail);
+            if log_decision.should_log {
                 tracing::error!(
                     %session_id,
                     boundary,
                     panic = %detail,
-                    "runtime attachment boundary panicked; payload recovered and converted to a typed driver error (logged once per distinct payload)"
+                    repeated_sightings = log_decision.repeated_sightings,
+                    "runtime attachment boundary panicked; payload recovered, sanitized, and converted to a typed driver error"
                 );
             }
             Err(RuntimeDriverError::Internal(build_message(&detail)))

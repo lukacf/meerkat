@@ -848,9 +848,19 @@ pub use service_ext::SessionServiceRuntimeExt;
 #[cfg(feature = "sqlite-store")]
 pub use store::SqliteRuntimeStore;
 pub use store::{
-    InMemoryRuntimeStore, InputStateRow, RuntimeDeliveryAuthorityCasOutcome,
-    RuntimeDeliveryAuthorityRecord, RuntimeDeliveryStoreRecord, RuntimeStore, RuntimeStoreError,
-    RuntimeStoreWriteFence, RuntimeStoreWriteFenceOutcome, SessionDelta,
+    CommittedRecoveryBoundary, CommittedWholeBlobProvisionalTail, CommittedWholeBlobSnapshot,
+    HeadCanonicalProvisionalTailAuthority, HeadCanonicalStoreAuthority, InMemoryRuntimeStore,
+    InputStateRow, PreparedDurableTailRecoverySource, PreparedHeadCanonicalProvisionalPromotion,
+    PreparedHeadCanonicalProvisionalTail, PreparedRecoveryEvidence,
+    PreparedRecoveryReceiptDigestEnrichment, PreparedRecoveryReceiptSource,
+    PreparedRuntimeSessionCommit, PreparedRuntimeSessionCommitKind,
+    PreparedRuntimeSessionCommitOutcome, PreparedRuntimeSessionCommitResult,
+    PreparedWholeBlobProvisionalTail, PreparedWholeBlobRewriteBoundary,
+    PreparedWholeBlobRewriteStoreParts, RecoveryCommitStatus, RuntimeDeliveryAuthorityCasOutcome,
+    RuntimeDeliveryAuthorityRecord, RuntimeDeliveryStoreRecord, RuntimeSessionAuthority,
+    RuntimeSessionPersistenceProfile, RuntimeStore, RuntimeStoreError, RuntimeStoreWriteFence,
+    RuntimeStoreWriteFenceOutcome, SerializedSessionSnapshot, WholeBlobProvisionalTailAuthority,
+    WholeBlobStoreAuthority,
 };
 pub use traits::{
     DestroyReport, RecoveryReport, RecycleReport, ResetReport, RetireReport, RuntimeControlPlane,

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use meerkat_core::error::ToolError;
 use meerkat_core::lifecycle::run_primitive::{
-    ConversationAppend, ConversationAppendRole, ConversationContextAppend, CoreRenderable,
+    ConversationAppend, ConversationAppendRole, CoreRenderable,
 };
 use meerkat_core::service::TurnToolOverlay;
 use meerkat_core::types::{
@@ -70,44 +70,6 @@ pub fn workgraph_attention_turn_append(
                     projection.binding_id, projection.work_ref.item_id, projection.mode
                 )),
                 payload: None,
-            }],
-        },
-    }
-}
-
-pub fn workgraph_attention_context_append(
-    key: String,
-    projection: &AttentionContextProjection,
-) -> ConversationContextAppend {
-    ConversationContextAppend {
-        key,
-        content: CoreRenderable::SystemNotice {
-            kind: SystemNoticeKind::Generic,
-            body: Some(format!(
-                "WorkGraph attention continuation requested for binding {} and item {} at binding revision {} / item revision {}. Scoped tools and runtime preflight reject stale or inactive attention before exposing item data or mutating the graph.\n\n{}",
-                projection.binding_id,
-                projection.work_ref.item_id,
-                projection.binding_revision,
-                projection.item_revision,
-                projection.text.rendered
-            )),
-            blocks: vec![SystemNoticeBlock::RuntimeNotice {
-                category: "workgraph_attention_binding".to_string(),
-                detail: Some(format!(
-                    "binding={} item={} mode={:?} binding_revision={} item_revision={}",
-                    projection.binding_id,
-                    projection.work_ref.item_id,
-                    projection.mode,
-                    projection.binding_revision,
-                    projection.item_revision
-                )),
-                payload: Some(serde_json::json!({
-                    "binding_id": projection.binding_id.clone(),
-                    "work_ref": projection.work_ref.clone(),
-                    "mode": projection.mode,
-                    "binding_revision": projection.binding_revision,
-                    "item_revision": projection.item_revision,
-                })),
             }],
         },
     }

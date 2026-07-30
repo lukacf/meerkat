@@ -67,7 +67,7 @@ test("MeerkatRuntime drives direct-session lifecycle through shipped wasm export
       idempotencyKey: "ctx-web-1",
     });
 
-    assert.equal(staged.status, "staged");
+    assert.equal(staged.status, "applied");
     assert.equal(staged.handle, session.handle);
 
     const state = session.getState();
@@ -122,7 +122,7 @@ test("Session.destroy does not cache destroyed state when the underlying wasm de
       }
     },
     () => "[]",
-    async () => JSON.stringify({ handle: 7, status: "staged" }),
+    async () => JSON.stringify({ handle: 7, status: "applied" }),
   );
 
   assert.throws(() => session.destroy(), /SESSION_BUSY/);
@@ -162,7 +162,7 @@ test("Session.destroy treats runtime teardown as canonical absence without poiso
       throw notInitializedEnvelope;
     },
     () => "[]",
-    async () => JSON.stringify({ handle: 8, status: "staged" }),
+    async () => JSON.stringify({ handle: 8, status: "applied" }),
   );
 
   assert.doesNotThrow(() => session.destroy());
@@ -195,7 +195,7 @@ test("Session.destroy swallows typed not_initialized without caching lifecycle s
       throw error;
     },
     () => "[]",
-    () => JSON.stringify({ handle: 9, status: "staged" }),
+    () => JSON.stringify({ handle: 9, status: "applied" }),
   );
 
   assert.doesNotThrow(() => session.destroy());
@@ -548,7 +548,7 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
       return JSON.stringify({
         mob_id: "mob-web-parity",
         agent_identity: agentIdentity,
-        status: "staged",
+        status: "applied",
       });
     },
     async mob_member_send(_mobId, agentIdentity, requestJson) {

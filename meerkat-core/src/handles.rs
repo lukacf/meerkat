@@ -1131,8 +1131,6 @@ pub trait TurnStateHandle: Send + Sync {
 
     fn start_immediate_append(&self, run_id: RunId) -> Result<(), DslTransitionError>;
 
-    fn start_immediate_context(&self, run_id: RunId) -> Result<(), DslTransitionError>;
-
     fn primitive_applied(&self, run_id: RunId) -> Result<(), DslTransitionError>;
 
     fn llm_returned_tool_calls(
@@ -2400,7 +2398,7 @@ pub trait PeerInteractionCleanupObserver: Send + Sync {
 /// Shell callers fire `context_advanced(updated_at_ms)` at every site that
 /// mutates canonical session truth (prompt append, external content
 /// injection, tool-result append, external assistant output,
-/// runtime-system-context append, any `summary_tx.send_replace`). The
+/// ordinary durable System-message append, any `summary_tx.send_replace`). The
 /// transition is monotonic: the DSL guard drops ticks whose `updated_at_ms`
 /// isn't strictly greater than the last recorded watermark, so callers can
 /// fire unconditionally post-mutation.
@@ -2867,9 +2865,9 @@ mod tests {
 
     #[test]
     fn peer_terminal_fact_round_trips_through_serde() {
-        // The typed fact is now persisted on `PendingSystemContextAppend` and
-        // read back by the realtime consumer instead of re-parsing flattened
-        // prompt text, so it must survive a durable serde round-trip.
+        // The typed fact is persisted with its runtime input and realized as
+        // one ordinary SystemNotice, so it must survive a durable serde
+        // round-trip without re-parsing flattened prompt text.
         let fact = PeerResponseTerminalFact::new(
             PeerResponseTerminalSource::parse(
                 Some("inproc://analyst"),

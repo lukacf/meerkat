@@ -1,0 +1,6 @@
+{
+  "realm_id": "fixture-realm",
+  "backend": "sqlite",
+  "origin": "explicit",
+  "created_at": "1785367557"
+}

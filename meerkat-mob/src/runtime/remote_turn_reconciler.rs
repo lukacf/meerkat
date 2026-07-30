@@ -993,7 +993,9 @@ impl AdoptedWait {
 enum ReconcileWake {
     ActorClosed,
     Adopted(Option<AdoptedCompletion>),
-    Event,
+    /// `Some(mob_id)` is an exact broadcast row; `None` means lag/closure and
+    /// conservatively requires a durable cursor rescan.
+    Event(Option<MobId>),
     MachineChanged,
     Scan,
 }
@@ -1001,6 +1003,10 @@ enum ReconcileWake {
 struct ScanSummary {
     live_intents: usize,
     next_retry_after: Option<Duration>,
+    /// Whether this completed scan actually tailed the durable event cursor.
+    /// Machine-only fast paths leave this false so they cannot re-arm the
+    /// independent cross-process safety deadline.
+    event_store_polled: bool,
     /// Dual-witness quiescence: durable rows AND machine custody both empty
     /// (plus no retry backlog and every recovered run converged).
     quiescent: bool,
@@ -1018,6 +1024,29 @@ fn scan_quiescence_witness(
     machine_custody_quiet: bool,
 ) -> bool {
     live_intents == 0 && retry_is_empty && all_recovered_converged && machine_custody_quiet
+}
+
+/// A broad machine-state watch is a wake hint, not proof that remote-turn work
+/// changed. Once both durable and machine witnesses were quiescent, an
+/// unrelated machine input may skip even the indexed event-store poll when no
+/// event wake arrived and remote-turn custody is still empty. Event wakes and
+/// the slow safety sweep remain the cross-process/public-row liveness owners.
+fn machine_only_wake_can_skip_event_poll(
+    previous_scan_quiescent: bool,
+    event_wake_since_last_scan: bool,
+    machine_wake_since_last_scan: bool,
+    machine_custody_quiet: bool,
+    event_safety_poll_due: bool,
+) -> bool {
+    previous_scan_quiescent
+        && !event_wake_since_last_scan
+        && machine_wake_since_last_scan
+        && machine_custody_quiet
+        && !event_safety_poll_due
+}
+
+fn event_signal_requires_scan(event_mob_id: Option<&MobId>, reconciled_mob_id: &MobId) -> bool {
+    event_mob_id.is_none_or(|event_mob_id| event_mob_id == reconciled_mob_id)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1083,15 +1112,22 @@ impl RemoteTurnIntentReconciler {
         let mut event_rx = self.handle.events.subscribe().ok();
         let mut machine_changes = Some(self.handle.machine_state_changes());
         let mut next_scan_after = RECONCILE_SCAN_INTERVAL;
-        // Unconditional first scan with the wake flag seeded true: the watch
-        // does not fire for the value present at subscribe time, and custody
-        // recovered during resume exists at spawn with no subsequent publish,
-        // so crash-recovery replay must not wait for a wake or safety tick.
+        // Unconditional first scan with the event-class flag seeded true: the
+        // watch does not fire for the value present at subscribe time, and
+        // custody/private rows recovered during resume exist at spawn with no
+        // subsequent publish, so crash recovery cannot take the
+        // machine-only/quiescent fast path.
         let mut deadline =
             super::ReconcileScanDeadline::first_scan(Instant::now(), RECONCILE_SCAN_INTERVAL);
         let mut idle_delay = RECONCILE_SCAN_INTERVAL;
-        let mut wake_since_last_scan = true;
+        let mut event_wake_since_last_scan = true;
+        let mut machine_wake_since_last_scan = false;
         let mut previous_scan_quiescent = false;
+        // This deadline is deliberately independent from the generic scan
+        // deadline. Broad machine wakes may complete cheap projection-only
+        // scans, but they must never postpone the durable cross-process safety
+        // sweep indefinitely.
+        let mut next_event_safety_poll_at = Instant::now();
 
         loop {
             let wake = tokio::select! {
@@ -1099,7 +1135,9 @@ impl RemoteTurnIntentReconciler {
                 completion = completion_waiters.next(), if !completion_waiters.is_empty() => {
                     ReconcileWake::Adopted(completion)
                 }
-                () = Self::wait_for_event(&mut event_rx) => ReconcileWake::Event,
+                event_mob_id = Self::wait_for_event(&mut event_rx) => {
+                    ReconcileWake::Event(event_mob_id)
+                },
                 () = super::wait_for_machine_state_change(&mut machine_changes) => {
                     ReconcileWake::MachineChanged
                 }
@@ -1120,33 +1158,49 @@ impl RemoteTurnIntentReconciler {
                     {
                         tracing::warn!(error = %error, "remote-turn adopted terminal reconciliation remains pending");
                     }
-                    wake_since_last_scan = true;
+                    // Completion folding can append public terminals and move
+                    // machine custody. Treat it as an event-class wake so the
+                    // next scan cannot take the machine-only fast path.
+                    event_wake_since_last_scan = true;
                     deadline.pull_earlier(Instant::now(), RECONCILE_SCAN_INTERVAL);
                 }
-                ReconcileWake::Event => {
+                ReconcileWake::Event(event_mob_id)
+                    if !event_signal_requires_scan(event_mob_id.as_ref(), &self.mob_id) =>
+                {
+                    // The event bus is store-global. An exact row for another
+                    // mob is neither this reconciler's public carrier nor
+                    // evidence that its private rows changed. Consume it
+                    // without pulling the durable-scan deadline earlier.
+                }
+                ReconcileWake::Event(_) => {
                     // Structural append wakeup. A small debounce lets the
                     // immediately-following private intent write settle when
                     // the wake was StepDispatched. Use an absolute deadline
                     // and only move it earlier: a busy event stream must not
                     // postpone reconciliation forever.
-                    wake_since_last_scan = true;
+                    event_wake_since_last_scan = true;
                     deadline.pull_earlier(Instant::now(), RECONCILE_SCAN_INTERVAL);
                 }
                 ReconcileWake::MachineChanged => {
                     // Custody moved (possibly with no public append); same
                     // min-earlier debounce as the event lane.
-                    wake_since_last_scan = true;
+                    machine_wake_since_last_scan = true;
                     deadline.pull_earlier(Instant::now(), RECONCILE_SCAN_INTERVAL);
                 }
                 ReconcileWake::Scan => {
-                    let woken = wake_since_last_scan;
-                    wake_since_last_scan = false;
+                    let event_woken = event_wake_since_last_scan;
+                    let machine_woken = machine_wake_since_last_scan;
+                    event_wake_since_last_scan = false;
+                    machine_wake_since_last_scan = false;
+                    let event_safety_poll_due = Instant::now() >= next_event_safety_poll_at;
                     let mut new_adoptions = Vec::new();
                     let scan_result = self
                         .scan_once(
                             &mut events_cache,
-                            woken,
+                            event_woken,
+                            machine_woken,
                             previous_scan_quiescent,
+                            event_safety_poll_due,
                             &mut new_adoptions,
                             &mut adopted,
                             &mut accepted,
@@ -1161,14 +1215,24 @@ impl RemoteTurnIntentReconciler {
                     }
                     match scan_result {
                         Ok(summary) => {
+                            let scan_completed_at = Instant::now();
+                            if summary.event_store_polled {
+                                next_event_safety_poll_at =
+                                    scan_completed_at + super::RECONCILE_SAFETY_INTERVAL;
+                            }
                             previous_scan_quiescent =
                                 summary.quiescent && completion_waiters.is_empty();
                             if previous_scan_quiescent {
                                 // Converged: both wake lanes own new-work
                                 // detection; the safety tick only bounds
-                                // drift from signals they cannot observe.
+                                // drift from signals they cannot observe. A
+                                // cheap machine-only scan cannot move that
+                                // absolute durable-poll deadline later.
                                 idle_delay = RECONCILE_SCAN_INTERVAL;
-                                next_scan_after = super::RECONCILE_SAFETY_INTERVAL;
+                                next_scan_after = super::RECONCILE_SAFETY_INTERVAL.min(
+                                    next_event_safety_poll_at
+                                        .saturating_duration_since(scan_completed_at),
+                                );
                             } else if summary.live_intents == 0 {
                                 // Rows are empty but the dual witness is not
                                 // satisfied (e.g. Absent-custody rows or an
@@ -1196,15 +1260,19 @@ impl RemoteTurnIntentReconciler {
         }
     }
 
-    async fn wait_for_event(event_rx: &mut Option<crate::store::MobEventReceiver>) {
+    async fn wait_for_event(
+        event_rx: &mut Option<crate::store::MobEventReceiver>,
+    ) -> Option<MobId> {
         match event_rx {
             Some(receiver) => match receiver.recv().await {
-                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Ok(event) => Some(event.mob_id),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => None,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                     *event_rx = None;
+                    None
                 }
             },
-            None => std::future::pending::<()>().await,
+            None => std::future::pending::<Option<MobId>>().await,
         }
     }
 
@@ -1214,8 +1282,10 @@ impl RemoteTurnIntentReconciler {
     async fn scan_once(
         &self,
         events_cache: &mut EpochEventCache,
-        wake_since_last_scan: bool,
+        event_wake_since_last_scan: bool,
+        machine_wake_since_last_scan: bool,
         previous_scan_quiescent: bool,
+        event_safety_poll_due: bool,
         new_adoptions: &mut Vec<AdoptedWait>,
         adopted: &mut BTreeSet<RemoteTurnKey>,
         accepted: &mut BTreeSet<RemoteTurnKey>,
@@ -1224,13 +1294,36 @@ impl RemoteTurnIntentReconciler {
         host_cursor: &mut usize,
         converged_runs: &mut BTreeSet<RunId>,
     ) -> Result<ScanSummary, MobError> {
+        let machine_custody_quiet = self
+            .handle
+            .project_remote_turn_custody_is_quiet_from_current_machine_state();
+        if machine_only_wake_can_skip_event_poll(
+            previous_scan_quiescent,
+            event_wake_since_last_scan,
+            machine_wake_since_last_scan,
+            machine_custody_quiet,
+            event_safety_poll_due,
+        ) {
+            // The watch publishes every applied machine input, including
+            // unrelated mob activity. On a proven-quiescent baseline, an
+            // unchanged remote-turn projection cannot make private/public
+            // recovery material actionable. Avoid opening SQLite merely
+            // because some other machine family advanced.
+            return Ok(ScanSummary {
+                live_intents: 0,
+                next_retry_after: None,
+                event_store_polled: false,
+                quiescent: true,
+            });
+        }
+
         // The cache refresh precedes every run-store row read, so the events
         // snapshot is always older-or-equal to the rows — the exact staleness
         // direction the torn-snapshot guard in prepare (and the
         // live_scan_stale_event_snapshot_preserves_fresh_private_rows pin)
         // proves non-destructive for repair=false scans.
         let refreshed = events_cache.refresh(&self.handle.events).await?;
-        if wake_since_last_scan && !refreshed.any_rows {
+        if event_wake_since_last_scan && !refreshed.any_rows {
             // A wake with zero rows past the frontier is the cursor
             // regression probe: the destroy path's store clear() resets the
             // cursor allocator. That path also closes the command channel, so
@@ -1242,9 +1335,11 @@ impl RemoteTurnIntentReconciler {
                 events_cache.refresh(&self.handle.events).await?;
             }
         }
-        if previous_scan_quiescent && !wake_since_last_scan && !refreshed.advanced_for_this_mob {
+        if previous_scan_quiescent && !refreshed.advanced_for_this_mob && machine_custody_quiet {
             // Idle safety tick over a proven-quiescent mob: the whole scan is
-            // the one indexed poll above returning zero rows. Soundness:
+            // the one indexed poll above returning no relevant rows. This also
+            // covers an event wake for another mob sharing the store and a
+            // machine wake whose relevant projection stayed empty. Soundness:
             // every private-row mint in a live process is accompanied by an
             // actor machine input (custody mint -> watch publish) and every
             // dispatch by current-epoch FlowStarted/StepDispatched appends;
@@ -1253,6 +1348,7 @@ impl RemoteTurnIntentReconciler {
             return Ok(ScanSummary {
                 live_intents: 0,
                 next_retry_after: None,
+                event_store_polled: true,
                 quiescent: true,
             });
         }
@@ -1526,6 +1622,7 @@ impl RemoteTurnIntentReconciler {
         Ok(ScanSummary {
             live_intents,
             next_retry_after,
+            event_store_polled: true,
             quiescent: scan_quiescence_witness(
                 live_intents,
                 retry.is_empty(),
@@ -2526,6 +2623,45 @@ mod tests {
         assert!(!scan_quiescence_witness(0, false, true, true));
         assert!(!scan_quiescence_witness(0, true, false, true));
         assert!(scan_quiescence_witness(0, true, true, true));
+    }
+
+    #[test]
+    fn unrelated_machine_wake_skips_event_poll_only_from_proven_quiescence() {
+        assert!(machine_only_wake_can_skip_event_poll(
+            true, false, true, true, false,
+        ));
+        assert!(
+            !machine_only_wake_can_skip_event_poll(true, true, true, true, false),
+            "a public event wake must always tail the durable event cursor"
+        );
+        assert!(
+            !machine_only_wake_can_skip_event_poll(true, false, true, false, false),
+            "machine custody makes the wake actionable even without a public event"
+        );
+        assert!(
+            !machine_only_wake_can_skip_event_poll(false, false, true, true, false),
+            "the first/unconverged scan cannot claim the dual-witness fast path"
+        );
+        assert!(
+            !machine_only_wake_can_skip_event_poll(true, false, false, true, false),
+            "the safety sweep still owns cross-process liveness"
+        );
+        assert!(
+            !machine_only_wake_can_skip_event_poll(true, false, true, true, true),
+            "machine wake storms cannot postpone an already-due durable safety sweep"
+        );
+    }
+
+    #[test]
+    fn store_global_event_signal_scans_only_for_target_or_uncertain_delivery() {
+        let target = MobId::from("target");
+        let other = MobId::from("other");
+        assert!(event_signal_requires_scan(Some(&target), &target));
+        assert!(!event_signal_requires_scan(Some(&other), &target));
+        assert!(
+            event_signal_requires_scan(None, &target),
+            "lag or subscription closure must conservatively tail the durable cursor"
+        );
     }
 
     #[tokio::test]

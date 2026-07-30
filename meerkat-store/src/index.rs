@@ -32,6 +32,20 @@ pub const JSONL_INDEX_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::Sch
         name: "base-schema",
         apply: migration_0001_session_index,
     }],
+    initialize_current: migration_0001_session_index,
+    allowed_existing_versions: &[1],
+    released_predecessors: &[],
+    owned_objects: &[
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "session_index",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Index,
+            name: "session_index_updated_idx",
+        },
+    ],
+    retired_objects: &[],
 };
 
 fn system_time_millis(time: SystemTime) -> i64 {
@@ -67,7 +81,7 @@ fn open_connection(path: &Path) -> Result<IndexConn, StoreError> {
         path,
         meerkat_sqlite::ConnectionProfile::PRIMARY,
         meerkat_sqlite::OpenOptions {
-            // Future-schema refusal precedes the Primary profile's WAL
+            // Schema-eligibility refusal precedes the Primary profile's WAL
             // conversion.
             schema_preflight: &[&JSONL_INDEX_DOMAIN],
             ..meerkat_sqlite::OpenOptions::default()

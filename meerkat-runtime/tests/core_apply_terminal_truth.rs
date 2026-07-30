@@ -64,15 +64,6 @@ fn assert_terminal_intent_validation_precedes_markers(
     Ok(())
 }
 
-fn assert_terminal_context_and_run_stages_pre_turn_appends(source: &str, owner: &str) {
-    assert!(
-        source.contains("primitive.is_peer_response_terminal_context_and_run()")
-            && source.contains("pending_system_context_appends(&staged.context_appends)")
-            && source.contains("pre_turn_context_appends"),
-        "{owner} must stage terminal context-and-run context into the admitted turn request"
-    );
-}
-
 fn derive_attribute_before<'a>(contents: &'a str, marker: &str) -> Result<&'a str, String> {
     let start = contents
         .find(marker)
@@ -526,7 +517,7 @@ fn runtime_loop_terminal_snapshot_failures_are_fail_closed() -> Result<(), Strin
 }
 
 #[test]
-fn terminal_context_and_run_adapters_use_canonical_primitive_intent() -> Result<(), String> {
+fn terminal_notices_flow_through_canonical_typed_appends() -> Result<(), String> {
     let root = workspace_root()?;
     let runtime_backed = fs::read_to_string(root.join("meerkat/src/surface/runtime_backed.rs"))
         .map_err(|err| format!("read runtime-backed surface source: {err}"))?;
@@ -535,17 +526,10 @@ fn terminal_context_and_run_adapters_use_canonical_primitive_intent() -> Result<
             .map_err(|err| format!("read MCP runtime ingress source: {err}"))?;
 
     let runtime_backed_apply = extract_braced_item(&runtime_backed, "async fn apply")?;
-    assert!(
-        runtime_backed_apply.contains("primitive.is_context_only_apply_without_turn()"),
-        "runtime-backed context shortcut must use the canonical primitive intent helper"
-    );
     assert_terminal_intent_validation_precedes_markers(
         runtime_backed_apply,
         "runtime-backed apply",
-        &[
-            "primitive.is_context_only_apply_without_turn()",
-            "start_turn_request_from_primitive(&primitive)",
-        ],
+        &["start_turn_request_from_primitive(&primitive)"],
     )?;
     assert!(
         runtime_backed_apply.contains("start_turn_request_from_primitive(&primitive)")
@@ -555,28 +539,21 @@ fn terminal_context_and_run_adapters_use_canonical_primitive_intent() -> Result<
 
     let runtime_backed_request =
         extract_braced_item(&runtime_backed, "fn start_turn_request_from_primitive")?;
-    assert_terminal_context_and_run_stages_pre_turn_appends(
-        runtime_backed_request,
-        "runtime-backed turn request builder",
+    assert!(
+        runtime_backed_request.contains(".with_typed_turn_appends(primitive.typed_turn_appends())"),
+        "runtime-backed turn request must carry the primitive's ordinary typed appends"
     );
 
     let mcp_runtime_apply =
         extract_braced_item(&mcp_runtime_ingress, "async fn apply_runtime_turn")?;
-    assert!(
-        mcp_runtime_apply.contains("primitive.is_context_only_apply_without_turn()"),
-        "MCP runtime ingress must not re-derive context-only terminal behavior from append shape"
-    );
     assert_terminal_intent_validation_precedes_markers(
         mcp_runtime_apply,
         "MCP runtime ingress apply",
-        &[
-            "primitive.is_context_only_apply_without_turn()",
-            "let pre_turn_context_appends = match primitive",
-        ],
+        &["primitive.typed_turn_appends()"],
     )?;
-    assert_terminal_context_and_run_stages_pre_turn_appends(
-        mcp_runtime_apply,
-        "MCP runtime ingress apply",
+    assert!(
+        mcp_runtime_apply.contains(".with_typed_turn_appends(typed_turn_appends)"),
+        "MCP runtime ingress must carry ordinary typed appends into the admitted turn"
     );
     Ok(())
 }

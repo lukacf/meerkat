@@ -1,9 +1,9 @@
 // Generated wire types for Meerkat SDK
-// Contract version: 0.8.10
+// Contract version: 0.8.11
 
 import { MeerkatError } from "./errors.js";
 
-export const CONTRACT_VERSION = "0.8.10";
+export const CONTRACT_VERSION = "0.8.11";
 
 export type Value = unknown;
 
@@ -659,7 +659,7 @@ export interface InjectSystemContextParams {
 }
 
 export interface InjectSystemContextResult {
-  status: "applied" | "staged" | "duplicate";
+  status: "applied" | "duplicate";
 }
 
 export interface InterruptParams {
@@ -1476,7 +1476,7 @@ export interface MobAppendSystemContextParams {
 export interface MobAppendSystemContextResult {
   agent_identity: string;
   mob_id: string;
-  status: "applied" | "staged" | "duplicate";
+  status: "applied" | "duplicate";
 }
 
 export interface MobFlowsResult {
@@ -1580,6 +1580,7 @@ export interface MobTurnStartParams {
   skill_refs?: SkillKey[] | null;
   structured_output_retries?: number | null;
   system_prompt?: string | null;
+  transient_turn_context?: string | null;
   turn_tool_overlay?: PublicTurnToolOverlay | null;
 }
 
@@ -1637,6 +1638,7 @@ export interface MobSubmitWorkParams {
   member_ref: WireMemberRef;
   objective_id?: string | null;
   origin?: "external" | "internal";
+  transient_turn_context?: string | null;
   work_ref?: string | null;
 }
 
@@ -2333,6 +2335,7 @@ export interface BridgeDeliveryPayload {
   protocol_version: BridgeProtocolVersion;
   supervisor: BridgePeerSpec;
   transcript_interaction_id?: string | null;
+  transient_turn_context?: string | null;
   turn?: BridgeTurnDirective | null;
 }
 
@@ -3245,6 +3248,7 @@ export interface BridgeCommandDeliverMemberInput {
   protocol_version: BridgeProtocolVersion;
   supervisor: BridgePeerSpec;
   transcript_interaction_id?: string | null;
+  transient_turn_context?: string | null;
   turn?: BridgeTurnDirective | null;
 }
 
@@ -5453,9 +5457,16 @@ export interface WireImageOperationPhaseTerminal {
 
 export type WireImageOperationPhase = WireImageOperationPhaseRequested | WireImageOperationPhaseValidating | WireImageOperationPhaseAwaitingApproval | WireImageOperationPhasePlanResolved | WireImageOperationPhaseProjectionSnapshotted | WireImageOperationPhaseScopedOverrideActive | WireImageOperationPhaseProviderCallInFlight | WireImageOperationPhaseProviderResultCaptured | WireImageOperationPhaseBlobCommitPending | WireImageOperationPhaseResultCommitted | WireImageOperationPhaseRestoringScopedOverride | WireImageOperationPhaseTerminal;
 
+/** Optional control-ingress identity carried by one durable System message. */
+export interface WireSystemMessageIdentity {
+  idempotency_key?: string | null;
+  source?: string | null;
+}
+
 export interface WireSessionMessageSystem {
   content: string;
   created_at: string;
+  identity?: WireSystemMessageIdentity | null;
   role: "system";
 }
 

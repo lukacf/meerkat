@@ -1044,11 +1044,14 @@ mod dispatch_session;
 pub mod dsl;
 pub(crate) mod dsl_authority;
 mod dsl_effects;
+mod durability_health;
 mod llm_reconfigure;
 mod runtime_control;
 mod session_management;
 mod traits;
 mod visibility;
+
+pub(crate) use durability_health::{DurabilityHealthHandle, DurabilityReloadRequired};
 
 pub(crate) use session_management::{
     DeleteOpsFinalizationAuthority, RetainOpsFinalizationAuthority,
@@ -1203,6 +1206,14 @@ struct RuntimeSessionEntry {
     /// it is an additional serialization point that spans the entire
     /// multi-step mutation window.
     mutation_gate: Arc<Mutex<()>>,
+    /// Shared fail-closed durability gate for persistent sessions.
+    ///
+    /// The persistent driver degrades this exact handle when its live shell can
+    /// no longer be proven against durable state. Direct session mutations
+    /// check it while holding `mutation_gate`; a degraded entry mechanically
+    /// detaches and interrupts its executor and can only be replaced by a new
+    /// registration-authorized cold install. Storeless sessions carry `None`.
+    durability_health: Option<DurabilityHealthHandle>,
     /// Serializes the complete live-open materialization window against a
     /// lifecycle owner's physical-absence proof + terminal marker window.
     /// This is separate from `mutation_gate`: live orchestration calls back
@@ -1543,9 +1554,9 @@ impl ArchivedSessionActorMaterializationAuthorization {
 
         let mutation_guard = self
             .machine
-            .lock_current_session_mutation_gate(&self.session_id)
+            .lock_current_durability_ready_session_mutation_gate(&self.session_id)
             .await
-            .ok_or(crate::RuntimeActorMaterializationError::RegistrationClosed)?;
+            .map_err(|_| crate::RuntimeActorMaterializationError::RegistrationClosed)?;
         {
             let sessions = self.machine.sessions.read().await;
             let entry = sessions
@@ -3008,8 +3019,9 @@ impl PreparedSessionMaterialization {
         }
         let Some(_mutation_guard) = self
             .machine
-            .lock_current_session_mutation_gate(self.session_id())
+            .lock_current_durability_ready_session_mutation_gate(self.session_id())
             .await
+            .ok()
         else {
             return false;
         };
@@ -3115,13 +3127,16 @@ impl PreparedSessionMaterialization {
         }
         let mutation_guard = self
             .machine
-            .lock_current_session_mutation_gate(self.session_id())
+            .lock_current_durability_ready_session_mutation_gate(self.session_id())
             .await
-            .ok_or_else(|| RuntimeDriverError::StaleAuthority {
-                reason: format!(
-                    "archived-resume session {} disappeared before commit lease acquisition",
-                    self.session_id()
-                ),
+            .map_err(|error| match error {
+                RuntimeDriverError::NotReady { .. } => RuntimeDriverError::StaleAuthority {
+                    reason: format!(
+                        "archived-resume session {} disappeared before commit lease acquisition",
+                        self.session_id()
+                    ),
+                },
+                error => error,
             })?;
         let exact = {
             let sessions = self.machine.sessions.read().await;
@@ -3463,6 +3478,7 @@ impl Drop for PendingPreparedMaterialization {
 /// machine-mutation -> recovery order for snapshot commit/checkpoint.
 pub struct MachineServiceTurnCommitLease {
     session_id: SessionId,
+    run_id: RunId,
     driver: SharedDriver,
     _mutation_guard: crate::tokio::sync::OwnedMutexGuard<()>,
 }
@@ -3473,6 +3489,14 @@ pub struct MachineServiceTurnCommitLease {
 pub struct MachineServiceTurnIdentity {
     session_id: SessionId,
     driver: SharedDriver,
+}
+
+impl MachineServiceTurnCommitLease {
+    /// Exact machine-owned run whose terminal this lease may commit.
+    #[must_use]
+    pub fn run_id(&self) -> &RunId {
+        &self.run_id
+    }
 }
 
 impl MachineSessionArchiveLease {
@@ -3641,6 +3665,13 @@ enum RuntimeLoopAttachmentSlot {
 }
 
 impl RuntimeSessionEntry {
+    fn require_durability_ready(&self) -> Result<(), DurabilityReloadRequired> {
+        match self.durability_health.as_ref() {
+            Some(health) => health.require_ready(),
+            None => Ok(()),
+        }
+    }
+
     fn dsl_mutation_blocked_by_unregister(
         &self,
         session_id: &SessionId,
@@ -4107,19 +4138,25 @@ impl MeerkatMachine {
         &self,
         session_id: &SessionId,
     ) -> Option<Arc<crate::handles::RuntimeModelRoutingHandle>> {
-        let (dsl_authority, visibility_owner) = {
+        let (dsl_authority, handle_teardown_gate, durability_health, visibility_owner) = {
             let sessions = self.sessions.read().await;
             let entry = sessions.get(session_id)?;
             (
                 Arc::clone(&entry.dsl_authority),
+                Arc::clone(&entry.handle_teardown_gate),
+                entry.durability_health.clone(),
                 Arc::clone(&entry.tool_visibility_owner),
             )
         };
         Some(Arc::new(
             crate::handles::RuntimeModelRoutingHandle::new_with_visibility_owner(
-                Arc::new(crate::handles::HandleDslAuthority::from_shared(
-                    dsl_authority,
-                )),
+                Arc::new(
+                    crate::handles::HandleDslAuthority::from_shared_with_runtime_gates(
+                        dsl_authority,
+                        handle_teardown_gate,
+                        durability_health,
+                    ),
+                ),
                 visibility_owner,
             ),
         ))
@@ -4149,6 +4186,78 @@ impl MeerkatMachine {
             if Arc::ptr_eq(&entry.mutation_gate, &gate) {
                 return Some(gate_guard);
             }
+        }
+    }
+
+    /// Acquire the existing same-session mutation gate and require the exact
+    /// persistent shell to remain durability-ready before returning it.
+    ///
+    /// A degraded entry is mechanically detached while the gate is held, so no
+    /// successor mutation can race a still-running executor. The hard-cancel
+    /// callback runs only after the session-map lock is released. Recovery and
+    /// unregister paths that replace or tear down the entry intentionally use
+    /// the lower-level gate above.
+    async fn lock_current_durability_ready_session_mutation_gate(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<crate::tokio::sync::OwnedMutexGuard<()>, RuntimeDriverError> {
+        loop {
+            let gate = self.session_mutation_gate(session_id).await.ok_or(
+                RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                },
+            )?;
+            let gate_guard = Arc::clone(&gate).lock_owned().await;
+            let (reload_required, interrupt_handle, detached_attachment) = {
+                let mut sessions = self.sessions.write().await;
+                let entry = sessions
+                    .get_mut(session_id)
+                    .ok_or(RuntimeDriverError::NotReady {
+                        state: RuntimeState::Destroyed,
+                    })?;
+                if !Arc::ptr_eq(&entry.mutation_gate, &gate) {
+                    continue;
+                }
+                match entry.require_durability_ready() {
+                    Ok(()) => return Ok(gate_guard),
+                    Err(reload_required) => {
+                        let interrupt_handle = entry.interrupt_handle();
+                        let detached_attachment = entry.take_runtime_loop_attachment();
+                        entry.provisional_interrupt_handle = None;
+                        (reload_required, interrupt_handle, detached_attachment)
+                    }
+                }
+            };
+
+            // Dropping the exact attachment closes its wake/effect senders and
+            // detaches it from the entry before the async interrupt callback.
+            drop(detached_attachment);
+            // The entry is already detached and every ready-gated successor
+            // will observe ReloadRequired. Do not retain M across the external
+            // interrupt callback: actor cancellation may itself need to finish
+            // a machine-owned terminal callback.
+            drop(gate_guard);
+            if let Some(interrupt_handle) = interrupt_handle
+                && let Err(error) = interrupt_handle
+                    .hard_cancel_current_run(format!(
+                        "durability reload required after `{}`: {}",
+                        reload_required.operation(),
+                        reload_required.reason()
+                    ))
+                    .await
+            {
+                tracing::warn!(
+                    %session_id,
+                    operation = reload_required.operation(),
+                    reason = reload_required.reason(),
+                    %error,
+                    "failed to hard-cancel executor after durability degradation"
+                );
+            }
+            return Err(RuntimeDriverError::RecoveryRepairBlocked {
+                evidence_digest: None,
+                reason: reload_required.to_string(),
+            });
         }
     }
 
@@ -4259,11 +4368,8 @@ impl MeerkatMachine {
         session_id: &SessionId,
     ) -> Result<crate::tokio::sync::OwnedMutexGuard<()>, RuntimeDriverError> {
         let gate_guard = self
-            .lock_current_session_mutation_gate(session_id)
-            .await
-            .ok_or(RuntimeDriverError::NotReady {
-                state: RuntimeState::Destroyed,
-            })?;
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await?;
         let blocked = {
             let sessions = self.sessions.read().await;
             let entry = sessions
@@ -4335,11 +4441,8 @@ impl MeerkatMachine {
         driver: &SharedDriver,
     ) -> Result<crate::tokio::sync::OwnedMutexGuard<()>, RuntimeDriverError> {
         let gate_guard = self
-            .lock_current_session_mutation_gate(session_id)
-            .await
-            .ok_or(RuntimeDriverError::NotReady {
-                state: RuntimeState::Destroyed,
-            })?;
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await?;
         {
             let sessions = self.sessions.read().await;
             let entry = sessions
@@ -4442,6 +4545,23 @@ impl MeerkatMachine {
             })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    async fn session_durability_health(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<DurabilityHealthHandle>, String> {
+        let sessions = self.sessions.read().await;
+        sessions
+            .get(session_id)
+            .map(|entry| entry.durability_health.clone())
+            .ok_or_else(|| {
+                RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                }
+                .to_string()
+            })
+    }
+
     /// Test-support: install the session's generated peer-comms handle (and its
     /// owner token) onto a comms runtime, so the runtime accepts generated trust
     /// mutations minted from THIS adapter's session dsl authority. Mirrors what
@@ -4463,8 +4583,16 @@ impl MeerkatMachine {
             .session_handle_teardown_gate(session_id)
             .await
             .map_err(|error| format!("session handle teardown gate unavailable: {error}"))?;
+        let durability_health = self
+            .session_durability_health(session_id)
+            .await
+            .map_err(|error| format!("session durability health unavailable: {error}"))?;
         let handle = std::sync::Arc::new(
-            crate::handles::HandleDslAuthority::from_shared_with_teardown_gate(dsl, teardown_gate),
+            crate::handles::HandleDslAuthority::from_shared_with_runtime_gates(
+                dsl,
+                teardown_gate,
+                durability_health,
+            ),
         );
         crate::handles::RuntimePeerCommsHandle::install_generated_on(handle, runtime)
     }
@@ -4697,23 +4825,31 @@ impl MeerkatMachine {
                         ),
                     })
                 }
-                Some(entry) => match entry.effect_sender() {
-                    None => Err(RuntimeDriverError::StaleAuthority {
-                        reason: format!(
-                            "{context}: runtime effect channel disappeared during boundary callback"
-                        ),
-                    }),
-                    Some(current_effect_tx)
-                        if !witness.effect_tx.same_channel(&current_effect_tx) =>
-                    {
-                        Err(RuntimeDriverError::StaleAuthority {
+                Some(entry) => {
+                    entry.require_durability_ready().map_err(|required| {
+                        RuntimeDriverError::RecoveryRepairBlocked {
+                            evidence_digest: None,
+                            reason: required.to_string(),
+                        }
+                    })?;
+                    match entry.effect_sender() {
+                        None => Err(RuntimeDriverError::StaleAuthority {
                             reason: format!(
-                                "{context}: runtime effect channel changed during boundary callback"
+                                "{context}: runtime effect channel disappeared during boundary callback"
                             ),
-                        })
+                        }),
+                        Some(current_effect_tx)
+                            if !witness.effect_tx.same_channel(&current_effect_tx) =>
+                        {
+                            Err(RuntimeDriverError::StaleAuthority {
+                                reason: format!(
+                                    "{context}: runtime effect channel changed during boundary callback"
+                                ),
+                            })
+                        }
+                        Some(current_effect_tx) => Ok(current_effect_tx),
                     }
-                    Some(current_effect_tx) => Ok(current_effect_tx),
-                },
+                }
             }
         };
         let current_effect_tx = current_effect_tx?;
@@ -5483,31 +5619,10 @@ pub struct MeerkatMachineShared {
     /// every new lookup prunes dead slots, so historical session ids cannot
     /// accumulate while overlapping transactions still rendezvous on one gate.
     registration_transaction_slots: StdRwLock<HashMap<SessionId, std::sync::Weak<Mutex<()>>>>,
-    /// Tokio runtime handle captured when this machine was composed, used to
-    /// spawn long-lived per-session runtime-loop tasks. The owned
-    /// ensure-session saga runs on the process-singleton one-worker cleanup
-    /// runtime (cancellation safety); without this handle the loop task
-    /// spawned inside that saga inherits the same single worker, so one
-    /// misbehaving loop starves every session command in the process (the
-    /// 2026-07 "meerkat-machine-cleanup" hot-spin incident). `None` when the
-    /// machine is composed outside a tokio runtime; spawn sites then fall
-    /// back to their ambient runtime.
-    #[cfg(not(target_arch = "wasm32"))]
-    serving_runtime: Option<crate::tokio::runtime::Handle>,
     /// Optional RuntimeStore for persistent drivers.
     store: Option<Arc<dyn RuntimeStore>>,
     /// Blob store used by persistent drivers for durable input externalization.
     blob_store: Option<Arc<dyn BlobStore>>,
-    /// Evidence source for the one-time 0.8.8 -> 0.8.9 upgrade boundary:
-    /// the session store's incremental capability, wired by the host that
-    /// composes machine + session store (the `llm_reconfigure_host`
-    /// precedent: shell composition slot, not machine state). Persistent
-    /// drivers thread it into their boundary commits so the runtime store
-    /// can VERIFY that a slim snapshot over a legacy INLINE row preserves
-    /// the retained history. Absent ⇒ those commits keep today's
-    /// fail-closed refusal.
-    legacy_history_evidence_source:
-        StdRwLock<Option<Arc<dyn meerkat_core::session_store::IncrementalSessionStore>>>,
     /// Runtime-owned shell seam for live session LLM reconfiguration I/O.
     llm_reconfigure_host: StdRwLock<Option<Arc<dyn SessionLlmReconfigureHost>>>,
     /// Machine-wide injected member-observation host (multi-host mobs
@@ -5765,11 +5880,8 @@ impl MemberResidencyUpdate {
             .validate_member_incarnation_registration(&self.session_id, &incarnation)?;
         let session_mutation_gate = self
             .adapter
-            .lock_current_session_mutation_gate(&self.session_id)
-            .await
-            .ok_or(RuntimeDriverError::NotReady {
-                state: RuntimeState::Destroyed,
-            })?;
+            .lock_current_durability_ready_session_mutation_gate(&self.session_id)
+            .await?;
         let gate = {
             let sessions = self.adapter.sessions.read().await;
             Arc::clone(
@@ -6288,6 +6400,12 @@ impl MeerkatMachine {
                     ),
                 });
             }
+            entry.require_durability_ready().map_err(|required| {
+                RuntimeDriverError::RecoveryRepairBlocked {
+                    evidence_digest: None,
+                    reason: required.to_string(),
+                }
+            })?;
         }
         let state = self
             .existing_session_runtime_state(session_id)
@@ -6482,19 +6600,6 @@ impl MeerkatMachine {
         self.store.is_some()
     }
 
-    /// Runtime handle for long-lived per-session runtime-loop tasks.
-    ///
-    /// Captured at machine composition. The loop spawn site uses this so a
-    /// loop task created inside the owned ensure-session saga (which runs on
-    /// the process-singleton one-worker cleanup runtime) does not inherit —
-    /// and monopolize — that single worker (2026-07 "meerkat-machine-cleanup"
-    /// hot-spin incident). `None` when the machine was composed outside a
-    /// tokio runtime.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn serving_runtime_handle(&self) -> Option<crate::tokio::runtime::Handle> {
-        self.serving_runtime.clone()
-    }
-
     fn normalize_destroyed_error(err: RuntimeDriverError) -> RuntimeDriverError {
         match err {
             RuntimeDriverError::NotReady {
@@ -6519,11 +6624,8 @@ impl MeerkatMachine {
                 boundary_panic_log_gate: meerkat_core::panic_payload::PanicPayloadLogGate::default(
                 ),
                 registration_transaction_slots: StdRwLock::new(HashMap::new()),
-                #[cfg(not(target_arch = "wasm32"))]
-                serving_runtime: crate::tokio::runtime::Handle::try_current().ok(),
                 store: None,
                 blob_store: None,
-                legacy_history_evidence_source: StdRwLock::new(None),
                 llm_reconfigure_host: StdRwLock::new(None),
                 member_observation_host: StdRwLock::new(None),
                 member_live_host: StdRwLock::new(None),
@@ -6582,11 +6684,8 @@ impl MeerkatMachine {
                 boundary_panic_log_gate: meerkat_core::panic_payload::PanicPayloadLogGate::default(
                 ),
                 registration_transaction_slots: StdRwLock::new(HashMap::new()),
-                #[cfg(not(target_arch = "wasm32"))]
-                serving_runtime: crate::tokio::runtime::Handle::try_current().ok(),
                 store: Some(store),
                 blob_store: Some(blob_store),
-                legacy_history_evidence_source: StdRwLock::new(None),
                 llm_reconfigure_host: StdRwLock::new(None),
                 member_observation_host: StdRwLock::new(None),
                 member_live_host: StdRwLock::new(None),
@@ -6645,11 +6744,8 @@ impl MeerkatMachine {
                 boundary_panic_log_gate: meerkat_core::panic_payload::PanicPayloadLogGate::default(
                 ),
                 registration_transaction_slots: StdRwLock::new(HashMap::new()),
-                #[cfg(not(target_arch = "wasm32"))]
-                serving_runtime: crate::tokio::runtime::Handle::try_current().ok(),
                 store: Some(store),
                 blob_store: Some(Arc::new(UnavailableBlobStore)),
-                legacy_history_evidence_source: StdRwLock::new(None),
                 llm_reconfigure_host: StdRwLock::new(None),
                 member_observation_host: StdRwLock::new(None),
                 member_live_host: StdRwLock::new(None),
@@ -6815,25 +6911,6 @@ impl MeerkatMachine {
         *slot = Some(dispatcher);
     }
 
-    /// Wire the evidence source for the one-time 0.8.8 -> 0.8.9 upgrade
-    /// boundary: the session store's incremental capability
-    /// (`SessionStore::as_incremental`). Hosts that compose this machine
-    /// with a persistent session store call this once at composition time;
-    /// persistent drivers created afterwards thread the source into their
-    /// boundary commits so the runtime store can VERIFY that a slim
-    /// snapshot over a legacy INLINE row preserves the retained history.
-    /// Without it, those commits keep today's fail-closed refusal.
-    pub fn set_legacy_history_evidence_source(
-        &self,
-        source: Arc<dyn meerkat_core::session_store::IncrementalSessionStore>,
-    ) {
-        let mut slot = self
-            .legacy_history_evidence_source
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *slot = Some(source);
-    }
-
     /// Apply a routed-input variant delivered by the `meerkat_mob_seam`
     /// composition dispatcher against the session's shared DSL authority.
     ///
@@ -6850,14 +6927,14 @@ impl MeerkatMachine {
         input: dsl::MeerkatMachineInput,
     ) -> Result<(), dsl_authority::DslTransitionRefusal> {
         let _gate_guard = self
-            .lock_current_session_mutation_gate(session_id)
+            .lock_current_durability_ready_session_mutation_gate(session_id)
             .await
-            .ok_or_else(|| {
+            .map_err(|error| {
                 dsl_authority::DslTransitionRefusal::other(
-                    "routed_session_not_registered",
+                    "routed_session_not_durability_ready",
                     format!(
-                        "session `{session_id}` is not registered with this MeerkatMachine; \
-                         cannot deliver routed input"
+                        "session `{session_id}` cannot accept routed input until its persistent \
+                         runtime is cold reloaded: {error}"
                     ),
                 )
             })?;
@@ -6887,7 +6964,8 @@ impl MeerkatMachine {
         runtime_id: LogicalRuntimeId,
         dsl_authority: crate::driver::ephemeral::SharedIngressDslAuthority,
         initial_runtime_state: RuntimeState,
-    ) -> DriverEntry {
+        durability_health: Option<DurabilityHealthHandle>,
+    ) -> Result<DriverEntry, RuntimeDriverError> {
         let control_projection = Arc::new(StdRwLock::new(
             crate::driver::ephemeral::RuntimeControlProjection {
                 phase: initial_runtime_state,
@@ -6897,27 +6975,31 @@ impl MeerkatMachine {
         ));
         match (&self.store, &self.blob_store) {
             (Some(store), Some(blob_store)) => {
-                let mut driver = PersistentRuntimeDriver::new_with_control(
+                let durability_health =
+                    durability_health.ok_or_else(|| RuntimeDriverError::Internal(
+                        "persistent runtime driver construction requires the registration cold-install durability handle"
+                            .to_string(),
+                    ))?;
+                let driver = PersistentRuntimeDriver::new_with_control_and_durability_health(
                     runtime_id,
                     store.clone(),
                     blob_store.clone(),
                     control_projection,
                     dsl_authority,
+                    durability_health,
                 );
-                let legacy_history_evidence_source = self
-                    .legacy_history_evidence_source
-                    .read()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone();
-                if let Some(source) = legacy_history_evidence_source {
-                    driver.set_legacy_history_evidence_source(source);
-                }
-                DriverEntry::Persistent(driver)
+                Ok(DriverEntry::Persistent(driver))
             }
-            _ => DriverEntry::Ephemeral(EphemeralRuntimeDriver::new_with_control_and_dsl(
-                runtime_id,
-                control_projection,
-                dsl_authority,
+            _ if durability_health.is_some() => Err(RuntimeDriverError::Internal(
+                "storeless runtime driver construction received a persistent durability handle"
+                    .to_string(),
+            )),
+            _ => Ok(DriverEntry::Ephemeral(
+                EphemeralRuntimeDriver::new_with_control_and_dsl(
+                    runtime_id,
+                    control_projection,
+                    dsl_authority,
+                ),
             )),
         }
     }
@@ -7042,7 +7124,6 @@ impl MeerkatMachine {
                 | MeerkatMachineCommand::SetSilentIntents { .. }
                 | MeerkatMachineCommand::CancelAfterBoundary { .. }
                 | MeerkatMachineCommand::StopRuntimeExecutor { .. }
-                | MeerkatMachineCommand::CommitServiceTurnTerminalReceipt { .. }
                 | MeerkatMachineCommand::ContainsSession { .. }
                 | MeerkatMachineCommand::SessionHasExecutor { .. }
                 | MeerkatMachineCommand::SessionHasComms { .. }

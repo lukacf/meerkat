@@ -1765,7 +1765,7 @@ mod tests {
     use crate::identifiers::LogicalRuntimeId;
     use crate::input_state::{InputStatePersistenceRecord, StoredInputState};
     use crate::runtime_state::RuntimeState;
-    use crate::store::{RuntimeStore, RuntimeStoreError, SessionDelta};
+    use crate::store::{RuntimeStore, RuntimeStoreError, SerializedSessionSnapshot};
 
     fn target_with_binding(binding: &str) -> AuthBindingRef {
         AuthBindingRef {
@@ -1867,6 +1867,10 @@ mod tests {
 
     #[async_trait::async_trait]
     impl RuntimeStore for FailingOAuthSnapshotStore {
+        fn session_persistence_profile(&self) -> crate::store::RuntimeSessionPersistenceProfile {
+            crate::store::RuntimeSessionPersistenceProfile::WholeBlobV1
+        }
+
         fn persist_auth_oauth_flow_snapshot(
             &self,
             snapshot_json: &[u8],
@@ -1914,17 +1918,27 @@ mod tests {
         async fn commit_session_snapshot(
             &self,
             _runtime_id: &LogicalRuntimeId,
-            _session_delta: SessionDelta,
+            _session_delta: SerializedSessionSnapshot,
         ) -> Result<(), RuntimeStoreError> {
             Err(RuntimeStoreError::Unsupported(
                 "commit_session_snapshot".to_string(),
             ))
         }
 
+        async fn commit_prepared_whole_blob_rewrite_boundary(
+            &self,
+            _runtime_id: &LogicalRuntimeId,
+            _boundary: crate::store::PreparedWholeBlobRewriteStoreParts,
+        ) -> Result<crate::store::RuntimeSessionAuthority, RuntimeStoreError> {
+            Err(RuntimeStoreError::Unsupported(
+                "commit_prepared_whole_blob_rewrite_boundary".to_string(),
+            ))
+        }
+
         async fn atomic_apply(
             &self,
             _runtime_id: &LogicalRuntimeId,
-            _session_delta: Option<SessionDelta>,
+            _session_delta: Option<SerializedSessionSnapshot>,
             _receipt: RunBoundaryReceipt,
             _input_updates: Vec<InputStatePersistenceRecord>,
             _session_store_key: Option<SessionId>,
@@ -1955,7 +1969,7 @@ mod tests {
         async fn load_session_snapshot(
             &self,
             _runtime_id: &LogicalRuntimeId,
-        ) -> Result<Option<Vec<u8>>, RuntimeStoreError> {
+        ) -> Result<Option<std::sync::Arc<Vec<u8>>>, RuntimeStoreError> {
             Err(RuntimeStoreError::Unsupported(
                 "load_session_snapshot".to_string(),
             ))

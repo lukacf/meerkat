@@ -98,6 +98,9 @@ pub struct CreateSessionParams {
     /// Injected context is excluded from semantic-memory indexing.
     #[serde(default)]
     pub injected_context: Option<Vec<ContentInput>>,
+    /// Request-only host context for the immediate first turn.
+    #[serde(default)]
+    pub transient_turn_context: Option<meerkat_core::lifecycle::run_primitive::TurnRequestContext>,
     /// Controls whether the first turn runs immediately or is deferred.
     /// Defaults to `run_immediately` when absent.
     #[serde(default)]
@@ -403,6 +406,24 @@ pub async fn create_session_with_params(
     // Create the session. When deferred, stash the prompt (and any injected
     // context) for the first turn; both materialize at promotion.
     let injected_context = params.injected_context.unwrap_or_default();
+    if params.initial_turn == Some(InitialTurn::Deferred) && params.transient_turn_context.is_some()
+    {
+        return RpcResponse::error(
+            id,
+            error::INVALID_PARAMS,
+            "transient_turn_context requires an immediate runtime input and is not supported on deferred create",
+        );
+    }
+    let initial_turn_overrides =
+        params
+            .transient_turn_context
+            .clone()
+            .map(
+                |transient_turn_context| crate::handlers::turn::TurnOverrides {
+                    transient_turn_context: Some(transient_turn_context),
+                    ..Default::default()
+                },
+            );
     let (deferred_prompt, deferred_injected_context, injected_context) =
         if params.initial_turn == Some(InitialTurn::Deferred) {
             (Some(params.prompt.clone()), injected_context, Vec::new())
@@ -500,6 +521,7 @@ pub async fn create_session_with_params(
         let injected_context_for_turn = injected_context.clone();
         let skill_refs_for_turn = skill_refs.clone();
         let request_context_for_turn = request_context.clone();
+        let initial_turn_overrides_for_turn = initial_turn_overrides.clone();
         tokio::spawn(async move {
             if let Err(rpc_err) = runtime_for_turn
                 .start_turn_via_runtime_with_request_context(
@@ -510,7 +532,7 @@ pub async fn create_session_with_params(
                     skill_refs_for_turn,
                     None,
                     None,
-                    None,
+                    initial_turn_overrides_for_turn,
                     request_context_for_turn,
                 )
                 .await
@@ -553,7 +575,7 @@ pub async fn create_session_with_params(
                 skill_refs,
                 None,
                 None,
-                None,
+                initial_turn_overrides,
                 request_context.clone(),
             )
             .await
@@ -976,8 +998,6 @@ pub async fn handle_inject_context(
         content: params.content,
         source: params.source,
         idempotency_key: params.idempotency_key,
-        source_kind: meerkat_core::session::SystemContextSource::Normal,
-        peer_response_terminal: None,
     };
 
     match runtime.append_system_context(&session_id, req).await {

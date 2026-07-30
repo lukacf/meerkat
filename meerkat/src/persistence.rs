@@ -19,7 +19,9 @@ use meerkat_workgraph::SqliteWorkGraphStore;
 use meerkat_workgraph::{DisabledWorkGraphStore, WorkGraphStore};
 
 #[cfg(feature = "session-store")]
-use meerkat_runtime::{MeerkatMachine, RuntimeStore, RuntimeStoreError};
+use meerkat_runtime::{
+    MeerkatMachine, RuntimeSessionPersistenceProfile, RuntimeStore, RuntimeStoreError,
+};
 #[cfg(all(
     feature = "session-store",
     feature = "jsonl-store",
@@ -69,6 +71,15 @@ pub enum PersistenceError {
          ephemeral declaration in the realm manifest; refusing to start"
     )]
     DurabilityViolation { domain: String },
+    /// A runtime profile that commits canonical session heads was paired with
+    /// a SessionStore that cannot prepare or materialize that representation.
+    #[error(
+        "runtime session persistence profile '{profile}' is incompatible with the supplied session store: {detail}"
+    )]
+    SessionPersistenceProfileMismatch {
+        profile: RuntimeSessionPersistenceProfile,
+        detail: String,
+    },
 }
 
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
@@ -96,6 +107,8 @@ pub struct PersistenceBundle {
     job_store: Arc<dyn meerkat_jobs::DetachedJobStore>,
     #[cfg(feature = "session-store")]
     runtime_store: Arc<dyn RuntimeStore>,
+    #[cfg(feature = "session-store")]
+    session_persistence_profile: RuntimeSessionPersistenceProfile,
     blob_store: Arc<dyn BlobStore>,
     artifact_store: Arc<dyn ArtifactStore>,
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
@@ -155,20 +168,11 @@ impl PersistenceBundle {
         schedule_store: Arc<dyn ScheduleStore>,
         workgraph_store: Arc<dyn WorkGraphStore>,
     ) -> Self {
+        let session_persistence_profile = runtime_store.session_persistence_profile();
         let runtime_adapter = Arc::new(MeerkatMachine::persistent(
             runtime_store.clone(),
             blob_store.clone(),
         ));
-        // Wire the one-time pre-0.8.9 upgrade-boundary evidence source for
-        // every non-mob runtime-backed surface (CLI, REST, RPC). Without it
-        // the machine-owned queued-input and failed-run boundary commits fall
-        // back to the defaulted evidence-less path and refuse the first slim
-        // save over a legacy inline runtime row — the exact wedge 0.8.10
-        // exists to clear. Mob hosts wire the same seam in
-        // `MobSessionService::runtime_adapter`.
-        if let Some(source) = Arc::clone(&session_store).as_incremental() {
-            runtime_adapter.set_legacy_history_evidence_source(source);
-        }
         Self {
             #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
             manifest: None,
@@ -179,6 +183,7 @@ impl PersistenceBundle {
             workgraph_store,
             job_store: Arc::new(meerkat_jobs::MemoryDetachedJobStore::new()),
             runtime_store,
+            session_persistence_profile,
             blob_store,
             artifact_store: Arc::new(meerkat_store::MemoryArtifactStore::new()),
             #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
@@ -297,6 +302,11 @@ impl PersistenceBundle {
     #[cfg(feature = "session-store")]
     pub fn runtime_store(&self) -> Arc<dyn RuntimeStore> {
         self.runtime_store.clone()
+    }
+
+    #[cfg(feature = "session-store")]
+    pub fn session_persistence_profile(&self) -> RuntimeSessionPersistenceProfile {
+        self.session_persistence_profile
     }
 
     #[cfg(feature = "session-store")]
@@ -445,6 +455,15 @@ pub async fn open_realm_persistence_with_provider(
     };
     let set = provider.open(&ctx).await?;
     crate::storage_provider::enforce_fail_closed_durability(&set, manifest.ephemeral_domains())?;
+    let profile = set.runtime_store.session_persistence_profile();
+    if profile == RuntimeSessionPersistenceProfile::HeadCanonicalV1
+        && Arc::clone(&set.session_store).as_incremental().is_none()
+    {
+        return Err(PersistenceError::SessionPersistenceProfileMismatch {
+            profile,
+            detail: "HeadCanonical requires an IncrementalSessionStore pairing".to_string(),
+        });
+    }
 
     let builtin_manifest = manifest.as_builtin().cloned();
     let mut bundle = if let (Some(projection_root), Some(builtin)) =
@@ -522,9 +541,10 @@ pub(crate) fn open_disk_store_set(
             let workgraph_store: Arc<dyn WorkGraphStore> = Arc::new(SqliteWorkGraphStore::open(
                 paths.root.join("workgraph.sqlite3"),
             )?);
-            let runtime_store = Arc::new(meerkat_runtime::store::SqliteRuntimeStore::new(
-                paths.runtime_sqlite_path.clone(),
-            )?) as Arc<dyn RuntimeStore>;
+            let runtime_store =
+                Arc::new(meerkat_runtime::store::SqliteRuntimeStore::new_whole_blob(
+                    paths.runtime_sqlite_path.clone(),
+                )?) as Arc<dyn RuntimeStore>;
             let job_store = Arc::new(meerkat_jobs::SqliteDetachedJobStore::open(
                 paths.jobs_sqlite_path.clone(),
             )?) as Arc<dyn meerkat_jobs::DetachedJobStore>;
@@ -601,9 +621,11 @@ pub(crate) fn open_disk_store_set(
             let workgraph_store = Arc::new(SqliteWorkGraphStore::open(
                 paths.root.join("workgraph.sqlite3"),
             )?) as Arc<dyn WorkGraphStore>;
-            let runtime_store = Arc::new(meerkat_runtime::store::SqliteRuntimeStore::new(
-                sqlite_store.path().to_path_buf(),
-            )?) as Arc<dyn RuntimeStore>;
+            let runtime_store = Arc::new(
+                meerkat_runtime::store::SqliteRuntimeStore::new_head_canonical(
+                    sqlite_store.path().to_path_buf(),
+                )?,
+            ) as Arc<dyn RuntimeStore>;
             let job_store = Arc::new(meerkat_jobs::SqliteDetachedJobStore::open(
                 paths.jobs_sqlite_path.clone(),
             )?) as Arc<dyn meerkat_jobs::DetachedJobStore>;
@@ -740,6 +762,10 @@ mod tests {
 
         assert!(bundle.blob_store().is_persistent());
         assert!(bundle.artifact_store().is_persistent());
+        assert_eq!(
+            bundle.session_persistence_profile(),
+            RuntimeSessionPersistenceProfile::HeadCanonicalV1
+        );
         let (event_store, projector) = bundle
             .event_projection()
             .expect("realm persistence must wire event projection");
@@ -790,6 +816,10 @@ mod tests {
         .await?;
 
         assert!(bundle.blob_store().is_persistent());
+        assert_eq!(
+            bundle.session_persistence_profile(),
+            RuntimeSessionPersistenceProfile::WholeBlobV1
+        );
         assert!(
             bundle.event_projection().is_some(),
             "jsonl realms still need the append-only event projection bridge"
@@ -808,8 +838,8 @@ mod tests {
             .runtime_store()
             .commit_session_snapshot(
                 &runtime_id,
-                meerkat_runtime::store::SessionDelta {
-                    session_snapshot: serde_json::to_vec(&session)?,
+                meerkat_runtime::store::SerializedSessionSnapshot {
+                    session_snapshot: serde_json::to_vec(&session)?.into(),
                 },
             )
             .await?;
@@ -850,6 +880,10 @@ mod tests {
         .await?;
 
         assert_eq!(manifest.backend, RealmBackend::Memory);
+        assert_eq!(
+            bundle.session_persistence_profile(),
+            RuntimeSessionPersistenceProfile::WholeBlobV1
+        );
         assert!(!bundle.blob_store().is_persistent());
         assert!(!bundle.artifact_store().is_persistent());
         assert_eq!(
@@ -873,8 +907,8 @@ mod tests {
             .runtime_store()
             .commit_session_snapshot(
                 &runtime_id,
-                meerkat_runtime::store::SessionDelta {
-                    session_snapshot: serde_json::to_vec(&session)?,
+                meerkat_runtime::store::SerializedSessionSnapshot {
+                    session_snapshot: serde_json::to_vec(&session)?.into(),
                 },
             )
             .await?;

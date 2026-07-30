@@ -30,24 +30,22 @@ use anyhow::{Context as _, bail};
 use meerkat::PersistentSessionService;
 use meerkat::surface::{
     NoopScheduleMobHost, ScheduledPromptDispatch, SharedScheduleTargetAdapter,
-    SurfaceScheduleSessionHost, schedule_delivery_idempotency_key, schedule_host_supported,
+    SurfaceScheduleSessionHost, runtime_delivery_dispatch_from_admission, schedule_host_supported,
+    schedule_runtime_correlation_id, schedule_runtime_delivery_idempotency_key,
     spawn_schedule_host,
 };
 use meerkat::{
-    AgentFactory, FactoryAgentBuilder, PersistenceBundle, ScheduleService, ScheduleToolDispatcher,
-    SqliteScheduleStore,
+    AgentFactory, FactoryAgentBuilder, PersistenceBundle, ScheduleDeliveryIdentity,
+    ScheduleService, ScheduleToolDispatcher, SqliteScheduleStore,
 };
 use meerkat_comms::{CommsRuntime, ResolvedCommsConfig};
-use meerkat_core::PendingSystemContextAppend;
 use meerkat_core::lifecycle::RunId;
 use meerkat_core::lifecycle::core_executor::{
     CoreApplyOutput, CoreExecutor, CoreExecutorBoundaryHandle, CoreExecutorError,
     CoreExecutorInterruptHandle, CoreExecutorPostStopCleanupHandle, CoreExecutorPublicationHandle,
     CoreExecutorTurnFinalizationBoundaryHandle,
 };
-use meerkat_core::lifecycle::run_primitive::{
-    ConversationContextAppend, CoreRenderable, RunApplyBoundary, RunPrimitive,
-};
+use meerkat_core::lifecycle::run_primitive::{CoreRenderable, RunApplyBoundary, RunPrimitive};
 use meerkat_core::mcp_config::McpConfig;
 use meerkat_core::service::{
     CreateSessionRequest, InitialTurnPolicy, SessionBuildOptions, SessionError, SessionService,
@@ -59,9 +57,7 @@ use meerkat_mcp::{McpRouter, McpRouterAdapter};
 use meerkat_mob::MobSessionService;
 use meerkat_mob_mcp::{AgentMobToolSurfaceFactory, MobMcpState};
 use meerkat_runtime::input::{InputDurability, InputHeader, InputVisibility};
-use meerkat_runtime::{
-    CorrelationId, IdempotencyKey, Input, InputOrigin, MeerkatMachine, PromptInput,
-};
+use meerkat_runtime::{IdempotencyKey, Input, InputOrigin, MeerkatMachine, PromptInput};
 use meerkat_store::{JsonlStore, MemoryBlobStore, SessionFilter, SessionStore};
 
 use mdm_tux::{
@@ -163,75 +159,6 @@ impl TargetScheduleSessionHost {
     }
 }
 
-fn accepted_scheduled_input_from_runtime_handle(
-    correlation_id: Option<String>,
-    handle: Option<meerkat_runtime::completion::CompletionHandle>,
-) -> meerkat::surface::AcceptedScheduledInput {
-    match handle {
-        Some(handle) => {
-            meerkat::surface::AcceptedScheduledInput::with_runtime_handle(correlation_id, handle)
-        }
-        None => meerkat::surface::AcceptedScheduledInput::with_authority_unavailable(
-            correlation_id,
-            "runtime completion handle missing after accepted dispatch",
-        ),
-    }
-}
-
-fn runtime_delivery_dispatch(
-    occurrence: &meerkat::Occurrence,
-    outcome: meerkat_runtime::accept::AcceptOutcome,
-    handle: Option<meerkat_runtime::completion::CompletionHandle>,
-    materialized_session_id: Option<SessionId>,
-) -> Result<meerkat::DeliveryDispatch, meerkat::ScheduleDomainError> {
-    match outcome {
-        meerkat_runtime::accept::AcceptOutcome::Accepted { input_id, .. } => {
-            let accepted =
-                accepted_scheduled_input_from_runtime_handle(Some(input_id.to_string()), handle);
-            Ok(meerkat::surface::build_dispatch_from_accepted(
-                occurrence,
-                accepted,
-                materialized_session_id,
-            ))
-        }
-        meerkat_runtime::accept::AcceptOutcome::Deduplicated { existing_id, .. } => {
-            let accepted = match handle {
-                Some(handle) => meerkat::surface::AcceptedScheduledInput::with_runtime_handle(
-                    Some(existing_id.to_string()),
-                    handle,
-                ),
-                None => meerkat::surface::AcceptedScheduledInput::with_authority_unavailable(
-                    Some(existing_id.to_string()),
-                    format!(
-                        "runtime completion authority unavailable for terminal deduplicated input {existing_id}"
-                    ),
-                ),
-            };
-            Ok(meerkat::surface::build_dispatch_from_accepted(
-                occurrence,
-                accepted,
-                materialized_session_id,
-            ))
-        }
-        meerkat_runtime::accept::AcceptOutcome::Rejected { reason } => {
-            Ok(meerkat::surface::immediate_delivery_failure(
-                occurrence,
-                reason.to_string(),
-                meerkat::DeliveryFailureReason::RuntimeRejected,
-                None,
-                materialized_session_id,
-            ))
-        }
-        _ => Ok(meerkat::surface::immediate_delivery_failure(
-            occurrence,
-            "runtime returned an unknown admission outcome".to_string(),
-            meerkat::DeliveryFailureReason::RuntimeRejected,
-            None,
-            materialized_session_id,
-        )),
-    }
-}
-
 #[async_trait::async_trait]
 impl SurfaceScheduleSessionHost for TargetScheduleSessionHost {
     async fn probe_session_target(
@@ -269,7 +196,6 @@ impl SurfaceScheduleSessionHost for TargetScheduleSessionHost {
         &self,
         occurrence: &meerkat::Occurrence,
         create: &meerkat::SessionMaterializationSpec,
-        prompt_system_prompt: Option<&str>,
     ) -> Result<SessionId, meerkat::ScheduleDomainError> {
         // Deterministic per-occurrence id so a reclaim/redrive reuses the same
         // session instead of orphaning a fresh random one.
@@ -337,10 +263,7 @@ impl SurfaceScheduleSessionHost for TargetScheduleSessionHost {
                 injected_context: Vec::new(),
                 model: create.model.clone(),
                 prompt: ContentInput::Text(String::new()),
-                system_prompt: match prompt_system_prompt
-                    .map(str::to_owned)
-                    .or_else(|| create.system_prompt.clone())
-                {
+                system_prompt: match create.system_prompt.clone() {
                     Some(s) => meerkat::SystemPromptOverride::Set(s),
                     None => meerkat::SystemPromptOverride::Inherit,
                 },
@@ -412,6 +335,7 @@ impl SurfaceScheduleSessionHost for TargetScheduleSessionHost {
         &self,
         session_id: &SessionId,
         occurrence: &meerkat::Occurrence,
+        identity: &ScheduleDeliveryIdentity,
         dispatch: ScheduledPromptDispatch,
     ) -> Result<meerkat::DeliveryDispatch, meerkat::ScheduleDomainError> {
         self.ensure_runtime_session_registered(session_id).await?;
@@ -441,7 +365,10 @@ impl SurfaceScheduleSessionHost for TargetScheduleSessionHost {
                                 }
                             })
                             .collect()
-                    }),
+                }),
+                system_prompts: dispatch.system_prompt.into_iter().collect(),
+                transient_turn_context: dispatch.transient_turn_context,
+                transient_turn_context_appends: Vec::new(),
                 model: None,
                 provider: None,
                 provider_params: None,
@@ -455,10 +382,15 @@ impl SurfaceScheduleSessionHost for TargetScheduleSessionHost {
         let mut prompt_input = PromptInput::from_content_input(dispatch.prompt, turn_metadata);
         prompt_input.header.source = InputOrigin::System;
         prompt_input.header.idempotency_key = Some(IdempotencyKey::new(
-            schedule_delivery_idempotency_key(occurrence),
+            schedule_runtime_delivery_idempotency_key(
+                self.runtime_adapter.as_ref(),
+                session_id,
+                occurrence,
+                &identity.idempotency_key,
+            )
+            .await?,
         ));
-        prompt_input.header.correlation_id =
-            Some(CorrelationId::from_uuid(occurrence.occurrence_id.0));
+        prompt_input.header.correlation_id = Some(schedule_runtime_correlation_id(identity)?);
 
         let (outcome, handle) = self
             .runtime_adapter
@@ -466,18 +398,23 @@ impl SurfaceScheduleSessionHost for TargetScheduleSessionHost {
             .await
             .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
 
-        runtime_delivery_dispatch(
+        runtime_delivery_dispatch_from_admission(
+            self.runtime_adapter.as_ref(),
+            session_id,
             occurrence,
+            identity,
             outcome,
             handle,
             dispatch.materialized_session_id,
         )
+        .await
     }
 
     async fn deliver_event(
         &self,
         session_id: &SessionId,
         occurrence: &meerkat::Occurrence,
+        identity: &ScheduleDeliveryIdentity,
         event_type: String,
         payload: serde_json::Value,
         render_metadata: Option<meerkat_core::types::RenderMetadata>,
@@ -496,11 +433,17 @@ impl SurfaceScheduleSessionHost for TargetScheduleSessionHost {
                 },
                 durability: InputDurability::Durable,
                 visibility: InputVisibility::default(),
-                idempotency_key: Some(IdempotencyKey::new(schedule_delivery_idempotency_key(
-                    occurrence,
-                ))),
+                idempotency_key: Some(IdempotencyKey::new(
+                    schedule_runtime_delivery_idempotency_key(
+                        self.runtime_adapter.as_ref(),
+                        session_id,
+                        occurrence,
+                        &identity.idempotency_key,
+                    )
+                    .await?,
+                )),
                 supersession_key: None,
-                correlation_id: Some(CorrelationId::from_uuid(occurrence.occurrence_id.0)),
+                correlation_id: Some(schedule_runtime_correlation_id(identity)?),
             },
             event_type,
             payload,
@@ -515,7 +458,16 @@ impl SurfaceScheduleSessionHost for TargetScheduleSessionHost {
             .await
             .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
 
-        runtime_delivery_dispatch(occurrence, outcome, handle, materialized_session_id)
+        runtime_delivery_dispatch_from_admission(
+            self.runtime_adapter.as_ref(),
+            session_id,
+            occurrence,
+            identity,
+            outcome,
+            handle,
+            materialized_session_id,
+        )
+        .await
     }
 }
 
@@ -1264,13 +1216,17 @@ impl CoreExecutorBoundaryHandle for TargetCoreBoundaryHandle {
             .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()))
     }
 
-    async fn prepare_system_context_at_boundary(
+    async fn prepare_transient_turn_context_at_boundary(
         &self,
         expected_run_id: &meerkat_core::RunId,
-        appends: Vec<meerkat_core::PendingSystemContextAppend>,
+        contexts: Vec<meerkat_core::lifecycle::run_primitive::TurnRequestContext>,
     ) -> Result<meerkat_core::CoreBoundaryStageOutput, meerkat_core::CoreBoundaryStageError> {
         self.service
-            .prepare_live_system_context_boundary(&self.session_id, expected_run_id, appends)
+            .prepare_live_transient_turn_context_boundary(
+                &self.session_id,
+                expected_run_id,
+                contexts,
+            )
             .await
     }
 }
@@ -1294,40 +1250,6 @@ impl CoreExecutorInterruptHandle for TargetCoreInterruptHandle {
     }
 }
 
-fn render_runtime_context_append_text(content: &CoreRenderable) -> String {
-    match content {
-        CoreRenderable::Text { text } => text.clone(),
-        CoreRenderable::Blocks { blocks } => meerkat_core::types::text_content(blocks),
-        CoreRenderable::Json { value } => {
-            serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
-        }
-        CoreRenderable::Reference { uri, label } => match label {
-            Some(label) if !label.trim().is_empty() => format!("[Reference] {label} ({uri})"),
-            _ => format!("[Reference] {uri}"),
-        },
-        _ => String::new(),
-    }
-}
-
-fn pending_system_context_appends(
-    appends: &[ConversationContextAppend],
-) -> Vec<PendingSystemContextAppend> {
-    let accepted_at = meerkat_core::time_compat::SystemTime::now();
-    appends
-        .iter()
-        .map(|append| PendingSystemContextAppend {
-            content: meerkat_core::lifecycle::run_primitive::CoreRenderable::Text {
-                text: render_runtime_context_append_text(&append.content),
-            },
-            source: Some(append.key.clone()),
-            idempotency_key: Some(append.key.clone()),
-            accepted_at,
-            source_kind: meerkat_core::session::SystemContextSource::Normal,
-            peer_response_terminal: None,
-        })
-        .collect()
-}
-
 fn start_turn_request_from_primitive(
     primitive: &RunPrimitive,
 ) -> Result<StartTurnRequest, CoreExecutorError> {
@@ -1337,14 +1259,6 @@ fn start_turn_request_from_primitive(
         ));
     }
     let metadata = primitive.turn_metadata();
-    let pre_turn_context_appends = match primitive {
-        RunPrimitive::StagedInput(staged)
-            if primitive.is_peer_response_terminal_context_and_run() =>
-        {
-            pending_system_context_appends(&staged.context_appends)
-        }
-        _ => Vec::new(),
-    };
     Ok(StartTurnRequest {
         injected_context: Vec::new(),
         prompt: primitive.extract_content_input(),
@@ -1355,10 +1269,10 @@ fn start_turn_request_from_primitive(
                 .and_then(|meta| meta.handling_mode)
                 .unwrap_or(HandlingMode::Queue),
             metadata.and_then(|meta| meta.turn_tool_overlay.clone()),
-            pre_turn_context_appends,
             metadata.cloned(),
         ),
-    })
+    }
+    .with_typed_turn_appends(primitive.typed_turn_appends()))
 }
 
 #[async_trait::async_trait]
@@ -1453,12 +1367,27 @@ impl CoreExecutor for TargetCoreExecutor {
 
     async fn checkpoint_committed_session_snapshot(
         &mut self,
-        session_snapshot: &[u8],
+        session_snapshot: Arc<Vec<u8>>,
     ) -> Result<(), CoreExecutorError> {
         self.service
             .checkpoint_committed_runtime_session_snapshot_under_runtime_turn_boundary(
                 &self.session_id,
                 session_snapshot,
+            )
+            .await
+            .map_err(CoreExecutorError::apply_failed_from_session_error)
+    }
+
+    async fn acknowledge_whole_blob_session_boundary(
+        &mut self,
+        committed_store_revision: u64,
+        committed_blob_sha256: &str,
+    ) -> Result<(), CoreExecutorError> {
+        self.service
+            .acknowledge_whole_blob_runtime_session_boundary_under_runtime_turn_boundary(
+                &self.session_id,
+                committed_store_revision,
+                committed_blob_sha256,
             )
             .await
             .map_err(CoreExecutorError::apply_failed_from_session_error)
@@ -2621,17 +2550,17 @@ mod tests {
     }
 
     #[test]
-    fn target_executor_carries_terminal_peer_response_context_into_turn_request() {
+    fn target_executor_carries_terminal_peer_response_notice_into_turn_request() {
         let primitive = RunPrimitive::StagedInput(
             meerkat_core::lifecycle::run_primitive::StagedRunInput {
                 boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
-                appends: Vec::new(),
-                context_appends: vec![
-                    meerkat_core::lifecycle::run_primitive::ConversationContextAppend {
-                        key: "peer_response_terminal:analyst:req-1".to_string(),
+                appends: vec![
+                    meerkat_core::lifecycle::run_primitive::ConversationAppend {
+                        role: meerkat_core::lifecycle::run_primitive::ConversationAppendRole::SystemNotice,
                         content: CoreRenderable::Text {
                             text: "terminal answer from analyst".to_string(),
                         },
+                        identity: None,
                     },
                 ],
                 contributing_input_ids: vec![meerkat_core::lifecycle::InputId::new()],
@@ -2641,7 +2570,7 @@ mod tests {
                             meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
                         ),
                         peer_response_terminal_apply_intent: Some(
-                            meerkat_core::lifecycle::run_primitive::PeerResponseTerminalApplyIntent::AppendContextAndRun,
+                            meerkat_core::lifecycle::run_primitive::PeerResponseTerminalApplyIntent::AppendContentAndRun,
                         ),
                         ..Default::default()
                     },
@@ -2653,14 +2582,12 @@ mod tests {
             super::start_turn_request_from_primitive(&primitive).expect("primitive should convert");
 
         assert_eq!(request.prompt.text_content(), "");
-        assert_eq!(request.runtime.pre_turn_context_appends.len(), 1);
+        assert_eq!(request.runtime.typed_turn_appends.len(), 1);
         assert_eq!(
-            request.runtime.pre_turn_context_appends[0]
-                .idempotency_key
-                .as_deref(),
-            Some("peer_response_terminal:analyst:req-1")
+            request.runtime.typed_turn_appends[0].role,
+            meerkat_core::lifecycle::run_primitive::ConversationAppendRole::SystemNotice
         );
-        let appended_text = match &request.runtime.pre_turn_context_appends[0].content {
+        let appended_text = match &request.runtime.typed_turn_appends[0].content {
             meerkat_core::lifecycle::run_primitive::CoreRenderable::Text { text } => text.as_str(),
             other => panic!("expected text content, got {other:?}"),
         };

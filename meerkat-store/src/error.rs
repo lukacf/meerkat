@@ -190,6 +190,9 @@ impl From<meerkat_sqlite::SqliteStoreError> for StoreError {
             E::LedgerMalformed { detail } => StoreError::CorruptLedger { detail },
             other @ (E::MigrationFailed { .. }
             | E::MigrationBrokeTransaction { .. }
+            | E::UnsupportedSchemaPredecessor { .. }
+            | E::SchemaFingerprintMismatch { .. }
+            | E::UnledgeredDomainObjects { .. }
             | E::WalNotEstablished { .. }
             | E::InvalidMigrationList { .. }
             | E::OpenRefused { .. }) => StoreError::Internal(other.to_string()),

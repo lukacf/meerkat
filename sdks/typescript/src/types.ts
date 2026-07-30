@@ -456,6 +456,8 @@ export interface TurnOptions {
    * from semantic-memory indexing.
    */
   readonly injectedContext?: readonly ContentInput[];
+  /** Request-only host facts for this logical turn. */
+  readonly transientTurnContext?: string;
   readonly skillRefs?: SkillRef[];
   readonly turnToolOverlay?: TurnToolOverlay;
   readonly additionalInstructions?: string[];
@@ -648,6 +650,8 @@ export interface MobTurnStartOptions {
    * semantic-memory indexing).
    */
   readonly injectedContext?: ContentInput[];
+  /** Request-only host facts for this logical turn. */
+  readonly transientTurnContext?: string;
   readonly keepAlive?: MobTurnStartWireOptions["keep_alive"];
   readonly model?: MobTurnStartWireOptions["model"];
   readonly provider?: MobTurnStartWireOptions["provider"];
@@ -1214,6 +1218,8 @@ export interface SessionOptions {
    * context is excluded from semantic-memory indexing.
    */
   injectedContext?: readonly ContentInput[];
+  /** Request-only host facts for the immediate first turn. */
+  transientTurnContext?: string;
   model?: string;
   provider?: string;
   systemPrompt?: SystemPromptOverride;

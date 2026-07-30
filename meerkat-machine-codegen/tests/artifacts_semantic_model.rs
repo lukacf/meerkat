@@ -411,18 +411,6 @@ fn session_document_restore_next_specializes_guard_forced_validation_facts() {
         !restore_next.contains(r"\in BOOLEAN"),
         "guard-forced restore facts must not retain full boolean domains:\n{restore_next}"
     );
-
-    let append_new = rendered
-        .lines()
-        .find(|line| {
-            line.contains("ResolveSystemContextAppendNew(")
-                && line.contains(r"\E trimmed_text_byte_count")
-        })
-        .expect("non-literal helper-driven transition in Next");
-    assert!(
-        append_new.contains(r"\E idempotency_key_present \in BOOLEAN"),
-        "booleans used under helper/disjunctive logic must retain their complete domain:\n{append_new}"
-    );
 }
 
 #[test]

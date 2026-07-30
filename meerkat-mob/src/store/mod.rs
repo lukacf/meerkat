@@ -1,7 +1,5 @@
 //! Mob store traits and implementations.
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
-mod identity_contract_tests;
 mod in_memory;
 mod realm_profile;
 #[cfg(not(target_arch = "wasm32"))]
@@ -24,12 +22,10 @@ use crate::event::{MemberRef, MobEvent, MobEventKind, NewMobEvent};
 #[cfg(feature = "runtime-adapter")]
 use crate::identity::DesiredSessionTarget;
 use crate::identity::{
-    IdentityActuationPermit, IdentityConvergenceStatus, IdentityDeclarationApplyPlan,
-    IdentityDeclarationManifestApplyOutcome, IdentityDeclarationScopeHead, IdentityIntent,
-    IdentityIntentRecord, IdentityLeaseClaim, IdentityLeaseClaimOutcome, IdentityLeaseRecord,
-    IdentityOperationReceipt, IdentityOperationReceiptInsertOutcome, IdentityOperationSlot,
-    IdentityOperationSubject, IdentityResourceObservation, IdentityStoredObservation,
-    IdentityTargetObservationVersion,
+    IdentityActuationPermit, IdentityConvergenceStatus, IdentityIntent, IdentityIntentRecord,
+    IdentityLeaseClaim, IdentityLeaseClaimOutcome, IdentityLeaseRecord, IdentityOperationReceipt,
+    IdentityOperationReceiptInsertOutcome, IdentityOperationSlot, IdentityOperationSubject,
+    IdentityResourceObservation, IdentityStoredObservation, IdentityTargetObservationVersion,
 };
 use crate::ids::{
     AgentIdentity, FlowId, FrameId, Generation, LoopId, LoopInstanceId, MobId, PlacedSpawnId,
@@ -205,6 +201,27 @@ pub enum MobStoreError {
     #[error("identity runtime write fencing is unavailable")]
     IdentityRuntimeWriteFenceUnavailable,
 
+    /// This identity store has no bounded keyset discovery seam.
+    #[error("bounded identity intent discovery is unavailable")]
+    IdentityIntentScanUnavailable,
+
+    /// This storage composition has no durable external-delivery ledger.
+    ///
+    /// Schedule delivery must fail closed at admission instead of silently
+    /// falling back to an in-memory dedup map.
+    #[error("durable mob external-delivery persistence is unavailable")]
+    ExternalDeliveryPersistenceUnavailable,
+
+    /// A stable external-delivery key was reused for different authority.
+    #[error(
+        "mob external-delivery identity conflict for mob '{mob_id}' key '{idempotency_key}': {detail}"
+    )]
+    ExternalDeliveryConflict {
+        mob_id: MobId,
+        idempotency_key: String,
+        detail: String,
+    },
+
     /// Serialization or deserialization failed.
     #[error("Serialization error: {0}")]
     Serialization(String),
@@ -212,6 +229,336 @@ pub enum MobStoreError {
     /// Internal error.
     #[error("Internal error: {0}")]
     Internal(String),
+}
+
+pub const MOB_EXTERNAL_DELIVERY_SCHEMA_VERSION: u32 = 1;
+pub const MOB_EXTERNAL_DELIVERY_KEY_MAX_BYTES: usize = 512;
+pub const MOB_EXTERNAL_DELIVERY_DETAIL_MAX_BYTES: usize = 2_048;
+pub const MOB_EXTERNAL_DELIVERY_REPAIR_BACKOFF_BASE_MS: u64 = 250;
+pub const MOB_EXTERNAL_DELIVERY_REPAIR_BACKOFF_CAP_MS: u64 = 60_000;
+
+/// Target class bound into one durable external-delivery admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum MobExternalDeliveryTargetKind {
+    MemberSend,
+    Flow,
+    SpawnHelper,
+    ForkHelper,
+}
+
+/// Stable caller-owned identity of one external mob delivery.
+///
+/// The idempotency key selects durable admission. Correlation is deliberately
+/// separate: it is stamped onto receipts/runtime inputs but never used as a
+/// substitute for target admission identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MobExternalDeliveryIdentity {
+    pub idempotency_key: String,
+    pub correlation_id: String,
+}
+
+impl MobExternalDeliveryIdentity {
+    pub fn new(
+        idempotency_key: impl Into<String>,
+        correlation_id: impl Into<String>,
+    ) -> Result<Self, MobStoreError> {
+        let identity = Self {
+            idempotency_key: idempotency_key.into(),
+            correlation_id: correlation_id.into(),
+        };
+        identity.validate()?;
+        Ok(identity)
+    }
+
+    pub fn validate(&self) -> Result<(), MobStoreError> {
+        for (field, value) in [
+            ("idempotency_key", self.idempotency_key.as_str()),
+            ("correlation_id", self.correlation_id.as_str()),
+        ] {
+            if value.is_empty()
+                || value.trim() != value
+                || value.len() > MOB_EXTERNAL_DELIVERY_KEY_MAX_BYTES
+                || value.chars().any(char::is_control)
+            {
+                return Err(MobStoreError::Serialization(format!(
+                    "mob external-delivery {field} must be canonical nonempty text no longer than {MOB_EXTERNAL_DELIVERY_KEY_MAX_BYTES} bytes"
+                )));
+            }
+        }
+        let correlation_id = uuid::Uuid::parse_str(&self.correlation_id).map_err(|_| {
+            MobStoreError::Serialization(
+                "mob external-delivery correlation_id must be a canonical UUID".to_string(),
+            )
+        })?;
+        if correlation_id.is_nil() || correlation_id.to_string() != self.correlation_id {
+            return Err(MobStoreError::Serialization(
+                "mob external-delivery correlation_id must be a canonical non-nil UUID".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Immutable authority written before a scheduled effect is attempted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MobExternalDeliveryIntent {
+    pub schema_version: u32,
+    pub mob_id: MobId,
+    pub identity: MobExternalDeliveryIdentity,
+    pub target_kind: MobExternalDeliveryTargetKind,
+    /// SHA-256 of the schedule target's canonical semantic key.
+    pub action_digest: String,
+}
+
+impl MobExternalDeliveryIntent {
+    pub fn new(
+        mob_id: MobId,
+        identity: MobExternalDeliveryIdentity,
+        target_kind: MobExternalDeliveryTargetKind,
+        canonical_action: &[u8],
+    ) -> Result<Self, MobStoreError> {
+        let intent = Self {
+            schema_version: MOB_EXTERNAL_DELIVERY_SCHEMA_VERSION,
+            mob_id,
+            identity,
+            target_kind,
+            action_digest: format!("sha256:{:x}", Sha256::digest(canonical_action)),
+        };
+        intent.validate()?;
+        Ok(intent)
+    }
+
+    pub fn validate(&self) -> Result<(), MobStoreError> {
+        if self.schema_version != MOB_EXTERNAL_DELIVERY_SCHEMA_VERSION {
+            return Err(MobStoreError::Serialization(format!(
+                "unsupported mob external-delivery schema version {}",
+                self.schema_version
+            )));
+        }
+        let mob_id = self.mob_id.as_str();
+        if mob_id.is_empty()
+            || mob_id.trim() != mob_id
+            || mob_id.len() > MOB_EXTERNAL_DELIVERY_KEY_MAX_BYTES
+            || mob_id.chars().any(char::is_control)
+        {
+            return Err(MobStoreError::Serialization(format!(
+                "mob external-delivery mob_id must be canonical nonempty text no longer than {MOB_EXTERNAL_DELIVERY_KEY_MAX_BYTES} bytes"
+            )));
+        }
+        self.identity.validate()?;
+        let valid_digest = self.action_digest.len() == "sha256:".len() + 64
+            && self
+                .action_digest
+                .strip_prefix("sha256:")
+                .is_some_and(|hex| {
+                    hex.bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                });
+        if !valid_digest {
+            return Err(MobStoreError::Serialization(
+                "mob external-delivery action digest is not canonical SHA-256".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Durable terminal of one external-delivery attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+pub enum MobExternalDeliveryTerminal {
+    Completed,
+    Failed {
+        failure_class: crate::error::MobFailureClass,
+        detail: String,
+    },
+}
+
+impl MobExternalDeliveryTerminal {
+    pub fn failed(error: &crate::MobError) -> Self {
+        Self::failed_with_class(error.failure_class(), error.to_string())
+    }
+
+    pub fn failed_with_class(
+        failure_class: crate::error::MobFailureClass,
+        detail: impl AsRef<str>,
+    ) -> Self {
+        let detail = meerkat_core::panic_payload::panic_safe_detail(detail.as_ref());
+        Self::Failed {
+            failure_class,
+            detail,
+        }
+    }
+}
+
+fn validate_external_delivery_terminal(
+    terminal: &MobExternalDeliveryTerminal,
+) -> Result<(), MobStoreError> {
+    if let MobExternalDeliveryTerminal::Failed { detail, .. } = terminal
+        && (detail.is_empty()
+            || detail.len() > MOB_EXTERNAL_DELIVERY_DETAIL_MAX_BYTES
+            || detail.chars().any(char::is_control))
+    {
+        return Err(MobStoreError::Serialization(format!(
+            "mob external-delivery failure detail must be nonempty single-line text no longer than {MOB_EXTERNAL_DELIVERY_DETAIL_MAX_BYTES} bytes"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_external_delivery_record(
+    record: &MobExternalDeliveryRecord,
+    expected_mob_id: &MobId,
+    expected_idempotency_key: &str,
+) -> Result<(), MobStoreError> {
+    record.intent.validate()?;
+    if &record.intent.mob_id != expected_mob_id
+        || record.intent.identity.idempotency_key != expected_idempotency_key
+    {
+        return Err(MobStoreError::Serialization(
+            "mob external-delivery row key does not match record authority".to_string(),
+        ));
+    }
+    match &record.phase {
+        MobExternalDeliveryPhase::Begun { repair } => repair.validate()?,
+        MobExternalDeliveryPhase::Terminal { terminal } => {
+            validate_external_delivery_terminal(terminal)?;
+        }
+    }
+    Ok(())
+}
+
+/// Durable retry custody for a begun delivery whose target/terminal boundary
+/// was not fully observed. The schedule occurrence remains the outbox; this
+/// state makes every live or cold repair attempt monotonic and gives another
+/// process the exact earliest retry deadline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct MobExternalDeliveryRepairState {
+    pub attempt: u32,
+    pub retry_not_before_ms: u64,
+}
+
+impl MobExternalDeliveryRepairState {
+    pub fn retry_delay_ms(self, now_ms: u64) -> u64 {
+        self.retry_not_before_ms.saturating_sub(now_ms)
+    }
+
+    fn validate(self) -> Result<(), MobStoreError> {
+        if (self.attempt == 0) != (self.retry_not_before_ms == 0) {
+            return Err(MobStoreError::Serialization(
+                "mob external-delivery repair state must be either the zero initial state or a positive attempt with a nonzero retry deadline"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn external_delivery_repair_now_ms() -> Result<u64, MobStoreError> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .map_err(|error| {
+            MobStoreError::Internal(format!("external-delivery repair clock failed: {error}"))
+        })
+}
+
+pub(crate) fn next_external_delivery_repair_state(
+    current: MobExternalDeliveryRepairState,
+    now_ms: u64,
+) -> MobExternalDeliveryRepairState {
+    let attempt = current.attempt.saturating_add(1);
+    let exponent = attempt.saturating_sub(1).min(16);
+    let delay_ms = MOB_EXTERNAL_DELIVERY_REPAIR_BACKOFF_BASE_MS
+        .saturating_mul(1u64 << exponent)
+        .min(MOB_EXTERNAL_DELIVERY_REPAIR_BACKOFF_CAP_MS);
+    MobExternalDeliveryRepairState {
+        attempt,
+        retry_not_before_ms: current
+            .retry_not_before_ms
+            .max(now_ms.saturating_add(delay_ms)),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "phase", rename_all = "snake_case", deny_unknown_fields)]
+pub enum MobExternalDeliveryPhase {
+    Begun {
+        #[serde(default)]
+        repair: MobExternalDeliveryRepairState,
+    },
+    Terminal {
+        terminal: MobExternalDeliveryTerminal,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MobExternalDeliveryRecord {
+    pub intent: MobExternalDeliveryIntent,
+    pub phase: MobExternalDeliveryPhase,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MobExternalDeliveryBeginOutcome {
+    Begun,
+    ExistingBegun {
+        repair: MobExternalDeliveryRepairState,
+    },
+    ExistingTerminal(MobExternalDeliveryTerminal),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MobExternalDeliveryRepairOutcome {
+    Scheduled(MobExternalDeliveryRepairState),
+    ExistingTerminal(MobExternalDeliveryTerminal),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MobExternalDeliveryCompleteOutcome {
+    Completed,
+    AlreadyCompleted,
+}
+
+#[cfg(test)]
+mod external_delivery_repair_tests {
+    use super::*;
+
+    #[test]
+    fn repair_state_rejects_partial_initial_shape() {
+        assert!(
+            MobExternalDeliveryRepairState {
+                attempt: 0,
+                retry_not_before_ms: 1,
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            MobExternalDeliveryRepairState {
+                attempt: 1,
+                retry_not_before_ms: 0,
+            }
+            .validate()
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn repair_deadline_does_not_regress_when_wall_clock_moves_back() {
+        let current = MobExternalDeliveryRepairState {
+            attempt: 9,
+            retry_not_before_ms: 100_000,
+        };
+        let next = next_external_delivery_repair_state(current, 1);
+        assert_eq!(next.attempt, 10);
+        assert_eq!(next.retry_not_before_ms, current.retry_not_before_ms);
+    }
 }
 
 /// Result of the single target-local CAS that finalizes a level-triggered
@@ -450,32 +797,6 @@ fn empty_identity_wiring_edges() -> &'static BTreeSet<crate::identity::DesiredId
 /// system clock; deterministic stores may inject an implementation for tests.
 pub trait MobIdentityStoreClock: Send + Sync {
     fn now_ms(&self) -> Result<u64, MobStoreError>;
-}
-
-pub(crate) fn validate_identity_declaration_replay_request(
-    mob_id: &MobId,
-    scope_id: &crate::identity::IdentityDeclarationScopeId,
-    operation_id: &meerkat_core::ops::OperationId,
-    request_digest: &str,
-) -> Result<(), MobStoreError> {
-    let digest = request_digest.strip_prefix("sha256:");
-    if mob_id.as_str().is_empty()
-        || mob_id.as_str().trim() != mob_id.as_str()
-        || scope_id.as_str().is_empty()
-        || scope_id.as_str().trim() != scope_id.as_str()
-        || operation_id.0.is_nil()
-        || digest.is_none_or(|hex| {
-            hex.len() != 64
-                || !hex
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        })
-    {
-        return Err(MobStoreError::Serialization(
-            "invalid identity declaration replay key".to_string(),
-        ));
-    }
-    Ok(())
 }
 
 #[derive(Debug, Default)]
@@ -3109,6 +3430,49 @@ pub struct ExternalBindingOverlayRecord {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait MobEventStore: private::MobEventStoreSealed + Send + Sync {
+    /// Atomically reserve one stable external-delivery identity before its
+    /// target effect can run.
+    ///
+    /// Built-in durable stores override this. The default is deliberately
+    /// unsupported so test/custom compositions cannot silently downgrade to
+    /// process-local dedup.
+    async fn begin_external_delivery(
+        &self,
+        _intent: &MobExternalDeliveryIntent,
+    ) -> Result<MobExternalDeliveryBeginOutcome, MobStoreError> {
+        Err(MobStoreError::ExternalDeliveryPersistenceUnavailable)
+    }
+
+    /// Commit the exact terminal for a previously begun delivery.
+    async fn complete_external_delivery(
+        &self,
+        _intent: &MobExternalDeliveryIntent,
+        _terminal: &MobExternalDeliveryTerminal,
+    ) -> Result<MobExternalDeliveryCompleteOutcome, MobStoreError> {
+        Err(MobStoreError::ExternalDeliveryPersistenceUnavailable)
+    }
+
+    /// Atomically advance the durable backoff/deadline for a begun delivery.
+    ///
+    /// Completion code calls this after a failed terminal write and cold
+    /// redrive calls it before any explicitly deduplicated target retry. A
+    /// terminal that won concurrently is returned rather than overwritten.
+    async fn schedule_external_delivery_repair(
+        &self,
+        _intent: &MobExternalDeliveryIntent,
+    ) -> Result<MobExternalDeliveryRepairOutcome, MobStoreError> {
+        Err(MobStoreError::ExternalDeliveryPersistenceUnavailable)
+    }
+
+    /// Read one exact external-delivery record.
+    async fn load_external_delivery(
+        &self,
+        _mob_id: &MobId,
+        _idempotency_key: &str,
+    ) -> Result<Option<MobExternalDeliveryRecord>, MobStoreError> {
+        Err(MobStoreError::ExternalDeliveryPersistenceUnavailable)
+    }
+
     /// Append a new event to the store.
     async fn append(&self, event: NewMobEvent) -> Result<MobEvent, MobStoreError>;
 
@@ -4572,6 +4936,52 @@ pub(crate) fn identity_runtime_fence_error(
     }
 }
 
+/// Opaque continuation for bounded identity-intent discovery.
+///
+/// The cursor names the physical ordering key rather than a decoded
+/// [`AgentIdentity`]. That distinction keeps a malformed/non-text SQLite key
+/// observable and lets the next page advance past it instead of looping on a
+/// synthetic diagnostic identity.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct IdentityIntentScanCursor {
+    storage_class: String,
+    physical_identity: Vec<u8>,
+}
+
+impl IdentityIntentScanCursor {
+    /// Construct a backend-issued keyset position. This is scheduling state,
+    /// not identity or mutation authority.
+    pub fn new(storage_class: impl Into<String>, physical_identity: Vec<u8>) -> Self {
+        Self {
+            storage_class: storage_class.into(),
+            physical_identity,
+        }
+    }
+
+    #[must_use]
+    pub fn storage_class(&self) -> &str {
+        &self.storage_class
+    }
+
+    #[must_use]
+    pub fn physical_identity(&self) -> &[u8] {
+        &self.physical_identity
+    }
+}
+
+/// One bounded, keyset-ordered page of durable identity intent.
+///
+/// `next` is present only when another row is known to exist. Callers retain
+/// it as volatile scan position; it is not desired-state authority.
+#[derive(Debug, Clone)]
+pub struct IdentityIntentScanPage {
+    pub observations: BTreeMap<AgentIdentity, IdentityStoredObservation<IdentityIntentRecord>>,
+    pub next: Option<IdentityIntentScanCursor>,
+}
+
+/// Hard contract bound for one identity-intent discovery read.
+pub const IDENTITY_INTENT_SCAN_PAGE_MAX: usize = 256;
+
 /// First-class persistence owner for level-triggered mob identity intent.
 ///
 /// This is intentionally separate from [`MobRuntimeMetadataStore`]: intent,
@@ -4597,12 +5007,6 @@ pub trait MobIdentityStore: Send + Sync {
         Err(MobStoreError::IdentityRuntimeWriteFenceUnavailable)
     }
 
-    async fn observe_identity_declaration_scope(
-        &self,
-        mob_id: &MobId,
-        scope_id: &crate::identity::IdentityDeclarationScopeId,
-    ) -> Result<IdentityStoredObservation<IdentityDeclarationScopeHead>, MobStoreError>;
-
     async fn observe_identity_intent(
         &self,
         mob_id: &MobId,
@@ -4615,35 +5019,37 @@ pub trait MobIdentityStore: Send + Sync {
     ) -> Result<
         BTreeMap<AgentIdentity, IdentityStoredObservation<IdentityIntentRecord>>,
         MobStoreError,
-    >;
+    > {
+        let mut observations = BTreeMap::new();
+        let mut cursor = None;
+        loop {
+            let page = self
+                .scan_identity_intents_page(mob_id, cursor.as_ref(), IDENTITY_INTENT_SCAN_PAGE_MAX)
+                .await?;
+            observations.extend(page.observations);
+            let Some(next) = page.next else {
+                return Ok(observations);
+            };
+            if cursor.as_ref().is_some_and(|current| &next <= current) {
+                return Err(MobStoreError::Internal(
+                    "identity intent scan returned a non-advancing cursor".to_string(),
+                ));
+            }
+            cursor = Some(next);
+        }
+    }
 
-    /// Return the immutable original result for an exact declaration
-    /// operation before the actor recompiles portable material. This protects
-    /// lost-ACK replay from profile, skill, or base-prompt drift.
-    ///
-    /// The store validates that current scope/intent authority is a monotonic
-    /// descendant of the receipt. A reused operation id with a different
-    /// request digest is a CAS conflict; `None` means the exact slot is absent.
-    async fn replay_identity_declaration(
+    /// Read at most `limit` intent rows after `after` in stable physical-key
+    /// order. Implementations must use keyset pagination and must not first
+    /// materialize the complete mob intent set.
+    async fn scan_identity_intents_page(
         &self,
-        mob_id: &MobId,
-        scope_id: &crate::identity::IdentityDeclarationScopeId,
-        operation_id: &meerkat_core::ops::OperationId,
-        request_digest: &str,
-    ) -> Result<Option<IdentityDeclarationManifestApplyOutcome>, MobStoreError>;
-
-    /// One transaction validates the scope CAS, reuses or allocates targets,
-    /// seals all affected intents, optionally installs a verified legacy
-    /// lease high-water for a previously missing identity, advances the scope
-    /// head, and inserts the immutable operation receipt. A legacy seed is
-    /// accepted only when both intent and lease rows are missing; its snapshot
-    /// fence is audit-only and never participates in checkpoint coherence.
-    /// No prepared/shadow rows exist.
-    async fn apply_identity_declaration(
-        &self,
-        mob_id: &MobId,
-        plan: &IdentityDeclarationApplyPlan,
-    ) -> Result<IdentityDeclarationManifestApplyOutcome, MobStoreError>;
+        _mob_id: &MobId,
+        _after: Option<&IdentityIntentScanCursor>,
+        _limit: usize,
+    ) -> Result<IdentityIntentScanPage, MobStoreError> {
+        Err(MobStoreError::IdentityIntentScanUnavailable)
+    }
 
     async fn observe_identity_lease(
         &self,

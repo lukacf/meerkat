@@ -89,53 +89,6 @@ pub enum SessionInitialPromptStageDecision {
     Store,
 }
 
-/// Disposition for a runtime system-context append-staging decision.
-///
-/// Ported verbatim from the retired `SessionSystemContextAuthorityMachine`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub enum SystemContextAppendDecision {
-    #[default]
-    Staged,
-    Duplicate,
-    RejectEmpty,
-    RejectConflict,
-}
-
-/// Machine-owned admission verdict for a PERSIST-TIME system-context append
-/// continuity check.
-///
-/// The session store's atomic append-only save guard must decide whether an
-/// incoming persisted system prompt is an admissible runtime-context-append
-/// continuation of the previously persisted one. This is the SAME machine that
-/// owns the staging-path append disposition ([`SystemContextAppendDecision`]);
-/// the persist-time decision is its own append-admission verdict over the
-/// structural prefix observations plus the typed `is_runtime_context_append`
-/// provenance marker (NOT a `[Runtime System Context]` content prefix). The
-/// session-store shell extracts those pure observations, drives
-/// `ResolveSystemContextPersistAppendAdmission`, and mirrors the verdict:
-/// `Admit` -> the divergence is an admissible append, `Reject` -> it is not.
-/// Fails closed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub enum SystemContextPersistAppendAdmission {
-    #[default]
-    Reject,
-    Admit,
-}
-
-/// Typed provenance class for a runtime system-context append.
-///
-/// This is the canonical replacement for the retired `runtime:steer:` string
-/// prefix folklore: the producer of a runtime-steer append constructs it with
-/// [`SystemContextSource::RuntimeSteer`]; everything else is
-/// [`SystemContextSource::Normal`]. The machine guards the typed field — no
-/// generated or shell code reclassifies a source string into this fact.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub enum SystemContextSource {
-    #[default]
-    Normal,
-    RuntimeSteer,
-}
-
 // ---------------------------------------------------------------------------
 // Realtime-transcript region typed vocabulary (folded from the retired
 // SessionRealtimeTranscriptAuthorityMachine).
@@ -238,23 +191,6 @@ pub enum RealtimeUserContentBlobFinalizeDisposition {
 // `SessionBuildState` records stay in the meerkat-core shell; a config field
 // the verdict never reads is not an authority input and is not modeled here.
 // ---------------------------------------------------------------------------
-
-/// Typed provenance class for a system-prompt mutation request.
-///
-/// This is carried on the mutation request so every provenance is a typed
-/// fact at the seam (no `source` string folklore). The mutation guard does not
-/// branch on the provenance — the verdict is decided from prompt presence —
-/// but keeping the class typed pins the producer's intent at the boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub enum SessionSystemPromptSource {
-    #[default]
-    DirectMutation,
-    ExplicitBuild,
-    DefaultBuild,
-    WasmDefaultBuild,
-    RuntimeContextAppend,
-    RuntimeSteerCleanup,
-}
 
 // ---------------------------------------------------------------------------
 // Pending-continuation region typed vocabulary (folded from the retired
@@ -362,10 +298,8 @@ pub enum LiveSessionAuthorityKind {
 
 /// Typed reason the durable session document superseded the live one. The
 /// machine — not the shell — encodes the precedence (archived > uncommitted
-/// transcript > runtime system-context divergence > stored transcript-revision
-/// divergence) and mints this typed reason, replacing the prior `&'static str`
-/// folklore. The shell mirrors the reason and branches on
-/// `RuntimeSystemContextDiverged` for its runtime-context-only sync path.
+/// transcript > stored transcript-revision divergence) and mints this typed
+/// reason, replacing the prior `&'static str` folklore.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum LiveSessionAuthorityReason {
     /// The stored session document is archived.
@@ -373,124 +307,8 @@ pub enum LiveSessionAuthorityReason {
     StoredArchived,
     /// The live transcript carries uncommitted (ahead-of-durable) messages.
     LiveUncommittedTranscript,
-    /// The runtime system-context state diverged from durable truth.
-    RuntimeSystemContextDiverged,
     /// The stored transcript revision diverged from the live revision.
     StoredTranscriptRevisionDiverged,
-}
-
-/// Disposition for a runtime-authoritative projection save whose durable
-/// session-store row ran AHEAD of the runtime authority. The intra-turn
-/// best-effort checkpointer writes the durable row while the machine boundary
-/// commit writes the runtime-store snapshot; the two commit points are
-/// non-atomic, so a host kill (or an in-process lifecycle-commit failure that
-/// evicted the uncommitted live turn) leaves the row carrying turn content
-/// the machine never committed. The runtime authority is singular: the row is
-/// an explicitly rebuildable projection and must converge back to committed
-/// truth rather than poisoning every subsequent save. The machine — not a
-/// shell comparison — owns the disposition; the shell extracts the pure
-/// continuation observation and mirrors the verdict.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub enum RuntimeProjectionConflictDisposition {
-    /// The row does not faithfully continue the authority transcript — a
-    /// genuine content fork, or evidence that cannot be verified. The save
-    /// fails closed exactly as before.
-    #[default]
-    RejectDivergent,
-    /// The committed authority's checkpoint chain is AT OR PAST the row's
-    /// stamped revision: the row is an intra-turn projection that its own
-    /// run superseded (an aborted or raced intermediate state whose final
-    /// outcome already committed). Converging the row onto committed truth
-    /// discards nothing the execution did not itself supersede — a LOST tail
-    /// can never reach this arm, because an uncommitted tail ahead of
-    /// authority blocks every later boundary commit (the save preflight
-    /// fails closed), so authority can only pass the row when no lost tail
-    /// exists.
-    ConvergeSupersededProjection,
-    /// The row is a VERIFIED STRICT DESCENDANT of the authority transcript:
-    /// its tail is durable turn content whose boundary commit never landed.
-    /// The bytes are retained for a machine-owned recovery commit to promote
-    /// or repair.
-    ///
-    /// This disposition NEVER authorizes shrinking the row. The former
-    /// `RebuildToAuthority` did, on the premise that an ahead row could only
-    /// be never-durable in-process residue. That premise is false: the
-    /// StoreCheckpointer writes intra-turn rows to the canonical store outside
-    /// the boundary transaction, so the tail can be durable — and can be a
-    /// COMPLETED turn (observed: a row two messages ahead whose last message
-    /// carries stop_reason=EndTurn and a concrete run_id). Discarding it is
-    /// data loss, and in an agentic harness the tail also records tool calls
-    /// that already executed.
-    RetainForRecovery,
-}
-
-/// Coarse class of a durable row's checkpoint provenance.
-///
-/// The read-source decision needs to know whether the row was written by a
-/// COMMITTED boundary or by the best-effort intra-turn checkpointer; it does
-/// not need the full provenance vocabulary, and folding the rest into
-/// `Committed` keeps the model state small.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub enum CheckpointProvenanceClass {
-    /// No verifiable stamp on the row.
-    #[default]
-    Unstamped,
-    /// Written by a committed boundary (run boundary, rewrite, creation,
-    /// fork, or a recovery commit).
-    Committed,
-    /// Written by the best-effort intra-turn checkpointer, outside the
-    /// boundary transaction.
-    IntraTurn,
-}
-
-/// What a cold or live reader should serve for a session.
-///
-/// Replaces the single `read_from_store_head: bool`, which could not express
-/// "the durable row is real but not yet committed authority" and therefore
-/// forced that case into one of the two serving answers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub enum RuntimeSnapshotReadDisposition {
-    /// Serve the committed runtime snapshot.
-    UseRuntimeSnapshot,
-    /// Serve the durable store head; it is a committed descendant.
-    UseCommittedStoreHead,
-    /// The durable head is a verified descendant written by the intra-turn
-    /// checkpointer and the session is cold. It must NOT be served as ordinary
-    /// authority, and it must NOT be discarded: a machine-owned recovery
-    /// commit promotes or repairs it first.
-    RecoveryRequired,
-    /// Evidence is forked or unverifiable. Retain intact; refuse to serve.
-    /// Fail-closed default: an uninitialized verdict must never serve a
-    /// document, matching every sibling classifier in this region.
-    #[default]
-    Quarantine,
-}
-
-/// What execution an uncommitted durable tail records, as observed
-/// mechanically by the shell.
-///
-/// The distinction matters because it selects between three different safe
-/// answers, and collapsing it to a boolean maps one of them to the wrong
-/// meaning:
-/// - `NoExecutionContent`: the tail holds no assistant turn output at all
-///   (for example a queued user message the checkpointer projected). The
-///   input lifecycle still owns that work and will redeliver it, so there is
-///   nothing for recovery to commit, close, or protect. Committed authority
-///   is served and the row is RETAINED by the conflict machinery — holding
-///   the session here would be an availability loss with no integrity gain.
-/// - `BoundExecution`: the tail's assistant content carries run identity, so
-///   a recovery commit can be bound to an exact run.
-/// - `UnboundExecution`: the tail records assistant output that carries NO
-///   run identity. This is real execution the input lifecycle will NOT
-///   redeliver, and no run exists to anchor a recovery boundary to. Neither
-///   serving past it (which invites a later projection rebuild to discard
-///   it) nor committing it is safe: quarantine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub enum DurableTailExecutionEvidence {
-    NoExecutionContent,
-    BoundExecution,
-    #[default]
-    UnboundExecution,
 }
 
 /// How many distinct run identities the durable tail carries.
@@ -536,42 +354,9 @@ pub enum DurableTailRecoveryClass {
     /// structurally coherent, but the turn never reached EndTurn (stopped at
     /// tool use or mid-stream).
     InterruptedRepairableCandidate,
-    /// The tail is one complete turn written by a PRE-RUN-IDENTITY legacy
-    /// writer: digest-proven strict continuation, ZERO run identity anywhere
-    /// in the tail, pre-witness-v3 stamp evidence on the head row, and the
-    /// clean completed shape (EndTurn terminal, no dangling calls, no orphan
-    /// results, nothing after the terminal). No run id can ever appear on
-    /// such a tail — the bookkeeping did not exist when it was written — so
-    /// holding it for a run identity is a permanent availability loss, not
-    /// caution. Adopted through a recovery boundary bound to a
-    /// domain-separated deterministic legacy run identity.
-    LegacyCompletedCandidate,
     /// Anything else. Held intact; never served, never discarded.
     #[default]
     Ambiguous,
-}
-
-/// Which stamp-schema era the durable head row's VERIFIED checkpoint stamp
-/// advertises, as observed mechanically by the shell.
-///
-/// Corroborating legacy-writer evidence for identity-less durable tails.
-/// Witness-v3 stamps (schema 3) ship with the same writer era as
-/// run-identity-era recovery bookkeeping: a 0.8.9+ mint over graph-bearing
-/// authority always advertises schema 3, and every in-run assistant append
-/// since v0.7.12 persists its run identity inside the same message bytes as
-/// the content (whole-document writes; a crash cannot strip identity from
-/// content it was appended with). A sub-v3 stamp is therefore necessary —
-/// never sufficient alone — evidence of a pre-modern writer; the machine
-/// combines it with intra-turn provenance, `NoRunId` cardinality, and the
-/// clean completed shape before admitting a legacy adoption.
-///
-/// Fail-closed default: an absent or unverifiable stamp reads as modern
-/// (`WitnessV3OrNewer`), which never widens any legacy arm.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub enum DurableHeadStampEra {
-    #[default]
-    WitnessV3OrNewer,
-    PreWitnessV3,
 }
 
 /// How a durable store row relates to the committed runtime authority
@@ -667,82 +452,31 @@ pub enum RuntimeCheckpointProjectionDisposition {
     Project,
 }
 
-/// Mechanical transcript relation between the two legacy copies of one
-/// pre-typed session document, observed by the shell during one-time
-/// recovery migration (committed runtime snapshot vs session-store
-/// projection). The default is the fail-closed conflict shape.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub enum LegacyCheckpointTranscriptRelation {
-    #[default]
-    Divergent,
-    Identical,
-    ProjectionExtendsSnapshot,
-    SnapshotExtendsProjection,
-    /// Fewer than two legacy copies exist, so no transcript relation is
-    /// defined; single-copy transitions never read this field.
-    NotComparable,
-}
-
-/// Machine-owned disposition for the one-time recovery migration of a
-/// pre-typed (legacy-unverified) session document into typed checkpoint
-/// authority.
-///
-/// `RefuseDivergent` is the fail-closed default: copies whose transcripts
-/// are not related by prefix extension — or whose only mechanical proof
-/// would require trusting extra transcript content held solely by an
-/// unverified legacy copy — carry no proof of which conversation is
-/// authoritative, so migration is refused and the conflict surfaces as
-/// typed evidence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub enum LegacyCheckpointMigrationDisposition {
-    #[default]
-    RefuseDivergent,
-    MigrateCanonicalSnapshot,
-    AdoptProjectionExtension,
-    MigrateStoreProjection,
-    /// The runtime snapshot is already typed but the session-store row is
-    /// still legacy (a crash between the migration's two durable writes, or
-    /// a pre-existing partial adoption). The shell rebuilds the projection
-    /// from the verified runtime authority; nothing is re-stamped.
-    RebuildProjectionFromTypedSnapshot,
-    /// The session-store row is already typed (sanctioned downstream
-    /// adoption stamped the continuity row — for example MobKit
-    /// lazy-at-restore or the bulk operator sweep) while the runtime
-    /// snapshot is still the pre-adoption legacy copy, and the typed
-    /// transcript contains the legacy transcript (identical or prefix
-    /// extension). The typed store row IS the authority; the shell
-    /// overwrites the stale legacy snapshot with the typed authority
-    /// bytes. Nothing is re-stamped.
-    ConvergeSnapshotOntoTypedProjection,
-}
-
-/// Machine-owned lifecycle merge for the one-time legacy-checkpoint
-/// recovery migration.
+/// Machine-owned lifecycle merge for reconciling two verified session
+/// documents.
 ///
 /// The lifecycle terminal merges by AUTHORITY OWNER, never by transcript
 /// election: `Archived` is an absorbing field-level fact, so when EITHER
-/// observed copy of one session document carries the Archived terminal
-/// (for example the documented archive partial state — session-store row
-/// Archived, runtime snapshot still Active after a failed second step),
-/// the migrated/elected result must carry it too. `CarryArchived` is the
-/// fail-closed default; `CarryElected` (no observed Archived terminal)
-/// leaves the elected copy's lifecycle untouched.
+/// verified document carries the Archived terminal, the reconciled result
+/// must carry it too. `CarryArchived` is the fail-closed default;
+/// `CarryAuthority` leaves the selected authority's lifecycle untouched
+/// when neither observation is archived.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub enum LegacyCheckpointLifecycleMerge {
+pub enum SessionDocumentLifecycleMerge {
     #[default]
     CarryArchived,
-    CarryElected,
+    CarryAuthority,
 }
 
 // ---------------------------------------------------------------------------
 // Transcript-edit region (folded from the meerkat-session persistent.rs
 // `persist_transcript_fork` / `persist_transcript_rewrite` commit paths under
 // LUC-524). The persist paths commit a fork or rewrite DIRECTLY via
-// `save_normalized_session` / `commit_session_transcript_rewrite_snapshot`
+// `save_normalized_session` / `commit_prepared_whole_blob_rewrite_boundary`
 // with no machine authorization gate. This region authorizes the commit: the
 // shell carries the typed `TranscriptEditKind` directive (fork vs rewrite) and
 // drives the transition BEFORE persisting; `save_normalized_session` /
-// `commit_session_transcript_rewrite_snapshot` become the effect HANDLER, not
+// `commit_prepared_whole_blob_rewrite_boundary` become the effect HANDLER, not
 // the decision-maker.
 // ---------------------------------------------------------------------------
 
@@ -806,64 +540,6 @@ machine! {
                 pending_tool_result_message_count: u64,
             },
             ResolveSessionFirstTurnOverridesAllowed { session_id: SessionId },
-
-            // -----------------------------------------------------------
-            // System-context region (folded from the retired
-            // SessionSystemContextAuthorityMachine).
-            //
-            // The bulky append payloads (text/source strings, pending/applied
-            // vectors, the seen map) stay in the shell's
-            // `SessionSystemContextState`. The machine owns the per-append
-            // SEMANTIC decisions: append disposition (RejectEmpty / Conflict /
-            // Duplicate / Staged) and the runtime-steer apply/discard
-            // disposition, which guards the TYPED `SystemContextSource` field
-            // instead of a `runtime:steer:` string prefix.
-            // -----------------------------------------------------------
-            ResolveSystemContextAppend {
-                trimmed_text_byte_count: u64,
-                idempotency_key_present: bool,
-                existing_key_matches: bool,
-                existing_key_conflicts: bool,
-                active_turn_scoped: bool,
-            },
-            // Per-pending-append decision for `mark_pending_applied`: a
-            // runtime-steer append is dropped (and its seen entry removed); a
-            // normal append is promoted to applied and its seen entry marked
-            // applied. The machine guards the typed `source_kind`.
-            ResolveSystemContextPendingApplyItem {
-                source_kind: Enum<SystemContextSource>,
-            },
-            // Per-item decision for transient runtime-steer cleanup: discard
-            // iff the typed `source_kind` is `RuntimeSteer`.
-            ResolveSystemContextSteerCleanupItem {
-                source_kind: Enum<SystemContextSource>,
-            },
-            // Snapshot-restore consistency authorization. Active-turn
-            // membership is independent of optional idempotency keys, so the
-            // shell reports one structural consistency fact covering both the
-            // exact pending-position witness and its keyed rollback projection.
-            RestoreSystemContextSnapshot {
-                active_turn_membership_is_consistent: bool,
-                seen_keys_match_known_appends: bool,
-            },
-            // Persist-time system-context append-admission continuity check.
-            // The session-store atomic append-only save guard extracts the pure
-            // structural observations (whether a previous system prompt exists,
-            // whether the incoming content is byte-identical, whether it extends
-            // the previous content as a prefix, whether the appended remainder
-            // begins with the canonical separator) plus the typed
-            // `is_runtime_context_append` provenance marker, and feeds them
-            // here. THIS machine — not a handwritten shell bool reducer — owns
-            // the verdict "is this incoming persisted prompt an admissible
-            // runtime-context-append continuation of the persisted one". The
-            // shell mirrors `Admit`/`Reject` and decides nothing.
-            ResolveSystemContextPersistAppendAdmission {
-                has_previous: bool,
-                content_identical: bool,
-                content_extends_previous: bool,
-                appended_starts_with_separator: bool,
-                incoming_is_runtime_context_append: bool,
-            },
 
             // -----------------------------------------------------------
             // Realtime-transcript region (folded from the retired
@@ -1008,12 +684,6 @@ machine! {
                 mob_tool_authority_context_generated: bool,
             },
             RestoreSessionBuildState,
-            AuthorizeSystemPromptMutation {
-                source: Enum<SessionSystemPromptSource>,
-                prompt_present: bool,
-                prompt_byte_count: u64,
-                replacing_existing: bool,
-            },
 
             // -----------------------------------------------------------
             // Pending-continuation region (folded from the retired
@@ -1048,19 +718,18 @@ machine! {
             // Live-vs-durable session-document authority reconciliation. The
             // session-store shell extracts FOUR pure boolean observations of
             // session-document divergence (stored transcript revision diverged,
-            // live transcript carries uncommitted messages, runtime
-            // system-context diverged, stored document archived). It carries NO
+            // live transcript carries uncommitted messages, stored document
+            // archived). It carries NO
             // pre-decided verdict and NO string reason. THIS machine — not a
             // handwritten boolean reducer — owns the LiveAuthoritative-vs-
             // DurableAuthoritative verdict AND the precedence (archived >
-            // uncommitted transcript > runtime system-context > revision) AND
+            // uncommitted transcript > revision) AND
             // the typed reason. The shell mirrors the verdict + typed reason and
             // decides nothing.
             // -----------------------------------------------------------
             ClassifyLiveSessionAuthority {
                 stored_transcript_diverged: bool,
                 live_has_uncommitted_transcript: bool,
-                runtime_system_context_diverged: bool,
                 stored_is_archived: bool,
             },
 
@@ -1086,28 +755,6 @@ machine! {
             },
 
             // -----------------------------------------------------------
-            // Runtime-projection-rollback region. When a runtime-authoritative
-            // projection save finds the durable session-store row AHEAD of the
-            // authority transcript (intra-turn checkpointer row vs a machine
-            // boundary commit that never landed — host kill or in-process
-            // lifecycle-commit eviction), the shell extracts two pure
-            // observations — the row judged as a faithful continuation of the
-            // authority by the same run-boundary proof the save guard uses,
-            // and the row's typed intra-turn checkpoint provenance fact — and
-            // drives this input; THIS machine — not a handwritten shell
-            // comparison — owns whether the projection write may rebuild the
-            // row onto committed truth. A row without the checkpointer's own
-            // provenance stamp is out-of-band divergence and keeps failing
-            // closed. The shell mirrors the disposition and decides nothing.
-            // -----------------------------------------------------------
-            ResolveRuntimeProjectionConflict {
-                session_id: SessionId,
-                relation: Enum<DurableHeadRelation>,
-                row_provenance: Enum<CheckpointProvenanceClass>,
-                authority_supersedes_row: bool,
-            },
-
-            // -----------------------------------------------------------
             // Runtime-checkpoint projection region. A runtime-loop teardown
             // can finish a committed checkpoint after archive has made the
             // session-document lifecycle terminal. THIS machine owns whether
@@ -1117,84 +764,24 @@ machine! {
             ResolveRuntimeCheckpointProjection { session_id: SessionId },
 
             // -----------------------------------------------------------
-            // Legacy-checkpoint recovery-migration region. Every document
-            // written before typed checkpoint stamps decodes as
-            // legacy-unverified and fails closed at each authority seam,
-            // with no released on-ramp into typed authority. The shell
-            // observes the mechanical carriers only — which copies exist,
-            // whether each is legacy, and the transcript prefix relation
-            // between them — and THIS machine owns whether the one-time
-            // recovery migration runs, which copy it adopts, or whether
-            // the divergence is refused as typed operator evidence.
+            // Lifecycle merge for two verified session documents. Transcript
+            // authority and lifecycle terminality are independent facts:
+            // selecting content from an Active document must never resurrect
+            // an Archived peer. The shell observes each lifecycle terminal
+            // mechanically and THIS machine owns the merge.
             // -----------------------------------------------------------
-            ResolveLegacyCheckpointMigration {
+            ResolveSessionDocumentLifecycleMerge {
                 session_id: SessionId,
-                runtime_snapshot_present: bool,
-                runtime_snapshot_legacy: bool,
-                store_row_present: bool,
-                store_row_legacy: bool,
-                transcript_relation: Enum<LegacyCheckpointTranscriptRelation>,
-            },
-
-            // -----------------------------------------------------------
-            // Post-election lifecycle merge for the legacy-checkpoint
-            // recovery migration. Transcript election picks the CONTENT
-            // copy; the lifecycle terminal is a separately-owned absorbing
-            // fact that must never ride that election (an Active runtime
-            // snapshot elected over an Archived store row would resurrect
-            // the archived session on write-back). The shell observes each
-            // copy's lifecycle terminal mechanically and THIS machine owns
-            // the merge: any observed Archived is absorbing.
-            // -----------------------------------------------------------
-            ResolveLegacyCheckpointMigrationLifecycle {
-                session_id: SessionId,
-                runtime_copy_archived: bool,
-                store_row_archived: bool,
-            },
-
-            // -----------------------------------------------------------
-            // Runtime-snapshot read-source region. On load, the committed
-            // runtime session snapshot normally leads the durable store head
-            // (it commits at the run boundary). A torn shutdown can freeze it
-            // as a STALE STRICT PREFIX of the store head (a completed turn's
-            // boundary save landed before the snapshot recommitted); loading
-            // the stale copy makes every subsequent save trip the append-only
-            // guard forever. The shell extracts three pure observations —
-            // the store head provably EXTENDS the snapshot (the snapshot's
-            // transcript digest equals the digest of the head's same-length
-            // prefix, the same continuity proof the save guard uses), the
-            // head row's typed intra-turn checkpoint provenance fact, and
-            // whether the session is LIVE in-process — and drives this
-            // input; THIS machine owns which copy is the authoritative read
-            // source. A checkpointer-stamped head is uncommitted intra-turn
-            // residue (its boundary commit never landed): the snapshot stays
-            // authoritative and the rollback region converges the row at
-            // save time. A live session keeps the snapshot too — its lag is
-            // transient and the live runtime recommits past it; only a COLD
-            // load (no live session: the torn-shutdown resume) defers to the
-            // extending head. A shorter, equal, or diverged head also keeps
-            // the snapshot. The shell mirrors the verdict and decides
-            // nothing.
-            // -----------------------------------------------------------
-            ResolveRuntimeSnapshotReadSource {
-                session_id: SessionId,
-                relation: Enum<DurableHeadRelation>,
-                store_provenance: Enum<CheckpointProvenanceClass>,
-                session_is_live: bool,
-                // What execution, if any, does the uncommitted tail record?
-                tail_execution: Enum<DurableTailExecutionEvidence>,
-                // Stamp-schema era of the head row's VERIFIED stamp; the
-                // fail-closed default (modern) is fed whenever no verified
-                // stamp exists to observe.
-                head_stamp_era: Enum<DurableHeadStampEra>,
+                authority_archived: bool,
+                candidate_archived: bool,
             },
 
             // -----------------------------------------------------------
             // Durable-tail classification. The shell mechanically encodes
             // the tail's structure (run-id cardinality, terminal stop shape,
             // dangling/orphan tool counts); THIS machine assigns meaning.
-            // candidate_id binds the exact evidence (session, authority
-            // stamp, store-head digest, CAS token, observed run identity) so
+            // candidate_id binds the exact evidence (session, store-issued
+            // authority, head digest, CAS token, observed run identity) so
             // a classification of one head can never authorize mutating a
             // later head. Tool-use IDs deliberately stay OUT of the machine:
             // the sealed list rides in the candidate payload.
@@ -1208,11 +795,6 @@ machine! {
                 dangling_tool_use_count: u64,
                 orphan_tool_result_count: u64,
                 messages_after_terminal: bool,
-                // Stamp-schema era of the head row's verified stamp — the
-                // corroborating legacy-writer evidence for the identity-less
-                // adoption arm. Fail-closed default (modern) when no
-                // verified stamp exists to observe.
-                head_stamp_era: Enum<DurableHeadStampEra>,
             },
 
             // -----------------------------------------------------------
@@ -1238,7 +820,7 @@ machine! {
             // input BEFORE persisting; THIS machine authorizes the commit and
             // emits `TranscriptRewriteCommitted`. The persist paths
             // (`save_normalized_session` for fork,
-            // `commit_session_transcript_rewrite_snapshot` for rewrite) become
+            // `commit_prepared_whole_blob_rewrite_boundary` for rewrite) become
             // the effect HANDLER driven by the verdict, not the decision-maker.
             // -----------------------------------------------------------
             TranscriptEdit {
@@ -1285,30 +867,6 @@ machine! {
                 restore_tool_results: bool,
             },
             SessionFirstTurnPhaseRecovered,
-
-            // System-context region effects.
-            SystemContextAppendResolved {
-                decision: Enum<SystemContextAppendDecision>,
-                active_turn_scoped: bool,
-            },
-            // `promote_to_applied`/`mark_seen_applied` are emitted for normal
-            // appends; `remove_seen` for runtime-steer appends. The shell
-            // mirrors these onto its bulky pending/applied/seen collections.
-            SystemContextPendingApplyItemResolved {
-                promote_to_applied: bool,
-                mark_seen_applied: bool,
-                remove_seen: bool,
-            },
-            // `discard` is emitted true for runtime-steer items.
-            SystemContextSteerCleanupItemResolved {
-                discard: bool,
-            },
-            SystemContextSnapshotRestoreAuthorized,
-            // Persist-time append-admission verdict. The session-store shell
-            // mirrors `Admit`/`Reject` onto its atomic append-only save guard.
-            SystemContextPersistAppendAdmissionResolved {
-                admission: Enum<SystemContextPersistAppendAdmission>,
-            },
 
             // Realtime-transcript region effects. The action vector is the
             // machine's decision; the shell mirrors each flag onto its bulky
@@ -1357,7 +915,6 @@ machine! {
             SessionMetadataPersistAuthorized,
             SessionBuildStatePersistAuthorized,
             SessionBuildStateRestoreAuthorized,
-            SystemPromptMutationAuthorized,
 
             // Pending-continuation region effects. The disposition is the
             // machine's decision; the shell mirrors it onto its run-pending /
@@ -1400,17 +957,6 @@ machine! {
             // explicitly rather than silently failing to load.
             SessionStoreRecoverySourceResolved { recoverable: bool },
 
-            // Runtime-projection-conflict disposition. The shell mirrors
-            // `disposition`: RetainForRecovery marks a verified strict
-            // descendant as recovery-owned durable content (never shrunk,
-            // never served as committed authority before a machine-owned
-            // recovery commit); RejectDivergent keeps the fail-closed
-            // rejection for genuine content forks. Total over the observation,
-            // so it is emitted on both branches.
-            RuntimeProjectionConflictResolved {
-                disposition: Enum<RuntimeProjectionConflictDisposition>,
-            },
-
             // Runtime-checkpoint compatibility-projection disposition.
             // Archived is an absorbing no-op: no downstream SessionStore
             // projection writer may be invoked for retained runtime bytes.
@@ -1418,33 +964,12 @@ machine! {
                 disposition: Enum<RuntimeCheckpointProjectionDisposition>,
             },
 
-            // Legacy-checkpoint recovery-migration disposition. The shell
-            // mirrors this verdict exactly: it stamps the named copy via
-            // recovery migration and re-projects the other, or surfaces the
-            // fail-closed refusal; it never chooses a copy itself.
-            LegacyCheckpointMigrationResolved {
-                disposition: Enum<LegacyCheckpointMigrationDisposition>,
-            },
-
-            // Post-election lifecycle-merge verdict for the legacy-checkpoint
-            // recovery migration. The shell mirrors this exactly:
-            // CarryArchived stamps the Archived terminal onto the migrated
-            // result before write-back (or refuses fail-closed when the
-            // elected copy is typed authority whose stamped bytes cannot be
-            // repaired); CarryElected leaves the elected copy's lifecycle
-            // untouched. Total over the observation, so it is emitted on
-            // both branches.
-            LegacyCheckpointMigrationLifecycleResolved {
-                merge: Enum<LegacyCheckpointLifecycleMerge>,
-            },
-
-            // Runtime-snapshot read-source verdict. The shell mirrors
-            // `read_from_store_head`: true loads the durable store head (the
-            // snapshot is a stale strict prefix), false keeps the runtime
-            // snapshot authoritative. Total over the observation, so it is
-            // emitted on both branches.
-            RuntimeSnapshotReadSourceResolved {
-                disposition: Enum<RuntimeSnapshotReadDisposition>,
+            // Lifecycle-merge verdict. The shell mirrors this exactly:
+            // CarryArchived installs the absorbing terminal before write-back;
+            // CarryAuthority leaves the selected authority's lifecycle
+            // untouched. Total over the observation.
+            SessionDocumentLifecycleMergeResolved {
+                merge: Enum<SessionDocumentLifecycleMerge>,
             },
 
             // Durable-tail classification verdict. Total over the
@@ -1500,58 +1025,6 @@ machine! {
             prompt_has_content: bool
         ) -> bool {
             phase == SessionFirstTurnPhase::Pending && prompt_has_content
-        }
-
-        // System-context append classification helpers (ported verbatim from
-        // the retired SessionSystemContextAuthorityMachine).
-        helper append_is_empty(trimmed_text_byte_count: u64) -> bool {
-            trimmed_text_byte_count == 0
-        }
-
-        helper append_is_conflict(
-            idempotency_key_present: bool,
-            existing_key_conflicts: bool
-        ) -> bool {
-            idempotency_key_present && existing_key_conflicts
-        }
-
-        helper append_is_duplicate(
-            idempotency_key_present: bool,
-            existing_key_matches: bool,
-            existing_key_conflicts: bool
-        ) -> bool {
-            idempotency_key_present && existing_key_matches && existing_key_conflicts == false
-        }
-
-        helper append_is_new(
-            idempotency_key_present: bool,
-            existing_key_matches: bool,
-            existing_key_conflicts: bool
-        ) -> bool {
-            idempotency_key_present == false
-                || (existing_key_matches == false && existing_key_conflicts == false)
-        }
-
-        // Persist-time append-admission verdict. Admissible iff the incoming
-        // persisted prompt is either a byte-identical no-op refresh of an
-        // existing prompt, OR a prefix-preserving append (separator-delimited)
-        // carrying the typed runtime-context-append provenance, OR — when there
-        // is no previous prompt — itself a typed runtime-context-append. Every
-        // other shape is rejected. Mirrors the retired
-        // `system_context_is_append` shell reducer exactly.
-        helper persist_append_is_admissible(
-            has_previous: bool,
-            content_identical: bool,
-            content_extends_previous: bool,
-            appended_starts_with_separator: bool,
-            incoming_is_runtime_context_append: bool
-        ) -> bool {
-            (has_previous && content_identical)
-                || (has_previous
-                    && content_extends_previous
-                    && appended_starts_with_separator
-                    && incoming_is_runtime_context_append)
-                || (has_previous == false && incoming_is_runtime_context_append)
         }
 
         // Realtime-transcript region classification helpers (ported verbatim
@@ -1694,11 +1167,6 @@ machine! {
         disposition SessionToolResultsStageResolved => local seam NoOwnerRealization,
         disposition SessionConsumedInputsRestoreResolved => local seam NoOwnerRealization,
         disposition SessionFirstTurnPhaseRecovered => local seam NoOwnerRealization,
-        disposition SystemContextAppendResolved => local seam NoOwnerRealization,
-        disposition SystemContextPendingApplyItemResolved => local seam NoOwnerRealization,
-        disposition SystemContextSteerCleanupItemResolved => local seam NoOwnerRealization,
-        disposition SystemContextSnapshotRestoreAuthorized => local seam NoOwnerRealization,
-        disposition SystemContextPersistAppendAdmissionResolved => local seam NoOwnerRealization,
         disposition RealtimeTranscriptEventResolved => local seam NoOwnerRealization,
         disposition RealtimeMaterializeCandidateResolved => local seam NoOwnerRealization,
         disposition RealtimeUserContentIdentityResolved => local seam NoOwnerRealization,
@@ -1709,18 +1177,14 @@ machine! {
         disposition SessionMetadataPersistAuthorized => local seam NoOwnerRealization,
         disposition SessionBuildStatePersistAuthorized => local seam NoOwnerRealization,
         disposition SessionBuildStateRestoreAuthorized => local seam NoOwnerRealization,
-        disposition SystemPromptMutationAuthorized => local seam NoOwnerRealization,
         disposition PendingContinuationResolved => local seam NoOwnerRealization,
         disposition PendingContinuationPublicTerminalResolved => local seam NoOwnerRealization,
         disposition SessionResumeOverridesAuthorized => local seam NoOwnerRealization,
         disposition SessionResumeOverridesRejected => local seam NoOwnerRealization,
         disposition LiveSessionAuthorityClassified => local seam NoOwnerRealization,
         disposition SessionStoreRecoverySourceResolved => local seam NoOwnerRealization,
-        disposition RuntimeProjectionConflictResolved => local seam NoOwnerRealization,
         disposition RuntimeCheckpointProjectionResolved => local seam NoOwnerRealization,
-        disposition LegacyCheckpointMigrationResolved => local seam NoOwnerRealization,
-        disposition LegacyCheckpointMigrationLifecycleResolved => local seam NoOwnerRealization,
-        disposition RuntimeSnapshotReadSourceResolved => local seam NoOwnerRealization,
+        disposition SessionDocumentLifecycleMergeResolved => local seam NoOwnerRealization,
         disposition DurableTailClassified => local seam NoOwnerRealization,
         disposition SessionToolResultsApplied => local seam NoOwnerRealization,
         disposition TranscriptRewriteCommitted => local seam NoOwnerRealization,
@@ -2069,249 +1533,6 @@ machine! {
             }
             to Ready
             emit SessionFirstTurnPhaseRecovered
-        }
-
-        // ===============================================================
-        // System-context region (folded from the retired
-        // SessionSystemContextAuthorityMachine).
-        // ===============================================================
-
-        // ---------------------------------------------------------------
-        // ResolveSystemContextAppend — four-way append disposition.
-        //
-        // Ported verbatim from the retired ResolveAppend transitions. The
-        // observations (key present / matches / conflicts) are mechanical
-        // string-equality facts the shell computes against its bulky `seen`
-        // map; the SEMANTIC disposition is decided here from those typed
-        // observations via the append classification helpers.
-        // ---------------------------------------------------------------
-        transition ResolveSystemContextAppendEmpty {
-            on input ResolveSystemContextAppend {
-                trimmed_text_byte_count,
-                idempotency_key_present,
-                existing_key_matches,
-                existing_key_conflicts,
-                active_turn_scoped
-            }
-            guard {
-                self.lifecycle_phase == Phase::Ready
-                && append_is_empty(trimmed_text_byte_count)
-            }
-            update {}
-            to Ready
-            emit SystemContextAppendResolved {
-                decision: SystemContextAppendDecision::RejectEmpty,
-                active_turn_scoped: active_turn_scoped
-            }
-        }
-
-        transition ResolveSystemContextAppendConflict {
-            on input ResolveSystemContextAppend {
-                trimmed_text_byte_count,
-                idempotency_key_present,
-                existing_key_matches,
-                existing_key_conflicts,
-                active_turn_scoped
-            }
-            guard {
-                self.lifecycle_phase == Phase::Ready
-                && append_is_empty(trimmed_text_byte_count) == false
-                && append_is_conflict(idempotency_key_present, existing_key_conflicts)
-            }
-            update {}
-            to Ready
-            emit SystemContextAppendResolved {
-                decision: SystemContextAppendDecision::RejectConflict,
-                active_turn_scoped: active_turn_scoped
-            }
-        }
-
-        transition ResolveSystemContextAppendDuplicate {
-            on input ResolveSystemContextAppend {
-                trimmed_text_byte_count,
-                idempotency_key_present,
-                existing_key_matches,
-                existing_key_conflicts,
-                active_turn_scoped
-            }
-            guard {
-                self.lifecycle_phase == Phase::Ready
-                && append_is_empty(trimmed_text_byte_count) == false
-                && append_is_duplicate(
-                    idempotency_key_present,
-                    existing_key_matches,
-                    existing_key_conflicts)
-            }
-            update {}
-            to Ready
-            emit SystemContextAppendResolved {
-                decision: SystemContextAppendDecision::Duplicate,
-                active_turn_scoped: active_turn_scoped
-            }
-        }
-
-        transition ResolveSystemContextAppendNew {
-            on input ResolveSystemContextAppend {
-                trimmed_text_byte_count,
-                idempotency_key_present,
-                existing_key_matches,
-                existing_key_conflicts,
-                active_turn_scoped
-            }
-            guard {
-                self.lifecycle_phase == Phase::Ready
-                && append_is_empty(trimmed_text_byte_count) == false
-                && append_is_new(
-                    idempotency_key_present,
-                    existing_key_matches,
-                    existing_key_conflicts)
-            }
-            update {}
-            to Ready
-            emit SystemContextAppendResolved {
-                decision: SystemContextAppendDecision::Staged,
-                active_turn_scoped: active_turn_scoped
-            }
-        }
-
-        // ---------------------------------------------------------------
-        // ResolveSystemContextPersistAppendAdmission — persist-time
-        // append-admission continuity verdict for the session-store atomic
-        // append-only save guard. The shell extracts the structural prefix
-        // observations plus the typed runtime-context-append provenance; this
-        // machine owns the Admit/Reject verdict via persist_append_is_admissible.
-        // ---------------------------------------------------------------
-        transition ResolveSystemContextPersistAppendAdmissionAdmit {
-            on input ResolveSystemContextPersistAppendAdmission {
-                has_previous,
-                content_identical,
-                content_extends_previous,
-                appended_starts_with_separator,
-                incoming_is_runtime_context_append
-            }
-            guard {
-                self.lifecycle_phase == Phase::Ready
-                && persist_append_is_admissible(
-                    has_previous,
-                    content_identical,
-                    content_extends_previous,
-                    appended_starts_with_separator,
-                    incoming_is_runtime_context_append)
-            }
-            update {}
-            to Ready
-            emit SystemContextPersistAppendAdmissionResolved {
-                admission: SystemContextPersistAppendAdmission::Admit
-            }
-        }
-
-        transition ResolveSystemContextPersistAppendAdmissionReject {
-            on input ResolveSystemContextPersistAppendAdmission {
-                has_previous,
-                content_identical,
-                content_extends_previous,
-                appended_starts_with_separator,
-                incoming_is_runtime_context_append
-            }
-            guard {
-                self.lifecycle_phase == Phase::Ready
-                && persist_append_is_admissible(
-                    has_previous,
-                    content_identical,
-                    content_extends_previous,
-                    appended_starts_with_separator,
-                    incoming_is_runtime_context_append) == false
-            }
-            update {}
-            to Ready
-            emit SystemContextPersistAppendAdmissionResolved {
-                admission: SystemContextPersistAppendAdmission::Reject
-            }
-        }
-
-        // ---------------------------------------------------------------
-        // ResolveSystemContextPendingApplyItem — per-pending-append apply
-        // decision. Guards the TYPED source_kind: a runtime-steer append is
-        // dropped from the applied set and its seen entry removed; a normal
-        // append is promoted to applied and its seen entry marked applied.
-        //
-        // This replaces the retired `is_runtime_steer_append` string-prefix
-        // classification (`source.starts_with("runtime:steer:")`).
-        // ---------------------------------------------------------------
-        transition ResolveSystemContextPendingApplyItemRuntimeSteer {
-            on input ResolveSystemContextPendingApplyItem { source_kind }
-            guard {
-                self.lifecycle_phase == Phase::Ready
-                && source_kind == SystemContextSource::RuntimeSteer
-            }
-            update {}
-            to Ready
-            emit SystemContextPendingApplyItemResolved {
-                promote_to_applied: false,
-                mark_seen_applied: false,
-                remove_seen: true
-            }
-        }
-
-        transition ResolveSystemContextPendingApplyItemNormal {
-            on input ResolveSystemContextPendingApplyItem { source_kind }
-            guard {
-                self.lifecycle_phase == Phase::Ready
-                && source_kind == SystemContextSource::Normal
-            }
-            update {}
-            to Ready
-            emit SystemContextPendingApplyItemResolved {
-                promote_to_applied: true,
-                mark_seen_applied: true,
-                remove_seen: false
-            }
-        }
-
-        // ---------------------------------------------------------------
-        // ResolveSystemContextSteerCleanupItem — per-item transient-steer
-        // discard decision, guarding the typed source_kind.
-        // ---------------------------------------------------------------
-        transition ResolveSystemContextSteerCleanupItemRuntimeSteer {
-            on input ResolveSystemContextSteerCleanupItem { source_kind }
-            guard {
-                self.lifecycle_phase == Phase::Ready
-                && source_kind == SystemContextSource::RuntimeSteer
-            }
-            update {}
-            to Ready
-            emit SystemContextSteerCleanupItemResolved { discard: true }
-        }
-
-        transition ResolveSystemContextSteerCleanupItemNormal {
-            on input ResolveSystemContextSteerCleanupItem { source_kind }
-            guard {
-                self.lifecycle_phase == Phase::Ready
-                && source_kind == SystemContextSource::Normal
-            }
-            update {}
-            to Ready
-            emit SystemContextSteerCleanupItemResolved { discard: false }
-        }
-
-        // ---------------------------------------------------------------
-        // RestoreSystemContextSnapshot — snapshot-restore consistency
-        // authorization for key-independent active-turn membership and seen
-        // idempotency projections.
-        // ---------------------------------------------------------------
-        transition RestoreSystemContextSnapshot {
-            on input RestoreSystemContextSnapshot {
-                active_turn_membership_is_consistent,
-                seen_keys_match_known_appends
-            }
-            guard {
-                self.lifecycle_phase == Phase::Ready
-                && active_turn_membership_is_consistent
-                && seen_keys_match_known_appends
-            }
-            update {}
-            to Ready
-            emit SystemContextSnapshotRestoreAuthorized
         }
 
         // ===============================================================
@@ -3618,28 +2839,6 @@ machine! {
             emit SessionBuildStateRestoreAuthorized
         }
 
-        // ---------------------------------------------------------------
-        // AuthorizeSystemPromptMutation — admit a system-prompt mutation iff
-        // the prompt has content or is an explicit clear (zero bytes). Ported
-        // verbatim from the retired guard
-        // `prompt_present == true || prompt_byte_count == 0`.
-        // ---------------------------------------------------------------
-        transition AuthorizeSystemPromptMutation {
-            on input AuthorizeSystemPromptMutation {
-                source,
-                prompt_present,
-                prompt_byte_count,
-                replacing_existing,
-            }
-            guard {
-                self.lifecycle_phase == Phase::Ready
-                && (prompt_present == true || prompt_byte_count == 0)
-            }
-            update {}
-            to Ready
-            emit SystemPromptMutationAuthorized
-        }
-
         // ===============================================================
         // Pending-continuation region (folded from the retired
         // PendingContinuationAdmissionMachine). Both transitions read only the
@@ -3950,14 +3149,13 @@ machine! {
         // ClassifyLiveSessionAuthority — live-vs-durable session-document
         // authority reconciliation. The session-store shell extracts four pure
         // boolean divergence observations; THIS machine owns the verdict, the
-        // precedence (archived > uncommitted transcript > runtime system-context
-        // > stored transcript-revision), and the typed reason.
+        // precedence (archived > uncommitted transcript > stored
+        // transcript-revision), and the typed reason.
         //
         //   all four false                       -> LiveAuthoritative
         //   stored_is_archived                   -> Durable / StoredArchived
         //   live_has_uncommitted_transcript      -> Durable / LiveUncommittedTranscript
-        //   runtime_system_context_diverged      -> Durable / RuntimeSystemContextDiverged
-        //   else (stored_transcript_diverged)    -> Durable / StoredTranscriptRevisionDiverged
+        //   stored_transcript_diverged           -> Durable / StoredTranscriptRevisionDiverged
         //
         // The four Durable guards are mutually exclusive and, with the Live
         // guard, total over the boolean cube. Stateless self-loop in Ready.
@@ -3966,14 +3164,12 @@ machine! {
             on input ClassifyLiveSessionAuthority {
                 stored_transcript_diverged,
                 live_has_uncommitted_transcript,
-                runtime_system_context_diverged,
                 stored_is_archived
             }
             guard {
                 self.lifecycle_phase == Phase::Ready
                 && stored_transcript_diverged == false
                 && live_has_uncommitted_transcript == false
-                && runtime_system_context_diverged == false
                 && stored_is_archived == false
             }
             update {}
@@ -3988,7 +3184,6 @@ machine! {
             on input ClassifyLiveSessionAuthority {
                 stored_transcript_diverged,
                 live_has_uncommitted_transcript,
-                runtime_system_context_diverged,
                 stored_is_archived
             }
             guard {
@@ -4007,7 +3202,6 @@ machine! {
             on input ClassifyLiveSessionAuthority {
                 stored_transcript_diverged,
                 live_has_uncommitted_transcript,
-                runtime_system_context_diverged,
                 stored_is_archived
             }
             guard {
@@ -4023,39 +3217,16 @@ machine! {
             }
         }
 
-        transition ClassifyLiveSessionAuthorityDurableSystemContext {
-            on input ClassifyLiveSessionAuthority {
-                stored_transcript_diverged,
-                live_has_uncommitted_transcript,
-                runtime_system_context_diverged,
-                stored_is_archived
-            }
-            guard {
-                self.lifecycle_phase == Phase::Ready
-                && stored_is_archived == false
-                && live_has_uncommitted_transcript == false
-                && runtime_system_context_diverged == true
-            }
-            update {}
-            to Ready
-            emit LiveSessionAuthorityClassified {
-                authority: LiveSessionAuthorityKind::DurableAuthoritative,
-                reason: LiveSessionAuthorityReason::RuntimeSystemContextDiverged
-            }
-        }
-
         transition ClassifyLiveSessionAuthorityDurableRevision {
             on input ClassifyLiveSessionAuthority {
                 stored_transcript_diverged,
                 live_has_uncommitted_transcript,
-                runtime_system_context_diverged,
                 stored_is_archived
             }
             guard {
                 self.lifecycle_phase == Phase::Ready
                 && stored_is_archived == false
                 && live_has_uncommitted_transcript == false
-                && runtime_system_context_diverged == false
                 && stored_transcript_diverged == true
             }
             update {}
@@ -4116,188 +3287,6 @@ machine! {
         }
 
         // ===============================================================
-        // Runtime-snapshot read-source region. Both transitions read the
-        // pure observations (the store head provably extends the runtime
-        // snapshot; the head row carries the intra-turn checkpointer's
-        // provenance stamp; the session is live in-process) and resolve the
-        // authoritative load source. Total over the observation cube,
-        // emitted on both branches; the shell mirrors `read_from_store_head`
-        // and decides nothing. A stale-strict-prefix snapshot loading
-        // unreconciled on a COLD resume is the permanent-save-rejection
-        // wedge (append-only guard vs frozen snapshot); a
-        // checkpointer-stamped ahead row is uncommitted intra-turn residue
-        // and must NOT be served (the rollback region converges it at save
-        // time); a live session's snapshot lag is transient and the live
-        // runtime recommits past it.
-        // ===============================================================
-
-        // A COMMITTED descendant is ordinary authority — independently of
-        // local actor liveness. A live actor observing a committed strict
-        // descendant is a superseded writer (another boundary, or an archive
-        // commit whose retirement failed, advanced past its snapshot); its
-        // stale snapshot must not mask committed truth, and its own next
-        // boundary preflight fails closed against the newer base. The live
-        // exception below is valid only for UNCOMMITTED intra-turn rows.
-        transition ResolveRuntimeSnapshotReadSourceCommittedHead {
-            on input ResolveRuntimeSnapshotReadSource {
-                session_id,
-                relation,
-                store_provenance,
-                session_is_live,
-                tail_execution,
-                head_stamp_era
-            }
-            guard {
-                self.lifecycle_phase == Phase::Ready
-                && relation == DurableHeadRelation::VerifiedStrictDescendant
-                && store_provenance == CheckpointProvenanceClass::Committed
-            }
-            update {}
-            to Ready
-            emit RuntimeSnapshotReadSourceResolved {
-                disposition: RuntimeSnapshotReadDisposition::UseCommittedStoreHead
-            }
-        }
-
-        // An INTRA-TURN descendant on a cold session is real durable content
-        // whose boundary commit never landed. It is neither servable as
-        // committed authority nor discardable: recovery owns it.
-        transition ResolveRuntimeSnapshotReadSourceRecoveryRequired {
-            on input ResolveRuntimeSnapshotReadSource {
-                session_id,
-                relation,
-                store_provenance,
-                session_is_live,
-                tail_execution,
-                head_stamp_era
-            }
-            guard {
-                self.lifecycle_phase == Phase::Ready
-                && relation == DurableHeadRelation::VerifiedStrictDescendant
-                && store_provenance != CheckpointProvenanceClass::Committed
-                && session_is_live == false
-                && tail_execution == DurableTailExecutionEvidence::BoundExecution
-            }
-            update {}
-            to Ready
-            emit RuntimeSnapshotReadSourceResolved {
-                disposition: RuntimeSnapshotReadDisposition::RecoveryRequired
-            }
-        }
-
-        // A COLD intra-turn descendant whose assistant tail carries NO run
-        // identity, on a head row whose VERIFIED stamp predates the
-        // witness-v3 era, is the legacy lost-boundary shape: run-identity
-        // bookkeeping did not exist when the tail was written, so no run id
-        // can ever appear and no reconciliation verb can promote it — the
-        // quarantine below would be a permanent availability loss on bytes
-        // already digest-proven to be exact continuations. Recovery owns it:
-        // the classifier applies the full legacy gate (clean EndTurn shape,
-        // NoRunId cardinality, legacy stamp era) and anything less stays
-        // held. Intra-turn provenance is required explicitly — only the
-        // in-run checkpointer mints it, which is what makes the missing run
-        // identity evidence of writer era rather than of writer path.
-        transition ResolveRuntimeSnapshotReadSourceLegacyRecoveryRequired {
-            on input ResolveRuntimeSnapshotReadSource {
-                session_id,
-                relation,
-                store_provenance,
-                session_is_live,
-                tail_execution,
-                head_stamp_era
-            }
-            guard {
-                self.lifecycle_phase == Phase::Ready
-                && relation == DurableHeadRelation::VerifiedStrictDescendant
-                && store_provenance == CheckpointProvenanceClass::IntraTurn
-                && session_is_live == false
-                && tail_execution == DurableTailExecutionEvidence::UnboundExecution
-                && head_stamp_era == DurableHeadStampEra::PreWitnessV3
-            }
-            update {}
-            to Ready
-            emit RuntimeSnapshotReadSourceResolved {
-                disposition: RuntimeSnapshotReadDisposition::RecoveryRequired
-            }
-        }
-
-        // A COMMITTED (or unstamped) fork, or unverifiable evidence, is
-        // contradictory: retain intact, refuse to serve.
-        transition ResolveRuntimeSnapshotReadSourceQuarantine {
-            on input ResolveRuntimeSnapshotReadSource {
-                session_id,
-                relation,
-                store_provenance,
-                session_is_live,
-                tail_execution,
-                head_stamp_era
-            }
-            guard {
-                self.lifecycle_phase == Phase::Ready
-                && ((relation == DurableHeadRelation::Diverged
-                        && store_provenance != CheckpointProvenanceClass::IntraTurn)
-                    || relation == DurableHeadRelation::Unverifiable
-                    // A COLD uncommitted descendant whose assistant content
-                    // carries no run identity records execution that no
-                    // recovery boundary can be anchored to and that the input
-                    // lifecycle will not redeliver. Serving past it would
-                    // invite a later projection rebuild to discard it. The
-                    // one carve-out is the legacy shape (intra-turn row whose
-                    // verified stamp predates witness-v3): recovery owns
-                    // that, in the arm above.
-                    || (relation == DurableHeadRelation::VerifiedStrictDescendant
-                        && store_provenance != CheckpointProvenanceClass::Committed
-                        && session_is_live == false
-                        && tail_execution
-                            == DurableTailExecutionEvidence::UnboundExecution
-                        && (store_provenance != CheckpointProvenanceClass::IntraTurn
-                            || head_stamp_era != DurableHeadStampEra::PreWitnessV3)))
-            }
-            update {}
-            to Ready
-            emit RuntimeSnapshotReadSourceResolved {
-                disposition: RuntimeSnapshotReadDisposition::Quarantine
-            }
-        }
-
-        // Everything else serves the committed runtime snapshot: an exact or
-        // behind row, a live session whose ahead-row is UNCOMMITTED (the live
-        // runtime's own intra-turn residue; its snapshot lag is transient and
-        // it recommits past the row), or an INTRA-TURN sibling
-        // that diverges from committed authority — the checkpointer's
-        // projection of a turn the boundary resolved differently (e.g. an
-        // evicted/cancelled live turn). The committed child is the verified
-        // authority; the sibling row is RETAINED (saves over it stay
-        // fail-closed and loud) but must not outrank committed truth or
-        // quarantine the session.
-        transition ResolveRuntimeSnapshotReadSourceSnapshot {
-            on input ResolveRuntimeSnapshotReadSource {
-                session_id,
-                relation,
-                store_provenance,
-                session_is_live,
-                tail_execution,
-                head_stamp_era
-            }
-            guard {
-                self.lifecycle_phase == Phase::Ready
-                && relation != DurableHeadRelation::Unverifiable
-                && (relation != DurableHeadRelation::Diverged
-                    || store_provenance == CheckpointProvenanceClass::IntraTurn)
-                && (relation != DurableHeadRelation::VerifiedStrictDescendant
-                    || (store_provenance != CheckpointProvenanceClass::Committed
-                        && (session_is_live == true
-                            || tail_execution
-                                == DurableTailExecutionEvidence::NoExecutionContent)))
-            }
-            update {}
-            to Ready
-            emit RuntimeSnapshotReadSourceResolved {
-                disposition: RuntimeSnapshotReadDisposition::UseRuntimeSnapshot
-            }
-        }
-
-        // ===============================================================
         // Durable-tail classification region. Total and disjoint over the
         // observation:
         //   Completed:  verified descendant, single run, EndTurn, no
@@ -4310,19 +3299,10 @@ machine! {
         //               execution: its external side effect may have fired
         //               before the crash, so no tail carrying one may be
         //               auto-closed and resumed.
-        //   Legacy:     verified descendant, ZERO run identity, EndTurn,
-        //               no dangling calls, no orphan results, nothing
-        //               after the terminal, AND pre-witness-v3 stamp
-        //               evidence on the head row. A pre-run-identity
-        //               writer wrote this tail; no run id can ever appear,
-        //               so it is adopted (never held for an identity that
-        //               cannot exist) under a domain-separated legacy run
-        //               identity.
         //   Ambiguous:  everything else (explicit negation of the above —
-        //               non-descendant relations, zero-without-legacy-
-        //               evidence or multiple runs, orphan results, content
-        //               after the terminal, Other stop shapes, ANY
-        //               dangling tool_use call, unclean legacy shapes).
+        //               non-descendant relations, zero or multiple runs,
+        //               orphan results, content after the terminal, Other
+        //               stop shapes, or ANY dangling tool_use call).
         // No class authorizes discarding; Ambiguous is held intact. For a
         // dangling call that means held for reconciliation: readable, never
         // executed against, until an idempotency/reconciliation witness or
@@ -4338,8 +3318,7 @@ machine! {
                 terminal_stop_reason,
                 dangling_tool_use_count,
                 orphan_tool_result_count,
-                messages_after_terminal,
-                head_stamp_era
+                messages_after_terminal
             }
             guard {
                 self.lifecycle_phase == Phase::Ready
@@ -4358,47 +3337,6 @@ machine! {
             }
         }
 
-        // Legacy adoption: a digest-proven byte-exact continuation written by
-        // a pre-run-identity writer. Four independent evidence axes must
-        // agree: zero run identity anywhere in the tail (every in-run
-        // assistant append since v0.7.12 persists its run id inside the same
-        // message bytes as the content, so a modern in-run tail cannot lack
-        // one), pre-witness-v3 stamp evidence on the head row (a modern mint
-        // over graph-bearing authority always advertises schema 3), the
-        // clean COMPLETED shape, and the verified strict-descendant
-        // relation. Anything less — an interrupted legacy tail, a
-        // tool-racing shape, modern stamp evidence — stays Ambiguous and
-        // held exactly as before.
-        transition ClassifyDurableTailLegacyCompleted {
-            on input ClassifyDurableTail {
-                session_id,
-                candidate_id,
-                relation,
-                run_id_cardinality,
-                terminal_stop_reason,
-                dangling_tool_use_count,
-                orphan_tool_result_count,
-                messages_after_terminal,
-                head_stamp_era
-            }
-            guard {
-                self.lifecycle_phase == Phase::Ready
-                && relation == DurableHeadRelation::VerifiedStrictDescendant
-                && run_id_cardinality == RunIdCardinality::NoRunId
-                && terminal_stop_reason == DurableTailStopReason::EndTurn
-                && dangling_tool_use_count == 0
-                && orphan_tool_result_count == 0
-                && messages_after_terminal == false
-                && head_stamp_era == DurableHeadStampEra::PreWitnessV3
-            }
-            update {}
-            to Ready
-            emit DurableTailClassified {
-                candidate_id: candidate_id,
-                class: DurableTailRecoveryClass::LegacyCompletedCandidate
-            }
-        }
-
         transition ClassifyDurableTailRepairable {
             on input ClassifyDurableTail {
                 session_id,
@@ -4408,8 +3346,7 @@ machine! {
                 terminal_stop_reason,
                 dangling_tool_use_count,
                 orphan_tool_result_count,
-                messages_after_terminal,
-                head_stamp_era
+                messages_after_terminal
             }
             guard {
                 self.lifecycle_phase == Phase::Ready
@@ -4438,8 +3375,7 @@ machine! {
                 terminal_stop_reason,
                 dangling_tool_use_count,
                 orphan_tool_result_count,
-                messages_after_terminal,
-                head_stamp_era
+                messages_after_terminal
             }
             guard {
                 self.lifecycle_phase == Phase::Ready
@@ -4449,103 +3385,12 @@ machine! {
                     || messages_after_terminal == true
                     || terminal_stop_reason == DurableTailStopReason::Other
                     || dangling_tool_use_count != 0)
-                // Exact complement of the legacy adoption arm: an
-                // identity-less tail stays Ambiguous unless EVERY legacy
-                // conjunct holds.
-                && (relation != DurableHeadRelation::VerifiedStrictDescendant
-                    || run_id_cardinality != RunIdCardinality::NoRunId
-                    || terminal_stop_reason != DurableTailStopReason::EndTurn
-                    || dangling_tool_use_count != 0
-                    || orphan_tool_result_count != 0
-                    || messages_after_terminal == true
-                    || head_stamp_era != DurableHeadStampEra::PreWitnessV3)
             }
             update {}
             to Ready
             emit DurableTailClassified {
                 candidate_id: candidate_id,
                 class: DurableTailRecoveryClass::Ambiguous
-            }
-        }
-
-        // ===============================================================
-        // Runtime-projection-rollback region. These transitions read the
-        // pure continuation observation and resolve the disposition of a
-        // runtime-authoritative projection save whose durable row ran ahead
-        // of the authority transcript. Total over the observation: a row
-        // that faithfully continues the authority (its tail is turn content
-        // whose boundary commit never landed) is retained for recovery; an
-        // INTRA-TURN row the authority provably superseded is rebuilt onto
-        // committed truth; anything else — including every COMMITTED row —
-        // keeps the fail-closed rejection. The shell mirrors the
-        // disposition.
-        // ===============================================================
-
-        transition ResolveRuntimeProjectionConflictRetain {
-            on input ResolveRuntimeProjectionConflict {
-                session_id,
-                relation,
-                row_provenance,
-                authority_supersedes_row
-            }
-            guard {
-                self.lifecycle_phase == Phase::Ready
-                && relation == DurableHeadRelation::VerifiedStrictDescendant
-            }
-            update {}
-            to Ready
-            emit RuntimeProjectionConflictResolved {
-                disposition: RuntimeProjectionConflictDisposition::RetainForRecovery
-            }
-        }
-
-        // The committed authority already passed the row's revision AND the
-        // row carries the checkpointer's own INTRA-TURN provenance stamp:
-        // the row is its own run's superseded intermediate projection, and
-        // the wedge invariant (a lost tail fails every later boundary
-        // preflight) proves no lost content can reach this arm. A verified
-        // strict descendant NEVER reaches here — authority behind the row
-        // excludes supersession by construction. A COMMITTED row never
-        // converges: revision ordering does not prove ancestry between two
-        // committed run boundaries, so committed siblings stay divergent
-        // and fail closed on the Reject arm below.
-        transition ResolveRuntimeProjectionConflictConverge {
-            on input ResolveRuntimeProjectionConflict {
-                session_id,
-                relation,
-                row_provenance,
-                authority_supersedes_row
-            }
-            guard {
-                self.lifecycle_phase == Phase::Ready
-                && relation != DurableHeadRelation::VerifiedStrictDescendant
-                && row_provenance == CheckpointProvenanceClass::IntraTurn
-                && authority_supersedes_row == true
-            }
-            update {}
-            to Ready
-            emit RuntimeProjectionConflictResolved {
-                disposition: RuntimeProjectionConflictDisposition::ConvergeSupersededProjection
-            }
-        }
-
-        transition ResolveRuntimeProjectionConflictReject {
-            on input ResolveRuntimeProjectionConflict {
-                session_id,
-                relation,
-                row_provenance,
-                authority_supersedes_row
-            }
-            guard {
-                self.lifecycle_phase == Phase::Ready
-                && relation != DurableHeadRelation::VerifiedStrictDescendant
-                && (authority_supersedes_row == false
-                    || row_provenance != CheckpointProvenanceClass::IntraTurn)
-            }
-            update {}
-            to Ready
-            emit RuntimeProjectionConflictResolved {
-                disposition: RuntimeProjectionConflictDisposition::RejectDivergent
             }
         }
 
@@ -4585,347 +3430,47 @@ machine! {
         }
 
         // ===============================================================
-        // Legacy-checkpoint recovery-migration region. Total over the legal
-        // observation shapes the shell can emit: the runtime snapshot copy
-        // is legacy (with the projection absent, legacy-related by prefix,
-        // already typed — the partial-adoption rebuild — or typed with the
-        // legacy snapshot related by prefix — the sanctioned-adoption
-        // convergence), or the runtime snapshot is absent and the
-        // session-store row is the sole legacy copy. Content custody rides
-        // this transcript election; the lifecycle terminal does NOT — it
-        // merges through the post-election
-        // ResolveLegacyCheckpointMigrationLifecycle input below, where an
-        // observed Archived terminal on either copy is absorbing.
+        // ===============================================================
+        // Session-document lifecycle merge. Total over the two observed
+        // lifecycle facts: Archived on EITHER verified document is absorbing;
+        // only when neither document is archived does the selected authority's
+        // lifecycle stand. The shell mirrors the verdict and decides nothing.
         // ===============================================================
 
-        transition ResolveLegacyCheckpointMigrationSnapshotIdenticalProjection {
-            on input ResolveLegacyCheckpointMigration {
+        transition ResolveSessionDocumentLifecycleMergeArchivedAbsorbing {
+            on input ResolveSessionDocumentLifecycleMerge {
                 session_id,
-                runtime_snapshot_present,
-                runtime_snapshot_legacy,
-                store_row_present,
-                store_row_legacy,
-                transcript_relation
+                authority_archived,
+                candidate_archived
             }
             guard {
                 self.lifecycle_phase == Phase::Ready
-                && runtime_snapshot_present == true
-                && runtime_snapshot_legacy == true
-                && store_row_present == true
-                && store_row_legacy == true
-                && transcript_relation == LegacyCheckpointTranscriptRelation::Identical
+                && (authority_archived == true || candidate_archived == true)
             }
             update {}
             to Ready
-            emit LegacyCheckpointMigrationResolved {
-                disposition: LegacyCheckpointMigrationDisposition::MigrateCanonicalSnapshot
+            emit SessionDocumentLifecycleMergeResolved {
+                merge: SessionDocumentLifecycleMerge::CarryArchived
             }
         }
 
-        transition ResolveLegacyCheckpointMigrationSnapshotAheadOfProjection {
-            on input ResolveLegacyCheckpointMigration {
+        transition ResolveSessionDocumentLifecycleMergeAuthority {
+            on input ResolveSessionDocumentLifecycleMerge {
                 session_id,
-                runtime_snapshot_present,
-                runtime_snapshot_legacy,
-                store_row_present,
-                store_row_legacy,
-                transcript_relation
+                authority_archived,
+                candidate_archived
             }
             guard {
                 self.lifecycle_phase == Phase::Ready
-                && runtime_snapshot_present == true
-                && runtime_snapshot_legacy == true
-                && store_row_present == true
-                && store_row_legacy == true
-                && transcript_relation == LegacyCheckpointTranscriptRelation::SnapshotExtendsProjection
+                && authority_archived == false
+                && candidate_archived == false
             }
             update {}
             to Ready
-            emit LegacyCheckpointMigrationResolved {
-                disposition: LegacyCheckpointMigrationDisposition::MigrateCanonicalSnapshot
+            emit SessionDocumentLifecycleMergeResolved {
+                merge: SessionDocumentLifecycleMerge::CarryAuthority
             }
         }
-
-        transition ResolveLegacyCheckpointMigrationProjectionExtension {
-            on input ResolveLegacyCheckpointMigration {
-                session_id,
-                runtime_snapshot_present,
-                runtime_snapshot_legacy,
-                store_row_present,
-                store_row_legacy,
-                transcript_relation
-            }
-            guard {
-                self.lifecycle_phase == Phase::Ready
-                && runtime_snapshot_present == true
-                && runtime_snapshot_legacy == true
-                && store_row_present == true
-                && store_row_legacy == true
-                && transcript_relation == LegacyCheckpointTranscriptRelation::ProjectionExtendsSnapshot
-            }
-            update {}
-            to Ready
-            emit LegacyCheckpointMigrationResolved {
-                disposition: LegacyCheckpointMigrationDisposition::AdoptProjectionExtension
-            }
-        }
-
-        transition ResolveLegacyCheckpointMigrationDivergentCopies {
-            on input ResolveLegacyCheckpointMigration {
-                session_id,
-                runtime_snapshot_present,
-                runtime_snapshot_legacy,
-                store_row_present,
-                store_row_legacy,
-                transcript_relation
-            }
-            guard {
-                self.lifecycle_phase == Phase::Ready
-                && runtime_snapshot_present == true
-                && runtime_snapshot_legacy == true
-                && store_row_present == true
-                && store_row_legacy == true
-                && transcript_relation == LegacyCheckpointTranscriptRelation::Divergent
-            }
-            update {}
-            to Ready
-            emit LegacyCheckpointMigrationResolved {
-                disposition: LegacyCheckpointMigrationDisposition::RefuseDivergent
-            }
-        }
-
-        transition ResolveLegacyCheckpointMigrationSnapshotOnly {
-            on input ResolveLegacyCheckpointMigration {
-                session_id,
-                runtime_snapshot_present,
-                runtime_snapshot_legacy,
-                store_row_present,
-                store_row_legacy,
-                transcript_relation
-            }
-            guard {
-                self.lifecycle_phase == Phase::Ready
-                && runtime_snapshot_present == true
-                && runtime_snapshot_legacy == true
-                && store_row_present == false
-            }
-            update {}
-            to Ready
-            emit LegacyCheckpointMigrationResolved {
-                disposition: LegacyCheckpointMigrationDisposition::MigrateCanonicalSnapshot
-            }
-        }
-
-        transition ResolveLegacyCheckpointMigrationStoreRowOnly {
-            on input ResolveLegacyCheckpointMigration {
-                session_id,
-                runtime_snapshot_present,
-                runtime_snapshot_legacy,
-                store_row_present,
-                store_row_legacy,
-                transcript_relation
-            }
-            guard {
-                self.lifecycle_phase == Phase::Ready
-                && runtime_snapshot_present == false
-                && store_row_present == true
-                && store_row_legacy == true
-            }
-            update {}
-            to Ready
-            emit LegacyCheckpointMigrationResolved {
-                disposition: LegacyCheckpointMigrationDisposition::MigrateStoreProjection
-            }
-        }
-
-        transition ResolveLegacyCheckpointMigrationTypedSnapshotLegacyProjection {
-            on input ResolveLegacyCheckpointMigration {
-                session_id,
-                runtime_snapshot_present,
-                runtime_snapshot_legacy,
-                store_row_present,
-                store_row_legacy,
-                transcript_relation
-            }
-            guard {
-                self.lifecycle_phase == Phase::Ready
-                && runtime_snapshot_present == true
-                && runtime_snapshot_legacy == false
-                && store_row_present == true
-                && store_row_legacy == true
-            }
-            update {}
-            to Ready
-            emit LegacyCheckpointMigrationResolved {
-                disposition: LegacyCheckpointMigrationDisposition::RebuildProjectionFromTypedSnapshot
-            }
-        }
-
-        transition ResolveLegacyCheckpointMigrationSnapshotIdenticalTypedProjection {
-            on input ResolveLegacyCheckpointMigration {
-                session_id,
-                runtime_snapshot_present,
-                runtime_snapshot_legacy,
-                store_row_present,
-                store_row_legacy,
-                transcript_relation
-            }
-            guard {
-                self.lifecycle_phase == Phase::Ready
-                && runtime_snapshot_present == true
-                && runtime_snapshot_legacy == true
-                && store_row_present == true
-                && store_row_legacy == false
-                && transcript_relation == LegacyCheckpointTranscriptRelation::Identical
-            }
-            update {}
-            to Ready
-            emit LegacyCheckpointMigrationResolved {
-                disposition: LegacyCheckpointMigrationDisposition::ConvergeSnapshotOntoTypedProjection
-            }
-        }
-
-        transition ResolveLegacyCheckpointMigrationTypedProjectionExtension {
-            on input ResolveLegacyCheckpointMigration {
-                session_id,
-                runtime_snapshot_present,
-                runtime_snapshot_legacy,
-                store_row_present,
-                store_row_legacy,
-                transcript_relation
-            }
-            guard {
-                self.lifecycle_phase == Phase::Ready
-                && runtime_snapshot_present == true
-                && runtime_snapshot_legacy == true
-                && store_row_present == true
-                && store_row_legacy == false
-                && transcript_relation == LegacyCheckpointTranscriptRelation::ProjectionExtendsSnapshot
-            }
-            update {}
-            to Ready
-            emit LegacyCheckpointMigrationResolved {
-                disposition: LegacyCheckpointMigrationDisposition::ConvergeSnapshotOntoTypedProjection
-            }
-        }
-
-        transition ResolveLegacyCheckpointMigrationSnapshotAheadOfTypedProjection {
-            on input ResolveLegacyCheckpointMigration {
-                session_id,
-                runtime_snapshot_present,
-                runtime_snapshot_legacy,
-                store_row_present,
-                store_row_legacy,
-                transcript_relation
-            }
-            guard {
-                self.lifecycle_phase == Phase::Ready
-                && runtime_snapshot_present == true
-                && runtime_snapshot_legacy == true
-                && store_row_present == true
-                && store_row_legacy == false
-                && transcript_relation == LegacyCheckpointTranscriptRelation::SnapshotExtendsProjection
-            }
-            update {}
-            to Ready
-            emit LegacyCheckpointMigrationResolved {
-                disposition: LegacyCheckpointMigrationDisposition::RefuseDivergent
-            }
-        }
-
-        transition ResolveLegacyCheckpointMigrationDivergentFromTypedProjection {
-            on input ResolveLegacyCheckpointMigration {
-                session_id,
-                runtime_snapshot_present,
-                runtime_snapshot_legacy,
-                store_row_present,
-                store_row_legacy,
-                transcript_relation
-            }
-            guard {
-                self.lifecycle_phase == Phase::Ready
-                && runtime_snapshot_present == true
-                && runtime_snapshot_legacy == true
-                && store_row_present == true
-                && store_row_legacy == false
-                && transcript_relation == LegacyCheckpointTranscriptRelation::Divergent
-            }
-            update {}
-            to Ready
-            emit LegacyCheckpointMigrationResolved {
-                disposition: LegacyCheckpointMigrationDisposition::RefuseDivergent
-            }
-        }
-
-        transition ResolveLegacyCheckpointMigrationTypedProjectionNotComparable {
-            on input ResolveLegacyCheckpointMigration {
-                session_id,
-                runtime_snapshot_present,
-                runtime_snapshot_legacy,
-                store_row_present,
-                store_row_legacy,
-                transcript_relation
-            }
-            guard {
-                self.lifecycle_phase == Phase::Ready
-                && runtime_snapshot_present == true
-                && runtime_snapshot_legacy == true
-                && store_row_present == true
-                && store_row_legacy == false
-                && transcript_relation == LegacyCheckpointTranscriptRelation::NotComparable
-            }
-            update {}
-            to Ready
-            emit LegacyCheckpointMigrationResolved {
-                disposition: LegacyCheckpointMigrationDisposition::RefuseDivergent
-            }
-        }
-
-        // ===============================================================
-        // Post-election lifecycle merge for the legacy-checkpoint recovery
-        // migration. Total over the two observed lifecycle facts: Archived
-        // on EITHER copy is absorbing (the elected result must carry it);
-        // only when neither copy is archived does the elected copy's own
-        // lifecycle stand. The shell mirrors the verdict and decides
-        // nothing.
-        // ===============================================================
-
-        transition ResolveLegacyCheckpointMigrationLifecycleArchivedAbsorbing {
-            on input ResolveLegacyCheckpointMigrationLifecycle {
-                session_id,
-                runtime_copy_archived,
-                store_row_archived
-            }
-            guard {
-                self.lifecycle_phase == Phase::Ready
-                && (runtime_copy_archived == true || store_row_archived == true)
-            }
-            update {}
-            to Ready
-            emit LegacyCheckpointMigrationLifecycleResolved {
-                merge: LegacyCheckpointLifecycleMerge::CarryArchived
-            }
-        }
-
-        transition ResolveLegacyCheckpointMigrationLifecycleElected {
-            on input ResolveLegacyCheckpointMigrationLifecycle {
-                session_id,
-                runtime_copy_archived,
-                store_row_archived
-            }
-            guard {
-                self.lifecycle_phase == Phase::Ready
-                && runtime_copy_archived == false
-                && store_row_archived == false
-            }
-            update {}
-            to Ready
-            emit LegacyCheckpointMigrationLifecycleResolved {
-                merge: LegacyCheckpointLifecycleMerge::CarryElected
-            }
-        }
-
-        // ===============================================================
         // Apply-pending-tool-results region. The transition reads the consumed
         // result count and authorizes the apply, emitting `applied_count` equal
         // to `result_count` (vacuous-accept, mirroring the staging-side

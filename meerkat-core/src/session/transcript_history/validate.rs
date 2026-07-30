@@ -3,7 +3,11 @@
 //! Extracted verbatim from `session.rs`; the extraction commit changes
 //! no behaviour, only where the code lives.
 
-use super::graph::{TranscriptHistoryState, TranscriptRevisionBody, TranscriptRewriteCommit};
+use super::graph::{
+    TRANSCRIPT_DIGEST_FORMAT_CURRENT, TRANSCRIPT_HISTORY_FORMAT_CURRENT, TranscriptEndpointWitness,
+    TranscriptHistoryState, TranscriptParentAdvance, TranscriptRevisionBody,
+    TranscriptRevisionEdge, TranscriptRewriteCommit, TranscriptRewritePrefixAccumulator,
+};
 use crate::session::{TranscriptEditError, TranscriptRewriteSemantic, transcript_messages_digest};
 use crate::types::{AssistantBlock, Message};
 use std::collections::BTreeSet;
@@ -238,158 +242,328 @@ pub(super) fn validate_transcript_rewrite_record(
 pub(crate) fn validate_transcript_history_state(
     state: &TranscriptHistoryState,
 ) -> Result<(), TranscriptEditError> {
-    if state
-        .revisions
-        .iter()
-        .all(|body| body.revision != state.head)
-    {
+    if state.format() != TRANSCRIPT_HISTORY_FORMAT_CURRENT {
         return Err(TranscriptEditError::HistoryStateMalformed(format!(
-            "missing transcript head body {}",
-            state.head
+            "unsupported transcript graph format {}",
+            state.format()
         )));
     }
-    for body in &state.revisions {
-        let digest = transcript_messages_digest(&body.messages)
-            .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
-        if digest != body.revision {
-            return Err(TranscriptEditError::HistoryStateMalformed(format!(
-                "transcript revision body {} has digest {digest}",
-                body.revision
-            )));
-        }
-    }
-    for commit in &state.commits {
-        let parent_body = state
-            .revisions
-            .iter()
-            .find(|body| body.revision == commit.parent_revision)
-            .ok_or_else(|| {
-                TranscriptEditError::HistoryStateMalformed(format!(
-                    "missing parent transcript body {}",
-                    commit.parent_revision
-                ))
-            })?;
-        let revision_body = state
-            .revisions
-            .iter()
-            .find(|body| body.revision == commit.revision)
-            .ok_or_else(|| {
-                TranscriptEditError::HistoryStateMalformed(format!(
-                    "missing transcript revision body {}",
-                    commit.revision
-                ))
-            })?;
-        validate_transcript_rewrite_record(commit, parent_body, revision_body)?;
-    }
-    let Some(first_commit) = state.commits.first() else {
-        return Ok(());
-    };
-    let mut expected_head = first_commit.parent_revision.clone();
-    for commit in &state.commits {
-        let parent_body = state
-            .revisions
-            .iter()
-            .find(|body| body.revision == commit.parent_revision)
-            .ok_or_else(|| {
-                TranscriptEditError::HistoryStateMalformed(format!(
-                    "missing parent transcript body {}",
-                    commit.parent_revision
-                ))
-            })?;
-        if commit.parent_revision != expected_head
-            && !revision_body_extends_head(parent_body, &state.revisions, &expected_head)?
-        {
-            return Err(TranscriptEditError::HistoryStateMalformed(format!(
-                "rewrite commit parent {} does not extend transcript head {}",
-                commit.parent_revision, expected_head
-            )));
-        }
-        expected_head = commit.revision.clone();
-    }
-    let head_is_audited_endpoint = state
-        .commits
-        .iter()
-        .any(|commit| commit.parent_revision == state.head || commit.revision == state.head);
-    let head_extends_latest_commit = if head_is_audited_endpoint {
-        let Some(head_body) = state
-            .revisions
-            .iter()
-            .find(|body| body.revision == state.head)
-        else {
-            return Err(TranscriptEditError::HistoryStateMalformed(format!(
-                "missing transcript head body {}",
-                state.head
-            )));
-        };
-        revision_body_extends_head(head_body, &state.revisions, &expected_head)?
-    } else {
-        let mut cursor = state.head.as_str();
-        let mut visited = BTreeSet::new();
-        while cursor != expected_head {
-            if !visited.insert(cursor.to_string()) {
-                break;
-            }
-            let Some(head_body) = state.revisions.iter().find(|body| body.revision == cursor)
-            else {
-                break;
-            };
-            let Some(parent) = head_body.parent_revision.as_deref() else {
-                break;
-            };
-            cursor = parent;
-        }
-        cursor == expected_head
-    };
-    if !head_extends_latest_commit {
+    if state.digest_format() != TRANSCRIPT_DIGEST_FORMAT_CURRENT {
         return Err(TranscriptEditError::HistoryStateMalformed(format!(
-            "transcript head {} does not extend the rewrite chain",
-            state.head
+            "unsupported transcript digest format {}",
+            state.digest_format()
+        )));
+    }
+    if state.edges().is_empty() {
+        return Err(TranscriptEditError::HistoryStateMalformed(
+            "current transcript graph carries no rewrite occurrence".to_string(),
+        ));
+    }
+    let anchor_digest = transcript_messages_digest(state.anchor().messages())
+        .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
+    if anchor_digest != state.anchor().revision() {
+        return Err(TranscriptEditError::HistoryStateMalformed(format!(
+            "transcript graph anchor {} has digest {anchor_digest}",
+            state.anchor().revision()
+        )));
+    }
+    let anchor_row_prefix =
+        crate::SessionMessageRowPrefixAccumulator::from_messages(state.anchor().messages())
+            .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
+    if &anchor_row_prefix != state.anchor().row_prefix() {
+        return Err(TranscriptEditError::HistoryStateMalformed(
+            "transcript graph anchor exact row prefix does not bind its messages".to_string(),
+        ));
+    }
+    let mut expected_base = state.anchor().revision();
+    let mut expected_witness = TranscriptEndpointWitness::from_messages(state.anchor().messages())
+        .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
+    let mut rewrite_prefix = TranscriptRewritePrefixAccumulator::empty();
+    for (index, edge) in state.edges().iter().enumerate() {
+        let expected = u64::try_from(index)
+            .ok()
+            .and_then(|index| index.checked_add(1))
+            .ok_or_else(|| {
+                TranscriptEditError::HistoryStateMalformed(
+                    "transcript rewrite generation exceeds u64".to_string(),
+                )
+            })?;
+        if edge.rewrite_generation() != expected {
+            return Err(TranscriptEditError::HistoryStateMalformed(format!(
+                "transcript rewrite generation {} is not the expected contiguous occurrence {expected}",
+                edge.rewrite_generation()
+            )));
+        }
+        validate_transcript_revision_edge(expected_base, &expected_witness, edge.as_ref())?;
+        rewrite_prefix = rewrite_prefix
+            .extend(edge.commit())
+            .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
+        if &rewrite_prefix != edge.rewrite_prefix() {
+            return Err(TranscriptEditError::HistoryStateMalformed(format!(
+                "rewrite occurrence {} cached prefix does not bind its commit",
+                edge.rewrite_generation()
+            )));
+        }
+        expected_base = edge.revision();
+        expected_witness = edge.result_witness().clone();
+    }
+    if &rewrite_prefix != state.rewrite_prefix() {
+        return Err(TranscriptEditError::HistoryStateMalformed(format!(
+            "rewrite-prefix accumulator does not bind {} ordered commits",
+            state.commit_count()
+        )));
+    }
+    let graph_prefix = super::graph::TranscriptGraphPrefixAccumulator::from_graph(
+        state.anchor(),
+        state.edges().iter().map(AsRef::as_ref),
+    )
+    .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
+    if &graph_prefix != state.graph_prefix() {
+        return Err(TranscriptEditError::HistoryStateMalformed(format!(
+            "graph-prefix accumulator does not bind {} ordered occurrence edges",
+            state.commit_count()
+        )));
+    }
+    if state.head() != expected_base {
+        return Err(TranscriptEditError::HistoryStateMalformed(format!(
+            "derived transcript head {} does not match final occurrence {expected_base}",
+            state.head()
         )));
     }
     Ok(())
 }
 
-pub(super) fn revision_body_extends_head(
-    candidate: &TranscriptRevisionBody,
-    revisions: &[TranscriptRevisionBody],
-    head: &str,
-) -> Result<bool, TranscriptEditError> {
-    let Some(head_body) = revisions.iter().find(|body| body.revision == head) else {
-        return Ok(false);
+pub(super) fn validate_transcript_revision_edge(
+    expected_base_revision: &str,
+    expected_base_witness: &TranscriptEndpointWitness,
+    edge: &TranscriptRevisionEdge,
+) -> Result<(), TranscriptEditError> {
+    let commit = edge.commit();
+    for (label, digest) in [
+        ("parent revision", commit.parent_revision.as_str()),
+        ("revision", commit.revision.as_str()),
+        ("original span", commit.original_span_digest.as_str()),
+        ("replacement", commit.replacement_digest.as_str()),
+    ] {
+        require_canonical_sha256(label, digest)?;
+    }
+    if edge.base_revision() != expected_base_revision {
+        return Err(TranscriptEditError::HistoryStateMalformed(format!(
+            "rewrite occurrence {} base {} does not match preceding endpoint {expected_base_revision}",
+            edge.rewrite_generation(),
+            edge.base_revision()
+        )));
+    }
+    if edge.parent_revision() != commit.parent_revision
+        || edge.revision() != commit.revision
+        || edge.rewrite_generation() != commit.rewrite_generation
+    {
+        return Err(TranscriptEditError::HistoryStateMalformed(format!(
+            "rewrite occurrence {} edge identity disagrees with embedded commit",
+            edge.rewrite_generation()
+        )));
+    }
+    if commit.parent_revision == commit.revision {
+        return Err(TranscriptEditError::NoOpRewrite {
+            revision: commit.revision.clone(),
+        });
+    }
+    if edge.messages_before_base() != expected_base_witness.message_count() {
+        return Err(TranscriptEditError::HistoryStateMalformed(format!(
+            "rewrite occurrence {} base count {} does not match endpoint witness {}",
+            edge.rewrite_generation(),
+            edge.messages_before_base(),
+            expected_base_witness.message_count()
+        )));
+    }
+    let appended = edge.parent_advance().appended().len();
+    let expected_parent_count = edge
+        .messages_before_base()
+        .checked_add(appended)
+        .ok_or_else(|| {
+            TranscriptEditError::HistoryStateMalformed(
+                "rewrite parent message count overflowed".to_string(),
+            )
+        })?;
+    if expected_parent_count != commit.messages_before {
+        return Err(TranscriptEditError::HistoryStateMalformed(format!(
+            "rewrite occurrence {} parent advance describes {} messages, commit records {}",
+            edge.rewrite_generation(),
+            expected_parent_count,
+            commit.messages_before
+        )));
+    }
+    if edge.parent_row_prefix().row_count() != commit.messages_before as u64 {
+        return Err(TranscriptEditError::HistoryStateMalformed(format!(
+            "rewrite occurrence {} exact parent row prefix covers {} rows, commit records {}",
+            edge.rewrite_generation(),
+            edge.parent_row_prefix().row_count(),
+            commit.messages_before
+        )));
+    }
+    let (base_parent_prefix, appended) = match edge.parent_advance() {
+        TranscriptParentAdvance::ExactAppend { appended } => {
+            (expected_base_witness.row_prefix().clone(), appended)
+        }
+        TranscriptParentAdvance::ExactSplice {
+            at,
+            replacement,
+            appended,
+        } => {
+            let end = at.checked_add(replacement.len()).ok_or_else(|| {
+                TranscriptEditError::HistoryStateMalformed(format!(
+                    "rewrite occurrence {} parent splice end overflowed",
+                    edge.rewrite_generation()
+                ))
+            })?;
+            if replacement.is_empty() || end > expected_base_witness.message_count() {
+                return Err(TranscriptEditError::HistoryStateMalformed(format!(
+                    "rewrite occurrence {} parent splice is empty or outside its base",
+                    edge.rewrite_generation()
+                )));
+            }
+            let replacement_rows = replacement
+                .iter()
+                .map(serde_json::to_vec)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
+            let at = u64::try_from(*at).map_err(|_| {
+                TranscriptEditError::HistoryStateMalformed(format!(
+                    "rewrite occurrence {} parent splice start exceeds durable row coordinates",
+                    edge.rewrite_generation()
+                ))
+            })?;
+            let end = u64::try_from(end).map_err(|_| {
+                TranscriptEditError::HistoryStateMalformed(format!(
+                    "rewrite occurrence {} parent splice end exceeds durable row coordinates",
+                    edge.rewrite_generation()
+                ))
+            })?;
+            let spliced = expected_base_witness
+                .row_prefix()
+                .replace_serialized_range(at, end, &replacement_rows)
+                .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
+            (spliced, appended)
+        }
     };
-    if candidate.revision == head {
-        return Ok(true);
+    let serialized = appended
+        .iter()
+        .map(serde_json::to_vec)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
+    let expected_parent_prefix = base_parent_prefix
+        .extend_serialized_rows(&serialized)
+        .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
+    if &expected_parent_prefix != edge.parent_row_prefix() {
+        return Err(TranscriptEditError::HistoryStateMalformed(format!(
+            "rewrite occurrence {} parent row prefix does not exactly bind its typed advance",
+            edge.rewrite_generation()
+        )));
     }
-    if candidate.messages.len() < head_body.messages.len() {
-        return Ok(false);
+    let (start, end) = commit.selection.bounds();
+    if start != edge.rewrite().at() || start > end || end > commit.messages_before {
+        return Err(TranscriptEditError::HistoryStateMalformed(format!(
+            "rewrite occurrence {} patch bounds do not match selection",
+            edge.rewrite_generation()
+        )));
     }
-    let prefix_digest = transcript_messages_digest(&candidate.messages[..head_body.messages.len()])
-        .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
-    if prefix_digest == head {
-        return Ok(true);
+    let expected_after = commit
+        .messages_before
+        .checked_sub(end - start)
+        .and_then(|retained| retained.checked_add(edge.rewrite().replacement().len()))
+        .ok_or_else(|| {
+            TranscriptEditError::HistoryStateMalformed(
+                "rewrite patch message count overflowed".to_string(),
+            )
+        })?;
+    if expected_after != commit.messages_after {
+        return Err(TranscriptEditError::HistoryStateMalformed(format!(
+            "rewrite occurrence {} patch produces {} messages, commit records {}",
+            edge.rewrite_generation(),
+            expected_after,
+            commit.messages_after
+        )));
     }
+    if edge.result_witness().message_count() != commit.messages_after
+        || edge.result_witness().row_prefix().row_count() != commit.messages_after as u64
+    {
+        return Err(TranscriptEditError::HistoryStateMalformed(format!(
+            "rewrite occurrence {} result endpoint witness is malformed",
+            edge.rewrite_generation()
+        )));
+    }
+    let replacement_digest = transcript_messages_digest(edge.rewrite().replacement())
+        .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
+    if replacement_digest != commit.replacement_digest {
+        return Err(TranscriptEditError::HistoryStateMalformed(format!(
+            "rewrite occurrence {} replacement digest does not match commit",
+            edge.rewrite_generation()
+        )));
+    }
+    let replacement_rows = edge
+        .rewrite()
+        .replacement()
+        .iter()
+        .map(serde_json::to_vec)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
+    let start = u64::try_from(start).map_err(|_| {
+        TranscriptEditError::HistoryStateMalformed(
+            "rewrite start exceeds durable u64 row coordinates".to_string(),
+        )
+    })?;
+    let end = u64::try_from(end).map_err(|_| {
+        TranscriptEditError::HistoryStateMalformed(
+            "rewrite end exceeds durable u64 row coordinates".to_string(),
+        )
+    })?;
+    let expected_result_prefix = edge
+        .parent_row_prefix()
+        .replace_serialized_range(start, end, &replacement_rows)
+        .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
+    if &expected_result_prefix != edge.result_witness().row_prefix() {
+        return Err(TranscriptEditError::HistoryStateMalformed(format!(
+            "rewrite occurrence {} result row lineage is not derived from its exact parent and replacement",
+            edge.rewrite_generation()
+        )));
+    }
+    if commit.selection.semantic() == TranscriptRewriteSemantic::Compaction {
+        let summaries = edge
+            .rewrite()
+            .replacement()
+            .iter()
+            .filter(|message| {
+                matches!(message, Message::User(user) if user.transcript_role.is_compaction_summary())
+            })
+            .count();
+        if start != 0
+            || end != commit.messages_before
+            || commit.messages_after >= commit.messages_before
+            || summaries != 1
+        {
+            return Err(TranscriptEditError::HistoryStateMalformed(
+                "typed compaction edge must shrink the full transcript and carry one summary"
+                    .to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
 
-    // A resume-time system refresh may replace the single leading System
-    // projection while preserving (and possibly appending to) the exact
-    // conversation tail. Prove that content shape directly; a historical
-    // parent_revision pointer is not occurrence identity and must never, by
-    // itself, authorize a later commit after a digest has recurred.
-    let (Some(Message::System(_)), Some(Message::System(_))) =
-        (candidate.messages.first(), head_body.messages.first())
-    else {
-        return Ok(false);
+fn require_canonical_sha256(label: &str, value: &str) -> Result<(), TranscriptEditError> {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        return Err(TranscriptEditError::HistoryStateMalformed(format!(
+            "{label} digest is not canonical sha256"
+        )));
     };
-    let head_tail_len = head_body.messages.len().saturating_sub(1);
-    if head_tail_len == 0 {
-        return Ok(true);
+    if hex.len() != 64
+        || !hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(TranscriptEditError::HistoryStateMalformed(format!(
+            "{label} digest is not canonical sha256"
+        )));
     }
-    let candidate_tail = &candidate.messages[1..];
-    if candidate_tail.len() < head_tail_len {
-        return Ok(false);
-    }
-    let head_tail_digest = transcript_messages_digest(&head_body.messages[1..])
-        .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
-    let candidate_tail_prefix_digest = transcript_messages_digest(&candidate_tail[..head_tail_len])
-        .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
-    Ok(candidate_tail_prefix_digest == head_tail_digest)
+    Ok(())
 }

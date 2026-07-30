@@ -3,14 +3,11 @@
 use meerkat_core::turn_execution_authority::ContentShape as CoreContentShape;
 use meerkat_runtime::meerkat_machine::dsl::ContentShape as RuntimeContentShape;
 
-fn core_shapes() -> [CoreContentShape; 6] {
+fn core_shapes() -> [CoreContentShape; 3] {
     [
         CoreContentShape::Conversation,
-        CoreContentShape::ConversationAndContext,
-        CoreContentShape::Context,
         CoreContentShape::Empty,
         CoreContentShape::ImmediateAppend,
-        CoreContentShape::ImmediateContext,
     ]
 }
 

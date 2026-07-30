@@ -153,79 +153,13 @@ are.
 
 ## Immediate hotfix (0.8.x, independent of everything below)
 
-> **Status: landing as PR #909** ("machine-owned auto-migration of pre-typed
-> session checkpoints"), with one conscious design override of this section
-> recorded below. External acceptance pending: the HomeCore dump-driven
-> restore harness against the branch.
-
-**Legacy checkpoint-evidence adoption.** Sessions written by 0.7.x carry
-`SessionCheckpointState::LegacyUnverified` metadata, and resume on 0.8.x hits
-the hard error in `load_committed_checkpoint_authority`
-(`meerkat-session/src/persistent.rs`). This is a live fleet blocker for at
-least two downstreams today (ob3: 32/32 identities broken on a real 0.7.9
-dataset; HomeCore: roster bricked on upgrade). It must not wait for the plan's
-arc:
-
-- Ship an explicit, quiescent adoption migration on the 0.8.x line, built on
-  the runtime store's existing legacy-evidence machinery (the path that
-  verifies the session-store row is byte-identical to its runtime checkpoint
-  before upgrading, `meerkat-runtime/src/store/sqlite.rs`). The original
-  draft cited `migrate_legacy_blob_in_txn` here; that is the wrong primitive —
-  it lays out blob sessions as strand/head rows and neither verifies nor mints
-  checkpoint authority.
-- **Export the stamping helper** — landed as
-  `meerkat_core::adopt_legacy_session(source_blob, generation, revision)`
-  plus `meerkat_core::legacy_session_transcript_relation` (the per-message
-  canonical-JSON prefix comparison between unstamped copies). The ordering
-  subtleties every remote backend used to re-derive are now owned in one
-  place: the stamp digest binds to the final bytes *after* any metadata
-  repair (e.g. comms_name rewrites at restore), observed
-  generation/revision come from the continuity row, and typed documents
-  are refused. The resolver's auto-migration is one caller; ob3's shim and
-  mobkit's continuity adoption (companion H3) are the others.
-- **Adoption mechanism — conscious override, decided in PR #909.** This plan
-  originally required adoption as an explicit migration step, never an eager
-  side effect of ordinary open. The shipped design is instead **lazy,
-  machine-owned, per-session adoption at first committed-authority touch**
-  (a `SessionDocumentMachine` input with typed dispositions:
-  `MigrateCanonicalSnapshot`, `AdoptProjectionExtension`,
-  `MigrateStoreProjection`, and fail-closed `RefuseDivergent`), an
-  operator-confirmed trade: zero-ceremony fleet upgrades outweigh the
-  maintenance-window framing. What survives of the original requirement:
-  the cost is observable rather than inferred (per-migration `tracing`
-  with session, disposition, and source bytes — it lands inside
-  resume/certification windows by design), adoption is idempotent and
-  exactly-once per document, and the Phase 6 `rkat storage migrate` verb
-  remains as the **bulk, fenced form of the same machinery** for operators
-  who want the work out of their resume paths.
-- **Documented residual (INITIAL-cursor stickiness).** The lazy auto path
-  seeds `INITIAL` generation/revision cursors — correct for lineages that
-  never minted authority (both known real datasets are generation 0). A
-  fleet whose continuity rows record a nonzero generation floor must adopt
-  through the exported helper *with the observed cursor* (the mobkit
-  companion's H3) **before** the lazy path touches those sessions: a
-  verified document never re-migrates, so a prematurely stamped lower
-  generation is sticky.
-- **Joint acceptance case with the mobkit companion's H3 (from HomeCore's
-  real dump): the byte-divergent canonical/projection pair.** A canonical
-  runtime snapshot and a continuity projection can legitimately differ in
-  bytes at the same generation/checkpoint (observed: 82,261,276 B vs
-  82,262,809 B at checkpoint 859). PR #909's machine now defines the
-  authority rule when both copies are visible to the resolver, superseding
-  this plan's earlier "canonical wins; projection re-anchors" sketch: a
-  projection that **provably extends** the canonical (per-message
-  canonical-JSON prefix relation) is adopted so no trailing turn is lost;
-  a stale-prefix projection is rebuilt from canonical; genuinely unrelated
-  transcripts refuse fail-closed (`RefuseDivergent`) with the divergence
-  named for the operator tool — no synthesis, matching principle 5.
-  HomeCore's dump pair is expected to classify as an extension. What
-  *remains* a joint acceptance case with mobkit H3 is the
-  independently-adopted variant: when the continuity copy lives in a store
-  the meerkat resolver never sees (identity-first gateways), H3's adoption
-  and meerkat's adoption happen independently and the pair must still
-  converge afterwards rather than landing in an ambiguous-checkpoint
-  terminal state. HomeCore's harness validates both shapes against the
-  real dump; this is an acceptance gate for the hotfix pair.
+> **Superseded in 0.8.11.** The compatibility floor is Meerkat 0.8.10.
+> Document-owned checkpoint evidence, lazy adoption, and cross-store stamp
+> reconciliation are no longer live architecture. Exact 0.8.10 state is
+> converted once inside the owning backend's activation transaction, which
+> binds the released source row and schema before installing store-issued
+> authority. State older than 0.8.10 must first be upgraded with an older
+> release.
 
 ## Phase 0 — Storage conformance harness
 
@@ -240,9 +174,9 @@ plus a whole-bundle `PersistentSessionService` integration suite.
 
 Coverage, by chapter:
 
-- **Core contracts:** save/load round-trips, CAS/revision-guard semantics,
-  checkpoint-stamp preservation across save/load, concurrent-writer
-  contention, large-payload behavior.
+- **Core contracts:** save/load round-trips, exact transcript/head authority
+  preservation, CAS/revision-guard semantics, concurrent-writer contention,
+  large-payload behavior.
 - **Capability discovery:** `as_incremental` forwarding through delegating
   wrappers and trait erasure — its default returns `None` and the runtime
   silently degrades to whole-blob persistence when a wrapper swallows the
@@ -271,8 +205,8 @@ Land the diagnostic surface *before* anything mutates:
   store); lease-aware; JSON output.
 - Reports: per-root realm inventory (both candidate roots), manifest state,
   schema-ledger state per database, dual-root twins for the realm being
-  resolved, checkpoint-evidence census (verified vs legacy rows), dangling
-  session→blob references, orphaned index/lease files.
+  resolved, structurally undecodable session documents, transcript-history
+  footprint, dangling session→blob references, and orphaned index/lease files.
 - Calls the provider's `StorageMigrator::diagnose` hook so remote deployments
   get doctor output too, not just disk realms.
 - Repair verbs stay in Phase 6; doctor gains a sanctioned
@@ -530,12 +464,12 @@ Migration cases:
    not independently revisioned rows. No "fork with a suffix" either —
    persisted session ids are UUIDs; preserved divergent sessions are archived
    under the non-authoritative root and surfaced in the report.
-4. **Checkpoint-evidence adoption.** The PR #909 machinery — the
-   `SessionDocumentMachine` disposition plus `adopt_legacy_session` —
-   invoked in bulk under the fence for any rows the lazy resolver path has
-   not yet touched (including via the exported helper for remote backends
-   and mobkit continuity snapshots, with observed cursors where continuity
-   records a nonzero generation floor).
+4. **Exact-floor activation import.** A backend that encounters the supported
+   0.8.10 format converts it once under its own migration fence. The
+   transaction binds the released source row, schema, and physical identity,
+   strips the retired document proof carrier, and installs current
+   store-issued authority atomically. There is no lazy per-read adoption path
+   and no generic caller-minted authority.
 5. **Deprecated leftovers (report-only).** Legacy `~/.rkat/sessions`-style
    directories, orphaned `session_index.sqlite3`, stale lease files.
    Credentials do not move.

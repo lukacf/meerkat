@@ -9,7 +9,12 @@ use serde::{Deserialize, Serialize};
 use crate::blob::BlobId;
 use crate::types::{ContentBlock, StopReason, Usage};
 
-/// Durable session metadata key for realtime transcript append state.
+/// WholeBlob/0.8.10 metadata key for the accumulated realtime reducer
+/// projection.
+///
+/// HeadCanonical persistence never writes this value into its compact head;
+/// it stores authenticated typed component-event rows and binds their prefix
+/// authority instead.
 pub const SESSION_REALTIME_TRANSCRIPT_STATE_KEY: &str = "realtime_transcript_state";
 
 /// Provider-neutral role for a realtime transcript item.

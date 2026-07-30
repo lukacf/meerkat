@@ -37,6 +37,32 @@ pub struct CompletionBatch {
     pub entries: Vec<CompletionEntry>,
     /// Feed watermark at the time entries were read.
     pub watermark: CompletionSeq,
+    /// Highest sequence that has been evicted from the bounded read window.
+    ///
+    /// A consumer whose cursor is lower than this value has an explicit gap:
+    /// the feed can no longer prove whether one of the unavailable entries
+    /// carried an obligation for that consumer.
+    pub dropped_through: CompletionSeq,
+}
+
+/// Typed proof that a completion-feed cursor fell behind bounded retention.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompletionFeedGap {
+    pub requested_after_seq: CompletionSeq,
+    pub dropped_through: CompletionSeq,
+    pub watermark: CompletionSeq,
+}
+
+impl CompletionBatch {
+    /// Return a typed retention gap when `after_seq` predates evicted entries.
+    #[must_use]
+    pub fn gap_after(&self, after_seq: CompletionSeq) -> Option<CompletionFeedGap> {
+        (after_seq < self.dropped_through).then_some(CompletionFeedGap {
+            requested_after_seq: after_seq,
+            dropped_through: self.dropped_through,
+            watermark: self.watermark,
+        })
+    }
 }
 
 /// Read-only handle to the canonical completion feed.
@@ -174,6 +200,7 @@ pub(crate) mod tests {
                     .cloned()
                     .collect(),
                 watermark: self.watermark.load(Ordering::Acquire),
+                dropped_through: 0,
             }
         }
 
@@ -190,5 +217,25 @@ pub(crate) mod tests {
         let feed = MockCompletionFeed::with_watermark(42);
         assert_eq!(feed.watermark(), 42);
         assert!(feed.list_since(0).entries.is_empty());
+    }
+
+    #[test]
+    fn completion_batch_reports_only_real_retention_gaps() {
+        let batch = CompletionBatch {
+            entries: Vec::new(),
+            watermark: 9,
+            dropped_through: 4,
+        };
+
+        assert_eq!(
+            batch.gap_after(3),
+            Some(CompletionFeedGap {
+                requested_after_seq: 3,
+                dropped_through: 4,
+                watermark: 9,
+            })
+        );
+        assert_eq!(batch.gap_after(4), None);
+        assert_eq!(batch.gap_after(8), None);
     }
 }

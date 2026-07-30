@@ -349,10 +349,36 @@ impl meerkat_core::lifecycle::CoreExecutor for MachineManagedPostStopExecutor {
 
     async fn checkpoint_committed_session_snapshot(
         &mut self,
-        session_snapshot: &[u8],
+        session_snapshot: Arc<Vec<u8>>,
     ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
         self.inner
             .checkpoint_committed_session_snapshot(session_snapshot)
+            .await
+    }
+
+    async fn acknowledge_whole_blob_session_boundary(
+        &mut self,
+        committed_store_revision: u64,
+        committed_blob_sha256: &str,
+    ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+        self.inner
+            .acknowledge_whole_blob_session_boundary(
+                committed_store_revision,
+                committed_blob_sha256,
+            )
+            .await
+    }
+
+    async fn acknowledge_provisional_session_boundary(
+        &mut self,
+        committed_store_revision: u64,
+        committed_authority_token: &str,
+    ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+        self.inner
+            .acknowledge_provisional_session_boundary(
+                committed_store_revision,
+                committed_authority_token,
+            )
             .await
     }
 
@@ -1526,7 +1552,8 @@ impl MeerkatMachine {
             runtime_id.clone(),
             Arc::clone(&dsl_authority),
             initial_runtime_state,
-        );
+            None,
+        )?;
         let control_projection = entry.control_projection_handle();
         let (ops_lifecycle, epoch_id, cursor_state) = Self::fresh_ops_state();
         let handle_teardown_gate = crate::handles::HandleTeardownGate::open();
@@ -1535,6 +1562,7 @@ impl MeerkatMachine {
         let session_entry = RuntimeSessionEntry {
             runtime_id: runtime_id.clone(),
             mutation_gate: Arc::new(Mutex::new(())),
+            durability_health: None,
             #[cfg(feature = "live")]
             live_lifecycle_gate: Arc::new(Mutex::new(())),
             supervisor_rotation_task: Arc::new(SupervisorRotationTaskSlot::new()),
@@ -1684,7 +1712,8 @@ impl MeerkatMachine {
             runtime_id.clone(),
             Arc::clone(&dsl_authority),
             initial_runtime_state,
-        );
+            None,
+        )?;
         tracing::debug!(
             %session_id,
             %runtime_id,
@@ -1703,6 +1732,7 @@ impl MeerkatMachine {
         let session_entry = RuntimeSessionEntry {
             runtime_id: runtime_id.clone(),
             mutation_gate: Arc::new(Mutex::new(())),
+            durability_health: None,
             #[cfg(feature = "live")]
             live_lifecycle_gate: Arc::new(Mutex::new(())),
             supervisor_rotation_task: Arc::new(SupervisorRotationTaskSlot::new()),
@@ -1830,11 +1860,18 @@ impl MeerkatMachine {
             ?initial_runtime_state,
             "MeerkatMachine::register_session_inner recovered authority"
         );
+        let (durability_health, rehydration_authority) = if self.store.is_some() {
+            let (health, rehydration) = super::durability_health::begin_registration_cold_install();
+            (Some(health), Some(rehydration))
+        } else {
+            (None, None)
+        };
         let mut entry = self.make_driver(
             runtime_id.clone(),
             Arc::clone(&dsl_authority),
             initial_runtime_state,
-        );
+            durability_health.clone(),
+        )?;
         tracing::debug!(
             %session_id,
             %runtime_id,
@@ -1846,6 +1883,7 @@ impl MeerkatMachine {
             }
             super::driver::DriverEntry::Persistent(driver) => {
                 if let Some(write_fence) = write_fence {
+                    driver.set_input_state_write_fence(Arc::clone(&write_fence));
                     driver
                         .recover_inputs_after_runtime_authority_with_fence(
                             recovered_unregister_progress.as_ref(),
@@ -1899,10 +1937,12 @@ impl MeerkatMachine {
 
         let tool_visibility_owner = Arc::new(MachineToolVisibilityOwner::new());
         tool_visibility_owner.bind_dsl_authority(Arc::clone(&dsl_authority));
+        tool_visibility_owner.bind_durability_health(durability_health.clone());
         let handle_teardown_gate = crate::handles::HandleTeardownGate::open();
         let session_entry = RuntimeSessionEntry {
             runtime_id: runtime_id.clone(),
             mutation_gate: Arc::new(Mutex::new(())),
+            durability_health: durability_health.clone(),
             #[cfg(feature = "live")]
             live_lifecycle_gate: Arc::new(Mutex::new(())),
             supervisor_rotation_task: Arc::new(SupervisorRotationTaskSlot::new()),
@@ -1938,6 +1978,14 @@ impl MeerkatMachine {
             dsl_authority,
             drain_slot: CommsDrainSlot::new(),
         };
+        if let Some(rehydration_authority) = rehydration_authority {
+            rehydration_authority.mark_ready().map_err(|required| {
+                RuntimeDriverError::RecoveryRepairBlocked {
+                    evidence_digest: None,
+                    reason: required.to_string(),
+                }
+            })?;
+        }
         Ok((session_entry, cold_recovered_generated_draining))
     }
 
@@ -2068,33 +2116,6 @@ impl MeerkatMachine {
             other => Err(RuntimeDriverError::Internal(format!(
                 "set_session_silent_intents: unexpected command result variant: {other:?}"
             ))),
-        }
-    }
-
-    pub async fn commit_service_turn_terminal_receipt(
-        &self,
-        session_id: &SessionId,
-        session_snapshot: Vec<u8>,
-    ) -> Result<(), RuntimeDriverError> {
-        match self
-            .execute_meerkat_machine_command(
-                None,
-                MeerkatMachineCommand::CommitServiceTurnTerminalReceipt {
-                    session_id: session_id.clone(),
-                    session_snapshot,
-                },
-            )
-            .await
-            .map_err(|err| match err {
-                MeerkatMachineCommandError::Driver(err) => err,
-                MeerkatMachineCommandError::Control(err) => {
-                    RuntimeDriverError::Internal(err.to_string())
-                }
-            })? {
-            MeerkatMachineCommandResult::Unit => Ok(()),
-            _ => Err(RuntimeDriverError::Internal(
-                "commit_service_turn_terminal_receipt: unexpected command result variant".into(),
-            )),
         }
     }
 
@@ -2245,11 +2266,8 @@ impl MeerkatMachine {
             });
         }
         let mutation_guard = self
-            .lock_current_session_mutation_gate(witness.session_id())
-            .await
-            .ok_or(RuntimeDriverError::NotReady {
-                state: RuntimeState::Destroyed,
-            })?;
+            .lock_current_durability_ready_session_mutation_gate(witness.session_id())
+            .await?;
         let (claim_id, previous_phase, claim_state, bindings) = {
             let sessions = self.sessions.read().await;
             let entry = sessions
@@ -2420,11 +2438,8 @@ impl MeerkatMachine {
         let expected_dsl_authority = Arc::clone(&authority.dsl_authority);
         let expected_teardown_gate = Arc::clone(&authority.teardown_gate);
         let _mutation_guard = self
-            .lock_current_session_mutation_gate(session_id)
-            .await
-            .ok_or(RuntimeDriverError::NotReady {
-                state: RuntimeState::Destroyed,
-            })?;
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await?;
         let mut sessions = self.sessions.write().await;
         let entry = sessions
             .get_mut(session_id)
@@ -2526,11 +2541,8 @@ impl MeerkatMachine {
             }
         })?;
         let _gate_guard = self
-            .lock_current_session_mutation_gate(bindings.session_id())
-            .await
-            .ok_or(RuntimeDriverError::NotReady {
-                state: RuntimeState::Destroyed,
-            })?;
+            .lock_current_durability_ready_session_mutation_gate(bindings.session_id())
+            .await?;
         let sessions = self.sessions.read().await;
         let entry = sessions
             .get(bindings.session_id())
@@ -2582,11 +2594,8 @@ impl MeerkatMachine {
             }
         })?;
         let _gate_guard = self
-            .lock_current_session_mutation_gate(bindings.session_id())
-            .await
-            .ok_or(RuntimeDriverError::NotReady {
-                state: RuntimeState::Destroyed,
-            })?;
+            .lock_current_durability_ready_session_mutation_gate(bindings.session_id())
+            .await?;
         let changed = {
             let sessions = self.sessions.read().await;
             let entry =
@@ -3150,6 +3159,14 @@ impl MeerkatMachine {
                 if !Arc::ptr_eq(&entry.mutation_gate, &gate) {
                     continue;
                 }
+                if let Err(required) = entry.require_durability_ready() {
+                    break ExistingExecutorClaim::Blocked(
+                        RuntimeDriverError::RecoveryRepairBlocked {
+                            evidence_digest: None,
+                            reason: required.to_string(),
+                        },
+                    );
+                }
                 if let Some(error) = entry.registration_blocked_by_unregister(&session_id) {
                     break ExistingExecutorClaim::Blocked(error);
                 }
@@ -3297,11 +3314,19 @@ impl MeerkatMachine {
             let initial_runtime_state =
                 super::dsl_authority::runtime_phase_from_authority(&recovery.authority);
             let dsl_authority = Arc::new(std::sync::Mutex::new(recovery.authority));
+            let (durability_health, rehydration_authority) = if self.store.is_some() {
+                let (health, rehydration) =
+                    super::durability_health::begin_registration_cold_install();
+                (Some(health), Some(rehydration))
+            } else {
+                (None, None)
+            };
             let mut recovered_entry = self.make_driver(
                 runtime_id.clone(),
                 Arc::clone(&dsl_authority),
                 initial_runtime_state,
-            );
+                durability_health.clone(),
+            )?;
             let recover_result = match &mut recovered_entry {
                 super::driver::DriverEntry::Ephemeral(driver) => {
                     crate::traits::RuntimeDriver::recover(driver).await
@@ -3357,11 +3382,21 @@ impl MeerkatMachine {
             // Bind the DSL authority before the entry is inserted — any
             // subsequent staging trait call must see the bound authority.
             tool_visibility_owner.bind_dsl_authority(Arc::clone(&dsl_authority));
+            tool_visibility_owner.bind_durability_health(durability_health.clone());
+            if let Some(rehydration_authority) = rehydration_authority {
+                rehydration_authority.mark_ready().map_err(|required| {
+                    RuntimeDriverError::RecoveryRepairBlocked {
+                        evidence_digest: None,
+                        reason: required.to_string(),
+                    }
+                })?;
+            }
             sessions.insert(
                 session_id.clone(),
                 RuntimeSessionEntry {
                     runtime_id,
                     mutation_gate: Arc::clone(&mutation_gate),
+                    durability_health: durability_health.clone(),
                     #[cfg(feature = "live")]
                     live_lifecycle_gate: Arc::new(Mutex::new(())),
                     supervisor_rotation_task: Arc::new(SupervisorRotationTaskSlot::new()),
@@ -3614,8 +3649,11 @@ impl MeerkatMachine {
                     .get(&session_id)
                     .map(|entry| Arc::clone(&entry.cursor_state))
             };
+            let runtime_loop_task_spawner =
+                crate::runtime_loop::RuntimeLoopTaskSpawner::acquire_process_owned()?;
             let mut pending_loop = Some(
                 crate::runtime_loop::spawn_runtime_loop_with_completions(
+                    runtime_loop_task_spawner,
                     driver.clone(),
                     executor,
                     wake_rx,
@@ -7302,7 +7340,7 @@ impl MeerkatMachine {
                 let rollback_result = {
                     let mut driver = driver_handle.lock().await;
                     driver
-                        .persist_current_machine_lifecycle("unregister rollback")
+                        .persist_recovery_machine_lifecycle("unregister rollback")
                         .await
                 };
                 return match rollback_result {
@@ -7974,6 +8012,9 @@ impl MeerkatMachine {
         runtime_running: bool,
         has_active_inputs: bool,
     ) -> Result<crate::meerkat_machine::dsl::TranscriptEditAdmissionKind, RuntimeDriverError> {
+        let _mutation_guard = self
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await?;
         let (_, effects) = self
             .apply_session_dsl_input(
                 session_id,
@@ -8063,11 +8104,9 @@ impl MeerkatMachine {
             return Err(RuntimeDriverError::NotReady { state });
         }
 
-        let gate = self.session_mutation_gate(session_id).await;
-        let _gate_guard = match gate {
-            Some(ref g) => Some(g.lock().await),
-            None => None,
-        };
+        let _gate_guard = self
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await?;
 
         let (driver, completions, publication_handle) = {
             let sessions = self.sessions.read().await;

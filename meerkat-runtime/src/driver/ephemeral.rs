@@ -10,7 +10,7 @@
 //! - S24 ephemeral recovery
 //! - S25 retire/reset/destroy lifecycle operations
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock as StdRwLock};
 
 use chrono::Utc;
@@ -136,7 +136,7 @@ pub(crate) struct EphemeralDriverRollbackSnapshot {
     request_id: HashMap<InputId, Option<RequestId>>,
     reservation_key: HashMap<InputId, Option<ReservationKey>>,
     policy_snapshot: HashMap<InputId, PolicyDecision>,
-    admission_order: Vec<InputId>,
+    admission_order: HashSet<InputId>,
 }
 
 /// Ephemeral runtime driver -- all state in-memory.
@@ -172,10 +172,11 @@ pub struct EphemeralRuntimeDriver {
     request_id: HashMap<InputId, Option<RequestId>>,
     reservation_key: HashMap<InputId, Option<ReservationKey>>,
     policy_snapshot: HashMap<InputId, PolicyDecision>,
-    /// Admission order preserved for observability. Retained in insertion
-    /// order so snapshot readers (`MeerkatAdmittedInputSnapshot`) can render
-    /// inputs deterministically.
-    admission_order: Vec<InputId>,
+    /// Live input ids participating in the generated admission-sequence
+    /// ordering. The generated `input_admission_seq` is the order authority;
+    /// this set is only a bounded membership index and supports O(1) terminal
+    /// removal.
+    admission_order: HashSet<InputId>,
 }
 
 /// Wrapper around the DSL authority that provides `Debug` output.
@@ -278,7 +279,7 @@ impl EphemeralRuntimeDriver {
             request_id: HashMap::new(),
             reservation_key: HashMap::new(),
             policy_snapshot: HashMap::new(),
-            admission_order: Vec::new(),
+            admission_order: HashSet::new(),
         }
     }
 
@@ -642,49 +643,6 @@ impl EphemeralRuntimeDriver {
         self.with_dsl_state(Self::supervisor_authority_snapshot_from_state)
     }
 
-    /// Compile the exact v0.6.34 completed-idle compatibility observation
-    /// as a fresh registered shell before minting durable lifecycle bytes.
-    /// The legacy row contributes no binding or supervisor authority.
-    #[cfg(feature = "sqlite-store")]
-    pub(crate) fn recover_v0_6_34_completed_idle_lifecycle_record(
-        &mut self,
-    ) -> Result<crate::store::MachineLifecycleStoreRecord, RuntimeDriverError> {
-        let session_id =
-            self.runtime_id
-                .session_id()
-                .ok_or_else(|| RuntimeDriverError::RecoveryCorruption {
-                    reason: format!(
-                        "v0.6.34 completed-idle migration runtime '{}' is not session-owned",
-                        self.runtime_id
-                    ),
-                })?;
-        let recovered = crate::meerkat_machine::dsl_authority::new_registered_authority(
-            &session_id,
-        )
-        .map_err(|err| {
-            RuntimeDriverError::Internal(crate::meerkat_machine::dsl_authority::map_error(
-                err,
-                "v0.6.34 completed-idle migration registration",
-            ))
-        })?;
-        self.replace_runtime_authority(recovered);
-        let durable_state =
-            crate::meerkat_machine::classify_runtime_lifecycle_durable_state_with_pre_run_phase(
-                crate::traits::RuntimeDriver::runtime_state(self),
-                self.pre_run_phase(),
-            )
-            .map_err(RuntimeDriverError::Internal)?;
-        Ok(
-            crate::store::MachineLifecycleCommit::new_with_binding_and_unregister_progress(
-                durable_state,
-                self.machine_lifecycle_binding_facts(),
-                self.supervisor_authority_snapshot(),
-                None,
-            )
-            .store_record(),
-        )
-    }
-
     /// Test-only seed helper for existing supervisor/binding recovery tests.
     /// It constructs state exclusively through normal generated transitions;
     /// production cold recovery observes and reconciles the lifecycle row.
@@ -843,7 +801,7 @@ impl EphemeralRuntimeDriver {
     }
 
     fn lane_in_admission_order(&self, lane: mm_dsl::InputLane) -> Vec<InputId> {
-        let mut candidates: Vec<(u64, InputId)> = self.with_dsl_state(|state| {
+        let mut candidates: Vec<(u64, String, InputId)> = self.with_dsl_state(|state| {
             self.admission_order
                 .iter()
                 .filter(|id| state.input_lane.get(&Self::dsl_key(id)).copied() == Some(lane))
@@ -854,12 +812,14 @@ impl EphemeralRuntimeDriver {
                         .get(&Self::dsl_key(&id))
                         .copied()
                         .unwrap_or(u64::MAX);
-                    (seq, id)
+                    (seq, id.to_string(), id)
                 })
                 .collect()
         });
-        candidates.sort_by_key(|(seq, _)| *seq);
-        candidates.into_iter().map(|(_, id)| id).collect()
+        candidates.sort_by(|(left_seq, left_id, _), (right_seq, right_id, _)| {
+            left_seq.cmp(right_seq).then_with(|| left_id.cmp(right_id))
+        });
+        candidates.into_iter().map(|(_, _, id)| id).collect()
     }
 
     /// Read the tracked lifecycle phase for an input from the DSL.
@@ -901,6 +861,20 @@ impl EphemeralRuntimeDriver {
             mm_dsl::InputPhase::Superseded => InputLifecycleState::Superseded,
             mm_dsl::InputPhase::Coalesced => InputLifecycleState::Coalesced,
             mm_dsl::InputPhase::Abandoned => InputLifecycleState::Abandoned,
+        }
+    }
+
+    fn terminal_lifecycle_to_input_phase(
+        phase: InputLifecycleState,
+    ) -> Result<mm_dsl::InputPhase, RuntimeDriverError> {
+        match phase {
+            InputLifecycleState::Consumed => Ok(mm_dsl::InputPhase::Consumed),
+            InputLifecycleState::Superseded => Ok(mm_dsl::InputPhase::Superseded),
+            InputLifecycleState::Coalesced => Ok(mm_dsl::InputPhase::Coalesced),
+            InputLifecycleState::Abandoned => Ok(mm_dsl::InputPhase::Abandoned),
+            other => Err(RuntimeDriverError::Internal(format!(
+                "terminal input archive requires a terminal phase, got {other:?}"
+            ))),
         }
     }
 
@@ -1028,21 +1002,22 @@ impl EphemeralRuntimeDriver {
 
     /// The admission order as minted by the DSL's `input_admission_seq`.
     pub fn admission_order(&self) -> Vec<InputId> {
-        let mut candidates: Vec<(u64, usize, InputId)> = self.with_dsl_state(|state| {
+        let mut candidates: Vec<(u64, String, InputId)> = self.with_dsl_state(|state| {
             self.admission_order
                 .iter()
-                .enumerate()
-                .map(|(index, id)| {
+                .map(|id| {
                     let seq = state
                         .input_admission_seq
                         .get(&Self::dsl_key(id))
                         .copied()
                         .unwrap_or(u64::MAX);
-                    (seq, index, id.clone())
+                    (seq, id.to_string(), id.clone())
                 })
                 .collect()
         });
-        candidates.sort_by_key(|(seq, index, _)| (*seq, *index));
+        candidates.sort_by(|(left_seq, left_id, _), (right_seq, right_id, _)| {
+            left_seq.cmp(right_seq).then_with(|| left_id.cmp(right_id))
+        });
         candidates.into_iter().map(|(_, _, id)| id).collect()
     }
 
@@ -1512,9 +1487,7 @@ impl EphemeralRuntimeDriver {
         request_id: Option<&RequestId>,
         reservation_key: Option<&ReservationKey>,
     ) {
-        if !self.admission_order.contains(work_id) {
-            self.admission_order.push(work_id.clone());
-        }
+        self.admission_order.insert(work_id.clone());
         self.content_shape.insert(work_id.clone(), *content_shape);
         self.handling_mode.insert(work_id.clone(), handling_mode);
         self.runtime_semantics
@@ -2154,6 +2127,10 @@ impl EphemeralRuntimeDriver {
             .collect()
     }
 
+    pub(crate) fn pending_terminal_owner_ids(&self) -> Vec<InputId> {
+        self.ledger.pending_terminal_owner_ids()
+    }
+
     /// Snapshot of every ledger entry paired with generated persistence
     /// authority for the DSL-owned seed facts.
     pub fn authorized_stored_input_states_snapshot(
@@ -2166,6 +2143,218 @@ impl EphemeralRuntimeDriver {
                     .map_err(RuntimeDriverError::Internal)
             })
             .collect()
+    }
+
+    /// Materialize generated persistence authority for exactly the inputs a
+    /// prepared transition changed.
+    ///
+    /// Ordinary commits must not turn a bounded transition into an
+    /// accumulated-history snapshot. The caller supplies the machine-owned
+    /// change set; duplicate or missing ids are rejected instead of silently
+    /// weakening that set.
+    pub fn authorized_stored_input_states_for_ids(
+        &self,
+        input_ids: &[InputId],
+    ) -> Result<Vec<InputStatePersistenceRecord>, RuntimeDriverError> {
+        let mut seen = std::collections::HashSet::with_capacity(input_ids.len());
+        let mut records = Vec::with_capacity(input_ids.len());
+        for input_id in input_ids {
+            if !seen.insert(input_id.clone()) {
+                return Err(RuntimeDriverError::Internal(format!(
+                    "input-state persistence change set contains duplicate input {input_id}"
+                )));
+            }
+            let record = self
+                .authorized_stored_input_state(input_id)?
+                .ok_or_else(|| {
+                    RuntimeDriverError::Internal(format!(
+                        "input-state persistence change set references missing input {input_id}"
+                    ))
+                })?;
+            records.push(record);
+        }
+        Ok(records)
+    }
+
+    /// Release one exact terminal input from live machine and shell state after
+    /// its complete terminal row has committed durably.
+    ///
+    /// The generated transition compares every persisted seed carrier before
+    /// erasing it. Shell mirrors are removed only after that transition
+    /// succeeds, so a mismatched witness fails closed without creating split
+    /// authority.
+    fn archive_terminal_input_after_durable_commit(
+        &mut self,
+        input_id: &InputId,
+    ) -> Result<(), RuntimeDriverError> {
+        let bundle = self.stored_input_state(input_id).ok_or_else(|| {
+            RuntimeDriverError::Internal(format!(
+                "terminal input archive references missing live input {input_id}"
+            ))
+        })?;
+        let phase = Self::terminal_lifecycle_to_input_phase(bundle.seed.phase)?;
+        let (terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count) =
+            match bundle.seed.terminal_outcome.as_ref() {
+                Some(InputTerminalOutcome::Consumed) => {
+                    (mm_dsl::InputTerminalKind::Consumed, None, None, None, None)
+                }
+                Some(InputTerminalOutcome::Superseded { superseded_by }) => (
+                    mm_dsl::InputTerminalKind::Superseded,
+                    Some(superseded_by.to_string()),
+                    None,
+                    None,
+                    None,
+                ),
+                Some(InputTerminalOutcome::Coalesced { aggregate_id }) => (
+                    mm_dsl::InputTerminalKind::Coalesced,
+                    None,
+                    Some(aggregate_id.to_string()),
+                    None,
+                    None,
+                ),
+                Some(InputTerminalOutcome::Abandoned { reason }) => (
+                    mm_dsl::InputTerminalKind::Abandoned,
+                    None,
+                    None,
+                    Some(mm_dsl::InputAbandonReason::from(reason)),
+                    Some(u64::from(bundle.seed.attempt_count)),
+                ),
+                None => {
+                    return Err(RuntimeDriverError::Internal(format!(
+                        "terminal input archive references input {input_id} without a terminal outcome"
+                    )));
+                }
+            };
+        self.dsl_apply(
+            mm_dsl::MeerkatMachineInput::ArchiveTerminalInput {
+                input_id: Self::dsl_key(input_id),
+                phase,
+                terminal_kind,
+                superseded_by,
+                aggregate_id,
+                abandon_reason,
+                abandon_attempt_count,
+                attempt_count: u64::from(bundle.seed.attempt_count),
+                run_id: bundle
+                    .seed
+                    .last_run_id
+                    .as_ref()
+                    .map(mm_dsl::RunId::from_domain),
+                boundary_sequence: bundle.seed.last_boundary_sequence,
+                admission_sequence: bundle.seed.admission_sequence,
+                idempotency_key: bundle
+                    .state
+                    .idempotency_key
+                    .as_ref()
+                    .map(|key| key.0.clone()),
+            },
+            "ArchiveTerminalInput(durable)",
+        )?;
+
+        let removed = self.ledger.remove(input_id);
+        if removed.is_none() {
+            return Err(RuntimeDriverError::Internal(format!(
+                "terminal input archive lost shell ledger row for {input_id}"
+            )));
+        }
+        self.handling_mode.remove(input_id);
+        self.runtime_semantics.remove(input_id);
+        self.primitive_projection.remove(input_id);
+        self.is_prompt_set.remove(input_id);
+        self.content_shape.remove(input_id);
+        self.request_id.remove(input_id);
+        self.reservation_key.remove(input_id);
+        self.policy_snapshot.remove(input_id);
+        self.admission_order.remove(input_id);
+        Ok(())
+    }
+
+    fn archive_terminal_inputs_after_durable_commit(
+        &mut self,
+        input_ids: &[InputId],
+    ) -> Result<(), RuntimeDriverError> {
+        let mut seen = std::collections::HashSet::with_capacity(input_ids.len());
+        for input_id in input_ids {
+            if !seen.insert(input_id.clone()) {
+                return Err(RuntimeDriverError::Internal(format!(
+                    "terminal input archive batch contains duplicate input {input_id}"
+                )));
+            }
+            self.archive_terminal_input_after_durable_commit(input_id)?;
+        }
+        Ok(())
+    }
+
+    /// Archive only terminal rows whose durable completion/publication sagas
+    /// are already closed. A terminal lifecycle row with a pending completion
+    /// or unpublished interaction outbox remains active authority even though
+    /// its terminal phase itself is durable.
+    pub(crate) fn archive_archivable_terminal_inputs_after_durable_commit(
+        &mut self,
+        input_ids: &[InputId],
+    ) -> Result<(), RuntimeDriverError> {
+        let archivable = self.archivable_terminal_input_ids_in(input_ids)?;
+        self.archive_terminal_inputs_after_durable_commit(&archivable)
+    }
+
+    pub(crate) fn archivable_terminal_input_ids_in(
+        &self,
+        input_ids: &[InputId],
+    ) -> Result<Vec<InputId>, RuntimeDriverError> {
+        let mut seen = std::collections::HashSet::with_capacity(input_ids.len());
+        let mut terminal = Vec::new();
+        for input_id in input_ids {
+            if !seen.insert(input_id.clone()) {
+                return Err(RuntimeDriverError::Internal(format!(
+                    "terminal input selection contains duplicate input {input_id}"
+                )));
+            }
+            let stored = self.stored_input_state(input_id).ok_or_else(|| {
+                RuntimeDriverError::Internal(format!(
+                    "terminal input selection references missing input {input_id}"
+                ))
+            })?;
+            if crate::store::input_state_payload_is_retirable(&stored) {
+                terminal.push(input_id.clone());
+            }
+        }
+        Ok(terminal)
+    }
+
+    /// Retire ingress payloads whose exact generated terminal state has no
+    /// remaining durable completion/publication obligation.
+    ///
+    /// Persistent callers invoke this only after taking their rollback
+    /// checkpoint and immediately before materializing the store transaction.
+    /// This keeps shell bytes and committed bytes convergent and lets a failed
+    /// commit restore (compatibility drivers) or fail-stop for cold reload
+    /// (shared production drivers).
+    pub(crate) fn retire_durably_quiescent_terminal_payloads_in(
+        &mut self,
+        input_ids: &[InputId],
+    ) -> Result<(), RuntimeDriverError> {
+        let mut seen = std::collections::HashSet::with_capacity(input_ids.len());
+        for input_id in input_ids {
+            if !seen.insert(input_id.clone()) {
+                return Err(RuntimeDriverError::Internal(format!(
+                    "terminal payload retirement contains duplicate input {input_id}"
+                )));
+            }
+            let stored = self.stored_input_state(input_id).ok_or_else(|| {
+                RuntimeDriverError::Internal(format!(
+                    "terminal payload retirement references missing input {input_id}"
+                ))
+            })?;
+            if crate::store::input_state_payload_is_retirable(&stored) {
+                let state = self.ledger.get_mut(input_id).ok_or_else(|| {
+                    RuntimeDriverError::Internal(format!(
+                        "terminal payload retirement lost shell input {input_id}"
+                    ))
+                })?;
+                state.persisted_input = None;
+            }
+        }
+        Ok(())
     }
 
     /// Store-write record for one input's generated seed snapshot.
@@ -2442,6 +2631,74 @@ impl EphemeralRuntimeDriver {
         Ok(())
     }
 
+    pub(crate) fn machine_normalize_live_boundary_unavailable(
+        &mut self,
+        input_id: &InputId,
+    ) -> Result<(), RuntimeDriverError> {
+        if !self.runtime_semantics.contains_key(input_id) {
+            return Err(RuntimeDriverError::Internal(format!(
+                "unavailable live-boundary input {input_id} lost admitted runtime semantics"
+            )));
+        }
+        if self.ledger.get(input_id).is_none() {
+            return Err(RuntimeDriverError::Internal(format!(
+                "unavailable live-boundary input {input_id} disappeared from the input ledger"
+            )));
+        }
+        let input_key = Self::dsl_key(input_id);
+        let effects = self.dsl_apply_effects(
+            mm_dsl::MeerkatMachineInput::LiveBoundaryUnavailable {
+                input_id: input_key.clone(),
+            },
+            "LiveBoundaryUnavailable",
+        )?;
+        let mut normalized = effects.into_iter().filter_map(|effect| match effect {
+            mm_dsl::MeerkatMachineEffect::LiveBoundaryUnavailableNormalized {
+                input_id,
+                execution_handling_mode,
+                live_interrupt_required,
+            } => Some((input_id, execution_handling_mode, live_interrupt_required)),
+            _ => None,
+        });
+        let Some((effect_input_id, execution_handling_mode, live_interrupt_required)) =
+            normalized.next()
+        else {
+            return Err(RuntimeDriverError::Internal(format!(
+                "generated machine emitted no unavailable-boundary normalization for input \
+                 {input_id}"
+            )));
+        };
+        if normalized.next().is_some() {
+            return Err(RuntimeDriverError::Internal(format!(
+                "generated machine emitted duplicate unavailable-boundary normalizations for \
+                 input {input_id}"
+            )));
+        }
+        if effect_input_id != input_key
+            || execution_handling_mode != mm_dsl::InputLane::Queue
+            || live_interrupt_required
+        {
+            return Err(RuntimeDriverError::Internal(format!(
+                "generated machine emitted mismatched unavailable-boundary normalization for \
+                 input {input_id}"
+            )));
+        }
+
+        let semantics = self
+            .runtime_semantics
+            .get_mut(input_id)
+            .expect("presence checked before generated normalization");
+        semantics.execution_handling_mode = Some(HandlingMode::Queue);
+        semantics.live_interrupt_required = false;
+        let normalized_semantics = *semantics;
+        let state = self
+            .ledger
+            .get_mut(input_id)
+            .expect("presence checked before generated normalization");
+        state.runtime_semantics = Some(normalized_semantics);
+        Ok(())
+    }
+
     fn machine_resolve_live_boundary_context_receipt(
         &mut self,
         run_id: &RunId,
@@ -2677,6 +2934,20 @@ impl EphemeralRuntimeDriver {
     fn emit_event(&mut self, event: RuntimeEvent) {
         self.events.push(self.make_envelope(event));
     }
+
+    pub(crate) fn record_durable_idempotency_deduplication(
+        &mut self,
+        input_id: InputId,
+        existing_id: InputId,
+    ) {
+        self.emit_event(RuntimeEvent::InputLifecycle(
+            InputLifecycleEvent::Deduplicated {
+                input_id,
+                existing_id,
+            },
+        ));
+    }
+
     fn make_envelope(&self, event: RuntimeEvent) -> RuntimeEventEnvelope {
         RuntimeEventEnvelope {
             id: crate::identifiers::RuntimeEventId::new(),
@@ -3009,6 +3280,21 @@ impl EphemeralRuntimeDriver {
                 idempotency_key,
             },
             "ResolveAdmissionIdempotency",
+        )?;
+        Self::resolved_idempotency_from_machine_effects(input_id, effects)
+    }
+
+    fn preview_idempotency(
+        &self,
+        input_id: &InputId,
+        idempotency_key: Option<String>,
+    ) -> Result<Option<InputId>, RuntimeDriverError> {
+        let effects = self.dsl_preview(
+            mm_dsl::MeerkatMachineInput::ResolveAdmissionIdempotency {
+                input_id: Self::dsl_key(input_id),
+                idempotency_key,
+            },
+            "ResolveAdmissionIdempotency(preview)",
         )?;
         Self::resolved_idempotency_from_machine_effects(input_id, effects)
     }
@@ -3470,25 +3756,139 @@ impl EphemeralRuntimeDriver {
         })
     }
 
+    /// Resolve only the public admission disposition without cloning or
+    /// mutating the accumulated runtime state.
+    ///
+    /// The control plane uses this before staging `AcceptWithCompletion`.
+    /// Only the outcome variant and input identities are consumed from an
+    /// accepted preview; its state/seed payload is deliberately a provisional
+    /// shell image. The committed call returns the exact machine projection.
+    pub(crate) fn preview_accept_resolved_input_bounded(
+        &self,
+        input: &Input,
+        resolved: &crate::accept::ResolvedAdmission,
+    ) -> Result<AcceptOutcome, RuntimeDriverError> {
+        let runtime_phase = self.runtime_phase_snapshot();
+        let lifecycle_facts = crate::meerkat_machine::classify_runtime_lifecycle_state(
+            runtime_phase,
+        )
+        .map_err(|err| {
+            RuntimeDriverError::Internal(format!(
+                "generated runtime lifecycle admission classification failed: {err}"
+            ))
+        })?;
+        if !lifecycle_facts.can_accept_input() {
+            return match lifecycle_facts.ingress_admission {
+                mm_dsl::RuntimeIngressAdmission::Destroyed => Err(RuntimeDriverError::Destroyed),
+                mm_dsl::RuntimeIngressAdmission::Open
+                | mm_dsl::RuntimeIngressAdmission::NotReady => Err(RuntimeDriverError::NotReady {
+                    state: runtime_phase,
+                }),
+            };
+        }
+
+        let input_id = input.id().clone();
+        let peer_handling_mode_error =
+            crate::peer_handling_mode::validate_peer_handling_mode(input)
+                .err()
+                .map(|error| error.to_string());
+        let peer_response_terminal_structural_error =
+            crate::input::validate_peer_response_terminal_fact(input)
+                .err()
+                .map(|error| error.to_string());
+        let peer_response_terminal_observed_status =
+            Self::peer_response_terminal_observed_status(input);
+        let peer_response_terminal_detail = peer_response_terminal_structural_error
+            .clone()
+            .or_else(|| Self::peer_response_terminal_generated_rejection_detail(input));
+        if let Some(reason) = self.resolve_admission_validation(
+            &input_id,
+            AdmissionValidationFacts {
+                input_kind: input.kind(),
+                input_origin: &input.header().source,
+                durability: input.header().durability,
+                peer_handling_mode_valid: peer_handling_mode_error.is_none(),
+                peer_response_terminal_structurally_valid: peer_response_terminal_structural_error
+                    .is_none(),
+                peer_response_terminal_observed_status,
+            },
+        )? {
+            return Ok(AcceptOutcome::Rejected {
+                reason: Self::reject_reason_from_machine_validation(
+                    reason,
+                    input.kind(),
+                    peer_handling_mode_error.as_deref(),
+                    peer_response_terminal_detail.as_deref(),
+                )?,
+            });
+        }
+
+        if resolved.authority().input_id() != input_id.to_string() {
+            return Err(RuntimeDriverError::Internal(format!(
+                "resolved admission authority id '{}' did not match previewed input '{input_id}'",
+                resolved.authority().input_id()
+            )));
+        }
+
+        if let Some(existing_id) = self.preview_idempotency(
+            &input_id,
+            input
+                .header()
+                .idempotency_key
+                .as_ref()
+                .map(std::string::ToString::to_string),
+        )? {
+            return Ok(AcceptOutcome::Deduplicated {
+                input_id,
+                existing_id,
+            });
+        }
+
+        let existing_superseded_id = self.existing_superseded_input(input).map(|(id, _)| id);
+        let authority = MachineAdmissionAuthority::new(
+            input_id.to_string(),
+            mm_dsl::AdmissionInputKind::from(input.kind()),
+            input.handling_mode().map(mm_dsl::InputLane::from),
+            mm_dsl::AdmissionContinuationKind::from(input.continuation_kind()),
+            self.matches_silent_intent_authority(input),
+            existing_superseded_id,
+            self.runtime_phase_snapshot() == RuntimeState::Running,
+            resolved.authority().active_turn_boundary_available(),
+            resolved.authority().without_wake(),
+        );
+        let effects = self.dsl_preview(
+            Self::resolve_admission_plan_input(&authority),
+            "ResolveAdmissionPlan(accept preview)",
+        )?;
+        let previewed =
+            self.resolved_admission_from_machine_effects(input, authority, effects, false)?;
+        if !resolved.semantically_equivalent_to(&previewed) {
+            return Err(RuntimeDriverError::Internal(format!(
+                "admission preview diverged from caller resolution: caller={resolved:?}, preview={previewed:?}"
+            )));
+        }
+
+        let mut state = InputState::new_accepted(input_id.clone());
+        state.durability = Some(input.header().durability);
+        state.idempotency_key = input.header().idempotency_key.clone();
+        state.policy = Some(PolicySnapshot {
+            version: resolved.policy().policy_version,
+            decision: resolved.policy().clone(),
+        });
+        Ok(AcceptOutcome::Accepted {
+            input_id,
+            policy: resolved.policy().clone(),
+            state,
+            seed: InputStateSeed::new_accepted(),
+        })
+    }
+
     pub(crate) async fn preview_accept_resolved_input(
         &self,
         input: Input,
         resolved: &crate::accept::ResolvedAdmission,
     ) -> Result<AcceptOutcome, RuntimeDriverError> {
-        let mut staged = self.clone_with_isolated_dsl_authority();
-        staged.ensure_contract_session_authority()?;
-        let resolved = if resolved.authority().without_wake() {
-            staged.resolve_admission_without_wake_with_active_turn_boundary(
-                &input,
-                resolved.authority().active_turn_boundary_available(),
-            )?
-        } else {
-            staged.resolve_admission_with_active_turn_boundary(
-                &input,
-                resolved.authority().active_turn_boundary_available(),
-            )?
-        };
-        staged.accept_resolved_input(input, resolved).await
+        self.preview_accept_resolved_input_bounded(&input, resolved)
     }
 
     pub fn abandon_all_non_terminal(

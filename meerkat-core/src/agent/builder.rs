@@ -75,7 +75,7 @@ pub struct AgentBuilder {
     pub(super) compaction_commit_coordinator:
         Option<Arc<dyn crate::memory::CompactionCommitCoordinator>>,
     pub(super) skill_engine: Option<Arc<crate::skills::SkillRuntime>>,
-    pub(super) checkpointer: Option<Arc<dyn crate::checkpoint::SessionCheckpointer>>,
+    pub(super) checkpointer: Option<Arc<dyn crate::SessionCheckpointer>>,
     pub(super) blob_store: Option<Arc<dyn crate::BlobStore>>,
     pub(super) silent_comms_intents: Vec<String>,
     pub(super) ops_lifecycle: Option<Arc<dyn crate::ops_lifecycle::OpsLifecycleRegistry>>,
@@ -132,10 +132,6 @@ pub enum AgentBuildPolicyError {
     InvalidFactoryBridgeToken,
     #[error("failed to restore canonical tool visibility state: {message}")]
     ToolVisibilityRestore { message: String },
-    #[error("failed to restore canonical system-context state: {message}")]
-    SystemContextRestore { message: String },
-    #[error("failed to authorize canonical system prompt: {message}")]
-    SystemPromptAuthority { message: String },
     #[error("failed to install tool visibility authority catalog: {message}")]
     ToolVisibilityCatalog { message: String },
     #[error("failed to persist canonical tool visibility state during restore: {message}")]
@@ -291,7 +287,10 @@ impl AgentBuilder {
         self
     }
 
-    /// Set the system prompt
+    /// Set the initial System event for a new, empty transcript.
+    ///
+    /// Rebuilding a non-empty transcript never applies this value; per-turn
+    /// System instructions belong on the turn-admission seam.
     pub fn system_prompt(mut self, prompt: impl Into<String>) -> Self {
         self.system_prompt = Some(prompt.into());
         self
@@ -517,64 +516,26 @@ impl AgentBuilder {
         if runtime_tool_visibility_owner_required && self.model_routing_handle.is_none() {
             return Err(AgentBuildPolicyError::MissingModelRoutingHandle);
         }
-        let mut session = self.session.unwrap_or_default();
-        let discarded_runtime_steer_context = session.discard_transient_runtime_steer_context();
-        if discarded_runtime_steer_context > 0 {
-            tracing::debug!(
-                discarded_runtime_steer_context,
-                "discarded transient runtime steer context while building agent"
-            );
-        }
-        let system_context_state = crate::session::SystemContextStateHandle::new(
-            session
-                .try_system_context_state()
-                .map_err(|err| AgentBuildPolicyError::SystemContextRestore {
-                    message: format!(
-                        "failed to restore canonical session metadata `{}`: {err}",
-                        crate::SESSION_SYSTEM_CONTEXT_STATE_KEY
-                    ),
-                })?
-                .unwrap_or_default(),
-        )
-        .map_err(|err| AgentBuildPolicyError::SystemContextRestore {
-            message: format!(
-                "failed to initialize canonical session metadata `{}`: {err}",
-                crate::SESSION_SYSTEM_CONTEXT_STATE_KEY
-            ),
-        })?;
+        let session = self.session.unwrap_or_default();
+        let transient_turn_context_state = crate::session::TransientTurnContextStateHandle::new();
 
-        // Apply system prompt: use the builder's explicit prompt if set;
-        // otherwise compose the built-in default ONLY when a caller opts in via
-        // `DefaultSystemPromptPolicy::ComposeDefault`. The composition seam owns
-        // default-prompt policy, so standalone core stays unprompted by default.
-        let has_system_prompt = matches!(session.messages().first(), Some(Message::System(_)));
-        if let Some(prompt) = self.system_prompt {
-            session
-                .set_system_prompt_with_source(
-                    prompt,
-                    crate::session_durable_config_authority::SessionSystemPromptSource::ExplicitBuild,
-                )
-                .map_err(|err| AgentBuildPolicyError::SystemPromptAuthority {
-                    message: err.to_string(),
-                })?;
-        } else if !has_system_prompt
-            && matches!(
+        // Build-time prompt composition can materialize only the first event
+        // of a new transcript. Rebuilding a non-empty transcript is
+        // observationally invisible; per-turn System events enter through the
+        // StartTurn boundary instead.
+        if session.messages().is_empty() {
+            if let Some(prompt) = self.system_prompt {
+                session.append_system_message(prompt);
+            } else if matches!(
                 self.default_system_prompt_policy,
                 DefaultSystemPromptPolicy::ComposeDefault
-            )
-        {
-            // Default-prompt composition only runs when a caller explicitly
-            // opts in. The canonical composition seam (facade/runtime) always
-            // hands core an explicit prompt or none, so it never reaches here;
-            // standalone core construction stays unprompted unless asked.
-            session
-                .set_system_prompt_with_source(
-                    SystemPromptConfig::new().compose().await,
-                    crate::session_durable_config_authority::SessionSystemPromptSource::DefaultBuild,
-                )
-                .map_err(|err| AgentBuildPolicyError::SystemPromptAuthority {
-                    message: err.to_string(),
-                })?;
+            ) {
+                // Default-prompt composition only runs when a caller explicitly
+                // opts in. The canonical composition seam (facade/runtime) always
+                // hands core an explicit prompt or none, so it never reaches here;
+                // standalone core construction stays unprompted unless asked.
+                session.append_system_message(SystemPromptConfig::new().compose().await);
+            }
         }
 
         let budget = Budget::new(self.budget_limits.unwrap_or_default());
@@ -713,6 +674,9 @@ impl AgentBuilder {
             compaction_curator: self.compaction_curator,
             last_input_tokens: 0,
             compaction_cadence,
+            pending_compaction_boundary_index: None,
+            pending_compaction_request_pressure: None,
+            post_compaction_pressure_check: None,
             memory_store: self.memory_store,
             compaction_commit_coordinator: self.compaction_commit_coordinator,
             compaction_transaction: None,
@@ -725,11 +689,12 @@ impl AgentBuilder {
             run_completed_event_emitted: false,
             silent_comms_intents: self.silent_comms_intents,
             checkpointer: self.checkpointer,
+            latest_run_checkpoint_receipt: None,
             blob_store: self.blob_store,
             event_tap: self
                 .event_tap
                 .unwrap_or_else(crate::event_tap::new_event_tap),
-            system_context_state,
+            transient_turn_context_state,
             default_event_tx: self.default_event_tx,
             applied_cursor,
             ops_lifecycle: self.ops_lifecycle,
@@ -742,6 +707,7 @@ impl AgentBuilder {
             runtime_started_run_id: None,
             runtime_terminal_failure_witness: None,
             active_transcript_identity: None,
+            active_turn_request_contexts: Vec::new(),
             turn_state_handle: self.turn_state_handle,
             model_routing_handle: self.model_routing_handle,
             sticky_model_fallback_commit_coordinator: self.sticky_model_fallback_commit_coordinator,
@@ -909,10 +875,7 @@ impl AgentBuilder {
     }
 
     /// Set the session checkpointer for keep-alive persistence.
-    pub fn with_checkpointer(
-        mut self,
-        cp: Arc<dyn crate::checkpoint::SessionCheckpointer>,
-    ) -> Self {
+    pub fn with_checkpointer(mut self, cp: Arc<dyn crate::SessionCheckpointer>) -> Self {
         self.checkpointer = Some(cp);
         self
     }
@@ -1693,48 +1656,31 @@ mod tests {
         }
     }
 
-    /// Regression test: AgentBuilder should apply system_prompt to resumed sessions
-    /// Previously, system_prompt was ignored when resuming a session.
+    /// Rebuilding an existing transcript must not materialize build-time prompt
+    /// configuration as a new message.
     #[tokio::test]
-    async fn test_regression_builder_applies_system_prompt_to_resumed_session() {
+    async fn test_builder_resume_is_invisible_to_ordered_system_transcript() {
         let client = Arc::new(MockClient);
         let tools = Arc::new(MockTools);
         let store = Arc::new(MockStore);
 
         // Create a session with an existing system prompt
         let mut existing_session = Session::new();
-        existing_session.set_system_prompt("Original system prompt".to_string());
+        existing_session.append_system_message("Original system prompt".to_string());
         existing_session.push(Message::User(UserMessage::text("Hello".to_string())));
 
-        // Resume the session with a NEW system prompt
+        let original = existing_session.messages().to_vec();
         let agent = AgentBuilder::new()
             .resume_session(existing_session)
             .system_prompt("Updated system prompt")
             .build_standalone(client, tools, store)
             .await;
 
-        // Check that the system prompt was UPDATED
-        let messages = agent.session().messages();
-        assert!(!messages.is_empty(), "Session should have messages");
-
-        match &messages[0] {
-            Message::System(sys) => {
-                assert_eq!(
-                    sys.content, "Updated system prompt",
-                    "System prompt should be updated when resuming with a new prompt"
-                );
-            }
-            other => panic!("First message should be System, got: {other:?}"),
-        }
-
-        // User message should still be preserved
-        assert!(messages.len() >= 2, "Should have system + user messages");
-        match &messages[1] {
-            Message::User(user) => {
-                assert_eq!(user.text_content(), "Hello");
-            }
-            other => panic!("Second message should be User, got: {other:?}"),
-        }
+        assert_eq!(
+            agent.session().messages(),
+            original.as_slice(),
+            "materialization cannot inject a System outside an admitted turn"
+        );
     }
 
     /// Regression test: Resumed sessions without explicit system_prompt should keep their original
@@ -1746,7 +1692,7 @@ mod tests {
 
         // Create a session with an existing system prompt
         let mut existing_session = Session::new();
-        existing_session.set_system_prompt("Original system prompt".to_string());
+        existing_session.append_system_message("Original system prompt".to_string());
 
         // Resume WITHOUT specifying a new system prompt
         let agent = AgentBuilder::new()

@@ -3,25 +3,16 @@
 use meerkat_core::turn_execution_authority::ContentShape as CoreContentShape;
 use meerkat_machine_kernels::generated::meerkat::ContentShape as KernelContentShape;
 
-fn shapes() -> [(CoreContentShape, KernelContentShape); 6] {
+fn shapes() -> [(CoreContentShape, KernelContentShape); 3] {
     [
         (
             CoreContentShape::Conversation,
             KernelContentShape::Conversation,
         ),
-        (
-            CoreContentShape::ConversationAndContext,
-            KernelContentShape::ConversationAndContext,
-        ),
-        (CoreContentShape::Context, KernelContentShape::Context),
         (CoreContentShape::Empty, KernelContentShape::Empty),
         (
             CoreContentShape::ImmediateAppend,
             KernelContentShape::ImmediateAppend,
-        ),
-        (
-            CoreContentShape::ImmediateContext,
-            KernelContentShape::ImmediateContext,
         ),
     ]
 }

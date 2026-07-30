@@ -16,17 +16,17 @@
 #![cfg(feature = "sqlite")]
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use chrono::{Duration, Utc};
+use chrono::{Duration, TimeZone, Utc};
 use meerkat_core::{ContentInput, SessionId};
 use meerkat_schedule::{
     ClaimDueRequest, CreateScheduleRequest, IntervalTriggerSpec, MisfirePolicy,
     MissingTargetPolicy, Occurrence, OccurrenceOrdinal, OverlapPolicy, Schedule, ScheduleFilter,
-    ScheduleLifecycleInput, ScheduleStore, ScheduleStoreRowFaultKind, ScheduledSessionAction,
-    SessionTargetBinding, TargetBinding, TriggerSpec,
+    ScheduleLifecycleInput, ScheduleService, ScheduleStore, ScheduleStoreRowFaultKind,
+    ScheduledSessionAction, SessionTargetBinding, TargetBinding, TriggerSpec,
 };
 use meerkat_store::SqliteScheduleStore;
 use rusqlite::{Connection, params};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 fn sample_schedule_request(name: &str) -> CreateScheduleRequest {
     CreateScheduleRequest {
@@ -73,12 +73,23 @@ async fn commit_schedule(store: &SqliteScheduleStore, name: &str) -> Schedule {
 }
 
 async fn commit_due_occurrence(store: &SqliteScheduleStore, schedule: &Schedule) -> Occurrence {
-    let write = Occurrence::planned_write_from_schedule(
+    commit_occurrence_at(
+        store,
         schedule,
         OccurrenceOrdinal(0),
         Utc::now() - Duration::seconds(1),
     )
-    .expect("occurrence planning should pass generated authority");
+    .await
+}
+
+async fn commit_occurrence_at(
+    store: &SqliteScheduleStore,
+    schedule: &Schedule,
+    ordinal: OccurrenceOrdinal,
+    due_at_utc: chrono::DateTime<Utc>,
+) -> Occurrence {
+    let write = Occurrence::planned_write_from_schedule(schedule, ordinal, due_at_utc)
+        .expect("occurrence planning should pass generated authority");
     let occurrence = write.occurrence().clone();
     store
         .commit_occurrence_write(write)
@@ -103,8 +114,109 @@ fn claim_request() -> ClaimDueRequest {
         owner_id: "row-fault-test".to_string(),
         limit: 16,
         lease_duration: Duration::seconds(60),
-        live_waiter_occurrence_ids: std::collections::BTreeSet::new(),
     }
+}
+
+#[tokio::test]
+async fn zero_limit_claim_is_a_true_noop() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("schedules.sqlite3");
+    let store = SqliteScheduleStore::open(&path).expect("open store");
+    let schedule = commit_schedule(&store, "zero-limit").await;
+    let occurrence = commit_due_occurrence(&store, &schedule).await;
+
+    let result = store
+        .claim_due_occurrences(ClaimDueRequest {
+            owner_id: "must-not-own".to_string(),
+            limit: 0,
+            lease_duration: Duration::seconds(60),
+        })
+        .await
+        .expect("zero-limit claim");
+    assert!(result.claimed.is_empty());
+    assert!(result.row_faults.is_empty());
+    let unchanged = store
+        .get_occurrence(&occurrence.occurrence_id)
+        .await
+        .expect("read occurrence")
+        .expect("occurrence exists");
+    assert_eq!(unchanged.attempt_count, 0);
+    assert_eq!(unchanged.claimed_by, None);
+
+    let claimed = store
+        .claim_due_occurrences(claim_request())
+        .await
+        .expect("later non-zero claim");
+    assert_eq!(claimed.claimed.len(), 1);
+    assert_eq!(claimed.claimed[0].occurrence_id, occurrence.occurrence_id);
+}
+
+#[tokio::test]
+async fn poisoned_front_page_cannot_permanently_starve_later_due_work() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("schedules.sqlite3");
+    let store = SqliteScheduleStore::open(&path).expect("open store");
+    let base = Utc::now() - Duration::seconds(5);
+    let mut poisoned_ids = Vec::new();
+    let mut healthy = None;
+
+    // limit=1 has a hard scan budget of 64. Put exactly 64 poisoned rows
+    // before one healthy due row so a fixed "LIMIT 64 from the beginning"
+    // implementation would starve it forever.
+    for index in 0..65_u32 {
+        let schedule = commit_schedule(&store, &format!("scan-row-{index}")).await;
+        let occurrence = commit_occurrence_at(
+            &store,
+            &schedule,
+            OccurrenceOrdinal(0),
+            base + Duration::milliseconds(i64::from(index)),
+        )
+        .await;
+        if index < 64 {
+            poisoned_ids.push(occurrence.occurrence_id);
+        } else {
+            healthy = Some(occurrence);
+        }
+    }
+    {
+        let mut conn = Connection::open(&path).expect("open sqlite");
+        let tx = conn.transaction().expect("begin poison transaction");
+        for occurrence_id in &poisoned_ids {
+            tx.execute(
+                "UPDATE schedule_occurrences SET occurrence_json = ?2 WHERE occurrence_id = ?1",
+                params![occurrence_id.to_string(), b"{not json".as_slice()],
+            )
+            .expect("poison occurrence");
+        }
+        tx.commit().expect("commit poison transaction");
+    }
+
+    let request = ClaimDueRequest {
+        owner_id: "fair-scan".to_string(),
+        limit: 1,
+        lease_duration: Duration::seconds(60),
+    };
+    let first = store
+        .claim_due_occurrences(request.clone())
+        .await
+        .expect("first bounded scan");
+    assert!(first.claimed.is_empty());
+    assert_eq!(first.row_faults.len(), 64);
+
+    let second = store
+        .claim_due_occurrences(request)
+        .await
+        .expect("cursor-advanced scan");
+    let healthy = healthy.expect("healthy tail occurrence");
+    assert_eq!(
+        second
+            .claimed
+            .iter()
+            .map(|occurrence| occurrence.occurrence_id.clone())
+            .collect::<Vec<_>>(),
+        vec![healthy.occurrence_id],
+        "cursor progress across typed row faults must expose later healthy work"
+    );
 }
 
 #[tokio::test]
@@ -150,6 +262,104 @@ async fn claim_scan_skips_poisoned_occurrence_row_and_claims_healthy_neighbor() 
         fault.schedule_id.as_deref(),
         Some(poisoned_schedule.schedule_id.to_string().as_str()),
         "the fault must carry the owning schedule id"
+    );
+}
+
+#[tokio::test]
+async fn refill_cursor_advances_past_a_poisoned_schedule_row() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("schedules.sqlite3");
+    let store = SqliteScheduleStore::open(&path).expect("open store");
+    let poisoned = commit_schedule(&store, "poisoned-refill").await;
+    let healthy = commit_schedule(&store, "healthy-refill").await;
+    {
+        let conn = Connection::open(&path).expect("open sqlite");
+        conn.execute(
+            r"
+            UPDATE schedule_schedules
+            SET next_refill_at_ms = 1, schedule_json = ?2
+            WHERE schedule_id = ?1
+            ",
+            params![poisoned.schedule_id.to_string(), b"{not json".as_slice()],
+        )
+        .expect("poison first refill row");
+        conn.execute(
+            r"
+            UPDATE schedule_schedules
+            SET next_refill_at_ms = 2
+            WHERE schedule_id = ?1
+            ",
+            params![healthy.schedule_id.to_string()],
+        )
+        .expect("order healthy refill row after poison");
+    }
+
+    let first = store
+        .read_due_refill_candidates(1)
+        .await
+        .expect("first bounded refill page");
+    assert!(first.candidates.is_empty());
+    assert_eq!(first.row_faults.len(), 1);
+    assert_eq!(
+        first.row_faults[0].schedule_id.as_deref(),
+        Some(poisoned.schedule_id.to_string().as_str())
+    );
+
+    let second = store
+        .read_due_refill_candidates(1)
+        .await
+        .expect("cursor-advanced refill page");
+    assert_eq!(second.row_faults.len(), 0);
+    assert_eq!(second.candidates.len(), 1);
+    assert_eq!(
+        second.candidates[0].schedule.schedule_id, healthy.schedule_id,
+        "poisoned head row must not permanently hide later refill work"
+    );
+}
+
+#[tokio::test]
+async fn sqlite_far_future_schedule_records_exact_refill_wake_without_due_scan() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("schedules.sqlite3");
+    let store = Arc::new(SqliteScheduleStore::open(&path).expect("open store"));
+    let service = ScheduleService::new(store.clone());
+    let start_at_utc = Utc
+        .timestamp_millis_opt((Utc::now() + Duration::days(3)).timestamp_millis())
+        .single()
+        .expect("millisecond timestamp");
+    let mut request = sample_schedule_request("far-future-refill");
+    request.trigger = TriggerSpec::Interval(IntervalTriggerSpec {
+        start_at_utc,
+        every_seconds: 60,
+        end_at_utc: None,
+    });
+    request.planning_horizon_days = Some(1);
+    request.planning_horizon_occurrences = Some(1);
+
+    let schedule = service.create(request).await.expect("create schedule");
+    assert!(
+        service
+            .list_occurrences(&schedule.schedule_id)
+            .await
+            .expect("list occurrences")
+            .is_empty()
+    );
+    assert_eq!(
+        store
+            .next_action_time_utc()
+            .await
+            .expect("next action")
+            .next_action_at_utc,
+        Some(start_at_utc - Duration::days(1))
+    );
+    assert!(
+        store
+            .read_due_refill_candidates(32)
+            .await
+            .expect("due refills")
+            .candidates
+            .is_empty(),
+        "ordinary ticks must not revisit a schedule before its exact refill wake"
     );
 }
 

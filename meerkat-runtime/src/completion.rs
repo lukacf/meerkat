@@ -18,6 +18,7 @@ use meerkat_core::lifecycle::RunId;
 use meerkat_core::lifecycle::core_executor::CoreApplyTerminal;
 use meerkat_core::types::{RunResult, SessionId};
 use meerkat_core::{TurnErrorMetadata, TurnTerminalCauseKind, TurnTerminalOutcome};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::meerkat_machine::driver::{
@@ -69,7 +70,8 @@ impl CompletionWaitError {
 }
 
 /// Outcome delivered to a completion waiter.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "completion_type", rename_all = "snake_case")]
 pub enum CompletionOutcome {
     /// The input was successfully consumed and produced a result.
     Completed(Box<RunResult>),
@@ -711,8 +713,39 @@ fn authorized_completion_outcome(
 #[must_use = "authorized runtime terminal bundle must be published and/or delivered"]
 pub(crate) struct AuthorizedRuntimeTerminalBundle {
     outcome: CompletionOutcome,
+    finalization: crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation,
     cleanup_observation: CompletionCleanupObservation,
     interaction_events: Vec<meerkat_core::event::AgentEvent>,
+    terminal_completion_witness:
+        crate::meerkat_machine::driver::InputTerminalCompletionAuthorizationWitness,
+}
+
+/// Non-constructible carrier for the exact public result selected by generated
+/// completion authority. Persistence accepts this token rather than a raw
+/// `CompletionOutcome`, so handwritten callers cannot mint durable success.
+#[must_use = "authorized terminal completion must be durably finalized"]
+pub(crate) struct AuthorizedInputTerminalCompletion {
+    outcome: CompletionOutcome,
+    finalization: crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation,
+    witness: crate::meerkat_machine::driver::InputTerminalCompletionAuthorizationWitness,
+}
+
+impl AuthorizedInputTerminalCompletion {
+    pub(crate) fn outcome(&self) -> &CompletionOutcome {
+        &self.outcome
+    }
+
+    pub(crate) fn finalization(
+        &self,
+    ) -> crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation {
+        self.finalization
+    }
+
+    pub(crate) fn witness(
+        &self,
+    ) -> &crate::meerkat_machine::driver::InputTerminalCompletionAuthorizationWitness {
+        &self.witness
+    }
 }
 
 impl AuthorizedRuntimeTerminalBundle {
@@ -720,9 +753,12 @@ impl AuthorizedRuntimeTerminalBundle {
         &self.interaction_events
     }
 
-    #[cfg(test)]
-    fn into_interaction_events(self) -> Vec<meerkat_core::event::AgentEvent> {
-        self.interaction_events
+    pub(crate) fn terminal_completion(&self) -> AuthorizedInputTerminalCompletion {
+        AuthorizedInputTerminalCompletion {
+            outcome: self.outcome.clone(),
+            finalization: self.finalization,
+            witness: self.terminal_completion_witness.clone(),
+        }
     }
 }
 
@@ -732,9 +768,68 @@ pub(crate) fn authorize_runtime_terminal_bundle(
     interaction_ids: &[meerkat_core::interaction::InteractionId],
     terminal: Option<&CoreApplyTerminal>,
     authority: RuntimeCompletionResultAuthority,
+    terminal_completion_witness:
+        crate::meerkat_machine::driver::InputTerminalCompletionAuthorizationWitness,
     finalization_error: Option<TurnErrorMetadata>,
     runtime_termination_reason: Option<&str>,
 ) -> Result<AuthorizedRuntimeTerminalBundle, CompletionWaitError> {
+    if !authority.completion_batch_matches(&terminal_completion_witness) {
+        return Err(CompletionWaitError::AuthorityUnavailable(
+            "generated runtime completion authority did not match the exact pending batch owner/run binding"
+                .to_string(),
+        ));
+    }
+    let result_class = authority.result_class();
+    let finalization = authority.finalization();
+    if finalization == crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Failed
+        && !matches!(
+            result_class,
+            RuntimeCompletionResultClass::CompletedWithFinalizationFailure
+                | RuntimeCompletionResultClass::AbandonedWithError
+        )
+    {
+        return Err(CompletionWaitError::AuthorityUnavailable(format!(
+            "generated runtime completion authority resolved {result_class:?} from a failed finalization"
+        )));
+    }
+    if finalization
+        == crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Succeeded
+        && matches!(
+            result_class,
+            RuntimeCompletionResultClass::CompletedWithFinalizationFailure
+        )
+    {
+        return Err(CompletionWaitError::AuthorityUnavailable(
+            "generated runtime completion authority resolved a finalization-failure result from successful finalization"
+                .to_string(),
+        ));
+    }
+    let candidate = match result_class {
+        RuntimeCompletionResultClass::RuntimeTerminated => {
+            let Some(reason) = runtime_termination_reason.filter(|reason| !reason.is_empty())
+            else {
+                return Err(CompletionWaitError::AuthorityUnavailable(
+                    "runtime completion authority resolved RuntimeTerminated without its exact reason"
+                        .to_string(),
+                ));
+            };
+            crate::input_state::InteractionTerminalCandidate::RuntimeTerminated {
+                reason: reason.to_string(),
+            }
+        }
+        RuntimeCompletionResultClass::Cancelled => {
+            crate::input_state::InteractionTerminalCandidate::Cancelled
+        }
+        _ => crate::input_state::InteractionTerminalCandidate::from_core_apply_terminal(terminal),
+    };
+    let candidate_digest = crate::input_state::interaction_terminal_payload_digest(&candidate)
+        .map_err(CompletionWaitError::AuthorityUnavailable)?;
+    if candidate_digest != terminal_completion_witness.candidate_digest() {
+        return Err(CompletionWaitError::AuthorityUnavailable(
+            "generated runtime completion payload did not match the exact pending batch candidate"
+                .to_string(),
+        ));
+    }
     let (outcome, cleanup_observation) = authorized_completion_outcome(
         terminal,
         authority,
@@ -747,8 +842,10 @@ pub(crate) fn authorize_runtime_terminal_bundle(
         .collect();
     Ok(AuthorizedRuntimeTerminalBundle {
         outcome,
+        finalization,
         cleanup_observation,
         interaction_events,
+        terminal_completion_witness,
     })
 }
 
@@ -761,14 +858,12 @@ pub(crate) fn authorized_interaction_terminal_events(
     authority: RuntimeCompletionResultAuthority,
     finalization_error: Option<TurnErrorMetadata>,
 ) -> Result<Vec<meerkat_core::event::AgentEvent>, CompletionWaitError> {
-    authorize_runtime_terminal_bundle(
-        interaction_ids,
-        terminal,
-        authority,
-        finalization_error,
-        None,
-    )
-    .map(AuthorizedRuntimeTerminalBundle::into_interaction_events)
+    let (outcome, _) =
+        authorized_completion_outcome(terminal, authority, finalization_error, None)?;
+    Ok(interaction_ids
+        .iter()
+        .map(|interaction_id| interaction_terminal_event(*interaction_id, outcome.clone()))
+        .collect())
 }
 
 /// Registry of pending completion waiters, keyed by InputId.
@@ -1448,13 +1543,21 @@ mod tests {
         let input_id = InputId::new();
         let interaction_id = meerkat_core::interaction::InteractionId(input_id.0);
         let reason = "runtime destroyed by operator blue/17";
+        let authority = authority(
+            RuntimeCompletionResultClass::RuntimeTerminated,
+            RuntimeCompletionObservedOutcome::RuntimeTerminated,
+        );
+        let witness = authority.test_completion_batch_witness(
+            vec![input_id.clone()],
+            crate::input_state::InteractionTerminalCandidate::RuntimeTerminated {
+                reason: reason.to_string(),
+            },
+        );
         let bundle = authorize_runtime_terminal_bundle(
             &[interaction_id],
             None,
-            authority(
-                RuntimeCompletionResultClass::RuntimeTerminated,
-                RuntimeCompletionObservedOutcome::RuntimeTerminated,
-            ),
+            authority,
+            witness,
             None,
             Some(reason),
         )
@@ -1481,6 +1584,38 @@ mod tests {
             }
             other => panic!("Expected RuntimeTerminated, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn runtime_terminal_bundle_rejects_a_witness_for_another_candidate() {
+        let input_id = InputId::new();
+        let authority = authority(
+            RuntimeCompletionResultClass::RuntimeTerminated,
+            RuntimeCompletionObservedOutcome::RuntimeTerminated,
+        );
+        let witness = authority.test_completion_batch_witness(
+            vec![input_id],
+            crate::input_state::InteractionTerminalCandidate::RuntimeTerminated {
+                reason: "different durable candidate".to_string(),
+            },
+        );
+        let error = match authorize_runtime_terminal_bundle(
+            &[],
+            None,
+            authority,
+            witness,
+            None,
+            Some("generated result reason"),
+        ) {
+            Ok(_) => panic!("authority authorized a differently digested pending candidate"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            CompletionWaitError::AuthorityUnavailable(reason)
+                if reason.contains("exact pending batch candidate")
+        ));
     }
 
     #[tokio::test]

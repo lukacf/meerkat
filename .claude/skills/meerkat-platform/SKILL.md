@@ -110,14 +110,19 @@ fallback. Downstream backends validate against the published
 `meerkat-store-conformance` harness (per-trait capability profiles; the same
 suite CI runs against the in-repo stores).
 
-Checkpoint roles (runtime-backed persistent sessions): the runtime store owns
-the machine-committed checkpoint authority; the session store holds the
-committed-boundary projection of the same stamped document. Resume verifies
-both stamps and refuses conflicting authorities typed instead of guessing.
-Sessions persisted before typed stamps existed read as `LegacyUnverified`;
-`rkat storage doctor` reports the verified-vs-legacy census and
-`rkat storage migrate --apply` adopts legacy checkpoints in bulk (sqlite
-realms; jsonl realms heal lazily on the run path).
+Runtime-backed session authority belongs to the selected store representation,
+not to the portable `Session` document. WholeBlob binds the exact serialized
+row to a store revision and row SHA-256. HeadCanonical binds its store revision
+to the exact canonical head token, row/rewrite prefixes, and component roots.
+Final run promotion consumes the store-issued provisional receipt and updates
+metadata only; it never asks a deserialized Session to certify itself.
+
+The 0.8.11 compatibility floor is Meerkat 0.8.10. Backend activation owns the
+one-time conversion in the same transaction that proves the exact released
+schema, key, and source bytes, installs current store authority and catalog
+state, and removes retired proof carriers. Ordinary reads and writes never
+perform a lazy legacy conversion. Older state must be upgraded with the older
+binary before repinning.
 
 Operator verbs: `rkat storage doctor` (read-only, live-realm-safe, `--json`),
 `rkat storage migrate` (dry-run by default, `--apply` for the fenced

@@ -8,7 +8,7 @@ pub mod transport;
 use crate::event::AgentEvent;
 use crate::event::EventEnvelope;
 use crate::lifecycle::run_primitive::{ConversationAppend, CoreRenderable, RuntimeTurnMetadata};
-use crate::session::{PendingSystemContextAppend, SystemContextStageError};
+use crate::session::SystemMessageAppendError;
 use crate::time_compat::SystemTime;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
@@ -421,8 +421,9 @@ impl SessionControlError {
     }
 }
 
-impl SystemContextStageError {
-    /// Convert a stage-time state conflict into a surface-level control error.
+impl SystemMessageAppendError {
+    /// Convert an ordinary System-message identity conflict into a
+    /// surface-level control error.
     pub fn into_control_error(self, id: &SessionId) -> SessionControlError {
         match self {
             Self::InvalidRequest(message) => SessionControlError::InvalidRequest { message },
@@ -627,7 +628,7 @@ pub struct SessionBuildOptions {
     /// agent. Surfaces use this to decide blocking vs fire-and-return semantics.
     pub keep_alive: bool,
     /// Optional session checkpointer for keep-alive persistence.
-    pub checkpointer: Option<std::sync::Arc<dyn crate::checkpoint::SessionCheckpointer>>,
+    pub checkpointer: Option<std::sync::Arc<dyn crate::SessionCheckpointer>>,
     /// Comms intents that should be silently injected into the session
     /// without triggering an LLM turn.
     pub silent_comms_intents: Vec<String>,
@@ -1516,10 +1517,16 @@ impl std::fmt::Debug for SessionBuildOptions {
 /// Runtime/session semantic carrier for starting a turn.
 ///
 /// The session service forwards this as one machine/composition-owned bundle.
-/// It must not split handling mode, tool overlays, context appends, or runtime
-/// metadata back into service-level request fields.
+/// It must not split handling mode, tool overlays, or runtime metadata back
+/// into service-level request fields.
 #[derive(Debug)]
 pub struct StartTurnRuntimeSemantics {
+    /// Caller-stable identity for durable runtime input admission.
+    ///
+    /// This is intentionally distinct from transcript identity. Runtime
+    /// adapters stamp these values onto `InputHeader`; direct session
+    /// backends that cannot provide durable input dedup must reject it.
+    pub input_identity: Option<StartTurnInputIdentity>,
     /// Handling mode for this turn's ordinary content-bearing work.
     ///
     /// This is a **runtime-owned semantic**: the runtime routes Queue/Steer
@@ -1529,9 +1536,6 @@ pub struct StartTurnRuntimeSemantics {
     pub handling_mode: HandlingMode,
     /// Optional per-turn tool overlay (ephemeral, non-persistent).
     pub turn_tool_overlay: Option<TurnToolOverlay>,
-    /// Runtime-owned system-context appends that must be applied at this
-    /// turn boundary before the model run starts.
-    pub pre_turn_context_appends: Vec<PendingSystemContextAppend>,
     /// Canonical runtime-authored typed appends for this turn.
     ///
     /// Provider prompt text is an internal projection derived from these
@@ -1551,9 +1555,9 @@ pub struct StartTurnRuntimeSemantics {
 impl Default for StartTurnRuntimeSemantics {
     fn default() -> Self {
         Self {
+            input_identity: None,
             handling_mode: HandlingMode::Queue,
             turn_tool_overlay: None,
-            pre_turn_context_appends: Vec::new(),
             typed_turn_appends: Vec::new(),
             turn_metadata: None,
         }
@@ -1565,13 +1569,12 @@ impl StartTurnRuntimeSemantics {
     pub fn new(
         handling_mode: HandlingMode,
         turn_tool_overlay: Option<TurnToolOverlay>,
-        pre_turn_context_appends: Vec<PendingSystemContextAppend>,
         turn_metadata: Option<RuntimeTurnMetadata>,
     ) -> Self {
         Self {
+            input_identity: None,
             handling_mode,
             turn_tool_overlay,
-            pre_turn_context_appends,
             typed_turn_appends: Vec::new(),
             turn_metadata,
         }
@@ -1590,6 +1593,18 @@ impl StartTurnRuntimeSemantics {
         self.typed_turn_appends = typed_turn_appends;
         self
     }
+
+    #[must_use]
+    pub fn with_input_identity(mut self, input_identity: StartTurnInputIdentity) -> Self {
+        self.input_identity = Some(input_identity);
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartTurnInputIdentity {
+    pub idempotency_key: String,
+    pub correlation_id: String,
 }
 
 /// Request to start a new turn on an existing session.
@@ -1606,10 +1621,7 @@ pub struct StartTurnRequest {
     /// context must arrive as `InjectedContext`-role appends instead — the
     /// agent run ingress fails closed if both carriers are populated.
     pub injected_context: Vec<ContentInput>,
-    /// Optional system prompt override for a deferred session's first turn.
-    ///
-    /// This is only supported before the session has any conversation history.
-    /// Materialized sessions with existing messages must reject it.
+    /// Optional explicit System message appended immediately before this turn.
     pub system_prompt: Option<String>,
     /// Channel for streaming events during the turn.
     pub event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
@@ -1617,9 +1629,12 @@ pub struct StartTurnRequest {
     pub runtime: StartTurnRuntimeSemantics,
 }
 
-/// Request to append runtime system context to an existing session.
-// Cannot derive `Eq`: the typed `peer_response_terminal` fact carries a
-// `serde_json::Value` render payload, which is `PartialEq` but not `Eq`.
+/// Request to append one ordinary durable System message to an existing
+/// session at the admitted transcript boundary.
+///
+/// System messages are repeatable, legal anywhere in the ordered transcript,
+/// and preserve the exact string returned by [`CoreRenderable::render_text`],
+/// including empty and whitespace-only strings.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AppendSystemContextRequest {
     /// Typed renderable content to append.
@@ -1627,34 +1642,20 @@ pub struct AppendSystemContextRequest {
     /// This is the single owner of the append body. Surfaces parse their
     /// inbound payload into a [`CoreRenderable`] at the ingress boundary; the
     /// stringly `text` field that previously flattened the body here is gone.
-    /// Consumers that need the plain-text projection call
-    /// [`CoreRenderable::render_text`].
+    /// Consumers append the exact plain-text projection returned by
+    /// [`CoreRenderable::render_text`] without wrapping or trimming it.
     pub content: CoreRenderable,
+    /// Optional message-identity metadata. This value does not change message
+    /// role, placement, rendering, or precedence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// Optional caller-stable identity for exact replay detection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
-    /// Typed provenance: whether this append is a transient runtime steer.
-    ///
-    /// The producer of a runtime-steer append sets
-    /// [`crate::session::SystemContextSource::RuntimeSteer`]; the default
-    /// (`Normal`) covers every durable append. This typed marker is the
-    /// canonical replacement for the retired `runtime:steer:` string prefix.
-    #[serde(
-        default,
-        skip_serializing_if = "crate::session::SystemContextSource::is_normal"
-    )]
-    pub source_kind: crate::session::SystemContextSource,
-    /// Typed terminal-peer-response fact this append carries, when the append
-    /// projects a [`crate::handles::PeerResponseTerminalFact`]. The producer
-    /// stamps the typed fact here; realtime/live consumers read it directly
-    /// instead of re-parsing the flattened prompt `text`/`source` string.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub peer_response_terminal: Option<crate::handles::PeerResponseTerminalFact>,
 }
 
 impl AppendSystemContextRequest {
-    /// Build a plain-text system-context append.
+    /// Build a plain-text System-message append.
     ///
     /// Text-only convenience for the common surface case (CLI/REST/RPC inject
     /// a bare string). Richer producers construct the request directly with a
@@ -1665,8 +1666,6 @@ impl AppendSystemContextRequest {
             content: CoreRenderable::text(text),
             source: None,
             idempotency_key: None,
-            source_kind: crate::session::SystemContextSource::Normal,
-            peer_response_terminal: None,
         }
     }
 
@@ -1677,7 +1676,7 @@ impl AppendSystemContextRequest {
     }
 }
 
-/// Result of appending runtime system context to a session.
+/// Result of appending an ordinary durable System message to a session.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppendSystemContextResult {
     pub status: AppendSystemContextStatus,
@@ -1716,7 +1715,6 @@ pub enum StageToolResultsDisposition {
 #[serde(rename_all = "snake_case")]
 pub enum AppendSystemContextStatus {
     Applied,
-    Staged,
     Duplicate,
 }
 
@@ -2480,11 +2478,11 @@ pub trait SessionServiceCommsExt: SessionService {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait SessionServiceControlExt: SessionService {
-    /// Append runtime system context to a session.
+    /// Append one ordinary durable ordered System message to a session.
     ///
-    /// The request is idempotent per `(session_id, idempotency_key)`. When a
-    /// turn is active, implementations may stage the append for application at
-    /// the next LLM boundary rather than mutating in-flight request state.
+    /// The request is idempotent per `(session_id, idempotency_key)`. The
+    /// rendered content is never trimmed, wrapped, coalesced, or interpreted
+    /// as singleton thread configuration.
     async fn append_system_context(
         &self,
         id: &SessionId,

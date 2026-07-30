@@ -13,14 +13,16 @@
 //!   ([`ConnectionProfile::Primary`], [`ConnectionProfile::ReadOnly`],
 //!   [`ConnectionProfile::Maintenance`]). Opening a connection never runs
 //!   schema DDL; stores apply their [`ledger`] domain after opening. The
-//!   optional [`OpenOptions::schema_preflight`] refuses a future file before
-//!   any mutating pragma, and [`WriteContact`] types each profile's honest
-//!   no-write guarantee (WAL reads may need sidecar files).
+//!   optional [`OpenOptions::schema_preflight`] proves an exact current,
+//!   released-predecessor, or fresh-domain shape before any mutating pragma,
+//!   and [`WriteContact`] types each profile's honest no-write guarantee
+//!   (WAL reads may need sidecar files).
 //! - [`ledger`]: the per-file migration ledger (`meerkat_schema(domain,
 //!   version)`) with the pinned concurrent-open transaction protocol and the
-//!   typed [`SqliteStoreError::SchemaFromTheFuture`] refusal. Ledger state
-//!   that is malformed (wrong shape, duplicate rows, non-positive versions)
-//!   is refused typed, never healed.
+//!   typed refusals for future, pre-floor, gap, unledgered-owned, and
+//!   fingerprint-mismatched shapes. Ledger state that is malformed (wrong
+//!   shape, duplicate rows, non-positive versions) is refused typed, never
+//!   healed.
 //! - [`json_column`]: the TEXT-or-BLOB tolerant JSON column codec.
 //! - [`fence`]: the per-operation maintenance-fence guards. Store operations
 //!   take a shared guard; offline migration takes the exclusive side and
@@ -52,8 +54,9 @@ pub use error::{SqliteErrorClass, SqliteStoreError, classify_sqlite_error, is_bu
 pub use fence::{ExclusiveFence, OperationGuard, fence_lock_path};
 pub use json_column::JsonColumnBytes;
 pub use ledger::{
-    LedgerReport, Migration, SchemaDomain, apply_domain_migrations, domain_version,
-    refuse_future_schema,
+    LedgerReport, Migration, SchemaDomain, SchemaObject, SchemaObjectKind, SchemaPredecessor,
+    apply_domain_migrations, domain_version, preflight_schema_eligibility,
+    verify_released_schema_fingerprint,
 };
 pub use profile::{
     ConnectionProfile, OpenOptions, SHARED_BUSY_TIMEOUT, WriteContact, begin_immediate, open,

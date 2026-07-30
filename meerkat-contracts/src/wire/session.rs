@@ -30,9 +30,9 @@ use meerkat_core::{
     AssistantBlock, BlobId, BlockAssistantMessage, ContentBlock, ContentInput, ImageData, Message,
     ProviderMeta, ServerToolKind, SessionHistoryPage, SessionId, SessionInfo, SessionSummary,
     SessionTranscriptRevisionList, SessionTranscriptRevisionPage, StopReason, SystemMessage,
-    SystemNoticeKind, SystemNoticeMessage, ToolResult, TranscriptEditRunningBehavior,
-    TranscriptReplacement, TranscriptRewriteReason, TranscriptRewriteSelection, TranscriptSource,
-    UserMessage, VideoData,
+    SystemMessageIdentity, SystemNoticeKind, SystemNoticeMessage, ToolResult,
+    TranscriptEditRunningBehavior, TranscriptReplacement, TranscriptRewriteReason,
+    TranscriptRewriteSelection, TranscriptSource, UserMessage, VideoData,
 };
 use meerkat_core::{InteractionId, RunId};
 use std::convert::TryFrom;
@@ -1113,8 +1113,8 @@ impl TranscriptRewriteMessage {
                 created_at,
             } => Ok(Message::System(SystemMessage {
                 content,
-                mutation_kind: meerkat_core::types::SystemPromptMutationKind::default(),
                 created_at: transcript_message_timestamp(created_at)?,
+                identity: None,
             })),
             Self::SystemNotice {
                 kind,
@@ -1316,6 +1316,10 @@ pub enum WireSessionMessage {
     System {
         content: String,
         created_at: String,
+        /// Optional exact control-ingress identity carried by this durable
+        /// transcript message. Provider adapters ignore it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        identity: Option<WireSystemMessageIdentity>,
     },
     SystemNotice {
         kind: SystemNoticeKind,
@@ -1360,12 +1364,33 @@ pub enum WireSessionMessage {
     },
 }
 
+/// Public wire projection of one ordinary System message's optional
+/// control-ingress identity.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireSystemMessageIdentity {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+}
+
+impl From<SystemMessageIdentity> for WireSystemMessageIdentity {
+    fn from(value: SystemMessageIdentity) -> Self {
+        Self {
+            source: value.source,
+            idempotency_key: value.idempotency_key,
+        }
+    }
+}
+
 impl From<Message> for WireSessionMessage {
     fn from(value: Message) -> Self {
         match value {
             Message::System(message) => Self::System {
                 content: message.content,
                 created_at: message.created_at.to_rfc3339(),
+                identity: message.identity.map(Into::into),
             },
             Message::SystemNotice(message) => Self::SystemNotice {
                 kind: message.kind,
@@ -2123,6 +2148,7 @@ mod tests {
                 WireSessionMessage::System {
                     content: "You are helpful".to_string(),
                     created_at: "2026-04-27T00:00:00Z".to_string(),
+                    identity: None,
                 },
                 WireSessionMessage::User {
                     content: WireContentInput::Text("hello".to_string()),
@@ -2283,6 +2309,39 @@ mod tests {
                 assert_eq!(actual_run, &run_id);
             }
             other => panic!("expected assistant identity, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_wire_session_history_exposes_system_message_identity() {
+        let system = SystemMessage::with_identity(
+            "new instruction",
+            Some("homecore".to_string()),
+            Some("instruction-17".to_string()),
+        );
+        let page = SessionHistoryPage {
+            session_id: SessionId::new(),
+            message_count: 1,
+            offset: 0,
+            limit: None,
+            has_more: false,
+            messages: vec![Message::System(system)],
+        };
+
+        let wire: WireSessionHistory = page.into();
+        match &wire.messages[0] {
+            WireSessionMessage::System {
+                identity:
+                    Some(WireSystemMessageIdentity {
+                        source,
+                        idempotency_key,
+                    }),
+                ..
+            } => {
+                assert_eq!(source.as_deref(), Some("homecore"));
+                assert_eq!(idempotency_key.as_deref(), Some("instruction-17"));
+            }
+            other => panic!("expected System identity, got {other:?}"),
         }
     }
 

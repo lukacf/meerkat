@@ -33,6 +33,7 @@ use std::sync::Arc;
 pub(crate) enum MobMachineCommand {
     PreviewRunFlowAdmission,
     RunFlow {
+        run_id: Option<RunId>,
         flow_id: FlowId,
         activation_params: serde_json::Value,
         scoped_event_tx: Option<tokio::sync::mpsc::Sender<meerkat_core::ScopedAgentEvent>>,
@@ -108,15 +109,8 @@ pub(crate) enum MobMachineCommand {
     MemberStatus {
         agent_identity: AgentIdentity,
     },
-    ApplyIdentityDeclarationManifest {
-        manifest: Box<crate::identity::IdentityDeclarationManifest>,
-    },
     GetIdentityIntent {
         agent_identity: AgentIdentity,
-    },
-    GetIdentityDeclarationReceipt {
-        scope_id: crate::identity::IdentityDeclarationScopeId,
-        operation_id: meerkat_core::ops::OperationId,
     },
     GetIdentityConvergenceStatus {
         agent_identity: AgentIdentity,
@@ -209,6 +203,7 @@ pub(crate) struct SubmitWorkCommand {
     pub work_ref: WorkRef,
     pub spec: WorkSpec,
     pub handling_mode: meerkat_core::types::HandlingMode,
+    pub external_delivery_identity: Option<crate::store::MobExternalDeliveryIdentity>,
     pub turn_metadata: Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
     pub event_tx:
         Option<tokio::sync::mpsc::Sender<meerkat_core::EventEnvelope<meerkat_core::AgentEvent>>>,
@@ -240,14 +235,8 @@ pub(crate) enum MobMachineCommandResult {
     ListMembersIncludingRetiring(Vec<MobMemberListEntry>),
     ListAllMembers(Vec<RosterEntry>),
     MemberStatus(crate::runtime::MobMemberSnapshot),
-    IdentityDeclarationManifestApplied(
-        Box<crate::identity::IdentityDeclarationManifestApplyOutcome>,
-    ),
     IdentityIntent(
         Box<crate::identity::IdentityStoredObservation<crate::identity::IdentityIntentRecord>>,
-    ),
-    IdentityDeclarationReceipt(
-        Box<crate::identity::IdentityStoredObservation<crate::identity::IdentityOperationReceipt>>,
     ),
     IdentityConvergenceStatus(
         crate::identity::IdentityStoredObservation<crate::identity::IdentityConvergenceStatus>,
@@ -338,10 +327,7 @@ impl MobMachineCommandVariant {
     #[must_use]
     pub const fn catalog_input(self) -> Option<MobMachineCatalogInput> {
         match self {
-            Self::ApplyIdentityDeclarationManifest
-            | Self::GetIdentityIntent
-            | Self::GetIdentityDeclarationReceipt
-            | Self::GetIdentityConvergenceStatus => None,
+            Self::GetIdentityIntent | Self::GetIdentityConvergenceStatus => None,
             #[cfg(test)]
             Self::FlowTrackerCounts
             | Self::OrchestratorSnapshot
@@ -406,7 +392,6 @@ pub enum MobMachineShellMechanicReason {
     AdmissionPreflight,
     FilteredRosterProjection,
     ProducerWiringBridge,
-    IdentityDesiredStateStore,
     IdentityProjection,
 }
 
@@ -1276,13 +1261,7 @@ const fn mob_machine_command_classification(
                 MobMachineShellMechanicReason::FilteredRosterProjection,
             )
         }
-        MobMachineCommandVariant::ApplyIdentityDeclarationManifest => {
-            MobMachineCommandClassification::ShellMechanic(
-                MobMachineShellMechanicReason::IdentityDesiredStateStore,
-            )
-        }
         MobMachineCommandVariant::GetIdentityIntent
-        | MobMachineCommandVariant::GetIdentityDeclarationReceipt
         | MobMachineCommandVariant::GetIdentityConvergenceStatus => {
             MobMachineCommandClassification::ShellMechanic(
                 MobMachineShellMechanicReason::IdentityProjection,

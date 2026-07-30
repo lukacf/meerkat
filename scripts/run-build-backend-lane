@@ -37,6 +37,22 @@ source "${root}/scripts/build-backend-env"
 
 cargo_bin="${CARGO:-${root}/scripts/repo-cargo}"
 
+run_head_canonical_kill_window() {
+  # This is the sole real-process-death HeadCanonical regression. Its hidden
+  # crash-stop command is intentionally feature-gated, so run the one target
+  # explicitly and fail if filtering/cfg drift ever selects zero tests.
+  "${cargo_bin}" nextest run \
+    -p meerkat-mob \
+    --test cold_restart_mob_resume \
+    --features test-support \
+    --profile fast \
+    --no-tests=fail \
+    --show-progress none \
+    --status-level none \
+    --final-status-level fail \
+    -E 'test(mob_cold_restart_resume_after_kill_between_commit_points)'
+}
+
 case "${lane}" in
   build)
     if meerkat_buildbuddy_enabled; then
@@ -67,6 +83,7 @@ case "${lane}" in
     # multiple times" guard. Expand the alias inline until the upstream
     # aliases are normalized to string form on `main`.
     "${cargo_bin}" nextest run --workspace --profile fast --show-progress none --status-level none --final-status-level fail
+    run_head_canonical_kill_window
     exec "${cargo_bin}" test -p meerkat-session --features session-store projection_continuity -- --quiet
     ;;
   test-all)
@@ -85,7 +102,8 @@ case "${lane}" in
     if meerkat_buildbuddy_enabled; then
       exec "${root}/scripts/buildbuddy-dev" test-int
     fi
-    exec "${cargo_bin}" nextest run --workspace --tests --profile fast --show-progress none --status-level none --final-status-level fail
+    "${cargo_bin}" nextest run --workspace --tests --profile fast --show-progress none --status-level none --final-status-level fail
+    run_head_canonical_kill_window
     ;;
   e2e-fast)
     if meerkat_buildbuddy_enabled; then

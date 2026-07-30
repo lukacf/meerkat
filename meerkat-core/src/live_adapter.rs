@@ -16,7 +16,6 @@ use crate::provider::Provider;
 use crate::realtime_transcript::{
     RealtimeTranscriptEvent, RealtimeUserContentIdentity, RealtimeUserContentTombstone,
 };
-use crate::session::PendingSystemContextAppend;
 use crate::types::{ContentBlock, Message, SessionId, StopReason, ToolDef, ToolName, Usage};
 
 // ---------------------------------------------------------------------------
@@ -135,8 +134,8 @@ pub enum LiveAdapterCommand {
     /// cross-session attach) where the runtime hands an already-bound
     /// adapter a snapshot that was *not* seeded at factory-construction
     /// time. `live/open` does NOT dispatch this — `factory.open_live_adapter`
-    /// already passed `seed_messages` + `runtime_system_context` to the
-    /// provider session before adapter wrap, so dispatching `Open` again
+    /// already passed the canonical `seed_messages` to the provider session
+    /// before adapter wrap, so dispatching `Open` again
     /// would double-seed the conversation. Adapters that receive this
     /// command after the channel is already live must replay the snapshot's
     /// seed history into their provider session (the OpenAI arm does this
@@ -161,10 +160,9 @@ pub enum LiveAdapterCommand {
     /// identity (model swaps require close + reopen — OpenAI Realtime has
     /// no mutable `model` field) and issuing a single `session.update`
     /// carrying the new instructions / tools / audio config. The
-    /// snapshot's `runtime_system_context` is folded into `instructions`
-    /// by that update, so newly-authoritative system context still reaches
-    /// the provider — as session config, not as synthetic conversation
-    /// items.
+    /// snapshot's `ordered_system_instructions` is derived from canonical
+    /// transcript System/SystemNotice rows and applied as provider session
+    /// config, not as a second out-of-band authority.
     ///
     /// Adapters that do not support live re-config should treat this as a
     /// no-op or surface a typed error observation.
@@ -761,7 +759,10 @@ pub struct LiveProjectionSnapshot {
     // `ToolDef` does not yet derive `JsonSchema`; same treatment.
     #[cfg_attr(feature = "schema", schemars(with = "Vec<serde_json::Value>"))]
     pub visible_tools: Vec<ToolDef>,
-    pub system_prompt: Option<String>,
+    /// Provider-facing singular lowering of every ordered `Message::System`
+    /// and `Message::SystemNotice` in the canonical transcript. This is a
+    /// projection, never session metadata or a privileged initial message.
+    pub ordered_system_instructions: Option<String>,
     pub model_id: String,
     // Typed in memory (the realtime refresh guard compares
     // `Provider == Provider`), but presented as a plain canonical provider
@@ -772,24 +773,6 @@ pub struct LiveProjectionSnapshot {
     #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub provider_id: Provider,
     pub audio_config: Option<LiveAudioConfig>,
-    /// R3: typed runtime system-context entries projected alongside seed
-    /// history.
-    ///
-    /// `RealtimeSessionOpenConfig` keeps `runtime_system_context` separate
-    /// from `seed_messages` so adapters can fold the entries into their
-    /// provider session as authoritative system instructions (peer terminal
-    /// context, ops_lifecycle context, etc.) rather than mixing them into
-    /// the canonical history. The snapshot must preserve that separation;
-    /// flattening into `seed_messages` would lose provenance and trip the
-    /// realtime layer's idempotent ordering on cross-source dedup.
-    ///
-    /// `PendingSystemContextAppend` does not (yet) derive `JsonSchema`;
-    /// represent as opaque JSON in the emitted schema until upstream
-    /// derives it (matches the treatment used for `Message` and `ToolDef`
-    /// above).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    #[cfg_attr(feature = "schema", schemars(with = "Vec<serde_json::Value>"))]
-    pub runtime_system_context: Vec<PendingSystemContextAppend>,
     /// Durable committed user-content bindings used for exact retry replay.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub user_content_identities: Vec<RealtimeUserContentIdentity>,
@@ -1329,11 +1312,10 @@ mod tests {
                 snapshot_version: 42,
                 seed_messages: vec![],
                 visible_tools: vec![],
-                system_prompt: Some("You are helpful.".into()),
+                ordered_system_instructions: Some("You are helpful.".into()),
                 model_id: "test-model-a".into(),
                 provider_id: Provider::OpenAI,
                 audio_config: None,
-                runtime_system_context: vec![],
                 user_content_identities: vec![],
                 user_content_tombstones: vec![],
                 canonical_user_image_decoded_bytes: None,
@@ -1343,52 +1325,31 @@ mod tests {
         let json = serde_json::to_string(&cmd).unwrap();
         assert!(json.contains("\"snapshot_version\":42"));
         assert!(json.contains("\"provider_id\":\"openai\""));
-        // R3: empty runtime_system_context must be skipped on the wire so
-        // existing consumers don't see a new field they don't recognize.
         assert!(!json.contains("runtime_system_context"));
     }
 
     #[test]
-    fn snapshot_round_trips_with_runtime_system_context() {
-        // R3: typed runtime system-context entries must round-trip through
-        // the snapshot without being folded into seed_messages.
-        use std::time::SystemTime;
+    fn snapshot_round_trips_without_out_of_band_system_context_authority() {
         let snapshot = LiveProjectionSnapshot {
             session_id: SessionId::new(),
             snapshot_version: 7,
             seed_messages: vec![],
             visible_tools: vec![],
-            system_prompt: None,
+            ordered_system_instructions: Some("first\n\n\n\nduplicate\n\nduplicate".into()),
             model_id: "test-model-a".into(),
             provider_id: Provider::OpenAI,
             audio_config: None,
-            runtime_system_context: vec![crate::session::PendingSystemContextAppend {
-                content: crate::lifecycle::run_primitive::CoreRenderable::text(
-                    "peer terminal: pty=42",
-                ),
-                source: Some("peer_terminal".into()),
-                idempotency_key: Some("k1".into()),
-                source_kind: crate::session::SystemContextSource::Normal,
-                accepted_at: SystemTime::UNIX_EPOCH,
-                peer_response_terminal: None,
-            }],
             user_content_identities: vec![],
             user_content_tombstones: vec![],
             canonical_user_image_decoded_bytes: None,
             transcript_rewrite_generation: 0,
         };
         let json = serde_json::to_string(&snapshot).unwrap();
-        assert!(json.contains("runtime_system_context"));
-        assert!(json.contains("peer_terminal"));
+        assert!(!json.contains("runtime_system_context"));
         let deser: LiveProjectionSnapshot = serde_json::from_str(&json).unwrap();
-        assert_eq!(deser.runtime_system_context.len(), 1);
         assert_eq!(
-            deser.runtime_system_context[0].content.render_text(),
-            "peer terminal: pty=42"
-        );
-        assert_eq!(
-            deser.runtime_system_context[0].source.as_deref(),
-            Some("peer_terminal")
+            deser.ordered_system_instructions.as_deref(),
+            Some("first\n\n\n\nduplicate\n\nduplicate")
         );
     }
 
@@ -1910,11 +1871,10 @@ mod tests {
             snapshot_version: 1,
             seed_messages: vec![],
             visible_tools: vec![],
-            system_prompt: None,
+            ordered_system_instructions: None,
             model_id: "test-model-a".into(),
             provider_id: Provider::OpenAI,
             audio_config: None,
-            runtime_system_context: vec![],
             user_content_identities: vec![],
             user_content_tombstones: vec![],
             canonical_user_image_decoded_bytes: None,

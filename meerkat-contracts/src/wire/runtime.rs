@@ -317,12 +317,6 @@ pub struct WireConversationAppend {
 /// Typed wire projection of a context-only append.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct WireConversationContextAppend {
-    pub key: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub blocks: Vec<WireContentBlock>,
-}
-
 /// Typed wire projection of a batched staged input.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -331,8 +325,6 @@ pub struct WireStagedRunInput {
     pub contributing_input_ids: Vec<String>,
     #[serde(default)]
     pub appends: Vec<WireConversationAppend>,
-    #[serde(default)]
-    pub context_appends: Vec<WireConversationContextAppend>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub boundary: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -347,7 +339,6 @@ pub struct WireStagedRunInput {
 pub enum WireRunPrimitive {
     StagedInput(WireStagedRunInput),
     ImmediateAppend(WireConversationAppend),
-    ImmediateContextAppend(WireConversationContextAppend),
 }
 
 /// Typed request payload for the input-acceptance RPC method.
@@ -1516,6 +1507,10 @@ pub struct WireRuntimeTurnMetadata {
     pub turn_tool_overlay: Option<meerkat_core::TurnToolOverlay>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_instructions: Option<Vec<WireTurnInstruction>>,
+    /// Exact host-generated facts projected only into provider requests for
+    /// this runtime-owned logical turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transient_turn_context: Option<meerkat_core::lifecycle::run_primitive::TurnRequestContext>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1551,7 +1546,7 @@ pub enum WireRuntimeExecutionKind {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum WirePeerResponseTerminalApplyIntent {
-    AppendContextAndRun,
+    AppendContentAndRun,
 }
 
 impl From<meerkat_core::lifecycle::run_primitive::RuntimeExecutionKind>
@@ -1584,8 +1579,8 @@ impl From<meerkat_core::lifecycle::run_primitive::PeerResponseTerminalApplyInten
         value: meerkat_core::lifecycle::run_primitive::PeerResponseTerminalApplyIntent,
     ) -> Self {
         match value {
-            meerkat_core::lifecycle::run_primitive::PeerResponseTerminalApplyIntent::AppendContextAndRun => {
-                Self::AppendContextAndRun
+            meerkat_core::lifecycle::run_primitive::PeerResponseTerminalApplyIntent::AppendContentAndRun => {
+                Self::AppendContentAndRun
             }
         }
     }
@@ -1596,7 +1591,7 @@ impl From<WirePeerResponseTerminalApplyIntent>
 {
     fn from(value: WirePeerResponseTerminalApplyIntent) -> Self {
         match value {
-            WirePeerResponseTerminalApplyIntent::AppendContextAndRun => Self::AppendContextAndRun,
+            WirePeerResponseTerminalApplyIntent::AppendContentAndRun => Self::AppendContentAndRun,
         }
     }
 }
@@ -1610,6 +1605,7 @@ impl From<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata> for WireR
             additional_instructions: value
                 .additional_instructions
                 .map(|v| v.into_iter().map(Into::into).collect()),
+            transient_turn_context: value.transient_turn_context,
             model: value.model.map(|m| m.as_str().to_string()),
             provider: value.provider,
             self_hosted_server_id: value.self_hosted_server_id,
@@ -1635,6 +1631,9 @@ impl From<WireRuntimeTurnMetadata> for meerkat_core::lifecycle::run_primitive::R
             additional_instructions: value
                 .additional_instructions
                 .map(|v| v.into_iter().map(Into::into).collect()),
+            system_prompts: Vec::new(),
+            transient_turn_context: value.transient_turn_context,
+            transient_turn_context_appends: Vec::new(),
             model: value.model.map(ModelId::new),
             provider: value.provider,
             self_hosted_server_id: value.self_hosted_server_id,

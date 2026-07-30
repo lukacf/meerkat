@@ -15,7 +15,7 @@ use meerkat_runtime::store::{InputStateRow, RuntimeStoreError, load_runtime_stat
 use meerkat_runtime::{
     EphemeralRuntimeDriver, InMemoryRuntimeStore, Input, InputDurability, InputHeader, InputOrigin,
     InputState, InputVisibility, LogicalRuntimeId, MeerkatMachine, PersistentRuntimeDriver,
-    PromptInput, RuntimeDriver, RuntimeState, RuntimeStore, SessionDelta,
+    PromptInput, RuntimeDriver, RuntimeState, RuntimeStore, SerializedSessionSnapshot,
 };
 use meerkat_store::MemoryBlobStore;
 
@@ -169,6 +169,12 @@ async fn persist_destroyed_runtime_lifecycle(
 
 #[async_trait]
 impl RuntimeStore for FailPersistInputStore {
+    fn session_persistence_profile(
+        &self,
+    ) -> meerkat_runtime::store::RuntimeSessionPersistenceProfile {
+        meerkat_runtime::store::RuntimeSessionPersistenceProfile::WholeBlobV1
+    }
+
     fn supports_compaction_projection_outbox(&self) -> bool {
         self.inner.supports_compaction_projection_outbox()
     }
@@ -202,17 +208,27 @@ impl RuntimeStore for FailPersistInputStore {
     async fn commit_session_snapshot(
         &self,
         runtime_id: &LogicalRuntimeId,
-        session_delta: SessionDelta,
+        session_delta: SerializedSessionSnapshot,
     ) -> Result<(), RuntimeStoreError> {
         self.inner
             .commit_session_snapshot(runtime_id, session_delta)
             .await
     }
 
+    async fn commit_prepared_whole_blob_rewrite_boundary(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        boundary: meerkat_runtime::store::PreparedWholeBlobRewriteStoreParts,
+    ) -> Result<meerkat_runtime::RuntimeSessionAuthority, RuntimeStoreError> {
+        self.inner
+            .commit_prepared_whole_blob_rewrite_boundary(runtime_id, boundary)
+            .await
+    }
+
     async fn atomic_apply(
         &self,
         runtime_id: &LogicalRuntimeId,
-        session_delta: Option<SessionDelta>,
+        session_delta: Option<SerializedSessionSnapshot>,
         receipt: RunBoundaryReceipt,
         input_updates: Vec<InputStatePersistenceRecord>,
         session_store_key: Option<meerkat_core::types::SessionId>,
@@ -264,7 +280,7 @@ impl RuntimeStore for FailPersistInputStore {
     async fn load_session_snapshot(
         &self,
         runtime_id: &LogicalRuntimeId,
-    ) -> Result<Option<Vec<u8>>, RuntimeStoreError> {
+    ) -> Result<Option<std::sync::Arc<Vec<u8>>>, RuntimeStoreError> {
         self.inner.load_session_snapshot(runtime_id).await
     }
 

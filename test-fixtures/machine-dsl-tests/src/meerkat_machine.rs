@@ -114,7 +114,6 @@ machine! {
             DrainQueuedRun { run_id: RunId },
             StartConversationRun,
             StartImmediateAppend,
-            StartImmediateContext,
             ClassifyExternalEnvelope,
             ClassifyPlainEvent,
             EnsureDrainRunning,
@@ -1015,7 +1014,7 @@ machine! {
             emit SubmitRunPrimitive
         }
 
-        // 30. StartConversationRun/StartImmediateAppend/StartImmediateContext:
+        // 30. StartConversationRun/StartImmediateAppend:
         //     Attached self-loops (signals), emit SubmitRunPrimitive
         transition StartConversationRunAttached {
             on signal StartConversationRun
@@ -1033,15 +1032,6 @@ machine! {
             to Attached
             emit SubmitRunPrimitive
         }
-        transition StartImmediateContextAttached {
-            on signal StartImmediateContext
-            guard { self.lifecycle_phase == Phase::Attached }
-            guard "session_registered" { self.session_id != None }
-            update {}
-            to Attached
-            emit SubmitRunPrimitive
-        }
-
         // 31. Commit: Running → Idle/Attached/Retired (guard pre_run_phase + run_id match)
         transition CommitRunningToIdle {
             on input Commit { input_id, run_id }

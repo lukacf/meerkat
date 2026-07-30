@@ -22,7 +22,7 @@ The canonical registry is `canonical_machine_schemas()` in
 | `ApprovalLifecycleMachine` | `meerkat-core` | Approval request and decision lifecycle and gating. |
 | `DetachedJobMachine` | `meerkat-jobs` | Durable job lifecycle, fenced attempts, leases, retry/loss classification, cancellation, terminality, and delivery acknowledgement. |
 | `RuntimeDeliveryMachine` | `meerkat-runtime` | Stable durable-inbox identity, monotonic delivery/feed sequence assignment, exact replay, and ordered application cursor. |
-| `SessionDocumentMachine` | `meerkat-core` | Session document, transcript, system-context, pending-continuation lifecycle, the session lifecycle terminal fact for all profiles, cold-read source disposition, and durable-tail recovery classification. |
+| `SessionDocumentMachine` | `meerkat-core` | Session document, transcript, pending-continuation lifecycle, the session lifecycle terminal fact for all profiles, cold-read source disposition, and durable-tail recovery classification. |
 | `SessionTurnAdmissionMachine` | `meerkat-session` | Per-turn input admission and classification lifecycle. |
 | `ScheduleLifecycleMachine` | `meerkat-schedule` | Schedule definition lifecycle, trigger state, and revision handling. |
 | `OccurrenceLifecycleMachine` | `meerkat-schedule` | Claimed occurrence delivery and terminal outcomes. |
@@ -69,19 +69,33 @@ second enforcement source.
 
 ## Durable-Tail Recovery Ownership
 
-A session's canonical store can hold a durable transcript row that is ahead of
-the committed runtime authority: the intra-turn checkpointer writes to the
-canonical store outside the boundary transaction, so a shutdown race can leave
-a durable tail — up to and including a fully completed turn — whose boundary
-commit never landed. Durable is not the same as runtime-committed, and the
-recovery of that tail is machine-owned end to end. Ownership splits three
-ways:
+A `Session` is domain state, not a portable proof of persistence. It carries
+the conversation, metadata, usage, and compact transcript-rewrite graph, but
+no embedded persistence authority. Physical currentness belongs to the store:
 
-- **`SessionDocumentMachine` classifies and retains.**
-  `ResolveRuntimeSnapshotReadSource` decides what a reader may be served
-  (`UseRuntimeSnapshot`, `UseCommittedStoreHead`, `RecoveryRequired`,
-  `Quarantine`); a recovery candidate is never returned as an ordinary
-  session. `ClassifyDurableTail` consumes the mechanically extracted tail
+- **WholeBlob** authority is the exact `{session_id, store_revision,
+  blob_sha256}` issued with the serialized row.
+- **HeadCanonical** authority is the exact `{session_id, store_revision,
+  boundary_head, committed_head_token}`. The small boundary head binds its
+  message-row, rewrite, graph, component, and metadata prefixes.
+
+The intra-turn persistence hook may write a physical successor before the
+runtime boundary transaction. Each successful write returns an explicit
+`RunCheckpointReceipt` naming the store profile, committed base, run, exact
+candidate identity, and a contiguous `candidate_sequence`. A later write in
+the same run must present the preceding receipt; a retry must match it exactly.
+The final boundary promotes the latest exact receipt rather than serializing
+or applying the accumulated state again.
+
+A shutdown race can still leave the latest candidate durable while its
+runtime boundary is uncommitted. Durable is not the same as
+runtime-committed, and recovery of that tail is machine-owned end to end.
+Ownership splits three ways:
+
+- **The runtime store retains; `SessionDocumentMachine` classifies.**
+  Store-issued committed authority and provisional-tail authority decide what
+  a reader may be served; a recovery candidate is never returned as an
+  ordinary session. `ClassifyDurableTail` consumes the mechanically extracted tail
   shape (head relation, run-id cardinality, terminal stop reason,
   dangling/orphan tool counts) and emits `DurableTailClassified` with a
   `DurableTailRecoveryClass`: `CompletedCandidate`,
@@ -89,9 +103,9 @@ ways:
   transitions are total and disjoint over the observation. A tail carrying
   any dangling tool call classifies `Ambiguous`: the call proves intent, not
   execution, so the tail is held for reconciliation rather than repaired.
-  The candidate id binds the exact evidence (session, authority stamp,
-  store-head digest, CAS token, observed run identity), so classifying one
-  head can never authorize mutating a later head.
+  The candidate id binds the exact store-issued base and candidate identities,
+  run id, and candidate sequence, so classifying one physical tail can never
+  authorize mutating a later one.
 - **`MeerkatMachine` authorizes.** `AuthorizeDurableTailRecovery` consumes
   the exact classified candidate together with typed projections of the
   durable evidence: the persisted machine-lifecycle row and its current-run
@@ -117,37 +131,28 @@ ways:
   the lifecycle phase.
 - **`RuntimeStore` realizes.** Only the machine's commit-authorizing effect
   may drive the recovery commit, and it lands through
-  `RuntimeStore::atomic_apply` as one boundary: recovered session snapshot,
-  boundary receipt, input lifecycle transitions, terminal outcome, and
-  outbox rows commit together — fenced on the exact observed lifecycle-row
-  version and per-input-row digests, so a concurrent writer fails the whole
-  boundary typed instead of being overwritten. No shell promotes or discards
-  the tail. The classification verdict crosses the crate seam sealed:
+  `RuntimeStore::atomic_apply` as one boundary: the exact store candidate is
+  promoted, the run-boundary receipt, input lifecycle transitions, terminal
+  outcome, catalog projection, and outbox rows commit together. WholeBlob
+  promotion reuses the candidate bytes already written; HeadCanonical
+  promotion advances the committed authority to the exact physical head.
+  Both are fenced on the observed store, lifecycle-row, and input-row
+  identities, so a concurrent writer fails the whole boundary typed instead
+  of being overwritten. No shell promotes or discards the tail. The
+  classification verdict crosses the crate seam sealed:
   `DurableTailRecoveryRequest` has private fields and one constructor,
   `from_classification`, which requires the classifier's own
   `DurableTailClassified` effect — the request cannot exist without the
   verdict that justifies it.
 
-The recovery rule is never-discard: every verified durable descendant is
+The recovery rule is never-discard: every store-proven durable descendant is
 preserved. Recovery commits a completed tail as a recovered run boundary,
 closes an interrupted tail as interrupted (content preserved, a typed
 recovery notice appended, the original run terminalized — never requeued), or
-holds ambiguous evidence intact with autonomous execution blocked. The
-`SessionDocumentMachine` conflict input `ResolveRuntimeProjectionConflict`
-resolves a verified strict descendant to `RetainForRecovery`; the former
-`RebuildToAuthority` disposition, which authorized shrinking an ahead row, no
-longer exists.
-
-Recovered commits carry their own checkpoint provenances,
-`RecoveredRunBoundaryCommit` (completed tail) and
-`RecoveredInterruptedBoundary` (interrupted tail), defined in
-`meerkat-core/src/checkpoint.rs`. Both are typed successors anchored to the
-last committed runtime snapshot — never to the intra-turn projection, which
-remains forbidden as an authority base. Stamp schema versions are selected
-per record from provenance: ordinary stamps write v1, recovered stamps write
-v2 (`SESSION_CHECKPOINT_STAMP_SCHEMA_VERSION_RECOVERED`), so only recovered
-records refuse on older binaries — and refusal is typed in both directions
-(a future schema version, or a version that mis-advertises its provenance).
+holds ambiguous evidence intact with autonomous execution blocked. Current
+stores expose only store-issued committed or provisional-tail authority; the
+former embedded-checkpoint projection-conflict vocabulary is not part of the
+live authority path.
 
 ## Canonical Compositions
 

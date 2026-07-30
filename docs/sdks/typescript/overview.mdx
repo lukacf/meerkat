@@ -74,7 +74,7 @@ The TypeScript SDK (`@rkat/sdk`) is a thin wrapper over Meerkat's settled runtim
 | `readSession(sessionId)` | Read typed session metadata (`SessionInfo`) |
 | `readSessionHistory(sessionId, options?)` | Read committed session transcript history |
 | `sendExternalEvent(sessionId, eventType, payload, options?)` | Inject a canonical external event into a session |
-| `injectContext(sessionId, text, options?)` | Append runtime system context |
+| `injectContext(sessionId, text, options?)` | Append one ordinary durable ordered System message |
 | `getModelsCatalog()` | Read config-backed model catalog |
 | `createSchedule/getSchedule/listSchedules/updateSchedule/pauseSchedule/resumeSchedule/deleteSchedule/listScheduleOccurrences/listScheduleTools/callScheduleTool` | Schedule API wrappers |
 | `createMob(options?)` | Create a mob, return a `Mob` |
@@ -133,7 +133,7 @@ Image-generation wire contracts are exported for integrations that inspect tool 
 | `session.turn(prompt, options?)` | Run another turn (non-streaming), returns `RunResult` |
 | `session.stream(prompt, options?)` | Run another turn with streaming, returns `EventStream` |
 | `session.history(options?)` | Read committed transcript history for this session |
-| `session.injectContext(text, options?)` | Append runtime system context |
+| `session.injectContext(text, options?)` | Append one ordinary durable ordered System message |
 | `session.interrupt()` | Cancel the currently running turn |
 | `session.archive()` | Remove the session from the server |
 | `session.invokeSkill(skillRef, prompt)` | Invoke a skill in this session |
@@ -181,7 +181,7 @@ conflict handling, and reconnect hydration limits.
 
 `seedMaxChars` maps to `live/open.seed_max_chars`. Use a positive value to
 bound serialized seed messages and request a core-selected whole-turn suffix;
-omit it for the complete canonical seed. The resolved root must fit; an existing
+omit it for the complete canonical seed. Every ordered System message must fit; an existing
 compaction summary may be retained, and any truncation reports
 degraded continuity. Canonical image identity, tombstone, and accounting
 sidecars remain complete. The server rejects zero.

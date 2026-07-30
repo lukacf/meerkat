@@ -688,6 +688,7 @@ pub fn raw_deliver_member_input_command(
         objective_id: None,
         expected_member: Some(expected_member),
         injected_context: Vec::new(),
+        transient_turn_context: None,
         turn,
         outcome_tracking: None,
     })

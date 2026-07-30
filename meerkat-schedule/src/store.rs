@@ -11,6 +11,7 @@ use crate::types::{
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Bound::{Excluded, Unbounded};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -24,16 +25,6 @@ pub struct ClaimDueRequest {
     pub owner_id: String,
     pub limit: usize,
     pub lease_duration: Duration,
-    /// Occurrences whose delivery waiter is verifiably alive in the calling
-    /// process (the driver owns the waiter registry and snapshots it per
-    /// tick). The claim scan must neither reclaim (`LeaseExpired`) nor
-    /// misfire these rows: an expired lease on a row with a live in-process
-    /// waiter means the renewal is late, not that the deliverer is dead
-    /// (2026-07 P0: the reclaim dispatched a duplicate turn under
-    /// `CatchUpWithin` and false-misfired a still-running delivery under
-    /// `Skip`). Post-crash the registry is empty, so genuinely dead
-    /// deliverers are reclaimed exactly as before.
-    pub live_waiter_occurrence_ids: BTreeSet<OccurrenceId>,
 }
 
 #[derive(Debug, Clone)]
@@ -44,6 +35,84 @@ pub struct ClaimDueResult {
     /// each skip is a typed, attributable fault (per-row tolerance), never a
     /// silent drop. The rows stay in the store for inspection and repair.
     pub row_faults: Vec<ScheduleStoreRowFault>,
+}
+
+/// Store-clock witness for host pacing. `next_action_at_utc` is the earliest
+/// instant at which durable schedule work can be required: a pending due
+/// time, an in-flight lease expiry, or an active schedule's refill deadline.
+/// It is a mechanical index projection only; the generated schedule and
+/// occurrence machines remain the eligibility authorities when rows are
+/// actually processed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScheduleStoreActionTime {
+    pub store_now_utc: DateTime<Utc>,
+    pub next_action_at_utc: Option<DateTime<Utc>>,
+}
+
+/// How a schedule host learns that durable work created outside this process
+/// may be available.
+///
+/// This is a required store declaration rather than host-side backend
+/// guessing. A remote/custom store must deliberately choose its cost and
+/// consistency contract: either provide a cancellation-safe push wait or
+/// accept a bounded polling cadence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScheduleStoreWakeMode {
+    /// The store is process-local. [`crate::ScheduleService`]'s mutation
+    /// signal and exact next-action timer are sufficient; no durability poll
+    /// is needed.
+    ProcessLocal,
+    /// The store can be written by another process and has no push primitive.
+    /// While otherwise idle, the host waits up to `max_interval` between
+    /// polls; a known earlier action deadline shortens that wait.
+    BoundedPoll { max_interval: std::time::Duration },
+    /// The store provides [`ScheduleStore::wait_for_durable_wake`].
+    Push,
+}
+
+/// One schedule whose durable refill projection says planning work is due.
+///
+/// `refill_at_utc` is a CAS token, not semantic authority. The schedule
+/// machine and trigger engine still decide what, if anything, to plan.
+#[derive(Debug, Clone)]
+pub struct ScheduleRefillCandidate {
+    pub schedule: Schedule,
+    pub pending_occurrences: Vec<Occurrence>,
+    pub refill_at_utc: DateTime<Utc>,
+}
+
+/// Bounded store-clock refill page. Durable stores advance a mechanical
+/// keyset cursor across poisoned rows so one bad payload cannot become a
+/// permanent head-of-queue wall.
+#[derive(Debug, Clone)]
+pub struct ScheduleRefillBatch {
+    pub store_now_utc: DateTime<Utc>,
+    pub candidates: Vec<ScheduleRefillCandidate>,
+    pub row_faults: Vec<ScheduleStoreRowFault>,
+}
+
+/// Exact durable claim witness used by lease renewal. The store samples its
+/// own clock in the same critical section/transaction that screens this
+/// evidence and commits the machine-authorized extension.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenewOccurrenceLeaseRequest {
+    pub occurrence_id: OccurrenceId,
+    pub expected_attempt: u32,
+    pub claim_token: Uuid,
+    pub expected_owner_id: String,
+    pub lease_duration: Duration,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum RenewOccurrenceLeaseOutcome {
+    Renewed(Occurrence),
+    StaleClaim,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RenewOccurrenceLeaseResult {
+    pub store_now_utc: DateTime<Utc>,
+    pub outcome: RenewOccurrenceLeaseOutcome,
 }
 
 /// A durable schedule/occurrence row a tolerant store scan could not surface
@@ -189,6 +258,34 @@ pub(crate) fn claim_occurrence(
         .map(OccurrenceLifecycleMutator::into_occurrence)
 }
 
+pub(crate) fn renew_occurrence_lease(
+    occurrence: Occurrence,
+    request: &RenewOccurrenceLeaseRequest,
+    at_utc: DateTime<Utc>,
+) -> Result<Occurrence, OccurrenceLifecycleError> {
+    occurrence
+        .apply(OccurrenceLifecycleInput::RenewLease {
+            claim_token: request.claim_token,
+            lease_expires_at_utc: at_utc + request.lease_duration,
+            at_utc,
+        })
+        .map(OccurrenceLifecycleMutator::into_occurrence)
+}
+
+pub(crate) fn occurrence_next_action_at(occurrence: &Occurrence) -> Option<DateTime<Utc>> {
+    match occurrence.phase {
+        OccurrencePhase::Pending => Some(occurrence.due_at_utc),
+        OccurrencePhase::Claimed
+        | OccurrencePhase::Dispatching
+        | OccurrencePhase::AwaitingCompletion => occurrence.lease_expires_at_utc,
+        OccurrencePhase::Completed
+        | OccurrencePhase::Skipped
+        | OccurrencePhase::Misfired
+        | OccurrencePhase::Superseded
+        | OccurrencePhase::DeliveryFailed => None,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScheduleStoreKind {
     Disabled,
@@ -220,7 +317,39 @@ impl std::fmt::Display for ScheduleStoreKind {
 pub trait ScheduleStore: Send + Sync {
     fn kind(&self) -> ScheduleStoreKind;
 
+    /// Declare how cross-process durable mutations wake a schedule host.
+    ///
+    /// There is intentionally no default: custom stores must explicitly
+    /// choose push or bounded polling instead of silently inheriting a
+    /// query-heavy host loop.
+    fn wake_mode(&self) -> ScheduleStoreWakeMode;
+
+    /// Wait until durable schedule work may have changed.
+    ///
+    /// Hosts call this only when [`Self::wake_mode`] is
+    /// [`ScheduleStoreWakeMode::Push`]. The future must be cancellation-safe:
+    /// host timers, local mutations, and shutdown can cancel and recreate it.
+    /// A successful return consumes one notification; the future must not stay
+    /// ready merely because previously known work still exists. Notifications
+    /// may be coalesced and are advisory; store reads remain authoritative.
+    async fn wait_for_durable_wake(&self) -> Result<(), ScheduleStoreError>;
+
     async fn get_store_time_utc(&self) -> Result<DateTime<Utc>, ScheduleStoreError>;
+
+    async fn next_action_time_utc(&self) -> Result<ScheduleStoreActionTime, ScheduleStoreError>;
+
+    /// Read one bounded page from the durable refill-work projection.
+    ///
+    /// Every backend must implement this explicitly. A list-based default
+    /// would silently recreate the O(all schedules) production defect for
+    /// custom/remote stores. `store_now_utc`, each schedule row, its refill
+    /// token, and the complete set of current-revision Pending occurrences
+    /// must come from one coherent store snapshot. Poisoned payloads are
+    /// reported as row faults and must not pin the page cursor forever.
+    async fn read_due_refill_candidates(
+        &self,
+        limit: usize,
+    ) -> Result<ScheduleRefillBatch, ScheduleStoreError>;
 
     async fn commit_schedule_write(
         &self,
@@ -270,6 +399,29 @@ pub trait ScheduleStore: Send + Sync {
         occurrences: Vec<AuthorizedOccurrenceWrite>,
     ) -> Result<Schedule, ScheduleStoreError>;
 
+    /// Atomically commit a machine-authorized planning mutation and its exact
+    /// next mechanical refill deadline. Backends must also make active
+    /// create/resume/revision changes due for planning and re-enqueue an
+    /// active schedule when a current-revision Pending occurrence leaves
+    /// Pending; otherwise a cleared deadline can lose work.
+    async fn commit_schedule_refill(
+        &self,
+        schedule: AuthorizedScheduleWrite,
+        occurrences: Vec<AuthorizedOccurrenceWrite>,
+        next_refill_at_utc: Option<DateTime<Utc>>,
+    ) -> Result<Schedule, ScheduleStoreError>;
+
+    /// CAS-acknowledge a refill candidate that produced no canonical schedule
+    /// mutation. The expected durable deadline prevents a stale planner from
+    /// overwriting another host's newer plan at the same schedule revision.
+    async fn record_refill_deadline_if_current(
+        &self,
+        schedule_id: &ScheduleId,
+        expected_revision: ScheduleRevision,
+        expected_refill_at_utc: DateTime<Utc>,
+        next_refill_at_utc: Option<DateTime<Utc>>,
+    ) -> Result<(), ScheduleStoreError>;
+
     async fn get_occurrence(
         &self,
         occurrence_id: &OccurrenceId,
@@ -291,6 +443,11 @@ pub trait ScheduleStore: Send + Sync {
         &self,
         request: ClaimDueRequest,
     ) -> Result<ClaimDueResult, ScheduleStoreError>;
+
+    async fn renew_occurrence_lease_if_current(
+        &self,
+        request: RenewOccurrenceLeaseRequest,
+    ) -> Result<RenewOccurrenceLeaseResult, ScheduleStoreError>;
 
     /// Attempt to apply `transition` to the occurrence identified by
     /// `occurrence_id`, gated on the claim evidence matching the durable row.
@@ -325,7 +482,28 @@ impl ScheduleStore for DisabledScheduleStore {
         ScheduleStoreKind::Disabled
     }
 
+    fn wake_mode(&self) -> ScheduleStoreWakeMode {
+        ScheduleStoreWakeMode::ProcessLocal
+    }
+
+    async fn wait_for_durable_wake(&self) -> Result<(), ScheduleStoreError> {
+        Err(ScheduleStoreError::DurableWakeUnsupported {
+            backend: self.kind(),
+        })
+    }
+
     async fn get_store_time_utc(&self) -> Result<DateTime<Utc>, ScheduleStoreError> {
+        Err(unsupported(self.kind()))
+    }
+
+    async fn next_action_time_utc(&self) -> Result<ScheduleStoreActionTime, ScheduleStoreError> {
+        Err(unsupported(self.kind()))
+    }
+
+    async fn read_due_refill_candidates(
+        &self,
+        _limit: usize,
+    ) -> Result<ScheduleRefillBatch, ScheduleStoreError> {
         Err(unsupported(self.kind()))
     }
 
@@ -365,6 +543,25 @@ impl ScheduleStore for DisabledScheduleStore {
         Err(unsupported(self.kind()))
     }
 
+    async fn commit_schedule_refill(
+        &self,
+        _schedule: AuthorizedScheduleWrite,
+        _occurrences: Vec<AuthorizedOccurrenceWrite>,
+        _next_refill_at_utc: Option<DateTime<Utc>>,
+    ) -> Result<Schedule, ScheduleStoreError> {
+        Err(unsupported(self.kind()))
+    }
+
+    async fn record_refill_deadline_if_current(
+        &self,
+        _schedule_id: &ScheduleId,
+        _expected_revision: ScheduleRevision,
+        _expected_refill_at_utc: DateTime<Utc>,
+        _next_refill_at_utc: Option<DateTime<Utc>>,
+    ) -> Result<(), ScheduleStoreError> {
+        Err(unsupported(self.kind()))
+    }
+
     async fn get_occurrence(
         &self,
         _occurrence_id: &OccurrenceId,
@@ -394,6 +591,13 @@ impl ScheduleStore for DisabledScheduleStore {
         &self,
         _request: ClaimDueRequest,
     ) -> Result<ClaimDueResult, ScheduleStoreError> {
+        Err(unsupported(self.kind()))
+    }
+
+    async fn renew_occurrence_lease_if_current(
+        &self,
+        _request: RenewOccurrenceLeaseRequest,
+    ) -> Result<RenewOccurrenceLeaseResult, ScheduleStoreError> {
         Err(unsupported(self.kind()))
     }
 
@@ -429,11 +633,191 @@ struct MemoryScheduleState {
     schedules: BTreeMap<ScheduleId, Schedule>,
     occurrences: BTreeMap<OccurrenceId, Occurrence>,
     receipts: BTreeMap<OccurrenceId, Vec<DeliveryReceipt>>,
+    refill_deadlines: BTreeMap<ScheduleId, DateTime<Utc>>,
+    refill_queue: BTreeSet<(DateTime<Utc>, ScheduleId)>,
+    refill_scan_cursor: Option<(DateTime<Utc>, ScheduleId)>,
+}
+
+fn memory_set_schedule_refill_deadline(
+    state: &mut MemoryScheduleState,
+    schedule_id: &ScheduleId,
+    deadline: Option<DateTime<Utc>>,
+) {
+    if let Some(previous) = state.refill_deadlines.remove(schedule_id) {
+        state.refill_queue.remove(&(previous, schedule_id.clone()));
+    }
+    if let Some(deadline) = deadline {
+        state.refill_deadlines.insert(schedule_id.clone(), deadline);
+        state.refill_queue.insert((deadline, schedule_id.clone()));
+    }
+}
+
+fn memory_update_schedule_refill_projection(
+    state: &mut MemoryScheduleState,
+    previous: Option<&Schedule>,
+    schedule: &Schedule,
+    exact_deadline: Option<Option<DateTime<Utc>>>,
+) {
+    if schedule.phase != SchedulePhase::Active {
+        memory_set_schedule_refill_deadline(state, &schedule.schedule_id, None);
+        return;
+    }
+    if let Some(deadline) = exact_deadline {
+        memory_set_schedule_refill_deadline(state, &schedule.schedule_id, deadline);
+        return;
+    }
+    let must_enqueue = previous.is_none_or(|previous| {
+        previous.phase != SchedulePhase::Active || previous.revision != schedule.revision
+    });
+    if must_enqueue || !state.refill_deadlines.contains_key(&schedule.schedule_id) {
+        memory_set_schedule_refill_deadline(state, &schedule.schedule_id, Some(Utc::now()));
+    }
+}
+
+fn memory_note_pending_departure(
+    state: &mut MemoryScheduleState,
+    previous: &Occurrence,
+    updated: Option<&Occurrence>,
+    store_now_utc: DateTime<Utc>,
+) {
+    if previous.phase != OccurrencePhase::Pending
+        || updated.is_some_and(|updated| {
+            updated.phase == OccurrencePhase::Pending
+                && updated.schedule_id == previous.schedule_id
+                && updated.schedule_revision == previous.schedule_revision
+        })
+    {
+        return;
+    }
+    let should_enqueue = state
+        .schedules
+        .get(&previous.schedule_id)
+        .is_some_and(|schedule| {
+            schedule.phase == SchedulePhase::Active
+                && schedule.revision == previous.schedule_revision
+        });
+    if should_enqueue {
+        let deadline = state
+            .refill_deadlines
+            .get(&previous.schedule_id)
+            .copied()
+            .unwrap_or(store_now_utc)
+            .min(store_now_utc);
+        memory_set_schedule_refill_deadline(state, &previous.schedule_id, Some(deadline));
+    }
 }
 
 impl MemoryScheduleStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    async fn commit_schedule_mutation_with_refill(
+        &self,
+        schedule: AuthorizedScheduleWrite,
+        occurrences: Vec<AuthorizedOccurrenceWrite>,
+        exact_refill_deadline: Option<Option<DateTime<Utc>>>,
+    ) -> Result<Schedule, ScheduleStoreError> {
+        let mut state = self.inner.write().await;
+        let previous_schedule = state.schedules.get(schedule.schedule_id()).cloned();
+        schedule
+            .precondition()
+            .check_current(state.schedules.get(schedule.schedule_id()))
+            .map_err(ScheduleStoreError::Concurrency)?;
+        for occurrence in &occurrences {
+            occurrence
+                .precondition()
+                .check_current(state.occurrences.get(occurrence.occurrence_id()))
+                .map_err(ScheduleStoreError::Concurrency)?;
+        }
+        let (schedule, supersession) = schedule.into_parts();
+        let mut committed_schedule = schedule;
+        committed_schedule
+            .validate_machine_projection()
+            .map_err(ScheduleStoreError::Internal)?;
+        state.schedules.insert(
+            committed_schedule.schedule_id.clone(),
+            committed_schedule.clone(),
+        );
+        for occurrence in occurrences {
+            let previous = state.occurrences.get(occurrence.occurrence_id()).cloned();
+            let occurrence = occurrence.into_occurrence();
+            occurrence
+                .validate_machine_projection()
+                .map_err(ScheduleStoreError::Internal)?;
+            if let Some(previous) = previous.as_ref() {
+                memory_note_pending_departure(&mut state, previous, Some(&occurrence), Utc::now());
+            }
+            state
+                .occurrences
+                .insert(occurrence.occurrence_id.clone(), occurrence);
+        }
+        let mut occurrence_acks = Vec::new();
+        if let Some(supersession) = supersession {
+            let occurrence_ids: Vec<OccurrenceId> = state
+                .occurrences
+                .values()
+                .filter(|occurrence| {
+                    occurrence.schedule_id == committed_schedule.schedule_id
+                        && !occurrence.is_terminal()
+                        && occurrence.schedule_revision < supersession.superseded_by_revision()
+                })
+                .map(|occurrence| occurrence.occurrence_id.clone())
+                .collect();
+            for occurrence_id in occurrence_ids {
+                let current = state
+                    .occurrences
+                    .get(&occurrence_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        ScheduleStoreError::Internal(format!(
+                            "occurrence {occurrence_id} disappeared during supersession sweep"
+                        ))
+                    })?;
+                let mutator = current
+                    .clone()
+                    .apply(OccurrenceLifecycleInput::Supersede {
+                        superseded_by_revision: supersession.superseded_by_revision(),
+                        at_utc: supersession.at_utc(),
+                    })
+                    .map_err(|error| ScheduleStoreError::Internal(error.to_string()))?;
+                let (updated, _effects, acks) = mutator.into_parts_with_supersession_feedback();
+                // The commit-time sweep is the sole receipt minter for
+                // supersession (0.7.2 D1). Mint exactly one superseded receipt
+                // per swept row; later driver paths that encounter an already-
+                // Superseded occurrence must not mint a second one.
+                let receipt = updated
+                    .delivery_receipt_from_authority(None)
+                    .map_err(|error| ScheduleStoreError::Internal(error.to_string()))?;
+                state
+                    .receipts
+                    .entry(updated.occurrence_id.clone())
+                    .or_default()
+                    .push(receipt);
+                occurrence_acks.extend(acks);
+                memory_note_pending_departure(
+                    &mut state,
+                    &current,
+                    Some(&updated),
+                    supersession.at_utc(),
+                );
+                state
+                    .occurrences
+                    .insert(updated.occurrence_id.clone(), updated);
+            }
+        }
+        committed_schedule = apply_supersession_feedback(committed_schedule, occurrence_acks)?;
+        state.schedules.insert(
+            committed_schedule.schedule_id.clone(),
+            committed_schedule.clone(),
+        );
+        memory_update_schedule_refill_projection(
+            &mut state,
+            previous_schedule.as_ref(),
+            &committed_schedule,
+            exact_refill_deadline,
+        );
+        Ok(committed_schedule)
     }
 }
 
@@ -443,8 +827,121 @@ impl ScheduleStore for MemoryScheduleStore {
         ScheduleStoreKind::Memory
     }
 
+    fn wake_mode(&self) -> ScheduleStoreWakeMode {
+        ScheduleStoreWakeMode::ProcessLocal
+    }
+
+    async fn wait_for_durable_wake(&self) -> Result<(), ScheduleStoreError> {
+        Err(ScheduleStoreError::DurableWakeUnsupported {
+            backend: self.kind(),
+        })
+    }
+
     async fn get_store_time_utc(&self) -> Result<DateTime<Utc>, ScheduleStoreError> {
         Ok(Utc::now())
+    }
+
+    async fn next_action_time_utc(&self) -> Result<ScheduleStoreActionTime, ScheduleStoreError> {
+        let store_now_utc = Utc::now();
+        let state = self.inner.read().await;
+        let next_occurrence_action_at_utc = state
+            .occurrences
+            .values()
+            .filter(|occurrence| {
+                state
+                    .schedules
+                    .get(&occurrence.schedule_id)
+                    .is_some_and(|schedule| schedule.phase == SchedulePhase::Active)
+            })
+            .filter_map(occurrence_next_action_at)
+            .min();
+        let next_refill_at_utc = state.refill_queue.first().map(|(deadline, _)| *deadline);
+        let next_action_at_utc = match (next_occurrence_action_at_utc, next_refill_at_utc) {
+            (Some(occurrence), Some(refill)) => Some(occurrence.min(refill)),
+            (Some(occurrence), None) => Some(occurrence),
+            (None, Some(refill)) => Some(refill),
+            (None, None) => None,
+        };
+        Ok(ScheduleStoreActionTime {
+            store_now_utc,
+            next_action_at_utc,
+        })
+    }
+
+    async fn read_due_refill_candidates(
+        &self,
+        limit: usize,
+    ) -> Result<ScheduleRefillBatch, ScheduleStoreError> {
+        let store_now_utc = Utc::now();
+        if limit == 0 {
+            return Ok(ScheduleRefillBatch {
+                store_now_utc,
+                candidates: Vec::new(),
+                row_faults: Vec::new(),
+            });
+        }
+        let mut state = self.inner.write().await;
+        let mut due = if let Some(cursor) = state.refill_scan_cursor.as_ref() {
+            state
+                .refill_queue
+                .range((Excluded(cursor.clone()), Unbounded))
+                .take_while(|(deadline, _)| *deadline <= store_now_utc)
+                .take(limit)
+                .cloned()
+                .collect::<Vec<_>>()
+        } else {
+            state
+                .refill_queue
+                .iter()
+                .take_while(|(deadline, _)| *deadline <= store_now_utc)
+                .take(limit)
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        if due.len() < limit
+            && let Some(cursor) = state.refill_scan_cursor.as_ref()
+        {
+            let remaining = limit - due.len();
+            due.extend(
+                state
+                    .refill_queue
+                    .range(..=cursor.clone())
+                    .take_while(|(deadline, _)| *deadline <= store_now_utc)
+                    .take(remaining)
+                    .cloned(),
+            );
+        }
+        state.refill_scan_cursor = due.last().cloned();
+
+        let candidates = due
+            .into_iter()
+            .filter_map(|(refill_at_utc, schedule_id)| {
+                let schedule = state.schedules.get(&schedule_id)?.clone();
+                if schedule.phase != SchedulePhase::Active {
+                    return None;
+                }
+                let pending_occurrences = state
+                    .occurrences
+                    .values()
+                    .filter(|occurrence| {
+                        occurrence.schedule_id == schedule_id
+                            && occurrence.schedule_revision == schedule.revision
+                            && occurrence.phase == OccurrencePhase::Pending
+                    })
+                    .cloned()
+                    .collect();
+                Some(ScheduleRefillCandidate {
+                    schedule,
+                    pending_occurrences,
+                    refill_at_utc,
+                })
+            })
+            .collect();
+        Ok(ScheduleRefillBatch {
+            store_now_utc,
+            candidates,
+            row_faults: Vec::new(),
+        })
     }
 
     async fn commit_schedule_write(
@@ -457,10 +954,12 @@ impl ScheduleStore for MemoryScheduleStore {
             .precondition()
             .check_current(state.schedules.get(write.schedule_id()))
             .map_err(ScheduleStoreError::Concurrency)?;
+        let previous = state.schedules.get(write.schedule_id()).cloned();
         let schedule = write.into_schedule();
         schedule
             .validate_machine_projection()
             .map_err(ScheduleStoreError::Internal)?;
+        memory_update_schedule_refill_projection(&mut state, previous.as_ref(), &schedule, None);
         state
             .schedules
             .insert(schedule.schedule_id.clone(), schedule);
@@ -507,10 +1006,14 @@ impl ScheduleStore for MemoryScheduleStore {
             .precondition()
             .check_current(state.occurrences.get(write.occurrence_id()))
             .map_err(ScheduleStoreError::Concurrency)?;
+        let previous = state.occurrences.get(write.occurrence_id()).cloned();
         let occurrence = write.into_occurrence();
         occurrence
             .validate_machine_projection()
             .map_err(ScheduleStoreError::Internal)?;
+        if let Some(previous) = previous.as_ref() {
+            memory_note_pending_departure(&mut state, previous, Some(&occurrence), Utc::now());
+        }
         state
             .occurrences
             .insert(occurrence.occurrence_id.clone(), occurrence);
@@ -522,88 +1025,48 @@ impl ScheduleStore for MemoryScheduleStore {
         schedule: AuthorizedScheduleWrite,
         occurrences: Vec<AuthorizedOccurrenceWrite>,
     ) -> Result<Schedule, ScheduleStoreError> {
+        self.commit_schedule_mutation_with_refill(schedule, occurrences, None)
+            .await
+    }
+
+    async fn commit_schedule_refill(
+        &self,
+        schedule: AuthorizedScheduleWrite,
+        occurrences: Vec<AuthorizedOccurrenceWrite>,
+        next_refill_at_utc: Option<DateTime<Utc>>,
+    ) -> Result<Schedule, ScheduleStoreError> {
+        self.commit_schedule_mutation_with_refill(schedule, occurrences, Some(next_refill_at_utc))
+            .await
+    }
+
+    async fn record_refill_deadline_if_current(
+        &self,
+        schedule_id: &ScheduleId,
+        expected_revision: ScheduleRevision,
+        expected_refill_at_utc: DateTime<Utc>,
+        next_refill_at_utc: Option<DateTime<Utc>>,
+    ) -> Result<(), ScheduleStoreError> {
         let mut state = self.inner.write().await;
-        schedule
-            .precondition()
-            .check_current(state.schedules.get(schedule.schedule_id()))
-            .map_err(ScheduleStoreError::Concurrency)?;
-        for occurrence in &occurrences {
-            occurrence
-                .precondition()
-                .check_current(state.occurrences.get(occurrence.occurrence_id()))
-                .map_err(ScheduleStoreError::Concurrency)?;
-        }
-        let (schedule, supersession) = schedule.into_parts();
-        let mut committed_schedule = schedule;
-        committed_schedule
-            .validate_machine_projection()
-            .map_err(ScheduleStoreError::Internal)?;
-        state.schedules.insert(
-            committed_schedule.schedule_id.clone(),
-            committed_schedule.clone(),
-        );
-        for occurrence in occurrences {
-            let occurrence = occurrence.into_occurrence();
-            occurrence
-                .validate_machine_projection()
-                .map_err(ScheduleStoreError::Internal)?;
-            state
-                .occurrences
-                .insert(occurrence.occurrence_id.clone(), occurrence);
-        }
-        let mut occurrence_acks = Vec::new();
-        if let Some(supersession) = supersession {
-            let occurrence_ids: Vec<OccurrenceId> = state
-                .occurrences
-                .values()
-                .filter(|occurrence| {
-                    occurrence.schedule_id == committed_schedule.schedule_id
-                        && !occurrence.is_terminal()
-                        && occurrence.schedule_revision < supersession.superseded_by_revision()
-                })
-                .map(|occurrence| occurrence.occurrence_id.clone())
-                .collect();
-            for occurrence_id in occurrence_ids {
-                let current = state
-                    .occurrences
-                    .get(&occurrence_id)
-                    .cloned()
-                    .ok_or_else(|| {
-                        ScheduleStoreError::Internal(format!(
-                            "occurrence {occurrence_id} disappeared during supersession sweep"
-                        ))
-                    })?;
-                let mutator = current
-                    .apply(OccurrenceLifecycleInput::Supersede {
-                        superseded_by_revision: supersession.superseded_by_revision(),
-                        at_utc: supersession.at_utc(),
-                    })
-                    .map_err(|error| ScheduleStoreError::Internal(error.to_string()))?;
-                let (updated, _effects, acks) = mutator.into_parts_with_supersession_feedback();
-                // The commit-time sweep is the sole receipt minter for
-                // supersession (0.7.2 D1). Mint exactly one superseded receipt
-                // per swept row; later driver paths that encounter an already-
-                // Superseded occurrence must not mint a second one.
-                let receipt = updated
-                    .delivery_receipt_from_authority(None)
-                    .map_err(|error| ScheduleStoreError::Internal(error.to_string()))?;
-                state
-                    .receipts
-                    .entry(updated.occurrence_id.clone())
-                    .or_default()
-                    .push(receipt);
-                occurrence_acks.extend(acks);
-                state
-                    .occurrences
-                    .insert(updated.occurrence_id.clone(), updated);
+        let schedule = state.schedules.get(schedule_id).cloned().ok_or_else(|| {
+            ScheduleStoreError::ScheduleNotFound {
+                schedule_id: schedule_id.clone(),
             }
+        })?;
+        if schedule.phase != SchedulePhase::Active
+            || schedule.revision != expected_revision
+            || state.refill_deadlines.get(schedule_id) != Some(&expected_refill_at_utc)
+        {
+            return Err(ScheduleStoreError::Concurrency(format!(
+                "schedule {schedule_id} refill token changed"
+            )));
         }
-        committed_schedule = apply_supersession_feedback(committed_schedule, occurrence_acks)?;
-        state.schedules.insert(
-            committed_schedule.schedule_id.clone(),
-            committed_schedule.clone(),
+        memory_update_schedule_refill_projection(
+            &mut state,
+            Some(&schedule),
+            &schedule,
+            Some(next_refill_at_utc),
         );
-        Ok(committed_schedule)
+        Ok(())
     }
 
     async fn get_occurrence(
@@ -666,6 +1129,7 @@ impl ScheduleStore for MemoryScheduleStore {
             });
         };
         let updated = occurrence
+            .clone()
             .apply(OccurrenceLifecycleInput::RecordReceipt {
                 runtime_outcome: receipt.runtime_outcome.clone(),
                 receipt: receipt.clone(),
@@ -682,6 +1146,7 @@ impl ScheduleStore for MemoryScheduleStore {
             .entry(receipt.occurrence_id.clone())
             .or_default()
             .push(canonical_receipt);
+        memory_note_pending_departure(&mut state, &occurrence, Some(&updated), Utc::now());
         state
             .occurrences
             .insert(updated.occurrence_id.clone(), updated);
@@ -707,6 +1172,13 @@ impl ScheduleStore for MemoryScheduleStore {
         request: ClaimDueRequest,
     ) -> Result<ClaimDueResult, ScheduleStoreError> {
         let store_now_utc = Utc::now();
+        if request.limit == 0 {
+            return Ok(ClaimDueResult {
+                store_now_utc,
+                claimed: Vec::new(),
+                row_faults: Vec::new(),
+            });
+        }
         let mut state = self.inner.write().await;
 
         let active_schedules: BTreeMap<ScheduleId, SchedulePhase> = state
@@ -722,10 +1194,13 @@ impl ScheduleStore for MemoryScheduleStore {
                 active_schedules
                     .get(&occurrence.schedule_id)
                     .is_some_and(|phase| *phase == SchedulePhase::Active)
+                    && occurrence_next_action_at(occurrence)
+                        .is_some_and(|action_at| action_at <= store_now_utc)
             })
             .map(|occurrence| {
                 (
                     (
+                        occurrence_next_action_at(occurrence).unwrap_or(occurrence.due_at_utc),
                         occurrence.due_at_utc,
                         occurrence.schedule_revision,
                         occurrence.occurrence_ordinal,
@@ -770,17 +1245,6 @@ impl ScheduleStore for MemoryScheduleStore {
             };
             match action {
                 Some(OccurrenceDueAction::MisfireRequired) => {
-                    // A live in-process waiter means the delivery is still
-                    // running; terminalizing it as misfired would lie about a
-                    // turn that is actually executing. Leave the row for a
-                    // later tick (once the waiter resolves, the completion —
-                    // or a then-legitimate misfire — accounts for it).
-                    if request
-                        .live_waiter_occurrence_ids
-                        .contains(&existing.occurrence_id)
-                    {
-                        continue;
-                    }
                     let detail = Some(existing.due_misfire_detail_at(store_now_utc));
                     let mut updated =
                         match existing
@@ -834,6 +1298,12 @@ impl ScheduleStore for MemoryScheduleStore {
                         .entry(updated.occurrence_id.clone())
                         .or_default()
                         .push(canonical_receipt);
+                    memory_note_pending_departure(
+                        &mut state,
+                        &existing,
+                        Some(&updated),
+                        store_now_utc,
+                    );
                     state
                         .occurrences
                         .insert(updated.occurrence_id.clone(), updated);
@@ -842,27 +1312,20 @@ impl ScheduleStore for MemoryScheduleStore {
                     if claimed.len() >= request.limit {
                         continue;
                     }
-                    let updated = claim_occurrence(existing, &request, store_now_utc)
+                    let updated = claim_occurrence(existing.clone(), &request, store_now_utc)
                         .map_err(|error| ScheduleStoreError::Concurrency(error.to_string()))?;
+                    memory_note_pending_departure(
+                        &mut state,
+                        &existing,
+                        Some(&updated),
+                        store_now_utc,
+                    );
                     state
                         .occurrences
                         .insert(updated.occurrence_id.clone(), updated.clone());
                     claimed.push(updated);
                 }
                 Some(OccurrenceDueAction::LeaseExpired) => {
-                    // A live in-process waiter means the deliverer is not
-                    // dead — only its lease renewal is late. Reclaiming here
-                    // would mint attempt N+1 while attempt N's turn still
-                    // runs (duplicate delivery) or, past the misfire
-                    // deadline, false-misfire it. Skip; the waiter's renewal
-                    // or completion resolves the row. Post-crash the set is
-                    // empty and the reclaim proceeds as before.
-                    if request
-                        .live_waiter_occurrence_ids
-                        .contains(&existing.occurrence_id)
-                    {
-                        continue;
-                    }
                     if claimed.len() >= request.limit {
                         continue;
                     }
@@ -919,6 +1382,38 @@ impl ScheduleStore for MemoryScheduleStore {
         })
     }
 
+    async fn renew_occurrence_lease_if_current(
+        &self,
+        request: RenewOccurrenceLeaseRequest,
+    ) -> Result<RenewOccurrenceLeaseResult, ScheduleStoreError> {
+        let mut state = self.inner.write().await;
+        let store_now_utc = Utc::now();
+        let Some(current) = state.occurrences.get(&request.occurrence_id).cloned() else {
+            return Ok(RenewOccurrenceLeaseResult {
+                store_now_utc,
+                outcome: RenewOccurrenceLeaseOutcome::StaleClaim,
+            });
+        };
+        if current.attempt_count != request.expected_attempt
+            || current.claim_token() != Some(request.claim_token)
+            || current.claimed_by.as_deref() != Some(request.expected_owner_id.as_str())
+        {
+            return Ok(RenewOccurrenceLeaseResult {
+                store_now_utc,
+                outcome: RenewOccurrenceLeaseOutcome::StaleClaim,
+            });
+        }
+        let renewed = renew_occurrence_lease(current, &request, store_now_utc)
+            .map_err(|error| ScheduleStoreError::Concurrency(error.to_string()))?;
+        state
+            .occurrences
+            .insert(renewed.occurrence_id.clone(), renewed.clone());
+        Ok(RenewOccurrenceLeaseResult {
+            store_now_utc,
+            outcome: RenewOccurrenceLeaseOutcome::Renewed(renewed),
+        })
+    }
+
     async fn transition_occurrence_if_current(
         &self,
         occurrence_id: &OccurrenceId,
@@ -936,9 +1431,11 @@ impl ScheduleStore for MemoryScheduleStore {
             return Ok(None);
         }
         let mutator = current
+            .clone()
             .apply(transition)
             .map_err(|error| ScheduleStoreError::Concurrency(error.to_string()))?;
         let (updated, effects) = mutator.into_parts();
+        memory_note_pending_departure(&mut state, &current, Some(&updated), Utc::now());
         state
             .occurrences
             .insert(updated.occurrence_id.clone(), updated.clone());
@@ -963,6 +1460,7 @@ impl ScheduleStore for MemoryScheduleStore {
             return Ok(None);
         }
         let terminalized = current
+            .clone()
             .apply(transition)
             .map_err(|error| ScheduleStoreError::Concurrency(error.to_string()))?
             .into_occurrence();
@@ -986,6 +1484,7 @@ impl ScheduleStore for MemoryScheduleStore {
             .entry(updated.occurrence_id.clone())
             .or_default()
             .push(canonical_receipt);
+        memory_note_pending_departure(&mut state, &current, Some(&updated), Utc::now());
         state
             .occurrences
             .insert(updated.occurrence_id.clone(), updated.clone());

@@ -29,7 +29,6 @@
 use meerkat_core::types::{ContentInput, SessionId};
 use meerkat_core::{
     AppendSystemContextRequest, AppendSystemContextStatus, Session, SessionLlmIdentity,
-    SessionSystemContextState,
 };
 use meerkat_runtime::meerkat_machine::dsl as machine_dsl;
 use std::collections::{BTreeMap, HashMap};
@@ -47,16 +46,9 @@ use crate::AgentBuildConfig;
 /// [`GeneratedStagedSessionAuthority`], then move payloads to mirror the
 /// accepted generated phase.
 enum StagedPayload {
-    Staged {
-        build_config: Box<AgentBuildConfig>,
-    },
-    Closing {
-        build_config: Box<AgentBuildConfig>,
-    },
-    Promoting {
-        starting_system_context_state: SessionSystemContextState,
-        current_system_context_state: SessionSystemContextState,
-    },
+    Staged { build_config: Box<AgentBuildConfig> },
+    Closing { build_config: Box<AgentBuildConfig> },
+    Promoting,
 }
 
 struct GeneratedStagedSessionAuthority {
@@ -190,18 +182,6 @@ impl GeneratedStagedSessionAuthority {
                 llm_identity: machine_dsl::SessionLlmIdentity::from_domain(effective_llm_identity),
             },
             "UpdateDeferredSessionLlmIdentity",
-        )
-    }
-
-    fn authorize_system_context_append(
-        &mut self,
-        id: &SessionId,
-    ) -> Result<(), StagedLifecycleError> {
-        self.apply(
-            machine_dsl::MeerkatMachineInput::AuthorizeDeferredSessionSystemContextAppend {
-                session_id: machine_dsl::SessionId::from_domain(id),
-            },
-            "AuthorizeDeferredSessionSystemContextAppend",
         )
     }
 
@@ -435,6 +415,10 @@ pub enum StagedLifecycleError {
         context: &'static str,
         reason: String,
     },
+    /// An ordinary staged System-message append conflicted with an existing
+    /// explicit idempotency identity.
+    #[error("staged System-message append rejected: {reason}")]
+    SystemMessageAppend { reason: String },
 }
 
 /// Payload registry for generated-authorized staged sessions.
@@ -545,7 +529,7 @@ impl StagedSessionRegistry {
                 slot.updated_at_secs = updated_at_secs;
                 Ok(true)
             }
-            StagedPayload::Promoting { .. } | StagedPayload::Closing { .. } => {
+            StagedPayload::Promoting | StagedPayload::Closing { .. } => {
                 Err(StagedLifecycleError::AlreadyPromoting(id.clone()))
             }
         }
@@ -565,7 +549,7 @@ impl StagedSessionRegistry {
             return Ok(false);
         };
         match &mut slot.payload {
-            StagedPayload::Promoting { .. } => {
+            StagedPayload::Promoting => {
                 slot.authority
                     .update_keep_alive(id, keep_alive, has_comms_name)?;
                 Ok(true)
@@ -592,7 +576,7 @@ impl StagedSessionRegistry {
             return Ok(false);
         };
         match &mut slot.payload {
-            StagedPayload::Staged { .. } | StagedPayload::Promoting { .. } => {
+            StagedPayload::Staged { .. } | StagedPayload::Promoting => {
                 slot.authority
                     .update_llm_identity(id, effective_llm_identity)?;
                 Ok(true)
@@ -613,7 +597,7 @@ impl StagedSessionRegistry {
         let Some(slot) = slots.get_mut(id) else {
             return Ok(false);
         };
-        if !matches!(slot.payload, StagedPayload::Promoting { .. }) {
+        if !matches!(slot.payload, StagedPayload::Promoting) {
             return Err(StagedLifecycleError::AlreadyPromoting(id.clone()));
         }
         slot.authority.authorize_machine_archived_resume(id)?;
@@ -653,6 +637,47 @@ impl StagedSessionRegistry {
         Ok(())
     }
 
+    /// Append one ordinary ordered System message to an unmaterialized
+    /// staged session.
+    ///
+    /// The staged build's exact resume snapshot is the durable-domain owner:
+    /// this does not create a sidecar, a "current prompt" slot, or replacement
+    /// semantics. The exact [`meerkat_core::CoreRenderable::render_text`]
+    /// projection (including empty or whitespace-only content) becomes one
+    /// distinct transcript row at the current tail.
+    ///
+    /// `Ok(None)` means no staged slot exists, so the caller may route the
+    /// request to the materialized session service.
+    pub async fn append_ordered_system_message(
+        &self,
+        id: &SessionId,
+        req: &AppendSystemContextRequest,
+        updated_at_secs: u64,
+    ) -> Result<Option<AppendSystemContextStatus>, StagedLifecycleError> {
+        let mut slots = self.slots.write().await;
+        let Some(slot) = slots.get_mut(id) else {
+            return Ok(None);
+        };
+        let StagedPayload::Staged { build_config } = &mut slot.payload else {
+            return Err(StagedLifecycleError::AlreadyPromoting(id.clone()));
+        };
+        let session = build_config
+            .resume_session
+            .get_or_insert_with(|| Session::with_id(id.clone()));
+        let status = session
+            .append_system_message_idempotent(
+                req.content.render_text(),
+                req.source.clone(),
+                req.idempotency_key.clone(),
+                meerkat_core::types::message_timestamp_now(),
+            )
+            .map_err(|error| StagedLifecycleError::SystemMessageAppend {
+                reason: error.to_string(),
+            })?;
+        slot.updated_at_secs = updated_at_secs;
+        Ok(Some(status))
+    }
+
     /// Flip a slot from `Staged` to `Promoting` and return the build
     /// payload + metadata. Called at the start of the pending-session
     /// materialization path.
@@ -664,24 +689,14 @@ impl StagedSessionRegistry {
         let Some(slot) = slots.get_mut(id) else {
             return Ok(None);
         };
-        let starting_state = match &slot.payload {
-            StagedPayload::Staged { build_config } => build_config
-                .resume_session
-                .as_ref()
-                .and_then(Session::system_context_state)
-                .unwrap_or_default(),
-            StagedPayload::Promoting { .. } | StagedPayload::Closing { .. } => {
+        match &slot.payload {
+            StagedPayload::Staged { .. } => {}
+            StagedPayload::Promoting | StagedPayload::Closing { .. } => {
                 return Err(StagedLifecycleError::AlreadyPromoting(id.clone()));
             }
-        };
+        }
         slot.authority.begin_promotion(id)?;
-        let payload = std::mem::replace(
-            &mut slot.payload,
-            StagedPayload::Promoting {
-                starting_system_context_state: starting_state.clone(),
-                current_system_context_state: starting_state,
-            },
-        );
+        let payload = std::mem::replace(&mut slot.payload, StagedPayload::Promoting);
         let StagedPayload::Staged { build_config } = payload else {
             return Err(StagedLifecycleError::GeneratedAuthorityRejected {
                 context: "BeginDeferredSessionPromotion",
@@ -704,54 +719,20 @@ impl StagedSessionRegistry {
         }))
     }
 
-    /// Take and remove the system-context states for a slot that is
-    /// `Promoting`. Used when the promotion has succeeded and the service
-    /// has taken over: the caller replays staged system-context appends
-    /// against the live session, then drops the slot entirely.
-    pub async fn take_promoting_system_context_state(
-        &self,
-        id: &SessionId,
-    ) -> Option<(SessionSystemContextState, SessionSystemContextState)> {
+    /// Finish a successful promotion and remove the bulky staged payload.
+    pub async fn finish_promotion(&self, id: &SessionId) -> bool {
         let mut slots = self.slots.write().await;
-        let should_remove = {
-            let slot = slots.get_mut(id)?;
-            if slot.authority.finish_promotion(id).is_err() {
-                return None;
-            }
-            true
+        let Some(slot) = slots.get_mut(id) else {
+            return false;
         };
-        if !should_remove {
-            return None;
+        if !matches!(slot.payload, StagedPayload::Promoting) {
+            return false;
         }
-        let slot = slots.remove(id)?;
-        match slot.payload {
-            StagedPayload::Promoting {
-                starting_system_context_state,
-                current_system_context_state,
-            } => Some((starting_system_context_state, current_system_context_state)),
-            StagedPayload::Staged { .. } | StagedPayload::Closing { .. } => None,
+        if slot.authority.finish_promotion(id).is_err() {
+            return false;
         }
-    }
-
-    /// Clone the system-context states for a slot that is currently
-    /// `Promoting` without removing the slot. Rollback paths use this before
-    /// restoring the slot to `Staged`.
-    pub async fn promoting_system_context_state(
-        &self,
-        id: &SessionId,
-    ) -> Option<(SessionSystemContextState, SessionSystemContextState)> {
-        let slots = self.slots.read().await;
-        let slot = slots.get(id)?;
-        match &slot.payload {
-            StagedPayload::Promoting {
-                starting_system_context_state,
-                current_system_context_state,
-            } => Some((
-                starting_system_context_state.clone(),
-                current_system_context_state.clone(),
-            )),
-            StagedPayload::Staged { .. } | StagedPayload::Closing { .. } => None,
-        }
+        slots.remove(id);
+        true
     }
 
     /// Restore a slot from `Promoting` back to `Staged` when override
@@ -773,7 +754,7 @@ impl StagedSessionRegistry {
         let Some(slot) = slots.get_mut(&id) else {
             return false;
         };
-        if !matches!(slot.payload, StagedPayload::Promoting { .. }) {
+        if !matches!(slot.payload, StagedPayload::Promoting) {
             return false;
         }
         if slot.authority.abandon_promotion(&id).is_err() {
@@ -802,13 +783,7 @@ impl StagedSessionRegistry {
         match &mut slot.payload {
             StagedPayload::Staged { .. } => {
                 slot.authority.begin_archive(id)?;
-                let payload = std::mem::replace(
-                    &mut slot.payload,
-                    StagedPayload::Promoting {
-                        starting_system_context_state: SessionSystemContextState::default(),
-                        current_system_context_state: SessionSystemContextState::default(),
-                    },
-                );
+                let payload = std::mem::replace(&mut slot.payload, StagedPayload::Promoting);
                 let StagedPayload::Staged { build_config } = payload else {
                     return Err(StagedLifecycleError::GeneratedAuthorityRejected {
                         context: "BeginDeferredSessionArchive",
@@ -818,7 +793,7 @@ impl StagedSessionRegistry {
                 slot.payload = StagedPayload::Closing { build_config };
                 Ok(true)
             }
-            StagedPayload::Promoting { .. } | StagedPayload::Closing { .. } => {
+            StagedPayload::Promoting | StagedPayload::Closing { .. } => {
                 Err(StagedLifecycleError::AlreadyPromoting(id.clone()))
             }
         }
@@ -836,13 +811,7 @@ impl StagedSessionRegistry {
         if slot.authority.restore_archive(id).is_err() {
             return false;
         }
-        let payload = std::mem::replace(
-            &mut slot.payload,
-            StagedPayload::Promoting {
-                starting_system_context_state: SessionSystemContextState::default(),
-                current_system_context_state: SessionSystemContextState::default(),
-            },
-        );
+        let payload = std::mem::replace(&mut slot.payload, StagedPayload::Promoting);
         let StagedPayload::Closing { build_config } = payload else {
             return false;
         };
@@ -905,85 +874,6 @@ impl StagedSessionRegistry {
     pub async fn clear(&self) {
         let mut slots = self.slots.write().await;
         slots.retain(|id, slot| slot.authority.drop_session(id).is_err());
-    }
-
-    /// Apply a system-context append against a staged or promoting slot.
-    /// Mutates the slot in place and bumps `updated_at_secs`.
-    ///
-    /// `now_secs` is the caller-supplied Unix seconds for the mutation timestamp.
-    /// `now_system_time` is the system time stamped on the pending append entry.
-    pub async fn append_system_context(
-        &self,
-        id: &SessionId,
-        req: &AppendSystemContextRequest,
-        now_system_time: meerkat_core::time_compat::SystemTime,
-        now_secs: u64,
-    ) -> Option<Result<AppendSystemContextStatus, meerkat_core::SystemContextStageError>> {
-        let mut slots = self.slots.write().await;
-        let slot = slots.get_mut(id)?;
-        let result = match &mut slot.payload {
-            StagedPayload::Staged { build_config } => {
-                if let Err(err) = slot.authority.authorize_system_context_append(id) {
-                    return Some(Err(meerkat_core::SystemContextStageError::InvalidRequest(
-                        format!(
-                            "generated staged-session system-context authority rejected append: {err}"
-                        ),
-                    )));
-                }
-                let session = build_config
-                    .resume_session
-                    .get_or_insert_with(|| Session::with_id(id.clone()));
-                let mut state = match session.try_system_context_state() {
-                    Ok(state) => state.unwrap_or_default(),
-                    Err(err) => {
-                        return Some(Err(meerkat_core::SystemContextStageError::InvalidRequest(
-                            format!(
-                                "generated system-context authority rejected staged restore: {err}"
-                            ),
-                        )));
-                    }
-                };
-                let stage_result = state.stage_append(req, now_system_time);
-                match stage_result {
-                    Ok(status) => match session.set_system_context_state(state) {
-                        Ok(()) => Ok(status),
-                        Err(_) => {
-                            // Serialization failure — surface via a dedicated
-                            // `InvalidRequest` since the callers currently map
-                            // this to an internal error anyway. We preserve the
-                            // existing contract by letting the caller treat a
-                            // serialization failure as a post-stage problem.
-                            Err(meerkat_core::SystemContextStageError::InvalidRequest(
-                                "failed to serialize system-context state".to_string(),
-                            ))
-                        }
-                    },
-                    Err(e) => Err(e),
-                }
-            }
-            StagedPayload::Promoting {
-                current_system_context_state,
-                ..
-            } => {
-                if let Err(err) = slot.authority.authorize_system_context_append(id) {
-                    return Some(Err(meerkat_core::SystemContextStageError::InvalidRequest(
-                        format!(
-                            "generated staged-session system-context authority rejected append: {err}"
-                        ),
-                    )));
-                }
-                current_system_context_state.stage_append(req, now_system_time)
-            }
-            StagedPayload::Closing { .. } => {
-                Err(meerkat_core::SystemContextStageError::InvalidRequest(
-                    "session is being archived".to_string(),
-                ))
-            }
-        };
-        if result.is_ok() {
-            slot.updated_at_secs = now_secs;
-        }
-        Some(result)
     }
 
     fn slot_info(slot: &StagedSlot) -> Result<StagedSessionInfo, StagedLifecycleError> {
@@ -1061,8 +951,7 @@ mod tests {
         assert!(info.is_promoting);
         // Dropping the slot from promoting state simulates a successful
         // materialization: registry no longer knows about the session.
-        let states = reg.take_promoting_system_context_state(&id).await;
-        assert!(states.is_some());
+        assert!(reg.finish_promotion(&id).await);
         assert!(!reg.contains(&id).await);
     }
 
@@ -1174,7 +1063,7 @@ mod tests {
             .ok()
             .flatten()
             .expect("initial promotion");
-        assert!(reg.take_promoting_system_context_state(&id).await.is_some());
+        assert!(reg.finish_promotion(&id).await);
         let restored = reg
             .abandon_promotion(
                 id.clone(),
@@ -1240,28 +1129,6 @@ mod tests {
             result,
             Err(StagedLifecycleError::AlreadyStaged(_))
         ));
-    }
-
-    #[tokio::test]
-    async fn append_system_context_mutates_staged_slot() {
-        let reg = StagedSessionRegistry::new();
-        let id = SessionId::new();
-        reg.stage(id.clone(), slot(&id)).await.unwrap();
-        let req = AppendSystemContextRequest {
-            content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
-                "hello".to_string(),
-            ),
-            source: Some("test".to_string()),
-            idempotency_key: Some("k1".to_string()),
-            source_kind: meerkat_core::session::SystemContextSource::Normal,
-            peer_response_terminal: None,
-        };
-        let now = meerkat_core::time_compat::SystemTime::now();
-        let res = reg.append_system_context(&id, &req, now, 200).await;
-        let outcome = res.expect("slot is present");
-        assert!(outcome.is_ok(), "staged append should succeed");
-        let info = reg.info(&id).await.unwrap().unwrap();
-        assert_eq!(info.updated_at_secs, 200);
     }
 
     #[tokio::test]

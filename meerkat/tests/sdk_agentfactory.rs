@@ -458,10 +458,6 @@ async fn public_agentbuilder_matches_factory_session_runtime_invariants() {
         .build_state()
         .expect("public builder should persist factory build state");
     assert_eq!(
-        public_build_state.system_prompt,
-        factory_build_state.system_prompt
-    );
-    assert_eq!(
         public_build_state.call_timeout_override,
         factory_build_state.call_timeout_override
     );

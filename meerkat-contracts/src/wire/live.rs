@@ -130,14 +130,16 @@ pub struct LiveOpenParams {
     /// sent to the realtime provider when the channel opens.
     ///
     /// Omitted means full-seed compatibility: project the complete canonical
-    /// history. A positive value requests a core-owned, whole-turn suffix
-    /// window. The resolved root prompt must fit and is never dropped; an
-    /// existing compaction-summary head may be retained. If any history is
-    /// omitted, the open result reports degraded continuity rather than
-    /// pretending the bounded replay was complete.
+    /// history. A positive value requests a core-owned, whole-turn dialogue
+    /// suffix window; an existing compaction-summary head may be retained. If
+    /// any history is omitted, the open result reports degraded continuity
+    /// rather than pretending the bounded replay was complete.
     ///
-    /// Runtime system context and canonical multimodal identity, tombstone,
-    /// and accounting state remain full sidecars outside this message window.
+    /// Ordered System and SystemNotice messages are excluded from this replay
+    /// budget and projected separately from the full active materialized
+    /// transcript. Optional System message identity is never provider-projected.
+    /// Canonical multimodal identity, tombstone, and accounting state remain
+    /// outside this dialogue window.
     /// `0` is valid at this serde-only wire layer so it can round-trip, but the
     /// `live/open` server validation rejects it; callers must send a positive
     /// value when the field is present.

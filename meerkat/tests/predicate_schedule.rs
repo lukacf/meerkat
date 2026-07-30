@@ -113,6 +113,7 @@ async fn schedule_occurrences_drive_predicate_checkpoint_and_notification_withou
             .run(HostRunnableInvocation {
                 occurrence_id: OccurrenceId::new(),
                 schedule_id: schedule_id.clone(),
+                delivery_idempotency_key: format!("predicate-schedule-test:{timestamp}"),
                 runnable: HostRunnableName::parse("meerkat.predicate.evaluate.v1")
                     .expect("runnable"),
                 trigger_time: Utc
@@ -190,6 +191,7 @@ async fn mismatched_schedule_cannot_reuse_a_predicate_jobs_current_fence() {
         .run(HostRunnableInvocation {
             occurrence_id: OccurrenceId::new(),
             schedule_id: other_schedule,
+            delivery_idempotency_key: "predicate-schedule-test:mismatch".to_string(),
             runnable: HostRunnableName::parse("meerkat.predicate.evaluate.v1").expect("runnable"),
             trigger_time: Utc.timestamp_millis_opt(100).single().expect("timestamp"),
             params: Some(params),
@@ -257,6 +259,7 @@ async fn delayed_occurrence_trigger_time_cannot_write_through_an_expired_job_lea
         .run(HostRunnableInvocation {
             occurrence_id: OccurrenceId::new(),
             schedule_id,
+            delivery_idempotency_key: "predicate-schedule-test:expired".to_string(),
             runnable: HostRunnableName::parse("meerkat.predicate.evaluate.v1").expect("runnable"),
             trigger_time: Utc.timestamp_millis_opt(1).single().expect("timestamp"),
             params: Some(params),

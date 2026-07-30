@@ -2155,20 +2155,25 @@ fn materialize_bazel_plan(
     // (scripts/buildbuddy-e2e-smoke-remote-test) deliberately does not set
     // the variable: there the artifacts are declared inputs of the running
     // bazel test action, so bazel itself guarantees their freshness.
-    let built_outputs = match std::env::var("MEERKAT_E2E_BAZEL_BUILD_EVENTS") {
-        Ok(path) => Some(bazel_build_event_output_names(Path::new(&path))?),
+    let build_provenance = match std::env::var("MEERKAT_E2E_BAZEL_BUILD_EVENTS") {
+        Ok(path) => Some(bazel_build_event_provenance(
+            Path::new(&path),
+            &workspace_root(),
+            bazel_bin_dir,
+        )?),
         Err(_) => None,
     };
 
     for requirement in &plan.requirements {
         match requirement {
             ArtifactRequirement::RustBin(requirement) => {
-                let path = bazel_rust_bin_path(bazel_bin_dir, built_outputs.as_ref(), requirement)?;
+                let path =
+                    bazel_rust_bin_path(bazel_bin_dir, build_provenance.as_ref(), requirement)?;
                 manifest.rust_bins.insert(requirement.bin.clone(), path);
             }
             ArtifactRequirement::RustTest(requirement) => {
                 let path =
-                    bazel_rust_test_path(bazel_bin_dir, built_outputs.as_ref(), requirement)?;
+                    bazel_rust_test_path(bazel_bin_dir, build_provenance.as_ref(), requirement)?;
                 manifest.rust_tests.insert(requirement.key(), path);
             }
             ArtifactRequirement::NodeBuild { cwd } => materialize_node_build(cwd)?,
@@ -2180,18 +2185,94 @@ fn materialize_bazel_plan(
     Ok(plan)
 }
 
-/// Bazel-bin-relative output names recorded by a build's Build Event
-/// Protocol JSON stream (`--build_event_json_file`): every `namedSetOfFiles`
-/// event's `files[].name`. Nested file sets each appear as their own event
-/// in the stream, so a flat scan sees every output file of the invocation.
-fn bazel_build_event_output_names(bep_path: &Path) -> Result<BTreeSet<String>, String> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BazelBuildEventProvenance {
+    invocation_id: String,
+    bazel_bin_prefix: String,
+    output_paths: BTreeSet<String>,
+}
+
+fn canonical_existing_path(path: &Path, label: &str) -> Result<PathBuf, String> {
+    std::fs::canonicalize(path)
+        .map_err(|error| format!("failed to canonicalize {label} {}: {error}", path.display()))
+}
+
+/// Return the execroot-relative path of the exact configuration directory
+/// materialized by this lane, for example
+/// `bazel-out/darwin_arm64-fastbuild/bin`.
+fn canonical_bazel_bin_prefix(bazel_bin_dir: &Path) -> Result<(PathBuf, String), String> {
+    let canonical = canonical_existing_path(bazel_bin_dir, "Bazel bin directory")?;
+    let components = canonical
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(value) => value.to_str().map(str::to_owned),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let bazel_out = components
+        .iter()
+        .position(|component| component == "bazel-out")
+        .ok_or_else(|| {
+            format!(
+                "Bazel bin directory {} is not under an execroot bazel-out configuration",
+                canonical.display()
+            )
+        })?;
+    let prefix = components[bazel_out..].join("/");
+    if !prefix.ends_with("/bin") {
+        return Err(format!(
+            "Bazel bin directory {} does not end in a configuration bin directory",
+            canonical.display()
+        ));
+    }
+    Ok((canonical, prefix))
+}
+
+/// Parse and verify one complete foundation-build BEP stream.
+///
+/// A filename alone is not provenance: the same `pkg/target` may exist under
+/// several Bazel configurations in one warm output base. This receipt binds
+/// the outputs to the exact current `bazel-bin` configuration, the canonical
+/// workspace, the current output base, a non-empty invocation id, the `build`
+/// command, and a successful `buildFinished` terminal.
+fn bazel_build_event_provenance(
+    bep_path: &Path,
+    expected_workspace: &Path,
+    bazel_bin_dir: &Path,
+) -> Result<BazelBuildEventProvenance, String> {
+    let canonical_bep = canonical_existing_path(bep_path, "Bazel build-event provenance")?;
+    let canonical_workspace = canonical_existing_path(expected_workspace, "workspace")?;
+    let (canonical_bazel_bin, bazel_bin_prefix) = canonical_bazel_bin_prefix(bazel_bin_dir)?;
+    let output_base = canonical_bazel_bin
+        .ancestors()
+        .find(|ancestor| ancestor.file_name().and_then(|name| name.to_str()) == Some("execroot"))
+        .and_then(Path::parent)
+        .ok_or_else(|| {
+            format!(
+                "Bazel bin directory {} is not inside an output-base execroot",
+                canonical_bazel_bin.display()
+            )
+        })?;
+    if !canonical_bep.starts_with(output_base) {
+        return Err(format!(
+            "Bazel build-event provenance {} is outside the current output base {}; \
+             refusing a receipt from another lane",
+            canonical_bep.display(),
+            output_base.display()
+        ));
+    }
+
     let raw = std::fs::read_to_string(bep_path).map_err(|error| {
         format!(
             "failed to read Bazel build-event provenance {}: {error}",
             bep_path.display()
         )
     })?;
-    let mut names = BTreeSet::new();
+    let mut invocation_id = None;
+    let mut invocation_workspace = None;
+    let mut invocation_command = None;
+    let mut overall_success = None;
+    let mut output_paths = BTreeSet::new();
     for line in raw.lines() {
         let line = line.trim();
         if line.is_empty() {
@@ -2203,46 +2284,137 @@ fn bazel_build_event_output_names(bep_path: &Path) -> Result<BTreeSet<String>, S
                 bep_path.display()
             )
         })?;
+        if let Some(started) = event.get("started") {
+            if invocation_id.is_some() {
+                return Err(format!(
+                    "Bazel build-event provenance {} records more than one started event",
+                    bep_path.display()
+                ));
+            }
+            invocation_id = started
+                .get("uuid")
+                .and_then(serde_json::Value::as_str)
+                .filter(|uuid| !uuid.is_empty())
+                .map(str::to_owned);
+            invocation_workspace = started
+                .get("workspaceDirectory")
+                .and_then(serde_json::Value::as_str)
+                .map(PathBuf::from);
+            invocation_command = started
+                .get("command")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
+        }
         if let Some(files) = event
             .get("namedSetOfFiles")
             .and_then(|set| set.get("files"))
             .and_then(serde_json::Value::as_array)
         {
             for file in files {
-                if let Some(name) = file.get("name").and_then(serde_json::Value::as_str) {
-                    names.insert(name.to_string());
+                let Some(name) = file.get("name").and_then(serde_json::Value::as_str) else {
+                    continue;
+                };
+                let Some(path_prefix) =
+                    file.get("pathPrefix").and_then(serde_json::Value::as_array)
+                else {
+                    continue;
+                };
+                let Some(path_prefix) = path_prefix
+                    .iter()
+                    .map(serde_json::Value::as_str)
+                    .collect::<Option<Vec<_>>>()
+                else {
+                    continue;
+                };
+                let mut full_path = path_prefix.join("/");
+                if !full_path.is_empty() {
+                    full_path.push('/');
                 }
+                full_path.push_str(name);
+                output_paths.insert(full_path);
             }
         }
+        if let Some(finished) = event.get("finished") {
+            if overall_success.is_some() {
+                return Err(format!(
+                    "Bazel build-event provenance {} records more than one buildFinished event",
+                    bep_path.display()
+                ));
+            }
+            overall_success = finished
+                .get("overallSuccess")
+                .and_then(serde_json::Value::as_bool);
+        }
     }
-    if names.is_empty() {
-        return Err(format!(
-            "Bazel build-event provenance {} records no output files; the foundation \
-             build did not produce artifacts, so nothing under bazel-bin can be trusted",
+
+    let invocation_id = invocation_id.ok_or_else(|| {
+        format!(
+            "Bazel build-event provenance {} has no non-empty invocation id",
             bep_path.display()
+        )
+    })?;
+    let invocation_workspace = invocation_workspace.ok_or_else(|| {
+        format!(
+            "Bazel build-event provenance {} does not bind a workspace directory",
+            bep_path.display()
+        )
+    })?;
+    let invocation_workspace =
+        canonical_existing_path(&invocation_workspace, "BEP workspace directory")?;
+    if invocation_workspace != canonical_workspace {
+        return Err(format!(
+            "Bazel build-event invocation {invocation_id} belongs to workspace {}, not current \
+             workspace {}",
+            invocation_workspace.display(),
+            canonical_workspace.display()
         ));
     }
-    Ok(names)
+    if invocation_command.as_deref() != Some("build") {
+        return Err(format!(
+            "Bazel build-event invocation {invocation_id} records command {:?}, not the \
+             e2e-smoke foundation build",
+            invocation_command.as_deref()
+        ));
+    }
+    if overall_success != Some(true) {
+        return Err(format!(
+            "Bazel build-event invocation {invocation_id} has no successful buildFinished \
+             terminal; partial or failed foundation output is not provenance"
+        ));
+    }
+    if output_paths.is_empty() {
+        return Err(format!(
+            "Bazel build-event invocation {invocation_id} records no configuration-bound output \
+             paths; the foundation build did not produce trustworthy artifacts"
+        ));
+    }
+    Ok(BazelBuildEventProvenance {
+        invocation_id,
+        bazel_bin_prefix,
+        output_paths,
+    })
 }
 
 /// Refuse an artifact path the recorded foundation invocation did not
 /// produce: whatever file sits there is stale output from an earlier build.
 fn require_built_by_recorded_invocation(
-    built_outputs: Option<&BTreeSet<String>>,
+    provenance: Option<&BazelBuildEventProvenance>,
     relative: &str,
     label: &str,
 ) -> Result<(), String> {
-    let Some(outputs) = built_outputs else {
+    let Some(provenance) = provenance else {
         return Ok(());
     };
-    if outputs.contains(relative) {
+    let expected_output = format!("{}/{relative}", provenance.bazel_bin_prefix);
+    if provenance.output_paths.contains(&expected_output) {
         return Ok(());
     }
     Err(format!(
-        "Bazel e2e artifact for {label} ({relative}) is not an output of the foundation \
-         build recorded in MEERKAT_E2E_BAZEL_BUILD_EVENTS; any file at that path is a \
-         stale binary from an earlier invocation. Add the target to the e2e-smoke-rbe \
-         selector in scripts/buildbuddy-bazel-poc and rebuild the foundation"
+        "Bazel e2e artifact for {label} ({expected_output}) is not an output of foundation \
+         invocation {}; any file at that path is stale or belongs to another configuration. \
+         Add the target to the e2e-smoke-rbe selector in scripts/buildbuddy-bazel-poc and \
+         rebuild the foundation",
+        provenance.invocation_id
     ))
 }
 
@@ -2280,7 +2452,7 @@ fn bazel_rust_bin_relative(bin: &str) -> Option<&'static str> {
 
 fn bazel_rust_bin_path(
     bazel_bin_dir: &Path,
-    built_outputs: Option<&BTreeSet<String>>,
+    build_provenance: Option<&BazelBuildEventProvenance>,
     requirement: &RustBinRequirement,
 ) -> Result<PathBuf, String> {
     let relative = bazel_rust_bin_relative(&requirement.bin).ok_or_else(|| {
@@ -2290,7 +2462,7 @@ fn bazel_rust_bin_path(
             requirement.key()
         )
     })?;
-    require_built_by_recorded_invocation(built_outputs, relative, &requirement.key())?;
+    require_built_by_recorded_invocation(build_provenance, relative, &requirement.key())?;
     require_executable_artifact(bazel_bin_dir.join(relative), &requirement.key())
 }
 
@@ -2320,12 +2492,12 @@ fn bazel_rust_test_relative(key: &str) -> Result<&'static str, String> {
 
 fn bazel_rust_test_path(
     bazel_bin_dir: &Path,
-    built_outputs: Option<&BTreeSet<String>>,
+    build_provenance: Option<&BazelBuildEventProvenance>,
     requirement: &RustTestRequirement,
 ) -> Result<PathBuf, String> {
     let key = requirement.key();
     let relative = bazel_rust_test_relative(&key)?;
-    require_built_by_recorded_invocation(built_outputs, relative, &key)?;
+    require_built_by_recorded_invocation(build_provenance, relative, &key)?;
     require_executable_artifact(bazel_bin_dir.join(relative), &key)
 }
 
@@ -5345,23 +5517,19 @@ fn suite_spec(name: &str) -> Option<&'static Spec> {
         "mob-turn-latency" => Some(&Spec {
             id: None,
             lane: Lane::Smoke,
-            title: "Mob turn digest-preimage flatness gate",
+            title: "Mob HeadCanonical turn storage-cost gate",
             // Each smoke scenario builds in its own isolated target dir, so
             // this scenario cold-compiles the smoke_mob_turn_latency test
-            // binary first. The test boots a persistent 3-member mob against
-            // SQLite session + runtime stores, grows one member to a ~10MB
-            // transcript, and drives identical one-word turns at a ~256KB
-            // member and at the ~10MB member. ASSERTED: fixture validity,
-            // the calibrated small-side hashed-bytes band (instrument
-            // honesty), per-fixture boundary-serialization envelopes
-            // (repeated-reserialize backstop), and the large/small
-            // digest-preimage byte ratio (canonical bytes fed to the
-            // content-digest hasher per turn must be document-size
-            // independent). The gate observes ONLY digest-preimage bytes;
-            // the work it deliberately does not measure (copies, memo-hit
-            // decodes, store reads, WAL bytes, encode volume, CPU/wall) is
-            // listed on the gate's doc comment. No live provider: members
-            // run against a scripted LLM client.
+            // binary first. The test boots a persistent 3-member mob with
+            // SQLite SessionStore + RuntimeStore sharing one HeadCanonical
+            // realm DB, grows one member to a ~10MB transcript, and drives
+            // identical one-word ordinary turns at a ~256KB and ~10MB
+            // member. ASSERTED at both sizes: fixed delta-bounded digest
+            // bytes, zero whole-session encode bytes, no whole-BLOB runtime
+            // rows, canonical authority presence, bounded committed
+            // canonical suffix rows/bytes, and bounded database + WAL
+            // growth. CPU/wall are diagnostics only. No live provider:
+            // members run against a scripted LLM client.
             timeout_secs: 1200,
             required_env: &[],
             required_bins: &["cargo"],
@@ -5372,7 +5540,7 @@ fn suite_spec(name: &str) -> Option<&'static Spec> {
             command: CommandSpec::CargoTest {
                 package: "meerkat-mob",
                 test_target: "smoke_mob_turn_latency",
-                test_name: "e2e_smoke_mob_turn_digest_preimage_flatness_gate",
+                test_name: "e2e_smoke_mob_turn_head_canonical_storage_cost_gate",
                 features: &["integration-real-tests"],
                 all_features: false,
             },
@@ -5385,7 +5553,7 @@ fn suite_spec(name: &str) -> Option<&'static Spec> {
 mod tests {
     use super::{
         ArtifactManifest, ArtifactRequirement, CommandLockMode, E2eSelection, ExecutionMode, Lane,
-        SMOKE_ENTRIES, SmokeRuntimeClass, SmokeScheduler, bazel_build_event_output_names,
+        SMOKE_ENTRIES, SmokeRuntimeClass, SmokeScheduler, bazel_build_event_provenance,
         build_commands_for_mode, normalize_command_with_env, order_smoke_specs_for_runtime,
         plan_for_selection, pre_command_lock_mode, repo_cargo,
         require_built_by_recorded_invocation, sanitize_artifact_key, scenario_spec,
@@ -5397,32 +5565,52 @@ mod tests {
     use tokio::sync::Semaphore;
     use tokio::time::{Duration, timeout};
 
+    fn build_event_fixture_paths(temp: &tempfile::TempDir) -> (PathBuf, PathBuf, PathBuf) {
+        let workspace = temp.path().join("workspace");
+        let output_base = temp.path().join("output-base");
+        let bazel_bin = output_base.join("execroot/_main/bazel-out/darwin_arm64-fastbuild/bin");
+        std::fs::create_dir_all(&workspace).expect("create fixture workspace");
+        std::fs::create_dir_all(&bazel_bin).expect("create fixture bazel-bin");
+        (workspace, output_base.join("build-events.json"), bazel_bin)
+    }
+
     #[test]
-    fn build_event_provenance_collects_named_set_output_names() {
+    fn build_event_provenance_binds_successful_invocation_workspace_and_config() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let bep = temp.path().join("build-events.json");
+        let (workspace, bep, bazel_bin) = build_event_fixture_paths(&temp);
         std::fs::write(
             &bep,
-            concat!(
-                r#"{"id":{"started":{}},"started":{"uuid":"abc"}}"#,
-                "\n",
-                r#"{"id":{"namedSet":{"id":"0"}},"namedSetOfFiles":{"files":[{"name":"meerkat-mob/smoke_mob_turn_latency_test","uri":"file:///x","pathPrefix":["bazel-out","darwin_arm64-fastbuild","bin"]}]}}"#,
-                "\n",
-                r#"{"id":{"namedSet":{"id":"1"}},"namedSetOfFiles":{"files":[{"name":"meerkat-cli/rkat"}],"fileSets":[{"id":"0"}]}}"#,
-                "\n",
-                r#"{"id":{"buildFinished":{}},"finished":{"overallSuccess":true}}"#,
-                "\n",
+            format!(
+                concat!(
+                    r#"{{"id":{{"started":{{}}}},"started":{{"uuid":"abc","command":"build","workspaceDirectory":{workspace}}}}}"#,
+                    "\n",
+                    r#"{"id":{"namedSet":{"id":"0"}},"namedSetOfFiles":{"files":[{"name":"meerkat-mob/smoke_mob_turn_latency_test","uri":"file:///x","pathPrefix":["bazel-out","darwin_arm64-fastbuild","bin"]}]}}"#,
+                    "\n",
+                    r#"{"id":{"namedSet":{"id":"1"}},"namedSetOfFiles":{"files":[{"name":"meerkat-cli/rkat","pathPrefix":["bazel-out","darwin_arm64-fastbuild","bin"]}],"fileSets":[{"id":"0"}]}}"#,
+                    "\n",
+                    r#"{"id":{"buildFinished":{}},"finished":{"overallSuccess":true}}"#,
+                    "\n",
+                ),
+                workspace = serde_json::to_string(
+                    workspace.to_str().expect("utf8 fixture workspace")
+                )
+                .expect("encode workspace"),
             ),
         )
         .expect("write BEP fixture");
-        let names = bazel_build_event_output_names(&bep).expect("parse BEP");
-        assert!(names.contains("meerkat-mob/smoke_mob_turn_latency_test"));
-        assert!(names.contains("meerkat-cli/rkat"));
+        let provenance =
+            bazel_build_event_provenance(&bep, &workspace, &bazel_bin).expect("parse BEP");
+        assert_eq!(provenance.invocation_id, "abc");
+        assert_eq!(
+            provenance.bazel_bin_prefix,
+            "bazel-out/darwin_arm64-fastbuild/bin"
+        );
         assert!(
-            require_built_by_recorded_invocation(Some(&names), "meerkat-cli/rkat", "rkat").is_ok()
+            require_built_by_recorded_invocation(Some(&provenance), "meerkat-cli/rkat", "rkat")
+                .is_ok()
         );
         let refusal = require_built_by_recorded_invocation(
-            Some(&names),
+            Some(&provenance),
             "meerkat-mob/smoke_mob_idle_burn_test",
             "meerkat-mob:smoke_mob_idle_burn",
         )
@@ -5433,13 +5621,59 @@ mod tests {
     }
 
     #[test]
-    fn build_event_provenance_refuses_an_empty_stream() {
+    fn build_event_provenance_refuses_partial_failed_or_wrong_config_streams() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let bep = temp.path().join("build-events.json");
-        std::fs::write(&bep, "{\"id\":{\"started\":{}}}\n").expect("write BEP fixture");
-        let error = bazel_build_event_output_names(&bep)
-            .expect_err("a BEP stream with no output files must refuse");
-        assert!(error.contains("records no output files"), "{error}");
+        let (workspace, bep, bazel_bin) = build_event_fixture_paths(&temp);
+        let started = format!(
+            r#"{{"id":{{"started":{{}}}},"started":{{"uuid":"abc","command":"build","workspaceDirectory":{}}}}}"#,
+            serde_json::to_string(workspace.to_str().expect("utf8 fixture workspace"))
+                .expect("encode workspace")
+        );
+        let output = r#"{"id":{"namedSet":{"id":"0"}},"namedSetOfFiles":{"files":[{"name":"meerkat-cli/rkat","pathPrefix":["bazel-out","other-config","bin"]}]}}"#;
+
+        std::fs::write(&bep, format!("{started}\n{output}\n")).expect("write partial BEP");
+        let error = bazel_build_event_provenance(&bep, &workspace, &bazel_bin)
+            .expect_err("a partial BEP stream must refuse");
+        assert!(error.contains("no successful buildFinished"), "{error}");
+
+        std::fs::write(
+            &bep,
+            format!(
+                "{started}\n{output}\n{}\n",
+                r#"{"id":{"buildFinished":{}},"finished":{"overallSuccess":false}}"#
+            ),
+        )
+        .expect("write failed BEP");
+        let error = bazel_build_event_provenance(&bep, &workspace, &bazel_bin)
+            .expect_err("a failed BEP stream must refuse");
+        assert!(error.contains("no successful buildFinished"), "{error}");
+
+        std::fs::write(
+            &bep,
+            format!(
+                "{started}\n{output}\n{}\n",
+                r#"{"id":{"buildFinished":{}},"finished":{"overallSuccess":true}}"#
+            ),
+        )
+        .expect("write wrong-config BEP");
+        let provenance =
+            bazel_build_event_provenance(&bep, &workspace, &bazel_bin).expect("complete BEP");
+        let error =
+            require_built_by_recorded_invocation(Some(&provenance), "meerkat-cli/rkat", "rkat")
+                .expect_err("an output from another configuration must refuse");
+        assert!(error.contains("another configuration"), "{error}");
+
+        let foreign_workspace = temp.path().join("foreign-workspace");
+        std::fs::create_dir(&foreign_workspace).expect("create foreign workspace");
+        let error = bazel_build_event_provenance(&bep, &foreign_workspace, &bazel_bin)
+            .expect_err("a receipt from another workspace must refuse");
+        assert!(error.contains("belongs to workspace"), "{error}");
+
+        let foreign_bep = temp.path().join("foreign-build-events.json");
+        std::fs::copy(&bep, &foreign_bep).expect("copy BEP outside output base");
+        let error = bazel_build_event_provenance(&foreign_bep, &workspace, &bazel_bin)
+            .expect_err("a receipt outside the current output base must refuse");
+        assert!(error.contains("outside the current output base"), "{error}");
     }
 
     /// Every artifact the smoke-lane plan can require from bazel-bin must be

@@ -2890,7 +2890,7 @@ async fn runtime_loop_checkpoints_session_snapshot_after_machine_commit() {
 
         async fn checkpoint_committed_session_snapshot(
             &mut self,
-            session_snapshot: &[u8],
+            session_snapshot: Arc<Vec<u8>>,
         ) -> Result<(), CoreExecutorError> {
             self.checkpoint_calls.fetch_add(1, Ordering::SeqCst);
             let runtime_id = crate::identifiers::LogicalRuntimeId::for_session(&self.session_id);
@@ -2900,7 +2900,30 @@ async fn runtime_loop_checkpoints_session_snapshot_after_machine_commit() {
             )
             .await
             .map_err(|err| CoreExecutorError::Internal(err.to_string()))?;
-            if committed.as_deref() == Some(session_snapshot) {
+            if committed.as_deref() == Some(session_snapshot.as_ref()) {
+                self.observed_committed_snapshot
+                    .store(true, Ordering::SeqCst);
+            }
+            Ok(())
+        }
+
+        async fn acknowledge_whole_blob_session_boundary(
+            &mut self,
+            committed_store_revision: u64,
+            committed_blob_sha256: &str,
+        ) -> Result<(), CoreExecutorError> {
+            self.checkpoint_calls.fetch_add(1, Ordering::SeqCst);
+            let runtime_id = crate::identifiers::LogicalRuntimeId::for_session(&self.session_id);
+            let committed = crate::store::RuntimeStore::load_whole_blob_store_authority(
+                self.runtime_store.as_ref(),
+                &runtime_id,
+            )
+            .await
+            .map_err(|err| CoreExecutorError::Internal(err.to_string()))?;
+            if committed.as_ref().is_some_and(|authority| {
+                authority.store_revision() == committed_store_revision
+                    && authority.blob_sha256() == committed_blob_sha256
+            }) {
                 self.observed_committed_snapshot
                     .store(true, Ordering::SeqCst);
             }
@@ -3909,7 +3932,17 @@ async fn runtime_loop_checkpoint_failure_is_completion_finalization_failure() {
 
         async fn checkpoint_committed_session_snapshot(
             &mut self,
-            _session_snapshot: &[u8],
+            _session_snapshot: Arc<Vec<u8>>,
+        ) -> Result<(), CoreExecutorError> {
+            Err(CoreExecutorError::apply_failed_unknown(
+                "synthetic checkpoint projection failure",
+            ))
+        }
+
+        async fn acknowledge_whole_blob_session_boundary(
+            &mut self,
+            _committed_store_revision: u64,
+            _committed_blob_sha256: &str,
         ) -> Result<(), CoreExecutorError> {
             Err(CoreExecutorError::apply_failed_unknown(
                 "synthetic checkpoint projection failure",
@@ -7095,6 +7128,33 @@ async fn input_state_by_idempotency_key_falls_back_to_store_when_unregistered() 
     );
 }
 
+/// The direct input-id selector uses the RuntimeStore point lookup after
+/// restart; it must not require materializing accumulated input history.
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite-store"))]
+#[tokio::test]
+async fn input_state_by_id_falls_back_to_store_when_unregistered() {
+    let (_dir, path, session_id, _key, prompt_id, _run_id) =
+        seed_terminal_keyed_prompt_store().await;
+
+    let restarted_store = Arc::new(
+        crate::store::SqliteRuntimeStore::new(path).expect("sqlite runtime store reopens"),
+    ) as Arc<dyn crate::store::RuntimeStore>;
+    let restarted = MeerkatMachine::persistent(restarted_store, memory_blob_store());
+    let stored = <MeerkatMachine as SessionServiceRuntimeExt>::input_state(
+        &restarted,
+        &session_id,
+        &prompt_id,
+    )
+    .await
+    .expect("unregistered input-id lookup should fall back to the durable point index")
+    .expect("the persisted input must resolve without registration");
+    assert_eq!(stored.state.input_id, prompt_id);
+    assert_eq!(
+        stored.seed.terminal_outcome,
+        Some(crate::input_state::InputTerminalOutcome::Consumed),
+    );
+}
+
 /// M4 restart-first-class (G2): a run id captured before the restart resolves
 /// from the durable input witnesses without registration.
 #[cfg(all(not(target_arch = "wasm32"), feature = "sqlite-store"))]
@@ -7408,6 +7468,24 @@ async fn live_and_durable_run_terminal_reports_agree_after_recovery() {
         .register_session(session_id.clone())
         .await
         .expect("session re-registration should recover persisted input states");
+
+    // Terminal rows are archived out of the live driver after their durable
+    // obligations settle. A registered point query may therefore fall through
+    // to the durable point index; its source must report that exact branch.
+    let archived_interaction =
+        <MeerkatMachine as SessionServiceRuntimeExt>::interaction_terminal_status(
+            &restarted,
+            &session_id,
+            crate::terminal_status::InteractionSelector::InputId(prompt_id.clone()),
+        )
+        .await
+        .expect("registered archived interaction query should succeed")
+        .expect("the durable archived interaction must remain queryable");
+    assert_eq!(
+        archived_interaction.source,
+        crate::terminal_status::TerminalWitnessSource::DurableStore,
+        "registered fallback must not relabel a durable row as live"
+    );
 
     let live = <MeerkatMachine as SessionServiceRuntimeExt>::run_terminal_status(
         &restarted,
@@ -9637,6 +9715,10 @@ async fn persistent_destroy_durable_commit_observes_canonical_destroy_truth() {
 
     #[async_trait::async_trait]
     impl RuntimeStore for BlockingDestroyCommitStore {
+        fn session_persistence_profile(&self) -> crate::store::RuntimeSessionPersistenceProfile {
+            RuntimeStore::session_persistence_profile(self.inner.as_ref())
+        }
+
         fn supports_compaction_projection_outbox(&self) -> bool {
             self.inner.supports_compaction_projection_outbox()
         }
@@ -9664,17 +9746,28 @@ async fn persistent_destroy_durable_commit_observes_canonical_destroy_truth() {
         async fn commit_session_snapshot(
             &self,
             runtime_id: &LogicalRuntimeId,
-            session_delta: crate::store::SessionDelta,
+            session_delta: crate::store::SerializedSessionSnapshot,
         ) -> Result<(), crate::store::RuntimeStoreError> {
             self.inner
                 .commit_session_snapshot(runtime_id, session_delta)
                 .await
         }
 
+        async fn commit_prepared_whole_blob_rewrite_boundary(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            boundary: crate::store::PreparedWholeBlobRewriteStoreParts,
+        ) -> Result<crate::store::RuntimeSessionAuthority, crate::store::RuntimeStoreError>
+        {
+            self.inner
+                .commit_prepared_whole_blob_rewrite_boundary(runtime_id, boundary)
+                .await
+        }
+
         async fn atomic_apply(
             &self,
             runtime_id: &LogicalRuntimeId,
-            session_delta: Option<crate::store::SessionDelta>,
+            session_delta: Option<crate::store::SerializedSessionSnapshot>,
             receipt: RunBoundaryReceipt,
             input_updates: Vec<crate::input_state::InputStatePersistenceRecord>,
             session_store_key: Option<SessionId>,
@@ -9711,7 +9804,7 @@ async fn persistent_destroy_durable_commit_observes_canonical_destroy_truth() {
         async fn load_session_snapshot(
             &self,
             runtime_id: &LogicalRuntimeId,
-        ) -> Result<Option<Vec<u8>>, crate::store::RuntimeStoreError> {
+        ) -> Result<Option<std::sync::Arc<Vec<u8>>>, crate::store::RuntimeStoreError> {
             self.inner.load_session_snapshot(runtime_id).await
         }
 
@@ -12236,7 +12329,7 @@ mod stop_teardown_coordinator_class {
 
         async fn checkpoint_committed_session_snapshot(
             &mut self,
-            _session_snapshot: &[u8],
+            _session_snapshot: Arc<Vec<u8>>,
         ) -> Result<(), CoreExecutorError> {
             if self.fail_checkpoint {
                 return Err(CoreExecutorError::control_failed_runtime(
@@ -13772,7 +13865,7 @@ mod stop_under_gate_deadlock_class {
 
         async fn checkpoint_committed_session_snapshot(
             &mut self,
-            _session_snapshot: &[u8],
+            _session_snapshot: Arc<Vec<u8>>,
         ) -> Result<(), CoreExecutorError> {
             if self.fail_checkpoint {
                 return Err(CoreExecutorError::control_failed_runtime(
@@ -15765,10 +15858,10 @@ impl CoreExecutorBoundaryHandle for InterruptYieldingBoundaryHandle {
         Ok(())
     }
 
-    async fn prepare_system_context_at_boundary(
+    async fn prepare_transient_turn_context_at_boundary(
         &self,
         _expected_run_id: &RunId,
-        appends: Vec<meerkat_core::PendingSystemContextAppend>,
+        contexts: Vec<meerkat_core::lifecycle::run_primitive::TurnRequestContext>,
     ) -> Result<
         meerkat_core::lifecycle::CoreBoundaryStageOutput,
         meerkat_core::lifecycle::CoreBoundaryStageError,
@@ -15779,9 +15872,9 @@ impl CoreExecutorBoundaryHandle for InterruptYieldingBoundaryHandle {
             .lock()
             .expect("prepared text mutex poisoned")
             .extend(
-                appends
+                contexts
                     .into_iter()
-                    .map(|append| append.content.render_text()),
+                    .map(|context| context.as_str().to_owned()),
             );
         match self.probe.result {
             BoundaryPreparationResult::Unavailable => Err(
@@ -15987,6 +16080,26 @@ impl InterruptYieldingTestRig {
         .await
         .expect("deferred exact failure terminal should resolve its completion after B releases");
     }
+
+    async fn admitted_runtime_semantics(
+        &self,
+        input_id: &InputId,
+    ) -> crate::ingress_types::RuntimeInputSemantics {
+        let driver = {
+            let sessions = self.adapter.sessions.read().await;
+            Arc::clone(
+                &sessions
+                    .get(&self.session_id)
+                    .expect("runtime session should remain registered")
+                    .driver,
+            )
+        };
+        let driver = driver.lock().await;
+        driver
+            .driver_ingress()
+            .runtime_semantics(input_id)
+            .expect("accepted input should retain admitted runtime semantics")
+    }
 }
 
 fn interrupt_yielding_peer_input(
@@ -16186,6 +16299,12 @@ async fn unavailable_exact_boundary_is_the_only_queued_fallback() {
             .and_then(|input| input.lifecycle),
         Some(crate::input_state::InputLifecycleState::Queued)
     );
+    let normalized = rig.admitted_runtime_semantics(&peer_id).await;
+    assert_eq!(
+        normalized.execution_handling_mode,
+        Some(meerkat_core::types::HandlingMode::Queue)
+    );
+    assert!(!normalized.live_interrupt_required);
 
     rig.allow_finish.notify_waiters();
     rig.wait_for_apply_calls(2).await;
@@ -24708,10 +24827,11 @@ impl CoreExecutor for RuntimeRecoveryExecutor {
 
     async fn checkpoint_committed_session_snapshot(
         &mut self,
-        session_snapshot: &[u8],
+        session_snapshot: Arc<Vec<u8>>,
     ) -> Result<(), CoreExecutorError> {
-        let checkpoint: meerkat_core::Session = serde_json::from_slice(session_snapshot)
-            .map_err(|error| CoreExecutorError::Internal(error.to_string()))?;
+        let checkpoint: meerkat_core::Session =
+            serde_json::from_slice(session_snapshot.as_ref())
+                .map_err(|error| CoreExecutorError::Internal(error.to_string()))?;
         if checkpoint.id() != self.session.id() || checkpoint.messages().is_empty() {
             return Ok(());
         }
@@ -24804,6 +24924,47 @@ fn runtime_recovery_compaction_session(
         actor: &'a Option<String>,
     }
 
+    /// Test-only supported-floor encoder. Full-body materialization is
+    /// deliberate here: it constructs exact released 0.8.10 ingress bytes,
+    /// never a current runtime persistence path.
+    fn encode_as_released_0810_compaction_fixture(
+        session: &meerkat_core::Session,
+    ) -> serde_json::Value {
+        let history = session
+            .validated_transcript_history_state()
+            .expect("seal fixture rewrite graph")
+            .expect("fixture rewrite graph exists");
+        assert_eq!(history.commit_count(), 1, "fixture has one rewrite");
+        let commit = history.last_commit().expect("fixture rewrite commit");
+        let (start, end) = commit.selection.bounds();
+        let mut released_commit =
+            serde_json::to_value(commit).expect("encode released fixture commit");
+        released_commit
+            .as_object_mut()
+            .expect("commit serializes as an object")
+            .remove("rewrite_generation");
+        released_commit["selection"] = serde_json::json!({
+            "type": "compaction_message_range",
+            "range": { "start": start, "end": end }
+        });
+        let released_graph = serde_json::json!({
+            "head": history.head(),
+            "commits": [released_commit],
+            "revisions": [
+                history
+                    .materialize_revision(&commit.parent_revision)
+                    .expect("materialize released fixture parent"),
+                history
+                    .materialize_revision(&commit.revision)
+                    .expect("materialize released fixture child"),
+            ],
+            "digest_format": history.digest_format(),
+        });
+        let mut encoded = serde_json::to_value(session).expect("encode fixture session");
+        encoded["metadata"][meerkat_core::SESSION_TRANSCRIPT_HISTORY_STATE_KEY] = released_graph;
+        encoded
+    }
+
     let mut session = meerkat_core::Session::with_id(session_id.clone());
     session.push(meerkat_core::types::Message::User(
         meerkat_core::types::UserMessage::text("verbose recovery context one"),
@@ -24827,19 +24988,14 @@ fn runtime_recovery_compaction_session(
             Some(parent),
         )
         .expect("commit compaction fixture rewrite");
-    let mut encoded = serde_json::to_value(&session).expect("encode compaction fixture");
-    encoded["metadata"][meerkat_core::SESSION_TRANSCRIPT_HISTORY_STATE_KEY]["commits"][0]["selection"] = serde_json::json!({
-        "type": "compaction_message_range",
-        "range": { "start": 0, "end": 2 }
-    });
+    let encoded = encode_as_released_0810_compaction_fixture(&session);
     let mut session: meerkat_core::Session =
         serde_json::from_value(encoded).expect("decode typed compaction fixture");
     let commit = session
-        .transcript_history_state()
-        .expect("decode compaction fixture history")
+        .validated_transcript_history_state()
+        .expect("seal compaction fixture history")
         .expect("compaction fixture history exists")
-        .commits
-        .last()
+        .last_commit()
         .expect("compaction fixture commit exists")
         .clone();
     let fingerprint = serde_json::to_vec(&CompactionCommitFingerprint {
@@ -25147,6 +25303,10 @@ impl RuntimeCommitAtomicityStore {
 
 #[async_trait::async_trait]
 impl RuntimeStore for RuntimeCommitAtomicityStore {
+    fn session_persistence_profile(&self) -> crate::store::RuntimeSessionPersistenceProfile {
+        RuntimeStore::session_persistence_profile(self.inner.as_ref())
+    }
+
     fn supports_compaction_projection_outbox(&self) -> bool {
         self.inner.supports_compaction_projection_outbox()
     }
@@ -25154,7 +25314,7 @@ impl RuntimeStore for RuntimeCommitAtomicityStore {
     async fn commit_session_snapshot(
         &self,
         runtime_id: &LogicalRuntimeId,
-        session_delta: crate::store::SessionDelta,
+        session_delta: crate::store::SerializedSessionSnapshot,
     ) -> Result<(), crate::store::RuntimeStoreError> {
         self.session_snapshot_commits.fetch_add(1, Ordering::SeqCst);
         self.inner
@@ -25162,10 +25322,21 @@ impl RuntimeStore for RuntimeCommitAtomicityStore {
             .await
     }
 
+    async fn commit_prepared_whole_blob_rewrite_boundary(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        boundary: crate::store::PreparedWholeBlobRewriteStoreParts,
+    ) -> Result<crate::store::RuntimeSessionAuthority, crate::store::RuntimeStoreError> {
+        self.session_snapshot_commits.fetch_add(1, Ordering::SeqCst);
+        self.inner
+            .commit_prepared_whole_blob_rewrite_boundary(runtime_id, boundary)
+            .await
+    }
+
     async fn atomic_apply(
         &self,
         runtime_id: &LogicalRuntimeId,
-        session_delta: Option<crate::store::SessionDelta>,
+        session_delta: Option<crate::store::SerializedSessionSnapshot>,
         receipt: RunBoundaryReceipt,
         input_updates: Vec<crate::input_state::InputStatePersistenceRecord>,
         session_store_key: Option<SessionId>,
@@ -25194,7 +25365,7 @@ impl RuntimeStore for RuntimeCommitAtomicityStore {
     async fn atomic_apply_with_machine_lifecycle(
         &self,
         runtime_id: &LogicalRuntimeId,
-        session_delta: crate::store::SessionDelta,
+        session_delta: crate::store::SerializedSessionSnapshot,
         receipt: RunBoundaryReceipt,
         machine_lifecycle: crate::store::MachineLifecycleCommit,
         input_updates: Vec<crate::input_state::InputStatePersistenceRecord>,
@@ -25246,7 +25417,7 @@ impl RuntimeStore for RuntimeCommitAtomicityStore {
     async fn load_session_snapshot(
         &self,
         runtime_id: &LogicalRuntimeId,
-    ) -> Result<Option<Vec<u8>>, crate::store::RuntimeStoreError> {
+    ) -> Result<Option<std::sync::Arc<Vec<u8>>>, crate::store::RuntimeStoreError> {
         self.session_snapshot_loads.fetch_add(1, Ordering::SeqCst);
         self.inner.load_session_snapshot(runtime_id).await
     }
@@ -25606,8 +25777,8 @@ async fn cold_ensure_reconciles_runtime_authority_once_then_recovers_inputs_only
     inner
         .commit_session_snapshot(
             &runtime_id,
-            crate::store::SessionDelta {
-                session_snapshot: retained_snapshot.clone(),
+            crate::store::SerializedSessionSnapshot {
+                session_snapshot: retained_snapshot.clone().into(),
             },
         )
         .await
@@ -26268,7 +26439,7 @@ async fn persistent_commit_success_persists_receipt_and_terminalizes_once() {
     );
     assert_eq!(
         inner.load_session_snapshot(&runtime_id).await.unwrap(),
-        Some(session_snapshot),
+        Some(Arc::new(session_snapshot)),
         "successful commit must persist the session snapshot"
     );
 
@@ -26629,7 +26800,7 @@ async fn persistent_machine_terminal_commit_recovers_consumed_input_and_failed_t
             .load_session_snapshot(&runtime_id)
             .await
             .expect("load committed failed-turn snapshot"),
-        Some(session_snapshot.clone()),
+        Some(Arc::new(session_snapshot.clone())),
         "the failed-turn transcript must commit with terminal input truth"
     );
     assert!(
@@ -40158,7 +40329,7 @@ async fn empty_compaction_outbox_skips_the_identity_checkpoint_cycle_after_commi
 
         async fn checkpoint_committed_session_snapshot(
             &mut self,
-            _session_snapshot: &[u8],
+            _session_snapshot: Arc<Vec<u8>>,
         ) -> Result<(), CoreExecutorError> {
             self.checkpoint_calls += 1;
             Ok(())
@@ -40185,8 +40356,8 @@ async fn empty_compaction_outbox_skips_the_identity_checkpoint_cycle_after_commi
     crate::store::RuntimeStore::commit_session_snapshot(
         inner.as_ref(),
         &runtime_id,
-        crate::store::SessionDelta {
-            session_snapshot: seeded.clone(),
+        crate::store::SerializedSessionSnapshot {
+            session_snapshot: seeded.clone().into(),
         },
     )
     .await

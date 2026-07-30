@@ -2,8 +2,8 @@ use crate::error::{ScheduleDomainError, ScheduleStoreError};
 use crate::lifecycle::{
     AuthorizedOccurrenceWrite, ScheduleLifecycleInput, ScheduleLifecycleMutator,
 };
-use crate::store::{OccurrenceFilter, ScheduleFilter, ScheduleStore};
-use crate::trigger::occurrences_for_horizon;
+use crate::store::{OccurrenceFilter, ScheduleFilter, ScheduleRefillCandidate, ScheduleStore};
+use crate::trigger::{next_due_after, occurrences_for_horizon};
 use crate::types::{
     CreateScheduleRequest, Occurrence, OccurrencePhase, Schedule, ScheduleId, SchedulePhase,
     UpdateScheduleRequest,
@@ -14,26 +14,45 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 #[cfg(target_arch = "wasm32")]
-use crate::tokio::sync::Mutex;
+use crate::tokio::sync::{Mutex, watch};
 #[cfg(not(target_arch = "wasm32"))]
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, watch};
 
 #[derive(Clone)]
 pub struct ScheduleService {
     store: Arc<dyn ScheduleStore>,
     planning_lock: Arc<Mutex<()>>,
+    mutation_generation: watch::Sender<u64>,
 }
 
 impl ScheduleService {
     pub fn new(store: Arc<dyn ScheduleStore>) -> Self {
+        let (mutation_generation, _) = watch::channel(0);
         Self {
             store,
             planning_lock: Arc::new(Mutex::new(())),
+            mutation_generation,
         }
     }
 
     pub fn store(&self) -> Arc<dyn ScheduleStore> {
         self.store.clone()
+    }
+
+    /// Subscribe to successful schedule mutations made through this service.
+    ///
+    /// The signal is deliberately advisory and process-local. It lets the
+    /// local schedule host wake immediately after a create/update/resume
+    /// instead of waiting for its declared durable push/poll wake. Durable
+    /// store time and the store's next-action query remain the scheduling
+    /// authority; this channel never carries schedule state.
+    pub fn subscribe_mutations(&self) -> watch::Receiver<u64> {
+        self.mutation_generation.subscribe()
+    }
+
+    fn notify_mutation(&self) {
+        self.mutation_generation
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
     }
 
     pub async fn create(
@@ -57,8 +76,13 @@ impl ScheduleService {
         }
         let committed = self
             .store
-            .commit_schedule_mutation(mutator.into_authorized_write(), planned.occurrences)
+            .commit_schedule_refill(
+                mutator.into_authorized_write(),
+                planned.occurrences,
+                planned.next_refill_at_utc,
+            )
             .await?;
+        self.notify_mutation();
         Ok(committed)
     }
 
@@ -82,9 +106,8 @@ impl ScheduleService {
             .map_err(Into::into)
     }
 
-    /// List non-deleted schedules with per-row tolerance: rows that fail
-    /// typed recovery are skipped and surfaced as typed faults instead of
-    /// failing the listing wholesale (the driver's scan path).
+    /// Explicitly list non-deleted schedules with per-row tolerance. Ordinary
+    /// driver ticks use the bounded refill-candidate store seam instead.
     pub async fn list_with_row_faults(
         &self,
     ) -> Result<(Vec<Schedule>, Vec<crate::ScheduleStoreRowFault>), ScheduleDomainError> {
@@ -134,8 +157,13 @@ impl ScheduleService {
         }
         let committed = self
             .store
-            .commit_schedule_mutation(mutator.into_authorized_write(), planned.occurrences)
+            .commit_schedule_refill(
+                mutator.into_authorized_write(),
+                planned.occurrences,
+                planned.next_refill_at_utc,
+            )
             .await?;
+        self.notify_mutation();
         Ok(committed)
     }
 
@@ -153,6 +181,7 @@ impl ScheduleService {
         self.store
             .commit_schedule_write(mutator.into_authorized_write())
             .await?;
+        self.notify_mutation();
         Ok(schedule)
     }
 
@@ -177,8 +206,13 @@ impl ScheduleService {
         }
         let committed = self
             .store
-            .commit_schedule_mutation(mutator.into_authorized_write(), planned.occurrences)
+            .commit_schedule_refill(
+                mutator.into_authorized_write(),
+                planned.occurrences,
+                planned.next_refill_at_utc,
+            )
             .await?;
+        self.notify_mutation();
         Ok(committed)
     }
 
@@ -195,6 +229,7 @@ impl ScheduleService {
             .store
             .commit_schedule_mutation(mutator.into_authorized_write(), Vec::new())
             .await?;
+        self.notify_mutation();
         Ok(committed)
     }
 
@@ -236,9 +271,51 @@ impl ScheduleService {
         if let Some(planning_mutator) = planned.schedule_mutator {
             let _ = self
                 .store
-                .commit_schedule_mutation(
+                .commit_schedule_refill(
                     planning_mutator.into_authorized_write(),
                     planned.occurrences,
+                    planned.next_refill_at_utc,
+                )
+                .await?;
+            self.notify_mutation();
+        }
+        Ok(occurrences)
+    }
+
+    /// Refill one store-selected durable candidate without re-reading its
+    /// schedule, store clock, or Pending set through separate connections.
+    pub(crate) async fn refill_candidate(
+        &self,
+        candidate: ScheduleRefillCandidate,
+        store_now_utc: chrono::DateTime<Utc>,
+    ) -> Result<Vec<Occurrence>, ScheduleDomainError> {
+        let _planning_guard = self.planning_lock.lock().await;
+        let planned = self.plan_schedule_occurrences_from_snapshot(
+            &candidate.schedule,
+            store_now_utc,
+            &candidate.pending_occurrences,
+        )?;
+        let occurrences: Vec<Occurrence> = planned
+            .occurrences
+            .iter()
+            .map(|write| write.occurrence().clone())
+            .collect();
+        if let Some(planning_mutator) = planned.schedule_mutator {
+            let _ = self
+                .store
+                .commit_schedule_refill(
+                    planning_mutator.into_authorized_write(),
+                    planned.occurrences,
+                    planned.next_refill_at_utc,
+                )
+                .await?;
+        } else {
+            self.store
+                .record_refill_deadline_if_current(
+                    &candidate.schedule.schedule_id,
+                    candidate.schedule.revision,
+                    candidate.refill_at_utc,
+                    planned.next_refill_at_utc,
                 )
                 .await?;
         }
@@ -268,6 +345,7 @@ impl ScheduleService {
         self.store
             .commit_occurrence_write(mutator.into_authorized_write())
             .await?;
+        self.notify_mutation();
         Ok(occurrence)
     }
 
@@ -296,6 +374,7 @@ impl ScheduleService {
             self.store
                 .commit_schedule_write(mutator.into_authorized_write())
                 .await?;
+            self.notify_mutation();
         }
 
         let pending = self
@@ -324,8 +403,10 @@ impl ScheduleService {
             }
         }
 
-        if !updated_pending.is_empty() {
+        let pending_changed = !updated_pending.is_empty();
+        if pending_changed {
             self.store.commit_occurrence_writes(updated_pending).await?;
+            self.notify_mutation();
         }
 
         Ok(())
@@ -336,12 +417,6 @@ impl ScheduleService {
         schedule: &Schedule,
         store_now_utc: chrono::DateTime<Utc>,
     ) -> Result<PlannedScheduleOccurrences, ScheduleDomainError> {
-        if schedule.phase != SchedulePhase::Active {
-            return Ok(PlannedScheduleOccurrences::default());
-        }
-
-        let horizon_end_utc =
-            store_now_utc + Duration::days(i64::from(schedule.config.planning_horizon_days));
         let existing = self
             .store
             .list_occurrences(OccurrenceFilter {
@@ -351,7 +426,21 @@ impl ScheduleService {
                 ..OccurrenceFilter::default()
             })
             .await?;
+        self.plan_schedule_occurrences_from_snapshot(schedule, store_now_utc, &existing)
+    }
 
+    fn plan_schedule_occurrences_from_snapshot(
+        &self,
+        schedule: &Schedule,
+        store_now_utc: chrono::DateTime<Utc>,
+        existing: &[Occurrence],
+    ) -> Result<PlannedScheduleOccurrences, ScheduleDomainError> {
+        if schedule.phase != SchedulePhase::Active {
+            return Ok(PlannedScheduleOccurrences::default());
+        }
+
+        let horizon_duration = Duration::days(i64::from(schedule.config.planning_horizon_days));
+        let horizon_end_utc = store_now_utc + horizon_duration;
         let existing_due: BTreeSet<_> = existing
             .iter()
             .filter(|occurrence| occurrence.schedule_revision == schedule.revision)
@@ -369,7 +458,7 @@ impl ScheduleService {
 
         let desired_count =
             usize::try_from(schedule.config.planning_horizon_occurrences).unwrap_or(usize::MAX);
-        if future_pending_count >= desired_count {
+        if desired_count == 0 || future_pending_count >= desired_count {
             return Ok(PlannedScheduleOccurrences::default());
         }
 
@@ -408,6 +497,18 @@ impl ScheduleService {
             }
         }
 
+        let pending_after_plan = future_pending_count.saturating_add(planned.len());
+        let next_refill_at_utc = if pending_after_plan >= desired_count {
+            None
+        } else {
+            let next_cursor = planned
+                .last()
+                .map(|write| write.occurrence().due_at_utc)
+                .unwrap_or(cursor);
+            next_due_after(&schedule.trigger, Some(next_cursor))?
+                .map(|next_due| (next_due - horizon_duration).max(store_now_utc))
+        };
+
         if !planned.is_empty() {
             let Some(planning_cursor_utc) =
                 planned.last().map(|write| write.occurrence().due_at_utc)
@@ -415,6 +516,7 @@ impl ScheduleService {
                 return Ok(PlannedScheduleOccurrences {
                     occurrences: planned,
                     schedule_mutator: None,
+                    next_refill_at_utc,
                 });
             };
             let mutator = Schedule::apply(
@@ -428,12 +530,14 @@ impl ScheduleService {
             return Ok(PlannedScheduleOccurrences {
                 occurrences: planned,
                 schedule_mutator: Some(mutator),
+                next_refill_at_utc,
             });
         }
 
         Ok(PlannedScheduleOccurrences {
             occurrences: planned,
             schedule_mutator: None,
+            next_refill_at_utc,
         })
     }
 }
@@ -442,6 +546,7 @@ impl ScheduleService {
 struct PlannedScheduleOccurrences {
     occurrences: Vec<AuthorizedOccurrenceWrite>,
     schedule_mutator: Option<ScheduleLifecycleMutator>,
+    next_refill_at_utc: Option<chrono::DateTime<Utc>>,
 }
 
 #[cfg(test)]
@@ -455,7 +560,7 @@ mod tests {
     };
     use crate::{MemoryScheduleStore, OverlapPolicy};
     use crate::{OccurrenceLifecycleEffect, OccurrenceLifecycleInput};
-    use chrono::Duration;
+    use chrono::{Duration, TimeZone};
     use meerkat_core::{ContentInput, ToolNameSet};
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -483,8 +588,29 @@ mod tests {
             self.inner.kind()
         }
 
+        fn wake_mode(&self) -> crate::ScheduleStoreWakeMode {
+            self.inner.wake_mode()
+        }
+
+        async fn wait_for_durable_wake(&self) -> Result<(), ScheduleStoreError> {
+            self.inner.wait_for_durable_wake().await
+        }
+
         async fn get_store_time_utc(&self) -> Result<chrono::DateTime<Utc>, ScheduleStoreError> {
             self.inner.get_store_time_utc().await
+        }
+
+        async fn next_action_time_utc(
+            &self,
+        ) -> Result<crate::ScheduleStoreActionTime, ScheduleStoreError> {
+            self.inner.next_action_time_utc().await
+        }
+
+        async fn read_due_refill_candidates(
+            &self,
+            limit: usize,
+        ) -> Result<crate::ScheduleRefillBatch, ScheduleStoreError> {
+            self.inner.read_due_refill_candidates(limit).await
         }
 
         async fn commit_schedule_write(
@@ -535,6 +661,35 @@ mod tests {
                 .await
         }
 
+        async fn commit_schedule_refill(
+            &self,
+            schedule: crate::AuthorizedScheduleWrite,
+            occurrences: Vec<AuthorizedOccurrenceWrite>,
+            next_refill_at_utc: Option<chrono::DateTime<Utc>>,
+        ) -> Result<Schedule, ScheduleStoreError> {
+            self.atomic_calls.fetch_add(1, Ordering::SeqCst);
+            self.inner
+                .commit_schedule_refill(schedule, occurrences, next_refill_at_utc)
+                .await
+        }
+
+        async fn record_refill_deadline_if_current(
+            &self,
+            schedule_id: &ScheduleId,
+            expected_revision: crate::ScheduleRevision,
+            expected_refill_at_utc: chrono::DateTime<Utc>,
+            next_refill_at_utc: Option<chrono::DateTime<Utc>>,
+        ) -> Result<(), ScheduleStoreError> {
+            self.inner
+                .record_refill_deadline_if_current(
+                    schedule_id,
+                    expected_revision,
+                    expected_refill_at_utc,
+                    next_refill_at_utc,
+                )
+                .await
+        }
+
         async fn get_occurrence(
             &self,
             occurrence_id: &OccurrenceId,
@@ -565,6 +720,13 @@ mod tests {
             request: crate::ClaimDueRequest,
         ) -> Result<crate::ClaimDueResult, ScheduleStoreError> {
             self.inner.claim_due_occurrences(request).await
+        }
+
+        async fn renew_occurrence_lease_if_current(
+            &self,
+            request: crate::RenewOccurrenceLeaseRequest,
+        ) -> Result<crate::RenewOccurrenceLeaseResult, ScheduleStoreError> {
+            self.inner.renew_occurrence_lease_if_current(request).await
         }
 
         async fn transition_occurrence_if_current(
@@ -603,6 +765,112 @@ mod tests {
                 )
                 .await
         }
+    }
+
+    #[tokio::test]
+    async fn far_future_trigger_sleeps_until_exact_horizon_entry() {
+        let memory = Arc::new(MemoryScheduleStore::new());
+        let store = memory.clone() as Arc<dyn ScheduleStore>;
+        let service = ScheduleService::new(store.clone());
+        let now = Utc::now();
+        let start_at_utc = Utc
+            .timestamp_millis_opt((now + Duration::days(3)).timestamp_millis())
+            .single()
+            .expect("millisecond timestamp");
+
+        let schedule = service
+            .create(CreateScheduleRequest {
+                name: Some("far-future".into()),
+                description: None,
+                trigger: TriggerSpec::Interval(IntervalTriggerSpec {
+                    start_at_utc,
+                    every_seconds: 60,
+                    end_at_utc: None,
+                }),
+                target: TargetBinding::session(SessionTargetBinding::ExactSession {
+                    session_id: SessionId::new(),
+                    action: ScheduledSessionAction::Prompt {
+                        prompt: ContentInput::Text("wake later".into()),
+                        system_prompt: None,
+                        render_metadata: None,
+                        skill_refs: Vec::new(),
+                        additional_instructions: Vec::new(),
+                    },
+                }),
+                misfire_policy: MisfirePolicy::Skip,
+                overlap_policy: OverlapPolicy::SkipIfRunning,
+                missing_target_policy: crate::MissingTargetPolicy::MarkMisfired,
+                labels: BTreeMap::new(),
+                planning_horizon_days: Some(1),
+                planning_horizon_occurrences: Some(1),
+            })
+            .await
+            .expect("create far-future schedule");
+
+        assert!(
+            service
+                .list_occurrences(&schedule.schedule_id)
+                .await
+                .expect("list occurrences")
+                .is_empty(),
+            "a trigger outside the horizon must not create an occurrence"
+        );
+        let action = store.next_action_time_utc().await.expect("next action");
+        assert_eq!(
+            action.next_action_at_utc,
+            Some(start_at_utc - Duration::days(1)),
+            "the durable wake is exactly when the trigger enters the horizon"
+        );
+        assert!(
+            store
+                .read_due_refill_candidates(32)
+                .await
+                .expect("read refill candidates")
+                .candidates
+                .is_empty(),
+            "far-future schedules must not be swept on ordinary ticks"
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_local_mutation_advances_host_wake_generation() {
+        let store = Arc::new(MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+        let service = ScheduleService::new(store);
+        let mut mutations = service.subscribe_mutations();
+
+        service
+            .create(CreateScheduleRequest {
+                name: Some("wake-host".into()),
+                description: None,
+                trigger: TriggerSpec::Interval(IntervalTriggerSpec {
+                    start_at_utc: Utc::now() + Duration::minutes(1),
+                    every_seconds: 60,
+                    end_at_utc: None,
+                }),
+                target: TargetBinding::session(SessionTargetBinding::ExactSession {
+                    session_id: SessionId::new(),
+                    action: ScheduledSessionAction::Prompt {
+                        prompt: ContentInput::Text("wake".into()),
+                        system_prompt: None,
+                        render_metadata: None,
+                        skill_refs: Vec::new(),
+                        additional_instructions: Vec::new(),
+                    },
+                }),
+                misfire_policy: MisfirePolicy::Skip,
+                overlap_policy: OverlapPolicy::SkipIfRunning,
+                missing_target_policy: crate::MissingTargetPolicy::MarkMisfired,
+                labels: BTreeMap::new(),
+                planning_horizon_days: Some(1),
+                planning_horizon_occurrences: Some(1),
+            })
+            .await
+            .expect("schedule creation should commit");
+
+        mutations
+            .changed()
+            .await
+            .expect("service-owned mutation sender must remain live");
     }
 
     #[tokio::test]
@@ -982,7 +1250,6 @@ mod tests {
                 owner_id: "driver-owner".into(),
                 limit: 1,
                 lease_duration: Duration::seconds(30),
-                live_waiter_occurrence_ids: std::collections::BTreeSet::new(),
             })
             .await?;
         let in_flight = claimed

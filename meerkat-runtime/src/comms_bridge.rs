@@ -1068,15 +1068,10 @@ mod tests {
             panic!("Expected PeerInput");
         }
         let projection = crate::input::runtime_input_projection_for_machine_batch(&input);
-        let context = projection
-            .context_append
-            .expect("terminal machine-batch context projection");
-        let expected_key = format!("peer_response_terminal:{route_id}:{in_reply_to}");
-        assert_eq!(context.key, expected_key);
         let meerkat_core::lifecycle::run_primitive::CoreRenderable::SystemNotice { blocks, .. } =
-            context.content
+            projection.append.expect("durable terminal notice").content
         else {
-            panic!("Expected terminal context notice");
+            panic!("Expected durable terminal notice");
         };
         assert!(matches!(
             blocks.first(),

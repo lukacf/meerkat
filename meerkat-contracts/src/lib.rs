@@ -511,6 +511,7 @@ pub use wire::{
     WireSwitchTurnControlResult,
     WireSwitchTurnIntent,
     WireSwitchTurnPhase,
+    WireSystemMessageIdentity,
     WireToolResult,
     WireToolResultContent,
     WireTrustedPeerIdentity,

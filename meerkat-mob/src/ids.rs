@@ -21,6 +21,17 @@ impl RunId {
     pub fn as_uuid(&self) -> &Uuid {
         &self.0
     }
+
+    pub(crate) fn for_external_delivery(
+        mob_id: &MobId,
+        flow_id: &FlowId,
+        idempotency_key: &str,
+    ) -> Self {
+        Self(Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("meerkat:mob:{mob_id}:flow:{flow_id}:delivery:{idempotency_key}").as_bytes(),
+        ))
+    }
 }
 
 impl Default for RunId {
@@ -386,6 +397,18 @@ impl WorkRef {
     pub fn as_uuid(&self) -> &Uuid {
         &self.0
     }
+
+    pub(crate) fn for_external_delivery(
+        mob_id: &MobId,
+        member_id: &AgentIdentity,
+        idempotency_key: &str,
+    ) -> Self {
+        Self(Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("meerkat:mob:{mob_id}:member:{member_id}:delivery:{idempotency_key}")
+                .as_bytes(),
+        ))
+    }
 }
 
 impl Default for WorkRef {
@@ -436,6 +459,9 @@ pub struct WorkSpec {
     /// reject it fail-closed with a typed [`crate::MobError`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub injected_context: Vec<meerkat_core::types::ContentInput>,
+    /// Host-regenerated request-only context for the member's logical turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transient_turn_context: Option<meerkat_core::lifecycle::run_primitive::TurnRequestContext>,
     /// Host-supplied interaction identity for this unit of work.
     ///
     /// Ask-15 addendum: the delivery path carries this id to
@@ -461,6 +487,7 @@ impl WorkSpec {
             content: content.into(),
             origin,
             injected_context: Vec::new(),
+            transient_turn_context: None,
             interaction_id: None,
             objective_id: None,
         }
@@ -481,6 +508,15 @@ impl WorkSpec {
         injected_context: Vec<meerkat_core::types::ContentInput>,
     ) -> Self {
         self.injected_context = injected_context;
+        self
+    }
+
+    #[must_use]
+    pub fn with_transient_turn_context(
+        mut self,
+        context: meerkat_core::lifecycle::run_primitive::TurnRequestContext,
+    ) -> Self {
+        self.transient_turn_context = Some(context);
         self
     }
 
@@ -559,6 +595,21 @@ mod tests {
         let rendered = run_id.to_string();
         let reparsed = RunId::from_str(&rendered).unwrap();
         assert_eq!(reparsed, run_id);
+    }
+
+    #[test]
+    fn external_delivery_run_id_is_stable_and_flow_scoped() {
+        let mob_id = MobId::from("ops");
+        let key = "schedule:one";
+        let first = RunId::for_external_delivery(&mob_id, &FlowId::from("alpha"), key);
+        assert_eq!(
+            first,
+            RunId::for_external_delivery(&mob_id, &FlowId::from("alpha"), key)
+        );
+        assert_ne!(
+            first,
+            RunId::for_external_delivery(&mob_id, &FlowId::from("beta"), key)
+        );
     }
 
     #[test]
@@ -726,6 +777,21 @@ mod tests {
         let rendered = wr.to_string();
         let reparsed = WorkRef::from_str(&rendered).unwrap();
         assert_eq!(reparsed, wr);
+    }
+
+    #[test]
+    fn external_delivery_work_ref_is_stable_and_member_scoped() {
+        let mob_id = MobId::from("ops");
+        let key = "schedule:one";
+        let first = WorkRef::for_external_delivery(&mob_id, &AgentIdentity::from("alpha"), key);
+        assert_eq!(
+            first,
+            WorkRef::for_external_delivery(&mob_id, &AgentIdentity::from("alpha"), key)
+        );
+        assert_ne!(
+            first,
+            WorkRef::for_external_delivery(&mob_id, &AgentIdentity::from("beta"), key)
+        );
     }
 
     #[test]

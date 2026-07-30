@@ -6,7 +6,7 @@ icon: "python"
 
 The Python SDK (`meerkat-sdk`) is a runtime-backed client over `rkat-rpc`.
 
-- **Contract version:** `0.8.10`
+- **Contract version:** `0.8.11`
 - **Python:** `>=3.10`
 - **Runtime dependencies:** `websockets>=12,<16`
 
@@ -144,8 +144,8 @@ before treating the image as durable context. See [Live Channels](/guides/realti
 for replay, conflict, and reconnect limits.
 
 `seed_max_chars` is an optional positive serialized-character budget for a
-core-selected whole-turn seed suffix. Omit it for the full canonical seed. The
-resolved root must fit. Runtime context and complete image identity, tombstone,
+core-selected whole-turn seed suffix. Omit it for the full canonical seed.
+Every ordered System message must fit. Runtime context and complete image identity, tombstone,
 and accounting sidecars remain outside the window; any truncation reports
 degraded continuity. Zero is rejected by the server.
 

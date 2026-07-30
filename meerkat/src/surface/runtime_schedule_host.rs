@@ -5,12 +5,12 @@ use async_trait::async_trait;
 #[cfg(feature = "comms")]
 use super::configure_peer_ingress;
 use super::{
-    AcceptedScheduledInput, NoopScheduleMobHost, ScheduledPromptDispatch,
-    SharedScheduleTargetAdapter, SurfaceScheduleMobHost, SurfaceScheduleSessionHost,
-    build_dispatch_from_accepted, default_persistent_executor,
-    default_persistent_executor_with_workgraph_service, immediate_delivery_failure,
-    materialize_session, recover_mob_member_identity_from_session_target,
-    schedule_delivery_idempotency_key, schedule_host_supported, spawn_schedule_host,
+    NoopScheduleMobHost, ScheduledPromptDispatch, SharedScheduleTargetAdapter,
+    SurfaceScheduleMobHost, SurfaceScheduleSessionHost, default_persistent_executor,
+    default_persistent_executor_with_workgraph_service, materialize_session,
+    recover_mob_member_identity_from_session_target, runtime_delivery_dispatch_from_admission,
+    schedule_host_supported, schedule_runtime_correlation_id,
+    schedule_runtime_delivery_idempotency_key, spawn_schedule_host,
 };
 use crate::{
     Config, CreateSessionRequest, PersistentSessionService, ScheduleDomainError, ScheduleService,
@@ -20,7 +20,7 @@ use crate::{
 use meerkat_core::service::{DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions};
 use meerkat_core::types::{ContentInput, SessionId};
 use meerkat_runtime::MeerkatMachine;
-use meerkat_schedule::{DeliveryFailureReason, IdentityTargetBinding, ScheduleRunnableHost};
+use meerkat_schedule::{IdentityTargetBinding, ScheduleDeliveryIdentity, ScheduleRunnableHost};
 
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_runtime_backed_schedule_host<B: SessionAgentBuilder + 'static>(
@@ -151,73 +151,6 @@ fn materialized_build_options(
         .then(|| create.additional_instructions.clone())
         .or(build.additional_instructions);
     Ok(build)
-}
-
-fn accepted_scheduled_input_from_runtime_handle(
-    correlation_id: Option<String>,
-    handle: Option<meerkat_runtime::CompletionHandle>,
-) -> AcceptedScheduledInput {
-    match handle {
-        Some(handle) => AcceptedScheduledInput::with_runtime_handle(correlation_id, handle),
-        None => AcceptedScheduledInput::with_authority_unavailable(
-            correlation_id,
-            "runtime completion handle missing after accepted dispatch",
-        ),
-    }
-}
-
-fn runtime_delivery_dispatch(
-    occurrence: &crate::Occurrence,
-    outcome: meerkat_runtime::accept::AcceptOutcome,
-    handle: Option<meerkat_runtime::CompletionHandle>,
-    materialized_session_id: Option<SessionId>,
-) -> Result<crate::DeliveryDispatch, ScheduleDomainError> {
-    match outcome {
-        meerkat_runtime::accept::AcceptOutcome::Accepted { input_id, .. } => {
-            let accepted =
-                accepted_scheduled_input_from_runtime_handle(Some(input_id.to_string()), handle);
-            Ok(build_dispatch_from_accepted(
-                occurrence,
-                accepted,
-                materialized_session_id,
-            ))
-        }
-        meerkat_runtime::accept::AcceptOutcome::Deduplicated { existing_id, .. } => {
-            let accepted = match handle {
-                Some(handle) => AcceptedScheduledInput::with_runtime_handle(
-                    Some(existing_id.to_string()),
-                    handle,
-                ),
-                None => AcceptedScheduledInput::with_authority_unavailable(
-                    Some(existing_id.to_string()),
-                    format!(
-                        "runtime completion authority unavailable for terminal deduplicated input {existing_id}"
-                    ),
-                ),
-            };
-            Ok(build_dispatch_from_accepted(
-                occurrence,
-                accepted,
-                materialized_session_id,
-            ))
-        }
-        meerkat_runtime::accept::AcceptOutcome::Rejected { reason } => {
-            Ok(immediate_delivery_failure(
-                occurrence,
-                reason.to_string(),
-                DeliveryFailureReason::RuntimeRejected,
-                None,
-                materialized_session_id,
-            ))
-        }
-        _ => Ok(immediate_delivery_failure(
-            occurrence,
-            "runtime returned an unknown admission outcome".to_string(),
-            DeliveryFailureReason::RuntimeRejected,
-            None,
-            materialized_session_id,
-        )),
-    }
 }
 
 impl<B: SessionAgentBuilder + 'static> RuntimeBackedScheduleSessionHost<B> {
@@ -516,7 +449,6 @@ impl<B: SessionAgentBuilder + 'static> RuntimeBackedScheduleSessionHost<B> {
     fn build_materialized_request(
         &self,
         create: &SessionMaterializationSpec,
-        prompt_system_prompt: Option<&str>,
     ) -> Result<CreateSessionRequest, ScheduleDomainError> {
         let build = materialized_build_options(&self.build_template, create)?;
 
@@ -524,13 +456,7 @@ impl<B: SessionAgentBuilder + 'static> RuntimeBackedScheduleSessionHost<B> {
             injected_context: Vec::new(),
             model: create.model.clone(),
             prompt: ContentInput::Text(String::new()),
-            // Parse the schedule-spec prompt representation once at this
-            // ingest boundary: an occurrence-rendered prompt wins over the
-            // spec prompt; either becomes an explicit `Set`, absence inherits.
-            system_prompt: match prompt_system_prompt
-                .map(str::to_owned)
-                .or_else(|| create.system_prompt.clone())
-            {
+            system_prompt: match create.system_prompt.clone() {
                 Some(prompt) => crate::SystemPromptOverride::Set(prompt),
                 None => crate::SystemPromptOverride::Inherit,
             },
@@ -593,9 +519,8 @@ impl<B: SessionAgentBuilder + 'static> SurfaceScheduleSessionHost
         &self,
         occurrence: &crate::Occurrence,
         create: &SessionMaterializationSpec,
-        prompt_system_prompt: Option<&str>,
     ) -> Result<SessionId, ScheduleDomainError> {
-        let request = self.build_materialized_request(create, prompt_system_prompt)?;
+        let request = self.build_materialized_request(create)?;
         let keep_alive = request.build.as_ref().is_some_and(|build| build.keep_alive);
         // Layer A: derive the materialized SessionId deterministically from the
         // occurrence identity (NOT attempt_count) so a redrive reuses the same
@@ -648,6 +573,7 @@ impl<B: SessionAgentBuilder + 'static> SurfaceScheduleSessionHost
         &self,
         session_id: &SessionId,
         occurrence: &crate::Occurrence,
+        identity: &ScheduleDeliveryIdentity,
         dispatch: ScheduledPromptDispatch,
     ) -> Result<crate::DeliveryDispatch, ScheduleDomainError> {
         let admission = self.ensure_runtime_session_registered(session_id).await?;
@@ -675,6 +601,9 @@ impl<B: SessionAgentBuilder + 'static> SurfaceScheduleSessionHost
                     )
                     .collect()
             }),
+            system_prompts: dispatch.system_prompt.into_iter().collect(),
+            transient_turn_context: dispatch.transient_turn_context,
+            transient_turn_context_appends: Vec::new(),
             model: None,
             provider: None,
             self_hosted_server_id: None,
@@ -696,29 +625,38 @@ impl<B: SessionAgentBuilder + 'static> SurfaceScheduleSessionHost
             meerkat_runtime::PromptInput::from_content_input(dispatch.prompt, Some(turn_metadata));
         prompt_input.header.source = meerkat_runtime::InputOrigin::System;
         prompt_input.header.idempotency_key = Some(meerkat_runtime::IdempotencyKey::new(
-            schedule_delivery_idempotency_key(occurrence),
+            schedule_runtime_delivery_idempotency_key(
+                self.runtime_adapter.as_ref(),
+                session_id,
+                occurrence,
+                &identity.idempotency_key,
+            )
+            .await?,
         ));
-        prompt_input.header.correlation_id = Some(meerkat_runtime::CorrelationId::from_uuid(
-            occurrence.occurrence_id.0,
-        ));
+        prompt_input.header.correlation_id = Some(schedule_runtime_correlation_id(identity)?);
 
         let input = meerkat_runtime::Input::Prompt(prompt_input);
         let (outcome, handle) = self
             .accept_scheduled_input(session_id, input, &admission)
             .await?;
 
-        runtime_delivery_dispatch(
+        runtime_delivery_dispatch_from_admission(
+            self.runtime_adapter.as_ref(),
+            session_id,
             occurrence,
+            identity,
             outcome,
             handle,
             dispatch.materialized_session_id,
         )
+        .await
     }
 
     async fn deliver_event(
         &self,
         session_id: &SessionId,
         occurrence: &crate::Occurrence,
+        identity: &ScheduleDeliveryIdentity,
         event_type: String,
         payload: serde_json::Value,
         render_metadata: Option<meerkat_core::types::RenderMetadata>,
@@ -737,12 +675,16 @@ impl<B: SessionAgentBuilder + 'static> SurfaceScheduleSessionHost
                 durability: meerkat_runtime::input::InputDurability::Durable,
                 visibility: meerkat_runtime::input::InputVisibility::default(),
                 idempotency_key: Some(meerkat_runtime::IdempotencyKey::new(
-                    schedule_delivery_idempotency_key(occurrence),
+                    schedule_runtime_delivery_idempotency_key(
+                        self.runtime_adapter.as_ref(),
+                        session_id,
+                        occurrence,
+                        &identity.idempotency_key,
+                    )
+                    .await?,
                 )),
                 supersession_key: None,
-                correlation_id: Some(meerkat_runtime::CorrelationId::from_uuid(
-                    occurrence.occurrence_id.0,
-                )),
+                correlation_id: Some(schedule_runtime_correlation_id(identity)?),
             },
             event_type,
             payload,
@@ -755,7 +697,16 @@ impl<B: SessionAgentBuilder + 'static> SurfaceScheduleSessionHost
             .accept_scheduled_input(session_id, input, &admission)
             .await?;
 
-        runtime_delivery_dispatch(occurrence, outcome, handle, materialized_session_id)
+        runtime_delivery_dispatch_from_admission(
+            self.runtime_adapter.as_ref(),
+            session_id,
+            occurrence,
+            identity,
+            outcome,
+            handle,
+            materialized_session_id,
+        )
+        .await
     }
 }
 
@@ -1038,12 +989,16 @@ mod tests {
             }
         ));
         let occurrence = sample_occurrence();
+        let identity = ScheduleDeliveryIdentity::for_occurrence(&occurrence);
         let dispatch = host
             .deliver_prompt(
                 &result.session_id,
                 &occurrence,
+                &identity,
                 ScheduledPromptDispatch {
                     prompt: ContentInput::Text("scheduled local mob prompt".to_string()),
+                    transient_turn_context: None,
+                    system_prompt: None,
                     render_metadata: None,
                     skill_refs: Vec::new(),
                     additional_instructions: Vec::new(),
@@ -1132,12 +1087,16 @@ mod tests {
             None,
         );
         let occurrence = sample_occurrence();
+        let identity = ScheduleDeliveryIdentity::for_occurrence(&occurrence);
         let dispatch = host
             .deliver_prompt(
                 &result.session_id,
                 &occurrence,
+                &identity,
                 ScheduledPromptDispatch {
                     prompt: ContentInput::Text("scheduled prompt".to_string()),
+                    transient_turn_context: None,
+                    system_prompt: None,
                     render_metadata: None,
                     skill_refs: Vec::new(),
                     additional_instructions: Vec::new(),
@@ -1223,12 +1182,16 @@ mod tests {
             None,
         );
         let occurrence = sample_occurrence();
+        let identity = ScheduleDeliveryIdentity::for_occurrence(&occurrence);
         let dispatch = host
             .deliver_prompt(
                 &result.session_id,
                 &occurrence,
+                &identity,
                 ScheduledPromptDispatch {
                     prompt: ContentInput::Text("scheduled prompt".to_string()),
+                    transient_turn_context: None,
+                    system_prompt: None,
                     render_metadata: None,
                     skill_refs: Vec::new(),
                     additional_instructions: Vec::new(),

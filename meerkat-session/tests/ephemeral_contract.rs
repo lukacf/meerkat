@@ -13,16 +13,15 @@ use meerkat_core::event::AgentEvent;
 use meerkat_core::lifecycle::core_executor::CoreApplyTerminal;
 use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
 use meerkat_core::service::{
-    AppendSystemContextRequest, AppendSystemContextStatus, CreateSessionRequest,
-    DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions, SessionError,
-    SessionHistoryQuery, SessionQuery, SessionService, SessionServiceControlExt,
+    CreateSessionRequest, DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions,
+    SessionError, SessionHistoryQuery, SessionQuery, SessionService, SessionServiceControlExt,
     SessionServiceHistoryExt, StartTurnRequest, TurnToolOverlay,
 };
 use meerkat_core::types::{AssistantBlock, HandlingMode, RunResult, SessionId, StopReason, Usage};
 use meerkat_core::{
     CancelAfterBoundaryCommand, CancelAfterBoundarySender, HookDecision, HookEngine,
     HookExecutionReport, HookId, HookInvocation, HookOutcome, HookPoint, HookReasonCode, RunId,
-    Session, SessionDeferredTurnState, SystemContextStateError,
+    Session, SessionDeferredTurnState, TransientTurnContextStateHandle,
 };
 use meerkat_session::ephemeral::SessionSnapshot;
 use meerkat_session::{EphemeralSessionService, SessionAgent, SessionAgentBuilder};
@@ -42,16 +41,14 @@ struct MockAgent {
     delay_ms: Option<u64>,
     callback_pending: bool,
     fail_overlay_clear: bool,
+    reject_system_messages: bool,
     overlay_updates: Arc<std::sync::Mutex<Vec<Option<TurnToolOverlay>>>>,
     durable_identity: Option<meerkat_core::SessionLlmIdentity>,
-    system_context_state: meerkat_core::SystemContextStateHandle,
+    transient_turn_context_state: TransientTurnContextStateHandle,
 }
 
-fn system_context_handle_for_test(
-    state: meerkat_core::SessionSystemContextState,
-) -> meerkat_core::SystemContextStateHandle {
-    meerkat_core::SystemContextStateHandle::new(state)
-        .expect("test system-context state should restore")
+fn transient_turn_context_handle_for_test() -> TransientTurnContextStateHandle {
+    TransientTurnContextStateHandle::new()
 }
 
 #[async_trait]
@@ -156,12 +153,8 @@ impl SessionAgent for MockAgent {
         }
     }
 
-    fn session_clone(&self) -> Result<meerkat_core::Session, SystemContextStateError> {
-        let mut session = meerkat_core::Session::with_id(self.session_id.clone());
-        session
-            .set_system_context_state(self.system_context_state.snapshot())
-            .expect("serialize system-context state");
-        Ok(session)
+    fn session_clone(&self) -> Result<meerkat_core::Session, meerkat_core::AgentError> {
+        Ok(meerkat_core::Session::with_id(self.session_id.clone()))
     }
 
     fn durable_llm_identity(&self) -> Option<meerkat_core::SessionLlmIdentity> {
@@ -176,22 +169,21 @@ impl SessionAgent for MockAgent {
         )
     }
 
-    fn apply_runtime_system_context(
-        &mut self,
-        appends: &[meerkat_core::PendingSystemContextAppend],
-    ) {
-        let mut session = self
-            .session_clone()
-            .expect("test session clone should succeed");
-        session.append_system_context_blocks(appends);
-        self.message_count = session.messages().len();
-        self.system_context_state
-            .replace_from_generated_restore(session.system_context_state().unwrap_or_default())
-            .expect("test system-context state should restore");
+    fn transient_turn_context_state(&self) -> TransientTurnContextStateHandle {
+        self.transient_turn_context_state.clone()
     }
 
-    fn system_context_state(&self) -> meerkat_core::SystemContextStateHandle {
-        self.system_context_state.clone()
+    fn append_system_messages(
+        &mut self,
+        contents: Vec<String>,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        if self.reject_system_messages {
+            return Err(meerkat_core::error::AgentError::ConfigError(
+                "reject System batch before mutation".to_string(),
+            ));
+        }
+        self.message_count += contents.len();
+        Ok(())
     }
 }
 
@@ -200,6 +192,7 @@ struct MockAgentBuilder {
     build_delay_ms: Option<u64>,
     callback_pending: bool,
     fail_overlay_clear: bool,
+    reject_system_messages: bool,
     overlay_updates: Arc<std::sync::Mutex<Vec<Option<TurnToolOverlay>>>>,
     durable_identity: Option<meerkat_core::SessionLlmIdentity>,
 }
@@ -211,6 +204,7 @@ impl MockAgentBuilder {
             build_delay_ms: None,
             callback_pending: false,
             fail_overlay_clear: false,
+            reject_system_messages: false,
             overlay_updates: Arc::new(std::sync::Mutex::new(Vec::new())),
             durable_identity: Some(test_llm_identity("mock")),
         }
@@ -222,6 +216,7 @@ impl MockAgentBuilder {
             build_delay_ms: None,
             callback_pending: false,
             fail_overlay_clear: false,
+            reject_system_messages: false,
             overlay_updates: Arc::new(std::sync::Mutex::new(Vec::new())),
             durable_identity: Some(test_llm_identity("mock")),
         }
@@ -233,6 +228,7 @@ impl MockAgentBuilder {
             build_delay_ms: Some(build_delay_ms),
             callback_pending: false,
             fail_overlay_clear: false,
+            reject_system_messages: false,
             overlay_updates: Arc::new(std::sync::Mutex::new(Vec::new())),
             durable_identity: Some(test_llm_identity("mock")),
         }
@@ -244,6 +240,7 @@ impl MockAgentBuilder {
             build_delay_ms: None,
             callback_pending: true,
             fail_overlay_clear: false,
+            reject_system_messages: false,
             overlay_updates: Arc::new(std::sync::Mutex::new(Vec::new())),
             durable_identity: Some(test_llm_identity("mock")),
         }
@@ -255,6 +252,7 @@ impl MockAgentBuilder {
             build_delay_ms: None,
             callback_pending: false,
             fail_overlay_clear: true,
+            reject_system_messages: false,
             overlay_updates: Arc::new(std::sync::Mutex::new(Vec::new())),
             durable_identity: Some(test_llm_identity("mock")),
         }
@@ -263,6 +261,13 @@ impl MockAgentBuilder {
     fn without_durable_identity() -> Self {
         Self {
             durable_identity: None,
+            ..Self::new()
+        }
+    }
+
+    fn rejecting_system_messages() -> Self {
+        Self {
+            reject_system_messages: true,
             ..Self::new()
         }
     }
@@ -291,9 +296,10 @@ impl SessionAgentBuilder for MockAgentBuilder {
             delay_ms: self.delay_ms,
             callback_pending: self.callback_pending,
             fail_overlay_clear: self.fail_overlay_clear,
+            reject_system_messages: self.reject_system_messages,
             overlay_updates: self.overlay_updates.clone(),
             durable_identity: self.durable_identity.clone(),
-            system_context_state: system_context_handle_for_test(Default::default()),
+            transient_turn_context_state: transient_turn_context_handle_for_test(),
         })
     }
 }
@@ -357,7 +363,7 @@ fn session_for_request(req: &CreateSessionRequest) -> Session {
         .and_then(|build| build.resume_session.clone())
         .unwrap_or_default();
     if let Some(system_prompt) = req.system_prompt.as_set_prompt() {
-        session.set_system_prompt(system_prompt.to_string());
+        session.append_system_message(system_prompt.to_string());
     }
     session
 }
@@ -381,34 +387,6 @@ fn session_snapshot(session: &Session) -> SessionSnapshot {
         usage: session.total_usage(),
         last_assistant_text: session.last_assistant_text(),
     }
-}
-
-fn session_clone_with_system_context(
-    session: &Session,
-    state: &meerkat_core::SystemContextStateHandle,
-) -> Session {
-    let mut clone = session.clone();
-    clone
-        .set_system_context_state(state.snapshot())
-        .expect("serialize system-context state");
-    clone
-}
-
-fn sync_session_context_state(session: &Session, state: &meerkat_core::SystemContextStateHandle) {
-    if let Some(session_state) = session.system_context_state() {
-        state
-            .replace_from_generated_restore(session_state)
-            .expect("test system-context state should restore");
-    }
-}
-
-fn sync_shared_system_context_to_session(
-    session: &mut Session,
-    state: &meerkat_core::SystemContextStateHandle,
-) {
-    session
-        .set_system_context_state(state.snapshot())
-        .expect("serialize system-context state");
 }
 
 fn successful_run_result(session: &Session, text: impl Into<String>) -> RunResult {
@@ -439,14 +417,9 @@ fn filtered_tool_names(overlay: &Option<TurnToolOverlay>) -> Vec<String> {
     names
 }
 
-fn rendered_system_prompts(
-    session: &Session,
-    appends: &[meerkat_core::PendingSystemContextAppend],
-) -> Vec<String> {
-    let mut session = session.clone();
-    session.append_system_context_blocks(appends);
+fn rendered_system_prompts(session: &Session) -> Vec<String> {
     session
-        .messages()
+        .messages_for_model_boundary()
         .iter()
         .filter_map(|message| match message {
             meerkat_core::types::Message::System(system) => Some(system.content.clone()),
@@ -462,30 +435,8 @@ struct RealSessionAgent {
     delay_ms: Option<u64>,
     hook_engine: Option<Arc<dyn HookEngine>>,
     turn_tool_overlay: Option<TurnToolOverlay>,
-    system_context_state: meerkat_core::SystemContextStateHandle,
+    transient_turn_context_state: TransientTurnContextStateHandle,
     cancel_after_boundary_tx: CancelAfterBoundarySender,
-}
-
-impl RealSessionAgent {
-    fn take_pending_system_context_boundary(
-        &mut self,
-    ) -> Vec<meerkat_core::PendingSystemContextAppend> {
-        let pending = {
-            let mut state = self.system_context_state.snapshot();
-            if state.pending().is_empty() {
-                return Vec::new();
-            }
-            let pending = state.pending().to_vec();
-            state.mark_pending_applied();
-            self.system_context_state
-                .replace_from_generated_restore(state)
-                .expect("test system-context state should restore");
-            pending
-        };
-
-        sync_shared_system_context_to_session(&mut self.session, &self.system_context_state);
-        pending
-    }
 }
 
 #[async_trait]
@@ -527,8 +478,6 @@ impl SessionAgent for RealSessionAgent {
             }
         }
 
-        let boundary_system_context = self.take_pending_system_context_boundary();
-
         self.provider_visible_tools
             .lock()
             .expect("provider_visible_tools lock poisoned")
@@ -536,10 +485,7 @@ impl SessionAgent for RealSessionAgent {
         self.provider_visible_system_prompts
             .lock()
             .expect("provider_visible_system_prompts lock poisoned")
-            .push(rendered_system_prompts(
-                &self.session,
-                &boundary_system_context,
-            ));
+            .push(rendered_system_prompts(&self.session));
 
         if let Some(delay_ms) = self.delay_ms {
             tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
@@ -597,11 +543,8 @@ impl SessionAgent for RealSessionAgent {
         session_snapshot(&self.session)
     }
 
-    fn session_clone(&self) -> Result<meerkat_core::Session, SystemContextStateError> {
-        Ok(session_clone_with_system_context(
-            &self.session,
-            &self.system_context_state,
-        ))
+    fn session_clone(&self) -> Result<meerkat_core::Session, meerkat_core::AgentError> {
+        Ok(self.session.clone())
     }
 
     fn durable_llm_identity(&self) -> Option<meerkat_core::SessionLlmIdentity> {
@@ -612,20 +555,17 @@ impl SessionAgent for RealSessionAgent {
         meerkat_core::pending_continuation::observe_session_tail(self.session.messages())
     }
 
-    fn apply_runtime_system_context(
+    fn transient_turn_context_state(&self) -> TransientTurnContextStateHandle {
+        self.transient_turn_context_state.clone()
+    }
+
+    fn append_system_messages(
         &mut self,
-        appends: &[meerkat_core::PendingSystemContextAppend],
-    ) {
-        self.session.append_system_context_blocks(appends);
-        sync_session_context_state(&self.session, &self.system_context_state);
-    }
-
-    fn system_context_state(&self) -> meerkat_core::SystemContextStateHandle {
-        self.system_context_state.clone()
-    }
-
-    fn sync_system_context_state(&mut self) -> Result<(), SystemContextStateError> {
-        sync_session_context_state(&self.session, &self.system_context_state);
+        contents: Vec<String>,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        for content in contents {
+            self.session.append_system_message(content);
+        }
         Ok(())
     }
 }
@@ -635,7 +575,7 @@ struct CompactionSessionAgent {
     seen_last_user_messages: Arc<std::sync::Mutex<Vec<String>>>,
     compactor: Arc<TrackingCompactor>,
     boundary_index: u64,
-    system_context_state: meerkat_core::SystemContextStateHandle,
+    transient_turn_context_state: TransientTurnContextStateHandle,
     cancel_after_boundary_tx: CancelAfterBoundarySender,
 }
 
@@ -651,6 +591,7 @@ impl SessionAgent for CompactionSessionAgent {
             message_count: self.session.messages().len(),
             estimated_history_tokens: 0,
             estimated_request_bytes: 0,
+            provider_request_pressure: None,
             last_compaction_boundary_index: None,
             session_boundary_index: self.boundary_index,
         };
@@ -718,11 +659,8 @@ impl SessionAgent for CompactionSessionAgent {
         session_snapshot(&self.session)
     }
 
-    fn session_clone(&self) -> Result<meerkat_core::Session, SystemContextStateError> {
-        Ok(session_clone_with_system_context(
-            &self.session,
-            &self.system_context_state,
-        ))
+    fn session_clone(&self) -> Result<meerkat_core::Session, meerkat_core::AgentError> {
+        Ok(self.session.clone())
     }
 
     fn durable_llm_identity(&self) -> Option<meerkat_core::SessionLlmIdentity> {
@@ -733,21 +671,8 @@ impl SessionAgent for CompactionSessionAgent {
         meerkat_core::pending_continuation::observe_session_tail(self.session.messages())
     }
 
-    fn apply_runtime_system_context(
-        &mut self,
-        appends: &[meerkat_core::PendingSystemContextAppend],
-    ) {
-        self.session.append_system_context_blocks(appends);
-        sync_session_context_state(&self.session, &self.system_context_state);
-    }
-
-    fn system_context_state(&self) -> meerkat_core::SystemContextStateHandle {
-        self.system_context_state.clone()
-    }
-
-    fn sync_system_context_state(&mut self) -> Result<(), SystemContextStateError> {
-        sync_session_context_state(&self.session, &self.system_context_state);
-        Ok(())
+    fn transient_turn_context_state(&self) -> TransientTurnContextStateHandle {
+        self.transient_turn_context_state.clone()
     }
 }
 
@@ -846,7 +771,7 @@ impl SessionAgentBuilder for CompactionAgentBuilder {
             seen_last_user_messages: Arc::clone(&self.seen_last_user_messages),
             compactor: Arc::clone(&self.compactor),
             boundary_index: 0,
-            system_context_state: system_context_handle_for_test(Default::default()),
+            transient_turn_context_state: transient_turn_context_handle_for_test(),
             cancel_after_boundary_tx,
         })
     }
@@ -870,7 +795,7 @@ impl SessionAgentBuilder for RealAgentBuilder {
             delay_ms: self.llm_delay_ms,
             hook_engine: self.hook_engine.as_ref().map(Arc::clone),
             turn_tool_overlay: None,
-            system_context_state: system_context_handle_for_test(Default::default()),
+            transient_turn_context_state: transient_turn_context_handle_for_test(),
             cancel_after_boundary_tx,
         })
     }
@@ -991,7 +916,7 @@ async fn test_create_session_rejects_without_durable_llm_identity() {
 }
 
 #[tokio::test]
-async fn test_recovered_session_does_not_rearm_consumed_first_turn_override_window() {
+async fn test_recovered_session_accepts_system_message_after_consumed_first_turn() {
     let service = make_service(MockAgentBuilder::new());
     let mut recovered = Session::new();
     let mut deferred = SessionDeferredTurnState::default();
@@ -1017,7 +942,7 @@ async fn test_recovered_session_does_not_rearm_consumed_first_turn_override_wind
         .await
         .expect("materialize recovered session");
 
-    let error = service
+    let result = service
         .start_turn(
             &created.session_id,
             StartTurnRequest {
@@ -1027,11 +952,16 @@ async fn test_recovered_session_does_not_rearm_consumed_first_turn_override_wind
             },
         )
         .await
-        .expect_err("recovered consumed first turn must not allow build-only overrides");
+        .expect("System messages are valid on every admitted turn");
 
-    assert!(
-        matches!(error, SessionError::Unsupported(ref message) if message == "system_prompt override is only allowed on a deferred session's first turn"),
-        "unexpected error: {error:?}"
+    assert_eq!(result.text, "Hello from mock");
+    let view = service
+        .read(&created.session_id)
+        .await
+        .expect("read session");
+    assert_eq!(
+        view.state.message_count, 3,
+        "one System plus the turn's user and assistant messages must commit"
     );
 }
 
@@ -1408,6 +1338,7 @@ async fn test_turn_tool_overlay_is_cleared_after_canceled_turn() {
             build_delay_ms: None,
             callback_pending: false,
             fail_overlay_clear: false,
+            reject_system_messages: false,
             overlay_updates: overlay_updates.clone(),
             durable_identity: Some(test_llm_identity("mock")),
         },
@@ -1622,7 +1553,12 @@ async fn test_apply_runtime_turn_returns_callback_pending_terminal() -> Result<(
         output.receipt.contributing_input_ids,
         contributing_input_ids
     );
-    assert!(output.snapshot_bytes().is_some());
+    assert!(
+        output
+            .whole_blob_bytes()
+            .expect("callback-pending snapshot should encode")
+            .is_some()
+    );
     let Some(CoreApplyTerminal::CallbackPending {
         tool_use_id,
         tool_name,
@@ -1711,7 +1647,12 @@ async fn test_apply_runtime_turn_resume_pending_no_boundary_is_typed_terminal() 
         output.receipt.contributing_input_ids,
         contributing_input_ids
     );
-    assert!(output.snapshot_bytes().is_some());
+    assert!(
+        output
+            .whole_blob_bytes()
+            .expect("no-pending snapshot should encode")
+            .is_some()
+    );
     assert!(matches!(
         output.terminal,
         Some(CoreApplyTerminal::NoPendingBoundary)
@@ -1720,397 +1661,118 @@ async fn test_apply_runtime_turn_resume_pending_no_boundary_is_typed_terminal() 
 }
 
 #[tokio::test]
-async fn test_append_system_context_stages_dedupes_and_conflicts_per_session() {
-    let service = make_service(MockAgentBuilder::new());
-    let _ = service
-        .create_session(create_req_deferred("Hello"))
+async fn test_runtime_and_request_system_messages_append_once_in_order() {
+    let provider_visible_system_prompts =
+        Arc::new(std::sync::Mutex::new(Vec::<Vec<String>>::new()));
+    let service = Arc::new(EphemeralSessionService::new(
+        RealAgentBuilder {
+            provider_visible_tools: Arc::new(std::sync::Mutex::new(Vec::new())),
+            provider_visible_system_prompts: Arc::clone(&provider_visible_system_prompts),
+            llm_delay_ms: None,
+            hook_engine: None,
+        },
+        10,
+    ));
+
+    let created = service
+        .create_session(create_req_deferred("ordered System messages"))
         .await
         .expect("create deferred session");
-    let session_id = service
-        .list(SessionQuery::default())
-        .await
-        .expect("list sessions")[0]
-        .session_id
-        .clone();
+    let mut request = turn_req("run");
+    request.runtime.turn_metadata = Some(
+        meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+            system_prompts: vec!["runtime one".to_string(), "runtime two".to_string()],
+            ..Default::default()
+        },
+    );
+    request.system_prompt = Some("request System".to_string());
 
-    let request = AppendSystemContextRequest {
-        content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
-            "Observe the orchestrator handoff.".to_string(),
+    service
+        .start_turn(&created.session_id, request)
+        .await
+        .expect("ordered System messages should be admitted");
+
+    assert_eq!(
+        provider_visible_system_prompts
+            .lock()
+            .expect("provider prompt capture lock poisoned")
+            .as_slice(),
+        &[vec![
+            "runtime one".to_string(),
+            "runtime two".to_string(),
+            "request System".to_string(),
+        ]],
+        "runtime metadata precedes the request field and no message is duplicated"
+    );
+}
+
+#[tokio::test]
+async fn test_rejected_system_batch_leaves_turn_boundary_unchanged() {
+    let service = make_service(MockAgentBuilder::rejecting_system_messages());
+    let created = service
+        .create_session(create_req_deferred("atomic System batch"))
+        .await
+        .expect("create deferred session");
+    let mut request = turn_req("must not append");
+    request.injected_context = vec![ContentInput::Text("must not inject".to_string())];
+    request.runtime.turn_metadata = Some(
+        meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+            system_prompts: vec!["first".to_string(), "second".to_string()],
+            ..Default::default()
+        },
+    );
+
+    service
+        .start_turn(&created.session_id, request)
+        .await
+        .expect_err("agent should reject the complete System batch");
+
+    let view = service
+        .read(&created.session_id)
+        .await
+        .expect("read rejected turn");
+    assert_eq!(
+        view.state.message_count, 0,
+        "batch rejection must precede all System, injected-context, user, and assistant appends"
+    );
+}
+
+#[tokio::test]
+async fn test_eager_initial_turn_appends_runtime_system_messages_once_in_order() {
+    let provider_visible_system_prompts =
+        Arc::new(std::sync::Mutex::new(Vec::<Vec<String>>::new()));
+    let service = EphemeralSessionService::new(
+        RealAgentBuilder {
+            provider_visible_tools: Arc::new(std::sync::Mutex::new(Vec::new())),
+            provider_visible_system_prompts: Arc::clone(&provider_visible_system_prompts),
+            llm_delay_ms: None,
+            hook_engine: None,
+        },
+        10,
+    );
+    let mut request = create_req("eager turn");
+    request.build = Some(SessionBuildOptions {
+        initial_turn_metadata: Some(
+            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                system_prompts: vec!["eager one".to_string(), "eager two".to_string()],
+                ..Default::default()
+            },
         ),
-        source: Some("mob".to_string()),
-        idempotency_key: Some("ctx-1".to_string()),
-        source_kind: meerkat_core::session::SystemContextSource::Normal,
-        peer_response_terminal: None,
-    };
+        ..Default::default()
+    });
 
-    let first = service
-        .append_system_context(&session_id, request.clone())
-        .await
-        .expect("stage first append");
-    assert_eq!(first.status, AppendSystemContextStatus::Staged);
-
-    let duplicate = service
-        .append_system_context(&session_id, request.clone())
-        .await
-        .expect("duplicate append should be accepted");
-    assert_eq!(duplicate.status, AppendSystemContextStatus::Duplicate);
-
-    let conflict = service
-        .append_system_context(
-            &session_id,
-            AppendSystemContextRequest {
-                content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
-                    "Different content".to_string(),
-                ),
-                source: Some("mob".to_string()),
-                idempotency_key: Some("ctx-1".to_string()),
-                source_kind: meerkat_core::session::SystemContextSource::Normal,
-                peer_response_terminal: None,
-            },
-        )
-        .await
-        .expect_err("same key with different content must conflict");
-    assert_eq!(conflict.code(), "SESSION_SYSTEM_CONTEXT_CONFLICT");
-
-    let state = service
-        .system_context_state(&session_id)
-        .await
-        .expect("shared system-context state");
-    let state = state.snapshot();
-    assert_eq!(state.pending_len(), 1, "duplicate must not enqueue twice");
-    assert_eq!(
-        state.pending()[0].content.render_text(),
-        "Observe the orchestrator handoff."
-    );
-    assert_eq!(state.pending()[0].source.as_deref(), Some("mob"));
-    let seen = state
-        .seen()
-        .get("ctx-1")
-        .expect("idempotency key should be tracked");
-    assert_eq!(seen.state, meerkat_core::SeenSystemContextState::Pending);
-}
-
-#[tokio::test]
-async fn test_staged_system_context_applies_at_next_llm_boundary() {
-    let provider_visible_tools = Arc::new(std::sync::Mutex::new(Vec::<Vec<String>>::new()));
-    let provider_visible_system_prompts =
-        Arc::new(std::sync::Mutex::new(Vec::<Vec<String>>::new()));
-    let service = Arc::new(EphemeralSessionService::new(
-        RealAgentBuilder {
-            provider_visible_tools: Arc::clone(&provider_visible_tools),
-            provider_visible_system_prompts: Arc::clone(&provider_visible_system_prompts),
-            llm_delay_ms: None,
-            hook_engine: None,
-        },
-        10,
-    ));
-
-    let mut request = create_req_deferred("runtime tool scope");
-    request.system_prompt =
-        meerkat_core::SystemPromptOverride::Set("Base system prompt".to_string());
-    let _ = service
+    service
         .create_session(request)
         .await
-        .expect("create deferred session");
-    let session_id = service
-        .list(SessionQuery::default())
-        .await
-        .expect("list sessions")[0]
-        .session_id
-        .clone();
+        .expect("eager turn with ordered System messages");
 
-    let staged = service
-        .append_system_context(
-            &session_id,
-            AppendSystemContextRequest {
-                content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
-                    "You are coordinating with an external orchestrator.".to_string(),
-                ),
-                source: Some("mob".to_string()),
-                idempotency_key: Some("ctx-boundary".to_string()),
-                source_kind: meerkat_core::session::SystemContextSource::Normal,
-                peer_response_terminal: None,
-            },
-        )
-        .await
-        .expect("append system context");
-    assert_eq!(staged.status, AppendSystemContextStatus::Staged);
-
-    let state = service
-        .system_context_state(&session_id)
-        .await
-        .expect("shared system-context state");
     assert_eq!(
-        state.snapshot().pending_len(),
-        1,
-        "append should remain pending until the next LLM boundary"
-    );
-
-    service
-        .start_turn(&session_id, turn_req("apply staged context"))
-        .await
-        .expect("turn should run");
-
-    let prompts = provider_visible_system_prompts
-        .lock()
-        .expect("provider_visible_system_prompts lock poisoned")
-        .clone();
-    assert_eq!(prompts.len(), 1, "expected one provider call");
-    assert_eq!(
-        prompts[0].len(),
-        1,
-        "expected a single canonical system prompt"
-    );
-    let system_prompt = &prompts[0][0];
-    assert!(system_prompt.contains("Base system prompt"));
-    assert!(system_prompt.contains("[Runtime System Context]"));
-    assert!(system_prompt.contains("source: mob"));
-    assert!(system_prompt.contains("You are coordinating with an external orchestrator."));
-    assert!(
-        system_prompt.contains(meerkat_core::SYSTEM_CONTEXT_SEPARATOR),
-        "runtime append should be rendered with the canonical separator"
-    );
-
-    let state = service
-        .system_context_state(&session_id)
-        .await
-        .expect("shared system-context state");
-    let state = state.snapshot();
-    assert!(
-        state.pending().is_empty(),
-        "boundary application should clear the pending queue"
-    );
-    let seen = state
-        .seen()
-        .get("ctx-boundary")
-        .expect("idempotency key should remain tracked");
-    assert_eq!(seen.state, meerkat_core::SeenSystemContextState::Applied);
-}
-
-#[tokio::test]
-async fn test_staged_system_context_is_not_replayed_on_later_turns() {
-    let provider_visible_system_prompts =
-        Arc::new(std::sync::Mutex::new(Vec::<Vec<String>>::new()));
-    let service = Arc::new(EphemeralSessionService::new(
-        RealAgentBuilder {
-            provider_visible_tools: Arc::new(std::sync::Mutex::new(Vec::<Vec<String>>::new())),
-            provider_visible_system_prompts: Arc::clone(&provider_visible_system_prompts),
-            llm_delay_ms: None,
-            hook_engine: None,
-        },
-        10,
-    ));
-
-    let mut request = create_req_deferred("runtime tool scope");
-    request.system_prompt =
-        meerkat_core::SystemPromptOverride::Set("Base system prompt".to_string());
-    let _ = service
-        .create_session(request)
-        .await
-        .expect("create deferred session");
-    let session_id = service
-        .list(SessionQuery::default())
-        .await
-        .expect("list sessions")[0]
-        .session_id
-        .clone();
-
-    service
-        .append_system_context(
-            &session_id,
-            AppendSystemContextRequest {
-                content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
-                    "You are coordinating with an external orchestrator.".to_string(),
-                ),
-                source: Some("mob".to_string()),
-                idempotency_key: Some("ctx-boundary-replay".to_string()),
-                source_kind: meerkat_core::session::SystemContextSource::Normal,
-                peer_response_terminal: None,
-            },
-        )
-        .await
-        .expect("append system context");
-
-    service
-        .start_turn(&session_id, turn_req("apply staged context"))
-        .await
-        .expect("first turn should run");
-
-    service
-        .start_turn(&session_id, turn_req("follow-up turn"))
-        .await
-        .expect("second turn should run");
-
-    let prompts = provider_visible_system_prompts
-        .lock()
-        .expect("provider_visible_system_prompts lock poisoned")
-        .clone();
-    assert_eq!(prompts.len(), 2, "expected one provider call per turn");
-    assert!(
-        prompts[0][0].contains("You are coordinating with an external orchestrator."),
-        "first turn should include staged context"
-    );
-    assert!(
-        !prompts[1][0].contains("You are coordinating with an external orchestrator."),
-        "second turn must not replay single-use staged context"
-    );
-}
-
-#[tokio::test]
-async fn test_staged_system_context_appended_during_active_turn_waits_for_next_turn() {
-    let provider_visible_system_prompts =
-        Arc::new(std::sync::Mutex::new(Vec::<Vec<String>>::new()));
-    let service = Arc::new(EphemeralSessionService::new(
-        RealAgentBuilder {
-            provider_visible_tools: Arc::new(std::sync::Mutex::new(Vec::<Vec<String>>::new())),
-            provider_visible_system_prompts: Arc::clone(&provider_visible_system_prompts),
-            llm_delay_ms: Some(200),
-            hook_engine: None,
-        },
-        10,
-    ));
-
-    let mut request = create_req_deferred("runtime tool scope");
-    request.system_prompt =
-        meerkat_core::SystemPromptOverride::Set("Base system prompt".to_string());
-    let _ = service
-        .create_session(request)
-        .await
-        .expect("create deferred session");
-    let session_id = service
-        .list(SessionQuery::default())
-        .await
-        .expect("list sessions")[0]
-        .session_id
-        .clone();
-
-    let first_turn = {
-        let service = Arc::clone(&service);
-        let session_id = session_id.clone();
-        tokio::spawn(async move {
-            service
-                .start_turn(&session_id, turn_req("first turn"))
-                .await
-        })
-    };
-
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-    service
-        .append_system_context(
-            &session_id,
-            AppendSystemContextRequest {
-                content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
-                    "Late staged context".to_string(),
-                ),
-                source: Some("mob".to_string()),
-                idempotency_key: Some("ctx-during-active-turn".to_string()),
-                source_kind: meerkat_core::session::SystemContextSource::Normal,
-                peer_response_terminal: None,
-            },
-        )
-        .await
-        .expect("append during active turn");
-
-    first_turn
-        .await
-        .expect("first turn join")
-        .expect("first turn should finish");
-
-    service
-        .start_turn(&session_id, turn_req("second turn"))
-        .await
-        .expect("second turn should run");
-
-    let prompts = provider_visible_system_prompts
-        .lock()
-        .expect("provider_visible_system_prompts lock poisoned")
-        .clone();
-    assert_eq!(prompts.len(), 2, "expected one provider call per turn");
-    assert!(
-        !prompts[0][0].contains("Late staged context"),
-        "context appended during an active turn must not enter the in-flight provider request"
-    );
-    assert!(
-        prompts[1][0].contains("Late staged context"),
-        "context appended during an active turn must stage for the subsequent eligible turn"
-    );
-}
-
-#[tokio::test]
-async fn test_pre_llm_denied_turn_does_not_consume_staged_system_context() {
-    let provider_visible_system_prompts =
-        Arc::new(std::sync::Mutex::new(Vec::<Vec<String>>::new()));
-    let service = Arc::new(EphemeralSessionService::new(
-        RealAgentBuilder {
-            provider_visible_tools: Arc::new(std::sync::Mutex::new(Vec::<Vec<String>>::new())),
-            provider_visible_system_prompts: Arc::clone(&provider_visible_system_prompts),
-            llm_delay_ms: None,
-            hook_engine: Some(Arc::new(DenyNextPreLlmHookEngine::new())),
-        },
-        10,
-    ));
-
-    let mut request = create_req_deferred("runtime tool scope");
-    request.system_prompt =
-        meerkat_core::SystemPromptOverride::Set("Base system prompt".to_string());
-    let _ = service
-        .create_session(request)
-        .await
-        .expect("create deferred session");
-    let session_id = service
-        .list(SessionQuery::default())
-        .await
-        .expect("list sessions")[0]
-        .session_id
-        .clone();
-
-    service
-        .append_system_context(
-            &session_id,
-            AppendSystemContextRequest {
-                content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
-                    "You are coordinating with an external orchestrator.".to_string(),
-                ),
-                source: Some("mob".to_string()),
-                idempotency_key: Some("ctx-pre-llm-deny".to_string()),
-                source_kind: meerkat_core::session::SystemContextSource::Normal,
-                peer_response_terminal: None,
-            },
-        )
-        .await
-        .expect("append system context");
-
-    let denied = service
-        .start_turn(&session_id, turn_req("denied turn"))
-        .await;
-    assert!(denied.is_err(), "pre-llm hook should deny the first turn");
-
-    let prompts = provider_visible_system_prompts
-        .lock()
-        .expect("provider_visible_system_prompts lock poisoned")
-        .clone();
-    assert!(
-        prompts.is_empty(),
-        "a denied pre-llm turn must not reach the provider"
-    );
-
-    service
-        .start_turn(&session_id, turn_req("eligible turn"))
-        .await
-        .expect("next eligible turn should run");
-
-    let prompts = provider_visible_system_prompts
-        .lock()
-        .expect("provider_visible_system_prompts lock poisoned")
-        .clone();
-    assert_eq!(
-        prompts.len(),
-        1,
-        "only the eligible turn should reach the provider"
-    );
-    assert!(
-        prompts[0][0].contains("You are coordinating with an external orchestrator."),
-        "staged context must survive a denied pre-llm turn and apply on the next eligible turn"
+        provider_visible_system_prompts
+            .lock()
+            .expect("provider prompt capture lock poisoned")
+            .as_slice(),
+        &[vec!["eager one".to_string(), "eager two".to_string()]],
+        "the eager create path must apply initial metadata Systems exactly once"
     );
 }
 

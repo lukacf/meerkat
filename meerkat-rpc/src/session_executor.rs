@@ -8,7 +8,6 @@
 use std::sync::Arc;
 
 use meerkat_core::EventEnvelope;
-use meerkat_core::PendingSystemContextAppend;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::lifecycle::core_executor::{
     CoreApplyFailureCause, CoreApplyFailureCauseKind, CoreApplyOutput, CoreExecutor,
@@ -100,6 +99,23 @@ impl CoreExecutorBoundaryHandle for SessionRuntimeBoundaryHandle {
                 err => Err(err),
             })
             .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))
+    }
+
+    async fn prepare_transient_turn_context_at_boundary(
+        &self,
+        expected_run_id: &meerkat_core::lifecycle::RunId,
+        contexts: Vec<meerkat_core::lifecycle::run_primitive::TurnRequestContext>,
+    ) -> Result<
+        meerkat_core::lifecycle::CoreBoundaryStageOutput,
+        meerkat_core::lifecycle::CoreBoundaryStageError,
+    > {
+        self.runtime
+            .prepare_live_transient_turn_context_boundary(
+                &self.session_id,
+                expected_run_id,
+                contexts,
+            )
+            .await
     }
 }
 
@@ -203,6 +219,23 @@ impl CoreExecutorBoundaryHandle for MobRpcRuntimeBoundaryHandle {
             "mob runtime boundary cancel for session {} has no MeerkatMachine authority",
             self.session_id
         )))
+    }
+
+    async fn prepare_transient_turn_context_at_boundary(
+        &self,
+        expected_run_id: &meerkat_core::lifecycle::RunId,
+        contexts: Vec<meerkat_core::lifecycle::run_primitive::TurnRequestContext>,
+    ) -> Result<
+        meerkat_core::lifecycle::CoreBoundaryStageOutput,
+        meerkat_core::lifecycle::CoreBoundaryStageError,
+    > {
+        self.session_service
+            .prepare_transient_turn_context_for_active_turn(
+                &self.session_id,
+                expected_run_id,
+                contexts,
+            )
+            .await
     }
 }
 
@@ -414,23 +447,6 @@ mod typed_context_append_tests {
     }
 }
 
-fn pending_system_context_appends_from_primitive(
-    appends: &[meerkat_core::lifecycle::run_primitive::ConversationContextAppend],
-) -> Vec<PendingSystemContextAppend> {
-    let accepted_at = meerkat_core::time_compat::SystemTime::now();
-    appends
-        .iter()
-        .map(|append| PendingSystemContextAppend {
-            content: append.content.clone(),
-            source: Some(append.key.clone()),
-            idempotency_key: Some(append.key.clone()),
-            accepted_at,
-            source_kind: meerkat_core::session::SystemContextSource::Normal,
-            peer_response_terminal: None,
-        })
-        .collect()
-}
-
 pub(crate) fn core_executor_error_from_rpc(err: RpcError) -> CoreExecutorError {
     if err.code == error::REQUEST_CANCELLED {
         return CoreExecutorError::cancelled();
@@ -559,31 +575,6 @@ impl CoreExecutor for SessionRuntimeExecutor {
             return Ok(output);
         }
 
-        // Context-only staged primitives may land directly as runtime
-        // system-context appends, but terminal peer responses carry a typed
-        // apply intent that requires a requester reaction turn.
-        if primitive.is_context_only_apply_without_turn() {
-            let RunPrimitive::StagedInput(staged) = &primitive else {
-                return Err(CoreExecutorError::apply_failed_primitive_rejected(
-                    "context-only apply without turn was not carried by a staged primitive",
-                ));
-            };
-            let pre_admission = self
-                .runtime
-                .take_runtime_pre_admission(&self.session_id, &staged.contributing_input_ids);
-            return self
-                .runtime
-                .apply_runtime_context_appends_via_service(
-                    &self.session_id,
-                    run_id,
-                    pending_system_context_appends_from_primitive(&staged.context_appends),
-                    primitive.apply_boundary(),
-                    staged.contributing_input_ids.clone(),
-                    pre_admission,
-                )
-                .await;
-        }
-
         #[cfg(test)]
         self.runtime
             .wait_runtime_routed_pre_promotion_hook(&self.session_id)
@@ -664,13 +655,29 @@ impl CoreExecutor for SessionRuntimeExecutor {
 
     async fn checkpoint_committed_session_snapshot(
         &mut self,
-        session_snapshot: &[u8],
+        session_snapshot: Arc<Vec<u8>>,
     ) -> Result<(), CoreExecutorError> {
         self.runtime
             .persistent_service()
             .checkpoint_committed_runtime_session_snapshot_under_runtime_turn_boundary(
                 &self.session_id,
                 session_snapshot,
+            )
+            .await
+            .map_err(CoreExecutorError::apply_failed_from_session_error)
+    }
+
+    async fn acknowledge_whole_blob_session_boundary(
+        &mut self,
+        committed_store_revision: u64,
+        committed_blob_sha256: &str,
+    ) -> Result<(), CoreExecutorError> {
+        self.runtime
+            .persistent_service()
+            .acknowledge_whole_blob_runtime_session_boundary_under_runtime_turn_boundary(
+                &self.session_id,
+                committed_store_revision,
+                committed_blob_sha256,
             )
             .await
             .map_err(CoreExecutorError::apply_failed_from_session_error)
@@ -785,33 +792,6 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
             ));
         }
 
-        if primitive.is_context_only_apply_without_turn() {
-            let RunPrimitive::StagedInput(staged) = &primitive else {
-                return Err(CoreExecutorError::apply_failed_primitive_rejected(
-                    "context-only apply without turn was not carried by a staged primitive",
-                ));
-            };
-            let pre_admission = self.runtime.as_ref().and_then(|runtime| {
-                runtime.take_runtime_pre_admission(&self.session_id, &staged.contributing_input_ids)
-            });
-            if let Some(runtime) = self.runtime.as_ref() {
-                return runtime
-                    .apply_runtime_context_appends_via_service(
-                        &self.session_id,
-                        run_id,
-                        pending_system_context_appends_from_primitive(&staged.context_appends),
-                        primitive.apply_boundary(),
-                        staged.contributing_input_ids.clone(),
-                        pre_admission,
-                    )
-                    .await;
-            }
-            return Err(CoreExecutorError::apply_failed_runtime_context(format!(
-                "mob RPC executor for {} has no SessionRuntime post-handoff authority",
-                self.session_id
-            )));
-        }
-
         let prompt = primitive.extract_content_input();
         let (event_tx, mut event_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(128);
         let sink = self.notification_sink.clone();
@@ -889,12 +869,27 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
 
     async fn checkpoint_committed_session_snapshot(
         &mut self,
-        session_snapshot: &[u8],
+        session_snapshot: Arc<Vec<u8>>,
     ) -> Result<(), CoreExecutorError> {
         self.session_service
             .checkpoint_committed_runtime_session_snapshot_under_turn_finalization_boundary(
                 &self.session_id,
                 session_snapshot,
+            )
+            .await
+            .map_err(CoreExecutorError::apply_failed_from_session_error)
+    }
+
+    async fn acknowledge_whole_blob_session_boundary(
+        &mut self,
+        committed_store_revision: u64,
+        committed_blob_sha256: &str,
+    ) -> Result<(), CoreExecutorError> {
+        self.session_service
+            .acknowledge_whole_blob_runtime_session_boundary_under_turn_finalization_boundary(
+                &self.session_id,
+                committed_store_revision,
+                committed_blob_sha256,
             )
             .await
             .map_err(CoreExecutorError::apply_failed_from_session_error)

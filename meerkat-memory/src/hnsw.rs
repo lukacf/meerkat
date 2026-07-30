@@ -195,15 +195,9 @@ impl EmbeddingModel for BagOfWordsEmbeddingModel {
 
 /// The memory store's schema domain in the per-file migration ledger.
 ///
-/// Migration 0001 is the base durable shape shared with pre-`session_id`
-/// binaries; 0002 lifts the historical in-place upgrade (projection column +
-/// covering index + allocator + compaction staging) into a once-per-file
-/// migration. The `table_info` guard keeps 0002 convergent on files of any
-/// vintage; the NULL `session_id` backfill deliberately stays OUT of the
-/// migration — [`backfill_null_session_ids`] already heals NULL rows on
-/// every open and before each per-scope operation (old binaries keep writing
-/// NULL rows after the migration, so a one-shot backfill could never be the
-/// invariant anyway).
+/// Version 2 is the released 0.8.10 floor and current shape. The historical
+/// v1 step remains only as an ingredient of the direct current initializer;
+/// a ledger-v1 or unledgered owned schema is refused.
 const MEMORY_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::SchemaDomain {
     name: "memory",
     migrations: &[
@@ -218,7 +212,46 @@ const MEMORY_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::SchemaDomain
             apply: migration_0002_scoped_projection,
         },
     ],
+    initialize_current: initialize_current_memory_schema,
+    allowed_existing_versions: &[2],
+    released_predecessors: &[],
+    owned_objects: &[
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "memory_metadata",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "memory_text",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Index,
+            name: "idx_memory_metadata_session_id",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "memory_allocator",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "memory_compaction_stage",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Index,
+            name: "idx_memory_compaction_stage_session",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "memory_scope_tombstone",
+        },
+    ],
+    retired_objects: &[],
 };
+
+fn initialize_current_memory_schema(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+    migration_0001_memory_schema(tx)?;
+    migration_0002_scoped_projection(tx)
+}
 
 fn migration_0001_memory_schema(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
     tx.execute_batch(CREATE_MEMORY_SCHEMA_SQL)
@@ -269,7 +302,7 @@ fn open_connection(path: &Path) -> Result<MemoryConn, MemoryStoreError> {
         path,
         meerkat_sqlite::ConnectionProfile::PRIMARY,
         meerkat_sqlite::OpenOptions {
-            // Future-schema refusal precedes the Primary profile's WAL
+            // Schema-eligibility refusal precedes the Primary profile's WAL
             // conversion.
             schema_preflight: &[&MEMORY_DOMAIN],
             ..meerkat_sqlite::OpenOptions::default()
@@ -3003,12 +3036,10 @@ mod tests {
         );
     }
 
-    /// Gate: opening a pre-`session_id` durable file migrates it in place —
-    /// the projection column is backfilled from typed metadata, the allocator
-    /// is seeded from `MAX(point_id)`, and every old row stays searchable and
-    /// enumerable.
+    /// The supported floor is released schema v2. An unledgered v1 shape is
+    /// refused without being inferred, migrated, or stamped.
     #[tokio::test]
-    async fn test_migration_from_pre_session_id_schema_heals_and_serves() {
+    async fn test_unledgered_pre_session_id_schema_is_refused_unmutated() {
         let dir = TempDir::new().unwrap();
         let memory_dir = dir.path().join("memory");
         std::fs::create_dir_all(&memory_dir).unwrap();
@@ -3024,52 +3055,32 @@ mod tests {
             ],
         );
 
-        let store = HnswMemoryStore::open(&memory_dir).unwrap();
-
-        // Migration backfilled every row's projection column.
-        assert_eq!(
-            query_i64(
-                &db_path,
-                "SELECT COUNT(*) FROM memory_metadata WHERE session_id IS NULL",
-            ),
-            0
+        let err = match HnswMemoryStore::open(&memory_dir) {
+            Ok(_) => panic!("unledgered owned memory schema must be refused"),
+            Err(error) => error,
+        };
+        assert!(
+            err.to_string().contains("no ledger row"),
+            "unexpected refusal: {err}"
         );
-        // Allocator seeded from MAX(point_id) + 1.
-        assert_eq!(
-            query_i64(
-                &db_path,
-                "SELECT high_water FROM memory_allocator WHERE id = 0"
-            ),
-            3
-        );
-
-        // Old rows are searchable per scope.
-        let scope_a = MemorySearchScope::for_session(session_a.clone());
-        let results = store
-            .search(&scope_a, "alpha entry from the old world", 10)
-            .await
-            .unwrap();
-        assert!(!results.is_empty());
-        assert!(results.iter().all(|r| r.metadata.session_id == session_a));
-
-        // And enumerable in durable-id order.
-        let page = store
-            .enumerate_scoped(&scope_a, enumeration(10, 0))
-            .await
-            .unwrap();
-        assert_eq!(page.records.len(), 2);
-        assert!(page.records[0].content.contains("alpha"));
-        assert!(page.records[1].content.contains("beta"));
-        assert_eq!(page.next_offset, None);
-
-        // New inserts continue past the migrated rows' IDs.
-        store
-            .index_scoped(request("delta entry post migration", &session_a))
-            .await
-            .unwrap();
         assert_eq!(
             query_i64(&db_path, "SELECT MAX(point_id) FROM memory_metadata"),
-            3
+            2,
+            "refusal mutated legacy rows"
+        );
+        let conn = Connection::open(&db_path).unwrap();
+        let projected_columns: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('memory_metadata')
+                 WHERE name = 'session_id'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(projected_columns, 0, "refusal altered legacy schema");
+        assert_eq!(
+            meerkat_sqlite::domain_version(&conn, MEMORY_DOMAIN.name).unwrap(),
+            None
         );
     }
 

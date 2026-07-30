@@ -310,7 +310,6 @@ const MACHINE_SPECS = [
             "CoalesceInput",
             "StartConversationRun",
             "StartImmediateAppend",
-            "StartImmediateContext",
             "PrimitiveApplied",
             "LlmReturnedToolCalls",
             "LlmReturnedTerminal",

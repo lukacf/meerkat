@@ -293,10 +293,6 @@ pub(crate) enum MeerkatMachineCommand {
         session_id: SessionId,
         reason: String,
     },
-    CommitServiceTurnTerminalReceipt {
-        session_id: SessionId,
-        session_snapshot: Vec<u8>,
-    },
     #[cfg_attr(not(test), allow(dead_code))]
     ContainsSession {
         session_id: SessionId,
@@ -721,7 +717,6 @@ meerkat_machine_runtime_internal_inputs!(
         StageForRun,
         StartConversationRun,
         StartImmediateAppend,
-        StartImmediateContext,
         SteerAccepted,
         SupersedeInput,
         AuthorizeStoredInputStateSeed,
@@ -796,6 +791,7 @@ meerkat_machine_runtime_internal_inputs!(
         RunCompleted,
         RunFailed,
         RuntimeExecutorExited,
+        ServiceTurnCommitted,
         TimeBudgetExceeded,
         ToolCallsResolved,
         TurnLimitReached,
@@ -911,7 +907,6 @@ meerkat_machine_runtime_internal_inputs!(
     DeferredSessionLifecycle => [
         AbandonDeferredSessionPromotion,
         AuthorizeDeferredSessionMachineArchivedResume,
-        AuthorizeDeferredSessionSystemContextAppend,
         BeginDeferredSessionArchive,
         BeginDeferredSessionPromotion,
         DropDeferredSession,
@@ -1460,7 +1455,6 @@ pub enum MeerkatMachineCatalogInput {
     SetSilentIntents,
     CancelAfterBoundary,
     StopRuntimeExecutor,
-    ServiceTurnCommitted,
     ContainsSession,
     SessionHasExecutor,
     SessionHasComms,
@@ -1509,7 +1503,6 @@ impl MeerkatMachineCatalogInput {
         Self::SetSilentIntents,
         Self::CancelAfterBoundary,
         Self::StopRuntimeExecutor,
-        Self::ServiceTurnCommitted,
         Self::ContainsSession,
         Self::SessionHasExecutor,
         Self::SessionHasComms,
@@ -1561,7 +1554,6 @@ impl MeerkatMachineCatalogInput {
             Self::SetSilentIntents => MeerkatMachineInputVariant::SetSilentIntents,
             Self::CancelAfterBoundary => MeerkatMachineInputVariant::CancelAfterBoundary,
             Self::StopRuntimeExecutor => MeerkatMachineInputVariant::StopRuntimeExecutor,
-            Self::ServiceTurnCommitted => MeerkatMachineInputVariant::ServiceTurnCommitted,
             Self::ContainsSession => MeerkatMachineInputVariant::ContainsSession,
             Self::SessionHasExecutor => MeerkatMachineInputVariant::SessionHasExecutor,
             Self::SessionHasComms => MeerkatMachineInputVariant::SessionHasComms,
@@ -1626,7 +1618,6 @@ impl MeerkatMachineCatalogInput {
             Self::SetSilentIntents => "SetSilentIntents",
             Self::CancelAfterBoundary => "CancelAfterBoundary",
             Self::StopRuntimeExecutor => "StopRuntimeExecutor",
-            Self::ServiceTurnCommitted => "ServiceTurnCommitted",
             Self::ContainsSession => "ContainsSession",
             Self::SessionHasExecutor => "SessionHasExecutor",
             Self::SessionHasComms => "SessionHasComms",
@@ -1686,9 +1677,6 @@ impl MeerkatMachineCommandVariant {
             Self::SetSilentIntents => Some(MeerkatMachineCatalogInput::SetSilentIntents),
             Self::CancelAfterBoundary => Some(MeerkatMachineCatalogInput::CancelAfterBoundary),
             Self::StopRuntimeExecutor => Some(MeerkatMachineCatalogInput::StopRuntimeExecutor),
-            Self::CommitServiceTurnTerminalReceipt => {
-                Some(MeerkatMachineCatalogInput::ServiceTurnCommitted)
-            }
             Self::ContainsSession => Some(MeerkatMachineCatalogInput::ContainsSession),
             Self::SessionHasExecutor => Some(MeerkatMachineCatalogInput::SessionHasExecutor),
             Self::SessionHasComms => Some(MeerkatMachineCatalogInput::SessionHasComms),
@@ -1838,11 +1826,6 @@ const fn meerkat_machine_command_classification(
         MeerkatMachineCommandVariant::StopRuntimeExecutor => {
             MeerkatMachineCommandClassification::CatalogInput(
                 MeerkatMachineCatalogInput::StopRuntimeExecutor,
-            )
-        }
-        MeerkatMachineCommandVariant::CommitServiceTurnTerminalReceipt => {
-            MeerkatMachineCommandClassification::CatalogInput(
-                MeerkatMachineCatalogInput::ServiceTurnCommitted,
             )
         }
         MeerkatMachineCommandVariant::ContainsSession => {

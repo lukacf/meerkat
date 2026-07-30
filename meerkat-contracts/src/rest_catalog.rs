@@ -191,7 +191,7 @@ pub fn rest_path_catalog() -> Vec<RestPathDescriptor> {
             "/sessions/{id}/system_context",
             vec![RestOperationDescriptor::with_json_request(
                 "post",
-                "Append system context to a session",
+                "Append one ordinary durable ordered System message to a session",
                 "RestAppendSystemContextRequest",
                 "StatusResponse",
             )],

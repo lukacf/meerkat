@@ -12,14 +12,15 @@ meerkat-llm-core          (LLM client trait surface, streaming primitives shared
 meerkat-auth-core         (token stores, OAuth helpers, MCP OAuth discovery/DCR/PKCE/refresh,
                            cloud authorizers — no meerkat-core deps)
 
-meerkat-core              (pure types, traits, agent loop, session-store contract, model_profile vocabulary + ModelCatalog mechanics,
+meerkat-core              (pure types, traits, agent loop, domain-only Session + session-store and
+                           provisional-receipt contracts, model_profile vocabulary + ModelCatalog mechanics,
                            DSL handle traits, StorageLayout path authority + realm-id-first dual-root
                            resolution, DurabilityClass vocabulary, StorageMigrator diagnose seam)
   ├── meerkat-capabilities    (typed capability vocabulary, feature-owned declaration collection)
   ├── meerkat-contracts       (wire types, error codes, generated surface schema projections)
   ├── meerkat-store-conformance (published storage conformance harness: per-trait capability
-                                profiles, capability-discovery, append-only media, legacy-data,
-                                blob/artifact chapters — depends only on meerkat-core)
+                                profiles, capability-discovery, append-only media, blob/artifact
+                                chapters — depends only on meerkat-core)
   ├── meerkat-anthropic       (Anthropic streaming client, implements AgentLlmClient through llm-core)
   ├── meerkat-openai          (OpenAI client, including realtime transport — implements AgentLlmClient)
   ├── meerkat-gemini          (Gemini client, including inline video — implements AgentLlmClient)
@@ -109,6 +110,7 @@ profiles; the in-repo stores run the same suite in
 | `AgentToolDispatcher` | Tool routing and dispatch | `CompositeDispatcher` (meerkat-tools), `DynamicToolComposite` / `ToolGateway` (meerkat-core), `AgentMobToolSurface` (meerkat-mob-mcp), `EmptyToolDispatcher` (meerkat-tools) |
 | `AgentSessionStore` | Agent-loop-facing persistence adapter | `StoreAdapter<S>` (meerkat-store) |
 | `SessionStore` | Canonical session persistence contract for backend authors | `MemoryStore`, `JsonlStore`, `SqliteSessionStore` (meerkat-store) |
+| `SessionCheckpointer` / `RunCheckpointReceipt` | Intra-turn persistence hook and exact latest provisional candidate; receipts remain outside `Session` and advance contiguously within one base/run | `PersistentSessionService` (meerkat-session) |
 | `SessionService` | Full substrate lifecycle; the runtime control plane (`MeerkatMachine`, meerkat-runtime) layers canonical runtime semantics on top | `EphemeralSessionService<B>` (meerkat-session), `PersistentSessionService<B>` (meerkat-session) |
 | `CommsRuntime` | Inter-agent communication | `meerkat_comms::CommsRuntime` |
 | `HookEngine` | Hook execution | `DefaultHookEngine` (meerkat-hooks) |
@@ -139,6 +141,8 @@ profiles; the in-repo stores run the same suite in
 | Trait/type | Purpose | Implementors |
 |-------|---------|-------------|
 | `RuntimeStore` delivery primitives | Persist opaque generated `RuntimeDeliveryMachine` authority with CAS and atomically insert ordered inbox rows; stores do not assign sequence or application semantics | `InMemoryRuntimeStore`, `SqliteRuntimeStore` |
+| `RuntimeSessionAuthority` / `WholeBlobStoreAuthority` / `HeadCanonicalStoreAuthority` | Store-issued physical identity for committed session state; materialized `Session` values never authorize writes | `InMemoryRuntimeStore`, `SqliteRuntimeStore` |
+| `RuntimeSessionCatalogEntry` | Body-free listing/lifecycle projection committed atomically with the selected session authority | `InMemoryRuntimeStore`, `SqliteRuntimeStore` |
 | `RuntimeDeliveryInbox` | Apply generated identity/sequence/cursor transitions over a runtime store and expose pending durable delivery records | Runtime-owned service |
 
 ### Session traits (defined in meerkat-session)
@@ -224,8 +228,17 @@ profiles; the in-repo stores run the same suite in
 | `SessionError::DurableTailHeldForRecovery` / `DurableEvidenceQuarantined` + `DurableResumeHold` | Typed durable resume holds (`SESSION_DURABLE_*` codes, `durable_resume_hold` structured payload) — meerkat-core/src/service/mod.rs |
 | `ResumeSessionLoad` / `SessionResumeUnavailableReason` / `MobFailureClass::TargetArchived` | Typed mob resume seam (`MobSessionService::load_session_for_resume` is required, no default) — meerkat-mob |
 | `RuntimeStore::{load_committed_boundary_receipts, load_input_states_with_versions}` + `InputRowVersionConflict` / `MachineLifecycleVersionConflict` | Recovery reads + fenced-record conflicts; `expected_row_digest` is enforced inside the writing transaction — meerkat-runtime/src/store/mod.rs |
-| `SESSION_CHECKPOINT_STAMP_SCHEMA_VERSION_RECOVERED` | Per-record stamp schema v2 for recovered provenances (ordinary stamps stay v1) — meerkat-core/src/checkpoint.rs |
 | `meerkat_runtime::stack_relief` | Fresh-task child-agent construction (never nested in a parent's poll stack) |
+
+### 0.8.11 additions (checkpoint-free session persistence)
+
+| Type | Purpose |
+|------|---------|
+| `Released0810ImportReceipt` / `ImportedReleased0810Session` | Single-use exact-0.8.10 activation import; store consumes the receipt while replacing released physical identity with current authority — meerkat-core/src/session/import_0810.rs |
+| `RunCheckpointReceipt` + `RunCheckpointAuthority::{WholeBlob, HeadCanonical}` | Latest exact provisional physical candidate for one active run; never serialized inside `Session` — meerkat-core/src/persistence_contract.rs |
+| `WholeBlobProvisionalTailAuthority` / `HeadCanonicalProvisionalTailAuthority` | Profile-specific base/run/candidate identity plus contiguous candidate sequence — meerkat-core/src/persistence_contract.rs |
+| `WholeBlobStoreAuthority` / `HeadCanonicalStoreAuthority` | Committed profile-specific physical authority: row revision+SHA or store revision+boundary head+head token — meerkat-runtime/src/store/mod.rs |
+| `RuntimeSessionCatalogEntry` | Transcript-free, graph-free catalog projection committed atomically with body authority — meerkat-runtime/src/store/mod.rs |
 
 ## Agent Loop State Machine
 

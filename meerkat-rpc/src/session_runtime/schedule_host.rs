@@ -2,88 +2,22 @@ use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
 use meerkat::surface::{
-    AcceptedScheduledInput, NoopScheduleMobHost, ScheduledPromptDispatch,
-    SharedScheduleTargetAdapter, SurfaceScheduleMobHost, SurfaceScheduleSessionHost,
-    build_dispatch_from_accepted, immediate_delivery_failure,
-    recover_mob_member_identity_from_session_target, schedule_delivery_idempotency_key,
-    schedule_host_supported, spawn_schedule_host,
+    NoopScheduleMobHost, ScheduledPromptDispatch, SharedScheduleTargetAdapter,
+    SurfaceScheduleMobHost, SurfaceScheduleSessionHost,
+    recover_mob_member_identity_from_session_target, runtime_delivery_dispatch_from_admission,
+    schedule_host_supported, schedule_runtime_correlation_id,
+    schedule_runtime_delivery_idempotency_key, spawn_schedule_host,
 };
 use meerkat::{
-    AgentBuildConfig, DeliveryDispatch, DeliveryFailureReason, IdentityTargetBinding, Occurrence,
-    ScheduleDomainError, SessionMaterializationSpec, SessionTargetBinding, TargetProbeOutcome,
+    AgentBuildConfig, DeliveryDispatch, IdentityTargetBinding, Occurrence,
+    ScheduleDeliveryIdentity, ScheduleDomainError, Session, SessionMaterializationSpec,
+    SessionTargetBinding, TargetProbeOutcome,
 };
 use meerkat_core::SessionId;
 #[cfg(feature = "mob")]
 use meerkat_mob_mcp::MobMcpScheduleHost;
 
 use super::{SessionRuntime, SessionState};
-
-fn accepted_scheduled_input_from_runtime_handle(
-    correlation_id: Option<String>,
-    handle: Option<meerkat_runtime::completion::CompletionHandle>,
-) -> AcceptedScheduledInput {
-    match handle {
-        Some(handle) => AcceptedScheduledInput::with_runtime_handle(correlation_id, handle),
-        None => AcceptedScheduledInput::with_authority_unavailable(
-            correlation_id,
-            "runtime completion handle missing after accepted dispatch",
-        ),
-    }
-}
-
-fn runtime_delivery_dispatch(
-    occurrence: &Occurrence,
-    outcome: meerkat_runtime::accept::AcceptOutcome,
-    handle: Option<meerkat_runtime::completion::CompletionHandle>,
-    materialized_session_id: Option<SessionId>,
-) -> Result<DeliveryDispatch, ScheduleDomainError> {
-    match outcome {
-        meerkat_runtime::accept::AcceptOutcome::Accepted { input_id, .. } => {
-            let accepted =
-                accepted_scheduled_input_from_runtime_handle(Some(input_id.to_string()), handle);
-            Ok(build_dispatch_from_accepted(
-                occurrence,
-                accepted,
-                materialized_session_id,
-            ))
-        }
-        meerkat_runtime::accept::AcceptOutcome::Deduplicated { existing_id, .. } => {
-            let accepted = match handle {
-                Some(handle) => AcceptedScheduledInput::with_runtime_handle(
-                    Some(existing_id.to_string()),
-                    handle,
-                ),
-                None => AcceptedScheduledInput::with_authority_unavailable(
-                    Some(existing_id.to_string()),
-                    format!(
-                        "runtime completion authority unavailable for terminal deduplicated input {existing_id}"
-                    ),
-                ),
-            };
-            Ok(build_dispatch_from_accepted(
-                occurrence,
-                accepted,
-                materialized_session_id,
-            ))
-        }
-        meerkat_runtime::accept::AcceptOutcome::Rejected { reason } => {
-            Ok(immediate_delivery_failure(
-                occurrence,
-                reason.to_string(),
-                DeliveryFailureReason::RuntimeRejected,
-                None,
-                materialized_session_id,
-            ))
-        }
-        _ => Ok(immediate_delivery_failure(
-            occurrence,
-            "runtime returned an unknown admission outcome".to_string(),
-            DeliveryFailureReason::RuntimeRejected,
-            None,
-            materialized_session_id,
-        )),
-    }
-}
 
 /// Project a schedule materialization spec into the spec-derived
 /// [`AgentBuildConfig`] fields.
@@ -93,18 +27,11 @@ fn runtime_delivery_dispatch(
 /// `SessionRuntime::materialize_scheduled_session`.
 fn scheduled_build_config(
     create: &SessionMaterializationSpec,
-    prompt_system_prompt: Option<&str>,
 ) -> Result<AgentBuildConfig, ScheduleDomainError> {
     let mut build_config = AgentBuildConfig::new(create.model.clone());
     build_config.provider = create.provider;
     build_config.max_tokens = create.max_tokens;
-    // Parse the schedule-spec prompt representation once at this ingest
-    // boundary: an occurrence-rendered prompt wins over the spec prompt;
-    // either becomes an explicit `Set`, absence inherits.
-    build_config.system_prompt = match prompt_system_prompt
-        .map(str::to_owned)
-        .or_else(|| create.system_prompt.clone())
-    {
+    build_config.system_prompt = match create.system_prompt.clone() {
         Some(prompt) => meerkat::SystemPromptOverride::Set(prompt),
         None => meerkat::SystemPromptOverride::Inherit,
     };
@@ -215,26 +142,24 @@ impl SurfaceScheduleSessionHost for RpcScheduleTargetAdapter {
 
     async fn materialize_session(
         &self,
-        _occurrence: &Occurrence,
+        occurrence: &Occurrence,
         create: &SessionMaterializationSpec,
-        prompt_system_prompt: Option<&str>,
     ) -> Result<SessionId, ScheduleDomainError> {
-        // Idempotent reuse of an already-bound materialized session is enforced
-        // by `SharedScheduleTargetAdapter::resolve_session` (Layer B) before
-        // this is reached, so this surface need not re-derive a deterministic id.
         let runtime = self.upgrade_runtime()?;
-        Box::pin(runtime.materialize_scheduled_session(create, prompt_system_prompt)).await
+        let session_id = occurrence.materialized_session_id();
+        Box::pin(runtime.materialize_scheduled_session(&session_id, create)).await
     }
 
     async fn deliver_prompt(
         &self,
         session_id: &SessionId,
         occurrence: &Occurrence,
+        identity: &ScheduleDeliveryIdentity,
         dispatch: ScheduledPromptDispatch,
     ) -> Result<DeliveryDispatch, ScheduleDomainError> {
         let runtime = self.upgrade_runtime()?;
         runtime
-            .deliver_scheduled_prompt(session_id, occurrence, dispatch)
+            .deliver_scheduled_prompt(session_id, occurrence, identity, dispatch)
             .await
     }
 
@@ -242,6 +167,7 @@ impl SurfaceScheduleSessionHost for RpcScheduleTargetAdapter {
         &self,
         session_id: &SessionId,
         occurrence: &Occurrence,
+        identity: &ScheduleDeliveryIdentity,
         event_type: String,
         payload: serde_json::Value,
         render_metadata: Option<meerkat_core::types::RenderMetadata>,
@@ -252,6 +178,7 @@ impl SurfaceScheduleSessionHost for RpcScheduleTargetAdapter {
             .deliver_scheduled_event(
                 session_id,
                 occurrence,
+                identity,
                 event_type,
                 payload,
                 render_metadata,
@@ -268,9 +195,10 @@ impl SessionRuntime {
         }
 
         let mut slot = self.schedule_host.lock().await;
-        if slot.is_some() {
+        if slot.as_ref().is_some_and(|handle| handle.is_running()) {
             return Ok(());
         }
+        let stale_handle = slot.take();
 
         let session_host: Arc<dyn SurfaceScheduleSessionHost> =
             Arc::new(RpcScheduleTargetAdapter::new(self));
@@ -285,6 +213,10 @@ impl SessionRuntime {
             shared_adapter,
             self.schedule_owner_id(),
         ));
+        drop(slot);
+        if let Some(stale_handle) = stale_handle {
+            stale_handle.shutdown().await;
+        }
         Ok(())
     }
 
@@ -301,22 +233,12 @@ impl SessionRuntime {
     /// them (field, 0.7.23: agent-authored schedules stranded pending 12h+
     /// past due while the embedder's own host drove a different store).
     ///
-    /// Idempotent; cheap after the first success (atomic fast path). A start
-    /// failure is logged loudly and retried on the next arming call rather
-    /// than failing the session — the schedule rows are durable and fire once
-    /// the host comes up.
+    /// Idempotent. The handle slot is the singular liveness authority: a
+    /// finished supervisor is replaced on the next arming call rather than
+    /// hidden behind a process-lifetime latch.
     pub(super) async fn arm_schedule_host_for_agent_tools(self: &Arc<Self>) {
-        if self
-            .schedule_host_armed
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
-            return;
-        }
         match self.ensure_schedule_host_started().await {
-            Ok(()) => {
-                self.schedule_host_armed
-                    .store(true, std::sync::atomic::Ordering::Relaxed);
-            }
+            Ok(()) => {}
             Err(error) => {
                 tracing::warn!(
                     %error,
@@ -338,10 +260,38 @@ impl SessionRuntime {
 
     pub(super) async fn materialize_scheduled_session(
         self: &Arc<Self>,
+        session_id: &SessionId,
         create: &SessionMaterializationSpec,
-        prompt_system_prompt: Option<&str>,
     ) -> Result<SessionId, ScheduleDomainError> {
-        let mut build_config = scheduled_build_config(create, prompt_system_prompt)?;
+        // Create-or-reuse is keyed solely by the occurrence-derived session
+        // identity. A crash after materialization but before the schedule bind
+        // must reopen this exact actor, never mint a second orphan.
+        if self
+            .session_state(session_id)
+            .await
+            .map_err(rpc_to_schedule)?
+            .is_some()
+        {
+            return Ok(session_id.clone());
+        }
+        if let Some(persisted) = self
+            .load_persisted_session(session_id)
+            .await
+            .map_err(rpc_to_schedule)?
+        {
+            if self
+                .session_archived_by_authority(session_id, &persisted)
+                .await
+                .map_err(rpc_to_schedule)?
+            {
+                return Err(ScheduleDomainError::InvalidSchedule(format!(
+                    "materialized session is archived: {session_id}"
+                )));
+            }
+            return Ok(session_id.clone());
+        }
+
+        let mut build_config = scheduled_build_config(create)?;
         // Runtime-scoped fallbacks for facts the spec leaves unset.
         build_config.realm_id = build_config.realm_id.or_else(|| self.inner.realm_id());
         build_config.instance_id = build_config
@@ -364,15 +314,22 @@ impl SessionRuntime {
             build_config.llm_client_override = Some(default_llm_client);
         }
 
-        self.create_session(build_config, Some(create.labels.clone()), None, Vec::new())
-            .await
-            .map_err(|error| ScheduleDomainError::Internal(error.message))
+        self.create_session_from_seed(
+            Session::with_id(session_id.clone()),
+            build_config,
+            Some(create.labels.clone()),
+            None,
+            Vec::new(),
+        )
+        .await
+        .map_err(|error| ScheduleDomainError::Internal(error.message))
     }
 
     async fn deliver_scheduled_prompt(
         self: &Arc<Self>,
         session_id: &SessionId,
         occurrence: &Occurrence,
+        identity: &ScheduleDeliveryIdentity,
         dispatch: ScheduledPromptDispatch,
     ) -> Result<DeliveryDispatch, ScheduleDomainError> {
         self.ensure_runtime_executor(session_id)
@@ -425,6 +382,9 @@ impl SessionRuntime {
                             .collect()
                     },
                 ),
+                system_prompts: dispatch.system_prompt.into_iter().collect(),
+                transient_turn_context: dispatch.transient_turn_context,
+                transient_turn_context_appends: Vec::new(),
                 model: None,
                 provider: None,
                 self_hosted_server_id: None,
@@ -441,11 +401,15 @@ impl SessionRuntime {
             meerkat_runtime::PromptInput::from_content_input(dispatch.prompt, turn_metadata);
         prompt_input.header.source = meerkat_runtime::InputOrigin::System;
         prompt_input.header.idempotency_key = Some(meerkat_runtime::IdempotencyKey::new(
-            schedule_delivery_idempotency_key(occurrence),
+            schedule_runtime_delivery_idempotency_key(
+                self.runtime_adapter.as_ref(),
+                session_id,
+                occurrence,
+                &identity.idempotency_key,
+            )
+            .await?,
         ));
-        prompt_input.header.correlation_id = Some(meerkat_runtime::CorrelationId::from_uuid(
-            occurrence.occurrence_id.0,
-        ));
+        prompt_input.header.correlation_id = Some(schedule_runtime_correlation_id(identity)?);
 
         let (outcome, handle) = self
             .runtime_adapter
@@ -453,18 +417,23 @@ impl SessionRuntime {
             .await
             .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
 
-        runtime_delivery_dispatch(
+        runtime_delivery_dispatch_from_admission(
+            self.runtime_adapter.as_ref(),
+            session_id,
             occurrence,
+            identity,
             outcome,
             handle,
             dispatch.materialized_session_id,
         )
+        .await
     }
 
     async fn deliver_scheduled_event(
         self: &Arc<Self>,
         session_id: &SessionId,
         occurrence: &Occurrence,
+        identity: &ScheduleDeliveryIdentity,
         event_type: String,
         payload: serde_json::Value,
         render_metadata: Option<meerkat_core::types::RenderMetadata>,
@@ -505,12 +474,16 @@ impl SessionRuntime {
                 durability: meerkat_runtime::input::InputDurability::Durable,
                 visibility: meerkat_runtime::input::InputVisibility::default(),
                 idempotency_key: Some(meerkat_runtime::IdempotencyKey::new(
-                    schedule_delivery_idempotency_key(occurrence),
+                    schedule_runtime_delivery_idempotency_key(
+                        self.runtime_adapter.as_ref(),
+                        session_id,
+                        occurrence,
+                        &identity.idempotency_key,
+                    )
+                    .await?,
                 )),
                 supersession_key: None,
-                correlation_id: Some(meerkat_runtime::CorrelationId::from_uuid(
-                    occurrence.occurrence_id.0,
-                )),
+                correlation_id: Some(schedule_runtime_correlation_id(identity)?),
             },
             event_type,
             payload,
@@ -525,7 +498,16 @@ impl SessionRuntime {
             .await
             .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
 
-        runtime_delivery_dispatch(occurrence, outcome, handle, materialized_session_id)
+        runtime_delivery_dispatch_from_admission(
+            self.runtime_adapter.as_ref(),
+            session_id,
+            occurrence,
+            identity,
+            outcome,
+            handle,
+            materialized_session_id,
+        )
+        .await
     }
 
     fn schedule_owner_id(&self) -> String {
@@ -606,37 +588,28 @@ mod tests {
         let mut create = materialization_spec();
         create.preload_skills = vec![key.clone()];
 
-        let build = scheduled_build_config(&create, None).expect("valid spec");
+        let build = scheduled_build_config(&create).expect("valid spec");
 
         assert_eq!(build.preload_skills, Some(vec![key]));
     }
 
     #[test]
     fn scheduled_build_config_empty_preload_skills_normalizes_to_none() {
-        let build = scheduled_build_config(&materialization_spec(), None).expect("valid spec");
+        let build = scheduled_build_config(&materialization_spec()).expect("valid spec");
         assert_eq!(build.preload_skills, None);
     }
 
     #[test]
-    fn scheduled_build_config_system_prompt_ingest() {
-        // Occurrence-rendered prompt wins over the spec prompt.
+    fn scheduled_build_config_uses_only_materialization_system_prompt() {
         let mut create = materialization_spec();
         create.system_prompt = Some("spec prompt".to_string());
-        let build = scheduled_build_config(&create, Some("rendered prompt")).expect("valid spec");
-        assert_eq!(
-            build.system_prompt,
-            meerkat::SystemPromptOverride::Set("rendered prompt".to_string())
-        );
-
-        // Spec prompt applies when no rendered prompt is present.
-        let build = scheduled_build_config(&create, None).expect("valid spec");
+        let build = scheduled_build_config(&create).expect("valid spec");
         assert_eq!(
             build.system_prompt,
             meerkat::SystemPromptOverride::Set("spec prompt".to_string())
         );
 
-        // Absence of both inherits.
-        let build = scheduled_build_config(&materialization_spec(), None).expect("valid spec");
+        let build = scheduled_build_config(&materialization_spec()).expect("valid spec");
         assert!(build.system_prompt.is_inherit());
     }
 }

@@ -152,18 +152,20 @@ const channel = LiveChannel.session(client, session.id, {
 
 The core counts the serialized projected seed messages and selects a recent
 whole-turn suffix; it never slices an individual turn just to fill the budget.
-The resolved root prompt is never dropped and must fit the requested window,
-or `live/open` rejects the request. An existing compaction summary may be
-retained as the head before the suffix.
+`System` and `SystemNotice` rows do not consume this replay budget because
+OpenAI Realtime does not replay them as conversation items. Their instruction
+projection is derived separately from the full active materialized transcript,
+so even a System larger than `seed_max_chars` remains exact. An existing
+compaction summary may be retained as the head before the suffix.
 
 If selection omits any history, `LiveOpenResult.continuity` reports
 `mode: "degraded"`. Omitting `seed_max_chars` preserves the full-seed behavior.
 The value must be positive; the server rejects zero.
 
-Runtime system context and canonical multimodal sidecars are outside the seed
-message window. Image identity, tombstones, and aggregate accounting remain
-complete even when older seed messages are omitted, so retries and future
-image admission continue to use full canonical truth.
+Ordered transcript instructions, image identity, tombstones, and aggregate
+accounting are outside the seed-message window and remain complete even when
+older dialogue is omitted. Runtime instructions have no separate provider
+sidecar.
 
 ### Configuration defaults
 

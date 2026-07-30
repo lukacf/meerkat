@@ -18358,7 +18358,7 @@
   "MobAppendSystemContextParams": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
-    "description": "Request payload for `mob/append_system_context`.",
+    "description": "Request payload for `mob/append_system_context`.\n\nAppends one ordinary durable ordered System message to the member session\nat the admitted transcript boundary. The text is preserved exactly.",
     "properties": {
       "agent_identity": {
         "type": "string"
@@ -27326,6 +27326,14 @@
           "null"
         ]
       },
+      "transient_turn_context": {
+        "description": "Host-regenerated request-only context for this work turn.",
+        "minLength": 1,
+        "type": [
+          "string",
+          "null"
+        ]
+      },
       "member_ref": {
         "$ref": "#/$defs/WireMemberRef"
       },
@@ -28475,6 +28483,14 @@
         },
         "type": [
           "array",
+          "null"
+        ]
+      },
+      "transient_turn_context": {
+        "description": "Host-regenerated request-only context for this member turn.",
+        "minLength": 1,
+        "type": [
+          "string",
           "null"
         ]
       },

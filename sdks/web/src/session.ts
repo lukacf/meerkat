@@ -19,6 +19,16 @@ type AppendSystemContextFn = (
   request_json: string,
 ) => Promise<string>;
 
+/**
+ * Browser/WASM sessions are standalone live sessions, not durable
+ * runtime-input sessions. The `never` field makes the unsupported
+ * request-only context contract explicit at compile time; the runtime guard
+ * below also fails closed for untyped JavaScript callers.
+ */
+export interface BrowserTurnOptions {
+  readonly transientTurnContext?: never;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -168,7 +178,19 @@ export class Session {
    * surfaces it as a {@link MeerkatError} carrying the typed error code —
    * never a synthetic empty-text "success".
    */
-  async turn(prompt: string | ContentBlock[]): Promise<TurnResult> {
+  async turn(
+    prompt: string | ContentBlock[],
+    options?: BrowserTurnOptions,
+  ): Promise<TurnResult> {
+    if (
+      options != null
+      && Object.prototype.hasOwnProperty.call(options, 'transientTurnContext')
+    ) {
+      throw new MeerkatError(
+        'UNSUPPORTED_FEATURE',
+        'transientTurnContext requires a durable runtime-input surface and is not supported by browser/WASM live sessions',
+      );
+    }
     const promptStr = serializePromptContentInput(prompt);
     let json: string;
     try {
@@ -223,7 +245,7 @@ export class Session {
     );
   }
 
-  /** Stage runtime system context for application at the next LLM boundary. */
+  /** Append one ordinary durable ordered System message at the admitted transcript boundary. */
   async appendSystemContext(
     options: AppendSystemContextOptions,
   ): Promise<AppendSystemContextResult> {

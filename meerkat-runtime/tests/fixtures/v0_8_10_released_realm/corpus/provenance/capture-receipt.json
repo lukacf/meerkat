@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "data_classification": "synthetic_non_production",
+  "producer": "meerkat-release",
+  "meerkat_version": "0.8.10",
+  "writer_binary_path": "/tmp/meerkat-0810-fixture.DqsFHZ/rkat",
+  "writer_binary_version_output": "rkat 0.8.10",
+  "writer_binary_sha256": "7a60f631c78cf6abc5abb523b503b86e752abeb13ae05d100f85164679435815",
+  "source_release": "https://github.com/lukacf/meerkat/releases/tag/v0.8.10",
+  "release_asset": "rkat-0.8.10-aarch64-apple-darwin.tar.gz",
+  "release_asset_sha256": "97501fa6bc078b344315e91981240f4b66a8d2f64c26f4575b04c74df73b5db7",
+  "current_source_build": false,
+  "capture_command": "published rkat 0.8.10: realm create fixture-realm --realm-backend sqlite; config patch deterministic self-hosted fixture model; run --system 'fixture system A' 'fixture user one'; run --resume 019fb032-f7ec-7291-afaa-aa0b1188e9b0 'fixture user two'",
+  "captured_at": "2026-07-30T01:25:58+02:00",
+  "clean_shutdown": true,
+  "sanitization_method": "synthetic_inputs_before_capture"
+}

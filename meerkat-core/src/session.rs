@@ -11,7 +11,7 @@
 
 use crate::Provider;
 use crate::generated::{session_document, session_persistence_version_authority};
-use crate::lifecycle::run_primitive::TurnMetadataOverride;
+use crate::lifecycle::run_primitive::{TurnMetadataOverride, TurnRequestContext};
 use crate::lifecycle::{CoreBoundaryStageError, RunId};
 use crate::peer_meta::PeerMeta;
 use crate::realtime_transcript::{
@@ -19,7 +19,11 @@ use crate::realtime_transcript::{
     SESSION_REALTIME_TRANSCRIPT_STATE_KEY,
 };
 use crate::realtime_transcript_revision::{self, SessionRealtimeTranscriptState};
-use crate::service::{AppendSystemContextRequest, MobToolAuthorityContext};
+use crate::realtime_transcript_sidecar::{
+    PreparedRealtimeTranscriptRebase, RealtimeTranscriptSidecarError,
+    RealtimeTranscriptSnapshotReasonV1, SessionRealtimeTranscriptProjection,
+};
+use crate::service::MobToolAuthorityContext;
 use crate::session_durable_config_authority;
 use crate::time_compat::SystemTime;
 #[cfg(target_arch = "wasm32")]
@@ -27,8 +31,7 @@ use crate::tokio;
 use crate::tool_scope::ToolFilter;
 use crate::types::{
     AssistantBlock, BlockAssistantMessage, ContentBlock, ContentInput, Message, SessionId,
-    StopReason, SystemNoticeMessage, ToolDef, ToolName, ToolProvenance, ToolResult, Usage,
-    UserMessage,
+    StopReason, ToolDef, ToolName, ToolProvenance, ToolResult, Usage, UserMessage,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
@@ -36,30 +39,45 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 mod digest_accumulator;
+mod head_metadata;
+mod import_0810;
 mod transcript_history;
 
 pub(crate) use digest_accumulator::TranscriptMessages;
-
-use transcript_history::decode_memo::{
-    TranscriptGraphValidationMode, approximate_json_bytes,
-    record_producer_validated_transcript_graph,
+pub use head_metadata::{
+    SessionHeadMetadataCell, SessionHeadMetadataCellIdentity, SessionHeadMetadataCellMutation,
+    SessionHeadMetadataDigest, SessionHeadMetadataIdentity, SessionHeadMetadataProjection,
+    SessionHeadMetadataValueDigest,
 };
-pub(crate) use transcript_history::graph::TRANSCRIPT_DIGEST_FORMAT_CURRENT;
+pub(crate) use import_0810::is_released_checkpoint_metadata_key;
+pub use import_0810::{
+    ImportedReleased0810Session, Released0810ImportError, Released0810ImportEvidence,
+    Released0810ImportReceipt, import_released_0810_session,
+};
+pub(crate) use transcript_history::graph::{
+    TRANSCRIPT_DIGEST_FORMAT_CURRENT, import_released_0810_history,
+};
 pub(crate) use transcript_history::validate::validate_transcript_history_state;
 use transcript_history::validate::{
     assistant_tool_use_ids, message_role_name, validate_transcript_tool_result_shape,
 };
 pub use transcript_history::{
-    TranscriptHistoryState, TranscriptReplayCursor, TranscriptRevisionBody,
-    TranscriptRewriteCommit, TranscriptRewriteRecord, ValidatedTranscriptHistory,
+    TRANSCRIPT_HISTORY_FORMAT_CURRENT, TranscriptEndpointWitness, TranscriptGraphPrefixAccumulator,
+    TranscriptHistoryState, TranscriptParentAdvance, TranscriptRevisionBody,
+    TranscriptRevisionEdge, TranscriptRewriteAuditReceiptBatch, TranscriptRewriteCommit,
+    TranscriptRewriteParentTransition, TranscriptRewritePatch, TranscriptRewritePrefixAccumulator,
+    TranscriptRewriteRecord, ValidatedTranscriptHistory, ValidatedTranscriptRewriteSuffix,
+    extend_transcript_rewrite_prefix_accumulator, transcript_history_full_body_materializations,
+    transcript_rewrite_prefix_commit_serializations, transcript_rewrite_prefix_digest,
 };
 
 /// Current session format version.
 ///
 /// The persisted `version` byte is mandatory and fail-closed: a stored row
-/// with a missing or non-current version (including pre-typed-owner v0/v1
-/// rows) is rejected at the serde boundary by the generated persistence
-/// version authority — it never silently defaults or upgrades on read.
+/// with a missing or non-current version is rejected at the serde boundary by
+/// the generated persistence version authority. The exact released 0.8.10
+/// envelope crosses only the explicit one-time importer; ordinary reads never
+/// silently default or upgrade an envelope.
 pub use crate::generated::session_persistence_version_authority::SESSION_VERSION;
 
 /// Current `SessionMetadata` schema version. Distinct from `SESSION_VERSION`
@@ -108,20 +126,19 @@ pub enum TranscriptReplacement {
 /// Session metadata key for the typed transcript revision graph head.
 pub const SESSION_TRANSCRIPT_HISTORY_STATE_KEY: &str = "session_transcript_history_state_v1";
 
-/// Storage-representation witness for transcript history that an incremental
-/// session store keeps out of line.
+/// Rolling identity of the exact ordered rewrite-commit
+/// prefix represented by this session.
 ///
-/// A full session carries [`SESSION_TRANSCRIPT_HISTORY_STATE_KEY`]. A slim
-/// incremental projection carries this digest instead, allowing the typed
-/// checkpoint digest to bind the same semantic history without rehydrating
-/// every retained revision on each read. Only typed store code may author it.
-pub const SESSION_TRANSCRIPT_HISTORY_CHECKPOINT_DIGEST_KEY: &str =
-    "session_transcript_history_checkpoint_digest_v1";
+/// Kept outside the bulky graph value so a head-canonical cold read can prove
+/// replay coverage from the small head row without materializing commit
+/// history. Typed graph writers update it atomically with the graph.
+pub const SESSION_TRANSCRIPT_REWRITE_PREFIX_AUTHORITY_KEY: &str =
+    "session_transcript_rewrite_prefix_authority_v1";
 
 /// A concrete transcript span selected for same-session rewrite.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TranscriptRewriteSelection {
     /// Pre-semantic-marker range retained for source/API compatibility and
     /// decoding prior durable records. New commits canonicalize this input to
@@ -140,6 +157,7 @@ pub enum TranscriptRewriteSelection {
 /// Opaque current-format range carried by an ordinary transcript edit.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct TranscriptEditRewriteRange {
     start: usize,
     end: usize,
@@ -148,6 +166,7 @@ pub struct TranscriptEditRewriteRange {
 /// Opaque range carried by the typed compaction rewrite semantic.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct CompactionRewriteRange {
     start: usize,
     end: usize,
@@ -226,7 +245,7 @@ impl TranscriptRewriteSelection {
 /// semantic through its opaque typed compaction range.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct TranscriptRewriteReason {
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -242,36 +261,6 @@ impl TranscriptRewriteReason {
     }
 }
 
-/// Typed rewrite-commit reason for a resume-time base-prompt refresh
-/// committed by [`Session::reconcile_resumed_system_prompt`].
-pub const RESUME_SYSTEM_PROMPT_REFRESH_REWRITE_REASON: &str = "resume-system-prompt-refresh";
-
-/// Typed outcome of [`Session::reconcile_resumed_system_prompt`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResumedSystemPromptReconciliation {
-    /// The persisted System message already carries the assembled base prompt
-    /// (identical, or extended only by runtime system-context appends). The
-    /// transcript was left untouched, so the resumed projection digests to
-    /// the persisted revision.
-    PreservedContinuation,
-    /// The assembled base differs from the persisted System message ONLY
-    /// inside caller-declared volatile spans ([`SYSTEM_PROMPT_VOLATILE_OPEN`]
-    /// / [`SYSTEM_PROMPT_VOLATILE_CLOSE`]). The transcript was left untouched
-    /// and NO audit revision was minted — semantically nothing changed — but
-    /// the fresh prompt is armed as a request-time overlay
-    /// ([`Session::messages_for_model_boundary`]) so the model sees current
-    /// volatile content. Guards the 2026-07-29 resume-mint incident (~127
-    /// rewrites per boot when only an opening timestamp differed).
-    PreservedVolatileRefresh,
-    /// The assembled base prompt diverged from the persisted System message;
-    /// the replacement was committed as a typed transcript rewrite so the
-    /// first post-resume persist proves a graph edge from the persisted head.
-    RewrittenBase,
-    /// The resumed transcript has no leading System message and the assembled
-    /// prompt is empty — nothing to reconcile.
-    NoChange,
-}
-
 impl std::fmt::Display for TranscriptRewriteReason {
     /// Human-facing projection consumed by revision-list reads. The typed
     /// `{kind, note}` audit value is retained; this rendering is derived only
@@ -282,19 +271,6 @@ impl std::fmt::Display for TranscriptRewriteReason {
             None => f.write_str(&self.kind),
         }
     }
-}
-
-/// Shape of a message mutation, as known by the seam that performed it.
-///
-/// The transcript-head refresh is the only consumer: an append can reuse the
-/// already-validated graph, while any other shape re-enters full validation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TranscriptMutationShape {
-    /// Messages were appended to the end of the live transcript; every
-    /// retained prefix is unchanged.
-    Appended,
-    /// The transcript was replaced or rewritten in place.
-    Rewritten,
 }
 
 /// Invalid typed transcript edit request.
@@ -390,74 +366,18 @@ fn canonicalize_message_images_for_digest_in_place(message: &mut Message) {
     }
 }
 
-/// Canonical checkpoint representation of the retained transcript graph.
+/// Validate only the compact current graph from a raw slice.
 ///
-/// Revision bodies are content-addressed by `revision`; their cached parent
-/// pointers and construction timestamps are storage bookkeeping. The ordered
-/// commit log remains intact because it is durable audit/selection history.
-pub(crate) fn canonicalize_checkpoint_history_value(
-    value: &serde_json::Value,
-) -> Result<serde_json::Value, serde_json::Error> {
-    let state: TranscriptHistoryState = serde_json::from_value(value.clone())?;
-    let mut revisions = state
-        .revisions
-        .into_iter()
-        .map(|body| {
-            serde_json::json!({
-                "revision": body.revision,
-                "messages": canonicalize_messages_for_digest(&body.messages),
-            })
-        })
-        .collect::<Vec<_>>();
-    revisions.sort_by(|left, right| {
-        left.get("revision")
-            .and_then(serde_json::Value::as_str)
-            .cmp(&right.get("revision").and_then(serde_json::Value::as_str))
-    });
-    Ok(serde_json::json!({
-        "head": state.head,
-        "commits": state.commits,
-        "revisions": revisions,
-    }))
-}
-
-/// Cached canonical byte segments for incremental history-witness assembly.
-///
-/// Entries are content-addressed: body chunks are keyed by the revision
-/// string (which IS the digest of the body's canonical messages, so a key
-/// determines its bytes), and the commits segment is keyed by
-/// `(count, last revision)` — an append-only audit log evolving inside one
-/// session instance cannot repeat that pair with different earlier entries.
-/// The debug/test cross-check plus release sampling in
-/// [`Session::assemble_transcript_history_witness`] backstop both keying
-/// arguments with recompute-and-compare.
-#[derive(Debug, Default)]
-pub(crate) struct HistoryWitnessAssemblyCache {
-    inner: std::sync::Mutex<HistoryWitnessAssemblyCacheInner>,
-}
-
-#[derive(Debug, Default, Clone)]
-struct HistoryWitnessAssemblyCacheInner {
-    /// Canonical bytes of the commits array, keyed by (count, last revision).
-    commits: Option<(usize, String, std::sync::Arc<[u8]>)>,
-    /// Canonical `{"messages":…,"revision":…}` chunk per retained body.
-    bodies: std::collections::HashMap<String, std::sync::Arc<[u8]>>,
-}
-
-impl Clone for HistoryWitnessAssemblyCache {
-    fn clone(&self) -> Self {
-        Self {
-            inner: std::sync::Mutex::new(self.locked().clone()),
-        }
-    }
-}
-
-impl HistoryWitnessAssemblyCache {
-    fn locked(&self) -> std::sync::MutexGuard<'_, HistoryWitnessAssemblyCacheInner> {
-        self.inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
+/// Released full-body history refuses before body decoding, making this the
+/// bounded doctor/diagnostic seam.
+pub fn validate_current_persisted_transcript_history_slice(
+    bytes: &[u8],
+) -> Result<u64, serde_json::Error> {
+    let rewrite_count =
+        transcript_history::graph::validate_current_transcript_history_slice(bytes)?;
+    u64::try_from(rewrite_count).map_err(|_| {
+        persisted_session_decode_error("persisted transcript-history occurrence count exceeds u64")
+    })
 }
 
 /// Shared parsed form of the current transcript-history graph.
@@ -465,8 +385,8 @@ impl HistoryWitnessAssemblyCache {
 /// Guards and the per-append head refresh need the TYPED graph; parsing the
 /// metadata value is O(graph), and a turn boundary parsed it twice (incoming
 /// and previous) plus once more per append. The typed installer caches the
-/// exact state it just serialized; readers share it by `Arc`. Cleared by
-/// every write to the history key, exactly like the witness memo.
+/// exact state it just serialized; readers share it by `Arc`. Every unchecked
+/// write to the history key clears the parsed state.
 #[derive(Debug, Default)]
 pub(crate) struct SharedTranscriptHistoryState {
     inner: std::sync::Mutex<Option<std::sync::Arc<TranscriptHistoryState>>>,
@@ -500,90 +420,6 @@ impl SharedTranscriptHistoryState {
     }
 }
 
-/// The replay cursor this load established, waiting for a graph write to carry
-/// it to disk.
-///
-/// NON-DURABLE and deliberately so. The load that reconciles a graph with the
-/// append-only log holds only `&Session` (the audit verifier's signature), and
-/// it must not dirty the document just to record a hint — writing the graph
-/// value on a read would rotate `updated_at` and manufacture a checkpoint
-/// sibling for a session whose content did not change. So the fact is parked
-/// here and stamped onto the next graph the session writes for its own reasons.
-///
-/// That is also what makes "never stamp on a graph you did not persist" hold by
-/// construction: a hint reaches disk only inside a graph write, inside a
-/// session that is then saved. If no save happens the hint dies with the
-/// in-memory `Session` and the durable cursor stays where it was — lower, which
-/// is the safe direction.
-#[derive(Debug, Default)]
-pub(crate) struct ReplayCursorHint {
-    inner: std::sync::Mutex<Option<TranscriptReplayCursor>>,
-}
-
-impl Clone for ReplayCursorHint {
-    fn clone(&self) -> Self {
-        Self {
-            inner: std::sync::Mutex::new(self.locked().clone()),
-        }
-    }
-}
-
-impl ReplayCursorHint {
-    fn locked(&self) -> std::sync::MutexGuard<'_, Option<TranscriptReplayCursor>> {
-        self.inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    fn clear(&self) {
-        *self.locked() = None;
-    }
-
-    fn set(&self, cursor: TranscriptReplayCursor) {
-        *self.locked() = Some(cursor);
-    }
-
-    fn get(&self) -> Option<TranscriptReplayCursor> {
-        self.locked().clone()
-    }
-}
-
-/// Canonical witness chunk of one retained revision body: the
-/// `write_canonical_json` form of `{"messages": canonicalized, "revision": r}`
-/// — exactly the per-element bytes `canonicalize_checkpoint_history_value`
-/// produces for this body.
-///
-/// Takes the MATERIALIZED body rather than the durable JSON entry: the durable
-/// revision chain stores every body after the anchor as an inverse splice, so
-/// the raw entry no longer carries a message vector to canonicalize. The typed
-/// body is the same value the full canonicalization path parses.
-fn canonical_history_body_chunk(body: &TranscriptRevisionBody) -> Option<Vec<u8>> {
-    let canonical = serde_json::json!({
-        "revision": body.revision,
-        "messages": canonicalize_messages_for_digest(&body.messages),
-    });
-    let mut bytes = Vec::new();
-    crate::checkpoint::write_canonical_json(&canonical, &mut bytes).ok()?;
-    Some(bytes)
-}
-
-fn canonicalize_checkpoint_deferred_turn_value(
-    value: &serde_json::Value,
-) -> Result<serde_json::Value, serde_json::Error> {
-    let mut state: SessionDeferredTurnState = serde_json::from_value(value.clone())?;
-    if let Some(prompt) = state.pending_initial_prompt_mut_for_blob_rewrite()
-        && let crate::types::ContentInput::Blocks(blocks) = &mut prompt.prompt
-    {
-        canonicalize_digest_image_blocks(blocks);
-    }
-    for pending in state.pending_tool_results_mut_for_blob_rewrite() {
-        for result in &mut pending.results {
-            canonicalize_digest_image_blocks(&mut result.content);
-        }
-    }
-    serde_json::to_value(state)
-}
-
 /// Timestamp sentinel used when erasing construction bookkeeping from the
 /// digest form. `created_at` always serializes, so a fixed value keeps the
 /// canonical bytes deterministic.
@@ -606,9 +442,9 @@ fn digest_timestamp_sentinel() -> crate::types::MessageTimestamp {
 ///   `TranscriptContinuityViolation`).
 ///
 /// Typed semantic facts stay in the digest — `transcript_role`,
-/// `mutation_kind`, `render_metadata`, notice kinds and blocks — because
-/// changing them changes the transcript's meaning.
-fn canonicalize_messages_for_digest(messages: &[Message]) -> Vec<Message> {
+/// `render_metadata`, notice kinds and blocks — because changing them changes
+/// the transcript's meaning.
+pub(crate) fn canonicalize_messages_for_digest(messages: &[Message]) -> Vec<Message> {
     let mut canonical = canonicalize_message_images_for_digest(messages);
     for message in &mut canonical {
         erase_message_construction_bookkeeping(message);
@@ -672,13 +508,12 @@ pub(crate) fn transcript_messages_digest_uncounted(
     Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
 }
 
-pub(crate) use digest_accumulator::SharedTranscriptSnapshot;
 pub(crate) use digest_accumulator::take_verification_sample as digest_accumulator_take_verification_sample;
 
 fn sha256_json_digest<T: Serialize + ?Sized>(value: &T) -> Result<String, serde_json::Error> {
-    crate::checkpoint::record_content_digest_computation();
+    crate::digest_observability::record_content_digest_computation();
     let bytes = serde_json::to_vec(value)?;
-    crate::checkpoint::record_content_digest_bytes(bytes.len() as u64);
+    crate::digest_observability::record_content_digest_bytes(bytes.len() as u64);
     let digest = Sha256::digest(bytes);
     let mut out = String::with_capacity(digest.len() * 2);
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -700,45 +535,46 @@ fn sha256_json_digest<T: Serialize + ?Sized>(value: &T) -> Result<String, serde_
 /// and the CLI's full-tools spawn runs against a literal 2 MB production stack
 /// budget, pinned by
 /// `tools_full_with_explicit_auth_binding_can_spawn_within_production_stack_budget`.
-/// Holding these three inline grew `Session` from 136 to 528 bytes and
+/// Holding these caches inline grew `Session` from 136 to 528 bytes and
 /// overflowed that stack. None is persisted or part of a session's identity;
-/// all are rebuildable from the metadata graph.
+/// all are rebuildable from durable session fields.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct SessionHistoryCaches {
-    /// Memoized transcript-history witnesses, one slot per witness format
-    /// (2 = sequential canonical whole-graph hash, 3 = revision-identity
-    /// digest). One in-memory document can legitimately be asked for both —
-    /// verify an old stamp under the format its evidence declares, then mint
-    /// the successor at current — so the memo is per (graph value, format).
-    witness: SessionWitnessMemo,
-    /// Content-addressed canonical chunks for incremental witness assembly.
-    assembly: HistoryWitnessAssemblyCache,
     /// Shared parsed form of the current history graph.
     shared_state: SharedTranscriptHistoryState,
-    /// Canonical checkpoint digest most recently PROVED against this exact
-    /// in-memory document. Derived cache only; cleared by every content
-    /// mutation.
-    verified_checkpoint_digest: std::sync::OnceLock<String>,
-    /// Replay cursor established by this load, awaiting the next graph write.
-    replay_cursor_hint: ReplayCursorHint,
+    /// Actor-local authenticated-map baseline and coalesced dirty-key set for
+    /// metadata carried out of line by HeadCanonical persistence.
+    ///
+    /// This is structural continuation state rather than a value cache:
+    /// ordinary preparation canonicalizes only changed cells, and a durable
+    /// acknowledgement advances the exact sparse-Merkle baseline. Cold
+    /// materialization and explicit 0.8.10 activation install a fully verified
+    /// snapshot before ordinary delta writes are admitted.
+    head_canonical_metadata: head_metadata::SessionHeadMetadataTracker,
 }
 
-/// Per-format memoized transcript-history witnesses; see
-/// [`SessionHistoryCaches::witness`].
-#[derive(Debug, Default, Clone)]
-pub(crate) struct SessionWitnessMemo {
-    v2: std::sync::OnceLock<String>,
-    v3: std::sync::OnceLock<String>,
+fn head_canonical_metadata_cell_carries_key(key: &str) -> bool {
+    !import_0810::is_released_checkpoint_metadata_key(key)
+        && !matches!(
+            key,
+            SESSION_TRANSCRIPT_HISTORY_STATE_KEY
+                | SESSION_TRANSCRIPT_REWRITE_PREFIX_AUTHORITY_KEY
+                | SESSION_REALTIME_TRANSCRIPT_STATE_KEY
+        )
 }
 
-impl SessionWitnessMemo {
-    fn slot(&self, format: u32) -> Option<&std::sync::OnceLock<String>> {
-        match format {
-            2 => Some(&self.v2),
-            3 => Some(&self.v3),
-            _ => None,
-        }
-    }
+#[cfg(test)]
+static SESSION_HEAD_METADATA_CANONICALIZATION_COUNT: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(test)]
+pub(crate) fn reset_session_head_metadata_canonicalization_count() {
+    SESSION_HEAD_METADATA_CANONICALIZATION_COUNT.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(crate) fn session_head_metadata_canonicalization_count() -> u64 {
+    SESSION_HEAD_METADATA_CANONICALIZATION_COUNT.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 #[derive(Debug, Clone)]
@@ -763,22 +599,22 @@ pub struct Session {
     updated_at: SystemTime,
     /// Arbitrary metadata
     metadata: serde_json::Map<String, serde_json::Value>,
-    /// Memoized canonical witness of the transcript-history graph currently
-    /// under [`SESSION_TRANSCRIPT_HISTORY_STATE_KEY`].
+    /// Typed in-memory realtime reducer projection plus its authenticated
+    /// HeadCanonical component-event suffix.
     ///
-    /// Deriving it canonicalizes and hashes every retained revision body, and
-    /// it is derived up to four times per save boundary (head projection,
-    /// stamp mint, stamp install, intra-turn projection) from the same
-    /// unchanged graph. This is pure derived state: the three methods that
-    /// write the history key clear it, so it can never outlive the value it
-    /// describes.
+    /// The accumulated reducer state is deliberately absent from `metadata`
+    /// during ordinary operation. WholeBlob serialization injects it only at
+    /// that exceptional O(document) representation boundary; HeadCanonical
+    /// binds the compact event-prefix authority and persists only new typed
+    /// records.
+    realtime_transcript: Box<SessionRealtimeTranscriptProjection>,
+    /// Derived actor-local indexes and structural continuation state.
+    ///
+    /// The transcript and authenticated store projections remain authority.
+    /// These caches accelerate terminal-notice membership, share the already
+    /// validated compact graph, and retain the sparse HeadCanonical metadata
+    /// baseline.
     history_caches: Box<SessionHistoryCaches>,
-    /// Cached canonical byte segments of the transcript-history graph
-    /// (commits segment, per-retained-body chunks) for incremental witness
-    /// assembly. Content-addressed; survives head-only append updates that
-    /// clear the witness memo above.
-    /// Shared parsed form of the current history graph; see
-    /// [`SharedTranscriptHistoryState`].
     /// Whether transcript-history metadata has already crossed a validating,
     /// compacting authority boundary in this in-memory session.
     ///
@@ -789,20 +625,6 @@ pub struct Session {
     transcript_history_metadata_validation: TranscriptHistoryMetadataValidation,
     /// Cumulative token usage across all LLM calls in this session
     usage: Usage,
-    /// Request-time overlay carrying a volatile-only refreshed base prompt
-    /// armed by [`Session::reconcile_resumed_system_prompt`].
-    ///
-    /// NEVER persisted and never part of any digest preimage (it is absent
-    /// from [`SessionSerdeRef`]): the transcript keeps the persisted bytes so
-    /// the resumed projection digests to the persisted revision, while the
-    /// model boundary substitutes the fresh bytes. Guards the 2026-07-29
-    /// resume-mint incident: prompts opening with a wall-clock timestamp
-    /// minted one full rewrite revision per identity per boot (~127/boot on
-    /// one production fleet), and each legacy-spelled mint retained a full
-    /// document copy on graph-carrying stores. Boxed so the always-`None`
-    /// common case costs one pointer (`Session` size is stack-budgeted, see
-    /// [`SessionHistoryCaches`]).
-    volatile_prompt_overlay: Option<Box<VolatilePromptOverlay>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -813,7 +635,7 @@ enum TranscriptHistoryMetadataValidation {
 
 /// Serde helper for Session serialization (flattens Arc)
 #[derive(Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 struct SessionSerde {
     version: u32,
     id: SessionId,
@@ -838,6 +660,63 @@ struct SessionSerdeRef<'a> {
     created_at: &'a SystemTime,
     updated_at: &'a SystemTime,
     metadata: &'a serde_json::Map<String, serde_json::Value>,
+    usage: &'a Usage,
+}
+
+/// Borrowed transient WholeBlob metadata overlay.
+///
+/// The live metadata map never owns the transcript graph or realtime
+/// projection. WholeBlob is the one representation that needs those values
+/// inline, so this serializer streams the base map and the typed projections
+/// into one object without cloning the map or constructing a graph-sized
+/// `serde_json::Value` shadow.
+struct SessionWholeBlobMetadataRef<'a> {
+    base: &'a serde_json::Map<String, serde_json::Value>,
+    history: Option<&'a TranscriptHistoryState>,
+    realtime: Option<&'a SessionRealtimeTranscriptState>,
+}
+
+impl Serialize for SessionWholeBlobMetadataRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        use serde::ser::SerializeMap;
+
+        let mut map = serializer.serialize_map(None)?;
+        for (key, value) in self.base {
+            if key == SESSION_REALTIME_TRANSCRIPT_STATE_KEY
+                || (self.history.is_some()
+                    && (key == SESSION_TRANSCRIPT_HISTORY_STATE_KEY
+                        || key == SESSION_TRANSCRIPT_REWRITE_PREFIX_AUTHORITY_KEY))
+            {
+                continue;
+            }
+            map.serialize_entry(key, value)?;
+        }
+        if let Some(history) = self.history {
+            map.serialize_entry(SESSION_TRANSCRIPT_HISTORY_STATE_KEY, history)?;
+            map.serialize_entry(
+                SESSION_TRANSCRIPT_REWRITE_PREFIX_AUTHORITY_KEY,
+                history.rewrite_prefix(),
+            )?;
+        }
+        if let Some(realtime) = self.realtime {
+            map.serialize_entry(SESSION_REALTIME_TRANSCRIPT_STATE_KEY, realtime)?;
+        }
+        map.end()
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+struct SessionWholeBlobSerdeRef<'a> {
+    version: u32,
+    id: &'a SessionId,
+    messages: &'a [Message],
+    created_at: &'a SystemTime,
+    updated_at: &'a SystemTime,
+    metadata: SessionWholeBlobMetadataRef<'a>,
     usage: &'a Usage,
 }
 
@@ -868,82 +747,118 @@ impl Serialize for Session {
     where
         S: Serializer,
     {
-        let _digest_site =
-            crate::checkpoint::enter_digest_site(crate::checkpoint::DIGEST_SITE_ENCODE);
-        let compacted_metadata = if self.transcript_history_metadata_validation
+        let _digest_site = crate::digest_observability::enter_digest_site(
+            crate::digest_observability::DIGEST_SITE_ENCODE,
+        );
+        if import_0810::contains_released_checkpoint_metadata(&self.metadata) {
+            return Err(<S::Error as serde::ser::Error>::custom(
+                "released checkpoint metadata cannot be serialized by the current Session domain",
+            ));
+        }
+        if self.transcript_history_metadata_validation
             == TranscriptHistoryMetadataValidation::RequiresValidation
+            && (self
+                .metadata
+                .contains_key(SESSION_TRANSCRIPT_HISTORY_STATE_KEY)
+                || self.history_caches.shared_state.get().is_some())
         {
-            let mut metadata = self.metadata.clone();
-            compact_transcript_history_metadata_for_snapshot(
-                &mut metadata,
-                TranscriptGraphValidationMode::FullVerify,
-            )
-            .map_err(<S::Error as serde::ser::Error>::custom)?;
-            Some(metadata)
-        } else {
-            None
+            return Err(<S::Error as serde::ser::Error>::custom(
+                "transcript-history graph lacks verified materialization or construction authority",
+            ));
+        }
+        let history = self.history_caches.shared_state.get();
+        let serde_repr = SessionWholeBlobSerdeRef {
+            version: self.version,
+            id: &self.id,
+            messages: self.messages(),
+            created_at: &self.created_at,
+            updated_at: &self.updated_at,
+            metadata: SessionWholeBlobMetadataRef {
+                base: &self.metadata,
+                history: history.as_deref(),
+                realtime: self.realtime_transcript.whole_blob_projection(),
+            },
+            usage: &self.usage,
         };
-        let serde_repr = persisted_envelope_ref(self, compacted_metadata.as_ref());
         serde_repr.serialize(serializer)
     }
 }
 
-/// Fail-closed gate over the carried transcript-history witness format.
-///
-/// Runs at every document ingress (`Session::deserialize`,
-/// `Session::from_head_parts`) BEFORE graph normalization or healing: a row
-/// whose witness declares a format this binary predates must never be
-/// interpreted, healed, or rewritten under an older algorithm. Bare digest
-/// strings (every pre-v3 row) and known formats pass untouched.
-fn validate_carried_transcript_history_witness_format(
-    metadata: &serde_json::Map<String, serde_json::Value>,
-) -> Result<(), String> {
-    let Some(value) = metadata.get(SESSION_TRANSCRIPT_HISTORY_CHECKPOINT_DIGEST_KEY) else {
-        return Ok(());
-    };
-    crate::checkpoint::TranscriptHistoryWitness::from_carried_value(value)
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TranscriptHistoryWireKind {
+    Released0810,
+    Current,
 }
 
-/// Validate-and-compact the transcript-history metadata value in place, and
-/// return the sealed proof of the exact graph that was installed.
+fn transcript_history_wire_kind(
+    metadata: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Option<TranscriptHistoryWireKind>, String> {
+    let Some(value) = metadata.get(SESSION_TRANSCRIPT_HISTORY_STATE_KEY) else {
+        return Ok(None);
+    };
+    let object = value
+        .as_object()
+        .ok_or_else(|| "transcript-history graph must be an object".to_string())?;
+    match object.get("format") {
+        None => Ok(Some(TranscriptHistoryWireKind::Released0810)),
+        Some(serde_json::Value::String(format)) if format == TRANSCRIPT_HISTORY_FORMAT_CURRENT => {
+            Ok(Some(TranscriptHistoryWireKind::Current))
+        }
+        Some(serde_json::Value::String(format)) => {
+            Err(format!("unsupported transcript graph format {format}"))
+        }
+        Some(_) => Err("transcript graph format must be a string".to_string()),
+    }
+}
+
+/// Decode and compact the transient transcript-history wire value, removing it
+/// from ordinary metadata and returning the singular typed in-memory graph.
 ///
 /// Returning the proof is the sealed-capability seam: the graph this function
-/// just validated (or substituted from the proven decode memo) used to be
-/// dropped on the floor, so the first consumer after a decode re-parsed the
-/// very value serialized from it one statement earlier. `Ok(None)` means the
-/// metadata carries no transcript-history graph at all.
+/// just validated used to be dropped on the floor, so the first consumer after
+/// a decode re-parsed the very value serialized from it one statement earlier.
+/// `Ok(None)` means the metadata carries no transcript-history graph at all.
 fn compact_transcript_history_metadata_for_snapshot(
     metadata: &mut serde_json::Map<String, serde_json::Value>,
-    mode: TranscriptGraphValidationMode,
-) -> Result<Option<ValidatedTranscriptHistory>, String> {
+) -> Result<Option<std::sync::Arc<TranscriptHistoryState>>, String> {
     let Some(value) = metadata.remove(SESSION_TRANSCRIPT_HISTORY_STATE_KEY) else {
         return Ok(None);
     };
     let mut state: TranscriptHistoryState =
         serde_json::from_value(value).map_err(|error| error.to_string())?;
     state
-        .compact_mechanical_revision_bodies_for(mode)
+        .compact_mechanical_revision_bodies()
         .map_err(|error| error.to_string())?;
-    let state = std::sync::Arc::new(state);
-    let value = serde_json::to_value(state.as_ref()).map_err(|error| error.to_string())?;
-    // FullVerify just ran a real whole-graph validation on a write/encode
-    // seam (DecodeMemoized records inside the graph call itself); admit the
-    // proven graph so the next decode of these exact persisted bytes
-    // substitutes it instead of re-validating. FullVerify only ever RECORDS
-    // here — it must never consult the memo, or a write seam would launder
-    // memoized trust in place of a fresh proof of current bytes.
-    if mode == TranscriptGraphValidationMode::FullVerify {
-        record_producer_validated_transcript_graph(
-            std::sync::Arc::clone(&state),
-            approximate_json_bytes(&value),
-        );
+    metadata.remove(SESSION_TRANSCRIPT_REWRITE_PREFIX_AUTHORITY_KEY);
+    Ok(Some(std::sync::Arc::new(state)))
+}
+
+impl ValidatedTranscriptHistory {
+    /// Rebuild and seal a graph from generation-bearing rewrite records while
+    /// reusing an optional already-proved prefix.
+    ///
+    /// The record builder validates every unproved endpoint body and edit
+    /// relation, preserves only byte-equal bodies/commits from `proved`,
+    /// checks occurrence contiguity and every bridge, and derives the rolling
+    /// prefix authority as it appends. Those are exactly the facts the full
+    /// graph validator would re-derive over the result, so this returns the
+    /// proof-bearing capability directly instead of immediately hashing every
+    /// retained body a second time.
+    pub fn from_rewrite_records_with_proved<I>(
+        records: I,
+        proved: Option<&ValidatedTranscriptHistory>,
+    ) -> Result<Option<Self>, TranscriptEditError>
+    where
+        I: IntoIterator<Item = TranscriptRewriteRecord>,
+    {
+        Ok(
+            TranscriptHistoryState::from_rewrite_records_with_proved(records, proved)?.map(
+                |state| {
+                    ValidatedTranscriptHistory::adopt_session_validated(std::sync::Arc::new(state))
+                },
+            ),
+        )
     }
-    metadata.insert(SESSION_TRANSCRIPT_HISTORY_STATE_KEY.to_string(), value);
-    Ok(Some(ValidatedTranscriptHistory::adopt_compacted_snapshot(
-        state,
-    )))
 }
 
 impl<'de> Deserialize<'de> for Session {
@@ -951,46 +866,92 @@ impl<'de> Deserialize<'de> for Session {
     where
         D: Deserializer<'de>,
     {
-        let _digest_site =
-            crate::checkpoint::enter_digest_site(crate::checkpoint::DIGEST_SITE_DECODE);
+        let _digest_site = crate::digest_observability::enter_digest_site(
+            crate::digest_observability::DIGEST_SITE_DECODE,
+        );
         let serde_repr = SessionSerde::deserialize(deserializer)?;
         let version = session_persistence_version_authority::restore_session_envelope_version(
             serde_repr.version,
         )
         .map_err(<D::Error as serde::de::Error>::custom)?;
         let mut metadata = serde_repr.metadata;
-        // Unknown transcript-history witness formats refuse typed HERE —
-        // before the graph normalization below and before any consumer can
-        // heal or rewrite the row under an algorithm this binary predates.
-        validate_carried_transcript_history_witness_format(&metadata)
+        if import_0810::contains_released_checkpoint_metadata(&metadata) {
+            return Err(<D::Error as serde::de::Error>::custom(
+                "embedded released checkpoint metadata requires the explicit one-time 0.8.10 importer",
+            ));
+        }
+        let realtime_transcript = match metadata.remove(SESSION_REALTIME_TRANSCRIPT_STATE_KEY) {
+            Some(value) => {
+                let state = serde_json::from_value(value)
+                    .map_err(<D::Error as serde::de::Error>::custom)?;
+                SessionRealtimeTranscriptProjection::from_inline_snapshot(&serde_repr.id, state)
+                    .map_err(<D::Error as serde::de::Error>::custom)?
+            }
+            None => SessionRealtimeTranscriptProjection::empty(&serde_repr.id),
+        };
+        let history_wire_kind = transcript_history_wire_kind(&metadata)
             .map_err(<D::Error as serde::de::Error>::custom)?;
-        // Durable-document decode seam: repeat decodes of an unchanged graph
-        // shape skip the per-body digest re-verification via the bounded
-        // process-lifetime decode memo (first sight still verifies fully).
-        let sealed = compact_transcript_history_metadata_for_snapshot(
-            &mut metadata,
-            TranscriptGraphValidationMode::DecodeMemoized,
-        )
-        .map_err(<D::Error as serde::de::Error>::custom)?;
-        let session = Session {
+        if matches!(
+            history_wire_kind,
+            Some(TranscriptHistoryWireKind::Released0810)
+        ) {
+            return Err(<D::Error as serde::de::Error>::custom(
+                "released 0.8.10 transcript history requires the explicit one-time importer",
+            ));
+        }
+        let mut history_caches = Box::<SessionHistoryCaches>::default();
+        let mut session = Session {
             version,
             id: serde_repr.id,
             messages: TranscriptMessages::from_vec(serde_repr.messages),
             created_at: serde_repr.created_at,
             updated_at: serde_repr.updated_at,
             metadata,
-            history_caches: Box::default(),
-            transcript_history_metadata_validation: TranscriptHistoryMetadataValidation::Validated,
+            realtime_transcript: Box::new(realtime_transcript),
+            history_caches,
+            transcript_history_metadata_validation: if history_wire_kind.is_some() {
+                TranscriptHistoryMetadataValidation::RequiresValidation
+            } else {
+                TranscriptHistoryMetadataValidation::Validated
+            },
             usage: serde_repr.usage,
-            volatile_prompt_overlay: None,
         };
-        // Seed the per-instance shared parse with the graph this decode just
-        // proved and installed. Without this, the first consumer after every
-        // decode re-parses the very metadata value that was serialized from
-        // this exact state one statement earlier — a whole-graph O(document)
-        // parse per load on the measured hot seam.
-        if let Some(sealed) = sealed {
-            session.history_caches.shared_state.set(sealed.shared());
+        if let Some(TranscriptHistoryWireKind::Current) = history_wire_kind {
+            let state = compact_transcript_history_metadata_for_snapshot(&mut session.metadata)
+                .map_err(<D::Error as serde::de::Error>::custom)?
+                .ok_or_else(|| {
+                    <D::Error as serde::de::Error>::custom(
+                        "transcript-history graph disappeared during ingress",
+                    )
+                })?;
+            let exact_live_prefix = state
+                .derive_live_row_lineage_after_final_semantic_replay(session.messages())
+                .map_err(<D::Error as serde::de::Error>::custom)?
+                .ok_or_else(|| {
+                    <D::Error as serde::de::Error>::custom(
+                        "live transcript does not preserve the graph-proved audited endpoint",
+                    )
+                })?;
+            let endpoint_prefix = state
+                .final_endpoint_witness()
+                .ok_or_else(|| {
+                    <D::Error as serde::de::Error>::custom(
+                        "compact transcript graph has no final endpoint witness",
+                    )
+                })?
+                .row_prefix()
+                .clone();
+            if !session.install_exact_message_row_lineage(endpoint_prefix, exact_live_prefix) {
+                return Err(<D::Error as serde::de::Error>::custom(
+                    "failed to install exact live message-row authority",
+                ));
+            }
+            session.transcript_history_metadata_validation =
+                TranscriptHistoryMetadataValidation::Validated;
+            session
+                .history_caches
+                .shared_state
+                .set(std::sync::Arc::clone(&state));
         }
         Ok(session)
     }
@@ -1045,20 +1006,6 @@ impl SessionMetadataDocument {
         self.metadata.get(SESSION_LIFECYCLE_TERMINAL_KEY)
     }
 
-    /// Decode typed checkpoint metadata without materializing the transcript.
-    ///
-    /// This validates schema and session identity and preserves explicit
-    /// legacy-unverified state. Digest verification still requires the full
-    /// document through [`Session::try_checkpoint_state`].
-    pub fn try_checkpoint_metadata_state(
-        &self,
-    ) -> Result<
-        crate::checkpoint::SessionCheckpointMetadataState,
-        crate::checkpoint::SessionCheckpointError,
-    > {
-        crate::checkpoint::session_checkpoint_metadata_state(&self.session_id, &self.metadata)
-    }
-
     /// Decode the typed metadata view through the canonical map-level
     /// decoders, failing closed on corrupt values.
     pub fn try_into_view(self) -> Result<PersistedSessionMetadataView, serde_json::Error> {
@@ -1078,13 +1025,200 @@ pub fn session_metadata_document_from_slice(
     let serde_repr: SessionMetadataDocumentSerde = serde_json::from_slice(bytes)?;
     session_persistence_version_authority::restore_session_envelope_version(serde_repr.version)
         .map_err(<serde_json::Error as serde::de::Error>::custom)?;
+    if import_0810::contains_released_checkpoint_metadata(&serde_repr.metadata) {
+        return Err(<serde_json::Error as serde::de::Error>::custom(
+            "released 0.8.10 proof metadata requires the explicit one-time importer",
+        ));
+    }
+    let history_wire_kind = transcript_history_wire_kind(&serde_repr.metadata)
+        .map_err(<serde_json::Error as serde::de::Error>::custom)?;
+    if matches!(
+        history_wire_kind,
+        Some(TranscriptHistoryWireKind::Released0810)
+    ) {
+        return Err(<serde_json::Error as serde::de::Error>::custom(
+            "released 0.8.10 transcript history requires the explicit one-time importer",
+        ));
+    }
     Ok(SessionMetadataDocument {
         session_id: serde_repr.id,
         metadata: serde_repr.metadata,
     })
 }
 
+/// One exact serialized session document plus its single-pass physical digest.
+///
+/// Typed producers construct this through [`Session::to_persisted_artifact`].
+/// The streaming JSON writer feeds the output buffer and SHA-256 in the same
+/// pass, so consumers can reuse `row_sha256_token` without scanning the full
+/// document again.
+#[derive(Debug, Clone)]
+pub struct SerializedSessionArtifact {
+    // `Arc<Vec<u8>>`, rather than `Arc<[u8]>`, is intentional: promoting a
+    // completed Vec into an Arc slice may allocate and copy the full document.
+    // Sharing the immutable Vec owner preserves the streaming writer's exact
+    // allocation without a second O(document) memory pass.
+    bytes: Arc<Vec<u8>>,
+    raw_sha256: [u8; 32],
+    row_sha256_token: Arc<str>,
+}
+
+impl SerializedSessionArtifact {
+    fn from_parts(bytes: Vec<u8>, raw_sha256: [u8; 32]) -> Self {
+        Self {
+            bytes: Arc::new(bytes),
+            raw_sha256,
+            row_sha256_token: Arc::from(row_sha256_token(raw_sha256)),
+        }
+    }
+
+    pub(crate) fn from_raw_bytes(bytes: Vec<u8>) -> Self {
+        let raw_sha256 = sha256_key(&bytes);
+        Self::from_parts(bytes, raw_sha256)
+    }
+
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        self.bytes.as_ref()
+    }
+
+    #[must_use]
+    pub fn bytes_arc(&self) -> Arc<Vec<u8>> {
+        Arc::clone(&self.bytes)
+    }
+
+    #[must_use]
+    pub fn into_bytes(self) -> Vec<u8> {
+        Arc::try_unwrap(self.bytes).unwrap_or_else(|shared| shared.as_ref().clone())
+    }
+
+    #[must_use]
+    pub const fn raw_sha256(&self) -> &[u8; 32] {
+        &self.raw_sha256
+    }
+
+    #[must_use]
+    pub fn row_sha256_token(&self) -> &str {
+        &self.row_sha256_token
+    }
+}
+
+struct SessionArtifactWriter {
+    bytes: Vec<u8>,
+    hasher: Sha256,
+}
+
+impl SessionArtifactWriter {
+    fn new() -> Self {
+        Self {
+            bytes: Vec::new(),
+            hasher: Sha256::new(),
+        }
+    }
+
+    fn finish(self) -> SerializedSessionArtifact {
+        let digest = self.hasher.finalize();
+        let mut raw_sha256 = [0u8; 32];
+        raw_sha256.copy_from_slice(&digest);
+        SerializedSessionArtifact::from_parts(self.bytes, raw_sha256)
+    }
+}
+
+impl std::io::Write for SessionArtifactWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.bytes.extend_from_slice(buffer);
+        self.hasher.update(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn sha256_key(bytes: &[u8]) -> [u8; 32] {
+    let digest = Sha256::digest(bytes);
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&digest);
+    key
+}
+
+fn row_sha256_token(raw_sha256: [u8; 32]) -> String {
+    use std::fmt::Write as _;
+
+    let mut token = String::with_capacity("row-sha256:".len() + 64);
+    token.push_str("row-sha256:");
+    for byte in raw_sha256 {
+        let _ = write!(token, "{byte:02x}");
+    }
+    token
+}
+
+fn persisted_session_decode_error(message: impl Into<String>) -> serde_json::Error {
+    serde_json::Error::io(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        message.into(),
+    ))
+}
+
 impl Session {
+    /// Install one current compact transcript graph after out-of-line domain
+    /// projections have been materialized.
+    ///
+    /// Released 0.8.10 graphs are admitted only by the explicit one-time
+    /// importer; normal current materialization never interprets them.
+    pub(crate) fn normalize_persisted_transcript_history_ingress(
+        &mut self,
+    ) -> Result<(), TranscriptEditError> {
+        let history_wire_kind = transcript_history_wire_kind(&self.metadata)
+            .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
+        let Some(history_wire_kind) = history_wire_kind else {
+            return Ok(());
+        };
+        if matches!(history_wire_kind, TranscriptHistoryWireKind::Released0810) {
+            return Err(TranscriptEditError::HistoryStateMalformed(
+                "released 0.8.10 transcript history requires the explicit one-time importer"
+                    .to_string(),
+            ));
+        };
+        let state = compact_transcript_history_metadata_for_snapshot(&mut self.metadata)
+            .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?
+            .ok_or_else(|| {
+                TranscriptEditError::HistoryStateMalformed(
+                    "transcript-history graph disappeared during ingress".to_string(),
+                )
+            })?;
+        let exact_live_prefix = state
+            .derive_live_row_lineage_after_final_semantic_replay(self.messages())
+            .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?
+            .ok_or_else(|| {
+                TranscriptEditError::HistoryStateMalformed(
+                    "live transcript does not preserve the graph-proved audited endpoint"
+                        .to_string(),
+                )
+            })?;
+        let endpoint_prefix = state
+            .final_endpoint_witness()
+            .ok_or_else(|| {
+                TranscriptEditError::HistoryStateMalformed(
+                    "compact transcript graph has no final endpoint witness".to_string(),
+                )
+            })?
+            .row_prefix()
+            .clone();
+        if !self.install_exact_message_row_lineage(endpoint_prefix, exact_live_prefix) {
+            return Err(TranscriptEditError::HistoryStateMalformed(
+                "failed to install exact live message-row authority".to_string(),
+            ));
+        }
+        self.transcript_history_metadata_validation =
+            TranscriptHistoryMetadataValidation::Validated;
+        self.history_caches
+            .shared_state
+            .set(std::sync::Arc::clone(&state));
+        Ok(())
+    }
+
     /// Rebuild a slim `Session` from persisted head-row parts.
     ///
     /// Used by [`crate::session_store::SessionHead::into_session`] to
@@ -1096,22 +1230,36 @@ impl Session {
         version: u32,
         id: SessionId,
         messages: Vec<Message>,
+        exact_row_prefix: Option<crate::SessionMessageRowPrefixAccumulator>,
         created_at: SystemTime,
         updated_at: SystemTime,
         metadata: serde_json::Map<String, serde_json::Value>,
         usage: Usage,
+        head_canonical_metadata: Option<Arc<SessionHeadMetadataProjection>>,
     ) -> Result<Self, String> {
         let version =
             session_persistence_version_authority::restore_session_envelope_version(version)
                 .map_err(|err| err.to_string())?;
-        // Same fail-closed gate as `Session::deserialize`: an unknown
-        // witness format refuses before this materialized head can be read,
-        // normalized, or re-persisted by any consumer.
-        validate_carried_transcript_history_witness_format(&metadata)?;
-        Ok(Self {
+        if import_0810::contains_released_checkpoint_metadata(&metadata) {
+            return Err(
+                "embedded released checkpoint metadata requires the explicit one-time 0.8.10 importer"
+                    .to_string(),
+            );
+        }
+        let transcript = TranscriptMessages::from_vec(messages);
+        if let Some(prefix) = exact_row_prefix
+            && !transcript.install_exact_row_prefix(prefix)
+        {
+            return Err(
+                "exact message-row prefix count differs from materialized messages".to_string(),
+            );
+        }
+        let realtime_transcript = Box::new(SessionRealtimeTranscriptProjection::empty(&id));
+        let mut history_caches = Box::<SessionHistoryCaches>::default();
+        let mut session = Self {
             version,
             id,
-            messages: TranscriptMessages::from_vec(messages),
+            messages: transcript,
             created_at,
             updated_at,
             transcript_history_metadata_validation: if metadata
@@ -1122,243 +1270,85 @@ impl Session {
                 TranscriptHistoryMetadataValidation::Validated
             },
             metadata,
-            history_caches: Box::default(),
+            realtime_transcript,
+            history_caches,
             usage,
-            volatile_prompt_overlay: None,
-        })
-    }
-
-    /// Build the canonical, storage-representation-invariant document used by
-    /// the typed checkpoint digest.
-    pub(crate) fn checkpoint_digest_document(
-        &self,
-    ) -> Result<serde_json::Value, serde_json::Error> {
-        let messages = canonicalize_messages_for_digest(self.messages());
-        let mut metadata = self.metadata.clone();
-        if self.transcript_history_metadata_validation
-            == TranscriptHistoryMetadataValidation::RequiresValidation
-        {
-            compact_transcript_history_metadata_for_snapshot(
-                &mut metadata,
-                TranscriptGraphValidationMode::FullVerify,
-            )
-            .map_err(<serde_json::Error as serde::ser::Error>::custom)?;
+        };
+        if let Some(projection) = head_canonical_metadata {
+            session
+                .install_head_canonical_metadata_projection(&projection)
+                .map_err(|error| {
+                    format!(
+                        "failed to install HeadCanonical metadata baseline for session {}: {error}",
+                        session.id
+                    )
+                })?;
         }
-        // Deliberately NOT canonicalized here.
-        //
-        // The sole caller (`checkpoint::session_checkpoint_digest_uncached`)
-        // removes SESSION_TRANSCRIPT_HISTORY_STATE_KEY from this document and
-        // substitutes a compact history marker before hashing, so canonicalizing
-        // the graph is work whose entire output is discarded — and on a
-        // history-bearing session that graph is document-sized. The resulting
-        // digest is byte-identical either way because the key never reaches the
-        // hash.
-        //
-        // If a second caller ever needs the canonicalized graph IN the document,
-        // it must ask for it explicitly rather than reinstating it here for
-        // everyone.
-        metadata.remove(SESSION_TRANSCRIPT_HISTORY_STATE_KEY);
-        if let Some(deferred) = metadata.get_mut(SESSION_DEFERRED_TURN_STATE_KEY) {
-            *deferred = canonicalize_checkpoint_deferred_turn_value(deferred)?;
-        }
-        serde_json::to_value(SessionSerdeRef {
-            version: self.version,
-            id: &self.id,
-            messages: &messages,
-            created_at: &self.created_at,
-            updated_at: &self.updated_at,
-            metadata: &metadata,
-            usage: &self.usage,
-        })
-    }
-
-    /// [`Self::checkpoint_digest_document`] with the transcript array
-    /// replaced by a per-call unique splice marker, for the framed-midstate
-    /// checkpoint digest fast path.
-    ///
-    /// The canonical checkpoint document sorts only the immutable
-    /// `created_at` and `id` before `messages`, so the caller can split the
-    /// canonical bytes of THIS document at the marker and finalize the
-    /// retained transcript midstate with `"]" ++ suffix` for a byte-identical
-    /// digest at O(metadata) cost. The marker's NUL prefix cannot occur in
-    /// real metadata; the caller still requires an exactly-once split and
-    /// falls back to the full path otherwise.
-    ///
-    /// The metadata clone skips the transcript-history graph when this
-    /// session's marker proves it validated — the full path deep-clones a
-    /// document-sized value whose every byte the digest then discards. A
-    /// `RequiresValidation` session keeps the graph present so the same
-    /// fail-closed FullVerify branch as the full path runs here.
-    pub(crate) fn checkpoint_digest_framed_document(
-        &self,
-    ) -> Result<(serde_json::Value, String), serde_json::Error> {
-        static SPLICE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let marker = format!(
-            "\u{0}meerkat-transcript-splice-{}",
-            SPLICE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        );
-        let mut metadata: serde_json::Map<String, serde_json::Value>;
-        if self.transcript_history_metadata_validation
-            == TranscriptHistoryMetadataValidation::RequiresValidation
-        {
-            metadata = self.metadata.clone();
-            compact_transcript_history_metadata_for_snapshot(
-                &mut metadata,
-                TranscriptGraphValidationMode::FullVerify,
-            )
-            .map_err(<serde_json::Error as serde::ser::Error>::custom)?;
-            metadata.remove(SESSION_TRANSCRIPT_HISTORY_STATE_KEY);
-        } else {
-            metadata = self
-                .metadata
-                .iter()
-                .filter(|(key, _)| key.as_str() != SESSION_TRANSCRIPT_HISTORY_STATE_KEY)
-                .map(|(key, value)| (key.clone(), value.clone()))
-                .collect();
-        }
-        if let Some(deferred) = metadata.get_mut(SESSION_DEFERRED_TURN_STATE_KEY) {
-            *deferred = canonicalize_checkpoint_deferred_turn_value(deferred)?;
-        }
-        // Exhaustive destructure of the persisted envelope: a new persisted
-        // field is a compile error here instead of a silent digest change.
-        let SessionSerdeRef {
-            version,
-            id,
-            messages: _,
-            created_at,
-            updated_at,
-            metadata: _,
-            usage,
-        } = persisted_envelope_ref(self, None);
-        let document = serde_json::to_value(CheckpointDigestFramingRef {
-            version,
-            id,
-            messages: &marker,
-            created_at,
-            updated_at,
-            metadata: &metadata,
-            usage,
-        })?;
-        Ok((document, marker))
-    }
-
-    /// Canonical checkpoint-document transcript midstate under `prefix`;
-    /// see `TranscriptDigestAccumulator::framed_document_hasher`.
-    pub(crate) fn framed_document_hasher(&self, prefix: &[u8]) -> Option<Sha256> {
-        self.messages.framed_document_hasher(prefix)
-    }
-
-    /// Serialize this session to its persisted JSON bytes and record its
-    /// retained digest midstates under the SHA-256 of those exact bytes, so
-    /// an in-process [`Self::from_persisted_bytes`] of the same bytes adopts
-    /// them instead of reseeding each midstate with an O(document)
-    /// canonicalize-and-hash pass.
-    ///
-    /// Serialization and admission are ONE operation deliberately: the memo
-    /// key binds exact bytes, and binding is only evidence when the bytes
-    /// provably serialize the session whose midstates are recorded — which
-    /// this method establishes by producing them itself. A raw
-    /// record-under-caller-supplied-bytes seam would be caller-attested
-    /// (record session A's midstates under session B's bytes and B later
-    /// serves A's digests), so the raw seams are crate-private and every
-    /// public path goes through the paired operations.
-    pub fn to_persisted_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
-        let serialized = serde_json::to_vec(self)?;
-        self.record_digest_midstates_for_bytes(&serialized);
-        Ok(serialized)
-    }
-
-    /// Record this session's retained digest midstates under the SHA-256 of
-    /// the EXACT bytes it was just serialized to. Crate-private on purpose:
-    /// the caller must be a seam that produced `serialized` from `self` in
-    /// the same operation (see [`Self::to_persisted_bytes`]).
-    pub(crate) fn record_digest_midstates_for_bytes(&self, serialized: &[u8]) {
-        self.messages.record_state_for_serialized_bytes(serialized);
-    }
-
-    /// Adopt digest midstates previously recorded for these EXACT serialized
-    /// bytes. Crate-private on purpose: the caller must have decoded `self`
-    /// from `serialized` in the same operation (see
-    /// [`Self::from_persisted_bytes`]).
-    pub(crate) fn adopt_digest_midstates_for_bytes(&mut self, serialized: &[u8]) {
-        self.messages.adopt_state_for_serialized_bytes(serialized);
-    }
-
-    /// Decode a session from persisted JSON bytes, adopting any digest
-    /// midstates recorded for these exact bytes by the producer that wrote
-    /// them (see [`Self::to_persisted_bytes`]). Decode and adoption are one
-    /// operation, so the adopted midstates provably describe the message
-    /// vector these bytes decode to.
-    pub fn from_persisted_bytes(serialized: &[u8]) -> Result<Self, serde_json::Error> {
-        let mut session: Session = serde_json::from_slice(serialized)?;
-        session.adopt_digest_midstates_for_bytes(serialized);
         Ok(session)
     }
 
-    /// Snapshot the live transcript buffer and its proven midstates for the
-    /// slim-materialization substitution memo (see `SessionHead`).
-    pub(crate) fn shared_transcript_snapshot(
+    /// Serialize this current Session envelope to persisted JSON bytes.
+    ///
+    /// This does not populate process-global identity or digest caches.
+    /// Callers that also need the exact physical blob digest should use
+    /// [`Self::to_persisted_artifact`] so bytes and SHA-256 are produced in one
+    /// pass.
+    pub fn to_persisted_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
+        Ok(self.to_persisted_artifact()?.into_bytes())
+    }
+
+    /// Stream this exact Session into a sealed WholeBlob artifact.
+    ///
+    /// JSON bytes and their physical SHA-256 are produced in one pass. No
+    /// process-global Session cache is populated: durable store authority, not
+    /// process memory, owns exact byte identity.
+    pub fn to_persisted_artifact(&self) -> Result<SerializedSessionArtifact, serde_json::Error> {
+        let mut writer = SessionArtifactWriter::new();
+        serde_json::to_writer(&mut writer, self)?;
+        Ok(writer.finish())
+    }
+
+    /// Decode one current Session envelope without a full-byte pre-hash or a
+    /// process-global memo lookup.
+    pub fn from_persisted_bytes(serialized: &[u8]) -> Result<Self, serde_json::Error> {
+        serde_json::from_slice(serialized)
+    }
+
+    /// Exact durable-row lineage at one prefix count, when this Session was
+    /// materialized from that authority and has changed only by appends.
+    pub(crate) fn exact_message_row_prefix_at(
         &self,
-    ) -> Option<digest_accumulator::SharedTranscriptSnapshot> {
-        self.messages.shared_snapshot()
+        row_count: u64,
+    ) -> Option<crate::SessionMessageRowPrefixAccumulator> {
+        self.messages.exact_row_prefix_at(row_count)
     }
 
-    /// [`Self::from_head_parts`] over an already-built transcript buffer —
-    /// the substitution path of slim materialization, where the buffer
-    /// carries proven content and warm midstates.
-    pub(crate) fn from_head_parts_with_transcript(
-        version: u32,
-        id: SessionId,
-        messages: TranscriptMessages,
-        created_at: SystemTime,
-        updated_at: SystemTime,
-        metadata: serde_json::Map<String, serde_json::Value>,
-        usage: Usage,
-    ) -> Result<Self, String> {
-        let version =
-            session_persistence_version_authority::restore_session_envelope_version(version)
-                .map_err(|err| err.to_string())?;
-        validate_carried_transcript_history_witness_format(&metadata)?;
-        Ok(Self {
-            version,
-            id,
-            messages,
-            created_at,
-            updated_at,
-            transcript_history_metadata_validation: if metadata
-                .contains_key(SESSION_TRANSCRIPT_HISTORY_STATE_KEY)
-            {
-                TranscriptHistoryMetadataValidation::RequiresValidation
-            } else {
-                TranscriptHistoryMetadataValidation::Validated
-            },
-            metadata,
-            history_caches: Box::default(),
-            usage,
-            volatile_prompt_overlay: None,
-        })
+    /// Adopt an exact row prefix after a prepared head-canonical boundary has
+    /// been acknowledged as durable.
+    pub(crate) fn install_exact_message_row_prefix(
+        &self,
+        prefix: crate::SessionMessageRowPrefixAccumulator,
+    ) -> bool {
+        self.messages.install_exact_row_prefix(prefix)
+    }
+
+    pub(crate) fn install_exact_message_row_lineage(
+        &self,
+        anchor: crate::SessionMessageRowPrefixAccumulator,
+        current: crate::SessionMessageRowPrefixAccumulator,
+    ) -> bool {
+        self.messages.install_exact_row_lineage(anchor, current)
+    }
+
+    pub(crate) fn exact_message_row_lineage_extends(
+        &self,
+        anchor: &crate::SessionMessageRowPrefixAccumulator,
+        current_count: u64,
+    ) -> bool {
+        self.messages
+            .exact_row_lineage_extends(anchor, current_count)
     }
 }
-
-/// [`SessionSerdeRef`] with the transcript array replaced by a splice
-/// marker string. Field set and ordering deliberately identical so the
-/// canonical byte stream differs from the real document ONLY at the
-/// marker; built exclusively from an exhaustive [`SessionSerdeRef`]
-/// destructure in [`Session::checkpoint_digest_framed_document`].
-#[derive(Serialize)]
-#[serde(rename_all = "snake_case")]
-struct CheckpointDigestFramingRef<'a> {
-    version: u32,
-    id: &'a SessionId,
-    messages: &'a str,
-    created_at: &'a SystemTime,
-    updated_at: &'a SystemTime,
-    metadata: &'a serde_json::Map<String, serde_json::Value>,
-    usage: &'a Usage,
-}
-
-/// Metadata key used to store durable system-context control state.
-pub const SESSION_SYSTEM_CONTEXT_STATE_KEY: &str = "session_system_context_state";
 
 /// Metadata key used to store deferred-turn control state.
 pub const SESSION_DEFERRED_TURN_STATE_KEY: &str = "session_deferred_turn_state";
@@ -1377,132 +1367,8 @@ pub const SESSION_TOOL_VISIBILITY_STATE_KEY: &str = "session_tool_visibility_sta
 /// Metadata key used to store the typed session lifecycle-terminal fact.
 pub const SESSION_LIFECYCLE_TERMINAL_KEY: &str = "session_lifecycle_terminal";
 
-/// Single canonical metadata key for the typed session checkpoint stamp.
-pub const SESSION_CHECKPOINT_STAMP_KEY: &str = "session_checkpoint_stamp_v1";
-
-/// Legacy compatibility marker for a session-store row written by the
-/// pre-typed intra-turn checkpointer.
-///
-/// This Boolean is decoded only as explicit legacy-unverified evidence. It
-/// never grants rollback authority; typed writers and recovery use the exact
-/// [`crate::checkpoint::SessionCheckpointStamp`] instead.
-pub const SESSION_RUNTIME_CHECKPOINT_PROVENANCE_KEY: &str =
-    "session_runtime_checkpoint_provenance_v1";
-
 /// Canonical tool name gated by `image_tool_results` capability.
 pub const VIEW_IMAGE_TOOL_NAME: &str = "view_image";
-
-/// Canonical separator between appended runtime system-context blocks.
-pub const SYSTEM_CONTEXT_SEPARATOR: &str = "\n\n---\n\n";
-
-/// Opening marker of a caller-declared volatile span inside an assembled
-/// system prompt.
-///
-/// Hosts whose prompts embed content that legitimately changes on every
-/// assembly (wall-clock time, boot counters) wrap exactly that content in
-/// [`SYSTEM_PROMPT_VOLATILE_OPEN`]/[`SYSTEM_PROMPT_VOLATILE_CLOSE`].
-/// [`Session::reconcile_resumed_system_prompt`] then treats a resume whose
-/// rebuilt base differs from the persisted prompt ONLY inside such spans as
-/// semantically unchanged: no audit revision is minted, and the fresh bytes
-/// reach the model through a request-time overlay instead (the 2026-07-29
-/// resume-mint incident: one rewrite revision per identity per boot when only
-/// an opening timestamp differed). Volatility is exclusively this
-/// declaration — reconciliation never infers it by diffing. The markers stay
-/// in the prompt the model sees; spans do not nest.
-pub const SYSTEM_PROMPT_VOLATILE_OPEN: &str = "<rkat:volatile>";
-
-/// Closing marker of a caller-declared volatile span; see
-/// [`SYSTEM_PROMPT_VOLATILE_OPEN`].
-pub const SYSTEM_PROMPT_VOLATILE_CLOSE: &str = "</rkat:volatile>";
-
-/// Render `prompt` with the content of every well-formed caller-declared
-/// volatile span blanked, keeping the markers themselves (so span structure
-/// still has to match byte-wise across prompts).
-///
-/// Returns `None` when the prompt declares no volatile span, or when a
-/// declaration is malformed (an opening marker without a matching closing
-/// marker): with no well-formed declaration there is nothing to exclude, and
-/// a malformed one must fail closed into the byte-wise comparison (minting a
-/// rewrite, today's behavior) rather than silently widen the excluded region.
-fn stable_prompt_projection(prompt: &str) -> Option<String> {
-    let mut remaining = prompt;
-    let mut projected = String::with_capacity(prompt.len());
-    let mut declared = false;
-    loop {
-        let Some(open_idx) = remaining.find(SYSTEM_PROMPT_VOLATILE_OPEN) else {
-            if !declared {
-                return None;
-            }
-            projected.push_str(remaining);
-            return Some(projected);
-        };
-        let span_start = open_idx + SYSTEM_PROMPT_VOLATILE_OPEN.len();
-        let Some(close_idx) = remaining[span_start..].find(SYSTEM_PROMPT_VOLATILE_CLOSE) else {
-            // Unterminated declaration: fail closed (see doc above).
-            return None;
-        };
-        declared = true;
-        projected.push_str(&remaining[..span_start]);
-        projected.push_str(SYSTEM_PROMPT_VOLATILE_CLOSE);
-        remaining = &remaining[span_start + close_idx + SYSTEM_PROMPT_VOLATILE_CLOSE.len()..];
-    }
-}
-
-/// Decide whether `incoming` differs from `persisted` ONLY inside
-/// caller-declared volatile spans.
-///
-/// Declaration-only by construction: both prompts must carry at least one
-/// well-formed volatile span and their stable projections (volatile span
-/// content blanked, everything else byte-exact) must be equal. Byte-equal
-/// prompts return `false` — they need no refresh at all.
-fn prompts_differ_only_in_declared_volatile_spans(persisted: &str, incoming: &str) -> bool {
-    if persisted == incoming {
-        return false;
-    }
-    match (
-        stable_prompt_projection(persisted),
-        stable_prompt_projection(incoming),
-    ) {
-        (Some(persisted_stable), Some(incoming_stable)) => persisted_stable == incoming_stable,
-        _ => false,
-    }
-}
-
-/// Request-time System-prompt substitution armed by
-/// [`Session::reconcile_resumed_system_prompt`] when the freshly assembled
-/// base differs from the persisted prompt only inside caller-declared
-/// volatile spans.
-///
-/// The transcript keeps the persisted bytes (semantically nothing changed, so
-/// the audit graph records nothing and the resumed projection digests to the
-/// persisted revision); [`Session::messages_for_model_boundary`] substitutes
-/// the fresh bytes so the model sees current volatile content.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct VolatilePromptOverlay {
-    /// Exact persisted System content the overlay was armed against (base
-    /// plus any verified runtime-context tail at reconcile time).
-    persisted_prefix: String,
-    /// The freshly assembled replacement: identical stable bytes, fresh
-    /// declared-volatile spans.
-    live_prefix: String,
-}
-
-impl VolatilePromptOverlay {
-    /// Refresh `content` when it still is — or, via later runtime
-    /// system-context appends, still extends — the persisted prefix this
-    /// overlay was armed against. `None` self-invalidates the overlay: the
-    /// prompt was mutated through another seam after reconciliation, and the
-    /// actual transcript bytes win.
-    fn refreshed_content(&self, content: &str) -> Option<String> {
-        if content == self.persisted_prefix {
-            return Some(self.live_prefix.clone());
-        }
-        let appended = content.strip_prefix(self.persisted_prefix.as_str())?;
-        appended
-            .starts_with(SYSTEM_CONTEXT_SEPARATOR)
-            .then(|| format!("{}{appended}", self.live_prefix))
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("metadata key `{key}` is reserved for session authority")]
@@ -1521,7 +1387,8 @@ impl ReservedSessionMetadataKey {
 fn is_session_authority_metadata_key(key: &str) -> bool {
     // Single reserved-key authority: the typed classifier owns the
     // session-authority key set (the `session_*` state constants).
-    crate::surface_metadata::ReservedMetadataKey::is_session_authority(key)
+    key == SESSION_TRANSCRIPT_REWRITE_PREFIX_AUTHORITY_KEY
+        || crate::surface_metadata::ReservedMetadataKey::is_session_authority(key)
 }
 
 #[allow(clippy::panic)]
@@ -1534,92 +1401,82 @@ fn fail_closed_generated_restore(authority: &'static str, err: serde_json::Error
     panic!("generated {authority} authority rejected durable restore: {err}");
 }
 
-/// Shared runtime system-context authority handle.
+/// Request-only context coordinator for one live actor.
 ///
-/// This handle is intentionally narrower than `Arc<Mutex<SessionSystemContextState>>`:
-/// callers can read snapshots or request generated-authority transitions, but
-/// cannot replace the machine-owned state by taking a mutable guard.
+/// This handle owns no Session state and has no persistence or idempotency
+/// semantics. It only coordinates publication of exact runtime-owned context
+/// at one named model boundary.
 #[derive(Clone)]
-pub struct SystemContextStateHandle {
-    inner: Arc<std::sync::Mutex<SessionSystemContextState>>,
-    boundary: Arc<SystemContextBoundaryCoordinator>,
+pub struct TransientTurnContextStateHandle {
+    boundary: Arc<TransientTurnContextBoundaryCoordinator>,
 }
 
-struct SystemContextBoundaryCoordinator {
+struct TransientTurnContextBoundaryCoordinator {
     incarnation_id: uuid::Uuid,
-    lifecycle: std::sync::Mutex<SystemContextBoundaryLifecycle>,
+    lifecycle: std::sync::Mutex<TransientTurnContextBoundaryLifecycle>,
     notify: tokio::sync::Notify,
 }
 
-struct SystemContextBoundaryLifecycle {
+struct TransientTurnContextBoundaryLifecycle {
     actor_live: bool,
     next_generation: u64,
     next_request_id: u64,
-    window: SystemContextBoundaryWindow,
+    window: TransientTurnContextBoundaryWindow,
 }
 
-enum SystemContextBoundaryWindow {
+enum TransientTurnContextBoundaryWindow {
     Closed,
     Open {
         run_id: RunId,
         generation: u64,
-        request: Option<RegisteredSystemContextBoundaryRequest>,
+        request: Option<RegisteredTransientTurnContextBoundaryRequest>,
     },
     Parked {
         run_id: RunId,
         generation: u64,
         request_id: u64,
-        candidate_state: SessionSystemContextState,
+        contexts: Vec<TurnRequestContext>,
     },
     Resolved {
         run_id: RunId,
         generation: u64,
         request_id: u64,
-        resolution: SystemContextBoundaryResolution,
-    },
-    /// The external prepare authority has resolved (or runner-first won), and
-    /// the runner is preprocessing the exact request immediately before the
-    /// model call. Canonical pending state remains unapplied until the runner
-    /// consumes this witness synchronously at that final call seam.
-    Consuming {
-        run_id: RunId,
-        generation: u64,
-        request_id: Option<u64>,
+        contexts: Vec<TurnRequestContext>,
+        resolution: TransientTurnContextBoundaryResolution,
     },
 }
 
-struct RegisteredSystemContextBoundaryRequest {
+struct RegisteredTransientTurnContextBoundaryRequest {
     request_id: u64,
-    appends: Vec<(AppendSystemContextRequest, SystemTime)>,
+    contexts: Vec<TurnRequestContext>,
 }
 
 #[derive(Clone)]
-enum SystemContextBoundaryResolution {
+enum TransientTurnContextBoundaryResolution {
     Committed,
     Aborted,
-    Failed(CoreBoundaryStageError),
 }
 
-impl Default for SystemContextBoundaryCoordinator {
+impl Default for TransientTurnContextBoundaryCoordinator {
     fn default() -> Self {
         Self {
             incarnation_id: uuid::Uuid::new_v4(),
-            lifecycle: std::sync::Mutex::new(SystemContextBoundaryLifecycle {
+            lifecycle: std::sync::Mutex::new(TransientTurnContextBoundaryLifecycle {
                 actor_live: true,
                 next_generation: 0,
                 next_request_id: 0,
-                window: SystemContextBoundaryWindow::Closed,
+                window: TransientTurnContextBoundaryWindow::Closed,
             }),
             notify: tokio::sync::Notify::new(),
         }
     }
 }
 
-impl SystemContextBoundaryCoordinator {
-    fn lock(&self) -> std::sync::MutexGuard<'_, SystemContextBoundaryLifecycle> {
+impl TransientTurnContextBoundaryCoordinator {
+    fn lock(&self) -> std::sync::MutexGuard<'_, TransientTurnContextBoundaryLifecycle> {
         self.lifecycle.lock().unwrap_or_else(|poisoned| {
             tracing::warn!(
-                "system-context boundary coordinator lock poisoned; retaining exact authority"
+                "transient turn-context boundary lock poisoned; retaining exact actor authority"
             );
             poisoned.into_inner()
         })
@@ -1628,40 +1485,41 @@ impl SystemContextBoundaryCoordinator {
     fn abort_request(&self, request_id: u64) -> Result<(), CoreBoundaryStageError> {
         let mut lifecycle = self.lock();
         let parked_owner = match &lifecycle.window {
-            SystemContextBoundaryWindow::Parked {
+            TransientTurnContextBoundaryWindow::Parked {
                 run_id,
                 generation,
-                request_id: current_request_id,
-                ..
-            } if *current_request_id == request_id => Some((run_id.clone(), *generation)),
+                request_id: current,
+                contexts,
+            } if *current == request_id => Some((run_id.clone(), *generation, contexts.clone())),
             _ => None,
         };
-        if let Some((run_id, generation)) = parked_owner {
-            lifecycle.window = SystemContextBoundaryWindow::Resolved {
+        if let Some((run_id, generation, contexts)) = parked_owner {
+            lifecycle.window = TransientTurnContextBoundaryWindow::Resolved {
                 run_id,
                 generation,
                 request_id,
-                resolution: SystemContextBoundaryResolution::Aborted,
+                contexts,
+                resolution: TransientTurnContextBoundaryResolution::Aborted,
             };
             drop(lifecycle);
             self.notify.notify_waiters();
             return Ok(());
         }
         match &mut lifecycle.window {
-            SystemContextBoundaryWindow::Open { request, .. }
+            TransientTurnContextBoundaryWindow::Open { request, .. }
                 if request
                     .as_ref()
                     .is_some_and(|request| request.request_id == request_id) =>
             {
                 *request = None;
             }
-            SystemContextBoundaryWindow::Resolved {
-                request_id: current_request_id,
+            TransientTurnContextBoundaryWindow::Resolved {
+                request_id: current,
                 ..
-            } if *current_request_id == request_id => return Ok(()),
+            } if *current == request_id => return Ok(()),
             _ => {
                 return Err(CoreBoundaryStageError::stale(format!(
-                    "boundary request {request_id} no longer owns its actor window"
+                    "transient boundary request {request_id} no longer owns its actor window"
                 )));
             }
         }
@@ -1673,22 +1531,19 @@ impl SystemContextBoundaryCoordinator {
     fn close_run(&self, run_id: &RunId) {
         let mut lifecycle = self.lock();
         let owns_window = match &lifecycle.window {
-            SystemContextBoundaryWindow::Open {
+            TransientTurnContextBoundaryWindow::Open {
                 run_id: current, ..
             }
-            | SystemContextBoundaryWindow::Parked {
+            | TransientTurnContextBoundaryWindow::Parked {
                 run_id: current, ..
             }
-            | SystemContextBoundaryWindow::Resolved {
-                run_id: current, ..
-            }
-            | SystemContextBoundaryWindow::Consuming {
+            | TransientTurnContextBoundaryWindow::Resolved {
                 run_id: current, ..
             } => current == run_id,
-            SystemContextBoundaryWindow::Closed => false,
+            TransientTurnContextBoundaryWindow::Closed => false,
         };
         if owns_window {
-            lifecycle.window = SystemContextBoundaryWindow::Closed;
+            lifecycle.window = TransientTurnContextBoundaryWindow::Closed;
             drop(lifecycle);
             self.notify.notify_waiters();
         }
@@ -1697,34 +1552,32 @@ impl SystemContextBoundaryCoordinator {
     fn revoke_actor(&self) {
         let mut lifecycle = self.lock();
         lifecycle.actor_live = false;
-        lifecycle.window = SystemContextBoundaryWindow::Closed;
+        lifecycle.window = TransientTurnContextBoundaryWindow::Closed;
         drop(lifecycle);
         self.notify.notify_waiters();
     }
 }
 
-/// Run-scoped closure guard for the exact actor's cooperative model boundary.
-/// Every normal return, error, hard-cancel drop, and task abort closes any
-/// registered or parked request for this run.
+/// Run-scoped guard closing every unresolved transient-context preparation.
 #[must_use]
-pub(crate) struct SystemContextBoundaryRunGuard {
-    boundary: Arc<SystemContextBoundaryCoordinator>,
+pub(crate) struct TransientTurnContextBoundaryRunGuard {
+    boundary: Arc<TransientTurnContextBoundaryCoordinator>,
     run_id: RunId,
 }
 
-impl Drop for SystemContextBoundaryRunGuard {
+impl Drop for TransientTurnContextBoundaryRunGuard {
     fn drop(&mut self) {
         self.boundary.close_run(&self.run_id);
     }
 }
 
-struct PendingSystemContextBoundaryPreparation {
-    boundary: Arc<SystemContextBoundaryCoordinator>,
+struct PendingTransientTurnContextBoundaryPreparation {
+    boundary: Arc<TransientTurnContextBoundaryCoordinator>,
     request_id: u64,
     armed: bool,
 }
 
-impl Drop for PendingSystemContextBoundaryPreparation {
+impl Drop for PendingTransientTurnContextBoundaryPreparation {
     fn drop(&mut self) {
         if self.armed {
             let _ = self.boundary.abort_request(self.request_id);
@@ -1732,93 +1585,21 @@ impl Drop for PendingSystemContextBoundaryPreparation {
     }
 }
 
-/// Runner-owned witness for the exact model request currently being prepared.
-///
-/// External commit only publishes the candidate as canonical pending state; it
-/// does not claim that the model has consumed it. The runner retains this
-/// second, actor-local witness across fallible/async request preprocessing and
-/// marks the pending state applied synchronously at the final LLM call seam.
-/// Dropping the witness closes the generation without marking anything applied.
-#[must_use = "model-boundary context must be consumed or dropped before opening another boundary"]
-pub(crate) struct ModelBoundarySystemContext {
-    state: SystemContextStateHandle,
-    run_id: RunId,
-    generation: u64,
-    request_id: Option<u64>,
-    appends: Vec<PendingSystemContextAppend>,
-    armed: bool,
-}
-
-impl ModelBoundarySystemContext {
-    pub(crate) fn appends(&self) -> &[PendingSystemContextAppend] {
-        &self.appends
-    }
-
-    /// Pre-serialize the exact post-consumption metadata state while failure is
-    /// still harmless. The consuming window rejects concurrent mutation, so
-    /// this projection remains exact until [`Self::consume`].
-    pub(crate) fn projected_state_after_consume(&self) -> SessionSystemContextState {
-        let mut projected = self.state.snapshot();
-        projected.mark_pending_applied();
-        projected
-    }
-
-    pub(crate) fn consume(
-        mut self,
-    ) -> Result<Vec<PendingSystemContextAppend>, CoreBoundaryStageError> {
-        self.state.finish_model_boundary_consumption(
-            &self.run_id,
-            self.generation,
-            self.request_id,
-            true,
-        )?;
-        self.armed = false;
-        Ok(std::mem::take(&mut self.appends))
-    }
-}
-
-impl Drop for ModelBoundarySystemContext {
-    fn drop(&mut self) {
-        if self.armed {
-            let _ = self.state.finish_model_boundary_consumption(
-                &self.run_id,
-                self.generation,
-                self.request_id,
-                false,
-            );
-            self.armed = false;
-        }
-    }
-}
-
-/// Unforgeable exact `{actor incarnation, run, boundary generation}`
-/// preparation. It is created only by the shared system-context authority
-/// after the runner has parked at the named boundary.
-///
-/// ```compile_fail
-/// use meerkat_core::PreparedSystemContextBoundary;
-/// fn cannot_duplicate(authority: &PreparedSystemContextBoundary) {
-///     let _duplicate = authority.clone();
-/// }
-/// ```
-#[must_use = "prepared system context must be committed or aborted"]
-pub struct PreparedSystemContextBoundary {
-    state: SystemContextStateHandle,
+/// Unique publication authority for one exact parked request boundary.
+#[must_use = "prepared transient turn context must be committed or aborted"]
+pub struct PreparedTransientTurnContextBoundary {
+    state: TransientTurnContextStateHandle,
     expected_run_id: RunId,
     generation: u64,
     request_id: u64,
-    candidate_state: SessionSystemContextState,
     armed: bool,
-    // The unique resolution authority may move to an owned commit task, but
-    // sharing one authority by reference across threads is unnecessary and
-    // obscures its exactly-once ownership contract.
     _not_sync: std::marker::PhantomData<std::cell::Cell<()>>,
 }
 
-impl std::fmt::Debug for PreparedSystemContextBoundary {
+impl std::fmt::Debug for PreparedTransientTurnContextBoundary {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("PreparedSystemContextBoundary")
+            .debug_struct("PreparedTransientTurnContextBoundary")
             .field("actor_incarnation", &self.state.boundary.incarnation_id)
             .field("expected_run_id", &self.expected_run_id)
             .field("generation", &self.generation)
@@ -1827,7 +1608,7 @@ impl std::fmt::Debug for PreparedSystemContextBoundary {
     }
 }
 
-impl PreparedSystemContextBoundary {
+impl PreparedTransientTurnContextBoundary {
     #[must_use]
     pub fn expected_run_id(&self) -> &RunId {
         &self.expected_run_id
@@ -1838,28 +1619,27 @@ impl PreparedSystemContextBoundary {
         self.generation
     }
 
-    #[must_use]
-    pub fn candidate_state(&self) -> &SessionSystemContextState {
-        &self.candidate_state
-    }
-
-    /// Bind the unforgeable parked authority to its optional durable session
-    /// snapshot. Surfaces cannot manufacture a successful output without this
-    /// core-minted preparation value.
+    /// Bind this request-only preparation to the generic commit/abort carrier.
+    ///
+    /// Transient context never has a Session snapshot; callers pass None.
     pub fn into_stage_output(
         self,
         session_snapshot: Option<Vec<u8>>,
     ) -> crate::lifecycle::CoreBoundaryStageOutput {
-        crate::lifecycle::CoreBoundaryStageOutput::prepared(session_snapshot, Box::new(self))
+        debug_assert!(
+            session_snapshot.is_none(),
+            "transient turn context cannot carry a durable Session snapshot"
+        );
+        crate::lifecycle::CoreBoundaryStageOutput::prepared(None, Box::new(self))
     }
 
     fn resolve(
         &mut self,
-        resolution: SystemContextBoundaryResolution,
+        resolution: TransientTurnContextBoundaryResolution,
     ) -> Result<(), CoreBoundaryStageError> {
         if !self.armed {
             return Err(CoreBoundaryStageError::stale(
-                "prepared boundary authority was already resolved",
+                "prepared transient boundary authority was already resolved",
             ));
         }
         let mut lifecycle = self.state.boundary.lock();
@@ -1872,7 +1652,7 @@ impl PreparedSystemContextBoundary {
         }
         let matches_exact = matches!(
             &lifecycle.window,
-            SystemContextBoundaryWindow::Parked {
+            TransientTurnContextBoundaryWindow::Parked {
                 run_id,
                 generation,
                 request_id,
@@ -1883,23 +1663,27 @@ impl PreparedSystemContextBoundary {
         );
         if !matches_exact {
             self.armed = false;
-            return Err(CoreBoundaryStageError::stale(format!(
-                "actor/run/boundary witness no longer matches request {}",
-                self.request_id
-            )));
+            return Err(CoreBoundaryStageError::stale(
+                "prepared transient boundary no longer owns the exact parked generation",
+            ));
         }
-        if matches!(&resolution, SystemContextBoundaryResolution::Committed) {
-            let mut state = self
-                .state
-                .inner
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *state = self.candidate_state.clone();
-        }
-        lifecycle.window = SystemContextBoundaryWindow::Resolved {
+        let contexts = match std::mem::replace(
+            &mut lifecycle.window,
+            TransientTurnContextBoundaryWindow::Closed,
+        ) {
+            TransientTurnContextBoundaryWindow::Parked { contexts, .. } => contexts,
+            _ => {
+                self.armed = false;
+                return Err(CoreBoundaryStageError::stale(
+                    "prepared transient boundary lost its parked context",
+                ));
+            }
+        };
+        lifecycle.window = TransientTurnContextBoundaryWindow::Resolved {
             run_id: self.expected_run_id.clone(),
             generation: self.generation,
             request_id: self.request_id,
+            contexts,
             resolution,
         };
         self.armed = false;
@@ -1910,70 +1694,59 @@ impl PreparedSystemContextBoundary {
 }
 
 impl crate::lifecycle::core_executor::CoreBoundaryStageCommitAuthority
-    for PreparedSystemContextBoundary
+    for PreparedTransientTurnContextBoundary
 {
     fn commit(&mut self) -> Result<(), CoreBoundaryStageError> {
-        self.resolve(SystemContextBoundaryResolution::Committed)
+        self.resolve(TransientTurnContextBoundaryResolution::Committed)
     }
 
     fn abort(&mut self) -> Result<(), CoreBoundaryStageError> {
-        self.resolve(SystemContextBoundaryResolution::Aborted)
+        self.resolve(TransientTurnContextBoundaryResolution::Aborted)
     }
 }
 
-impl Drop for PreparedSystemContextBoundary {
+impl Drop for PreparedTransientTurnContextBoundary {
     fn drop(&mut self) {
         if self.armed {
-            let _ = self.state.boundary.abort_request(self.request_id);
-            self.armed = false;
+            let _ = self.resolve(TransientTurnContextBoundaryResolution::Aborted);
         }
     }
 }
 
-impl std::fmt::Debug for SystemContextStateHandle {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SystemContextStateHandle")
-            .field("inner", &"<Arc<Mutex<SessionSystemContextState>>>")
-            .field("actor_incarnation", &self.boundary.incarnation_id)
-            .finish()
+impl Default for TransientTurnContextStateHandle {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
-impl SystemContextStateHandle {
-    fn boundary_reserves_state(lifecycle: &SystemContextBoundaryLifecycle) -> bool {
-        matches!(
-            &lifecycle.window,
-            SystemContextBoundaryWindow::Parked { .. }
-                | SystemContextBoundaryWindow::Resolved { .. }
-                | SystemContextBoundaryWindow::Consuming { .. }
-        )
+impl std::fmt::Debug for TransientTurnContextStateHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TransientTurnContextStateHandle")
+            .field("actor_incarnation", &self.boundary.incarnation_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl TransientTurnContextStateHandle {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            boundary: Arc::new(TransientTurnContextBoundaryCoordinator::default()),
+        }
     }
 
-    pub fn new(state: SessionSystemContextState) -> Result<Self, serde_json::Error> {
-        let state = system_context_authority::restore_system_context_state(state)
-            .map_err(<serde_json::Error as serde::de::Error>::custom)?;
-        Ok(Self {
-            inner: Arc::new(std::sync::Mutex::new(state)),
-            boundary: Arc::new(SystemContextBoundaryCoordinator::default()),
-        })
-    }
-
-    /// Open the first exact cooperative model-boundary window for `run_id` and
-    /// return a guard that closes it on every exit, including future drop.
     pub(crate) fn begin_boundary_run(
         &self,
         run_id: RunId,
-    ) -> Result<SystemContextBoundaryRunGuard, CoreBoundaryStageError> {
+    ) -> Result<TransientTurnContextBoundaryRunGuard, CoreBoundaryStageError> {
         self.open_next_boundary(&run_id)?;
-        Ok(SystemContextBoundaryRunGuard {
+        Ok(TransientTurnContextBoundaryRunGuard {
             boundary: Arc::clone(&self.boundary),
             run_id,
         })
     }
 
-    /// Ensure an exact next-boundary window is open for the active run. Calling
-    /// this twice before consumption is idempotent; after consumption it mints
-    /// the next monotonically increasing actor-local generation.
     pub(crate) fn open_next_boundary(&self, run_id: &RunId) -> Result<u64, CoreBoundaryStageError> {
         let mut lifecycle = self.boundary.lock();
         if !lifecycle.actor_live {
@@ -1983,33 +1756,32 @@ impl SystemContextStateHandle {
             )));
         }
         match &lifecycle.window {
-            SystemContextBoundaryWindow::Open {
+            TransientTurnContextBoundaryWindow::Open {
                 run_id: current,
                 generation,
                 ..
             } if current == run_id => return Ok(*generation),
-            SystemContextBoundaryWindow::Parked { .. }
-            | SystemContextBoundaryWindow::Resolved { .. }
-            | SystemContextBoundaryWindow::Consuming { .. } => {
+            TransientTurnContextBoundaryWindow::Parked { .. }
+            | TransientTurnContextBoundaryWindow::Resolved { .. } => {
                 return Err(CoreBoundaryStageError::fault(
-                    "runner attempted to open a new boundary while the prior boundary was unresolved",
+                    "runner attempted to open a boundary while its predecessor was unresolved",
                 ));
             }
-            SystemContextBoundaryWindow::Open {
+            TransientTurnContextBoundaryWindow::Open {
                 run_id: current, ..
             } => {
                 return Err(CoreBoundaryStageError::stale(format!(
-                    "run {run_id} cannot replace still-open boundary owned by {current}"
+                    "run {run_id} cannot replace boundary owned by {current}"
                 )));
             }
-            SystemContextBoundaryWindow::Closed => {}
+            TransientTurnContextBoundaryWindow::Closed => {}
         }
         lifecycle.next_generation = lifecycle
             .next_generation
             .checked_add(1)
             .ok_or_else(|| CoreBoundaryStageError::fault("boundary generation overflow"))?;
         let generation = lifecycle.next_generation;
-        lifecycle.window = SystemContextBoundaryWindow::Open {
+        lifecycle.window = TransientTurnContextBoundaryWindow::Open {
             run_id: run_id.clone(),
             generation,
             request: None,
@@ -2019,35 +1791,16 @@ impl SystemContextStateHandle {
         Ok(generation)
     }
 
-    /// Register context for the exact currently-open generation, then wait
-    /// until the runner is parked immediately before consuming it. The lock
-    /// linearization makes runner-first return `Unavailable` and prepare-first
-    /// park; no snapshot/boolean sampling participates in the verdict.
     pub async fn prepare_active_turn_boundary(
         &self,
         expected_run_id: &RunId,
-        appends: Vec<PendingSystemContextAppend>,
-    ) -> Result<PreparedSystemContextBoundary, CoreBoundaryStageError> {
-        if appends.is_empty() {
+        contexts: Vec<TurnRequestContext>,
+    ) -> Result<PreparedTransientTurnContextBoundary, CoreBoundaryStageError> {
+        if contexts.is_empty() {
             return Err(CoreBoundaryStageError::fault(
-                "boundary preparation requires at least one context append",
+                "transient boundary preparation requires at least one context value",
             ));
         }
-        let stage_inputs = appends
-            .into_iter()
-            .map(|append| {
-                (
-                    AppendSystemContextRequest {
-                        content: append.content,
-                        source: append.source,
-                        idempotency_key: append.idempotency_key,
-                        source_kind: append.source_kind,
-                        peer_response_terminal: append.peer_response_terminal,
-                    },
-                    append.accepted_at,
-                )
-            })
-            .collect::<Vec<_>>();
 
         let request_id = {
             let mut lifecycle = self.boundary.lock();
@@ -2058,19 +1811,18 @@ impl SystemContextStateHandle {
                 )));
             }
             let (run_id, request) = match &mut lifecycle.window {
-                SystemContextBoundaryWindow::Open {
+                TransientTurnContextBoundaryWindow::Open {
                     run_id, request, ..
                 } => (run_id, request),
-                SystemContextBoundaryWindow::Closed => {
+                TransientTurnContextBoundaryWindow::Closed => {
                     return Err(CoreBoundaryStageError::unavailable(format!(
                         "run {expected_run_id} has no open cooperative model boundary"
                     )));
                 }
-                SystemContextBoundaryWindow::Parked { .. }
-                | SystemContextBoundaryWindow::Resolved { .. }
-                | SystemContextBoundaryWindow::Consuming { .. } => {
+                TransientTurnContextBoundaryWindow::Parked { .. }
+                | TransientTurnContextBoundaryWindow::Resolved { .. } => {
                     return Err(CoreBoundaryStageError::unavailable(format!(
-                        "the open boundary for run {expected_run_id} was already claimed or consumed"
+                        "the next boundary for run {expected_run_id} was already claimed"
                     )));
                 }
             };
@@ -2084,37 +1836,25 @@ impl SystemContextStateHandle {
                     "the next boundary for run {expected_run_id} already has a preparation"
                 )));
             }
-            // Validate idempotency/conflict semantics against the exact state
-            // observed at registration without publishing the candidate.
-            let state = self
-                .inner
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let mut candidate = state.clone();
-            for (append, accepted_at) in &stage_inputs {
-                candidate
-                    .stage_active_turn_append(append, *accepted_at)
-                    .map_err(|error| CoreBoundaryStageError::fault(error.to_string()))?;
-            }
-            drop(state);
             lifecycle.next_request_id = lifecycle
                 .next_request_id
                 .checked_add(1)
                 .ok_or_else(|| CoreBoundaryStageError::fault("boundary request id overflow"))?;
             let request_id = lifecycle.next_request_id;
-            let SystemContextBoundaryWindow::Open { request, .. } = &mut lifecycle.window else {
+            let TransientTurnContextBoundaryWindow::Open { request, .. } = &mut lifecycle.window
+            else {
                 return Err(CoreBoundaryStageError::fault(
                     "boundary window changed while registering preparation",
                 ));
             };
-            *request = Some(RegisteredSystemContextBoundaryRequest {
+            *request = Some(RegisteredTransientTurnContextBoundaryRequest {
                 request_id,
-                appends: stage_inputs,
+                contexts,
             });
             request_id
         };
 
-        let mut pending = PendingSystemContextBoundaryPreparation {
+        let mut pending = PendingTransientTurnContextBoundaryPreparation {
             boundary: Arc::clone(&self.boundary),
             request_id,
             armed: true,
@@ -2127,53 +1867,39 @@ impl SystemContextStateHandle {
             notified.as_mut().enable();
             let poll = {
                 let lifecycle = self.boundary.lock();
-                if lifecycle.actor_live {
+                if !lifecycle.actor_live {
+                    Err(CoreBoundaryStageError::stale(format!(
+                        "actor incarnation {} was revoked while preparing boundary",
+                        self.boundary.incarnation_id
+                    )))
+                } else {
                     match &lifecycle.window {
-                        SystemContextBoundaryWindow::Parked {
+                        TransientTurnContextBoundaryWindow::Parked {
                             run_id,
                             generation,
                             request_id: parked_request_id,
-                            candidate_state,
+                            ..
                         } if *parked_request_id == request_id => {
-                            Ok(Some(PreparedSystemContextBoundary {
+                            Ok(Some(PreparedTransientTurnContextBoundary {
                                 state: self.clone(),
                                 expected_run_id: run_id.clone(),
                                 generation: *generation,
                                 request_id,
-                                candidate_state: candidate_state.clone(),
                                 armed: true,
                                 _not_sync: std::marker::PhantomData,
                             }))
                         }
-                        SystemContextBoundaryWindow::Open { request, .. }
+                        TransientTurnContextBoundaryWindow::Open { request, .. }
                             if request
                                 .as_ref()
                                 .is_some_and(|request| request.request_id == request_id) =>
                         {
                             Ok(None)
                         }
-                        SystemContextBoundaryWindow::Resolved {
-                            request_id: resolved_request_id,
-                            resolution,
-                            ..
-                        } if *resolved_request_id == request_id => match resolution {
-                            SystemContextBoundaryResolution::Failed(error) => Err(error.clone()),
-                            SystemContextBoundaryResolution::Committed
-                            | SystemContextBoundaryResolution::Aborted => {
-                                Err(CoreBoundaryStageError::stale(format!(
-                                    "boundary request {request_id} resolved before its authority was delivered"
-                                )))
-                            }
-                        },
                         _ => Err(CoreBoundaryStageError::unavailable(format!(
-                            "run {expected_run_id} ended before boundary request {request_id} parked"
+                            "run {expected_run_id} ended before transient boundary request {request_id} parked"
                         ))),
                     }
-                } else {
-                    Err(CoreBoundaryStageError::stale(format!(
-                        "actor incarnation {} was revoked while preparing boundary",
-                        self.boundary.incarnation_id
-                    )))
                 }
             };
             match poll {
@@ -2187,17 +1913,15 @@ impl SystemContextStateHandle {
         }
     }
 
-    /// Park at the exact model boundary and return a runner-owned consumption
-    /// witness. Once a preparation has registered, this future cannot return
-    /// until its authority commits, aborts, is dropped, or the run/actor closes.
-    /// Returned pending state is not marked applied until the witness is
-    /// synchronously consumed at the final LLM call seam.
+    /// Consume context published for this exact boundary.
+    ///
+    /// Runner-first closes the window with an empty result. Prepare-first parks
+    /// until the unique external authority commits or aborts.
     pub(crate) async fn take_pending_at_exact_boundary(
         &self,
         run_id: &RunId,
-    ) -> Result<ModelBoundarySystemContext, CoreBoundaryStageError> {
-        let parked_request_id;
-        {
+    ) -> Result<Vec<TurnRequestContext>, CoreBoundaryStageError> {
+        let request_id = {
             let mut lifecycle = self.boundary.lock();
             if !lifecycle.actor_live {
                 return Err(CoreBoundaryStageError::stale(format!(
@@ -2206,94 +1930,47 @@ impl SystemContextStateHandle {
                 )));
             }
             let (generation, request) = match &mut lifecycle.window {
-                SystemContextBoundaryWindow::Open {
+                TransientTurnContextBoundaryWindow::Open {
                     run_id: current,
                     generation,
                     request,
                 } if current == run_id => (*generation, request.take()),
-                SystemContextBoundaryWindow::Open {
+                TransientTurnContextBoundaryWindow::Open {
                     run_id: current, ..
                 } => {
                     return Err(CoreBoundaryStageError::stale(format!(
                         "runner {run_id} reached boundary owned by {current}"
                     )));
                 }
-                SystemContextBoundaryWindow::Closed => {
+                TransientTurnContextBoundaryWindow::Closed => {
                     return Err(CoreBoundaryStageError::unavailable(format!(
                         "run {run_id} reached a boundary with no open generation"
                     )));
                 }
-                SystemContextBoundaryWindow::Parked { .. }
-                | SystemContextBoundaryWindow::Resolved { .. }
-                | SystemContextBoundaryWindow::Consuming { .. } => {
+                TransientTurnContextBoundaryWindow::Parked { .. }
+                | TransientTurnContextBoundaryWindow::Resolved { .. } => {
                     return Err(CoreBoundaryStageError::fault(
-                        "runner re-entered an unresolved model boundary",
+                        "runner re-entered an unresolved transient model boundary",
                     ));
                 }
             };
-            if let Some(request) = request {
-                let RegisteredSystemContextBoundaryRequest {
-                    request_id,
-                    appends,
-                } = request;
-                let state = self
-                    .inner
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let mut candidate_state = state.clone();
-                let candidate_result = appends.into_iter().try_for_each(|(append, accepted_at)| {
-                    candidate_state
-                        .stage_active_turn_append(&append, accepted_at)
-                        .map(|_| ())
-                });
-                if let Err(error) = candidate_result {
-                    drop(state);
-                    let error = CoreBoundaryStageError::fault(error.to_string());
-                    lifecycle.window = SystemContextBoundaryWindow::Resolved {
-                        run_id: run_id.clone(),
-                        generation,
-                        request_id,
-                        resolution: SystemContextBoundaryResolution::Failed(error.clone()),
-                    };
-                    drop(lifecycle);
-                    self.boundary.notify.notify_waiters();
-                    return Err(error);
-                }
-                drop(state);
-                parked_request_id = request_id;
-                lifecycle.window = SystemContextBoundaryWindow::Parked {
-                    run_id: run_id.clone(),
-                    generation,
-                    request_id,
-                    candidate_state,
-                };
-            } else {
-                let state = self
-                    .inner
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let pending = state.pending().to_vec();
-                drop(state);
-                lifecycle.window = SystemContextBoundaryWindow::Consuming {
-                    run_id: run_id.clone(),
-                    generation,
-                    request_id: None,
-                };
-                return Ok(ModelBoundarySystemContext {
-                    state: self.clone(),
-                    run_id: run_id.clone(),
-                    generation,
-                    request_id: None,
-                    appends: pending,
-                    armed: true,
-                });
-            }
-        }
+            let Some(request) = request else {
+                lifecycle.window = TransientTurnContextBoundaryWindow::Closed;
+                return Ok(Vec::new());
+            };
+            let request_id = request.request_id;
+            lifecycle.window = TransientTurnContextBoundaryWindow::Parked {
+                run_id: run_id.clone(),
+                generation,
+                request_id,
+                contexts: request.contexts,
+            };
+            request_id
+        };
         self.boundary.notify.notify_waiters();
 
-        let request_id = parked_request_id;
         struct RunnerParkGuard {
-            boundary: Arc<SystemContextBoundaryCoordinator>,
+            boundary: Arc<TransientTurnContextBoundaryCoordinator>,
             request_id: u64,
             armed: bool,
         }
@@ -2316,72 +1993,53 @@ impl SystemContextStateHandle {
             notified.as_mut().enable();
             let poll = {
                 let mut lifecycle = self.boundary.lock();
-                if lifecycle.actor_live {
-                    match &lifecycle.window {
-                        SystemContextBoundaryWindow::Parked {
-                            request_id: parked_request_id,
-                            ..
-                        } if *parked_request_id == request_id => Ok(None),
-                        SystemContextBoundaryWindow::Resolved {
-                            run_id: resolved_run_id,
-                            generation,
-                            request_id: resolved_request_id,
-                            resolution,
-                        } if resolved_run_id == run_id && *resolved_request_id == request_id => {
-                            let resolution = resolution.clone();
-                            let generation = *generation;
-                            if let SystemContextBoundaryResolution::Failed(error) = resolution {
-                                Err(error)
-                            } else {
-                                let pending = {
-                                    let state = self
-                                        .inner
-                                        .lock()
-                                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                                    state.pending().to_vec()
-                                };
-                                lifecycle.window = SystemContextBoundaryWindow::Consuming {
-                                    run_id: run_id.clone(),
-                                    generation,
-                                    request_id: Some(request_id),
-                                };
-                                Ok(Some((
-                                    ModelBoundarySystemContext {
-                                        state: self.clone(),
-                                        run_id: run_id.clone(),
-                                        generation,
-                                        request_id: Some(request_id),
-                                        appends: pending,
-                                        armed: true,
-                                    },
-                                    resolution,
-                                )))
-                            }
-                        }
-                        _ => Err(CoreBoundaryStageError::stale(format!(
-                            "parked boundary request {request_id} lost exact run/generation authority"
-                        ))),
-                    }
-                } else {
+                if !lifecycle.actor_live {
                     Err(CoreBoundaryStageError::stale(format!(
                         "actor incarnation {} was revoked while parked",
                         self.boundary.incarnation_id
                     )))
+                } else {
+                    match &lifecycle.window {
+                        TransientTurnContextBoundaryWindow::Parked {
+                            request_id: parked_request_id,
+                            ..
+                        } if *parked_request_id == request_id => Ok(None),
+                        TransientTurnContextBoundaryWindow::Resolved {
+                            run_id: resolved_run_id,
+                            request_id: resolved_request_id,
+                            ..
+                        } if resolved_run_id == run_id && *resolved_request_id == request_id => {
+                            let (resolution, contexts) = match std::mem::replace(
+                                &mut lifecycle.window,
+                                TransientTurnContextBoundaryWindow::Closed,
+                            ) {
+                                TransientTurnContextBoundaryWindow::Resolved {
+                                    contexts,
+                                    resolution,
+                                    ..
+                                } => (resolution, contexts),
+                                _ => unreachable!("matched resolved transient boundary"),
+                            };
+                            let contexts = if matches!(
+                                resolution,
+                                TransientTurnContextBoundaryResolution::Committed
+                            ) {
+                                contexts
+                            } else {
+                                Vec::new()
+                            };
+                            Ok(Some(contexts))
+                        }
+                        _ => Err(CoreBoundaryStageError::stale(format!(
+                            "parked transient request {request_id} lost exact authority"
+                        ))),
+                    }
                 }
             };
             match poll {
-                Ok(Some((context, resolution))) => {
+                Ok(Some(contexts)) => {
                     park_guard.armed = false;
-                    self.boundary.notify.notify_waiters();
-                    if matches!(resolution, SystemContextBoundaryResolution::Aborted) {
-                        tracing::debug!(
-                            actor_incarnation = %self.boundary.incarnation_id,
-                            run_id = %run_id,
-                            request_id,
-                            "exact model-boundary preparation aborted; consuming ordinary pending context only"
-                        );
-                    }
-                    return Ok(context);
+                    return Ok(contexts);
                 }
                 Ok(None) => notified.as_mut().await,
                 Err(error) => {
@@ -2392,381 +2050,11 @@ impl SystemContextStateHandle {
         }
     }
 
-    fn finish_model_boundary_consumption(
-        &self,
-        run_id: &RunId,
-        generation: u64,
-        request_id: Option<u64>,
-        apply: bool,
-    ) -> Result<(), CoreBoundaryStageError> {
-        let mut lifecycle = self.boundary.lock();
-        if !lifecycle.actor_live {
-            return Err(CoreBoundaryStageError::stale(format!(
-                "actor incarnation {} was revoked before model-boundary consumption",
-                self.boundary.incarnation_id
-            )));
-        }
-        let matches_exact = matches!(
-            &lifecycle.window,
-            SystemContextBoundaryWindow::Consuming {
-                run_id: current_run_id,
-                generation: current_generation,
-                request_id: current_request_id,
-            } if current_run_id == run_id
-                && *current_generation == generation
-                && *current_request_id == request_id
-        );
-        if !matches_exact {
-            return Err(CoreBoundaryStageError::stale(format!(
-                "runner model-boundary witness for run {run_id} generation {generation} is no longer current"
-            )));
-        }
-        if apply {
-            let mut state = self
-                .inner
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            state.mark_pending_applied();
-        }
-        lifecycle.window = SystemContextBoundaryWindow::Closed;
-        drop(lifecycle);
-        self.boundary.notify.notify_waiters();
-        Ok(())
-    }
-
-    /// Revoke this exact actor allocation. Existing prepared authorities can
-    /// no longer publish, and all runner/preparer waiters are synchronously
-    /// released before actor-registry removal awaits anything.
+    #[doc(hidden)]
     pub fn revoke_boundary_actor(&self) {
         self.boundary.revoke_actor();
     }
-
-    pub fn snapshot(&self) -> SessionSystemContextState {
-        match self.inner.lock() {
-            Ok(guard) => guard.clone(),
-            Err(poisoned) => {
-                tracing::warn!("system-context state lock poisoned while reading snapshot");
-                poisoned.into_inner().clone()
-            }
-        }
-    }
-
-    pub fn replace_from_generated_restore(
-        &self,
-        state: SessionSystemContextState,
-    ) -> Result<(), serde_json::Error> {
-        let state = system_context_authority::restore_system_context_state(state)
-            .map_err(<serde_json::Error as serde::de::Error>::custom)?;
-        let boundary = self.boundary.lock();
-        if Self::boundary_reserves_state(&boundary) {
-            return Err(<serde_json::Error as serde::de::Error>::custom(
-                "system-context state is reserved by an exact parked boundary",
-            ));
-        }
-        match self.inner.lock() {
-            Ok(mut guard) => {
-                *guard = state;
-            }
-            Err(poisoned) => {
-                tracing::warn!("system-context state lock poisoned while restoring state");
-                *poisoned.into_inner() = state;
-            }
-        }
-        Ok(())
-    }
-
-    pub fn replace_from_generated_restore_if_changed(
-        &self,
-        state: SessionSystemContextState,
-    ) -> Result<bool, serde_json::Error> {
-        let state = system_context_authority::restore_system_context_state(state)
-            .map_err(<serde_json::Error as serde::de::Error>::custom)?;
-        let boundary = self.boundary.lock();
-        if Self::boundary_reserves_state(&boundary) {
-            return Err(<serde_json::Error as serde::de::Error>::custom(
-                "system-context state is reserved by an exact parked boundary",
-            ));
-        }
-        let mut guard = match self.inner.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                tracing::warn!(
-                    "system-context state lock poisoned while replacing generated-restored state"
-                );
-                poisoned.into_inner()
-            }
-        };
-        if *guard == state {
-            return Ok(false);
-        }
-        *guard = state;
-        Ok(true)
-    }
-
-    pub fn replace_from_generated_restore_if_current(
-        &self,
-        current: &SessionSystemContextState,
-        replacement: SessionSystemContextState,
-    ) -> Result<bool, serde_json::Error> {
-        let replacement = system_context_authority::restore_system_context_state(replacement)
-            .map_err(<serde_json::Error as serde::de::Error>::custom)?;
-        let boundary = self.boundary.lock();
-        if Self::boundary_reserves_state(&boundary) {
-            return Err(<serde_json::Error as serde::de::Error>::custom(
-                "system-context state is reserved by an exact parked boundary",
-            ));
-        }
-        let mut guard = match self.inner.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                tracing::warn!(
-                    "system-context state lock poisoned while conditionally replacing generated-restored state"
-                );
-                poisoned.into_inner()
-            }
-        };
-        if *guard != *current {
-            return Ok(false);
-        }
-        *guard = replacement;
-        Ok(true)
-    }
-
-    pub fn stage_append_with_snapshot(
-        &self,
-        req: &AppendSystemContextRequest,
-        accepted_at: SystemTime,
-    ) -> Result<
-        (
-            crate::service::AppendSystemContextStatus,
-            SessionSystemContextState,
-            SessionSystemContextState,
-        ),
-        SystemContextStageError,
-    > {
-        let boundary = self.boundary.lock();
-        if Self::boundary_reserves_state(&boundary) {
-            return Err(SystemContextStageError::InvalidRequest(
-                "system-context state is reserved by an exact parked boundary".to_string(),
-            ));
-        }
-        let mut guard = match self.inner.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                tracing::warn!("system-context state lock poisoned while staging append");
-                poisoned.into_inner()
-            }
-        };
-        let snapshot = guard.clone();
-        let status = guard.stage_append(req, accepted_at)?;
-        let staged = guard.clone();
-        Ok((status, snapshot, staged))
-    }
-
-    pub fn stage_active_turn_appends_with_snapshot(
-        &self,
-        appends: Vec<(AppendSystemContextRequest, SystemTime)>,
-    ) -> Result<(SessionSystemContextState, SessionSystemContextState), SystemContextStageError>
-    {
-        let boundary = self.boundary.lock();
-        if Self::boundary_reserves_state(&boundary) {
-            return Err(SystemContextStageError::InvalidRequest(
-                "system-context state is reserved by an exact parked boundary".to_string(),
-            ));
-        }
-        let mut guard = match self.inner.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                tracing::warn!(
-                    "system-context state lock poisoned while staging active-turn appends"
-                );
-                poisoned.into_inner()
-            }
-        };
-        let snapshot = guard.clone();
-        let mut candidate = snapshot.clone();
-        for (req, accepted_at) in appends {
-            candidate.stage_active_turn_append(&req, accepted_at)?;
-        }
-        *guard = candidate.clone();
-        let staged = candidate;
-        Ok((snapshot, staged))
-    }
-
-    pub fn discard_unapplied_active_turn_pending(&self) -> Result<usize, CoreBoundaryStageError> {
-        let boundary = self.boundary.lock();
-        if Self::boundary_reserves_state(&boundary) {
-            return Err(CoreBoundaryStageError::fault(format!(
-                "cannot discard active-turn system context while exact actor incarnation {} owns a parked or consuming boundary",
-                self.boundary.incarnation_id
-            )));
-        }
-        let discarded = match self.inner.lock() {
-            Ok(mut guard) => guard.discard_unapplied_active_turn_pending(),
-            Err(poisoned) => {
-                tracing::warn!(
-                    "system-context state lock poisoned while discarding active-turn context"
-                );
-                poisoned
-                    .into_inner()
-                    .discard_unapplied_active_turn_pending()
-            }
-        };
-        Ok(discarded.len())
-    }
-
-    pub fn discard_active_turn_pending_by_keys(
-        &self,
-        idempotency_keys: &[String],
-    ) -> Result<Vec<PendingSystemContextAppend>, CoreBoundaryStageError> {
-        let boundary = self.boundary.lock();
-        if Self::boundary_reserves_state(&boundary) {
-            return Err(CoreBoundaryStageError::fault(format!(
-                "cannot discard keyed active-turn system context while exact actor incarnation {} owns a parked or consuming boundary",
-                self.boundary.incarnation_id
-            )));
-        }
-        let discarded = match self.inner.lock() {
-            Ok(mut guard) => guard.discard_active_turn_pending_by_keys(idempotency_keys),
-            Err(poisoned) => {
-                tracing::warn!(
-                    "system-context state lock poisoned while discarding active-turn pending appends"
-                );
-                poisoned
-                    .into_inner()
-                    .discard_active_turn_pending_by_keys(idempotency_keys)
-            }
-        };
-        Ok(discarded)
-    }
-
-    pub fn stage_active_turn_append(
-        &self,
-        req: &AppendSystemContextRequest,
-        accepted_at: SystemTime,
-    ) -> Result<crate::service::AppendSystemContextStatus, SystemContextStageError> {
-        let boundary = self.boundary.lock();
-        if Self::boundary_reserves_state(&boundary) {
-            return Err(SystemContextStageError::InvalidRequest(
-                "system-context state is reserved by an exact parked boundary".to_string(),
-            ));
-        }
-        match self.inner.lock() {
-            Ok(mut guard) => guard.stage_active_turn_append(req, accepted_at),
-            Err(poisoned) => {
-                tracing::warn!(
-                    "system-context state lock poisoned while staging active-turn context"
-                );
-                poisoned
-                    .into_inner()
-                    .stage_active_turn_append(req, accepted_at)
-            }
-        }
-    }
 }
-
-/// Durable control state for runtime system-context append requests.
-// Cannot derive `Eq`: `PendingSystemContextAppend` carries a typed
-// `peer_response_terminal` fact whose render payload is a `serde_json::Value`.
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub struct SessionSystemContextState {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(crate) pending: Vec<PendingSystemContextAppend>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(crate) applied: Vec<PendingSystemContextAppend>,
-    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub(crate) seen: std::collections::BTreeMap<String, SeenSystemContextKey>,
-    /// Keyed projection used for idempotency-aware rollback. This is not the
-    /// lifetime owner because active-turn appends may be keyless.
-    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
-    pub(crate) active_turn_pending_keys: std::collections::BTreeSet<String>,
-    /// Exact positions in `pending` that belong to the active turn.
-    ///
-    /// Idempotency keys are optional, so they cannot carry lifetime ownership.
-    /// The positional witness is durable and independent of deduplication;
-    /// every pending-queue mutation rebases it atomically with the queue.
-    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
-    pub(crate) active_turn_pending_indices: std::collections::BTreeSet<u64>,
-}
-
-/// Typed provenance class for a runtime system-context append.
-///
-/// Canonical replacement for the retired `runtime:steer:` string-prefix
-/// folklore. The PRODUCER of a runtime-steer append (the runtime input
-/// projection in `meerkat-runtime`) constructs it with
-/// [`SystemContextSource::RuntimeSteer`]; everything else is
-/// [`SystemContextSource::Normal`]. No code reclassifies a `source` string
-/// into this fact — it is set once at construction and the machine guards the
-/// typed field.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum SystemContextSource {
-    /// A durable, non-transient runtime context append (peer responses, etc.).
-    #[default]
-    Normal,
-    /// A transient operator/peer steer append that must not survive past the
-    /// turn it steers and must not be promoted to the durable applied set.
-    RuntimeSteer,
-}
-
-impl From<SystemContextSource> for session_document::SystemContextSource {
-    fn from(value: SystemContextSource) -> Self {
-        match value {
-            SystemContextSource::Normal => Self::Normal,
-            SystemContextSource::RuntimeSteer => Self::RuntimeSteer,
-        }
-    }
-}
-
-impl SystemContextSource {
-    /// Whether this is the default (`Normal`) provenance. Used by
-    /// `skip_serializing_if` so durable appends serialize without the field.
-    #[must_use]
-    pub fn is_normal(&self) -> bool {
-        matches!(self, Self::Normal)
-    }
-
-    /// Whether this append is a transient runtime steer.
-    #[must_use]
-    pub fn is_runtime_steer(&self) -> bool {
-        matches!(self, Self::RuntimeSteer)
-    }
-}
-
-/// Pending append request accepted by the control plane but not yet applied at an LLM boundary.
-// Cannot derive `Eq`: the typed `peer_response_terminal` fact carries a
-// `serde_json::Value` render payload, which is `PartialEq` but not `Eq`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub struct PendingSystemContextAppend {
-    /// Typed renderable append content, carried end-to-end from the surface
-    /// request ([`AppendSystemContextRequest.content`]). The ONE lowering to
-    /// model-facing prompt text happens where the transcript consumes the
-    /// append ([`CoreRenderable::render_text`] inside the render seam) —
-    /// surfaces never pre-flatten this into a string.
-    ///
-    /// [`CoreRenderable::render_text`]: crate::lifecycle::run_primitive::CoreRenderable::render_text
-    pub content: crate::lifecycle::run_primitive::CoreRenderable,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub idempotency_key: Option<String>,
-    /// Typed provenance: whether this append is a transient runtime steer.
-    #[serde(default, skip_serializing_if = "SystemContextSource::is_normal")]
-    pub source_kind: SystemContextSource,
-    /// Typed terminal-peer-response fact this append carries, when the append
-    /// projects a `PeerResponseTerminalFact`. The producer stamps the typed
-    /// fact here at construction; realtime/live consumers read the typed fact
-    /// directly instead of re-parsing the flattened prompt `text`/`source`
-    /// string (the `peer_response_terminal:` prefix + `Payload:` split). This
-    /// mirrors the `source_kind` precedent that retired the `runtime:steer:`
-    /// string-prefix re-derivation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub peer_response_terminal: Option<crate::handles::PeerResponseTerminalFact>,
-    pub accepted_at: SystemTime,
-}
-
 /// Typed terminal-lifecycle projection of the canonical
 /// [`session_document::SessionDocumentMachine`] `session_lifecycle_terminal`
 /// fact.
@@ -3062,11 +2350,6 @@ impl AuthorizedSessionToolVisibilityState {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub struct SessionBuildState {
-    #[serde(
-        default,
-        skip_serializing_if = "crate::config::SystemPromptOverride::is_inherit"
-    )]
-    pub system_prompt: crate::config::SystemPromptOverride,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_schema: Option<crate::OutputSchema>,
     #[serde(default, skip_serializing_if = "is_default_hook_run_overrides")]
@@ -3094,14 +2377,6 @@ pub struct SessionBuildState {
     pub mob_tool_authority_context: Option<MobToolAuthorityContext>,
     #[serde(default, skip_serializing_if = "is_default_call_timeout_override")]
     pub call_timeout_override: crate::CallTimeoutOverride,
-    /// Exact assembled base-prompt bytes the last build applied (or verified)
-    /// for this session. Runtime system-context appends extend the leading
-    /// System message past this base; recording the base lets a later resume
-    /// split the persisted content into `base + appended tail` byte-exactly
-    /// (see [`Session::reconcile_resumed_system_prompt`]) instead of
-    /// re-deriving append renders.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub assembled_system_prompt: Option<String>,
 }
 
 /// Deferred create-time prompt staged for the next turn.
@@ -3313,158 +2588,6 @@ impl ConsumedDeferredTurnInputs {
 
     pub fn pending_tool_results(&self) -> &[PendingToolResultsMessage] {
         &self.pending_tool_results
-    }
-}
-
-/// Seen idempotency-key entry for system-context append requests.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub struct SeenSystemContextKey {
-    /// Typed renderable content of the accepted append for this key.
-    pub content: crate::lifecycle::run_primitive::CoreRenderable,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<String>,
-    /// Typed provenance carried from the append, so runtime-steer cleanup can
-    /// match seen entries by the typed marker rather than a `source` prefix.
-    #[serde(default, skip_serializing_if = "SystemContextSource::is_normal")]
-    pub source_kind: SystemContextSource,
-    pub state: SeenSystemContextState,
-}
-
-/// Lifecycle state for an accepted idempotency key.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum SeenSystemContextState {
-    Pending,
-    Applied,
-}
-
-impl SessionSystemContextState {
-    pub fn pending(&self) -> &[PendingSystemContextAppend] {
-        &self.pending
-    }
-
-    pub fn applied(&self) -> &[PendingSystemContextAppend] {
-        &self.applied
-    }
-
-    pub fn seen(&self) -> &BTreeMap<String, SeenSystemContextKey> {
-        &self.seen
-    }
-
-    pub fn active_turn_pending_keys(&self) -> &BTreeSet<String> {
-        &self.active_turn_pending_keys
-    }
-
-    pub fn pending_len(&self) -> usize {
-        self.pending.len()
-    }
-
-    pub fn applied_len(&self) -> usize {
-        self.applied.len()
-    }
-
-    pub fn active_turn_pending_len(&self) -> usize {
-        if self.active_turn_pending_indices.is_empty() && !self.active_turn_pending_keys.is_empty()
-        {
-            return self
-                .pending
-                .iter()
-                .filter(|append| {
-                    append
-                        .idempotency_key
-                        .as_ref()
-                        .is_some_and(|key| self.active_turn_pending_keys.contains(key))
-                })
-                .count();
-        }
-        self.active_turn_pending_indices.len()
-    }
-
-    pub fn realtime_projection_appends(&self) -> Vec<PendingSystemContextAppend> {
-        self.applied
-            .iter()
-            .chain(self.pending.iter())
-            .cloned()
-            .collect()
-    }
-
-    /// Stage an append request, enforcing per-session idempotency.
-    pub fn stage_append(
-        &mut self,
-        req: &AppendSystemContextRequest,
-        accepted_at: SystemTime,
-    ) -> Result<crate::service::AppendSystemContextStatus, SystemContextStageError> {
-        system_context_authority::stage_append(self, req, accepted_at, false)
-    }
-
-    fn stage_append_with_generated_authority(
-        &mut self,
-        req: &AppendSystemContextRequest,
-        accepted_at: SystemTime,
-        active_turn_scoped: bool,
-    ) -> Result<crate::service::AppendSystemContextStatus, SystemContextStageError> {
-        system_context_authority::stage_append(self, req, accepted_at, active_turn_scoped)
-    }
-
-    /// Stage an append that is scoped to the currently-active turn only.
-    ///
-    /// If the active turn reaches another model boundary, normal pending
-    /// consumption moves it to `applied`. If the turn completes first, callers
-    /// should discard the still-pending active-turn keys so the context cannot
-    /// leak into an unrelated later run.
-    pub fn stage_active_turn_append(
-        &mut self,
-        req: &AppendSystemContextRequest,
-        accepted_at: SystemTime,
-    ) -> Result<crate::service::AppendSystemContextStatus, SystemContextStageError> {
-        self.stage_append_with_generated_authority(req, accepted_at, true)
-    }
-
-    /// Mark all currently-pending appends as applied and clear the pending queue.
-    pub fn mark_pending_applied(&mut self) {
-        system_context_authority::mark_pending_applied(self);
-    }
-
-    /// Discard active-turn-only appends that were not consumed by the turn's
-    /// next LLM boundary.
-    pub fn discard_unapplied_active_turn_pending(&mut self) -> Vec<PendingSystemContextAppend> {
-        system_context_authority::discard_unapplied_active_turn_pending(self)
-    }
-
-    /// Discard specific active-turn-only appends that are still pending.
-    ///
-    /// This is the rollback companion for live-boundary staging. The runtime
-    /// owns the accepted input, so if that commit fails after the session has
-    /// staged context, the session-side projection must be removed by the same
-    /// idempotency keys before the caller reports failure.
-    pub fn discard_active_turn_pending_by_keys(
-        &mut self,
-        idempotency_keys: &[String],
-    ) -> Vec<PendingSystemContextAppend> {
-        system_context_authority::discard_active_turn_pending_by_keys(self, idempotency_keys)
-    }
-
-    /// Authorize this snapshot through the canonical
-    /// [`session_document::SessionDocumentMachine`] system-context restore
-    /// transition, returning the state unchanged on success.
-    pub fn restore_from_snapshot(self) -> Result<Self, SystemContextStageError> {
-        system_context_authority::restore_system_context_state(self)
-    }
-
-    /// Record the machine-authorized applied system-context blocks, returning
-    /// the appends that are newly applied (and thus need rendering into the
-    /// system prompt by the caller).
-    pub fn record_applied_blocks(
-        &mut self,
-        appends: &[PendingSystemContextAppend],
-        current_system_prompt: &str,
-    ) -> Vec<PendingSystemContextAppend> {
-        system_context_authority::record_applied_system_context_blocks(
-            self,
-            appends,
-            current_system_prompt,
-        )
     }
 }
 
@@ -3878,10 +3001,9 @@ impl SessionDeferredTurnState {
     }
 }
 
-/// Failure when staging a system-context append request.
+/// Failure when appending an identity-bearing System message.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SystemContextStageError {
-    InvalidRequest(String),
+pub enum SystemMessageAppendError {
     Conflict {
         key: String,
         existing_text: String,
@@ -3889,794 +3011,20 @@ pub enum SystemContextStageError {
     },
 }
 
-impl std::fmt::Display for SystemContextStageError {
+impl std::fmt::Display for SystemMessageAppendError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::InvalidRequest(message) => {
-                write!(f, "invalid system-context append request: {message}")
-            }
             Self::Conflict { key, .. } => {
                 write!(
                     f,
-                    "system-context append conflict for idempotency key `{key}`"
+                    "System-message append conflict for idempotency key `{key}`"
                 )
             }
         }
     }
 }
 
-impl std::error::Error for SystemContextStageError {}
-
-/// Mechanical PRESENTATION helper: render a system-context append into the
-/// display block string that is concatenated into the model-facing system
-/// prompt. This is NOT a decision — it builds the `[Runtime System Context]`
-/// label text for OUTPUT only. The authority for which appends to render and
-/// whether one is a runtime steer lives in the
-/// [`session_document::SessionDocumentMachine`]; this function never inspects
-/// the `source` string to classify anything.
-fn render_system_context_block(append: &PendingSystemContextAppend) -> String {
-    let mut rendered = String::from(SYSTEM_CONTEXT_RENDER_LABEL);
-    if let Some(source) = &append.source {
-        rendered.push_str("\nsource: ");
-        rendered.push_str(source);
-    }
-    rendered.push_str("\n\n");
-    // The single CoreRenderable -> prompt-text lowering for system-context
-    // appends. Surfaces carry the typed renderable through untouched.
-    rendered.push_str(append.content.render_text().trim());
-    rendered
-}
-
-/// Display label prefix for a rendered runtime system-context block.
-///
-/// PRESENTATION only — this is the human/model-facing heading, not a
-/// classification key. Nothing reads this back to make a semantic decision.
-const SYSTEM_CONTEXT_RENDER_LABEL: &str = "[Runtime System Context]";
-
-/// Render only appends that belong in the durable leading system prompt.
-///
-/// A typed peer terminal response is a conversation event, not agent
-/// instruction. It is persisted as a [`Message::SystemNotice`] at the
-/// transcript tail instead, keeping the stable instruction prefix immutable.
-fn render_system_prompt_context_blocks_joined(appends: &[PendingSystemContextAppend]) -> String {
-    appends
-        .iter()
-        .filter(|append| append.peer_response_terminal.is_none())
-        .map(render_system_context_block)
-        .collect::<Vec<_>>()
-        .join(SYSTEM_CONTEXT_SEPARATOR)
-}
-
-fn peer_response_terminal_notice(
-    append: &PendingSystemContextAppend,
-) -> Option<SystemNoticeMessage> {
-    append.peer_response_terminal.as_ref()?;
-    Some(append.content.clone().into_system_notice_message())
-}
-
-fn system_notice_semantically_matches(
-    existing: &SystemNoticeMessage,
-    candidate: &SystemNoticeMessage,
-) -> bool {
-    existing.kind == candidate.kind
-        && existing.body == candidate.body
-        && existing.blocks == candidate.blocks
-}
-
-/// Remove legacy terminal blocks only from a suffix proven to be
-/// runtime-context-owned.
-///
-/// A recorded assembled base is the strongest split boundary. Without one,
-/// the entire ordered applied-record rendering must match the complete prompt
-/// or an exact prompt suffix; otherwise migration fails closed and leaves the
-/// transcript byte-identical.
-fn remove_legacy_peer_terminal_system_tail(
-    system_prompt: &str,
-    prior_base: Option<&str>,
-    applied: &[PendingSystemContextAppend],
-    terminal_appends: &[PendingSystemContextAppend],
-) -> (String, usize) {
-    if terminal_appends.is_empty() {
-        return (system_prompt.to_string(), 0);
-    }
-
-    let applied_tail = applied
-        .iter()
-        .map(render_system_context_block)
-        .collect::<Vec<_>>()
-        .join(SYSTEM_CONTEXT_SEPARATOR);
-    if applied_tail.is_empty() {
-        return (system_prompt.to_string(), 0);
-    }
-
-    if let Some(base) = prior_base {
-        if system_prompt == base {
-            return (system_prompt.to_string(), 0);
-        }
-        let Some(context_tail) = system_prompt
-            .strip_prefix(base)
-            .and_then(|suffix| suffix.strip_prefix(SYSTEM_CONTEXT_SEPARATOR))
-        else {
-            return (system_prompt.to_string(), 0);
-        };
-        let mut terminal_budget = BTreeMap::<String, usize>::new();
-        let mut non_terminal_renderings = BTreeSet::new();
-        for append in applied {
-            let rendered = render_system_context_block(append);
-            if append.peer_response_terminal.is_some() {
-                *terminal_budget.entry(rendered).or_default() += 1;
-            } else {
-                non_terminal_renderings.insert(rendered);
-            }
-        }
-        let mut retained = Vec::new();
-        let mut removed = 0;
-        for segment in context_tail.split(SYSTEM_CONTEXT_SEPARATOR) {
-            let terminal_remaining = terminal_budget.get_mut(segment);
-            if terminal_remaining.is_some() && non_terminal_renderings.contains(segment) {
-                return (system_prompt.to_string(), 0);
-            }
-            if let Some(remaining) = terminal_remaining.filter(|remaining| **remaining > 0) {
-                *remaining -= 1;
-                removed += 1;
-            } else {
-                retained.push(segment);
-            }
-        }
-        if removed == 0 {
-            return (system_prompt.to_string(), 0);
-        }
-        let retained_tail = retained.join(SYSTEM_CONTEXT_SEPARATOR);
-        let cleaned = if retained_tail.is_empty() {
-            base.to_string()
-        } else {
-            format!("{base}{SYSTEM_CONTEXT_SEPARATOR}{retained_tail}")
-        };
-        return (cleaned, removed);
-    }
-
-    let retained_tail = applied
-        .iter()
-        .filter(|append| append.peer_response_terminal.is_none())
-        .map(render_system_context_block)
-        .collect::<Vec<_>>()
-        .join(SYSTEM_CONTEXT_SEPARATOR);
-    let removed = terminal_appends.len();
-    let (base, tail_is_whole_prompt) = if system_prompt == applied_tail {
-        ("", true)
-    } else {
-        let suffix = format!("{SYSTEM_CONTEXT_SEPARATOR}{applied_tail}");
-        let Some(base) = system_prompt.strip_suffix(&suffix) else {
-            return (system_prompt.to_string(), 0);
-        };
-        (base, false)
-    };
-    let cleaned = if tail_is_whole_prompt {
-        retained_tail
-    } else if retained_tail.is_empty() {
-        base.to_string()
-    } else {
-        format!("{base}{SYSTEM_CONTEXT_SEPARATOR}{retained_tail}")
-    };
-    (cleaned, removed)
-}
-
-/// Compose a system prompt from a base and a verified runtime-context tail
-/// (leading [`SYSTEM_CONTEXT_SEPARATOR`] included; empty = no tail),
-/// mirroring [`Session::append_system_context_blocks`]' rule that an empty
-/// base renders the blocks without a separator prefix.
-fn compose_system_prompt_with_context_tail(base: &str, tail: &str) -> String {
-    if tail.is_empty() {
-        return base.to_string();
-    }
-    if base.is_empty() {
-        return tail
-            .strip_prefix(SYSTEM_CONTEXT_SEPARATOR)
-            .unwrap_or(tail)
-            .to_string();
-    }
-    format!("{base}{tail}")
-}
-
-/// Drive the canonical [`session_document::SessionDocumentMachine`]
-/// persist-append admission for the resume fast path: may the persisted
-/// System prompt be admitted as a runtime-context-append continuation of the
-/// freshly assembled base?
-///
-/// Mirrors the save-guard shell (`session_store::system_context_is_append`):
-/// this extracts only pure structural observations plus the typed
-/// [`crate::types::SystemPromptMutationKind`] provenance; the machine owns
-/// the verdict. A machine error fails closed — the caller falls back to the
-/// audited rewrite path.
-fn persisted_prompt_is_admitted_context_append_continuation(
-    assembled_base: &str,
-    persisted_content: &str,
-    persisted_mutation_kind: crate::types::SystemPromptMutationKind,
-) -> bool {
-    let content_identical = persisted_content == assembled_base;
-    let content_extends = persisted_content.starts_with(assembled_base);
-    let appended_starts_with_separator = content_extends
-        && persisted_content[assembled_base.len()..].starts_with(SYSTEM_CONTEXT_SEPARATOR);
-    let mut authority = session_document::SessionDocumentMachineAuthority::new();
-    match authority.resolve_system_context_persist_append_admission(
-        true,
-        content_identical,
-        content_extends,
-        appended_starts_with_separator,
-        persisted_mutation_kind.is_runtime_context_append(),
-    ) {
-        Ok(effects) => effects.into_iter().any(|effect| {
-            matches!(
-                effect,
-                session_document::SessionDocumentEffect::SystemContextPersistAppendAdmissionResolved {
-                    admission: session_document::SystemContextPersistAppendAdmission::Admit,
-                }
-            )
-        }),
-        Err(error) => {
-            tracing::warn!(
-                error = %error,
-                "session document authority refused resume prompt continuation admission; \
-                 falling back to audited rewrite"
-            );
-            false
-        }
-    }
-}
-
-/// Shell adapter that drives the canonical
-/// [`session_document::SessionDocumentMachine`] system-context region and
-/// mirrors its emitted decisions onto the bulky `SessionSystemContextState`.
-///
-/// The machine owns every SEMANTIC decision (append disposition, per-append
-/// apply/discard from the typed [`SystemContextSource`] marker, snapshot
-/// restore legality). This module performs only the mechanical collection
-/// work — iterating the shell's pending/applied/seen collections and applying
-/// the machine's per-item verdict. It never decides; in particular it never
-/// inspects a `source` string to classify a runtime steer.
-mod system_context_authority {
-    use super::{
-        AppendSystemContextRequest, BTreeSet, PendingSystemContextAppend, SeenSystemContextKey,
-        SeenSystemContextState, SessionSystemContextState, SystemContextSource,
-        SystemContextStageError, SystemTime, render_system_context_block, session_document,
-        usize_to_u64,
-    };
-    use crate::service::AppendSystemContextStatus;
-
-    fn document_authority() -> session_document::SessionDocumentMachineAuthority {
-        session_document::SessionDocumentMachineAuthority::new()
-    }
-
-    /// Resolve the four-way append disposition through the machine.
-    fn resolve_append_decision(
-        trimmed_text_byte_count: u64,
-        idempotency_key_present: bool,
-        existing_key_matches: bool,
-        existing_key_conflicts: bool,
-        active_turn_scoped: bool,
-    ) -> Result<session_document::SystemContextAppendDecision, SystemContextStageError> {
-        let mut authority = document_authority();
-        let effects = authority
-            .resolve_system_context_append(
-                trimmed_text_byte_count,
-                idempotency_key_present,
-                existing_key_matches,
-                existing_key_conflicts,
-                active_turn_scoped,
-            )
-            .map_err(|err| SystemContextStageError::InvalidRequest(err.to_string()))?;
-        effects
-            .into_iter()
-            .find_map(|effect| match effect {
-                session_document::SessionDocumentEffect::SystemContextAppendResolved {
-                    decision,
-                    ..
-                } => Some(decision),
-                _ => None,
-            })
-            .ok_or_else(|| {
-                SystemContextStageError::InvalidRequest(
-                    "generated session document authority returned no append decision".to_string(),
-                )
-            })
-    }
-
-    /// Per-pending-append apply verdict, decided by the machine from the typed
-    /// `source_kind` marker (NOT a `source` string prefix).
-    fn pending_apply_item(source_kind: SystemContextSource) -> Option<(bool, bool, bool)> {
-        let mut authority = document_authority();
-        match authority.resolve_system_context_pending_apply_item(source_kind.into()) {
-            Ok(effects) => effects.into_iter().find_map(|effect| {
-                match effect {
-                session_document::SessionDocumentEffect::SystemContextPendingApplyItemResolved {
-                    promote_to_applied,
-                    mark_seen_applied,
-                    remove_seen,
-                } => Some((promote_to_applied, mark_seen_applied, remove_seen)),
-                _ => None,
-            }
-            }),
-            Err(err) => {
-                tracing::warn!(
-                    error = %err,
-                    "generated session document authority rejected system-context apply item"
-                );
-                None
-            }
-        }
-    }
-
-    /// Per-item transient-steer discard verdict, decided by the machine from
-    /// the typed `source_kind` marker.
-    fn steer_cleanup_discards(source_kind: SystemContextSource) -> bool {
-        let mut authority = document_authority();
-        match authority.resolve_system_context_steer_cleanup_item(source_kind.into()) {
-            Ok(effects) => effects
-                .into_iter()
-                .find_map(|effect| {
-                    match effect {
-                    session_document::SessionDocumentEffect::SystemContextSteerCleanupItemResolved {
-                        discard,
-                    } => Some(discard),
-                    _ => None,
-                }
-                })
-                .unwrap_or(false),
-            Err(err) => {
-                tracing::warn!(
-                    error = %err,
-                    "generated session document authority rejected system-context steer cleanup item"
-                );
-                false
-            }
-        }
-    }
-
-    fn discard_pending_where(
-        state: &mut SessionSystemContextState,
-        mut should_discard: impl FnMut(&PendingSystemContextAppend, bool) -> bool,
-    ) -> Vec<PendingSystemContextAppend> {
-        reconstruct_legacy_active_turn_indices(state);
-        let active_indices = std::mem::take(&mut state.active_turn_pending_indices);
-        let pending = std::mem::take(&mut state.pending);
-        let mut retained = Vec::with_capacity(pending.len());
-        let mut retained_active_indices = BTreeSet::new();
-        let mut retained_active_keys = BTreeSet::new();
-        let mut discarded = Vec::new();
-
-        for (index, append) in pending.into_iter().enumerate() {
-            let is_active_turn = active_indices.contains(&usize_to_u64(index));
-            if should_discard(&append, is_active_turn) {
-                discarded.push(append);
-                continue;
-            }
-            if is_active_turn {
-                retained_active_indices.insert(usize_to_u64(retained.len()));
-                if let Some(key) = append.idempotency_key.as_ref() {
-                    retained_active_keys.insert(key.clone());
-                }
-            }
-            retained.push(append);
-        }
-
-        state.pending = retained;
-        state.active_turn_pending_indices = retained_active_indices;
-        state.active_turn_pending_keys = retained_active_keys;
-        discarded
-    }
-
-    fn reconstruct_legacy_active_turn_indices(state: &mut SessionSystemContextState) {
-        if !state.active_turn_pending_indices.is_empty()
-            || state.active_turn_pending_keys.is_empty()
-        {
-            return;
-        }
-        state.active_turn_pending_indices = state
-            .pending
-            .iter()
-            .enumerate()
-            .filter(|(_index, append)| {
-                append
-                    .idempotency_key
-                    .as_ref()
-                    .is_some_and(|key| state.active_turn_pending_keys.contains(key))
-            })
-            .map(|(index, _append)| usize_to_u64(index))
-            .collect();
-    }
-
-    pub(super) fn restore_system_context_state(
-        mut state: SessionSystemContextState,
-    ) -> Result<SessionSystemContextState, SystemContextStageError> {
-        // Backward compatibility for snapshots written before active-turn
-        // membership had an identity independent of idempotency. Keyed
-        // members can be reconstructed exactly from the pending queue.
-        reconstruct_legacy_active_turn_indices(&mut state);
-        let active_indices_are_in_bounds = state
-            .active_turn_pending_indices
-            .iter()
-            .all(|index| usize::try_from(*index).is_ok_and(|index| index < state.pending.len()));
-        let active_keys_have_indexed_pending = state.active_turn_pending_keys.iter().all(|key| {
-            state.active_turn_pending_indices.iter().any(|index| {
-                usize::try_from(*index)
-                    .ok()
-                    .and_then(|index| state.pending.get(index))
-                    .and_then(|append| append.idempotency_key.as_ref())
-                    == Some(key)
-            })
-        });
-        let indexed_pending_keys_are_active =
-            state.active_turn_pending_indices.iter().all(|index| {
-                usize::try_from(*index)
-                    .ok()
-                    .and_then(|index| state.pending.get(index))
-                    .is_some_and(|append| {
-                        append
-                            .idempotency_key
-                            .as_ref()
-                            .is_none_or(|key| state.active_turn_pending_keys.contains(key))
-                    })
-            });
-        let active_turn_membership_is_consistent = active_indices_are_in_bounds
-            && active_keys_have_indexed_pending
-            && indexed_pending_keys_are_active;
-        let seen_keys_match_known_appends = state.seen.iter().all(|(key, seen)| {
-            state
-                .pending
-                .iter()
-                .chain(state.applied.iter())
-                .any(|append| {
-                    append.idempotency_key.as_ref() == Some(key)
-                        && seen.content == append.content
-                        && seen.source.as_deref() == append.source.as_deref()
-                })
-        });
-        let mut authority = document_authority();
-        authority
-            .restore_system_context_snapshot(
-                active_turn_membership_is_consistent,
-                seen_keys_match_known_appends,
-            )
-            .map_err(|err| SystemContextStageError::InvalidRequest(err.to_string()))?;
-        Ok(state)
-    }
-
-    pub(super) fn stage_append(
-        state: &mut SessionSystemContextState,
-        req: &AppendSystemContextRequest,
-        accepted_at: SystemTime,
-        active_turn_scoped: bool,
-    ) -> Result<AppendSystemContextStatus, SystemContextStageError> {
-        // Emptiness is judged on the canonical text projection; the typed
-        // renderable itself is what gets stored (lowering happens once, at
-        // the transcript render seam).
-        let rendered_text = req.content.render_text();
-        let rendered_len = rendered_text.trim().len();
-        let existing = req
-            .idempotency_key
-            .as_ref()
-            .and_then(|key| state.seen.get(key));
-        let existing_key_matches = existing.is_some_and(|existing| {
-            existing.content == req.content && existing.source.as_deref() == req.source.as_deref()
-        });
-        let existing_key_conflicts = existing.is_some() && !existing_key_matches;
-        let decision = resolve_append_decision(
-            usize_to_u64(rendered_len),
-            req.idempotency_key.is_some(),
-            existing_key_matches,
-            existing_key_conflicts,
-            active_turn_scoped,
-        )?;
-
-        match decision {
-            session_document::SystemContextAppendDecision::RejectEmpty => {
-                return Err(SystemContextStageError::InvalidRequest(
-                    "system context text must not be empty".to_string(),
-                ));
-            }
-            session_document::SystemContextAppendDecision::RejectConflict => {
-                let Some(key) = req.idempotency_key.as_ref() else {
-                    return Err(SystemContextStageError::InvalidRequest(
-                        "generated system-context authority rejected append without a key"
-                            .to_string(),
-                    ));
-                };
-                let Some(existing) = existing else {
-                    return Err(SystemContextStageError::InvalidRequest(
-                        "generated system-context authority rejected append without a conflict"
-                            .to_string(),
-                    ));
-                };
-                return Err(SystemContextStageError::Conflict {
-                    key: key.clone(),
-                    existing_text: existing.content.render_text(),
-                    existing_source: existing.source.clone(),
-                });
-            }
-            session_document::SystemContextAppendDecision::Duplicate => {
-                return Ok(AppendSystemContextStatus::Duplicate);
-            }
-            session_document::SystemContextAppendDecision::Staged => {}
-        }
-
-        let append = PendingSystemContextAppend {
-            content: req.content.clone(),
-            source: req.source.clone(),
-            idempotency_key: req.idempotency_key.clone(),
-            source_kind: req.source_kind,
-            // Carry the typed `PeerResponseTerminalFact` so realtime/live
-            // consumers read it directly instead of re-parsing the flattened
-            // prompt text. Mirrors the `source_kind` typed-provenance precedent.
-            peer_response_terminal: req.peer_response_terminal.clone(),
-            accepted_at,
-        };
-        if let Some(key) = req.idempotency_key.as_ref() {
-            state.seen.insert(
-                key.clone(),
-                SeenSystemContextKey {
-                    content: append.content.clone(),
-                    source: append.source.clone(),
-                    source_kind: append.source_kind,
-                    state: SeenSystemContextState::Pending,
-                },
-            );
-        }
-        if active_turn_scoped {
-            state
-                .active_turn_pending_indices
-                .insert(usize_to_u64(state.pending.len()));
-            if let Some(key) = req.idempotency_key.as_ref() {
-                state.active_turn_pending_keys.insert(key.clone());
-            }
-        }
-        state.pending.push(append);
-        Ok(AppendSystemContextStatus::Staged)
-    }
-
-    pub(super) fn mark_pending_applied(state: &mut SessionSystemContextState) {
-        // Promote pending appends to applied per the machine's per-item
-        // verdict (keyed on the typed `source_kind`).
-        let pending = std::mem::take(&mut state.pending);
-        let mut seen_to_remove = Vec::new();
-        for append in &pending {
-            let Some((promote_to_applied, mark_seen_applied, remove_seen)) =
-                pending_apply_item(append.source_kind)
-            else {
-                continue;
-            };
-            if promote_to_applied && !state.applied.contains(append) {
-                state.applied.push(append.clone());
-            }
-            if let Some(key) = append.idempotency_key.as_ref() {
-                if remove_seen {
-                    seen_to_remove.push(key.clone());
-                } else if mark_seen_applied && let Some(seen) = state.seen.get_mut(key) {
-                    seen.state = SeenSystemContextState::Applied;
-                }
-            }
-        }
-        for key in seen_to_remove {
-            state.seen.remove(&key);
-        }
-        state.active_turn_pending_keys.clear();
-        state.active_turn_pending_indices.clear();
-    }
-
-    pub(super) fn discard_unapplied_active_turn_pending(
-        state: &mut SessionSystemContextState,
-    ) -> Vec<PendingSystemContextAppend> {
-        reconstruct_legacy_active_turn_indices(state);
-        if state.active_turn_pending_indices.is_empty() {
-            return Vec::new();
-        }
-        let discarded = discard_pending_where(state, |_append, is_active_turn| is_active_turn);
-
-        for append in &discarded {
-            if let Some(key) = append.idempotency_key.as_ref()
-                && state
-                    .seen
-                    .get(key)
-                    .is_some_and(|seen| seen.state == SeenSystemContextState::Pending)
-            {
-                state.seen.remove(key);
-            }
-        }
-
-        discarded
-    }
-
-    pub(super) fn discard_active_turn_pending_by_keys(
-        state: &mut SessionSystemContextState,
-        idempotency_keys: &[String],
-    ) -> Vec<PendingSystemContextAppend> {
-        reconstruct_legacy_active_turn_indices(state);
-        if idempotency_keys.is_empty() || state.active_turn_pending_indices.is_empty() {
-            return Vec::new();
-        }
-        let requested_keys: BTreeSet<&str> = idempotency_keys.iter().map(String::as_str).collect();
-        let discarded = discard_pending_where(state, |append, is_active_turn| {
-            is_active_turn
-                && append
-                    .idempotency_key
-                    .as_ref()
-                    .is_some_and(|key| requested_keys.contains(key.as_str()))
-        });
-
-        for append in &discarded {
-            let Some(key) = append.idempotency_key.as_ref() else {
-                continue;
-            };
-            if state
-                .seen
-                .get(key)
-                .is_some_and(|seen| seen.state == SeenSystemContextState::Pending)
-            {
-                state.seen.remove(key);
-            }
-        }
-
-        discarded
-    }
-
-    pub(super) fn discard_transient_runtime_steer_state(
-        state: &mut SessionSystemContextState,
-    ) -> usize {
-        let mut removed = 0usize;
-
-        let before_active = state.active_turn_pending_keys.len();
-        removed += discard_pending_where(state, |append, _is_active_turn| {
-            steer_cleanup_discards(append.source_kind)
-        })
-        .len();
-
-        let before_applied = state.applied.len();
-        state
-            .applied
-            .retain(|append| !steer_cleanup_discards(append.source_kind));
-        removed += before_applied.saturating_sub(state.applied.len());
-
-        let before_seen = state.seen.len();
-        state
-            .seen
-            .retain(|_key, seen| !steer_cleanup_discards(seen.source_kind));
-        removed += before_seen.saturating_sub(state.seen.len());
-
-        removed += before_active.saturating_sub(state.active_turn_pending_keys.len());
-
-        removed
-    }
-
-    pub(super) fn remove_runtime_steer_blocks_for_rendered(
-        system_prompt: &str,
-        runtime_steer_appends: &[PendingSystemContextAppend],
-    ) -> (String, usize) {
-        if runtime_steer_appends.is_empty() {
-            return (system_prompt.to_string(), 0);
-        }
-        // Build the set of rendered blocks for the typed runtime-steer appends,
-        // then remove those exact rendered blocks from the prompt. The typed
-        // marker is the authority; rendering is mechanical presentation.
-        let steer_blocks: BTreeSet<String> = runtime_steer_appends
-            .iter()
-            .map(render_system_context_block)
-            .collect();
-        let parts = system_prompt
-            .split(super::SYSTEM_CONTEXT_SEPARATOR)
-            .map(str::to_string)
-            .collect::<Vec<_>>();
-        let original_len = parts.len();
-        let retained = parts
-            .into_iter()
-            .filter(|part| !steer_blocks.contains(part))
-            .collect::<Vec<_>>();
-        let removed = original_len.saturating_sub(retained.len());
-        (retained.join(super::SYSTEM_CONTEXT_SEPARATOR), removed)
-    }
-
-    pub(super) fn record_applied_system_context_blocks(
-        state: &mut SessionSystemContextState,
-        appends: &[PendingSystemContextAppend],
-        current_system_prompt: &str,
-    ) -> Vec<PendingSystemContextAppend> {
-        let mut new_appends: Vec<PendingSystemContextAppend> = Vec::new();
-        for append in appends {
-            if append.content.render_text().trim().is_empty() {
-                continue;
-            }
-            let rendered = render_system_context_block(append);
-            if let Some(key) = append.idempotency_key.as_ref() {
-                if let Some(existing) = state.seen.get(key)
-                    && !seen_system_context_matches(existing, append)
-                {
-                    tracing::warn!(
-                        idempotency_key = %key,
-                        "skipping conflicting runtime system-context append"
-                    );
-                    continue;
-                }
-                if let Some(existing) = state
-                    .applied
-                    .iter()
-                    .find(|applied| applied.idempotency_key.as_ref() == Some(key))
-                    && !pending_system_context_matches(existing, append)
-                {
-                    tracing::warn!(
-                        idempotency_key = %key,
-                        "skipping conflicting runtime system-context append"
-                    );
-                    continue;
-                }
-                if let Some(existing) = new_appends
-                    .iter()
-                    .find(|pending| pending.idempotency_key.as_ref() == Some(key))
-                {
-                    if !pending_system_context_matches(existing, append) {
-                        tracing::warn!(
-                            idempotency_key = %key,
-                            "skipping conflicting runtime system-context append"
-                        );
-                    }
-                    continue;
-                }
-                if append.peer_response_terminal.is_none()
-                    && current_system_prompt.contains(&rendered)
-                {
-                    record_applied_append(state, append);
-                    continue;
-                }
-            } else if new_appends.contains(append)
-                || (append.peer_response_terminal.is_none()
-                    && current_system_prompt.contains(&rendered))
-            {
-                continue;
-            }
-            record_applied_append(state, append);
-            new_appends.push(append.clone());
-        }
-        new_appends
-    }
-
-    fn record_applied_append(
-        state: &mut SessionSystemContextState,
-        append: &PendingSystemContextAppend,
-    ) {
-        if let Some(key) = append.idempotency_key.as_ref() {
-            state.seen.insert(
-                key.clone(),
-                SeenSystemContextKey {
-                    content: append.content.clone(),
-                    source: append.source.clone(),
-                    source_kind: append.source_kind,
-                    state: SeenSystemContextState::Applied,
-                },
-            );
-            if state
-                .applied
-                .iter()
-                .any(|applied| applied.idempotency_key.as_ref() == Some(key))
-            {
-                return;
-            }
-        } else if state.applied.contains(append) {
-            return;
-        }
-        state.applied.push(append.clone());
-    }
-
-    fn seen_system_context_matches(
-        seen: &SeenSystemContextKey,
-        append: &PendingSystemContextAppend,
-    ) -> bool {
-        seen.content == append.content && seen.source.as_deref() == append.source.as_deref()
-    }
-
-    fn pending_system_context_matches(
-        existing: &PendingSystemContextAppend,
-        append: &PendingSystemContextAppend,
-    ) -> bool {
-        existing.content == append.content && existing.source.as_deref() == append.source.as_deref()
-    }
-}
+impl std::error::Error for SystemMessageAppendError {}
 
 impl Session {
     /// Validate callback-result ingress against the exact durable callback
@@ -4710,9 +3058,11 @@ impl Session {
     /// Create a new empty session
     pub fn new() -> Self {
         let now = SystemTime::now();
+        let id = SessionId::new();
         Self {
             version: session_version(),
-            id: SessionId::new(),
+            realtime_transcript: Box::new(SessionRealtimeTranscriptProjection::empty(&id)),
+            id,
             messages: TranscriptMessages::default(),
             created_at: now,
             updated_at: now,
@@ -4720,13 +3070,13 @@ impl Session {
             history_caches: Box::default(),
             transcript_history_metadata_validation: TranscriptHistoryMetadataValidation::Validated,
             usage: Usage::default(),
-            volatile_prompt_overlay: None,
         }
     }
 
     /// Create a session with a specific ID (for loading)
     pub fn with_id(id: SessionId) -> Self {
         let mut session = Self::new();
+        session.realtime_transcript = Box::new(SessionRealtimeTranscriptProjection::empty(&id));
         session.id = id;
         session
     }
@@ -4953,43 +3303,43 @@ impl Session {
             .cloned()
             .collect::<Vec<_>>();
         refreshed.extend(replacements);
-
-        let realtime_state =
-            self.reconciled_realtime_transcript_metadata_after_rewrite(&refreshed)?;
+        let realtime_rebase = self.prepare_realtime_transcript_rebase_after_rewrite(
+            &refreshed,
+            RealtimeTranscriptSnapshotReasonV1::TranscriptRewrite,
+        )?;
+        if let Some(history) = self.validated_transcript_history_state()? {
+            let head_len = history
+                .final_endpoint_witness()
+                .ok_or_else(|| {
+                    TranscriptEditError::HistoryStateMalformed(
+                        "compact graph has no final endpoint witness".to_string(),
+                    )
+                })?
+                .message_count();
+            // This transformation removes only matching notices and appends
+            // every replacement at the tail. Therefore an existing matching
+            // notice inside the audited prefix is exactly the shape that
+            // would alter it; no whole-prefix hash or message copy is needed
+            // to prove the negative.
+            if self.messages.len() < head_len
+                || self.messages[..head_len].iter().any(&is_refresh_notice)
+            {
+                return Err(TranscriptEditError::InvalidTranscriptShape(
+                    "synthetic notice refresh would rewrite the audited transcript prefix; route it through a typed transcript rewrite"
+                        .to_string(),
+                ));
+            }
+        }
         let updated_at = SystemTime::now();
-        // The graph head refresh needs the new content digest; sessions
-        // without a transcript graph (the common shape) skip the hash
-        // entirely — `transcript_history_state_after_message_mutation`
-        // returns `None` for them without reading the head.
-        let history_state = if self
-            .metadata
-            .contains_key(SESSION_TRANSCRIPT_HISTORY_STATE_KEY)
-        {
-            let refreshed_digest = transcript_messages_digest(&refreshed)
-                .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
-            self.transcript_history_state_after_message_mutation(
-                &refreshed,
-                refreshed_digest,
-                updated_at,
-                TranscriptMutationShape::Rewritten,
-            )?
-            .map(serde_json::to_value)
-            .transpose()
-            .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?
-        } else {
-            None
-        };
-
         // SEAM 1 (non-append): synthetic notices are stripped from anywhere in
         // the vector, so the retained midstate and prefix ring are discarded.
+        // Audited history remains byte-for-byte untouched. A mutation that
+        // changes an audited prefix must cross the typed rewrite boundary
+        // before persistence; cosmetic graph reinstall cannot authorize it.
         self.messages.replace(refreshed);
         self.mark_content_mutated(updated_at);
-        if let Some(value) = realtime_state {
-            self.set_metadata_unchecked(SESSION_REALTIME_TRANSCRIPT_STATE_KEY, value);
-        }
-        if let Some(value) = history_state {
-            self.set_validated_transcript_history_metadata(value);
-        }
+        self.realtime_transcript
+            .apply_prepared_rebase(realtime_rebase);
         Ok(())
     }
 
@@ -5008,9 +3358,11 @@ impl Session {
     /// Updates the timestamp. For adding multiple messages, prefer `push_batch`.
     pub fn push(&mut self, message: Message) {
         // SEAM 2 (append): the accumulator folds only the appended bytes.
+        // Retained rewrite history is intentionally untouched: its head is the
+        // latest AUDITED endpoint, while this live append is owned by
+        // `messages` plus the digest accumulator.
         self.messages.push(message);
         self.mark_content_mutated(SystemTime::now());
-        self.refresh_transcript_head_after_message_mutation(TranscriptMutationShape::Appended);
     }
 
     /// Add multiple messages in one operation (single timestamp update)
@@ -5021,9 +3373,10 @@ impl Session {
             return;
         }
         // SEAM 3 (append): the accumulator folds only the appended batch.
+        // See `push`: ordinary appends never materialize or rewrite the
+        // transcript-history compatibility projection.
         self.messages.extend_batch(messages);
         self.mark_content_mutated(SystemTime::now());
-        self.refresh_transcript_head_after_message_mutation(TranscriptMutationShape::Appended);
     }
 
     /// Rewrite inline media payloads in-place as `BlobRef` pointers.
@@ -5043,17 +3396,8 @@ impl Session {
     ) -> Result<(), crate::blob::BlobStoreError> {
         // SEAM 4 (in-place media scan): the scan reports the lowest mutated
         // index. `None` means the buffer is byte-identical, so the retained
-        // midstate stays valid AND no transcript-head refresh is owed — which
-        // is what deletes the two full transcript digests this paid on EVERY
-        // boundary save of a history-bearing session, images or not.
-        let previous_digest = if self
-            .metadata
-            .contains_key(SESSION_TRANSCRIPT_HISTORY_STATE_KEY)
-        {
-            self.messages.digest().ok()
-        } else {
-            None
-        };
+        // midstate stays valid. Either way audited graph metadata is
+        // independent and remains untouched.
         let buffer = self.messages.begin_in_place_scan();
         let lowest_mutated = match crate::image_content::externalize_messages_from_reporting_lowest(
             blob_store, buffer, start,
@@ -5065,22 +3409,10 @@ impl Session {
                 // The scan may have externalized part of the buffer before
                 // failing; fail safe by discarding the parked midstate.
                 self.messages.finish_in_place_scan(Some(start));
-                self.clear_checkpoint_digest_seal();
                 return Err(error);
             }
         };
         self.messages.finish_in_place_scan(lowest_mutated);
-        // This seam rewrites message CONTENT without advancing `updated_at`,
-        // so the checkpoint-digest seal must be cleared explicitly — and
-        // unconditionally: the scan exposed the buffer for mutation, so the
-        // seal must not depend on the scan's own mutation report.
-        self.clear_checkpoint_digest_seal();
-        if lowest_mutated.is_some()
-            && let Some(previous_digest) = previous_digest
-            && self.messages.digest().ok().as_ref() != Some(&previous_digest)
-        {
-            self.refresh_transcript_head_after_message_mutation(TranscriptMutationShape::Rewritten);
-        }
         Ok(())
     }
 
@@ -5108,14 +3440,6 @@ impl Session {
         blob_store: &dyn crate::BlobStore,
         max_decoded_bytes: usize,
     ) -> Result<usize, crate::image_content::RealtimeUserImageHydrationError> {
-        let previous_digest = if self
-            .metadata
-            .contains_key(SESSION_TRANSCRIPT_HISTORY_STATE_KEY)
-        {
-            self.messages.digest().ok()
-        } else {
-            None
-        };
         // SEAM 5 (in-place media scan): same contract as `externalize_media`.
         let buffer = self.messages.begin_in_place_scan();
         let (decoded_total, lowest_mutated) =
@@ -5129,36 +3453,18 @@ impl Session {
                 Ok(outcome) => outcome,
                 Err(error) => {
                     self.messages.finish_in_place_scan(Some(0));
-                    self.clear_checkpoint_digest_seal();
                     return Err(error);
                 }
             };
         self.messages.finish_in_place_scan(lowest_mutated);
-        // Same contract as `externalize_media`: content may have been
-        // rewritten in place without an `updated_at` bump, so the seal is
-        // cleared unconditionally.
-        self.clear_checkpoint_digest_seal();
-        if lowest_mutated.is_some()
-            && let Some(previous_digest) = previous_digest
-            && self.messages.digest().ok().as_ref() != Some(&previous_digest)
-        {
-            self.refresh_transcript_head_after_message_mutation(TranscriptMutationShape::Rewritten);
-        }
+        // This typed hydrator mutates User messages only. It cannot change a
+        // SystemNotice semantic identity, so the terminal index remains exact.
         Ok(decoded_total)
     }
 
-    /// Advance `updated_at` and clear the per-session checkpoint-digest
-    /// seal.
-    ///
-    /// Every content mutation that bumps the timestamp must route through
-    /// here: `updated_at` is part of the canonical digest document, so any
-    /// write to it invalidates the sealed proof. Content mutations that
-    /// deliberately do NOT advance `updated_at` (`externalize_media`,
-    /// `hydrate_realtime_user_images_with_usage`,
-    /// `backfill_metadata_if_absent`) must clear the seal explicitly.
+    /// Advance the durable content timestamp.
     fn mark_content_mutated(&mut self, at: SystemTime) {
         self.updated_at = at;
-        self.clear_checkpoint_digest_seal();
     }
 
     /// Explicitly update the timestamp
@@ -5218,24 +3524,26 @@ impl Session {
     /// Apply an identity-bearing provider realtime transcript event.
     ///
     /// This is the canonical append authority for provider-managed realtime
-    /// turns: provider item ids, predecessor links, and content segment ids are
-    /// persisted in session metadata so duplicate websocket delivery,
-    /// reconnect replay, and causally equivalent event ordering cannot create
-    /// duplicate or misordered canonical messages.
+    /// turns. Provider item ids, predecessor links, and content segment ids
+    /// reduce into the in-memory projection while the exact typed event is
+    /// appended to the authenticated HeadCanonical component sidecar.
+    /// WholeBlob serialization alone materializes the accumulated projection.
     pub fn append_realtime_transcript_event(
         &mut self,
         event: RealtimeTranscriptEvent,
     ) -> RealtimeTranscriptApplyOutcome {
-        let mut state = self.realtime_transcript_state();
-        let commit =
-            realtime_transcript_revision::apply_realtime_transcript_event(&mut state, event)
+        let (commit, recorded) =
+            self.realtime_transcript
+                .apply_event(event)
                 .unwrap_or_else(|err| {
                     fail_closed_generated_restore(
                         "realtime-transcript",
                         <serde_json::Error as serde::de::Error>::custom(err),
                     )
                 });
-        self.store_realtime_transcript_state(&state);
+        if recorded {
+            self.mark_content_mutated(SystemTime::now());
+        }
         self.push_batch(commit.messages);
         if commit.usage != Usage::default() {
             self.record_usage(commit.usage);
@@ -5250,14 +3558,16 @@ impl Session {
         &self,
         event: &RealtimeTranscriptEvent,
     ) -> Option<crate::RealtimeUserContentApplyOutcome> {
-        let state = self.realtime_transcript_state();
-        realtime_transcript_revision::preflight_realtime_user_content_event(&state, event)
-            .unwrap_or_else(|err| {
-                fail_closed_generated_restore(
-                    "realtime-user-content-preflight",
-                    <serde_json::Error as serde::de::Error>::custom(err),
-                )
-            })
+        realtime_transcript_revision::preflight_realtime_user_content_event(
+            self.realtime_transcript.state(),
+            event,
+        )
+        .unwrap_or_else(|err| {
+            fail_closed_generated_restore(
+                "realtime-user-content-preflight",
+                <serde_json::Error as serde::de::Error>::custom(err),
+            )
+        })
     }
 
     /// Return every distinct provider `response_id` currently staged in the
@@ -5280,16 +3590,18 @@ impl Session {
     /// least one live unmaterialized assistant item are returned.
     #[must_use]
     pub fn in_flight_realtime_assistant_response_ids(&self) -> Vec<String> {
-        let state = self.realtime_transcript_state();
-        realtime_transcript_revision::in_flight_realtime_assistant_response_ids(&state)
+        realtime_transcript_revision::in_flight_realtime_assistant_response_ids(
+            self.realtime_transcript.state(),
+        )
     }
 
     /// Durable session-scoped bindings used to make live non-text input retry
     /// safe across provider reconnects and lost public receipts.
     #[must_use]
     pub fn realtime_user_content_identities(&self) -> Vec<RealtimeUserContentIdentity> {
-        let state = self.realtime_transcript_state();
-        realtime_transcript_revision::realtime_user_content_identities(&state)
+        realtime_transcript_revision::realtime_user_content_identities(
+            self.realtime_transcript.state(),
+        )
     }
 
     /// Return the bounded metadata-only image-blob recovery anchor, if one is
@@ -5298,8 +3610,9 @@ impl Session {
     pub fn pending_realtime_user_content_blob(
         &self,
     ) -> Option<crate::PendingRealtimeUserContentBlob> {
-        let state = self.realtime_transcript_state();
-        realtime_transcript_revision::pending_realtime_user_content_blob(&state)
+        realtime_transcript_revision::pending_realtime_user_content_blob(
+            self.realtime_transcript.state(),
+        )
     }
 
     /// Stage or exactly reuse the one-slot durable image-blob recovery anchor
@@ -5311,12 +3624,24 @@ impl Session {
         crate::generated::session_document::RealtimeUserContentBlobStageDisposition,
         realtime_transcript_revision::RealtimeTranscriptShellError,
     > {
-        let mut state = self.realtime_transcript_state();
-        let disposition = realtime_transcript_revision::stage_pending_realtime_user_content_blob(
-            &mut state, pending,
-        )?;
-        self.store_realtime_transcript_state(&state);
-        Ok(disposition)
+        match self
+            .realtime_transcript
+            .stage_pending_user_content_blob(pending)
+        {
+            Ok(disposition) => {
+                if disposition
+                    == crate::generated::session_document::RealtimeUserContentBlobStageDisposition::StageNew
+                {
+                    self.mark_content_mutated(SystemTime::now());
+                }
+                Ok(disposition)
+            }
+            Err(RealtimeTranscriptSidecarError::Reducer(error)) => Err(error),
+            Err(error) => fail_closed_generated_restore(
+                "realtime-user-content-stage",
+                <serde_json::Error as serde::de::Error>::custom(error),
+            ),
+        }
     }
 
     pub fn resolve_pending_realtime_user_content_blob_recovery(
@@ -5327,9 +3652,8 @@ impl Session {
         crate::generated::session_document::RealtimeUserContentBlobRecoveryDisposition,
         realtime_transcript_revision::RealtimeTranscriptShellError,
     > {
-        let state = self.realtime_transcript_state();
         realtime_transcript_revision::resolve_pending_realtime_user_content_blob_recovery(
-            &state,
+            self.realtime_transcript.state(),
             request,
             pending_blob_valid,
         )
@@ -5341,12 +3665,20 @@ impl Session {
         &mut self,
         request: Option<&crate::PendingRealtimeUserContentBlob>,
     ) -> Result<(), realtime_transcript_revision::RealtimeTranscriptShellError> {
-        let mut state = self.realtime_transcript_state();
-        realtime_transcript_revision::clear_invalid_pending_realtime_user_content_blob(
-            &mut state, request,
-        )?;
-        self.store_realtime_transcript_state(&state);
-        Ok(())
+        match self
+            .realtime_transcript
+            .clear_invalid_pending_user_content_blob(request)
+        {
+            Ok(()) => {
+                self.mark_content_mutated(SystemTime::now());
+                Ok(())
+            }
+            Err(RealtimeTranscriptSidecarError::Reducer(error)) => Err(error),
+            Err(error) => fail_closed_generated_restore(
+                "realtime-user-content-clear",
+                <serde_json::Error as serde::de::Error>::custom(error),
+            ),
+        }
     }
 
     /// Durable caller keys whose canonical realtime image was removed by a
@@ -5356,655 +3688,91 @@ impl Session {
     pub fn realtime_user_content_tombstones(
         &self,
     ) -> Vec<crate::realtime_transcript::RealtimeUserContentTombstone> {
-        let state = self.realtime_transcript_state();
-        realtime_transcript_revision::realtime_user_content_tombstones(&state)
+        realtime_transcript_revision::realtime_user_content_tombstones(
+            self.realtime_transcript.state(),
+        )
     }
 
-    fn realtime_transcript_state(&self) -> SessionRealtimeTranscriptState {
-        match self.try_realtime_transcript_state() {
-            Ok(Some(state)) => state,
-            Ok(None) => SessionRealtimeTranscriptState::default(),
-            Err(err) => fail_closed_generated_restore("realtime-transcript", err),
-        }
-    }
-
-    fn try_realtime_transcript_state(
-        &self,
-    ) -> Result<Option<SessionRealtimeTranscriptState>, serde_json::Error> {
-        self.metadata
-            .get(SESSION_REALTIME_TRANSCRIPT_STATE_KEY)
-            .map(|value| {
-                let state = serde_json::from_value(value.clone())?;
-                realtime_transcript_revision::restore_realtime_transcript_state(state)
-                    .map_err(<serde_json::Error as serde::de::Error>::custom)
-            })
-            .transpose()
-    }
-
-    fn store_realtime_transcript_state(&mut self, state: &SessionRealtimeTranscriptState) {
-        match serde_json::to_value(state) {
-            Ok(value) => self.set_metadata_unchecked(SESSION_REALTIME_TRANSCRIPT_STATE_KEY, value),
-            Err(error) => {
-                tracing::warn!(error = %error, "failed to serialize realtime transcript state");
-            }
-        }
-    }
-
-    fn reconciled_realtime_transcript_metadata_after_rewrite(
+    fn prepare_realtime_transcript_rebase_after_rewrite(
         &self,
         messages: &[Message],
-    ) -> Result<Option<serde_json::Value>, TranscriptEditError> {
-        let Some(state) = self
-            .try_realtime_transcript_state()
-            .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?
-        else {
-            return Ok(None);
-        };
+        reason: RealtimeTranscriptSnapshotReasonV1,
+    ) -> Result<PreparedRealtimeTranscriptRebase, TranscriptEditError> {
         let state =
             realtime_transcript_revision::reconcile_realtime_transcript_state_after_rewrite(
-                state, messages,
+                self.realtime_transcript.state().clone(),
+                messages,
             )
             .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
-        serde_json::to_value(state)
-            .map(Some)
+        self.realtime_transcript
+            .prepare_rebase_snapshot(state, reason)
             .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))
     }
 
-    fn apply_authorized_system_prompt(
-        &mut self,
-        prompt: session_durable_config_authority::AuthorizedSystemPrompt,
-    ) {
+    /// Append an ordinary System message at the current transcript boundary.
+    pub fn append_system_message(&mut self, content: impl Into<String>) {
         use crate::types::SystemMessage;
 
-        // The typed mutation provenance is carried onto the applied system
-        // message so the transcript-continuity save-guard recognizes a
-        // runtime context-append shape from a typed field instead of the
-        // rendered `[Runtime System Context]` label.
-        let mutation_kind = prompt.mutation_kind();
-        let (prompt, _replacing_existing) = prompt.into_parts();
-        let message = SystemMessage::with_mutation_kind(prompt, mutation_kind);
-        // SEAM 6 (non-append): index 0 is replaced or the vector is shifted, so
-        // neither the midstate nor any retained prefix survives.
-        let inner = self.messages.mutate_in_place();
-        // Check if first message is system
-        if let Some(Message::System(_)) = inner.first() {
-            inner[0] = Message::System(message);
-        } else {
-            inner.insert(0, Message::System(message));
-        }
-        self.mark_content_mutated(SystemTime::now());
-        self.refresh_transcript_head_after_message_mutation(TranscriptMutationShape::Rewritten);
+        self.push(Message::System(SystemMessage::new(content)));
     }
 
-    /// Set a system prompt through generated durable-config authority.
-    pub fn set_system_prompt_with_source(
-        &mut self,
-        prompt: String,
-        source: session_durable_config_authority::SessionSystemPromptSource,
-    ) -> Result<(), session_durable_config_authority::SessionDurableConfigAuthorityError> {
-        let replacing_existing = matches!(self.messages.first(), Some(Message::System(_)));
-        let prompt = session_durable_config_authority::authorize_system_prompt_mutation(
-            prompt,
-            source,
-            replacing_existing,
-        )?;
-        self.apply_authorized_system_prompt(prompt);
-        Ok(())
-    }
-
-    /// Set a system prompt (adds or replaces System message at start).
-    pub fn set_system_prompt(&mut self, prompt: String) {
-        if let Err(err) = self.set_system_prompt_with_source(
-            prompt,
-            session_durable_config_authority::SessionSystemPromptSource::DirectMutation,
-        ) {
-            tracing::warn!(error = %err, "generated session durable-config authority rejected system prompt mutation");
-        }
-    }
-
-    /// Remove transient active-turn steer context from persisted session state.
+    /// Append an ordinary System message with optional control-ingress
+    /// identity.
     ///
-    /// Operator steers accepted into an already-running turn are request-local:
-    /// they should be visible to that turn's next model boundary, then vanish
-    /// instead of replaying into later turns after persistence or resume.
-    pub fn discard_transient_runtime_steer_context(&mut self) -> usize {
-        let mut removed = 0usize;
+    /// The ordered transcript is the singular durable owner. Idempotency is
+    /// checked only for this explicit control operation; ordinary turn and
+    /// resume paths never scan the transcript.
+    pub fn append_system_message_idempotent(
+        &mut self,
+        content: impl Into<String>,
+        source: Option<String>,
+        idempotency_key: Option<String>,
+        created_at: crate::types::MessageTimestamp,
+    ) -> Result<crate::service::AppendSystemContextStatus, SystemMessageAppendError> {
+        use crate::types::{SystemMessage, SystemMessageIdentity};
 
-        let mut state = match self.try_system_context_state() {
-            Ok(state) => state.unwrap_or_default(),
-            Err(err) => {
-                tracing::warn!(
-                    error = %err,
-                    "generated system-context authority rejected runtime steer cleanup state"
-                );
-                return removed;
-            }
-        };
-
-        // The typed `source_kind` marker on persisted appends is the authority
-        // for which rendered prompt blocks are transient runtime steers. Gather
-        // the runtime-steer appends, then remove their exact rendered blocks
-        // from the system prompt — no `runtime:steer:` string classification.
-        let runtime_steer_appends = state
-            .pending
-            .iter()
-            .chain(state.applied.iter())
-            .filter(|append| append.source_kind.is_runtime_steer())
-            .cloned()
-            .collect::<Vec<_>>();
-        if let Some(Message::System(system)) = self.messages.first() {
-            let (retained_prompt, removed_blocks) =
-                system_context_authority::remove_runtime_steer_blocks_for_rendered(
-                    &system.content,
-                    &runtime_steer_appends,
-                );
-            if removed_blocks > 0 {
-                removed += removed_blocks;
-                if let Err(err) = self.set_system_prompt_with_source(
-                    retained_prompt,
-                    session_durable_config_authority::SessionSystemPromptSource::RuntimeSteerCleanup,
-                ) {
-                    tracing::warn!(
-                        error = %err,
-                        "generated session durable-config authority rejected runtime steer prompt cleanup"
-                    );
+        let content = content.into();
+        if let Some(key) = idempotency_key.as_deref() {
+            for message in self.messages() {
+                let Message::System(existing) = message else {
+                    continue;
+                };
+                let Some(identity) = existing.identity.as_ref() else {
+                    continue;
+                };
+                if identity.idempotency_key.as_deref() != Some(key) {
+                    continue;
                 }
-            }
-        }
-
-        removed += system_context_authority::discard_transient_runtime_steer_state(&mut state);
-
-        if removed > 0
-            && let Err(err) = self.set_system_context_state(state)
-        {
-            tracing::warn!(
-                error = %err,
-                "failed to persist runtime steer context cleanup"
-            );
-        }
-
-        removed
-    }
-
-    /// Persist typed peer terminal facts as conversation-tail notices.
-    ///
-    /// The semantic comparison intentionally ignores `created_at`: a replayed
-    /// delivery of the same terminal fact must not mint another notice merely
-    /// because construction happened at a different wall-clock instant.
-    pub(crate) fn append_peer_response_terminal_notices(
-        &mut self,
-        appends: &[PendingSystemContextAppend],
-    ) -> usize {
-        let mut notices = Vec::new();
-        for candidate in appends.iter().filter_map(peer_response_terminal_notice) {
-            let already_persisted = self.messages.iter().any(|message| {
-                matches!(
-                    message,
-                    Message::SystemNotice(existing)
-                        if system_notice_semantically_matches(existing, &candidate)
-                )
-            });
-            let already_staged = notices.iter().any(|message| {
-                matches!(
-                    message,
-                    Message::SystemNotice(existing)
-                        if system_notice_semantically_matches(existing, &candidate)
-                )
-            });
-            if !already_persisted && !already_staged {
-                notices.push(Message::SystemNotice(candidate));
-            }
-        }
-        let appended = notices.len();
-        self.push_batch(notices);
-        appended
-    }
-
-    /// Apply runtime context at the canonical model boundary.
-    ///
-    /// Instruction-like context extends the leading system prompt. Typed peer
-    /// terminal responses are durable conversation events and are appended as
-    /// [`Message::SystemNotice`] records at the transcript tail instead.
-    pub fn append_system_context_blocks(&mut self, appends: &[PendingSystemContextAppend]) {
-        if appends.is_empty() {
-            return;
-        }
-
-        let current_system_prompt = self
-            .messages
-            .first()
-            .and_then(|message| match message {
-                Message::System(system) => Some(system.content.as_str()),
-                _ => None,
-            })
-            .unwrap_or_default();
-        let mut state = match self.try_system_context_state() {
-            Ok(state) => state.unwrap_or_default(),
-            Err(err) => {
-                tracing::warn!(
-                    error = %err,
-                    "generated system-context authority rejected applied context state"
-                );
-                return;
-            }
-        };
-        let new_appends = system_context_authority::record_applied_system_context_blocks(
-            &mut state,
-            appends,
-            current_system_prompt,
-        );
-        if new_appends.is_empty() {
-            if let Err(err) = self.set_system_context_state(state) {
-                tracing::warn!(error = %err, "failed to persist applied system-context state");
-            }
-            return;
-        }
-
-        let rendered = render_system_prompt_context_blocks_joined(&new_appends);
-        if !rendered.is_empty() {
-            let next = match self.messages.first() {
-                Some(Message::System(sys)) if !sys.content.is_empty() => {
-                    format!("{}{}{}", sys.content, SYSTEM_CONTEXT_SEPARATOR, rendered)
+                if existing.content == content && identity.source == source {
+                    return Ok(crate::service::AppendSystemContextStatus::Duplicate);
                 }
-                _ => rendered,
-            };
-            if let Err(err) = self.set_system_prompt_with_source(
-                next,
-                session_durable_config_authority::SessionSystemPromptSource::RuntimeContextAppend,
-            ) {
-                tracing::warn!(
-                    error = %err,
-                    "generated session durable-config authority rejected system-context prompt append"
-                );
-                return;
-            }
-        }
-        self.append_peer_response_terminal_notices(&new_appends);
-        if let Err(err) = self.set_system_context_state(state) {
-            tracing::warn!(error = %err, "failed to persist applied system-context state");
-        }
-    }
-
-    /// Upgrade legacy rows that rendered typed terminal facts into the
-    /// leading system prompt before terminal facts became transcript notices.
-    ///
-    /// Exact typed records are the only authority for selecting blocks. The
-    /// old rendered blocks are removed through an audited transcript rewrite,
-    /// then missing notices are appended through the normal append path. This
-    /// produces valid persistence edges and preserves the applied/seen dedupe
-    /// records that now belong to the durable notice.
-    fn migrate_legacy_peer_terminal_context(
-        &mut self,
-        actor: Option<String>,
-    ) -> Result<bool, TranscriptEditError> {
-        let applied = self
-            .system_context_state()
-            .map(|state| state.applied)
-            .unwrap_or_default();
-        let terminal_appends = applied
-            .iter()
-            .filter(|append| append.peer_response_terminal.is_some())
-            .cloned()
-            .collect::<Vec<_>>();
-        if terminal_appends.is_empty() {
-            return Ok(false);
-        }
-
-        let mut migrated = false;
-        if let Some(Message::System(system)) = self.messages.first() {
-            let prior_base = self
-                .build_state()
-                .and_then(|state| state.assembled_system_prompt);
-            let (cleaned, removed) = remove_legacy_peer_terminal_system_tail(
-                &system.content,
-                prior_base.as_deref(),
-                &applied,
-                &terminal_appends,
-            );
-            if removed > 0 {
-                self.commit_resume_system_prompt_rewrite(cleaned, true, actor)?;
-                migrated = true;
-            }
-        }
-        migrated |= self.append_peer_response_terminal_notices(&terminal_appends) > 0;
-        Ok(migrated)
-    }
-
-    /// Reconcile a resumed session's persisted system prompt with a freshly
-    /// assembled base prompt.
-    ///
-    /// A resumed transcript is durable state: its leading [`Message::System`]
-    /// carries the base prompt PLUS every runtime system-context append the
-    /// runtime durably applied (comms rosters, host context — rendered by
-    /// [`Session::append_system_context_blocks`]). Blind-replacing that
-    /// message with a re-assembled base prompt discards the runtime-applied
-    /// context and produces a projection that is no longer a continuation of
-    /// the persisted transcript revision — the append-only save guard then
-    /// rejects the very first post-resume persist and the live session is
-    /// discarded (the upstream cold-restart transcript-loss report).
-    ///
-    /// Reconciliation instead of replacement:
-    /// - If the persisted System content IS the assembled base — identical, or
-    ///   extended only by [`SYSTEM_CONTEXT_SEPARATOR`]-joined runtime context
-    ///   appends — the transcript is left untouched (byte-for-byte, including
-    ///   the typed `mutation_kind`), so the resumed projection digests to the
-    ///   persisted revision.
-    /// - If the base differs ONLY inside caller-declared volatile spans
-    ///   ([`SYSTEM_PROMPT_VOLATILE_OPEN`] / [`SYSTEM_PROMPT_VOLATILE_CLOSE`]),
-    ///   the transcript is likewise left untouched and NO rewrite is minted;
-    ///   the fresh prompt is armed as a request-time overlay
-    ///   ([`Session::messages_for_model_boundary`]) so the model sees current
-    ///   volatile content while the audit graph records nothing (semantically
-    ///   nothing changed — 2026-07-29 resume-mint incident, ~127 rewrites per
-    ///   boot from a leading wall-clock timestamp).
-    /// - If the base genuinely changed, the new System message (new base plus
-    ///   the reconstructed runtime-append tail, when the persisted tail is
-    ///   verifiable from the durable applied-append records) is committed
-    ///   through [`Session::commit_transcript_rewrite`] — the canonical typed
-    ///   rewrite path — so the first post-resume persist proves a transcript
-    ///   graph edge from the persisted head instead of failing closed.
-    pub fn reconcile_resumed_system_prompt(
-        &mut self,
-        assembled_base: String,
-        actor: Option<String>,
-    ) -> Result<ResumedSystemPromptReconciliation, TranscriptEditError> {
-        // Any overlay armed by an earlier reconciliation of this in-memory
-        // session is stale relative to this rebuild; every outcome below
-        // either preserves the persisted bytes as-is or re-arms a fresh one.
-        self.volatile_prompt_overlay = None;
-        let migrated_terminal_context = self.migrate_legacy_peer_terminal_context(actor.clone())?;
-        let persisted = match self.messages.first() {
-            Some(Message::System(system)) => Some((system.content.clone(), system.mutation_kind)),
-            _ => None,
-        };
-
-        let Some((persisted_content, persisted_mutation_kind)) = persisted else {
-            if assembled_base.is_empty() {
-                return Ok(if migrated_terminal_context {
-                    ResumedSystemPromptReconciliation::RewrittenBase
-                } else {
-                    ResumedSystemPromptReconciliation::NoChange
+                return Err(SystemMessageAppendError::Conflict {
+                    key: key.to_string(),
+                    existing_text: existing.content.clone(),
+                    existing_source: identity.source.clone(),
                 });
             }
-            // The persisted transcript never had a system prompt; introducing
-            // one changes the transcript, so it flows through the same typed
-            // rewrite path (an insert rewrite over the empty leading span).
-            self.commit_resume_system_prompt_rewrite(assembled_base, false, actor)?;
-            return Ok(ResumedSystemPromptReconciliation::RewrittenBase);
-        };
+        }
 
-        if persisted_content == assembled_base {
-            return Ok(if migrated_terminal_context {
-                ResumedSystemPromptReconciliation::RewrittenBase
-            } else {
-                ResumedSystemPromptReconciliation::PreservedContinuation
+        let identity =
+            (source.is_some() || idempotency_key.is_some()).then_some(SystemMessageIdentity {
+                source,
+                idempotency_key,
             });
-        }
-
-        // Byte-exact reconciliation first: when the persisted content splits
-        // into a VERIFIED base + runtime-appended tail, the expected content
-        // for this build is `assembled_base + tail` — equal means the base is
-        // unchanged (preserve untouched), different means the base changed
-        // (audited rewrite that carries the tail). This runs before the
-        // structural fast path so a shortened base whose removed remainder
-        // merely looks like a context tail (the separator is ordinary
-        // markdown) is applied instead of silently ignored.
-        if let Some(tail) = self.verified_runtime_context_tail(&persisted_content) {
-            let expected = compose_system_prompt_with_context_tail(&assembled_base, &tail);
-            if expected == persisted_content {
-                return Ok(if migrated_terminal_context {
-                    ResumedSystemPromptReconciliation::RewrittenBase
-                } else {
-                    ResumedSystemPromptReconciliation::PreservedContinuation
-                });
-            }
-            // A base that changed only inside caller-declared volatile spans
-            // is semantically unchanged: arm the request-time overlay instead
-            // of minting a rewrite (the tail bytes are identical on both
-            // sides, so the projection comparison sees only the base spans).
-            if prompts_differ_only_in_declared_volatile_spans(&persisted_content, &expected) {
-                return Ok(self.preserve_volatile_only_prompt_refresh(
-                    persisted_content,
-                    expected,
-                    migrated_terminal_context,
-                ));
-            }
-            self.commit_resume_system_prompt_rewrite(expected, true, actor)?;
-            return Ok(ResumedSystemPromptReconciliation::RewrittenBase);
-        }
-
-        // No verifiable tail record (rows written before the assembled base
-        // was recorded, or applied-append state swept by the runtime path).
-        // The canonical SessionDocumentMachine persist-append admission
-        // decides — from the structural observations plus the typed mutation
-        // provenance — whether the persisted prompt is a runtime-context-
-        // append continuation of the assembled base. Machine refusal fails
-        // closed into the audited rewrite below.
-        if persisted_prompt_is_admitted_context_append_continuation(
-            &assembled_base,
-            &persisted_content,
-            persisted_mutation_kind,
-        ) {
-            return Ok(if migrated_terminal_context {
-                ResumedSystemPromptReconciliation::RewrittenBase
-            } else {
-                ResumedSystemPromptReconciliation::PreservedContinuation
-            });
-        }
-
-        // Volatile-only divergence with no reconstructible tail (rows whose
-        // recorded assembled base already drifted volatilely, or that never
-        // recorded one): still semantically unchanged, so arm the overlay
-        // instead of minting. A persisted prompt that carries an unverifiable
-        // context tail cannot compare volatile-equal (the tail bytes exist
-        // only on one side) and falls through to the rewrite, as today.
-        if prompts_differ_only_in_declared_volatile_spans(&persisted_content, &assembled_base) {
-            return Ok(self.preserve_volatile_only_prompt_refresh(
-                persisted_content,
-                assembled_base,
-                migrated_terminal_context,
-            ));
-        }
-
-        // The base diverged and the runtime-context tail is not
-        // reconstructible: only the new base can be written. Dropping the
-        // appended context silently would leave the durable applied/seen
-        // records claiming those appends are applied — keyed re-sends would
-        // be deduplicated forever — so clear the orphaned records to keep the
-        // context restorable by the host.
-        let dropping_applied_context = persisted_mutation_kind.is_runtime_context_append()
-            || self.system_context_state().is_some_and(|state| {
-                state
-                    .applied
-                    .iter()
-                    .any(|append| append.peer_response_terminal.is_none())
-            });
-        self.commit_resume_system_prompt_rewrite(assembled_base, true, actor)?;
-        if dropping_applied_context {
-            tracing::warn!(
-                session_id = %self.id,
-                "resume base-prompt refresh dropped an unverifiable runtime system-context tail; \
-                 clearing applied-append records so keyed re-sends can restore the context"
-            );
-            self.clear_applied_system_prompt_context_records();
-        }
-        Ok(ResumedSystemPromptReconciliation::RewrittenBase)
-    }
-
-    /// Arm the request-time volatile overlay for a resume whose rebuilt
-    /// prompt differs from the persisted one only inside caller-declared
-    /// volatile spans, leaving the transcript untouched (no revision minted).
-    ///
-    /// When a legacy terminal-context migration already committed a rewrite
-    /// in this reconciliation, the honest outcome remains `RewrittenBase` —
-    /// the overlay is still armed so the model sees fresh volatile content.
-    fn preserve_volatile_only_prompt_refresh(
-        &mut self,
-        persisted_prefix: String,
-        live_prefix: String,
-        migrated_terminal_context: bool,
-    ) -> ResumedSystemPromptReconciliation {
-        self.volatile_prompt_overlay = Some(Box::new(VolatilePromptOverlay {
-            persisted_prefix,
-            live_prefix,
+        self.push(Message::System(SystemMessage {
+            content,
+            created_at,
+            identity,
         }));
-        if migrated_terminal_context {
-            ResumedSystemPromptReconciliation::RewrittenBase
-        } else {
-            ResumedSystemPromptReconciliation::PreservedVolatileRefresh
-        }
+        Ok(crate::service::AppendSystemContextStatus::Applied)
     }
 
-    /// Messages as the model boundary must see them: the persisted transcript
-    /// with the leading System content substituted by the volatile-refresh
-    /// overlay, when one is armed and the persisted prompt still matches (or
-    /// extends, via runtime system-context appends) the content it was armed
-    /// against. A prompt mutated through any other seam after reconciliation
-    /// wins as-is — the overlay self-invalidates instead of clobbering it.
+    /// Clone the active ordered transcript for a model request.
     ///
-    /// The substitution is request-local only. The `Session` document — the
-    /// digest preimage and checkpoint-authority input — is never touched, so
-    /// persists of a volatile-refreshed resume stay byte-identical to the
-    /// persisted revision.
+    /// System messages are ordinary durable rows. No request-local System
+    /// message is synthesized or repositioned at this boundary.
     pub fn messages_for_model_boundary(&self) -> Vec<Message> {
-        let mut messages = self.messages().to_vec();
-        if let Some(overlay) = self.volatile_prompt_overlay.as_deref()
-            && let Some(Message::System(system)) = messages.first_mut()
-            && let Some(refreshed) = overlay.refreshed_content(&system.content)
-        {
-            system.content = refreshed;
-        }
-        messages
-    }
-
-    /// Split the persisted System content into a VERIFIED runtime-appended
-    /// tail (leading [`SYSTEM_CONTEXT_SEPARATOR`] included; empty when the
-    /// content is exactly a verified base).
-    ///
-    /// Verification sources, strongest first: byte-exact against the prior
-    /// build's recorded assembled base
-    /// ([`SessionBuildState::assembled_system_prompt`]), then a re-render of
-    /// the durable applied-append records. `None` means the tail is not
-    /// reconstructible from durable facts.
-    fn verified_runtime_context_tail(&self, persisted_content: &str) -> Option<String> {
-        if let Some(prior_base) = self
-            .build_state()
-            .and_then(|state| state.assembled_system_prompt)
-        {
-            if persisted_content == prior_base {
-                return Some(String::new());
-            }
-            if let Some(appended) = persisted_content.strip_prefix(prior_base.as_str())
-                && appended.starts_with(SYSTEM_CONTEXT_SEPARATOR)
-            {
-                return Some(appended.to_string());
-            }
-            // The record does not split this content (e.g. it predates the
-            // last prompt mutation); fall through to the render verification.
-        }
-        let rendered_tail = self
-            .system_context_state()
-            .map(|state| render_system_prompt_context_blocks_joined(&state.applied))
-            .unwrap_or_default();
-        if rendered_tail.is_empty() {
-            return None;
-        }
-        if persisted_content == rendered_tail {
-            // The entire persisted prompt is verified runtime context (a
-            // promptless/empty-base build whose appends compose without a
-            // separator prefix) — the tail is the whole content, not empty.
-            return Some(format!("{SYSTEM_CONTEXT_SEPARATOR}{rendered_tail}"));
-        }
-        let with_separator = format!("{SYSTEM_CONTEXT_SEPARATOR}{rendered_tail}");
-        persisted_content
-            .ends_with(&with_separator)
-            .then_some(with_separator)
-    }
-
-    /// Commit a resume-time base-prompt refresh through the generated
-    /// durable-config authority and the canonical typed rewrite path.
-    fn commit_resume_system_prompt_rewrite(
-        &mut self,
-        content: String,
-        replacing_existing: bool,
-        actor: Option<String>,
-    ) -> Result<(), TranscriptEditError> {
-        let authorized = session_durable_config_authority::authorize_system_prompt_mutation(
-            content,
-            session_durable_config_authority::SessionSystemPromptSource::ExplicitBuild,
-            replacing_existing,
-        )
-        .map_err(|err| {
-            TranscriptEditError::HistoryStateMalformed(format!(
-                "generated session durable-config authority rejected resume system prompt refresh: {err}"
-            ))
-        })?;
-        let mutation_kind = authorized.mutation_kind();
-        let (content, _replacing_existing) = authorized.into_parts();
-        let replacement = Message::System(crate::types::SystemMessage::with_mutation_kind(
-            content,
-            mutation_kind,
-        ));
-        let end = usize::from(replacing_existing);
-        self.commit_transcript_rewrite(
-            TranscriptRewriteSelection::MessageRange { start: 0, end },
-            vec![replacement],
-            TranscriptRewriteReason::new(RESUME_SYSTEM_PROMPT_REFRESH_REWRITE_REASON),
-            actor,
-            None,
-        )?;
-        Ok(())
-    }
-
-    /// Clear applied-append records (and their idempotency keys) after a
-    /// resume rewrite dropped their rendered blocks from the System prompt,
-    /// so the same keyed appends re-apply instead of deduplicating forever.
-    fn clear_applied_system_prompt_context_records(&mut self) {
-        let mut state = match self.try_system_context_state() {
-            Ok(Some(state)) => state,
-            Ok(None) => return,
-            Err(error) => {
-                tracing::warn!(
-                    session_id = %self.id,
-                    error = %error,
-                    "failed to read system-context state while clearing orphaned applied records"
-                );
-                return;
-            }
-        };
-        if !state
-            .applied
-            .iter()
-            .any(|append| append.peer_response_terminal.is_none())
-        {
-            return;
-        }
-        let dropped_keys: Vec<String> = state
-            .applied
-            .iter()
-            .filter(|append| append.peer_response_terminal.is_none())
-            .filter_map(|append| append.idempotency_key.clone())
-            .collect();
-        state
-            .applied
-            .retain(|append| append.peer_response_terminal.is_some());
-        let retained_keys: BTreeSet<&str> = state
-            .applied
-            .iter()
-            .filter_map(|append| append.idempotency_key.as_deref())
-            .collect();
-        for key in &dropped_keys {
-            if !retained_keys.contains(key.as_str()) {
-                state.seen.remove(key);
-            }
-        }
-        if let Err(error) = self.set_system_context_state(state) {
-            tracing::warn!(
-                session_id = %self.id,
-                error = %error,
-                "failed to persist cleared applied system-context records after resume prompt refresh"
-            );
-        }
+        self.messages().to_vec()
     }
 
     /// Get the last assistant message text content.
@@ -6048,362 +3816,234 @@ impl Session {
             .sum()
     }
 
-    /// Get metadata
+    /// Get non-component session metadata.
+    ///
+    /// Typed realtime/system-context reducer projections are intentionally not
+    /// exposed through this raw map. WholeBlob serialization materializes its
+    /// compatibility projection separately; HeadCanonical binds typed
+    /// component roots.
     pub fn metadata(&self) -> &serde_json::Map<String, serde_json::Value> {
         &self.metadata
     }
 
-    /// Memoized witness of the current transcript-history graph under one
-    /// witness format.
-    ///
-    /// `None` means "not derived yet in this session instance", never
-    /// "absent": the caller derives and records it. Cleared by every write to
-    /// [`SESSION_TRANSCRIPT_HISTORY_STATE_KEY`].
-    pub(crate) fn cached_transcript_history_witness(&self, format: u32) -> Option<&str> {
-        self.history_caches
-            .witness
-            .slot(format)?
-            .get()
-            .map(String::as_str)
-    }
-
-    /// Whether this exact in-memory document was already PROVED to carry
-    /// `digest` (per-session seal, never a process-global map). `false`
-    /// means "not proved on this instance": the caller re-verifies.
-    pub(crate) fn checkpoint_digest_seal_matches(
+    /// Borrow the accumulated projection for explicit WholeBlob compatibility
+    /// encoding. HeadCanonical code must use the compact component prefix.
+    pub(crate) fn whole_blob_realtime_transcript_state(
         &self,
-        digest: &crate::checkpoint::SessionCheckpointDigest,
-    ) -> bool {
-        self.history_caches
-            .verified_checkpoint_digest
-            .get()
-            .is_some_and(|sealed| sealed == digest.as_str())
+    ) -> Option<&SessionRealtimeTranscriptState> {
+        self.realtime_transcript.whole_blob_projection()
     }
 
-    /// Seal the canonical checkpoint digest just proved against this exact
-    /// in-memory document. Every content mutation clears the seal.
-    pub(crate) fn seal_verified_checkpoint_digest(
+    /// Inject the accumulated realtime projection into a WholeBlob metadata
+    /// map. HeadCanonical digest/head builders must not call this: they bind
+    /// the compact event prefix directly and never materialize this value.
+    pub(crate) fn inject_realtime_whole_blob_projection(
         &self,
-        digest: &crate::checkpoint::SessionCheckpointDigest,
-    ) {
-        let _ = self
-            .history_caches
-            .verified_checkpoint_digest
-            .set(digest.as_str().to_string());
-    }
-
-    fn clear_checkpoint_digest_seal(&mut self) {
-        self.history_caches.verified_checkpoint_digest = std::sync::OnceLock::new();
-    }
-
-    /// Record the witness derived from the CURRENT history value under one
-    /// witness format. Unknown formats are never memoized (they refuse at
-    /// the typed carrier gate before any derivation).
-    pub(crate) fn record_transcript_history_witness(&self, format: u32, witness: &str) {
-        if let Some(slot) = self.history_caches.witness.slot(format) {
-            let _ = slot.set(witness.to_string());
-        }
-    }
-
-    /// Assemble the transcript-history checkpoint witness incrementally:
-    /// byte-identical to `canonical_value_digest(canonicalize_checkpoint_
-    /// history_value(history))`, served as ONE raw SHA-256 pass over cached
-    /// canonical segments instead of a clone + parse + canonicalize + write
-    /// pass over the whole graph.
-    ///
-    /// `None` on any structural surprise — the caller falls back to the full
-    /// canonicalization path, which is also where malformed graphs get their
-    /// typed errors. Only graphs installed by an in-process typed path
-    /// (`Validated`) are assembled, so the legacy heal/reconstruction steps
-    /// the full parse performs are known no-ops for every assembled graph.
-    ///
-    /// The irreducible residual is the hash itself: the canonical form
-    /// interleaves the per-append-changing `head` BEFORE the retained bodies
-    /// (`commits` < `head` < `revisions`), and SHA-256 is sequential, so any
-    /// head change forces re-hashing every byte after it. Removing that pass
-    /// requires a digest-format change and is out of phase-1 scope.
-    pub(crate) fn assemble_transcript_history_witness(
-        &self,
-        history: &serde_json::Value,
-    ) -> Option<crate::checkpoint::SessionCheckpointDigest> {
-        use sha2::Digest as _;
-        let _digest_site =
-            crate::checkpoint::enter_digest_site(crate::checkpoint::DIGEST_SITE_WITNESS);
-        if self.transcript_history_metadata_validation
-            != TranscriptHistoryMetadataValidation::Validated
-        {
-            return None;
-        }
-        let object = history.as_object()?;
-        let head = object.get("head")?.as_str()?;
-        let commits_value = object.get("commits")?;
-        let commits_array = commits_value.as_array()?;
-        let revisions = object.get("revisions")?.as_array()?;
-
-        // Retained bodies come from the session's own parsed graph, not from
-        // the raw entries: the durable revision chain stores everything after
-        // the anchor as an inverse splice, so a raw entry has no message
-        // vector of its own. `history` IS the metadata value this cache is
-        // paired with (the shared parse is cleared by every write to the same
-        // key), and the per-index revision cross-check below refuses to
-        // assemble if the two ever disagree — a `None` there costs only the
-        // full canonicalization fall-back.
-        let graph = self.transcript_history_state_shared().ok()??;
-        if graph.head != head || graph.revisions.len() != revisions.len() {
-            return None;
-        }
-
-        let commits_last = match commits_array.last() {
-            Some(commit) => commit.get("revision")?.as_str()?.to_string(),
-            None => String::new(),
-        };
-        let mut cache = self.history_caches.assembly.locked();
-        let commits_bytes = match &cache.commits {
-            Some((count, last, bytes))
-                if *count == commits_array.len() && *last == commits_last =>
-            {
-                std::sync::Arc::clone(bytes)
-            }
-            _ => {
-                let typed: Vec<TranscriptRewriteCommit> =
-                    serde_json::from_value(commits_value.clone()).ok()?;
-                let value = serde_json::to_value(&typed).ok()?;
-                let mut bytes = Vec::new();
-                crate::checkpoint::write_canonical_json(&value, &mut bytes).ok()?;
-                let bytes: std::sync::Arc<[u8]> = bytes.into();
-                cache.commits = Some((
-                    commits_array.len(),
-                    commits_last,
-                    std::sync::Arc::clone(&bytes),
-                ));
-                bytes
-            }
-        };
-
-        // (revision, chunk) pairs; `None` bytes = the live head body, which
-        // streams from the accumulator's retained sorted transcript bytes.
-        let mut chunks: Vec<(&str, Option<std::sync::Arc<[u8]>>)> =
-            Vec::with_capacity(revisions.len());
-        for (body_value, body) in revisions.iter().zip(graph.revisions.iter()) {
-            let revision = body_value.get("revision")?.as_str()?;
-            if revision != body.revision {
-                return None;
-            }
-            if revision == head {
-                if body.messages.len() != self.messages.len() {
-                    return None;
-                }
-                chunks.push((revision, None));
-                continue;
-            }
-            let bytes = match cache.bodies.get(revision) {
-                Some(bytes) => std::sync::Arc::clone(bytes),
-                None => {
-                    let bytes = canonical_history_body_chunk(body)?;
-                    let bytes: std::sync::Arc<[u8]> = bytes.into();
-                    cache
-                        .bodies
-                        .insert(revision.to_string(), std::sync::Arc::clone(&bytes));
-                    bytes
-                }
-            };
-            chunks.push((revision, Some(bytes)));
-        }
-        // Bound the cache to bodies the current graph retains.
-        if cache.bodies.len() > revisions.len() {
-            let live = revisions
-                .iter()
-                .filter_map(|body| body.get("revision").and_then(serde_json::Value::as_str))
-                .collect::<std::collections::HashSet<_>>();
-            cache
-                .bodies
-                .retain(|revision, _| live.contains(revision.as_str()));
-        }
-        drop(cache);
-
-        // Stable sort by revision string: exactly the ordering
-        // `canonicalize_checkpoint_history_value` applies to the array.
-        chunks.sort_by(|left, right| left.0.cmp(right.0));
-
-        let mut hasher = Sha256::new();
-        let mut hashed_bytes = 0u64;
-        let mut absorb = |hasher: &mut Sha256, bytes: &[u8]| {
-            hashed_bytes += bytes.len() as u64;
-            hasher.update(bytes);
-        };
-        absorb(&mut hasher, b"{\"commits\":");
-        absorb(&mut hasher, &commits_bytes);
-        absorb(&mut hasher, b",\"head\":");
-        absorb(&mut hasher, serde_json::to_string(head).ok()?.as_bytes());
-        absorb(&mut hasher, b",\"revisions\":[");
-        for (index, (revision, bytes)) in chunks.iter().enumerate() {
-            if index > 0 {
-                absorb(&mut hasher, b",");
-            }
-            match bytes {
-                Some(bytes) => absorb(&mut hasher, bytes),
-                None => {
-                    absorb(&mut hasher, b"{\"messages\":");
-                    if !self.messages.hash_sorted_canonical_into(&mut hasher) {
-                        return None;
-                    }
-                    absorb(&mut hasher, b",\"revision\":");
-                    absorb(
-                        &mut hasher,
-                        serde_json::to_string(revision).ok()?.as_bytes(),
-                    );
-                    absorb(&mut hasher, b"}");
-                }
-            }
-        }
-        absorb(&mut hasher, b"]}");
-        // One whole-graph hash pass: counted as one budget pass with the
-        // bytes it actually hashed (the sorted-stream bytes count inside
-        // `hash_sorted_canonical_into`).
-        crate::checkpoint::record_content_digest_computation();
-        crate::checkpoint::record_content_digest_bytes(hashed_bytes);
-        let digest = crate::checkpoint::SessionCheckpointDigest::from_assembled(format!(
-            "sha256:{:x}",
-            hasher.finalize()
-        ));
-
-        if digest_accumulator_take_verification_sample() {
-            let recomputed =
-                crate::checkpoint::session_checkpoint_history_digest_uncounted(history).ok()?;
-            assert_eq!(
-                digest, recomputed,
-                "incremental history-witness assembly diverged from the canonical \
-                 derivation: a cached segment or the sorted transcript stream is \
-                 stale, or a keying assumption (content-addressed bodies, \
-                 append-only commits) was violated"
+        metadata: &mut serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), serde_json::Error> {
+        if let Some(projection) = self.whole_blob_realtime_transcript_state() {
+            metadata.insert(
+                SESSION_REALTIME_TRANSCRIPT_STATE_KEY.to_string(),
+                serde_json::to_value(projection)?,
             );
         }
-        Some(digest)
+        Ok(())
+    }
+
+    /// Current authenticated realtime component-event prefix, including every
+    /// event staged since the last durable acknowledgement.
+    pub(crate) fn realtime_component_event_prefix(
+        &self,
+    ) -> Result<crate::ComponentEventPrefixAuthority, RealtimeTranscriptSidecarError> {
+        self.realtime_transcript.successor_prefix()
+    }
+
+    /// Durable predecessor from which the pending realtime suffix extends.
+    pub(crate) fn realtime_component_event_acknowledged_prefix(
+        &self,
+    ) -> &crate::ComponentEventPrefixAuthority {
+        self.realtime_transcript.acknowledged_prefix()
+    }
+
+    /// Convert the inline WholeBlob realtime projection into one parked
+    /// HeadCanonical snapshot event.
+    ///
+    /// This is an explicit store-activation seam, not an ordinary mutation
+    /// fallback. Callers must persist the resulting component suffix and
+    /// rebound schema-v4 head in one transaction.
+    #[doc(hidden)]
+    pub fn activate_realtime_component_sidecar(
+        &mut self,
+    ) -> Result<(), RealtimeTranscriptSidecarError> {
+        let Some(value) = self.metadata.get(SESSION_REALTIME_TRANSCRIPT_STATE_KEY) else {
+            // WholeBlob deserialization already parks the activation snapshot,
+            // while new sessions legitimately begin with an empty prefix.
+            return Ok(());
+        };
+        if !self.realtime_transcript.is_pristine() {
+            return Err(RealtimeTranscriptSidecarError::Incoherent(
+                "inline realtime projection cannot replace an active component sidecar".to_string(),
+            ));
+        }
+        let state = serde_json::from_value(value.clone())?;
+        let projection =
+            SessionRealtimeTranscriptProjection::from_inline_snapshot(&self.id, state)?;
+        self.metadata.remove(SESSION_REALTIME_TRANSCRIPT_STATE_KEY);
+        self.realtime_transcript = Box::new(projection);
+        Ok(())
+    }
+
+    /// Seal the exact realtime event suffix pending at this boundary.
+    /// Seal the parked realtime activation/ordinary suffix for an atomic
+    /// HeadCanonical store transaction.
+    #[doc(hidden)]
+    pub fn prepare_realtime_component_event_suffix(
+        &self,
+    ) -> Result<Option<crate::PreparedComponentEventSuffix>, RealtimeTranscriptSidecarError> {
+        self.realtime_transcript.prepare_suffix()
+    }
+
+    /// Install a store-verified complete realtime sidecar projection.
+    pub(crate) fn install_verified_realtime_component_sequence(
+        &mut self,
+        sequence: &crate::VerifiedComponentEventSequence,
+    ) -> Result<(), RealtimeTranscriptSidecarError> {
+        self.realtime_transcript = Box::new(
+            SessionRealtimeTranscriptProjection::from_verified_sequence(&self.id, sequence)?,
+        );
+        Ok(())
+    }
+
+    /// Adopt the exact prepared realtime prefix after the writing transaction
+    /// acknowledges that same successor.
+    pub(crate) fn acknowledge_realtime_component_event_suffix(
+        &mut self,
+        prepared: &crate::PreparedComponentEventSuffix,
+        committed: &crate::ComponentEventPrefixAuthority,
+    ) -> Result<(), RealtimeTranscriptSidecarError> {
+        self.realtime_transcript
+            .acknowledge_suffix(prepared, committed)
+    }
+
+    pub(crate) fn head_canonical_metadata_projection(
+        &self,
+    ) -> Result<Arc<SessionHeadMetadataProjection>, serde_json::Error> {
+        self.history_caches
+            .head_canonical_metadata
+            .projection(&self.metadata)
+            .map_err(<serde_json::Error as serde::ser::Error>::custom)
+    }
+
+    pub(crate) fn install_head_canonical_metadata_projection(
+        &mut self,
+        projection: &Arc<SessionHeadMetadataProjection>,
+    ) -> Result<(), String> {
+        self.history_caches
+            .head_canonical_metadata
+            .install_snapshot(projection)
+    }
+
+    pub(crate) fn acknowledge_head_canonical_metadata_projection(
+        &mut self,
+        projection: &Arc<SessionHeadMetadataProjection>,
+    ) -> Result<(), String> {
+        self.history_caches
+            .head_canonical_metadata
+            .acknowledge(projection, &self.metadata)
+    }
+
+    pub(crate) fn validate_head_canonical_metadata_acknowledgement(
+        &self,
+        projection: &Arc<SessionHeadMetadataProjection>,
+    ) -> Result<(), String> {
+        self.history_caches
+            .head_canonical_metadata
+            .validate_acknowledgement(projection, &self.metadata)
+    }
+
+    fn mark_head_canonical_metadata_key_mutated(&mut self, key: &str) {
+        self.history_caches
+            .head_canonical_metadata
+            .mark_key_mutated(key);
+    }
+
+    fn adopt_head_canonical_metadata_baseline_from(&mut self, source: &Session) {
+        self.history_caches.head_canonical_metadata =
+            source.history_caches.head_canonical_metadata.clone();
     }
 
     fn set_metadata_unchecked(&mut self, key: &str, value: serde_json::Value) {
         // Reapplying an identical durable projection is not a session-content
-        // mutation. In particular, cold materialization restores the sealed
+        // mutation. In particular, cold materialization restores
         // SessionMetadata and SessionBuildState before it knows whether the
         // values changed; advancing `updated_at` for an exact no-op would
-        // rotate the checkpoint digest and manufacture a sibling checkpoint
-        // even though the committed document is unchanged.
+        // manufacture a content change even though the committed document is
+        // unchanged.
         if self.metadata.get(key) == Some(&value) {
             return;
         }
+        self.mark_head_canonical_metadata_key_mutated(key);
         self.metadata.insert(key.to_string(), value);
         if key == SESSION_TRANSCRIPT_HISTORY_STATE_KEY {
             self.metadata
-                .remove(SESSION_TRANSCRIPT_HISTORY_CHECKPOINT_DIGEST_KEY);
-            self.history_caches.witness = SessionWitnessMemo::default();
+                .remove(SESSION_TRANSCRIPT_REWRITE_PREFIX_AUTHORITY_KEY);
             self.history_caches.shared_state.clear();
-            // An UNCHECKED graph install can substitute a different lineage
-            // entirely, and a cursor established against the graph this one
-            // replaced describes nothing here. Drop it rather than let the next
-            // write stamp it onto a stranger.
-            self.history_caches.replay_cursor_hint.clear();
             self.transcript_history_metadata_validation =
                 TranscriptHistoryMetadataValidation::RequiresValidation;
         }
         self.mark_content_mutated(SystemTime::now());
     }
 
-    /// Install transcript history that was produced by a typed path which
-    /// already validated and compacted the graph.
-    fn set_validated_transcript_history_metadata(&mut self, value: serde_json::Value) {
+    /// Install a graph a typed path already validated as the singular
+    /// in-memory authority.
+    ///
+    /// The serialized graph and rewrite-prefix projection are absent from
+    /// ordinary metadata. WholeBlob encoding synthesizes them at the explicit
+    /// wire boundary; HeadCanonical consumes this shared typed state directly.
+    fn install_validated_transcript_history_state(
+        &mut self,
+        state: TranscriptHistoryState,
+    ) -> Result<(), serde_json::Error> {
+        let state = std::sync::Arc::new(state);
+        let unchanged = self
+            .history_caches
+            .shared_state
+            .get()
+            .is_some_and(|current| {
+                current.graph_prefix() == state.graph_prefix()
+                    && current.rewrite_prefix() == state.rewrite_prefix()
+                    && current.head() == state.head()
+            });
+        self.metadata.remove(SESSION_TRANSCRIPT_HISTORY_STATE_KEY);
         self.metadata
-            .insert(SESSION_TRANSCRIPT_HISTORY_STATE_KEY.to_string(), value);
-        self.metadata
-            .remove(SESSION_TRANSCRIPT_HISTORY_CHECKPOINT_DIGEST_KEY);
-        self.history_caches.witness = SessionWitnessMemo::default();
-        self.history_caches.shared_state.clear();
+            .remove(SESSION_TRANSCRIPT_REWRITE_PREFIX_AUTHORITY_KEY);
+        if unchanged {
+            self.history_caches.shared_state.set(state);
+            self.transcript_history_metadata_validation =
+                TranscriptHistoryMetadataValidation::Validated;
+            return Ok(());
+        }
+        self.history_caches.shared_state.set(state);
         self.transcript_history_metadata_validation =
             TranscriptHistoryMetadataValidation::Validated;
         self.mark_content_mutated(SystemTime::now());
-    }
-
-    /// [`Self::set_validated_transcript_history_metadata`] when the caller
-    /// also holds the typed state it just serialized: caches the parsed form
-    /// so guards and the next append refresh skip the O(graph) reparse, and
-    /// seeds the validated decode memo so the next decode of these exact
-    /// persisted bytes substitutes the proven graph instead of re-validating
-    /// it (memoizing is strictly less consequential than the persist this
-    /// value is headed for). Sizing comes from the already-built `value`;
-    /// the estimate feeds a memory budget only.
-    fn set_validated_transcript_history_metadata_with_state(
-        &mut self,
-        value: serde_json::Value,
-        state: std::sync::Arc<TranscriptHistoryState>,
-    ) {
-        let approx_bytes = approximate_json_bytes(&value);
-        self.set_validated_transcript_history_metadata(value);
-        self.history_caches
-            .shared_state
-            .set(std::sync::Arc::clone(&state));
-        record_producer_validated_transcript_graph(state, approx_bytes);
-    }
-
-    /// Install a graph a typed path already validated, stamping this load's
-    /// replay cursor onto it on the way out.
-    ///
-    /// The single sink for typed graph writes, so the cursor cannot be lost by
-    /// a caller that forgot it, and the typed value cached here always agrees
-    /// with the bytes persisted from it — the field is stamped BEFORE the one
-    /// serialization, never patched into the JSON afterwards.
-    fn install_validated_transcript_history_state(
-        &mut self,
-        mut state: TranscriptHistoryState,
-    ) -> Result<(), serde_json::Error> {
-        state.replay_cursor = Self::higher_replay_cursor(
-            state.replay_cursor.take(),
-            self.history_caches.replay_cursor_hint.get(),
-        );
-        let state = std::sync::Arc::new(state);
-        let value = serde_json::to_value(state.as_ref())?;
-        self.set_validated_transcript_history_metadata_with_state(value, state);
         Ok(())
     }
 
-    /// The further-along of two cursors, so a graph write can only ever move
-    /// the durable position forward.
-    fn higher_replay_cursor(
-        carried: Option<TranscriptReplayCursor>,
-        hint: Option<TranscriptReplayCursor>,
-    ) -> Option<TranscriptReplayCursor> {
-        match (carried, hint) {
-            (Some(carried), Some(hint)) => Some(if hint.seq > carried.seq {
-                hint
-            } else {
-                carried
-            }),
-            (carried, hint) => carried.or(hint),
-        }
-    }
-
-    /// How far the append-only rewrite log has already been folded into this
-    /// session's durable graph.
-    ///
-    /// Read straight off the metadata value rather than the typed graph: this
-    /// runs on every authoritative load, and parsing the graph to learn where
-    /// to start reading would cost more than the read it saves.
+    /// Small rewrite-prefix fact for receipt comparison.
     #[must_use]
-    pub fn transcript_replay_cursor(&self) -> Option<TranscriptReplayCursor> {
+    pub fn transcript_rewrite_prefix_authority(
+        &self,
+    ) -> Option<TranscriptRewritePrefixAccumulator> {
+        if let Some(state) = self.history_caches.shared_state.get() {
+            return Some(state.rewrite_prefix().clone());
+        }
         serde_json::from_value(
             self.metadata
-                .get(SESSION_TRANSCRIPT_HISTORY_STATE_KEY)?
-                .get("replay_cursor")?
+                .get(SESSION_TRANSCRIPT_REWRITE_PREFIX_AUTHORITY_KEY)?
                 .clone(),
         )
         .ok()
-    }
-
-    /// Park a replay cursor for the next graph write; see [`ReplayCursorHint`].
-    ///
-    /// Callers must have established BOTH coverage directions in the same load.
-    /// Recording nothing is always safe, so every doubtful case should simply
-    /// not call this.
-    pub fn record_transcript_replay_cursor(&self, cursor: TranscriptReplayCursor) {
-        self.history_caches.replay_cursor_hint.set(cursor);
     }
 
     #[cfg(test)]
@@ -6421,18 +4061,17 @@ impl Session {
         let removed = self.metadata.remove(key).is_some();
         let mut changed = removed;
         if key == SESSION_TRANSCRIPT_HISTORY_STATE_KEY {
+            changed |= self.history_caches.shared_state.get().is_some();
             changed |= self
                 .metadata
-                .remove(SESSION_TRANSCRIPT_HISTORY_CHECKPOINT_DIGEST_KEY)
+                .remove(SESSION_TRANSCRIPT_REWRITE_PREFIX_AUTHORITY_KEY)
                 .is_some();
-            self.history_caches.witness = SessionWitnessMemo::default();
             self.history_caches.shared_state.clear();
-            // The graph this cursor described is gone.
-            self.history_caches.replay_cursor_hint.clear();
             self.transcript_history_metadata_validation =
                 TranscriptHistoryMetadataValidation::Validated;
         }
         if changed {
+            self.mark_head_canonical_metadata_key_mutated(key);
             self.mark_content_mutated(SystemTime::now());
         }
     }
@@ -6477,10 +4116,7 @@ impl Session {
             false
         } else {
             self.metadata.insert(key.to_string(), value);
-            // Content mutation that deliberately does not advance
-            // `updated_at`: the checkpoint-digest seal must be cleared
-            // explicitly.
-            self.clear_checkpoint_digest_seal();
+            self.mark_head_canonical_metadata_key_mutated(key);
             true
         }
     }
@@ -6495,6 +4131,7 @@ impl Session {
             return;
         }
         if self.metadata.remove(key).is_some() {
+            self.mark_head_canonical_metadata_key_mutated(key);
             self.mark_content_mutated(SystemTime::now());
         }
     }
@@ -6527,44 +4164,6 @@ impl Session {
     /// Try to load SessionMetadata through generated restore authority.
     pub fn try_session_metadata(&self) -> Result<Option<SessionMetadata>, serde_json::Error> {
         try_session_metadata_from_map(&self.metadata)
-    }
-
-    /// Store durable system-context control state in the session metadata map.
-    pub fn set_system_context_state(
-        &mut self,
-        state: SessionSystemContextState,
-    ) -> Result<(), serde_json::Error> {
-        let state = system_context_authority::restore_system_context_state(state)
-            .map_err(<serde_json::Error as serde::ser::Error>::custom)?;
-        let value = serde_json::to_value(state)?;
-        self.set_metadata_unchecked(SESSION_SYSTEM_CONTEXT_STATE_KEY, value);
-        Ok(())
-    }
-
-    /// Try to load durable system-context control state through generated restore authority.
-    pub fn try_system_context_state(
-        &self,
-    ) -> Result<Option<SessionSystemContextState>, serde_json::Error> {
-        self.metadata
-            .get(SESSION_SYSTEM_CONTEXT_STATE_KEY)
-            .map(|value| {
-                let state = serde_json::from_value(value.clone())?;
-                system_context_authority::restore_system_context_state(state)
-                    .map_err(<serde_json::Error as serde::de::Error>::custom)
-            })
-            .transpose()
-    }
-
-    /// Load durable system-context control state from the session metadata map.
-    ///
-    /// Rejected durable facts fail closed through the generated restore
-    /// authority. Callers that need the typed rejection must use
-    /// [`Self::try_system_context_state`].
-    pub fn system_context_state(&self) -> Option<SessionSystemContextState> {
-        match self.try_system_context_state() {
-            Ok(state) => state,
-            Err(err) => fail_closed_generated_restore("system-context", err),
-        }
     }
 
     /// Store durable deferred-turn control state in the session metadata map.
@@ -6929,6 +4528,9 @@ impl Session {
     pub fn transcript_history_state(
         &self,
     ) -> Result<Option<TranscriptHistoryState>, serde_json::Error> {
+        if let Some(state) = self.history_caches.shared_state.get() {
+            return Ok(Some(state.as_ref().clone()));
+        }
         self.metadata
             .get(SESSION_TRANSCRIPT_HISTORY_STATE_KEY)
             .map(|value| serde_json::from_value(value.clone()))
@@ -6985,7 +4587,10 @@ impl Session {
                 state,
             )));
         }
-        ValidatedTranscriptHistory::seal(state).map(Some)
+        Err(TranscriptEditError::HistoryStateMalformed(
+            "transcript-history graph has structural bytes but no verified materialization or construction authority"
+                .to_string(),
+        ))
     }
 
     /// This session's transcript graph, but ONLY when the session's own marker
@@ -7010,29 +4615,30 @@ impl Session {
             .map(ValidatedTranscriptHistory::adopt_session_validated))
     }
 
-    /// Return the already-validated transcript graph head without cloning and
-    /// deserializing the full history document again.
+    /// Prove that `state.head` is either the exact live transcript revision or
+    /// a content-addressed prefix ancestor of the live transcript.
     ///
-    /// Store guards use this after typed Session deserialization when they
-    /// only need to prove live-message/head coherence. Unchecked metadata
-    /// still crosses the full graph validator before the borrowed head can be
-    /// observed.
-    pub(crate) fn validated_transcript_history_head(
+    /// `state` must already have crossed graph validation: that proof binds the
+    /// retained head body's messages to `state.head`. The remaining relation is
+    /// therefore one prefix digest over the live buffer. Warm append paths serve
+    /// it from the retained boundary witness; cold/replay callers may pay one
+    /// fail-closed prefix derivation.
+    pub(crate) fn live_transcript_extends_history_head(
         &self,
-    ) -> Result<Option<&str>, TranscriptEditError> {
-        self.validate_transcript_history_state()?;
-        let Some(value) = self.metadata.get(SESSION_TRANSCRIPT_HISTORY_STATE_KEY) else {
-            return Ok(None);
-        };
-        value
-            .get("head")
-            .and_then(serde_json::Value::as_str)
-            .map(Some)
-            .ok_or_else(|| {
-                TranscriptEditError::HistoryStateMalformed(
-                    "validated transcript history metadata omitted a string head".to_string(),
-                )
-            })
+        state: &TranscriptHistoryState,
+        _live_revision: &str,
+    ) -> Result<bool, TranscriptEditError> {
+        let current_count = u64::try_from(self.messages.len()).map_err(|_| {
+            TranscriptEditError::HistoryStateMalformed(
+                "live transcript row count exceeds u64".to_string(),
+            )
+        })?;
+        let endpoint = state.final_endpoint_witness().ok_or_else(|| {
+            TranscriptEditError::HistoryStateMalformed(
+                "compact transcript graph has no final endpoint witness".to_string(),
+            )
+        })?;
+        Ok(self.exact_message_row_lineage_extends(endpoint.row_prefix(), current_count))
     }
 
     /// Load exact compaction projection intents carried to the runtime's
@@ -7057,17 +4663,13 @@ impl Session {
     pub fn validated_compaction_projection_intents(
         &self,
     ) -> Result<Vec<crate::memory::CompactionProjectionIntent>, serde_json::Error> {
-        self.validate_transcript_history_state()
-            .map_err(|error| <serde_json::Error as serde::ser::Error>::custom(error.to_string()))?;
         let intents = self.compaction_projection_intents()?;
         if intents.is_empty() {
             return Ok(intents);
         }
-        let history = self.transcript_history_state()?;
-        let commits = history
-            .as_ref()
-            .map(|history| history.commits.as_slice())
-            .unwrap_or_default();
+        let history = self
+            .validated_transcript_history_state()
+            .map_err(|error| <serde_json::Error as serde::ser::Error>::custom(error.to_string()))?;
         let mut unique = std::collections::HashSet::new();
         for intent in &intents {
             if intent.projection.session_id() != self.id() {
@@ -7080,10 +4682,12 @@ impl Session {
                     "compaction projection outbox contains a duplicate rewrite identity",
                 ));
             }
-            let backed = commits.iter().any(|commit| {
-                intent
-                    .projection
-                    .matches_transcript_rewrite(self.id(), commit)
+            let backed = history.as_ref().is_some_and(|history| {
+                history.commits().any(|commit| {
+                    intent
+                        .projection
+                        .matches_transcript_rewrite(self.id(), commit)
+                })
             });
             if !backed {
                 return Err(<serde_json::Error as serde::ser::Error>::custom(format!(
@@ -7106,14 +4710,15 @@ impl Session {
                 "compaction projection intent session does not match snapshot session",
             ));
         }
-        self.validate_transcript_history_state()
-            .map_err(|error| <serde_json::Error as serde::ser::Error>::custom(error.to_string()))?;
-        let history = self.transcript_history_state()?.ok_or_else(|| {
-            <serde_json::Error as serde::ser::Error>::custom(
-                "compaction projection intent requires transcript history state",
-            )
-        })?;
-        let owns_commit = history.commits.iter().any(|commit| {
+        let history = self
+            .validated_transcript_history_state()
+            .map_err(|error| <serde_json::Error as serde::ser::Error>::custom(error.to_string()))?
+            .ok_or_else(|| {
+                <serde_json::Error as serde::ser::Error>::custom(
+                    "compaction projection intent requires transcript history state",
+                )
+            })?;
+        let owns_commit = history.commits().any(|commit| {
             commit.parent_revision == intent.projection.parent_revision()
                 && commit.revision == intent.projection.revision()
                 && intent
@@ -7179,97 +4784,23 @@ impl Session {
         {
             return Ok(());
         }
-        let Some(state) = self
-            .transcript_history_state()
-            .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?
-        else {
-            return Ok(());
-        };
-        validate_transcript_history_state(&state)
+        if self.history_caches.shared_state.get().is_some()
+            || self
+                .metadata
+                .contains_key(SESSION_TRANSCRIPT_HISTORY_STATE_KEY)
+        {
+            return Err(TranscriptEditError::HistoryStateMalformed(
+                "transcript-history graph has not crossed verified materialization or construction authority"
+                    .to_string(),
+            ));
+        }
+        Ok(())
     }
 
     /// Clear retained transcript revision metadata after a caller has
     /// materialized the desired message projection.
     pub fn clear_transcript_history_state(&mut self) {
         self.remove_metadata_unchecked(SESSION_TRANSCRIPT_HISTORY_STATE_KEY);
-    }
-
-    /// Decode and verify this document's typed checkpoint state.
-    ///
-    /// Missing typed metadata is returned as explicit legacy-unverified state.
-    /// A present malformed stamp or malformed legacy compatibility value is an
-    /// error and is never laundered into absence.
-    pub fn try_checkpoint_state(
-        &self,
-    ) -> Result<crate::checkpoint::SessionCheckpointState, crate::checkpoint::SessionCheckpointError>
-    {
-        let stamp =
-            match crate::checkpoint::session_checkpoint_metadata_state(&self.id, &self.metadata)? {
-                crate::checkpoint::SessionCheckpointMetadataState::Stamped(stamp) => stamp,
-                crate::checkpoint::SessionCheckpointMetadataState::LegacyUnverified {
-                    legacy_runtime_checkpoint,
-                } => {
-                    return Ok(
-                        crate::checkpoint::SessionCheckpointState::LegacyUnverified {
-                            legacy_runtime_checkpoint,
-                        },
-                    );
-                }
-            };
-        let actual = crate::checkpoint::session_checkpoint_digest(self)?;
-        if stamp.digest() != &actual {
-            return Err(crate::checkpoint::SessionCheckpointError::DigestMismatch {
-                expected: stamp.digest().clone(),
-                actual,
-            });
-        }
-        self.seal_verified_checkpoint_digest(&actual);
-        Ok(crate::checkpoint::SessionCheckpointState::Verified(stamp))
-    }
-
-    /// [`Session::try_checkpoint_state`] for steady-state READS of durable
-    /// documents, skipping the canonical-content digest recomputation when
-    /// this exact in-memory document was already fully verified against the
-    /// stamp digest.
-    ///
-    /// The proof is a per-session seal, not a process-global map: it lives
-    /// on this `Session` instance, so it can never vouch for a different
-    /// document, and every content mutation of this instance clears it.
-    /// Sealing requires one complete verification (here, in
-    /// `try_checkpoint_state`, or at stamp mint/install time), so the first
-    /// read of a freshly deserialized document still hashes once. Write,
-    /// adoption, and convergence seams must keep calling
-    /// [`Session::try_checkpoint_state`]: a sealed hit is memoized trust,
-    /// not a fresh proof of current bytes.
-    pub fn try_checkpoint_state_cached(
-        &self,
-    ) -> Result<crate::checkpoint::SessionCheckpointState, crate::checkpoint::SessionCheckpointError>
-    {
-        let stamp =
-            match crate::checkpoint::session_checkpoint_metadata_state(&self.id, &self.metadata)? {
-                crate::checkpoint::SessionCheckpointMetadataState::Stamped(stamp) => stamp,
-                crate::checkpoint::SessionCheckpointMetadataState::LegacyUnverified {
-                    legacy_runtime_checkpoint,
-                } => {
-                    return Ok(
-                        crate::checkpoint::SessionCheckpointState::LegacyUnverified {
-                            legacy_runtime_checkpoint,
-                        },
-                    );
-                }
-            };
-        if self.checkpoint_digest_seal_matches(stamp.digest()) {
-            return Ok(crate::checkpoint::SessionCheckpointState::Verified(stamp));
-        }
-        let actual = crate::checkpoint::session_checkpoint_digest(self)?;
-        if stamp.digest() != &actual {
-            return Err(crate::checkpoint::SessionCheckpointError::DigestMismatch {
-                expected: stamp.digest().clone(),
-                actual,
-            });
-        }
-        self.seal_verified_checkpoint_digest(&actual);
-        Ok(crate::checkpoint::SessionCheckpointState::Verified(stamp))
     }
 
     /// Adopt a durable head's non-transcript persisted state onto a recovery
@@ -7287,9 +4818,9 @@ impl Session {
     /// - `messages` (and the inline transcript-history graph under
     ///   [`SESSION_TRANSCRIPT_HISTORY_STATE_KEY`]) — rebuilt by recovery
     ///   through the mutation seam; owned by the target.
-    /// - the checkpoint stamp and intra-turn provenance marker — minted by
-    ///   recovery as the committed authority's typed successor; owned by the
-    ///   target.
+    /// - the lifecycle terminal — merged through generated
+    ///   `SessionDocumentMachine` authority because Archived is absorbing; it
+    ///   never rides the generic metadata overwrite.
     /// - `updated_at`, `usage`, and EVERY other metadata key (compaction
     ///   projection intents, visibility state, deferred context, ...) — the
     ///   head's values are the newer durable truth and are adopted verbatim,
@@ -7300,12 +4831,42 @@ impl Session {
     /// pattern, so an unclassified addition is a compile error at this
     /// adoption site rather than a field that silently reverts to the stale
     /// snapshot value on every recovery.
-    pub fn adopt_recovered_head_state(&mut self, head: &Session) {
+    pub fn adopt_recovered_head_state(&mut self, head: &Session) -> Result<(), String> {
         const RECOVERY_OWNED_KEYS: [&str; 3] = [
             SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
-            SESSION_CHECKPOINT_STAMP_KEY,
-            SESSION_RUNTIME_CHECKPOINT_PROVENANCE_KEY,
+            SESSION_TRANSCRIPT_REWRITE_PREFIX_AUTHORITY_KEY,
+            SESSION_LIFECYCLE_TERMINAL_KEY,
         ];
+        let recovered_archived = self
+            .try_lifecycle_terminal()
+            .map_err(|error| format!("recovered lifecycle-terminal is malformed: {error}"))?
+            == Some(SessionLifecycleTerminal::Archived);
+        let head_terminal = head
+            .try_lifecycle_terminal()
+            .map_err(|error| format!("durable-head lifecycle-terminal is malformed: {error}"))?;
+        let head_archived = head_terminal == Some(SessionLifecycleTerminal::Archived);
+        let mut lifecycle_authority = session_document::SessionDocumentMachineAuthority::new();
+        let lifecycle_merge = lifecycle_authority
+            .resolve_session_document_lifecycle_merge(
+                session_document::SessionDocumentKey::new(self.id.to_string()),
+                recovered_archived,
+                head_archived,
+            )
+            .map_err(|error| {
+                format!("session document authority rejected recovered lifecycle merge: {error}")
+            })?
+            .into_iter()
+            .find_map(|effect| {
+                match effect {
+                session_document::SessionDocumentEffect::SessionDocumentLifecycleMergeResolved {
+                    merge,
+                } => Some(merge),
+                _ => None,
+            }
+            })
+            .ok_or_else(|| {
+                "session document authority emitted no recovered lifecycle merge".to_string()
+            })?;
         // The bindings below ARE the classification: identity-invariant and
         // recovery-owned fields are bound to `_`-prefixed names precisely
         // because reading them from the head would be wrong.
@@ -7319,6 +4880,10 @@ impl Session {
             usage: head_usage,
         } = persisted_envelope_ref(head, None);
         self.usage = head_usage.clone();
+        // `head` was materialized from the exact authenticated metadata state
+        // that owns these general values. Adopt that baseline together with
+        // the values instead of diffing or re-hashing the complete map.
+        self.adopt_head_canonical_metadata_baseline_from(head);
         self.metadata.retain(|key, _| {
             RECOVERY_OWNED_KEYS.contains(&key.as_str()) || head_metadata.contains_key(key)
         });
@@ -7328,121 +4893,24 @@ impl Session {
             }
             self.metadata.insert(key.clone(), value.clone());
         }
-        // `updated_at` and general metadata are part of the canonical digest
-        // document: route through the seal-clearing mutator so a stale
-        // sealed proof can never survive the adoption.
+        match lifecycle_merge {
+            session_document::SessionDocumentLifecycleMerge::CarryArchived => self
+                .set_lifecycle_terminal(SessionLifecycleTerminal::Archived)
+                .map_err(|error| {
+                    format!("failed to realize absorbing Archived terminal: {error}")
+                })?,
+            session_document::SessionDocumentLifecycleMerge::CarryAuthority => {
+                match head_terminal {
+                    Some(terminal) => self.set_lifecycle_terminal(terminal).map_err(|error| {
+                        format!("failed to realize durable-head lifecycle terminal: {error}")
+                    })?,
+                    None => {
+                        self.remove_metadata_unchecked(SESSION_LIFECYCLE_TERMINAL_KEY);
+                    }
+                }
+            }
+        }
         self.mark_content_mutated(*head_updated_at);
-    }
-
-    /// Install a prevalidated semantic checkpoint stamp on this exact document
-    /// without changing its content timestamps.
-    pub fn install_checkpoint_stamp(
-        &mut self,
-        stamp: crate::checkpoint::SessionCheckpointStamp,
-    ) -> Result<(), crate::checkpoint::SessionCheckpointError> {
-        stamp.validate_for_session(&self.id)?;
-        // Fast path: this exact document shape was already proved to carry this
-        // exact digest in this process — which is the case for the dominant
-        // caller, a mint immediately followed by an install of the stamp it
-        // just minted from the same unmutated document. The slow path is
-        // unchanged: a foreign or stale stamp re-derives the canonical digest
-        // and fails closed on mismatch.
-        let actual = if self.checkpoint_digest_seal_matches(stamp.digest()) {
-            stamp.digest().clone()
-        } else {
-            // Verify under the witness format THE STAMP BEING INSTALLED
-            // declares: the document's metadata still carries the
-            // predecessor stamp, so document-evidence resolution here would
-            // compute the predecessor's witness format and refuse a valid
-            // freshly minted format-3 stamp with a misleading mismatch.
-            let actual = crate::checkpoint::session_checkpoint_digest_for_stamp(self, &stamp)?;
-            if stamp.digest() != &actual {
-                return Err(crate::checkpoint::SessionCheckpointError::DigestMismatch {
-                    expected: stamp.digest().clone(),
-                    actual,
-                });
-            }
-            actual
-        };
-        let value = serde_json::to_value(&stamp)?;
-        // These metadata writes touch only keys the canonical digest
-        // excludes, so the seal legitimately survives the install — that is
-        // exactly what preserves the mint-then-install single-pass win.
-        self.metadata
-            .remove(SESSION_RUNTIME_CHECKPOINT_PROVENANCE_KEY);
-        // A full graph is the authoritative witness source; a carried
-        // projection witness beside it is transitional bookkeeping
-        // (slim-to-full reconstructions, older writers) whose stale format
-        // would keep contradicting the just-installed stamp's evidence on
-        // every later verification. Promoting a graph-bearing document
-        // retires it. Slim rows are untouched — their carrier is the only
-        // witness evidence they have.
-        if self
-            .metadata
-            .contains_key(SESSION_TRANSCRIPT_HISTORY_STATE_KEY)
-        {
-            self.metadata
-                .remove(SESSION_TRANSCRIPT_HISTORY_CHECKPOINT_DIGEST_KEY);
-        }
-        self.metadata
-            .insert(SESSION_CHECKPOINT_STAMP_KEY.to_string(), value);
-        self.seal_verified_checkpoint_digest(&actual);
-        Ok(())
-    }
-
-    /// Fail-closed typed read of intra-turn checkpoint provenance.
-    pub fn try_has_runtime_checkpoint_provenance(
-        &self,
-    ) -> Result<bool, crate::checkpoint::SessionCheckpointError> {
-        match self.try_checkpoint_state()? {
-            crate::checkpoint::SessionCheckpointState::Verified(stamp) => Ok(matches!(
-                stamp.provenance(),
-                crate::checkpoint::SessionCheckpointProvenance::IntraTurnCheckpoint
-            )),
-            crate::checkpoint::SessionCheckpointState::LegacyUnverified { .. } => {
-                Err(crate::checkpoint::SessionCheckpointError::LegacyCheckpointUnverified)
-            }
-        }
-    }
-
-    /// Set the legacy compatibility marker on an untyped projection.
-    #[deprecated(
-        note = "legacy compatibility only; typed writers must install an exact checkpoint stamp"
-    )]
-    pub fn set_runtime_checkpoint_provenance(
-        &mut self,
-    ) -> Result<(), crate::checkpoint::SessionCheckpointError> {
-        if matches!(
-            self.try_checkpoint_state()?,
-            crate::checkpoint::SessionCheckpointState::Verified(_)
-        ) {
-            return Err(
-                crate::checkpoint::SessionCheckpointError::LegacyProvenanceMutationOnTypedCheckpoint,
-            );
-        }
-        self.set_metadata_unchecked(
-            SESSION_RUNTIME_CHECKPOINT_PROVENANCE_KEY,
-            serde_json::Value::Bool(true),
-        );
-        Ok(())
-    }
-
-    /// Clear the legacy compatibility marker on an untyped projection.
-    #[deprecated(
-        note = "legacy compatibility only; typed writers must install an exact run-boundary successor"
-    )]
-    pub fn clear_runtime_checkpoint_provenance(
-        &mut self,
-    ) -> Result<(), crate::checkpoint::SessionCheckpointError> {
-        if matches!(
-            self.try_checkpoint_state()?,
-            crate::checkpoint::SessionCheckpointState::Verified(_)
-        ) {
-            return Err(
-                crate::checkpoint::SessionCheckpointError::LegacyProvenanceMutationOnTypedCheckpoint,
-            );
-        }
-        self.remove_metadata_unchecked(SESSION_RUNTIME_CHECKPOINT_PROVENANCE_KEY);
         Ok(())
     }
 
@@ -7451,12 +4919,11 @@ impl Session {
         &self,
         revision: &str,
     ) -> Result<Option<TranscriptRevisionBody>, serde_json::Error> {
-        Ok(self.transcript_history_state()?.and_then(|state| {
-            state
-                .revisions
-                .into_iter()
-                .find(|body| body.revision == revision)
-        }))
+        self.validated_transcript_history_state()
+            .map_err(|error| <serde_json::Error as serde::ser::Error>::custom(error.to_string()))?
+            .map(|history| history.materialize_revision(revision))
+            .transpose()
+            .map_err(|error| <serde_json::Error as serde::ser::Error>::custom(error.to_string()))
     }
 
     /// Return the ordered messages for a retained transcript revision.
@@ -7475,46 +4942,127 @@ impl Session {
         mut state: TranscriptHistoryState,
     ) -> Result<(), TranscriptEditError> {
         state.compact_mechanical_revision_bodies()?;
-        let head_body = state
-            .revisions
+        self.apply_proved_transcript_history_state(state)
+    }
+
+    /// Materialize this session from a proof-bearing transcript-history
+    /// projection without re-validating every retained body.
+    ///
+    /// The capability can only be minted by a full validator or by
+    /// proof-preserving graph transformations such as
+    /// [`ValidatedTranscriptHistory::project_at_revision`]. This keeps the
+    /// write seam fail-closed while letting a rewrite-chain persistence walk
+    /// project each already-proved prefix without turning `N` commits into
+    /// `N` full-graph verification passes.
+    pub fn apply_validated_transcript_history_state(
+        &mut self,
+        validated: ValidatedTranscriptHistory,
+    ) -> Result<(), TranscriptEditError> {
+        let mut state = validated.into_state();
+        // The graph is already proved, so pruning is the construction-safe
+        // half only. Calling `compact_mechanical_revision_bodies()` here
+        // would discard the capability and re-run FullVerify.
+        state.prune_mechanical_revision_bodies();
+        self.apply_proved_transcript_history_state(state)
+    }
+
+    /// Install a proof-bearing AUDITED graph while preserving an extending
+    /// live transcript.
+    ///
+    /// Replay consumers reconstruct rewrite history independently from the
+    /// current strand tail. Replacing `messages` with the audited endpoint
+    /// would discard that tail; manufacturing a mechanical graph head would
+    /// copy it into retained history. This seam does neither. It canonicalizes
+    /// the proved graph to its latest audited endpoint, proves that endpoint is
+    /// the exact live revision or a content-addressed live prefix, and installs
+    /// only the graph metadata.
+    pub fn install_validated_audited_transcript_history_preserving_live(
+        &mut self,
+        validated: ValidatedTranscriptHistory,
+    ) -> Result<(), TranscriptEditError> {
+        let mut state = validated.into_state();
+        state.canonicalize_to_latest_audited_head();
+        let live_revision = self
+            .transcript_content_digest()
+            .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
+        if !self.live_transcript_extends_history_head(&state, &live_revision)? {
+            return Err(TranscriptEditError::HistoryStateMalformed(format!(
+                "audited transcript head {} is not a prefix ancestor of live revision {live_revision}",
+                state.head
+            )));
+        }
+        self.install_validated_transcript_history_state(state)
+            .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))
+    }
+
+    /// Clone the persisted envelope around a proof-bearing transcript
+    /// projection without cloning the source graph's metadata value.
+    ///
+    /// `Session::clone()` is cheap for live messages but deep-clones every
+    /// metadata value. Once transcript history is present, that includes the
+    /// complete retained graph, so a rewrite-chain walk that immediately
+    /// replaces the graph still copied all retained bodies once per commit.
+    /// This constructor copies every other persisted field exactly, omits only
+    /// the graph the sealed projection replaces, and then installs that
+    /// projection through the proof-preserving apply seam.
+    pub fn with_validated_transcript_history_projection(
+        &self,
+        validated: ValidatedTranscriptHistory,
+    ) -> Result<Self, TranscriptEditError> {
+        let metadata = self
+            .metadata
             .iter()
-            .find(|body| body.revision == state.head)
-            .ok_or_else(|| {
-                TranscriptEditError::HistoryStateMalformed(format!(
-                    "missing transcript head body {}",
-                    state.head
-                ))
-            })?
-            .clone();
-        let realtime_state =
-            self.reconciled_realtime_transcript_metadata_after_rewrite(&head_body.messages)?;
+            .filter(|(key, _)| key.as_str() != SESSION_TRANSCRIPT_HISTORY_STATE_KEY)
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        let mut projected = Self {
+            version: self.version,
+            id: self.id.clone(),
+            messages: self.messages.clone(),
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+            metadata,
+            realtime_transcript: self.realtime_transcript.clone(),
+            history_caches: Box::default(),
+            transcript_history_metadata_validation: TranscriptHistoryMetadataValidation::Validated,
+            usage: self.usage.clone(),
+        };
+        projected.apply_validated_transcript_history_state(validated)?;
+        Ok(projected)
+    }
+
+    fn apply_proved_transcript_history_state(
+        &mut self,
+        state: TranscriptHistoryState,
+    ) -> Result<(), TranscriptEditError> {
+        let head_body = state.materialize_revision(state.head())?;
+        let realtime_rebase = self.prepare_realtime_transcript_rebase_after_rewrite(
+            &head_body.messages,
+            RealtimeTranscriptSnapshotReasonV1::RecoveryRebase,
+        )?;
         let mut updated_at = head_body.created_at;
-        for commit in &state.commits {
+        for commit in state.commits() {
             if commit.committed_at > updated_at {
                 updated_at = commit.committed_at;
             }
         }
         self.install_validated_transcript_history_state(state)
             .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
-        if let Some(value) = realtime_state {
-            self.set_metadata_unchecked(SESSION_REALTIME_TRANSCRIPT_STATE_KEY, value);
-        }
+        self.realtime_transcript
+            .apply_prepared_rebase(realtime_rebase);
         // SEAM 7 (non-append): the projection adopts a graph head body.
         self.messages.replace(head_body.messages);
         self.mark_content_mutated(updated_at);
         Ok(())
     }
 
-    /// Current transcript head revision. Rows written before transcript
-    /// revisions derive their implicit head from the current message snapshot.
+    /// Current LIVE transcript revision.
+    ///
+    /// The retained graph's `head` is the latest audited rewrite endpoint and
+    /// may be a prefix ancestor after ordinary appends. Live identity always
+    /// comes from the message buffer and its incremental digest accumulator.
     pub fn transcript_revision(&self) -> Result<String, serde_json::Error> {
-        if let Some(state) = self.transcript_history_state()? {
-            Ok(state.head)
-        } else {
-            // Byte-identical to `transcript_messages_digest(self.messages())`,
-            // served from the session accumulator in O(delta).
-            self.transcript_content_digest()
-        }
+        self.transcript_content_digest()
     }
 
     /// Monotonic durable generation for same-session transcript rewrites.
@@ -7522,9 +5070,10 @@ impl Session {
     /// this value, allowing live config refresh after normal turns while still
     /// forcing reopen after a rewrite.
     pub fn transcript_rewrite_generation(&self) -> Result<u64, serde_json::Error> {
-        Ok(self.transcript_history_state()?.map_or(0, |state| {
-            u64::try_from(state.commits.len()).unwrap_or(u64::MAX)
-        }))
+        Ok(self
+            .transcript_history_state_shared()?
+            .and_then(|state| state.last_commit().map(|commit| commit.rewrite_generation))
+            .unwrap_or(0))
     }
 
     /// Commit a same-session transcript rewrite and advance the transcript head.
@@ -7613,10 +5162,9 @@ impl Session {
                 .saturating_add(message_count.saturating_sub(end)),
         );
         rewritten.extend_from_slice(&self.messages[..start]);
-        rewritten.extend(replacement);
+        rewritten.extend(replacement.iter().cloned());
         rewritten.extend_from_slice(&self.messages[end..]);
         validate_transcript_tool_result_shape(&rewritten)?;
-
         // One required hash of the genuinely new content, computed FIRST so
         // the whole-span digests below reuse it instead of re-hashing the
         // same bytes. The reuse conditions are slice-identity arithmetic,
@@ -7650,10 +5198,23 @@ impl Session {
             transcript_messages_digest(&rewritten[start..start + replacement_len])
                 .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?
         };
-        let realtime_state =
-            self.reconciled_realtime_transcript_metadata_after_rewrite(&rewritten)?;
-
+        let realtime_rebase = self.prepare_realtime_transcript_rebase_after_rewrite(
+            &rewritten,
+            RealtimeTranscriptSnapshotReasonV1::TranscriptRewrite,
+        )?;
+        let prior_history = self.validated_transcript_history_state()?;
+        let rewrite_generation = prior_history
+            .as_ref()
+            .and_then(ValidatedTranscriptHistory::last_commit)
+            .map_or(Some(1), |commit| commit.rewrite_generation.checked_add(1))
+            .ok_or_else(|| {
+                TranscriptEditError::HistoryStateMalformed(
+                    "transcript rewrite generation exhausted u64".to_string(),
+                )
+            })?;
+        let committed_at = SystemTime::now();
         let commit = TranscriptRewriteCommit {
+            rewrite_generation,
             parent_revision,
             revision: revision.clone(),
             selection,
@@ -7663,266 +5224,139 @@ impl Session {
             messages_after: rewritten.len(),
             reason,
             actor,
-            committed_at: SystemTime::now(),
+            committed_at,
         };
-
-        let prior_state = self
-            .transcript_history_state()
-            .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
-        let graph_preexisted = prior_state.is_some();
-        let prior_graph_validated = graph_preexisted
-            && self.transcript_history_metadata_validation
-                == TranscriptHistoryMetadataValidation::Validated;
-        let mut state = prior_state.unwrap_or_else(|| TranscriptHistoryState {
-            head: commit.parent_revision.clone(),
-            commits: Vec::new(),
-            revisions: Vec::new(),
-            digest_format: TRANSCRIPT_DIGEST_FORMAT_CURRENT,
-            replay_cursor: None,
-        });
-        let prior_head_is_parent = state.head == commit.parent_revision;
-        let parent_body_preexisted = state
-            .revisions
-            .iter()
-            .any(|body| body.revision == commit.parent_revision);
-        // Chain-content coherence, the fact "parent == prior head" does NOT
-        // imply: when the prior head is a MECHANICAL body, its parent
-        // pointer was installed by pruning (zero content evidence), yet the
-        // full validator demands that a commit PARENT content-extend the
-        // previous commit's revision (`revision_body_extends_head`). Prove
-        // it in O(1) from the retained boundary ring — the live vector IS
-        // the parent body here — or fall through to FullVerify below. The
-        // three provable shapes: no prior commits at all; the parent IS the
-        // last commit's endpoint; or the ring witnesses that the live
-        // vector's prefix at the last endpoint's length digests to exactly
-        // that endpoint (the same proof the append fast path uses).
-        let chain_content_proved = match state.commits.last() {
-            None => true,
-            Some(last_commit) if commit.parent_revision == last_commit.revision => true,
-            Some(last_commit) => state
-                .revisions
-                .iter()
-                .find(|body| body.revision == last_commit.revision)
-                .is_some_and(|last_body| {
-                    last_body.messages.len() <= self.messages.len()
-                        && self
-                            .messages
-                            .prefix_digest_witness(last_body.messages.len())
-                            .as_deref()
-                            == Some(last_commit.revision.as_str())
-                }),
-        };
-        if !parent_body_preexisted {
-            state.revisions.push(TranscriptRevisionBody {
-                revision: commit.parent_revision.clone(),
-                parent_revision: None,
-                messages: self.messages().to_vec(),
-                created_at: self.updated_at,
-            });
-        }
-        if !state
-            .revisions
-            .iter()
-            .any(|body| body.revision == commit.revision)
-        {
-            state.revisions.push(TranscriptRevisionBody {
-                revision: commit.revision.clone(),
-                parent_revision: Some(commit.parent_revision.clone()),
-                messages: rewritten.clone(),
-                created_at: commit.committed_at,
-            });
-        }
-        state.head = revision;
-        state.commits.push(commit.clone());
-        // Rewrite-shape fast path (mirrors the append fast path in
-        // `transcript_history_state_after_message_mutation`): every retained
-        // body and commit either survives unchanged from a graph a
-        // validating authority installed, or was constructed above from
-        // digests this function computed over the exact slices they name.
-        // The TWO new chain facts are the parent/head string compare and the
-        // O(1) chain-content proof captured above. Re-running the
-        // whole-graph validator here re-proved commits and bodies that were
-        // proven when they were written, at O(document x compaction-count)
-        // on the hottest path in the product. Anything that does not prove
-        // cleanly falls through to FullVerify; correctness never depends on
-        // the fast path being taken — and producer memo seeding below stays
-        // sound because every installed graph is either FullVerify-proven or
-        // construction-plus-content proven, which is full validity.
-        // Live-transcript binding: `parent_revision` came from `state.head`
-        // in the graph branch, so "parent == prior head" alone is
-        // tautological there, and DECODE never checks head/live coherence
-        // (that is a save-guard invariant) — a divergent row loads with the
-        // Validated marker. The rewritten vector is built from the LIVE
-        // messages, so without this fact the constructed commit's span
-        // digests reference live content while the parent body carries head
-        // content, and the graph fails the full validator. Proving
-        // d(live) == commit parent makes those relations hold by
-        // construction: digest equality is canonical-content equality, so
-        // the parent body's canonical messages ARE the live vector's.
-        // O(delta) on a warm session; a cold graph-bearing session pays one
-        // seeding pass here or takes the FullVerify fall-through.
-        let live_transcript_is_parent = self.transcript_content_digest().ok().as_deref()
-            == Some(commit.parent_revision.as_str());
-        let rewrite_construction_proved = prior_head_is_parent
-            && live_transcript_is_parent
-            && chain_content_proved
-            && if graph_preexisted {
-                // A Validated prior graph proves its retained bodies. The
-                // parent body must be one of them: a parent body pushed
-                // above would carry a digest this commit never computed.
-                prior_graph_validated && parent_body_preexisted
-            } else {
-                // Fresh graph: the parent body was constructed above from
-                // the live vector whose accumulator digest is the commit
-                // parent, and the revision body from the rewritten vector
-                // this commit just hashed.
-                true
-            };
-        if rewrite_construction_proved {
-            state.prune_mechanical_revision_bodies();
-            // Sampled cross-check, FAIL-CLOSED: debug/test builds verify
-            // every fast-path commit, release builds the first N per process
-            // (the framed-digest discipline) — so a release-build
-            // construction bug surfaces here as a typed commit refusal
-            // instead of first manifesting as fail-closed loads at fleet
-            // restart. Digest accounting is suppressed in debug so the
-            // budget tests keep measuring the production path; the bounded
-            // release samples are counted honestly.
-            if digest_accumulator_take_verification_sample() {
-                #[cfg(any(test, debug_assertions))]
-                let _suppress = crate::checkpoint::suppress_digest_accounting();
-                validate_transcript_history_state(&state)?;
-            }
-        } else {
-            state.compact_mechanical_revision_bodies()?;
-        }
-        self.install_validated_transcript_history_state(state)
-            .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
-        if let Some(value) = realtime_state {
-            self.set_metadata_unchecked(SESSION_REALTIME_TRANSCRIPT_STATE_KEY, value);
-        }
-
-        // SEAM 8 (non-append): an audited rewrite replaces a mid-vector span.
-        self.messages.replace(rewritten);
-        self.mark_content_mutated(SystemTime::now());
-        Ok(commit)
+        return self.finish_compact_transcript_rewrite(
+            prior_history,
+            commit,
+            replacement,
+            rewritten,
+            realtime_rebase,
+        );
     }
 
-    fn transcript_history_state_after_message_mutation(
-        &self,
-        messages: &[Message],
-        head: String,
-        created_at: SystemTime,
-        shape: TranscriptMutationShape,
-    ) -> Result<Option<TranscriptHistoryState>, TranscriptEditError> {
-        if !self
-            .metadata
-            .contains_key(SESSION_TRANSCRIPT_HISTORY_STATE_KEY)
-        {
-            return Ok(None);
-        }
-        let mut state = self
-            .transcript_history_state_shared()
-            .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?
-            .map(|state| (*state).clone())
+    fn finish_compact_transcript_rewrite(
+        &mut self,
+        prior_history: Option<ValidatedTranscriptHistory>,
+        commit: TranscriptRewriteCommit,
+        replacement: Vec<Message>,
+        rewritten: Vec<Message>,
+        realtime_rebase: PreparedRealtimeTranscriptRebase,
+    ) -> Result<TranscriptRewriteCommit, TranscriptEditError> {
+        let parent_row_prefix = self
+            .exact_message_row_prefix_at(u64::try_from(self.messages.len()).map_err(|_| {
+                TranscriptEditError::HistoryStateMalformed(
+                    "live transcript row count exceeds u64".to_string(),
+                )
+            })?)
             .ok_or_else(|| {
                 TranscriptEditError::HistoryStateMalformed(
-                    "transcript history metadata key decoded without state".to_string(),
+                    "live transcript has no exact row-lineage authority".to_string(),
                 )
             })?;
+        let (start, end) = commit.selection.bounds();
+        let serialized_replacement = replacement
+            .iter()
+            .map(serde_json::to_vec)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
+        let start = u64::try_from(start).map_err(|_| {
+            TranscriptEditError::HistoryStateMalformed(
+                "rewrite start exceeds durable row coordinates".to_string(),
+            )
+        })?;
+        let end = u64::try_from(end).map_err(|_| {
+            TranscriptEditError::HistoryStateMalformed(
+                "rewrite end exceeds durable row coordinates".to_string(),
+            )
+        })?;
+        let result_row_prefix = parent_row_prefix
+            .replace_serialized_range(start, end, &serialized_replacement)
+            .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
+        let result_witness = TranscriptEndpointWitness::from_messages_with_row_prefix(
+            &rewritten,
+            result_row_prefix.clone(),
+        )
+        .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
 
-        // Fast path: an APPEND onto a graph that a validating authority
-        // installed. The two full graph validations this used to pay per
-        // appended batch re-proved nothing that changed — every retained body
-        // is untouched, every commit's inputs are untouched, and the one new
-        // fact ("the new head body extends the previous head") is proved in
-        // O(1) from a retained prefix midstate instead of by re-hashing the
-        // whole graph. Anything that does not prove cleanly falls through to
-        // the full validating path below; correctness never depends on the
-        // fast path being taken.
-        if shape == TranscriptMutationShape::Appended
-            && self.transcript_history_metadata_validation
-                == TranscriptHistoryMetadataValidation::Validated
-            && let Some(previous_head_body) = state
-                .revisions
-                .iter()
-                .find(|body| body.revision == state.head)
-            && previous_head_body.messages.len() <= messages.len()
-            && self
-                .messages
-                .prefix_digest_witness(previous_head_body.messages.len())
-                .as_deref()
-                == Some(state.head.as_str())
-        {
-            if !state.revisions.iter().any(|body| body.revision == head) {
-                state.revisions.push(TranscriptRevisionBody {
-                    revision: head.clone(),
-                    parent_revision: state.commits.last().map(|commit| commit.revision.clone()),
-                    messages: messages.to_vec(),
-                    created_at,
-                });
+        let state = match prior_history {
+            None => {
+                let parent = TranscriptRevisionBody {
+                    revision: commit.parent_revision.clone(),
+                    parent_revision: None,
+                    messages: self.messages.to_vec(),
+                    created_at: self.updated_at,
+                };
+                TranscriptHistoryState::from_authorized_first_rewrite(
+                    parent,
+                    parent_row_prefix,
+                    &commit.revision,
+                    &rewritten,
+                    commit.committed_at,
+                    result_row_prefix.clone(),
+                    replacement,
+                    commit.clone(),
+                )?
             }
-            state.head = head;
-            state.prune_mechanical_revision_bodies();
-            return Ok(Some(state));
-        }
-
-        state.compact_mechanical_revision_bodies()?;
-        if !state.revisions.iter().any(|body| body.revision == head) {
-            state.revisions.push(TranscriptRevisionBody {
-                revision: head.clone(),
-                parent_revision: state.commits.last().map(|commit| commit.revision.clone()),
-                messages: messages.to_vec(),
-                created_at,
-            });
-        }
-        state.head = head;
-        state.compact_mechanical_revision_bodies()?;
-        Ok(Some(state))
-    }
-
-    fn refresh_transcript_head_after_message_mutation(&mut self, shape: TranscriptMutationShape) {
-        if !self
-            .metadata
-            .contains_key(SESSION_TRANSCRIPT_HISTORY_STATE_KEY)
-        {
-            return;
-        }
-        let head = match self.messages.digest() {
-            Ok(head) => head,
-            Err(error) => {
-                tracing::warn!(
-                    session_id = %self.id,
-                    error = %error,
-                    "failed to digest transcript after message mutation"
-                );
-                return;
+            Some(history) => {
+                let mut state = history.state().clone();
+                let endpoint = state.final_endpoint_witness().ok_or_else(|| {
+                    TranscriptEditError::HistoryStateMalformed(
+                        "compact transcript graph has no final endpoint witness".to_string(),
+                    )
+                })?;
+                if self.messages.len() < endpoint.message_count() {
+                    return Err(TranscriptEditError::HistoryStateMalformed(
+                        "live rewrite parent is shorter than the audited endpoint".to_string(),
+                    ));
+                }
+                let appended = self.messages[endpoint.message_count()..].to_vec();
+                let serialized_appended = appended
+                    .iter()
+                    .map(serde_json::to_vec)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| {
+                        TranscriptEditError::HistoryStateMalformed(error.to_string())
+                    })?;
+                let exact_append_prefix = endpoint
+                    .row_prefix()
+                    .extend_serialized_rows(&serialized_appended)
+                    .map_err(|error| {
+                        TranscriptEditError::HistoryStateMalformed(error.to_string())
+                    })?;
+                let parent_advance = if exact_append_prefix == parent_row_prefix {
+                    TranscriptParentAdvance::ExactAppend { appended }
+                } else {
+                    return Err(TranscriptEditError::HistoryStateMalformed(
+                        "live rewrite parent is not an exact audited append".to_string(),
+                    ));
+                };
+                let messages_before_base = endpoint.message_count();
+                state.append_authorized_rewrite(
+                    commit.clone(),
+                    messages_before_base,
+                    parent_advance,
+                    parent_row_prefix,
+                    replacement,
+                    result_witness,
+                    self.updated_at,
+                    commit.committed_at,
+                )?;
+                state
             }
         };
-        match self.transcript_history_state_after_message_mutation(
-            self.messages(),
-            head,
-            SystemTime::now(),
-            shape,
-        ) {
-            Ok(Some(state)) => {
-                if let Err(error) = self.install_validated_transcript_history_state(state) {
-                    tracing::warn!(
-                        session_id = %self.id,
-                        error = %error,
-                        "failed to serialize transcript history state after message mutation"
-                    );
-                }
-            }
-            Ok(None) => {}
-            Err(error) => {
-                tracing::warn!(
-                    session_id = %self.id,
-                    error = %error,
-                    "transcript history state failed validation after message mutation"
-                );
-            }
+        self.install_validated_transcript_history_state(state)
+            .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
+        self.realtime_transcript
+            .apply_prepared_rebase(realtime_rebase);
+        self.messages.replace(rewritten);
+        self.mark_content_mutated(commit.committed_at);
+        if !self.install_exact_message_row_prefix(result_row_prefix) {
+            return Err(TranscriptEditError::HistoryStateMalformed(
+                "failed to install rewrite result row-lineage authority".to_string(),
+            ));
         }
+        Ok(commit)
     }
 
     /// Store typed mob operator authority inside canonical build-state metadata.
@@ -7970,9 +5404,11 @@ impl Session {
     pub fn fork_at(&self, index: usize) -> Self {
         let now = SystemTime::now();
         let truncated = self.messages[..index.min(self.messages.len())].to_vec();
+        let id = SessionId::new();
         Self {
             version: session_version(),
-            id: SessionId::new(),
+            realtime_transcript: Box::new(SessionRealtimeTranscriptProjection::empty(&id)),
+            id,
             messages: TranscriptMessages::from_vec(truncated),
             created_at: now,
             updated_at: now,
@@ -7980,9 +5416,6 @@ impl Session {
             history_caches: Box::default(),
             transcript_history_metadata_validation: TranscriptHistoryMetadataValidation::Validated,
             usage: self.usage.clone(),
-            // The fork keeps the source prefix (including the leading System
-            // message), so an armed volatile refresh stays valid for it.
-            volatile_prompt_overlay: self.volatile_prompt_overlay.clone(),
         }
     }
 
@@ -8094,9 +5527,11 @@ impl Session {
     /// Copy-on-write occurs when either session mutates its messages.
     pub fn fork(&self) -> Self {
         let now = SystemTime::now();
+        let id = SessionId::new();
         Self {
             version: session_version(),
-            id: SessionId::new(),
+            realtime_transcript: Box::new(SessionRealtimeTranscriptProjection::empty(&id)),
+            id,
             messages: self.messages.clone(),
             created_at: now,
             updated_at: now,
@@ -8104,9 +5539,6 @@ impl Session {
             history_caches: Box::default(),
             transcript_history_metadata_validation: TranscriptHistoryMetadataValidation::Validated,
             usage: self.usage.clone(),
-            // Shares the source transcript, so an armed volatile refresh
-            // stays valid for the fork.
-            volatile_prompt_overlay: self.volatile_prompt_overlay.clone(),
         }
     }
 }
@@ -8656,18 +6088,17 @@ impl PersistedSessionMetadataView {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
 
-    /// The append fast path in `transcript_history_state_after_message_mutation`
-    /// must be a pure cost optimization: the graph it installs has to be the
-    /// same graph the full validating path installs.
+    /// Ordinary append does not consult or rewrite transcript-history
+    /// metadata, regardless of whether the session's parsed-graph cache is
+    /// warm or requires validation.
     ///
     /// Control session takes the slow path (its history-validation flag is
     /// flipped back to `RequiresValidation` before every append, which is the
     /// state an unchecked metadata write leaves behind); the subject takes the
-    /// fast path. Both must agree on head, commits, and the retained
-    /// (revision, messages) set — only body construction timestamps differ,
-    /// and those are storage bookkeeping the canonical digest erases.
+    /// Both sessions must retain the same audited head, commits, and bodies;
+    /// only their live transcript digest advances.
     #[test]
-    fn append_fast_path_installs_the_same_graph_as_the_validating_path()
+    fn ordinary_append_graph_is_independent_of_validation_cache_state()
     -> Result<(), Box<dyn std::error::Error>> {
         fn seeded() -> Result<Session, Box<dyn std::error::Error>> {
             let mut session = Session::new();
@@ -8732,7 +6163,6 @@ mod tests {
         }
         Ok(())
     }
-    use super::transcript_history::heal::legacy_transcript_messages_digest;
     use super::*;
     use crate::handles::{
         PeerResponseTerminalCorrelationId, PeerResponseTerminalDisplayIdentity,
@@ -8748,22 +6178,14 @@ mod tests {
     };
     use std::sync::Arc;
 
-    fn exact_boundary_append(key: &str, text: &str) -> PendingSystemContextAppend {
-        PendingSystemContextAppend {
-            content: crate::lifecycle::CoreRenderable::text(text.to_string()),
-            source: Some("test:exact-boundary".to_string()),
-            idempotency_key: Some(key.to_string()),
-            source_kind: SystemContextSource::RuntimeSteer,
-            accepted_at: SystemTime::now(),
-            peer_response_terminal: None,
-        }
+    fn transient_context(text: &str) -> TurnRequestContext {
+        TurnRequestContext::new(text.to_string()).expect("non-empty transient context")
     }
-
-    async fn wait_for_exact_boundary_request(handle: &SystemContextStateHandle) {
+    async fn wait_for_transient_boundary_request(handle: &TransientTurnContextStateHandle) {
         for _ in 0..1_000 {
             let registered = matches!(
                 &handle.boundary.lock().window,
-                SystemContextBoundaryWindow::Open {
+                TransientTurnContextBoundaryWindow::Open {
                     request: Some(_),
                     ..
                 }
@@ -8773,131 +6195,50 @@ mod tests {
             }
             tokio::task::yield_now().await;
         }
-        panic!("exact boundary request did not register");
+        panic!("transient boundary request did not register");
     }
-
-    fn assert_send<T: Send>() {}
-
     #[test]
-    fn prepared_boundary_authority_is_send_for_owned_commit_handoff() {
-        assert_send::<PreparedSystemContextBoundary>();
+    fn prepared_transient_boundary_authority_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<PreparedTransientTurnContextBoundary>();
         assert_send::<crate::lifecycle::CoreBoundaryStageOutput>();
-        assert_send::<ModelBoundarySystemContext>();
     }
-
     #[tokio::test]
-    async fn exact_boundary_runner_first_is_typed_unavailable() {
-        let state = SystemContextStateHandle::new(Default::default()).expect("state");
+    async fn transient_boundary_runner_first_consumes_no_context() {
+        let state = TransientTurnContextStateHandle::new();
         let run_id = RunId::new();
-        let _run = state
+        let _guard = state
             .begin_boundary_run(run_id.clone())
             .expect("open boundary");
-
-        let consuming = state
+        let contexts = state
             .take_pending_at_exact_boundary(&run_id)
             .await
-            .expect("runner claims open boundary");
-        assert!(consuming.appends().is_empty());
-        assert!(
-            consuming
-                .consume()
-                .expect("runner consumes open boundary")
-                .is_empty()
-        );
+            .expect("consume empty boundary");
+        assert!(contexts.is_empty());
         let error = state
-            .prepare_active_turn_boundary(
-                &run_id,
-                vec![exact_boundary_append("runner-first", "too late")],
-            )
+            .prepare_active_turn_boundary(&run_id, vec![transient_context("late")])
             .await
-            .expect_err("consumed generation cannot mint a preparation");
-        assert!(matches!(error, CoreBoundaryStageError::Unavailable { .. }));
+            .expect_err("runner-first boundary is closed");
+        assert!(error.is_unavailable());
     }
-
     #[tokio::test]
-    async fn exact_boundary_wrong_run_is_stale_without_claiming_or_mutating_window() {
-        let state = SystemContextStateHandle::new(Default::default()).expect("state");
-        let active_run_id = RunId::new();
-        let wrong_run_id = RunId::new();
-        let _run = state
-            .begin_boundary_run(active_run_id.clone())
-            .expect("open boundary");
-
-        let error = state
-            .prepare_active_turn_boundary(
-                &wrong_run_id,
-                vec![exact_boundary_append("wrong-run", "must not stage")],
-            )
-            .await
-            .expect_err("a different run cannot claim the active window");
-        assert!(matches!(error, CoreBoundaryStageError::Stale { .. }));
-        assert!(state.snapshot().seen().is_empty());
-
-        let consuming = state
-            .take_pending_at_exact_boundary(&active_run_id)
-            .await
-            .expect("the correct run still owns its unclaimed boundary");
-        assert!(
-            consuming
-                .consume()
-                .expect("consume unchanged active window")
-                .is_empty()
-        );
-    }
-
-    #[tokio::test]
-    async fn exact_boundary_conflicting_batch_is_atomic_and_leaves_window_unclaimed() {
-        let state = SystemContextStateHandle::new(Default::default()).expect("state");
+    async fn transient_boundary_prepare_commit_publishes_exact_order_once() {
+        let state = TransientTurnContextStateHandle::new();
         let run_id = RunId::new();
-        let _run = state
+        let _guard = state
             .begin_boundary_run(run_id.clone())
             .expect("open boundary");
-
-        let error = state
-            .prepare_active_turn_boundary(
-                &run_id,
-                vec![
-                    exact_boundary_append("conflict", "first"),
-                    exact_boundary_append("conflict", "different"),
-                ],
-            )
-            .await
-            .expect_err("a conflicting batch must fail before registration");
-        assert!(matches!(error, CoreBoundaryStageError::Fault { .. }));
-        assert!(state.snapshot().seen().is_empty());
-
-        let consuming = state
-            .take_pending_at_exact_boundary(&run_id)
-            .await
-            .expect("failed validation must leave the exact window unclaimed");
-        assert!(
-            consuming
-                .consume()
-                .expect("consume unchanged active window")
-                .is_empty()
-        );
-    }
-
-    #[tokio::test]
-    async fn exact_boundary_prepare_first_parks_until_commit() {
-        let state = SystemContextStateHandle::new(Default::default()).expect("state");
-        let run_id = RunId::new();
-        let _run = state
-            .begin_boundary_run(run_id.clone())
-            .expect("open boundary");
-
         let prepare_state = state.clone();
         let prepare_run_id = run_id.clone();
         let prepare = tokio::spawn(async move {
             prepare_state
                 .prepare_active_turn_boundary(
                     &prepare_run_id,
-                    vec![exact_boundary_append("prepare-first", "parked context")],
+                    vec![transient_context(" first "), transient_context("second")],
                 )
                 .await
         });
-        wait_for_exact_boundary_request(&state).await;
-
+        wait_for_transient_boundary_request(&state).await;
         let runner_state = state.clone();
         let runner_run_id = run_id.clone();
         let runner = tokio::spawn(async move {
@@ -8908,37 +6249,26 @@ mod tests {
         let prepared = prepare
             .await
             .expect("prepare task")
-            .expect("prepare must return only after park");
-        assert_eq!(prepared.expected_run_id(), &run_id);
-        assert!(prepared.boundary_generation() > 0);
-        assert!(state.snapshot().pending().is_empty());
-        assert!(
-            !runner.is_finished(),
-            "runner must remain parked before commit"
-        );
-
+            .expect("parked preparation");
         prepared
             .into_stage_output(None)
             .commit()
-            .expect("exact commit");
-        let consuming = runner
-            .await
-            .expect("runner task")
-            .expect("runner resumes after commit");
-        assert_eq!(state.snapshot().pending().len(), 1);
-        assert!(state.snapshot().applied().is_empty());
-        let consumed = consuming.consume().expect("consume at model call seam");
-        assert_eq!(consumed.len(), 1);
-        assert_eq!(consumed[0].content.render_text(), "parked context");
-        assert!(state.snapshot().pending().is_empty());
-        assert!(state.snapshot().applied().is_empty());
+            .expect("publish transient context");
+        let contexts = runner.await.expect("runner task").expect("runner consume");
+        assert_eq!(
+            contexts
+                .iter()
+                .map(TurnRequestContext::as_str)
+                .collect::<Vec<_>>(),
+            vec![" first ", "second"]
+        );
     }
 
     #[tokio::test]
-    async fn exact_boundary_preprocessing_drop_does_not_claim_model_consumption() {
-        let state = SystemContextStateHandle::new(Default::default()).expect("state");
+    async fn transient_boundary_prepare_abort_releases_runner_without_context() {
+        let state = TransientTurnContextStateHandle::new();
         let run_id = RunId::new();
-        let _run = state
+        let _guard = state
             .begin_boundary_run(run_id.clone())
             .expect("open boundary");
         let prepare_state = state.clone();
@@ -8947,14 +6277,11 @@ mod tests {
             prepare_state
                 .prepare_active_turn_boundary(
                     &prepare_run_id,
-                    vec![exact_boundary_append(
-                        "preprocess-drop",
-                        "retryable context",
-                    )],
+                    vec![transient_context("must not publish")],
                 )
                 .await
         });
-        wait_for_exact_boundary_request(&state).await;
+        wait_for_transient_boundary_request(&state).await;
         let runner_state = state.clone();
         let runner_run_id = run_id.clone();
         let runner = tokio::spawn(async move {
@@ -8962,387 +6289,21 @@ mod tests {
                 .take_pending_at_exact_boundary(&runner_run_id)
                 .await
         });
-        prepare
+        let prepared = prepare
             .await
             .expect("prepare task")
-            .expect("prepare parks")
-            .into_stage_output(None)
-            .commit()
-            .expect("publish pending candidate");
-
-        let consuming = runner
-            .await
-            .expect("runner task")
-            .expect("runner enters preprocessing");
-        assert_eq!(consuming.appends().len(), 1);
-        drop(consuming);
-
-        let snapshot = state.snapshot();
-        assert_eq!(snapshot.pending().len(), 1);
-        assert!(snapshot.applied().is_empty());
-        assert!(snapshot.seen().contains_key("preprocess-drop"));
-
-        // Commit publishes to the exact active turn; it does not claim model
-        // delivery. A later hard cancel/preprocessing drop owns the following
-        // cleanup linearization and must not leak the accepted steer to a
-        // successor run.
-        assert_eq!(
-            state
-                .discard_unapplied_active_turn_pending()
-                .expect("closed consuming window permits active-turn cleanup"),
-            1
-        );
-        assert!(state.snapshot().pending().is_empty());
-    }
-
-    #[tokio::test]
-    async fn exact_boundary_drop_aborts_and_preserves_ordinary_pending() {
-        let state = SystemContextStateHandle::new(Default::default()).expect("state");
-        state
-            .stage_append_with_snapshot(
-                &AppendSystemContextRequest {
-                    content: crate::lifecycle::CoreRenderable::text("ordinary"),
-                    source: Some("test:ordinary".to_string()),
-                    idempotency_key: Some("ordinary".to_string()),
-                    source_kind: SystemContextSource::Normal,
-                    peer_response_terminal: None,
-                },
-                SystemTime::now(),
-            )
-            .expect("ordinary append");
-        let run_id = RunId::new();
-        let _run = state
-            .begin_boundary_run(run_id.clone())
-            .expect("open boundary");
-        let prepare_state = state.clone();
-        let prepare_run_id = run_id.clone();
-        let prepare = tokio::spawn(async move {
-            prepare_state
-                .prepare_active_turn_boundary(
-                    &prepare_run_id,
-                    vec![exact_boundary_append("drop-abort", "must not publish")],
-                )
-                .await
-        });
-        wait_for_exact_boundary_request(&state).await;
-        let runner_state = state.clone();
-        let runner_run_id = run_id.clone();
-        let runner = tokio::spawn(async move {
-            runner_state
-                .take_pending_at_exact_boundary(&runner_run_id)
-                .await
-        });
-        let prepared = prepare.await.expect("prepare task").expect("parked");
-        drop(prepared);
-        let consuming = runner
-            .await
-            .expect("runner task")
-            .expect("drop abort wakes runner");
-        let consumed = consuming
-            .consume()
-            .expect("consume ordinary pending context");
-        assert_eq!(consumed.len(), 1);
-        assert_eq!(consumed[0].content.render_text(), "ordinary");
-        assert!(!state.snapshot().seen().contains_key("drop-abort"));
-    }
-
-    #[tokio::test]
-    async fn exact_boundary_duplicate_prepare_cannot_overwrite_generation() {
-        let state = SystemContextStateHandle::new(Default::default()).expect("state");
-        let run_id = RunId::new();
-        let _run = state
-            .begin_boundary_run(run_id.clone())
-            .expect("open boundary");
-        let first_state = state.clone();
-        let first_run_id = run_id.clone();
-        let first = tokio::spawn(async move {
-            first_state
-                .prepare_active_turn_boundary(
-                    &first_run_id,
-                    vec![exact_boundary_append("first", "first")],
-                )
-                .await
-        });
-        wait_for_exact_boundary_request(&state).await;
-        let duplicate = state
-            .prepare_active_turn_boundary(&run_id, vec![exact_boundary_append("second", "second")])
-            .await
-            .expect_err("duplicate preparation must fail closed");
-        assert!(duplicate.is_unavailable());
-
-        let runner_state = state.clone();
-        let runner_run_id = run_id.clone();
-        let runner = tokio::spawn(async move {
-            runner_state
-                .take_pending_at_exact_boundary(&runner_run_id)
-                .await
-        });
-        let prepared = first.await.expect("first task").expect("first parks");
+            .expect("parked preparation");
         prepared
             .into_stage_output(None)
             .abort()
-            .expect("explicit abort");
-        runner
-            .await
-            .expect("runner task")
-            .expect("runner resumes after abort")
-            .consume()
-            .expect("consume ordinary pending after abort");
-        assert!(!state.snapshot().seen().contains_key("second"));
-    }
-
-    #[tokio::test]
-    async fn exact_boundary_concurrent_conflict_surfaces_fault_to_runner_and_preparer() {
-        let state = SystemContextStateHandle::new(Default::default()).expect("state");
-        let run_id = RunId::new();
-        let _run = state
-            .begin_boundary_run(run_id.clone())
-            .expect("open boundary");
-        let prepare_state = state.clone();
-        let prepare_run_id = run_id.clone();
-        let prepare = tokio::spawn(async move {
-            prepare_state
-                .prepare_active_turn_boundary(
-                    &prepare_run_id,
-                    vec![exact_boundary_append("shared-key", "prepared context")],
-                )
-                .await
-        });
-        wait_for_exact_boundary_request(&state).await;
-
-        state
-            .stage_append_with_snapshot(
-                &AppendSystemContextRequest {
-                    content: crate::lifecycle::CoreRenderable::text("ordinary conflict"),
-                    source: Some("test:exact-boundary".to_string()),
-                    idempotency_key: Some("shared-key".to_string()),
-                    source_kind: SystemContextSource::Normal,
-                    peer_response_terminal: None,
-                },
-                SystemTime::now(),
-            )
-            .expect("ordinary mutation remains legal before the runner parks");
-
-        let runner_error = state
-            .take_pending_at_exact_boundary(&run_id)
-            .await
-            .err()
-            .expect("runner must surface candidate recomputation conflict");
-        assert!(matches!(runner_error, CoreBoundaryStageError::Fault { .. }));
-        let prepare_error = prepare
-            .await
-            .expect("prepare task")
-            .expect_err("preparer must receive the same typed failure class");
-        assert!(matches!(
-            prepare_error,
-            CoreBoundaryStageError::Fault { .. }
-        ));
-
-        let snapshot = state.snapshot();
-        assert_eq!(snapshot.pending().len(), 1);
-        assert_eq!(
-            snapshot.pending()[0].content.render_text(),
-            "ordinary conflict"
-        );
-        assert!(snapshot.applied().is_empty());
-    }
-
-    #[tokio::test]
-    async fn exact_boundary_nonconflicting_open_mutation_is_preserved_in_candidate() {
-        let state = SystemContextStateHandle::new(Default::default()).expect("state");
-        let run_id = RunId::new();
-        let _run = state
-            .begin_boundary_run(run_id.clone())
-            .expect("open boundary");
-        let prepare_state = state.clone();
-        let prepare_run_id = run_id.clone();
-        let prepare = tokio::spawn(async move {
-            prepare_state
-                .prepare_active_turn_boundary(
-                    &prepare_run_id,
-                    vec![exact_boundary_append("prepared", "prepared context")],
-                )
-                .await
-        });
-        wait_for_exact_boundary_request(&state).await;
-
-        state
-            .stage_append_with_snapshot(
-                &AppendSystemContextRequest {
-                    content: crate::lifecycle::CoreRenderable::text("ordinary context"),
-                    source: Some("test:ordinary".to_string()),
-                    idempotency_key: Some("ordinary".to_string()),
-                    source_kind: SystemContextSource::Normal,
-                    peer_response_terminal: None,
-                },
-                SystemTime::now(),
-            )
-            .expect("nonconflicting mutation remains legal before park");
-
-        let runner_state = state.clone();
-        let runner_run_id = run_id.clone();
-        let runner = tokio::spawn(async move {
-            runner_state
-                .take_pending_at_exact_boundary(&runner_run_id)
-                .await
-        });
-        let prepared = prepare.await.expect("prepare task").expect("parked");
-        assert_eq!(prepared.candidate_state().pending().len(), 2);
-        prepared
-            .into_stage_output(None)
-            .commit()
-            .expect("commit exact candidate");
-        let consuming = runner
-            .await
-            .expect("runner task")
-            .expect("runner resumes after commit");
-        let consumed = consuming.consume().expect("consume exact candidate");
-        assert_eq!(consumed.len(), 2);
+            .expect("abort transient context");
         assert!(
-            consumed
-                .iter()
-                .any(|append| append.content.render_text() == "ordinary context")
+            runner
+                .await
+                .expect("runner task")
+                .expect("runner released")
+                .is_empty()
         );
-        assert!(
-            consumed
-                .iter()
-                .any(|append| append.content.render_text() == "prepared context")
-        );
-    }
-
-    #[tokio::test]
-    async fn exact_boundary_actor_replacement_rejects_old_commit() {
-        let actor_a = SystemContextStateHandle::new(Default::default()).expect("actor A");
-        let run_id = RunId::new();
-        let _run_a = actor_a
-            .begin_boundary_run(run_id.clone())
-            .expect("open A boundary");
-        let prepare_state = actor_a.clone();
-        let prepare_run_id = run_id.clone();
-        let prepare = tokio::spawn(async move {
-            prepare_state
-                .prepare_active_turn_boundary(
-                    &prepare_run_id,
-                    vec![exact_boundary_append("actor-a", "stale A")],
-                )
-                .await
-        });
-        wait_for_exact_boundary_request(&actor_a).await;
-        let runner_state = actor_a.clone();
-        let runner_run_id = run_id.clone();
-        let runner = tokio::spawn(async move {
-            runner_state
-                .take_pending_at_exact_boundary(&runner_run_id)
-                .await
-        });
-        let prepared_a = prepare.await.expect("prepare task").expect("A parked");
-
-        actor_a.revoke_boundary_actor();
-        let actor_b = SystemContextStateHandle::new(Default::default()).expect("actor B");
-        let _run_b = actor_b
-            .begin_boundary_run(run_id.clone())
-            .expect("replacement opens independently");
-        let error = prepared_a
-            .into_stage_output(None)
-            .commit()
-            .expect_err("A cannot commit after replacement revoke");
-        assert!(matches!(error, CoreBoundaryStageError::Stale { .. }));
-        assert!(runner.await.expect("A runner task").is_err());
-        assert!(actor_b.snapshot().seen().is_empty());
-    }
-
-    #[tokio::test]
-    async fn exact_boundary_hard_interrupt_and_concurrent_append_fail_closed() {
-        let state = SystemContextStateHandle::new(Default::default()).expect("state");
-        let run_id = RunId::new();
-        let _run = state
-            .begin_boundary_run(run_id.clone())
-            .expect("open boundary");
-        let prepare_state = state.clone();
-        let prepare_run_id = run_id.clone();
-        let prepare = tokio::spawn(async move {
-            prepare_state
-                .prepare_active_turn_boundary(
-                    &prepare_run_id,
-                    vec![exact_boundary_append("interrupt", "stale")],
-                )
-                .await
-        });
-        wait_for_exact_boundary_request(&state).await;
-        let runner_state = state.clone();
-        let runner_run_id = run_id.clone();
-        let runner = tokio::spawn(async move {
-            runner_state
-                .take_pending_at_exact_boundary(&runner_run_id)
-                .await
-        });
-        let prepared = prepare.await.expect("prepare task").expect("parked");
-        let concurrent = state.stage_append_with_snapshot(
-            &AppendSystemContextRequest {
-                content: crate::lifecycle::CoreRenderable::text("concurrent"),
-                source: Some("test:concurrent".to_string()),
-                idempotency_key: Some("concurrent".to_string()),
-                source_kind: SystemContextSource::Normal,
-                peer_response_terminal: None,
-            },
-            SystemTime::now(),
-        );
-        assert!(
-            concurrent.is_err(),
-            "parked candidate must not be overwritten"
-        );
-        let discard_error = state
-            .discard_unapplied_active_turn_pending()
-            .expect_err("parked authority must reject cleanup, not report an empty success");
-        assert!(matches!(
-            discard_error,
-            CoreBoundaryStageError::Fault { .. }
-        ));
-        let keyed_discard_error = state
-            .discard_active_turn_pending_by_keys(&["interrupt".to_string()])
-            .expect_err("parked authority must reject keyed rollback");
-        assert!(matches!(
-            keyed_discard_error,
-            CoreBoundaryStageError::Fault { .. }
-        ));
-
-        runner.abort();
-        let _ = runner.await;
-        let error = prepared
-            .into_stage_output(None)
-            .commit()
-            .expect_err("hard-interrupted parked request cannot commit later");
-        assert!(matches!(error, CoreBoundaryStageError::Stale { .. }));
-        assert!(state.snapshot().seen().is_empty());
-    }
-
-    #[tokio::test]
-    async fn exact_boundary_run_exit_wakes_prepare_before_parking() {
-        let state = SystemContextStateHandle::new(Default::default()).expect("state");
-        let run_id = RunId::new();
-        let run = state
-            .begin_boundary_run(run_id.clone())
-            .expect("open boundary");
-        let prepare_state = state.clone();
-        let prepare_run_id = run_id.clone();
-        let prepare = tokio::spawn(async move {
-            prepare_state
-                .prepare_active_turn_boundary(
-                    &prepare_run_id,
-                    vec![exact_boundary_append("run-exit", "never parks")],
-                )
-                .await
-        });
-        wait_for_exact_boundary_request(&state).await;
-        drop(run);
-        let error = prepare
-            .await
-            .expect("prepare task")
-            .expect_err("run exit must release preparer");
-        assert!(matches!(
-            error,
-            CoreBoundaryStageError::Unavailable { .. } | CoreBoundaryStageError::Stale { .. }
-        ));
     }
 
     fn block_assistant_text(message: &BlockAssistantMessage) -> String {
@@ -9547,20 +6508,12 @@ mod tests {
         validate_transcript_history_state(&state).unwrap();
     }
 
-    /// P0 regression (adversarial review, 2026-07-27): a rewrite committed on
-    /// top of a MECHANICAL head that only pointer-extends the last commit —
-    /// the shape a mid-window `replace_synthetic_notices` refresh produces —
-    /// must never install a graph the full validator rejects. "Parent equals
-    /// the prior head" is not chain-content coherence: the mechanical head's
-    /// parent pointer is installed by pruning with zero content evidence,
-    /// while the validator demands a commit parent content-extend the
-    /// previous commit's revision. The fast path's O(1) chain-content proof
-    /// cannot cover this shape (the boundary ring was invalidated by the
-    /// mid-vector refresh), so the commit falls through to FullVerify and
-    /// fails CLOSED — the session is untouched and stays decodable, instead
-    /// of a warm process persisting a graph every cold reader refuses.
+    /// A cosmetic synthetic-notice refresh may never rewrite bytes inside an
+    /// audited endpoint. Refuse it atomically at the mechanical mutation seam
+    /// instead of allowing a graph/live divergence that only the next save or
+    /// rewrite discovers.
     #[test]
-    fn rewrite_on_a_pointer_extended_mechanical_head_fails_closed_and_stays_decodable() {
+    fn synthetic_notice_refresh_inside_audited_prefix_fails_before_mutation() {
         use crate::types::{SystemNoticeKind, SystemNoticeMessage};
 
         let mut session = Session::new();
@@ -9587,12 +6540,11 @@ mod tests {
                 None,
             )
             .expect("first rewrite commits");
-        // Ordinary append, then a refresh that moves the notice from
-        // mid-vector to the tail: the new mechanical head no longer
-        // prefix-extends the first commit's endpoint and passes FullVerify
-        // only through the parent-pointer walk.
+        // Ordinary append, then an attempted refresh that would move the
+        // audited notice from inside the prefix to the tail.
         session.push(Message::User(UserMessage::text("u-2")));
-        session
+        let before = session.messages().to_vec();
+        let error = session
             .replace_synthetic_notices(
                 SystemNoticeKind::McpPending,
                 vec![Message::SystemNotice(SystemNoticeMessage::new(
@@ -9600,53 +6552,36 @@ mod tests {
                     "pending v2",
                 ))],
             )
-            .expect("mid-window notice refresh");
-
-        // The second rewrite's parent IS the prior head, but that head does
-        // not content-extend the first commit — the full validator rejects
-        // the would-be graph, so the commit must fail closed.
-        let error = session
-            .commit_transcript_rewrite(
-                TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
-                vec![Message::User(UserMessage::text("u-0-rewritten-again"))],
-                TranscriptRewriteReason::new("unit-test"),
-                Some("unit-test".to_string()),
-                None,
-            )
-            .expect_err("a chain-incoherent rewrite must fail closed");
+            .expect_err("refresh must not rewrite an audited prefix");
         assert!(
-            matches!(error, TranscriptEditError::HistoryStateMalformed(_)),
-            "expected the whole-graph validator's refusal, got: {error:?}"
+            matches!(error, TranscriptEditError::InvalidTranscriptShape(_)),
+            "expected the atomic audited-prefix refusal, got: {error:?}"
         );
+        assert_eq!(session.messages(), before.as_slice());
 
-        // Fail-CLOSED means untouched and durable: the session still decodes
-        // in a fresh validator pass (no memo laundering, no restart bomb).
+        // Fail-closed means untouched and durable.
         let bytes = serde_json::to_vec(&session).expect("session serializes");
         let decoded: Session = serde_json::from_slice(&bytes)
             .expect("the failed rewrite must leave a graph every cold reader accepts");
         assert_eq!(decoded.messages().len(), session.messages().len());
     }
 
-    /// Codex-review P1 regression: DECODE never checks head/live coherence
-    /// (that is a save-guard invariant), so a row whose TOP-LEVEL messages
-    /// diverged from its internally valid graph loads with the Validated
-    /// marker. A rewrite on such a session builds its commit from the LIVE
-    /// vector while the parent body carries the HEAD content, so the
-    /// constructed graph fails the full validator — the fast path's
-    /// live-transcript binding (`d(live) == commit parent`) must refuse the
-    /// shape and the FullVerify fall-through must fail CLOSED. Without the
-    /// binding, a release build past its verification samples would install
-    /// and memoize the invalid graph, converting a save-guard-recoverable
-    /// inconsistent row into a restart-time load failure.
+    /// Decode validates the graph internally but the save/rewrite boundary
+    /// owns its audited-prefix relation to top-level live messages. A current
+    /// envelope whose live rows diverge inside the graph-proved
+    /// endpoint must fail at ingress. Historical exact parent splices remain
+    /// materializable only when already encoded as imported graph edges;
+    /// current top-level rows cannot manufacture that relationship around the
+    /// graph.
     #[test]
-    fn rewrite_on_a_head_divergent_decoded_row_fails_closed() {
+    fn current_envelope_rejects_non_append_live_rows_at_ingress() {
         let mut session = Session::new();
-        session.push(Message::User(UserMessage::text("m-0")));
+        session.append_system_message("original system");
         session.push(Message::User(UserMessage::text("m-1")));
         session
             .commit_transcript_rewrite(
-                TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
-                vec![Message::User(UserMessage::text("m-0-rewritten"))],
+                TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+                vec![Message::User(UserMessage::text("m-1-rewritten"))],
                 TranscriptRewriteReason::new("unit-test"),
                 Some("unit-test".to_string()),
                 None,
@@ -9654,39 +6589,75 @@ mod tests {
             .expect("seed rewrite commits");
         session.push(Message::User(UserMessage::text("m-2")));
 
-        // Tamper the TOP-LEVEL messages only; the graph value is untouched
-        // and still internally valid, so the decode accepts the document and
-        // marks it Validated — with live != head.
+        // Tamper only the first top-level row. The compact graph
+        // remains internally valid, but the live vector is no longer its
+        // exact endpoint plus an append-only suffix.
         let mut document = serde_json::to_value(&session).expect("session serializes");
         let divergent_message =
-            serde_json::to_value(Message::User(UserMessage::text("divergent-live-tail")))
+            serde_json::to_value(Message::System(SystemMessage::new("replacement system")))
                 .expect("message serializes");
-        document
+        let messages = document
             .get_mut("messages")
             .and_then(serde_json::Value::as_array_mut)
-            .expect("messages array")
-            .push(divergent_message);
-        let mut divergent: Session =
-            serde_json::from_value(document).expect("divergent row still decodes");
+            .expect("messages array");
+        messages[0] = divergent_message;
+        let error = serde_json::from_value::<Session>(document)
+            .expect_err("a current non-append live tail must fail closed at ingress");
+        assert!(
+            error
+                .to_string()
+                .contains("live transcript does not preserve the graph-proved audited endpoint"),
+            "unexpected error: {error}"
+        );
+    }
 
-        let error = divergent
+    #[test]
+    fn current_rewrite_refuses_non_append_parent_divergence() {
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("original row")));
+        session.push(Message::User(UserMessage::text("question")));
+        session
             .commit_transcript_rewrite(
-                TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
-                vec![Message::User(UserMessage::text("m-0-rewritten-again"))],
+                TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+                vec![Message::User(UserMessage::text("edited question"))],
                 TranscriptRewriteReason::new("unit-test"),
                 Some("unit-test".to_string()),
                 None,
             )
-            .expect_err("a rewrite on a head-divergent row must fail closed");
+            .expect("seed audited endpoint");
+        let generation_before = session
+            .transcript_rewrite_generation()
+            .expect("rewrite generation");
+
+        let mut divergent = session.messages().to_vec();
+        divergent[0] = Message::User(UserMessage::text("replacement row"));
+        session.messages.replace(divergent);
+        let current_prefix =
+            crate::SessionMessageRowPrefixAccumulator::from_messages(session.messages())
+                .expect("current row prefix");
+        assert!(session.install_exact_message_row_prefix(current_prefix));
+
+        let error = session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+                vec![Message::User(UserMessage::text("edited again"))],
+                TranscriptRewriteReason::new("unit-test"),
+                Some("unit-test".to_string()),
+                None,
+            )
+            .expect_err("current writer must not infer a non-append parent splice");
         assert!(
-            matches!(error, TranscriptEditError::HistoryStateMalformed(_)),
-            "expected the whole-graph validator's refusal, got: {error:?}"
+            matches!(error, TranscriptEditError::HistoryStateMalformed(ref message)
+                if message.contains("not an exact audited append")),
+            "unexpected error: {error}"
         );
-        // Untouched and still loadable by a cold reader.
-        let bytes = serde_json::to_vec(&divergent).expect("row serializes");
-        let decoded: Session = serde_json::from_slice(&bytes)
-            .expect("the failed rewrite must leave the row decodable");
-        assert_eq!(decoded.messages().len(), divergent.messages().len());
+        assert_eq!(
+            session
+                .transcript_rewrite_generation()
+                .expect("rewrite generation"),
+            generation_before,
+            "failed current write must not append a graph edge"
+        );
     }
 
     #[test]
@@ -9743,171 +6714,6 @@ mod tests {
         );
     }
 
-    /// HomeCore cutover regression: documents written by pre-marker code
-    /// (`digest_format` absent, current-format digests) previously re-paid
-    /// the decode-time heal probe plus the full per-body graph validation —
-    /// a canonical-JSON + SHA-256 pass over the whole retained transcript —
-    /// on EVERY decode. Repeat decodes of unchanged bytes must be absorbed
-    /// by the bounded process-lifetime decode memo after the first
-    /// full-verify decode.
-    #[test]
-    fn marker_less_document_decode_memoizes_probe_and_graph_validation() {
-        use crate::checkpoint::session_content_digest_computations;
-
-        // Fixture content is unique to this test so no sibling test's decode
-        // can pre-warm the process-lifetime memo for this graph shape.
-        let mut session = Session::new();
-        session.push(Message::User(UserMessage::text(
-            "marker-less-memo old context one",
-        )));
-        session.push(Message::User(UserMessage::text(
-            "marker-less-memo old context two",
-        )));
-        session
-            .commit_transcript_rewrite(
-                TranscriptRewriteSelection::MessageRange { start: 0, end: 2 },
-                vec![Message::User(UserMessage::text(
-                    "marker-less-memo replacement",
-                ))],
-                TranscriptRewriteReason::new("edit"),
-                None,
-                None,
-            )
-            .unwrap();
-        let mut document = serde_json::to_value(&session).unwrap();
-        // Forge the pre-marker writer's shape (the HomeCore 0.8.4-migrated
-        // fleet): identical current-format digests, marker absent.
-        document["metadata"][SESSION_TRANSCRIPT_HISTORY_STATE_KEY]
-            .as_object_mut()
-            .unwrap()
-            .remove("digest_format")
-            .expect("fixture blob was written with the marker");
-
-        let before_first = session_content_digest_computations();
-        let first: Session = serde_json::from_value(document.clone()).unwrap();
-        let after_first = session_content_digest_computations();
-        assert!(
-            after_first > before_first,
-            "first decode of a marker-less document must fully verify \
-             (heal probe + per-body graph validation)"
-        );
-        // Decode stamps the in-memory state, so any re-save persists the
-        // marker (the mobkit stamping verb relies on exactly this).
-        let restamped = serde_json::to_value(&first).unwrap();
-        assert_eq!(
-            restamped["metadata"][SESSION_TRANSCRIPT_HISTORY_STATE_KEY]["digest_format"],
-            serde_json::json!(TRANSCRIPT_DIGEST_FORMAT_CURRENT),
-            "decoding a marker-less document must stamp the current digest format"
-        );
-
-        for _ in 0..3 {
-            let repeat: Session = serde_json::from_value(document.clone()).unwrap();
-            assert_eq!(repeat.messages().len(), first.messages().len());
-        }
-        assert_eq!(
-            session_content_digest_computations(),
-            after_first,
-            "repeat decodes of unchanged marker-less bytes must not recompute \
-             content digests (O(1) per repeat load within a process)"
-        );
-
-        // The marker-stamped spelling of the SAME graph shares the proof:
-        // the probe is format-gated and the graph validation is memoized on
-        // shape, which deliberately excludes the compatibility marker.
-        let stamped_repeat: Session = serde_json::from_value(restamped).unwrap();
-        assert_eq!(stamped_repeat.messages().len(), first.messages().len());
-        assert_eq!(
-            session_content_digest_computations(),
-            after_first,
-            "repeat decode of the marker-stamped spelling must not recompute digests"
-        );
-
-        // Substitution pin: with the memo hot, a repeat decode must carry a
-        // graph structurally identical to the first fully-verified parse —
-        // the hit substitutes the proven object, it does not bless the
-        // incoming bytes.
-        let substituted: Session = serde_json::from_value(document.clone()).unwrap();
-        assert_eq!(
-            serde_json::to_value(&substituted).unwrap()["metadata"]
-                [SESSION_TRANSCRIPT_HISTORY_STATE_KEY],
-            serde_json::to_value(&first).unwrap()["metadata"][SESSION_TRANSCRIPT_HISTORY_STATE_KEY],
-            "a memo hit must substitute the exact graph that was proved"
-        );
-
-        // created_at pin: the content-addressed revision strings do not
-        // cover a retained body's `created_at`, so the shape key must.
-        // Mutating only `created_at` must re-key the memo (full re-verify)
-        // and the decoded graph must carry the MUTATED `created_at`, never
-        // the cached object's.
-        let mut retimed = document.clone();
-        let retimed_head = retimed["metadata"][SESSION_TRANSCRIPT_HISTORY_STATE_KEY]["head"]
-            .as_str()
-            .unwrap()
-            .to_string();
-        let retimed_body = retimed["metadata"][SESSION_TRANSCRIPT_HISTORY_STATE_KEY]["revisions"]
-            .as_array_mut()
-            .unwrap()
-            .iter_mut()
-            .find(|body| body["revision"].as_str() == Some(retimed_head.as_str()))
-            .unwrap();
-        retimed_body["created_at"]["secs_since_epoch"] = serde_json::json!(12345);
-        let digests_before_retimed = session_content_digest_computations();
-        let retimed_session: Session = serde_json::from_value(retimed).unwrap();
-        assert!(
-            session_content_digest_computations() > digests_before_retimed,
-            "a created_at-only change must re-verify, not hit the memo"
-        );
-        let retimed_value = serde_json::to_value(&retimed_session).unwrap();
-        let decoded_head_created_at = retimed_value["metadata"]
-            [SESSION_TRANSCRIPT_HISTORY_STATE_KEY]["revisions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|body| body["revision"].as_str() == Some(retimed_head.as_str()))
-            .unwrap()["created_at"]["secs_since_epoch"]
-            .clone();
-        assert_eq!(
-            decoded_head_created_at,
-            serde_json::json!(12345),
-            "decode must carry the document's created_at, never the cached object's"
-        );
-
-        // Changed content re-keys the memo and re-verifies: appending a
-        // message to the retained head body (message count changes the
-        // shape key) must be caught by full validation, never laundered
-        // through memoized trust. The tamper is applied to the TYPED graph
-        // and re-encoded so it lands whichever way the durable revision
-        // chain happens to spell the head body — as the chain anchor or as
-        // an inverse splice onto one.
-        let mut tampered = document.clone();
-        let mut tampered_state: TranscriptHistoryState = serde_json::from_value(
-            tampered["metadata"][SESSION_TRANSCRIPT_HISTORY_STATE_KEY].clone(),
-        )
-        .unwrap();
-        let tampered_head = tampered_state.head.clone();
-        let head_body = tampered_state
-            .revisions
-            .iter_mut()
-            .find(|body| body.revision == tampered_head)
-            .unwrap();
-        let smuggled = head_body.messages[0].clone();
-        head_body.messages.push(smuggled);
-        // Keep the forged pre-marker shape this test decodes under.
-        tampered_state.digest_format = 0;
-        tampered["metadata"][SESSION_TRANSCRIPT_HISTORY_STATE_KEY] =
-            serde_json::to_value(&tampered_state).unwrap();
-        let digests_before_tampered = session_content_digest_computations();
-        let error = serde_json::from_value::<Session>(tampered).unwrap_err();
-        assert!(
-            error.to_string().contains("digest"),
-            "tampered head body must fail digest validation, got: {error}"
-        );
-        assert!(
-            session_content_digest_computations() > digests_before_tampered,
-            "a changed graph shape must re-verify, not hit the memo"
-        );
-    }
-
     /// Sealed-capability seam: the snapshot compaction returns the proof of
     /// exactly the graph value it installed into the metadata map.
     #[test]
@@ -9930,12 +6736,9 @@ mod tests {
             document["metadata"][SESSION_TRANSCRIPT_HISTORY_STATE_KEY].clone(),
         );
 
-        let sealed = compact_transcript_history_metadata_for_snapshot(
-            &mut metadata,
-            TranscriptGraphValidationMode::FullVerify,
-        )
-        .expect("valid graph compacts")
-        .expect("graph value present");
+        let sealed = compact_transcript_history_metadata_for_snapshot(&mut metadata)
+            .expect("valid graph compacts")
+            .expect("graph value present");
         assert_eq!(
             serde_json::to_value(sealed.state()).unwrap(),
             metadata[SESSION_TRANSCRIPT_HISTORY_STATE_KEY],
@@ -9945,12 +6748,9 @@ mod tests {
         // No graph, no proof: the seam must not manufacture evidence.
         let mut empty = serde_json::Map::new();
         assert!(
-            compact_transcript_history_metadata_for_snapshot(
-                &mut empty,
-                TranscriptGraphValidationMode::FullVerify,
-            )
-            .expect("empty metadata compacts")
-            .is_none()
+            compact_transcript_history_metadata_for_snapshot(&mut empty)
+                .expect("empty metadata compacts")
+                .is_none()
         );
     }
 
@@ -9999,161 +6799,6 @@ mod tests {
         assert!(bare.history_caches.shared_state.get().is_none());
     }
 
-    fn legacy_rewrite_fixture() -> (TranscriptRewriteCommit, Vec<Message>, Vec<Message>) {
-        let parent_messages = vec![
-            Message::User(UserMessage::text("before rewrite".to_string())),
-            Message::User(UserMessage::text("retained tail".to_string())),
-        ];
-        let revision_messages = vec![
-            Message::User(UserMessage::text("after rewrite".to_string())),
-            Message::User(UserMessage::text("retained tail".to_string())),
-        ];
-        // Compute the graph strings the way a pre-0.7.14 writer did:
-        // bookkeeping-inclusive digests.
-        let parent_revision =
-            legacy_transcript_messages_digest(&parent_messages).expect("legacy parent digest");
-        let revision =
-            legacy_transcript_messages_digest(&revision_messages).expect("legacy revision digest");
-        let commit = TranscriptRewriteCommit {
-            parent_revision,
-            revision,
-            selection: TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
-            original_span_digest: legacy_transcript_messages_digest(&parent_messages[0..1])
-                .expect("legacy span digest"),
-            replacement_digest: legacy_transcript_messages_digest(&revision_messages[0..1])
-                .expect("legacy replacement digest"),
-            messages_before: 2,
-            messages_after: 2,
-            reason: TranscriptRewriteReason::new("compaction"),
-            actor: Some("legacy-test".to_string()),
-            committed_at: SystemTime::now(),
-        };
-        (commit, parent_messages, revision_messages)
-    }
-
-    #[test]
-    fn legacy_transcript_history_state_heals_to_content_addressed_on_parse() {
-        let (commit, parent_messages, revision_messages) = legacy_rewrite_fixture();
-        let state = TranscriptHistoryState {
-            head: commit.revision.clone(),
-            digest_format: 0,
-            replay_cursor: None,
-            commits: vec![commit.clone()],
-            revisions: vec![
-                TranscriptRevisionBody {
-                    revision: commit.parent_revision.clone(),
-                    parent_revision: None,
-                    messages: parent_messages.clone(),
-                    created_at: SystemTime::now(),
-                },
-                TranscriptRevisionBody {
-                    revision: commit.revision.clone(),
-                    parent_revision: Some(commit.parent_revision),
-                    messages: revision_messages.clone(),
-                    created_at: SystemTime::now(),
-                },
-            ],
-        };
-        let value = serde_json::to_value(&state).expect("serialize legacy state");
-        let healed: TranscriptHistoryState =
-            serde_json::from_value(value).expect("parse legacy state");
-
-        let content_parent =
-            transcript_messages_digest(&parent_messages).expect("content parent digest");
-        let content_revision =
-            transcript_messages_digest(&revision_messages).expect("content revision digest");
-        assert_eq!(healed.head, content_revision, "head must re-derive");
-        assert_eq!(healed.commits[0].parent_revision, content_parent);
-        assert_eq!(healed.commits[0].revision, content_revision);
-        assert_eq!(healed.revisions[0].revision, content_parent);
-        assert_eq!(healed.revisions[1].revision, content_revision);
-        assert_eq!(
-            healed.revisions[1].parent_revision.as_deref(),
-            Some(content_parent.as_str())
-        );
-        validate_transcript_history_state(&healed).expect("healed graph must validate");
-
-        // A session materialized from the healed graph can extend the chain
-        // with a current-format rewrite.
-        let mut session = Session::new();
-        session
-            .apply_transcript_history_state(healed)
-            .expect("apply healed graph");
-        session
-            .commit_transcript_rewrite(
-                TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
-                vec![Message::User(UserMessage::text(
-                    "rewritten again".to_string(),
-                ))],
-                TranscriptRewriteReason::new("unit-test"),
-                None,
-                None,
-            )
-            .expect("extend healed graph with a new rewrite");
-        session
-            .validate_transcript_history_state()
-            .expect("extended graph must validate");
-    }
-
-    #[test]
-    fn legacy_transcript_rewrite_record_heals_on_parse() {
-        let (commit, parent_messages, revision_messages) = legacy_rewrite_fixture();
-        let record_value = serde_json::json!({
-            "commit": commit,
-            "parent_body": TranscriptRevisionBody {
-                revision: commit.parent_revision.clone(),
-                parent_revision: None,
-                messages: parent_messages,
-                created_at: SystemTime::now(),
-            },
-            "revision_body": TranscriptRevisionBody {
-                revision: commit.revision.clone(),
-                parent_revision: Some(commit.parent_revision),
-                messages: revision_messages.clone(),
-                created_at: SystemTime::now(),
-            },
-        });
-        let healed: TranscriptRewriteRecord =
-            serde_json::from_value(record_value).expect("parse legacy record");
-        assert_eq!(
-            healed.commit.revision,
-            transcript_messages_digest(&revision_messages).expect("content digest")
-        );
-        // The healed record passes the same validation `new` enforces.
-        TranscriptRewriteRecord::new(healed.commit, healed.parent_body, healed.revision_body)
-            .expect("healed record must validate");
-    }
-
-    #[test]
-    fn corrupt_transcript_history_strings_stay_untouched_and_fail_validation() {
-        let (commit, parent_messages, _revision_messages) = legacy_rewrite_fixture();
-        let bogus = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
-        let state = TranscriptHistoryState {
-            digest_format: 0,
-            replay_cursor: None,
-            head: bogus.to_string(),
-            commits: Vec::new(),
-            revisions: vec![TranscriptRevisionBody {
-                revision: bogus.to_string(),
-                parent_revision: None,
-                messages: parent_messages,
-                created_at: SystemTime::now(),
-            }],
-        };
-        let _ = commit;
-        let value = serde_json::to_value(&state).expect("serialize corrupt state");
-        let parsed: TranscriptHistoryState =
-            serde_json::from_value(value).expect("corrupt strings still parse");
-        assert_eq!(
-            parsed.head, bogus,
-            "unverifiable strings must not be rewritten"
-        );
-        assert!(
-            validate_transcript_history_state(&parsed).is_err(),
-            "corrupt graph must keep failing validation"
-        );
-    }
-
     /// A `ValidatedTranscriptHistory` is the evidence its consumers stopped
     /// re-deriving, so the one place that mints it must never hand one out for
     /// a graph this process has not actually verified. Metadata written through
@@ -10165,9 +6810,10 @@ mod tests {
         let messages = vec![Message::User(UserMessage::text("hello".to_string()))];
         let state = TranscriptHistoryState {
             digest_format: TRANSCRIPT_DIGEST_FORMAT_CURRENT,
-            replay_cursor: None,
             head: bogus.to_string(),
             commits: Vec::new(),
+            parent_transitions: Vec::new(),
+            rewrite_prefix: Default::default(),
             revisions: vec![TranscriptRevisionBody {
                 revision: bogus.to_string(),
                 parent_revision: None,
@@ -10200,9 +6846,10 @@ mod tests {
         let revision = transcript_messages_digest(&messages).expect("content digest");
         let state = TranscriptHistoryState {
             digest_format: TRANSCRIPT_DIGEST_FORMAT_CURRENT,
-            replay_cursor: None,
             head: revision.clone(),
             commits: Vec::new(),
+            parent_transitions: Vec::new(),
+            rewrite_prefix: Default::default(),
             revisions: vec![TranscriptRevisionBody {
                 revision: revision.clone(),
                 parent_revision: None,
@@ -10292,7 +6939,7 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_appends_after_rewrite_coalesce_mechanical_revision_bodies() {
+    fn ordinary_appends_after_rewrite_leave_audited_graph_untouched() {
         let mut session = Session::new();
         for message in 0..133 {
             session.push(Message::User(UserMessage::text(format!(
@@ -10300,7 +6947,7 @@ mod tests {
             ))));
         }
         let parent = session.transcript_revision().expect("parent revision");
-        session
+        let commit = session
             .commit_transcript_rewrite(
                 TranscriptRewriteSelection::MessageRange {
                     start: 132,
@@ -10312,11 +6959,21 @@ mod tests {
                 Some(parent),
             )
             .expect("rewrite should commit");
+        let graph_before = session
+            .metadata()
+            .get(SESSION_TRANSCRIPT_HISTORY_STATE_KEY)
+            .cloned()
+            .expect("rewrite graph");
 
         for turn in 0..762 {
             session.push(Message::User(UserMessage::text(format!("turn {turn}"))));
         }
 
+        assert_eq!(
+            session.metadata().get(SESSION_TRANSCRIPT_HISTORY_STATE_KEY),
+            Some(&graph_before),
+            "ordinary appends must not parse, mutate, or reserialize audited graph metadata"
+        );
         let state = session
             .transcript_history_state()
             .expect("history state should decode")
@@ -10325,15 +6982,21 @@ mod tests {
         assert_eq!(state.commits.len(), 1, "ordinary appends are not rewrites");
         assert_eq!(
             state.revisions.len(),
-            3,
-            "one real rewrite retains its two audited endpoints plus one live head"
+            2,
+            "one real rewrite retains only its two audited endpoints"
+        );
+        assert_eq!(state.head, commit.revision);
+        assert_ne!(
+            session.transcript_revision().expect("live revision"),
+            state.head,
+            "the live append tail is Session authority, not a mechanical graph head"
         );
         let retained_message_entries = state
             .revisions
             .iter()
             .map(|body| body.messages.len())
             .sum::<usize>();
-        assert!(retained_message_entries <= 3 * session.messages().len());
+        assert!(retained_message_entries <= 2 * session.messages().len());
 
         let live_bytes = serde_json::to_vec(session.messages())
             .expect("live transcript should serialize")
@@ -10362,6 +7025,11 @@ mod tests {
                 None,
             )
             .expect("seed rewrite");
+        let graph_before = session
+            .metadata()
+            .get(SESSION_TRANSCRIPT_HISTORY_STATE_KEY)
+            .cloned()
+            .expect("audited graph");
 
         for refresh in 0..64 {
             session
@@ -10374,6 +7042,11 @@ mod tests {
                 )
                 .expect("mechanical refresh");
         }
+        assert_eq!(
+            session.metadata().get(SESSION_TRANSCRIPT_HISTORY_STATE_KEY),
+            Some(&graph_before),
+            "tail-only synthetic refreshes must not materialize or rewrite audited graph metadata"
+        );
 
         let state = session
             .transcript_history_state()
@@ -10381,85 +7054,10 @@ mod tests {
             .expect("seed rewrite history");
         assert_eq!(state.commits.len(), 1);
         assert_eq!(session.transcript_rewrite_generation().unwrap(), 1);
-        assert_eq!(state.revisions.len(), 3);
-    }
-
-    #[test]
-    fn legacy_append_head_chain_compacts_during_session_restore() {
-        let mut session = Session::new();
-        session.push(Message::User(UserMessage::text("seed".to_string())));
-        session
-            .commit_transcript_rewrite(
-                TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
-                vec![Message::User(UserMessage::text(
-                    "rewritten seed".to_string(),
-                ))],
-                TranscriptRewriteReason::new("unit-test-edit"),
-                Some("unit-test".to_string()),
-                None,
-            )
-            .expect("seed rewrite");
-
-        let mut legacy = session
-            .transcript_history_state()
-            .expect("history state")
-            .expect("seed history");
-        let mut messages = session.messages().to_vec();
-        let mut previous_head = legacy.head.clone();
-        for append in 0..32 {
-            messages.push(Message::User(UserMessage::text(format!(
-                "legacy append {append}"
-            ))));
-            let revision = transcript_messages_digest(&messages).expect("revision digest");
-            legacy.revisions.push(TranscriptRevisionBody {
-                revision: revision.clone(),
-                parent_revision: Some(previous_head),
-                messages: messages.clone(),
-                created_at: SystemTime::now(),
-            });
-            previous_head = revision;
-        }
-        legacy.head = previous_head;
-        assert_eq!(legacy.revisions.len(), 34, "fixture matches old shape");
-
-        let mut envelope = serde_json::to_value(&session).expect("base envelope");
-        envelope["messages"] = serde_json::to_value(&messages).expect("legacy live messages");
-        envelope["metadata"][SESSION_TRANSCRIPT_HISTORY_STATE_KEY] =
-            serde_json::to_value(&legacy).expect("legacy unbounded history");
-        // The pre-parent-pointer v1 writer spelled every retained body in
-        // full and carried no lineage at all. Rebuild that exact array
-        // (`TranscriptRevisionBody`'s own encoding IS the full spelling) so
-        // this test keeps exercising the legacy append-order inference
-        // rather than the current delta chain.
-        envelope["metadata"][SESSION_TRANSCRIPT_HISTORY_STATE_KEY]["revisions"] =
-            serde_json::Value::Array(
-                legacy
-                    .revisions
-                    .iter()
-                    .map(|body| {
-                        let mut body =
-                            serde_json::to_value(body).expect("legacy revision body encodes");
-                        body.as_object_mut()
-                            .expect("legacy revision body")
-                            .remove("parent_revision");
-                        body
-                    })
-                    .collect(),
-            );
-        let raw = serde_json::to_vec(&envelope).expect("raw legacy bytes");
-
-        let restored: Session = serde_json::from_slice(&raw).expect("legacy restore");
-        let compact = restored
-            .transcript_history_state()
-            .expect("compacted state")
-            .expect("history retained");
-        assert_eq!(compact.commits, legacy.commits);
-        assert_eq!(compact.revisions.len(), 3);
-        validate_transcript_history_state(&compact).expect("compacted history remains valid");
-        let repaired = serde_json::to_vec(&restored).expect("repaired snapshot");
-        assert!(
-            repaired.len() * 4 < raw.len(),
-            "repair should shed old bodies"
+        assert_eq!(
+            state.revisions.len(),
+            2,
+            "mechanical refreshes do not mint retained live-head bodies"
         );
     }
 
@@ -10497,8 +7095,11 @@ mod tests {
         );
     }
 
+    /// The compatibility floor is 0.8.10. Its current-digest graph could still
+    /// carry full mechanical append bodies; snapshot ingress validates that
+    /// exact released shape before canonicalizing to audited endpoints.
     #[test]
-    fn unchecked_valid_history_is_validated_and_compacted_at_snapshot_boundary() {
+    fn released_0_8_10_mechanical_history_is_compacted_at_snapshot_boundary() {
         let mut session = Session::new();
         session.push(Message::User(UserMessage::text("seed".to_string())));
         session
@@ -10518,7 +7119,7 @@ mod tests {
         let mut parent = state.head.clone();
         for index in 0..8 {
             messages.push(Message::User(UserMessage::text(format!(
-                "legacy append {index}"
+                "0.8.10 ordinary append {index}"
             ))));
             let revision = transcript_messages_digest(&messages).expect("revision digest");
             state.revisions.push(TranscriptRevisionBody {
@@ -10550,8 +7151,12 @@ mod tests {
 
         assert_eq!(
             compact.revisions.len(),
-            3,
-            "snapshot boundary should retain two audited endpoints plus the live head"
+            2,
+            "snapshot boundary should retain only the two audited endpoints"
+        );
+        assert_eq!(
+            compact.head,
+            compact.commits.last().expect("rewrite commit").revision
         );
         validate_transcript_history_state(&compact).expect("compacted history remains valid");
     }
@@ -10620,6 +7225,61 @@ mod tests {
     }
 
     #[test]
+    fn zero_generation_0_8_10_cycle_normalizes_from_proved_vector_order() {
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("A".to_string())));
+        session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+                vec![Message::User(UserMessage::text("B".to_string()))],
+                TranscriptRewriteReason::new("to-b"),
+                Some("unit-test".to_string()),
+                None,
+            )
+            .expect("A to B");
+        session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+                vec![Message::User(UserMessage::text("A".to_string()))],
+                TranscriptRewriteReason::new("restore-a"),
+                Some("unit-test".to_string()),
+                None,
+            )
+            .expect("B back to A");
+
+        let mut value = serde_json::to_value(&session).expect("current session serializes");
+        let metadata = value["metadata"].as_object_mut().expect("metadata object");
+        metadata.remove(SESSION_TRANSCRIPT_REWRITE_PREFIX_AUTHORITY_KEY);
+        let graph = metadata[SESSION_TRANSCRIPT_HISTORY_STATE_KEY]
+            .as_object_mut()
+            .expect("graph object");
+        graph.remove("rewrite_prefix");
+        for commit in graph["commits"].as_array_mut().expect("commit array") {
+            commit
+                .as_object_mut()
+                .expect("commit object")
+                .remove("rewrite_generation");
+        }
+
+        let restored: Session =
+            serde_json::from_value(value).expect("0.8.10 cyclic graph remains supported");
+        let state = restored
+            .transcript_history_state()
+            .expect("history decodes")
+            .expect("history exists");
+        assert_eq!(
+            state
+                .commits
+                .iter()
+                .map(|commit| commit.rewrite_generation)
+                .collect::<Vec<_>>(),
+            vec![1, 2],
+            "content recurrence must not rotate or refuse the proved commit-vector order"
+        );
+        validate_transcript_history_state(&state).expect("normalized cycle remains valid");
+    }
+
+    #[test]
     fn transcript_history_rejects_orphan_head_parent_cycle() {
         let mut session = Session::new();
         session.push(Message::User(UserMessage::text("P".to_string())));
@@ -10665,7 +7325,7 @@ mod tests {
     }
 
     #[test]
-    fn mechanical_append_can_recur_to_an_audited_digest_without_mutating_its_body() {
+    fn live_append_can_recur_to_an_audited_digest_without_moving_audited_head() {
         let a = Message::User(UserMessage::text("A".to_string()));
         let b = Message::User(UserMessage::text("B".to_string()));
         let mut session = Session::new();
@@ -10684,7 +7344,7 @@ mod tests {
             .expect("H body")
             .expect("H retained")
             .parent_revision;
-        session
+        let second = session
             .commit_transcript_rewrite(
                 TranscriptRewriteSelection::MessageRange { start: 0, end: 2 },
                 vec![a],
@@ -10700,7 +7360,10 @@ mod tests {
             .transcript_history_state()
             .expect("state")
             .expect("history");
-        assert_eq!(state.head, first.revision);
+        assert_eq!(
+            state.head, second.revision,
+            "graph head remains the latest audited endpoint"
+        );
         assert_eq!(session.transcript_revision().unwrap(), first.revision);
         assert_eq!(
             state
@@ -10712,7 +7375,7 @@ mod tests {
             h_parent,
             "reusing an audited digest must not rewrite its occurrence metadata"
         );
-        validate_transcript_history_state(&state).expect("recurred mechanical head is valid");
+        validate_transcript_history_state(&state).expect("audited graph remains valid");
     }
 
     /// K4 invariant (fail-closed): an invalid replacement is rejected with a
@@ -11554,7 +8217,7 @@ mod tests {
     }
 
     #[test]
-    fn set_system_prompt_refreshes_transcript_history_head_after_rewrite() {
+    fn append_system_message_preserves_exact_prefix_without_rewriting_history() {
         let mut session = Session::new();
         session.push(Message::User(UserMessage::text("question".to_string())));
         session.push(Message::BlockAssistant(BlockAssistantMessage {
@@ -11585,32 +8248,50 @@ mod tests {
                 Some(parent),
             )
             .expect("rewrite should commit");
+        let graph_before = session
+            .metadata()
+            .get(SESSION_TRANSCRIPT_HISTORY_STATE_KEY)
+            .cloned()
+            .expect("audited graph");
+        let messages_before = session.messages().to_vec();
 
-        session.set_system_prompt("durable system prompt".to_string());
+        session.append_system_message("durable system prompt".to_string());
 
+        assert_eq!(
+            &session.messages()[..messages_before.len()],
+            messages_before.as_slice(),
+            "setting a System prompt must preserve every existing message as an exact prefix"
+        );
+        assert!(matches!(
+            session.messages().last(),
+            Some(Message::System(system)) if system.content == "durable system prompt"
+        ));
         let head = session
             .transcript_revision()
-            .expect("system prompt should refresh transcript head");
+            .expect("live system prompt digest");
         assert_ne!(head, rewrite.revision);
         assert_eq!(
             head,
             transcript_messages_digest(session.messages()).expect("current digest")
         );
-        let head_messages = session
-            .transcript_revision_messages(&head)
-            .expect("history state should decode")
-            .expect("refreshed head body should be retained");
         assert_eq!(
-            serde_json::to_value(&head_messages).expect("head serializes"),
-            serde_json::to_value(session.messages()).expect("session serializes")
+            session.metadata().get(SESSION_TRANSCRIPT_HISTORY_STATE_KEY),
+            Some(&graph_before),
+            "mechanical prompt mutation must not rewrite audited graph metadata"
         );
-        validate_transcript_history_state(
-            &session
-                .transcript_history_state()
+        assert!(
+            session
+                .transcript_revision_messages(&head)
                 .expect("history state should decode")
-                .expect("history state should exist"),
-        )
-        .expect("history state remains valid after system prompt update");
+                .is_none(),
+            "live message digests are not retained graph revisions"
+        );
+        let state = session
+            .transcript_history_state()
+            .expect("history state should decode")
+            .expect("history state should exist");
+        assert_eq!(state.head, rewrite.revision);
+        validate_transcript_history_state(&state).expect("audited graph remains valid");
     }
 
     #[test]
@@ -11685,6 +8366,212 @@ mod tests {
             serde_json::to_value(&original_messages).expect("original serializes")
         );
         assert_eq!(replayed.updated_at(), restore.committed_at);
+    }
+
+    #[test]
+    fn validated_bridge_projection_preserves_its_selected_head() {
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("question".to_string())));
+        session.push(Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::Text {
+                text: "verbose answer".to_string(),
+                meta: None,
+            }],
+            stop_reason: StopReason::EndTurn,
+            identity: crate::types::TranscriptMessageIdentity::default(),
+            created_at: crate::types::message_timestamp_now(),
+        }));
+
+        let first_parent = session.transcript_revision().expect("first parent");
+        let first = session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+                vec![Message::BlockAssistant(BlockAssistantMessage {
+                    blocks: vec![AssistantBlock::Text {
+                        text: "compact answer".to_string(),
+                        meta: None,
+                    }],
+                    stop_reason: StopReason::EndTurn,
+                    identity: crate::types::TranscriptMessageIdentity::default(),
+                    created_at: crate::types::message_timestamp_now(),
+                })],
+                TranscriptRewriteReason::new("compaction"),
+                Some("unit-test".to_string()),
+                Some(first_parent),
+            )
+            .expect("first rewrite should commit");
+
+        session.push(Message::User(UserMessage::text("follow up".to_string())));
+        session.push(Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::Text {
+                text: "verbose follow-up".to_string(),
+                meta: None,
+            }],
+            stop_reason: StopReason::EndTurn,
+            identity: crate::types::TranscriptMessageIdentity::default(),
+            created_at: crate::types::message_timestamp_now(),
+        }));
+        let bridge_messages = session.messages().to_vec();
+        let bridge_revision = session.transcript_revision().expect("bridge revision");
+
+        let second = session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 3, end: 4 },
+                vec![Message::BlockAssistant(BlockAssistantMessage {
+                    blocks: vec![AssistantBlock::Text {
+                        text: "compact follow-up".to_string(),
+                        meta: None,
+                    }],
+                    stop_reason: StopReason::EndTurn,
+                    identity: crate::types::TranscriptMessageIdentity::default(),
+                    created_at: crate::types::message_timestamp_now(),
+                })],
+                TranscriptRewriteReason::new("compaction"),
+                Some("unit-test".to_string()),
+                Some(bridge_revision.clone()),
+            )
+            .expect("second rewrite should commit");
+        assert_ne!(second.revision, bridge_revision);
+
+        let full = session
+            .transcript_history_state()
+            .expect("history state should decode")
+            .expect("history state should exist");
+        assert_eq!(full.head, second.revision);
+        let projection = ValidatedTranscriptHistory::seal_owned(full)
+            .expect("full graph should seal")
+            .project_at_revision(&bridge_revision)
+            .expect("bridge projection should preserve proof");
+
+        let mut replayed = Session::new();
+        replayed
+            .apply_validated_transcript_history_state(projection)
+            .expect("bridge projection should materialize");
+        assert_eq!(
+            replayed.transcript_revision().expect("projected revision"),
+            bridge_revision
+        );
+        assert_eq!(
+            serde_json::to_value(replayed.messages()).expect("projection serializes"),
+            serde_json::to_value(&bridge_messages).expect("bridge serializes")
+        );
+        let projected = replayed
+            .transcript_history_state()
+            .expect("projected history decodes")
+            .expect("projected history exists");
+        assert_eq!(
+            projected.head, bridge_revision,
+            "generic pruning must not rewind a selected bridge to the latest audited commit"
+        );
+        assert_eq!(projected.commits.len(), 1);
+        assert_eq!(
+            projected.commits.last().map(|commit| &commit.revision),
+            Some(&first.revision)
+        );
+    }
+
+    #[test]
+    fn exact_rewrite_occurrence_projection_orders_digest_recurrence() {
+        let message_a = Message::User(UserMessage::text("A".to_string()));
+        let message_b = Message::User(UserMessage::text("B".to_string()));
+        let mut session = Session::new();
+        session.push(message_a.clone());
+        let revision_a = session.transcript_revision().expect("A revision");
+
+        let first_b = session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+                vec![message_b.clone()],
+                TranscriptRewriteReason::new("A-to-B"),
+                Some("unit-test".to_string()),
+                Some(revision_a.clone()),
+            )
+            .expect("first B occurrence should commit");
+        let back_to_a = session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+                vec![message_a.clone()],
+                TranscriptRewriteReason::new("B-to-A"),
+                Some("unit-test".to_string()),
+                Some(first_b.revision.clone()),
+            )
+            .expect("second A occurrence should commit");
+        let second_b = session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+                vec![message_b.clone()],
+                TranscriptRewriteReason::new("A-to-B-again"),
+                Some("unit-test".to_string()),
+                Some(back_to_a.revision.clone()),
+            )
+            .expect("second B occurrence should commit");
+
+        assert_eq!(back_to_a.revision, revision_a);
+        assert_eq!(second_b.revision, first_b.revision);
+        let graph = session
+            .transcript_history_state()
+            .expect("history state should decode")
+            .expect("history state should exist");
+        let sealed =
+            ValidatedTranscriptHistory::seal_owned(graph).expect("recurrence graph should seal");
+
+        for (generation, commit, parent_message, revision_message) in [
+            (1_u64, &first_b, &message_a, &message_b),
+            (2_u64, &back_to_a, &message_b, &message_a),
+            (3_u64, &second_b, &message_a, &message_b),
+        ] {
+            assert_eq!(commit.rewrite_generation, generation);
+
+            let mut before = Session::new();
+            before
+                .apply_validated_transcript_history_state(
+                    sealed
+                        .project_at_rewrite_parent(commit)
+                        .expect("exact parent occurrence should project"),
+                )
+                .expect("exact parent occurrence should materialize");
+            assert_eq!(before.messages(), std::slice::from_ref(parent_message));
+            let before_graph = before
+                .transcript_history_state()
+                .expect("parent graph should decode")
+                .expect("parent graph should exist");
+            assert_eq!(
+                before_graph.commits.len(),
+                usize::try_from(generation - 1).expect("test generation fits usize")
+            );
+
+            let mut after = Session::new();
+            after
+                .apply_validated_transcript_history_state(
+                    sealed
+                        .project_at_rewrite_commit(commit)
+                        .expect("exact rewrite occurrence should project"),
+                )
+                .expect("exact rewrite occurrence should materialize");
+            assert_eq!(after.messages(), std::slice::from_ref(revision_message));
+            let after_graph = after
+                .transcript_history_state()
+                .expect("rewrite graph should decode")
+                .expect("rewrite graph should exist");
+            assert_eq!(
+                after_graph.commits.len(),
+                usize::try_from(generation).expect("test generation fits usize")
+            );
+            assert_eq!(
+                after_graph.commits.last(),
+                Some(commit),
+                "the projection must end at this occurrence, not a later equal digest"
+            );
+        }
+
+        let latest_b = sealed
+            .project_at_revision(&first_b.revision)
+            .expect("content lookup should remain available");
+        assert_eq!(
+            latest_b.commits.len(),
+            3,
+            "digest-only lookup intentionally selects the latest matching occurrence"
+        );
     }
 
     #[test]
@@ -11927,6 +8814,75 @@ mod tests {
     }
 
     #[test]
+    fn realtime_legacy_inline_activation_is_failure_atomic_and_preserves_whole_blob() {
+        let mut malformed = Session::new();
+        malformed.set_metadata_unchecked_for_test(
+            SESSION_REALTIME_TRANSCRIPT_STATE_KEY,
+            serde_json::json!("not-a-realtime-state"),
+        );
+        let pristine_prefix = malformed
+            .realtime_component_event_prefix()
+            .expect("pristine realtime prefix");
+        assert!(matches!(
+            malformed.activate_realtime_component_sidecar(),
+            Err(RealtimeTranscriptSidecarError::Serialization(_))
+        ));
+        assert_eq!(
+            malformed
+                .metadata()
+                .get(SESSION_REALTIME_TRANSCRIPT_STATE_KEY),
+            Some(&serde_json::json!("not-a-realtime-state")),
+            "failed activation must leave the exact legacy value in place"
+        );
+        assert_eq!(
+            malformed
+                .realtime_component_event_prefix()
+                .expect("unchanged realtime prefix"),
+            pristine_prefix,
+            "failed activation must not advance component authority"
+        );
+
+        let mut session = Session::new();
+        let state = SessionRealtimeTranscriptState::default();
+        let inline = serde_json::to_value(&state).expect("inline projection");
+        session
+            .set_metadata_unchecked_for_test(SESSION_REALTIME_TRANSCRIPT_STATE_KEY, inline.clone());
+        session
+            .activate_realtime_component_sidecar()
+            .expect("supported inline activation");
+        assert!(
+            !session
+                .metadata()
+                .contains_key(SESSION_REALTIME_TRANSCRIPT_STATE_KEY),
+            "successful activation removes raw shadow authority"
+        );
+        let suffix = session
+            .prepare_realtime_component_event_suffix()
+            .expect("prepare activation suffix")
+            .expect("SnapshotV1 suffix");
+        assert_eq!(suffix.events().len(), 1);
+        assert!(matches!(
+            suffix.events()[0]
+                .decode_payload::<crate::RealtimeTranscriptSidecarRecord>(
+                    crate::REALTIME_TRANSCRIPT_SIDECAR_EVENT_SCHEMA_V1
+                )
+                .expect("decode activation record"),
+            crate::RealtimeTranscriptSidecarRecord::SnapshotV1 { .. }
+        ));
+
+        let whole_blob =
+            serde_json::to_value(&session).expect("WholeBlob projection after activation");
+        assert_eq!(
+            whole_blob
+                .get("metadata")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|metadata| metadata.get(SESSION_REALTIME_TRANSCRIPT_STATE_KEY)),
+            Some(&inline),
+            "activation changes storage authority, not the WholeBlob projection"
+        );
+    }
+
+    #[test]
     fn realtime_user_image_materializes_once_and_unblocks_causal_assistant() {
         let mut session = Session::new();
         let image_data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB".to_string();
@@ -11955,10 +8911,19 @@ mod tests {
             crate::RealtimeUserContentApplyOutcome::AlreadyCommitted(_)
         ));
 
-        let staged_state = session
-            .metadata
-            .get(SESSION_REALTIME_TRANSCRIPT_STATE_KEY)
-            .expect("realtime state must be persisted");
+        assert!(
+            !session
+                .metadata()
+                .contains_key(SESSION_REALTIME_TRANSCRIPT_STATE_KEY),
+            "ordinary operation must keep the full realtime projection out of raw metadata"
+        );
+        let whole_blob =
+            serde_json::to_value(&session).expect("WholeBlob projection should serialize");
+        let staged_state = whole_blob
+            .get("metadata")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|metadata| metadata.get(SESSION_REALTIME_TRANSCRIPT_STATE_KEY))
+            .expect("WholeBlob compatibility projection must include realtime state");
         assert!(
             !staged_state.to_string().contains(&image_data),
             "materialized image bytes must not remain duplicated in transcript metadata"
@@ -13452,9 +10417,6 @@ mod tests {
             .set_build_state(SessionBuildState::default())
             .expect("build state should serialize");
         session
-            .set_system_context_state(SessionSystemContextState::default())
-            .expect("system-context state should serialize");
-        session
             .set_deferred_turn_state(SessionDeferredTurnState::default())
             .expect("deferred-turn state should serialize");
         session
@@ -13475,10 +10437,18 @@ mod tests {
             serde_json::json!([{"sealed_projection": "must-not-fork"}]),
         );
         assert!(
-            session
+            !session
                 .metadata()
                 .contains_key(SESSION_REALTIME_TRANSCRIPT_STATE_KEY),
-            "test setup should install realtime transcript authority state"
+            "typed realtime authority must not leak into the raw metadata map"
+        );
+        assert_eq!(
+            session
+                .realtime_component_event_prefix()
+                .expect("realtime component prefix")
+                .event_count(),
+            1,
+            "test setup should park one typed realtime event"
         );
 
         let forked_at = session.fork_at(1);
@@ -13501,12 +10471,6 @@ mod tests {
             assert!(
                 !forked
                     .metadata()
-                    .contains_key(SESSION_SYSTEM_CONTEXT_STATE_KEY),
-                "forked sessions must not raw-copy system-context authority state"
-            );
-            assert!(
-                !forked
-                    .metadata()
                     .contains_key(SESSION_DEFERRED_TURN_STATE_KEY),
                 "forked sessions must not raw-copy deferred-turn authority state"
             );
@@ -13521,6 +10485,14 @@ mod tests {
                     .metadata()
                     .contains_key(SESSION_REALTIME_TRANSCRIPT_STATE_KEY),
                 "forked sessions must not raw-copy realtime transcript authority state"
+            );
+            assert_eq!(
+                forked
+                    .realtime_component_event_prefix()
+                    .expect("fork realtime component prefix")
+                    .event_count(),
+                0,
+                "forked sessions must start a new empty realtime component lineage"
             );
             assert!(
                 !forked
@@ -13540,12 +10512,13 @@ mod tests {
     }
 
     #[test]
-    fn identical_metadata_projection_is_checkpoint_idempotent() {
+    fn identical_metadata_projection_is_wire_idempotent() {
         let mut session = Session::new();
         session.set_metadata("key", serde_json::json!({ "value": 1 }));
         let updated_at = session.updated_at;
-        let digest = crate::session_checkpoint_digest(&session)
-            .expect("checkpoint digest before identical projection");
+        let bytes = session
+            .to_persisted_bytes()
+            .expect("session bytes before identical projection");
 
         session.set_metadata("key", serde_json::json!({ "value": 1 }));
         session.remove_metadata("already_absent");
@@ -13555,10 +10528,11 @@ mod tests {
             "an identical durable projection must not manufacture a content mutation"
         );
         assert_eq!(
-            crate::session_checkpoint_digest(&session)
-                .expect("checkpoint digest after identical projection"),
-            digest,
-            "an identical durable projection must not rotate checkpoint authority"
+            session
+                .to_persisted_bytes()
+                .expect("session bytes after identical projection"),
+            bytes,
+            "an identical durable projection must not rotate current Session bytes"
         );
     }
 
@@ -13670,6 +10644,43 @@ mod tests {
     }
 
     #[test]
+    fn recovered_head_adoption_keeps_archived_absorbing_from_either_copy() {
+        let mut archived_recovery = Session::new();
+        archived_recovery
+            .set_lifecycle_terminal(SessionLifecycleTerminal::Archived)
+            .expect("archive terminal serializes");
+        let mut active_head = archived_recovery.clone();
+        active_head
+            .set_lifecycle_terminal(SessionLifecycleTerminal::Active)
+            .expect("active terminal serializes");
+        archived_recovery
+            .adopt_recovered_head_state(&active_head)
+            .expect("generated lifecycle merge resolves");
+        assert_eq!(
+            archived_recovery.lifecycle_terminal(),
+            Some(SessionLifecycleTerminal::Archived),
+            "a newer Active projection must not resurrect an Archived recovery base"
+        );
+
+        let mut active_recovery = Session::new();
+        active_recovery
+            .set_lifecycle_terminal(SessionLifecycleTerminal::Active)
+            .expect("active terminal serializes");
+        let mut archived_head = active_recovery.clone();
+        archived_head
+            .set_lifecycle_terminal(SessionLifecycleTerminal::Archived)
+            .expect("archive terminal serializes");
+        active_recovery
+            .adopt_recovered_head_state(&archived_head)
+            .expect("generated lifecycle merge resolves");
+        assert_eq!(
+            active_recovery.lifecycle_terminal(),
+            Some(SessionLifecycleTerminal::Archived),
+            "an Archived durable head must remain terminal after recovery adoption"
+        );
+    }
+
+    #[test]
     fn lifecycle_terminal_key_rejects_raw_mutation() {
         let mut session = Session::new();
         assert!(
@@ -13704,11 +10715,6 @@ mod tests {
 
         assert!(
             session
-                .try_set_metadata(SESSION_SYSTEM_CONTEXT_STATE_KEY, serde_json::json!({}))
-                .is_err()
-        );
-        assert!(
-            session
                 .try_set_metadata(SESSION_METADATA_KEY, serde_json::json!({}))
                 .is_err()
         );
@@ -13716,6 +10722,18 @@ mod tests {
             session
                 .try_set_metadata(SESSION_BUILD_STATE_KEY, serde_json::json!({}))
                 .is_err()
+        );
+        assert!(
+            session
+                .try_set_metadata(
+                    SESSION_TRANSCRIPT_REWRITE_PREFIX_AUTHORITY_KEY,
+                    serde_json::json!({
+                        "occurrence_count": 0,
+                        "digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+                    })
+                )
+                .is_err(),
+            "raw metadata must not forge rewrite-prefix authority"
         );
         let compaction_intents_key = crate::memory::SESSION_COMPACTION_PROJECTION_INTENTS_KEY;
         let sealed_compaction_intents =
@@ -13785,34 +10803,6 @@ mod tests {
                 .metadata()
                 .contains_key(SESSION_DEFERRED_TURN_STATE_KEY)
         );
-        assert!(
-            !session.backfill_metadata_if_absent(
-                SESSION_SYSTEM_CONTEXT_STATE_KEY,
-                serde_json::json!({})
-            )
-        );
-
-        let state = SessionSystemContextState::default();
-        session
-            .set_system_context_state(state.clone())
-            .expect("typed setter should route through generated authority");
-        session.remove_metadata(SESSION_SYSTEM_CONTEXT_STATE_KEY);
-        assert_eq!(
-            session
-                .try_system_context_state()
-                .expect("typed state should restore"),
-            Some(state)
-        );
-
-        session.metadata.insert(
-            SESSION_SYSTEM_CONTEXT_STATE_KEY.to_string(),
-            serde_json::json!("not-a-state"),
-        );
-        assert!(
-            session.try_system_context_state().is_err(),
-            "malformed generated authority state must not decode as absent/default"
-        );
-
         session.metadata.insert(
             SESSION_METADATA_KEY.to_string(),
             serde_json::json!("not-metadata"),
@@ -13867,18 +10857,33 @@ mod tests {
             response_id: None,
         });
         assert!(
-            session
+            !session
                 .metadata()
                 .contains_key(SESSION_REALTIME_TRANSCRIPT_STATE_KEY),
-            "typed realtime transcript append should retain authority to persist its state"
+            "typed realtime transcript append must not recreate raw shadow authority"
+        );
+        assert_eq!(
+            session
+                .realtime_component_event_prefix()
+                .expect("typed realtime prefix")
+                .event_count(),
+            1,
+            "typed append must advance the authenticated component prefix"
         );
         session.metadata.insert(
             SESSION_REALTIME_TRANSCRIPT_STATE_KEY.to_string(),
             serde_json::json!("not-a-state"),
         );
+        let whole_blob =
+            serde_json::to_value(&session).expect("typed projection must override a raw shadow");
+        let projected = whole_blob
+            .get("metadata")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|metadata| metadata.get(SESSION_REALTIME_TRANSCRIPT_STATE_KEY))
+            .expect("WholeBlob projection");
         assert!(
-            session.try_realtime_transcript_state().is_err(),
-            "malformed realtime generated authority state must not decode as absent/default"
+            serde_json::from_value::<SessionRealtimeTranscriptState>(projected.clone()).is_ok(),
+            "WholeBlob encoding must derive from typed authority, never a raw metadata shadow"
         );
     }
 
@@ -14116,1500 +11121,68 @@ mod tests {
     }
 
     #[test]
-    fn system_context_state_preserves_applied_runtime_context() {
-        let accepted_at = SystemTime::UNIX_EPOCH;
-        let mut state = SessionSystemContextState::default();
-        state
-            .stage_append(
-                &AppendSystemContextRequest {
-                    content: crate::lifecycle::run_primitive::CoreRenderable::text(
-                        "Authoritative peer token is birch seventeen.".to_string(),
-                    ),
-                    source: Some(
-                        "peer_response_terminal:analyst:018f6f79-7a82-7c4e-a552-a3b86f9630f1"
-                            .to_string(),
-                    ),
-                    idempotency_key: Some("018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string()),
-                    source_kind: SystemContextSource::Normal,
-                    peer_response_terminal: None,
-                },
-                accepted_at,
+    fn persisted_round_trip_preserves_multiple_systems_anywhere_exactly() {
+        let mut session = Session::new();
+        session.append_system_message("first");
+        session.push(Message::User(UserMessage::text("hello")));
+        session.append_system_message(" second ");
+        session.append_system_message("");
+        session.append_system_message(" second ");
+        let expected = session.messages().to_vec();
+        let bytes = serde_json::to_vec(&session).expect("serialize session");
+        let resumed: Session = serde_json::from_slice(&bytes).expect("deserialize session");
+        assert_eq!(resumed.messages(), expected.as_slice());
+        assert_eq!(resumed.messages_for_model_boundary(), expected);
+    }
+    #[test]
+    fn system_control_idempotency_is_explicit_and_does_not_coalesce_keyless_rows() {
+        let mut session = Session::new();
+        let timestamp = crate::types::message_timestamp_now();
+        let first = session
+            .append_system_message_idempotent(
+                " exact ",
+                Some("host".to_string()),
+                Some("key".to_string()),
+                timestamp,
             )
-            .expect("append should stage");
-
-        state.mark_pending_applied();
-
-        assert!(state.pending.is_empty());
-        assert_eq!(state.applied.len(), 1);
-        assert_eq!(
-            state.applied[0].content.render_text(),
-            "Authoritative peer token is birch seventeen."
-        );
-        assert_eq!(
-            state.applied[0].source.as_deref(),
-            Some("peer_response_terminal:analyst:018f6f79-7a82-7c4e-a552-a3b86f9630f1")
-        );
-
-        let round_tripped: SessionSystemContextState =
-            serde_json::from_value(serde_json::to_value(&state).expect("serialize state"))
-                .expect("deserialize state");
-        assert_eq!(round_tripped.applied, state.applied);
-    }
-
-    #[test]
-    fn active_turn_system_context_is_discarded_when_not_applied() {
-        let mut state = SessionSystemContextState::default();
-        state
-            .stage_active_turn_append(
-                &AppendSystemContextRequest {
-                    content: crate::lifecycle::run_primitive::CoreRenderable::text(
-                        "only for the active run".to_string(),
-                    ),
-                    source: Some("runtime:steer:input-1".to_string()),
-                    idempotency_key: Some("runtime:steer:input-1".to_string()),
-                    source_kind: SystemContextSource::RuntimeSteer,
-                    peer_response_terminal: None,
-                },
-                SystemTime::UNIX_EPOCH,
+            .expect("first append");
+        assert_eq!(first, crate::service::AppendSystemContextStatus::Applied);
+        let duplicate = session
+            .append_system_message_idempotent(
+                " exact ",
+                Some("host".to_string()),
+                Some("key".to_string()),
+                timestamp,
             )
-            .expect("active context should stage");
-
-        let discarded = state.discard_unapplied_active_turn_pending();
-
-        assert_eq!(discarded.len(), 1);
-        assert!(state.pending.is_empty());
-        assert!(state.applied.is_empty());
-        assert!(state.active_turn_pending_keys.is_empty());
-        assert!(state.active_turn_pending_indices.is_empty());
-        assert!(
-            state.seen.is_empty(),
-            "discarded active-turn context should not block later idempotency keys"
-        );
-    }
-
-    #[test]
-    fn keyless_active_turn_system_context_is_owned_and_discarded() {
-        let mut state = SessionSystemContextState::default();
-        state
-            .stage_active_turn_append(
-                &AppendSystemContextRequest {
-                    content: crate::lifecycle::run_primitive::CoreRenderable::text(
-                        "keyless active-turn context".to_string(),
-                    ),
-                    source: Some("test:keyless-active-turn".to_string()),
-                    idempotency_key: None,
-                    source_kind: SystemContextSource::RuntimeSteer,
-                    peer_response_terminal: None,
-                },
-                SystemTime::UNIX_EPOCH,
-            )
-            .expect("keyless active context should stage");
-
-        assert!(state.active_turn_pending_keys.is_empty());
-        assert_eq!(state.active_turn_pending_len(), 1);
-        let discarded = state.discard_unapplied_active_turn_pending();
-
-        assert_eq!(discarded.len(), 1);
-        assert!(state.pending.is_empty());
-        assert_eq!(state.active_turn_pending_len(), 0);
-    }
-
-    #[test]
-    fn active_turn_system_context_can_roll_back_targeted_keys() {
-        let mut state = SessionSystemContextState::default();
-        for key in ["runtime:steer:input-1", "runtime:steer:input-2"] {
-            state
-                .stage_active_turn_append(
-                    &AppendSystemContextRequest {
-                        content: crate::lifecycle::run_primitive::CoreRenderable::text(format!(
-                            "context for {key}"
-                        )),
-                        source: Some(key.to_string()),
-                        idempotency_key: Some(key.to_string()),
-                        source_kind: SystemContextSource::RuntimeSteer,
-                        peer_response_terminal: None,
-                    },
-                    SystemTime::UNIX_EPOCH,
-                )
-                .expect("active context should stage");
-        }
-
-        let discarded =
-            state.discard_active_turn_pending_by_keys(&["runtime:steer:input-1".to_string()]);
-
-        assert_eq!(discarded.len(), 1);
+            .expect("exact retry");
         assert_eq!(
-            discarded[0].idempotency_key.as_deref(),
-            Some("runtime:steer:input-1")
+            duplicate,
+            crate::service::AppendSystemContextStatus::Duplicate
         );
-        assert_eq!(state.pending.len(), 1);
-        assert_eq!(
-            state.pending[0].idempotency_key.as_deref(),
-            Some("runtime:steer:input-2")
-        );
-        assert!(!state.seen.contains_key("runtime:steer:input-1"));
-        assert!(state.seen.contains_key("runtime:steer:input-2"));
-        assert!(
-            !state
-                .active_turn_pending_keys
-                .contains("runtime:steer:input-1")
-        );
-        assert!(
-            state
-                .active_turn_pending_keys
-                .contains("runtime:steer:input-2")
-        );
-    }
-
-    #[test]
-    fn active_turn_system_context_is_transient_when_boundary_consumes_it() {
-        let mut state = SessionSystemContextState::default();
-        state
-            .stage_active_turn_append(
-                &AppendSystemContextRequest {
-                    content: crate::lifecycle::run_primitive::CoreRenderable::text(
-                        "visible to this run".to_string(),
-                    ),
-                    source: Some("runtime:steer:input-2".to_string()),
-                    idempotency_key: Some("runtime:steer:input-2".to_string()),
-                    source_kind: SystemContextSource::RuntimeSteer,
-                    peer_response_terminal: None,
-                },
-                SystemTime::UNIX_EPOCH,
-            )
-            .expect("active context should stage");
-
-        state.mark_pending_applied();
-        let discarded = state.discard_unapplied_active_turn_pending();
-
-        assert!(discarded.is_empty());
-        assert!(state.pending.is_empty());
-        assert!(state.applied.is_empty());
-        assert!(state.active_turn_pending_keys.is_empty());
-        assert!(state.active_turn_pending_indices.is_empty());
-        assert_eq!(
-            state.seen.get("runtime:steer:input-2"),
-            None,
-            "consumed active-turn steer context must not become durable state"
-        );
-    }
-
-    #[test]
-    fn discard_transient_runtime_steer_context_removes_steer_via_typed_marker() {
-        let mut session = Session::new();
-        // The runtime-steer fact is carried by the typed `source_kind`, not by
-        // the `source` string. The durable peer fact uses the same `source`
-        // string scheme but is marked `Normal`, so only the steers are removed.
-        session.set_system_prompt(format!(
-            "base{}{}{}{}",
-            SYSTEM_CONTEXT_SEPARATOR,
-            render_system_context_block(&PendingSystemContextAppend {
-                content: crate::lifecycle::run_primitive::CoreRenderable::text(
-                    "old steer".to_string()
-                ),
-                source: Some("steer-source-old".to_string()),
-                idempotency_key: Some("steer-key-old".to_string()),
-                source_kind: SystemContextSource::RuntimeSteer,
-                peer_response_terminal: None,
-                accepted_at: SystemTime::UNIX_EPOCH,
-            }),
-            SYSTEM_CONTEXT_SEPARATOR,
-            render_system_context_block(&PendingSystemContextAppend {
-                content: crate::lifecycle::run_primitive::CoreRenderable::text(
-                    "durable peer fact".to_string()
-                ),
-                source: Some("peer_response_terminal:analyst:req".to_string()),
-                idempotency_key: Some("peer_response_terminal:analyst:req".to_string()),
-                source_kind: SystemContextSource::Normal,
-                peer_response_terminal: None,
-                accepted_at: SystemTime::UNIX_EPOCH,
-            })
-        ));
         session
-            .set_system_context_state(SessionSystemContextState {
-                pending: vec![PendingSystemContextAppend {
-                    content: crate::lifecycle::run_primitive::CoreRenderable::text(
-                        "pending steer".to_string(),
-                    ),
-                    source: Some("steer-source-pending".to_string()),
-                    idempotency_key: Some("steer-key-pending".to_string()),
-                    source_kind: SystemContextSource::RuntimeSteer,
-                    peer_response_terminal: None,
-                    accepted_at: SystemTime::UNIX_EPOCH,
-                }],
-                applied: vec![
-                    PendingSystemContextAppend {
-                        content: crate::lifecycle::run_primitive::CoreRenderable::text(
-                            "old steer".to_string(),
-                        ),
-                        source: Some("steer-source-old".to_string()),
-                        idempotency_key: Some("steer-key-old".to_string()),
-                        source_kind: SystemContextSource::RuntimeSteer,
-                        peer_response_terminal: None,
-                        accepted_at: SystemTime::UNIX_EPOCH,
-                    },
-                    PendingSystemContextAppend {
-                        content: crate::lifecycle::run_primitive::CoreRenderable::text(
-                            "durable peer fact".to_string(),
-                        ),
-                        source: Some("peer_response_terminal:analyst:req".to_string()),
-                        idempotency_key: Some("peer_response_terminal:analyst:req".to_string()),
-                        source_kind: SystemContextSource::Normal,
-                        peer_response_terminal: None,
-                        accepted_at: SystemTime::UNIX_EPOCH,
-                    },
-                ],
-                seen: BTreeMap::from([(
-                    "steer-key-old".to_string(),
-                    SeenSystemContextKey {
-                        content: crate::lifecycle::run_primitive::CoreRenderable::text(
-                            "old steer".to_string(),
-                        ),
-                        source: Some("steer-source-old".to_string()),
-                        source_kind: SystemContextSource::RuntimeSteer,
-                        state: SeenSystemContextState::Applied,
-                    },
-                )]),
-                active_turn_pending_keys: BTreeSet::from(["steer-key-pending".to_string()]),
-                active_turn_pending_indices: BTreeSet::from([0]),
-            })
-            .expect("system context state should serialize");
-
-        let removed = session.discard_transient_runtime_steer_context();
-
-        assert!(removed >= 4);
-        let system_prompt = match session.messages().first() {
-            Some(Message::System(system)) => system.content.as_str(),
-            other => panic!("expected system prompt, got {other:?}"),
-        };
-        assert!(!system_prompt.contains("old steer"));
-        assert!(system_prompt.contains("durable peer fact"));
-        let state = session.system_context_state().unwrap_or_default();
-        assert!(state.pending.is_empty());
-        assert_eq!(state.applied.len(), 1);
-        assert_eq!(state.applied[0].content.render_text(), "durable peer fact");
-        assert!(state.seen.is_empty());
-        assert!(state.active_turn_pending_keys.is_empty());
-    }
-
-    #[test]
-    fn append_system_context_blocks_records_typed_applied_context() {
-        let append = PendingSystemContextAppend {
-            content: crate::lifecycle::run_primitive::CoreRenderable::text(
-                "Authoritative peer token is birch seventeen.".to_string(),
-            ),
-            source: Some(
-                "peer_response_terminal:analyst:018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string(),
-            ),
-            idempotency_key: Some("018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string()),
-            source_kind: SystemContextSource::Normal,
-            peer_response_terminal: None,
-            accepted_at: SystemTime::UNIX_EPOCH,
-        };
-        let mut session = Session::new();
-
-        session.append_system_context_blocks(std::slice::from_ref(&append));
-
-        let state = session
-            .system_context_state()
-            .expect("append should persist typed context state");
-        assert_eq!(state.applied, vec![append]);
-    }
-
-    fn roster_append() -> PendingSystemContextAppend {
-        PendingSystemContextAppend {
-            content: crate::lifecycle::run_primitive::CoreRenderable::text(
-                "peer roster: lead-1, w-1".to_string(),
-            ),
-            source: Some("comms:roster".to_string()),
-            idempotency_key: Some("comms:roster:v1".to_string()),
-            source_kind: SystemContextSource::Normal,
-            peer_response_terminal: None,
-            accepted_at: SystemTime::UNIX_EPOCH,
-        }
-    }
-
-    fn peer_terminal_append(
-        key: &str,
-        request_id: &str,
-        status: PeerResponseTerminalProjectionStatus,
-    ) -> PendingSystemContextAppend {
-        let route_identity =
-            PeerResponseTerminalRouteIdentity::parse("550e8400-e29b-41d4-a716-446655440000")
-                .expect("route identity");
-        let display_identity =
-            PeerResponseTerminalDisplayIdentity::parse("Analyst").expect("display identity");
-        let correlation_id =
-            PeerResponseTerminalCorrelationId::parse(request_id).expect("correlation id");
-        let payload = serde_json::json!({"token": "birch seventeen"});
-        let fact = PeerResponseTerminalFact::new(
-            PeerResponseTerminalSource::new(None, route_identity, display_identity),
-            correlation_id,
-            status,
-            PeerResponseTerminalRenderPayload::new(Some(payload.clone())),
-        );
-        PendingSystemContextAppend {
-            content: crate::lifecycle::run_primitive::CoreRenderable::SystemNotice {
-                kind: SystemNoticeKind::Comms,
-                body: Some("Peer terminal response context".to_string()),
-                blocks: vec![SystemNoticeBlock::Comms {
-                    kind: CommsNoticeKind::ResponseTerminal,
-                    direction: SystemNoticeDirection::Incoming,
-                    peer: Some(SystemNoticePeer {
-                        id: fact.source.route_identity.peer_id(),
-                        display_name: Some(fact.source.display_identity.to_string()),
-                    }),
-                    sender_taint: None,
-                    request_id: Some(fact.correlation_id.to_string()),
-                    intent: None,
-                    status: Some(fact.status.label().to_string()),
-                    summary: Some("Peer terminal response".to_string()),
-                    payload: Some(payload),
-                    content: Vec::new(),
-                }],
-            },
-            source: Some(format!(
-                "peer_response_terminal:{}:{}",
-                fact.source.route_identity, fact.correlation_id
-            )),
-            idempotency_key: Some(key.to_string()),
-            source_kind: SystemContextSource::Normal,
-            peer_response_terminal: Some(fact),
-            accepted_at: SystemTime::UNIX_EPOCH,
-        }
-    }
-
-    fn terminal_notice_count(session: &Session) -> usize {
+            .append_system_message_idempotent("", None, None, timestamp)
+            .expect("empty keyless System");
         session
-            .messages()
-            .iter()
-            .filter(|message| {
-                matches!(
-                    message,
-                    Message::SystemNotice(SystemNoticeMessage {
-                        kind: SystemNoticeKind::Comms,
-                        blocks,
-                        ..
-                    }) if blocks.iter().any(|block| matches!(
-                        block,
-                        SystemNoticeBlock::Comms {
-                            kind: CommsNoticeKind::ResponseTerminal,
-                            ..
-                        }
-                    ))
-                )
-            })
-            .count()
-    }
-
-    #[test]
-    fn peer_terminal_context_preserves_system_prefix_and_appends_typed_notice() {
-        let append = peer_terminal_append(
-            "terminal-1",
-            "018f6f79-7a82-7c4e-a552-a3b86f9630f1",
-            PeerResponseTerminalProjectionStatus::Completed,
-        );
-        let mut session = Session::new();
-        session.set_system_prompt("byte-stable system prompt".to_string());
-        let leading_before = session.messages().first().cloned();
-
-        session.append_system_context_blocks(std::slice::from_ref(&append));
-
+            .append_system_message_idempotent("", None, None, timestamp)
+            .expect("duplicate keyless System");
         assert_eq!(
-            session.messages().first(),
-            leading_before.as_ref(),
-            "terminal conversation facts must not mutate the leading system message"
-        );
-        assert_eq!(terminal_notice_count(&session), 1);
-        assert!(matches!(
-            session.messages().last(),
-            Some(Message::SystemNotice(_))
-        ));
-        let state = session.system_context_state().expect("typed state");
-        assert_eq!(state.applied, vec![append]);
-        assert_eq!(
-            state.seen["terminal-1"].state,
-            SeenSystemContextState::Applied
-        );
-    }
-
-    #[test]
-    fn peer_terminal_context_dedupes_same_and_conflicting_key() {
-        let first = peer_terminal_append(
-            "terminal-1",
-            "018f6f79-7a82-7c4e-a552-a3b86f9630f1",
-            PeerResponseTerminalProjectionStatus::Completed,
-        );
-        let duplicate = PendingSystemContextAppend {
-            accepted_at: SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1),
-            ..first.clone()
-        };
-        let conflicting = peer_terminal_append(
-            "terminal-1",
-            "018f6f79-7a82-7c4e-a552-a3b86f9630f2",
-            PeerResponseTerminalProjectionStatus::Failed,
-        );
-        let mut session = Session::new();
-        session.set_system_prompt("stable".to_string());
-
-        session.append_system_context_blocks(std::slice::from_ref(&first));
-        session.append_system_context_blocks(std::slice::from_ref(&duplicate));
-        session.append_system_context_blocks(std::slice::from_ref(&conflicting));
-
-        assert_eq!(terminal_notice_count(&session), 1);
-        assert_eq!(leading_system_content(&session), "stable");
-        assert_eq!(
-            session.system_context_state().expect("typed state").applied,
-            vec![first]
-        );
-    }
-
-    #[test]
-    fn mixed_terminal_and_instruction_context_route_to_distinct_transcript_roles() {
-        let terminal = peer_terminal_append(
-            "terminal-1",
-            "018f6f79-7a82-7c4e-a552-a3b86f9630f1",
-            PeerResponseTerminalProjectionStatus::Completed,
-        );
-        let roster = roster_append();
-        let mut session = Session::new();
-        session.set_system_prompt("base".to_string());
-
-        session.append_system_context_blocks(&[terminal, roster]);
-
-        let system = leading_system_content(&session);
-        assert!(system.starts_with("base"));
-        assert!(system.contains("peer roster: lead-1, w-1"));
-        assert!(!system.contains("Peer terminal response"));
-        assert_eq!(terminal_notice_count(&session), 1);
-    }
-
-    #[test]
-    fn resume_base_change_preserves_terminal_notice_and_dedupe_authority() {
-        let terminal = peer_terminal_append(
-            "terminal-1",
-            "018f6f79-7a82-7c4e-a552-a3b86f9630f1",
-            PeerResponseTerminalProjectionStatus::Completed,
-        );
-        let mut session = Session::new();
-        session.set_system_prompt("old base".to_string());
-        session.append_system_context_blocks(std::slice::from_ref(&terminal));
-
-        let outcome = session
-            .reconcile_resumed_system_prompt("new base".to_string(), None)
-            .expect("reconcile changed base");
-
-        assert_eq!(outcome, ResumedSystemPromptReconciliation::RewrittenBase);
-        assert_eq!(leading_system_content(&session), "new base");
-        assert_eq!(terminal_notice_count(&session), 1);
-        let state = session.system_context_state().expect("typed state");
-        assert_eq!(state.applied, vec![terminal.clone()]);
-        assert!(state.seen.contains_key("terminal-1"));
-
-        session.append_system_context_blocks(std::slice::from_ref(&terminal));
-        assert_eq!(
-            terminal_notice_count(&session),
-            1,
-            "retry after cold-resume reconciliation must remain idempotent"
-        );
-        assert_eq!(leading_system_content(&session), "new base");
-    }
-
-    fn legacy_session_with_system_context(
-        base: &str,
-        appends: &[PendingSystemContextAppend],
-    ) -> Session {
-        let mut session = Session::new();
-        let rendered = appends
-            .iter()
-            .map(render_system_context_block)
-            .collect::<Vec<_>>()
-            .join(SYSTEM_CONTEXT_SEPARATOR);
-        session
-            .set_system_prompt_with_source(
-                format!("{base}{SYSTEM_CONTEXT_SEPARATOR}{rendered}"),
-                session_durable_config_authority::SessionSystemPromptSource::RuntimeContextAppend,
-            )
-            .expect("legacy runtime-context prompt");
-        let mut state = SessionSystemContextState::default();
-        let accepted =
-            system_context_authority::record_applied_system_context_blocks(&mut state, appends, "");
-        assert_eq!(accepted, appends);
-        session
-            .set_system_context_state(state)
-            .expect("legacy applied state");
-        session
-            .set_build_state(SessionBuildState {
-                assembled_system_prompt: Some(base.to_string()),
-                ..Default::default()
-            })
-            .expect("legacy build state");
-        session
-    }
-
-    #[test]
-    fn cold_resume_migrates_legacy_terminal_system_tail_to_notice() {
-        let terminal = peer_terminal_append(
-            "terminal-1",
-            "018f6f79-7a82-7c4e-a552-a3b86f9630f1",
-            PeerResponseTerminalProjectionStatus::Completed,
-        );
-        let legacy = legacy_session_with_system_context("base", std::slice::from_ref(&terminal));
-        let mut resumed: Session =
-            serde_json::from_value(serde_json::to_value(legacy).expect("serialize legacy session"))
-                .expect("deserialize legacy session");
-
-        let outcome = resumed
-            .reconcile_resumed_system_prompt("base".to_string(), Some("resume".to_string()))
-            .expect("migrate legacy terminal context");
-
-        assert_eq!(outcome, ResumedSystemPromptReconciliation::RewrittenBase);
-        assert_eq!(leading_system_content(&resumed), "base");
-        assert_eq!(terminal_notice_count(&resumed), 1);
-        let state = resumed.system_context_state().expect("typed state");
-        assert_eq!(state.applied, vec![terminal.clone()]);
-        assert!(state.seen.contains_key("terminal-1"));
-
-        resumed.append_system_context_blocks(std::slice::from_ref(&terminal));
-        assert_eq!(terminal_notice_count(&resumed), 1);
-        assert_eq!(leading_system_content(&resumed), "base");
-    }
-
-    #[test]
-    fn resume_migrates_legacy_terminal_but_preserves_roster_tail() {
-        let terminal = peer_terminal_append(
-            "terminal-1",
-            "018f6f79-7a82-7c4e-a552-a3b86f9630f1",
-            PeerResponseTerminalProjectionStatus::Completed,
-        );
-        let roster = roster_append();
-        let mut session =
-            legacy_session_with_system_context("old base", &[roster.clone(), terminal.clone()]);
-
-        let outcome = session
-            .reconcile_resumed_system_prompt("new base".to_string(), Some("resume".to_string()))
-            .expect("migrate mixed legacy context");
-
-        assert_eq!(outcome, ResumedSystemPromptReconciliation::RewrittenBase);
-        let system = leading_system_content(&session);
-        assert!(system.starts_with("new base"));
-        assert!(system.contains("peer roster: lead-1, w-1"));
-        assert!(!system.contains("Peer terminal response"));
-        assert_eq!(terminal_notice_count(&session), 1);
-        let state = session.system_context_state().expect("typed state");
-        assert_eq!(state.applied, vec![roster, terminal]);
-        assert!(state.seen.contains_key("comms:roster:v1"));
-        assert!(state.seen.contains_key("terminal-1"));
-    }
-
-    #[test]
-    fn terminal_migration_never_removes_base_owned_collision() {
-        let terminal = peer_terminal_append(
-            "terminal-1",
-            "018f6f79-7a82-7c4e-a552-a3b86f9630f1",
-            PeerResponseTerminalProjectionStatus::Completed,
-        );
-        let base = format!(
-            "base text{SYSTEM_CONTEXT_SEPARATOR}{}",
-            render_system_context_block(&terminal)
-        );
-        let mut session = Session::new();
-        session.set_system_prompt(base.clone());
-        session
-            .set_build_state(SessionBuildState {
-                assembled_system_prompt: Some(base.clone()),
-                ..Default::default()
-            })
-            .expect("build state");
-        session.append_system_context_blocks(std::slice::from_ref(&terminal));
-        let document_before =
-            serde_json::to_vec(&session).expect("serialize pre-reconcile collision session");
-
-        let outcome = session
-            .reconcile_resumed_system_prompt(base, Some("resume".to_string()))
-            .expect("reconcile base-owned collision");
-
-        assert_eq!(
-            outcome,
-            ResumedSystemPromptReconciliation::PreservedContinuation
-        );
-        assert_eq!(
-            serde_json::to_vec(&session).expect("serialize post-reconcile collision session"),
-            document_before,
-            "typed terminal state must never authorize rewriting base-owned bytes"
-        );
-        assert_eq!(terminal_notice_count(&session), 1);
-    }
-
-    #[test]
-    fn legacy_migration_fails_closed_on_typed_rendering_ambiguity() {
-        let terminal = peer_terminal_append(
-            "terminal-1",
-            "018f6f79-7a82-7c4e-a552-a3b86f9630f1",
-            PeerResponseTerminalProjectionStatus::Completed,
-        );
-        let ordinary_collision = PendingSystemContextAppend {
-            idempotency_key: Some("ordinary-collision".to_string()),
-            peer_response_terminal: None,
-            ..terminal.clone()
-        };
-        assert_eq!(
-            render_system_context_block(&ordinary_collision),
-            render_system_context_block(&terminal)
-        );
-        let mut session = legacy_session_with_system_context(
-            "base",
-            &[ordinary_collision.clone(), terminal.clone()],
-        );
-        let system_before = leading_system_content(&session);
-
-        let outcome = session
-            .reconcile_resumed_system_prompt("base".to_string(), Some("resume".to_string()))
-            .expect("migrate colliding typed tail");
-
-        assert_eq!(outcome, ResumedSystemPromptReconciliation::RewrittenBase);
-        assert_eq!(
-            leading_system_content(&session),
-            system_before,
-            "ambiguous identical terminal/non-terminal renderings must not authorize removal"
-        );
-        assert_eq!(terminal_notice_count(&session), 1);
-        let state = session.system_context_state().expect("typed state");
-        assert_eq!(state.applied, vec![ordinary_collision, terminal]);
-        assert!(state.seen.contains_key("ordinary-collision"));
-        assert!(state.seen.contains_key("terminal-1"));
-    }
-
-    #[test]
-    fn legacy_migration_handles_applied_only_active_boundary_terminal() {
-        let rendered_terminal = peer_terminal_append(
-            "terminal-a",
-            "018f6f79-7a82-7c4e-a552-a3b86f9630f1",
-            PeerResponseTerminalProjectionStatus::Completed,
-        );
-        let applied_only_terminal = peer_terminal_append(
-            "terminal-b",
-            "018f6f79-7a82-7c4e-a552-a3b86f9630f2",
-            PeerResponseTerminalProjectionStatus::Completed,
-        );
-        let mut session =
-            legacy_session_with_system_context("base", std::slice::from_ref(&rendered_terminal));
-        let mut state = session.system_context_state().expect("legacy typed state");
-        let accepted = system_context_authority::record_applied_system_context_blocks(
-            &mut state,
-            std::slice::from_ref(&applied_only_terminal),
-            &leading_system_content(&session),
-        );
-        assert_eq!(accepted, vec![applied_only_terminal.clone()]);
-        session
-            .set_system_context_state(state)
-            .expect("active-boundary applied-only state");
-
-        let outcome = session
-            .reconcile_resumed_system_prompt("base".to_string(), Some("resume".to_string()))
-            .expect("migrate partial legacy terminal tail");
-
-        assert_eq!(outcome, ResumedSystemPromptReconciliation::RewrittenBase);
-        assert_eq!(leading_system_content(&session), "base");
-        assert_eq!(terminal_notice_count(&session), 2);
-        let state = session.system_context_state().expect("typed state");
-        assert_eq!(
-            state.applied,
-            vec![rendered_terminal, applied_only_terminal]
-        );
-        assert!(state.seen.contains_key("terminal-a"));
-        assert!(state.seen.contains_key("terminal-b"));
-    }
-
-    #[test]
-    fn legacy_migration_caps_removal_at_typed_terminal_multiplicity() {
-        let terminal = peer_terminal_append(
-            "terminal-1",
-            "018f6f79-7a82-7c4e-a552-a3b86f9630f1",
-            PeerResponseTerminalProjectionStatus::Completed,
-        );
-        let mut session =
-            legacy_session_with_system_context("base", std::slice::from_ref(&terminal));
-        let rendered = render_system_context_block(&terminal);
-        session
-            .set_system_prompt_with_source(
-                format!(
-                    "base{SYSTEM_CONTEXT_SEPARATOR}{rendered}\
-                     {SYSTEM_CONTEXT_SEPARATOR}{rendered}"
-                ),
-                session_durable_config_authority::SessionSystemPromptSource::RuntimeContextAppend,
-            )
-            .expect("duplicate legacy terminal-shaped segment");
-
-        let outcome = session
-            .reconcile_resumed_system_prompt("base".to_string(), Some("resume".to_string()))
-            .expect("migrate duplicate legacy terminal-shaped suffix");
-
-        assert_eq!(outcome, ResumedSystemPromptReconciliation::RewrittenBase);
-        assert_eq!(
-            leading_system_content(&session),
-            format!("base{SYSTEM_CONTEXT_SEPARATOR}{rendered}"),
-            "one typed terminal record may remove only one matching suffix occurrence"
-        );
-        assert_eq!(terminal_notice_count(&session), 1);
-        let state = session.system_context_state().expect("typed state");
-        assert_eq!(state.applied, vec![terminal]);
-        assert!(state.seen.contains_key("terminal-1"));
-    }
-
-    fn resumed_session_with_context_appended_prompt(base: &str) -> Session {
-        let mut session = Session::new();
-        session.set_system_prompt(base.to_string());
-        session.push(Message::User(UserMessage::text("hello".to_string())));
-        session.append_system_context_blocks(std::slice::from_ref(&roster_append()));
-        session
-    }
-
-    #[test]
-    fn reconcile_resumed_system_prompt_preserves_identical_base() {
-        let mut session = Session::new();
-        session.set_system_prompt("base prompt".to_string());
-        session.push(Message::User(UserMessage::text("hello".to_string())));
-        let digest_before = transcript_messages_digest(session.messages()).unwrap();
-        let document_before =
-            serde_json::to_vec(&session).expect("serialize pre-reconcile session document");
-
-        let outcome = session
-            .reconcile_resumed_system_prompt("base prompt".to_string(), None)
-            .expect("reconcile");
-
-        assert_eq!(
-            outcome,
-            ResumedSystemPromptReconciliation::PreservedContinuation
-        );
-        assert_eq!(
-            transcript_messages_digest(session.messages()).unwrap(),
-            digest_before,
-            "identical base must leave the transcript revision unchanged"
-        );
-        assert_eq!(
-            serde_json::to_vec(&session).expect("serialize post-reconcile session document"),
-            document_before,
-            "a session without legacy terminal context must be a byte-identical no-op"
-        );
-    }
-
-    #[test]
-    fn reconcile_resumed_system_prompt_preserves_context_appended_base() {
-        let mut session = resumed_session_with_context_appended_prompt("base prompt");
-        let digest_before = transcript_messages_digest(session.messages()).unwrap();
-
-        let outcome = session
-            .reconcile_resumed_system_prompt("base prompt".to_string(), None)
-            .expect("reconcile");
-
-        assert_eq!(
-            outcome,
-            ResumedSystemPromptReconciliation::PreservedContinuation
-        );
-        assert_eq!(
-            transcript_messages_digest(session.messages()).unwrap(),
-            digest_before,
-            "a base extended only by runtime context appends must stay untouched"
-        );
-        let system = match session.messages().first() {
-            Some(Message::System(system)) => system.clone(),
-            other => panic!("expected system message, got {other:?}"),
-        };
-        assert!(system.content.contains("peer roster: lead-1, w-1"));
-        assert!(
-            system.mutation_kind.is_runtime_context_append(),
-            "the persisted mutation provenance must survive reconciliation"
-        );
-    }
-
-    #[test]
-    fn reconcile_resumed_system_prompt_rewrites_changed_base_preserving_tail() {
-        let mut session = resumed_session_with_context_appended_prompt("base prompt");
-
-        let outcome = session
-            .reconcile_resumed_system_prompt("new base prompt".to_string(), None)
-            .expect("reconcile");
-
-        assert_eq!(outcome, ResumedSystemPromptReconciliation::RewrittenBase);
-        let system_content = match session.messages().first() {
-            Some(Message::System(system)) => system.content.clone(),
-            other => panic!("expected system message, got {other:?}"),
-        };
-        assert!(
-            system_content.starts_with("new base prompt"),
-            "the changed base must be applied: {system_content}"
-        );
-        assert!(
-            system_content.contains("peer roster: lead-1, w-1"),
-            "the runtime-applied context tail must survive the base change: {system_content}"
-        );
-        let state = session
-            .transcript_history_state()
-            .expect("history state deserializes")
-            .expect("rewrite must record transcript history");
-        assert_eq!(state.commits.len(), 1);
-        assert_eq!(
-            state.commits[0].reason.kind,
-            RESUME_SYSTEM_PROMPT_REFRESH_REWRITE_REASON
-        );
-        assert_eq!(
-            state.head,
-            transcript_messages_digest(session.messages()).unwrap(),
-            "the committed head must match the rewritten transcript"
-        );
-    }
-
-    fn volatile_prompt(timestamp: &str, stable_tail: &str) -> String {
-        format!(
-            "Current date and time: {SYSTEM_PROMPT_VOLATILE_OPEN}{timestamp}\
-             {SYSTEM_PROMPT_VOLATILE_CLOSE}\n{stable_tail}"
-        )
-    }
-
-    fn leading_model_boundary_system_content(session: &Session) -> String {
-        match session.messages_for_model_boundary().into_iter().next() {
-            Some(Message::System(system)) => system.content,
-            other => panic!("expected boundary system message, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn stable_prompt_projection_blanks_declared_spans_only() {
-        assert_eq!(stable_prompt_projection("no declaration"), None);
-        assert_eq!(
-            stable_prompt_projection(&format!(
-                "a {SYSTEM_PROMPT_VOLATILE_OPEN}x{SYSTEM_PROMPT_VOLATILE_CLOSE} b \
-                 {SYSTEM_PROMPT_VOLATILE_OPEN}y{SYSTEM_PROMPT_VOLATILE_CLOSE} c"
-            )),
-            Some(format!(
-                "a {SYSTEM_PROMPT_VOLATILE_OPEN}{SYSTEM_PROMPT_VOLATILE_CLOSE} b \
-                 {SYSTEM_PROMPT_VOLATILE_OPEN}{SYSTEM_PROMPT_VOLATILE_CLOSE} c"
-            ))
-        );
-        // Unterminated declaration fails closed: no projection, byte-wise
-        // comparison (and therefore the audited rewrite) decides.
-        assert_eq!(
-            stable_prompt_projection(&format!("a {SYSTEM_PROMPT_VOLATILE_OPEN}x")),
-            None
-        );
-    }
-
-    #[test]
-    fn reconcile_volatile_only_difference_preserves_transcript_without_mint() {
-        let persisted = volatile_prompt("2026-07-28T08:00Z", "You are rkat.");
-        let mut session = Session::new();
-        session.set_system_prompt(persisted.clone());
-        session.push(Message::User(UserMessage::text("hello".to_string())));
-        let digest_before = transcript_messages_digest(session.messages()).unwrap();
-        let document_before =
-            serde_json::to_vec(&session).expect("serialize pre-reconcile session document");
-
-        let fresh = volatile_prompt("2026-07-29T09:30Z", "You are rkat.");
-        let outcome = session
-            .reconcile_resumed_system_prompt(fresh.clone(), None)
-            .expect("reconcile");
-
-        assert_eq!(
-            outcome,
-            ResumedSystemPromptReconciliation::PreservedVolatileRefresh
-        );
-        assert!(
             session
-                .transcript_history_state()
-                .expect("history state deserializes")
-                .is_none(),
-            "a volatile-only refresh must not mint a rewrite revision"
-        );
-        assert_eq!(
-            transcript_messages_digest(session.messages()).unwrap(),
-            digest_before,
-            "the persisted transcript revision must stay untouched"
-        );
-        // Digest-preimage proof: the serialized session document — including
-        // the armed overlay's carrier — is byte-identical to the persisted
-        // revision, so the first post-resume persist chains cleanly.
-        assert_eq!(
-            serde_json::to_vec(&session).expect("serialize post-reconcile session document"),
-            document_before,
-            "the overlay must never reach the persisted envelope"
-        );
-        assert_eq!(leading_system_content(&session), persisted);
-        assert_eq!(
-            leading_model_boundary_system_content(&session),
-            fresh,
-            "the model boundary must carry the FRESH prompt"
-        );
-    }
-
-    #[test]
-    fn reconcile_volatile_only_difference_refreshes_base_under_context_tail() {
-        let persisted_base = volatile_prompt("2026-07-28T08:00Z", "You are rkat.");
-        let mut session = resumed_session_with_context_appended_prompt(&persisted_base);
-        let digest_before = transcript_messages_digest(session.messages()).unwrap();
-
-        let fresh_base = volatile_prompt("2026-07-29T09:30Z", "You are rkat.");
-        let outcome = session
-            .reconcile_resumed_system_prompt(fresh_base.clone(), None)
-            .expect("reconcile");
-
-        assert_eq!(
-            outcome,
-            ResumedSystemPromptReconciliation::PreservedVolatileRefresh
-        );
-        assert_eq!(
-            transcript_messages_digest(session.messages()).unwrap(),
-            digest_before,
-            "volatile-only base drift under a runtime-context tail must not rewrite"
-        );
-        let boundary = leading_model_boundary_system_content(&session);
-        assert!(
-            boundary.starts_with(&fresh_base),
-            "the boundary prompt must carry the fresh base: {boundary}"
-        );
-        assert!(
-            boundary.contains("peer roster: lead-1, w-1"),
-            "the runtime-applied context tail must survive the refresh: {boundary}"
-        );
-    }
-
-    #[test]
-    fn reconcile_mixed_volatile_and_stable_difference_mints_rewrite() {
-        let persisted = volatile_prompt("2026-07-28T08:00Z", "You are rkat.");
-        let mut session = Session::new();
-        session.set_system_prompt(persisted);
-        session.push(Message::User(UserMessage::text("hello".to_string())));
-
-        let fresh = volatile_prompt("2026-07-29T09:30Z", "You are rkat, now with tools.");
-        let outcome = session
-            .reconcile_resumed_system_prompt(fresh.clone(), None)
-            .expect("reconcile");
-
-        assert_eq!(outcome, ResumedSystemPromptReconciliation::RewrittenBase);
-        assert_eq!(leading_system_content(&session), fresh);
-        assert_eq!(
-            leading_model_boundary_system_content(&session),
-            fresh,
-            "a minted rewrite must not leave a stale overlay armed"
-        );
-        let state = session
-            .transcript_history_state()
-            .expect("history state deserializes")
-            .expect("a stable change must record transcript history");
-        assert_eq!(state.commits.len(), 1);
-        assert_eq!(
-            state.commits[0].reason.kind,
-            RESUME_SYSTEM_PROMPT_REFRESH_REWRITE_REASON
-        );
-    }
-
-    #[test]
-    fn reconcile_timestamp_drift_without_declaration_mints_rewrite() {
-        // Volatility is caller-declared ONLY: an undeclared timestamp change
-        // must keep today's byte-wise mint, never be inferred by diffing.
-        let mut session = Session::new();
-        session.set_system_prompt("Current date and time: 2026-07-28T08:00Z".to_string());
-        session.push(Message::User(UserMessage::text("hello".to_string())));
-
-        let fresh = "Current date and time: 2026-07-29T09:30Z".to_string();
-        let outcome = session
-            .reconcile_resumed_system_prompt(fresh.clone(), None)
-            .expect("reconcile");
-
-        assert_eq!(outcome, ResumedSystemPromptReconciliation::RewrittenBase);
-        assert_eq!(leading_system_content(&session), fresh);
-    }
-
-    #[test]
-    fn reconcile_unterminated_volatile_declaration_fails_closed_to_rewrite() {
-        let persisted = format!("time {SYSTEM_PROMPT_VOLATILE_OPEN}2026-07-28");
-        let mut session = Session::new();
-        session.set_system_prompt(persisted);
-        session.push(Message::User(UserMessage::text("hello".to_string())));
-
-        let fresh = format!("time {SYSTEM_PROMPT_VOLATILE_OPEN}2026-07-29");
-        let outcome = session
-            .reconcile_resumed_system_prompt(fresh.clone(), None)
-            .expect("reconcile");
-
-        assert_eq!(outcome, ResumedSystemPromptReconciliation::RewrittenBase);
-        assert_eq!(leading_system_content(&session), fresh);
-    }
-
-    #[test]
-    fn volatile_overlay_survives_later_runtime_context_appends() {
-        let persisted = volatile_prompt("2026-07-28T08:00Z", "You are rkat.");
-        let mut session = Session::new();
-        session.set_system_prompt(persisted.clone());
-        session.push(Message::User(UserMessage::text("hello".to_string())));
-
-        let fresh = volatile_prompt("2026-07-29T09:30Z", "You are rkat.");
-        session
-            .reconcile_resumed_system_prompt(fresh.clone(), None)
-            .expect("reconcile");
-        session.append_system_context_blocks(std::slice::from_ref(&roster_append()));
-
-        let boundary = leading_model_boundary_system_content(&session);
-        assert!(
-            boundary.starts_with(&fresh),
-            "appends after the refresh must extend the fresh base: {boundary}"
-        );
-        assert!(boundary.contains("peer roster: lead-1, w-1"));
-        assert!(
-            leading_system_content(&session).starts_with(&persisted),
-            "the persisted transcript must keep the persisted base bytes"
-        );
-    }
-
-    #[test]
-    fn volatile_overlay_self_invalidates_after_unrelated_prompt_mutation() {
-        let persisted = volatile_prompt("2026-07-28T08:00Z", "You are rkat.");
-        let mut session = Session::new();
-        session.set_system_prompt(persisted);
-        session.push(Message::User(UserMessage::text("hello".to_string())));
-
-        session
-            .reconcile_resumed_system_prompt(
-                volatile_prompt("2026-07-29T09:30Z", "You are rkat."),
-                None,
-            )
-            .expect("reconcile");
-        session.set_system_prompt("replaced through another seam".to_string());
-
-        assert_eq!(
-            leading_model_boundary_system_content(&session),
-            "replaced through another seam",
-            "a prompt mutated through another seam must win over the overlay"
-        );
-    }
-
-    #[test]
-    fn volatile_overlay_does_not_survive_persistence_roundtrip() {
-        let persisted = volatile_prompt("2026-07-28T08:00Z", "You are rkat.");
-        let mut session = Session::new();
-        session.set_system_prompt(persisted.clone());
-        session.push(Message::User(UserMessage::text("hello".to_string())));
-        let fresh = volatile_prompt("2026-07-29T09:30Z", "You are rkat.");
-        session
-            .reconcile_resumed_system_prompt(fresh, None)
-            .expect("reconcile");
-
-        let reloaded: Session = serde_json::from_slice(
-            &serde_json::to_vec(&session).expect("serialize refreshed session"),
-        )
-        .expect("deserialize refreshed session");
-
-        assert_eq!(
-            leading_model_boundary_system_content(&reloaded),
-            persisted,
-            "the overlay is request-local state and must not persist; the next \
-             resume re-arms it from a fresh reconciliation"
-        );
-    }
-
-    #[test]
-    fn reconcile_resumed_system_prompt_inserts_prompt_on_promptless_transcript() {
-        let mut session = Session::new();
-        session.push(Message::User(UserMessage::text("hello".to_string())));
-
-        let outcome = session
-            .reconcile_resumed_system_prompt("late prompt".to_string(), None)
-            .expect("reconcile");
-
-        assert_eq!(outcome, ResumedSystemPromptReconciliation::RewrittenBase);
-        assert!(matches!(
-            session.messages().first(),
-            Some(Message::System(system)) if system.content == "late prompt"
-        ));
-        let state = session
-            .transcript_history_state()
-            .expect("history state deserializes")
-            .expect("insert must record transcript history");
-        assert_eq!(state.commits.len(), 1);
-        assert_eq!(
-            state.commits[0].reason.kind,
-            RESUME_SYSTEM_PROMPT_REFRESH_REWRITE_REASON
-        );
-    }
-
-    fn leading_system_content(session: &Session) -> String {
-        match session.messages().first() {
-            Some(Message::System(system)) => system.content.clone(),
-            other => panic!("expected leading system message, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn reconcile_resumed_system_prompt_preserves_full_context_prompt_from_empty_base() {
-        // Promptless/empty-base build: appends compose as the WHOLE System
-        // content with no separator prefix. A resume with a non-empty
-        // explicit base must carry the verified all-context tail onto the
-        // new base instead of discarding it as an "empty tail".
-        let mut session = Session::new();
-        session.push(Message::User(UserMessage::text("hello".to_string())));
-        session.append_system_context_blocks(std::slice::from_ref(&roster_append()));
-        let all_context_content = leading_system_content(&session);
-        assert!(all_context_content.contains("peer roster: lead-1, w-1"));
-
-        let outcome = session
-            .reconcile_resumed_system_prompt("new base prompt".to_string(), None)
-            .expect("reconcile");
-
-        assert_eq!(outcome, ResumedSystemPromptReconciliation::RewrittenBase);
-        assert_eq!(
-            leading_system_content(&session),
-            format!("new base prompt{SYSTEM_CONTEXT_SEPARATOR}{all_context_content}"),
-            "the all-context prompt must survive as the runtime tail of the new base"
-        );
-    }
-
-    #[test]
-    fn reconcile_resumed_system_prompt_preserves_context_only_prompt_on_empty_base_resume() {
-        // Empty-base → empty-base resume: the all-context prompt IS the
-        // expected composition; it must be preserved untouched.
-        let mut session = Session::new();
-        session.push(Message::User(UserMessage::text("hello".to_string())));
-        session.append_system_context_blocks(std::slice::from_ref(&roster_append()));
-        let digest_before = transcript_messages_digest(session.messages()).unwrap();
-
-        let outcome = session
-            .reconcile_resumed_system_prompt(String::new(), None)
-            .expect("reconcile");
-
-        assert_eq!(
-            outcome,
-            ResumedSystemPromptReconciliation::PreservedContinuation
-        );
-        assert_eq!(
-            transcript_messages_digest(session.messages()).unwrap(),
-            digest_before
-        );
-    }
-
-    #[test]
-    fn reconcile_resumed_system_prompt_applies_shortened_base_with_recorded_prior() {
-        // The separator is ordinary markdown: a base prompt may legitimately
-        // contain it. Shortening the base must be APPLIED (audited rewrite),
-        // not silently classified as a preserved context-append continuation.
-        let full_base = format!("part one{SYSTEM_CONTEXT_SEPARATOR}part two");
-        let mut session = Session::new();
-        session.set_system_prompt(full_base.clone());
-        session.push(Message::User(UserMessage::text("hello".to_string())));
-        session
-            .set_build_state(SessionBuildState {
-                assembled_system_prompt: Some(full_base),
-                ..Default::default()
-            })
-            .expect("build state");
-
-        let outcome = session
-            .reconcile_resumed_system_prompt("part one".to_string(), None)
-            .expect("reconcile");
-
-        assert_eq!(outcome, ResumedSystemPromptReconciliation::RewrittenBase);
-        assert_eq!(leading_system_content(&session), "part one");
-    }
-
-    #[test]
-    fn reconcile_resumed_system_prompt_applies_shortened_base_without_context_provenance() {
-        // No recorded prior base, no applied records, and the persisted
-        // prompt's mutation provenance is not a runtime context append: the
-        // machine rejects the structural-extends continuation, so the
-        // shortened base is applied instead of silently ignored.
-        let full_base = format!("part one{SYSTEM_CONTEXT_SEPARATOR}part two");
-        let mut session = Session::new();
-        session.set_system_prompt(full_base);
-        session.push(Message::User(UserMessage::text("hello".to_string())));
-
-        let outcome = session
-            .reconcile_resumed_system_prompt("part one".to_string(), None)
-            .expect("reconcile");
-
-        assert_eq!(outcome, ResumedSystemPromptReconciliation::RewrittenBase);
-        assert_eq!(leading_system_content(&session), "part one");
-    }
-
-    #[test]
-    fn reconcile_resumed_system_prompt_preserves_appended_prompt_without_applied_records() {
-        // The runtime persistence path sweeps applied records and pre-0.7.15
-        // rows have no recorded assembled base. The typed
-        // RuntimeContextAppend provenance on the persisted message still
-        // admits the continuation through the machine fast path.
-        let mut session = resumed_session_with_context_appended_prompt("base prompt");
-        session
-            .set_system_context_state(SessionSystemContextState::default())
-            .expect("sweep applied records");
-        let digest_before = transcript_messages_digest(session.messages()).unwrap();
-
-        let outcome = session
-            .reconcile_resumed_system_prompt("base prompt".to_string(), None)
-            .expect("reconcile");
-
-        assert_eq!(
-            outcome,
-            ResumedSystemPromptReconciliation::PreservedContinuation
-        );
-        assert_eq!(
-            transcript_messages_digest(session.messages()).unwrap(),
-            digest_before
-        );
-    }
-
-    #[test]
-    fn reconcile_resumed_system_prompt_clears_orphaned_applied_records_on_tail_drop() {
-        let mut session = resumed_session_with_context_appended_prompt("base prompt");
-        // An out-of-band prompt mutation makes the applied records'
-        // re-render no longer reproduce the persisted content (and no
-        // assembled base was recorded): the tail is unverifiable and must be
-        // dropped by the rewrite.
-        session.set_system_prompt(format!(
-            "mutated base{SYSTEM_CONTEXT_SEPARATOR}stale-looking tail"
-        ));
-
-        let outcome = session
-            .reconcile_resumed_system_prompt("new base prompt".to_string(), None)
-            .expect("reconcile");
-
-        assert_eq!(outcome, ResumedSystemPromptReconciliation::RewrittenBase);
-        assert_eq!(leading_system_content(&session), "new base prompt");
-        let state = session.system_context_state().unwrap_or_default();
-        assert!(
-            state.applied.is_empty(),
-            "orphaned applied records must be cleared so the context stays restorable"
-        );
-        assert!(
-            state.seen.is_empty(),
-            "orphaned idempotency keys must be cleared so keyed re-sends re-apply"
-        );
-
-        // A host re-send of the same keyed append restores the context
-        // instead of deduplicating against the dropped application.
-        session.append_system_context_blocks(std::slice::from_ref(&roster_append()));
-        assert!(
-            leading_system_content(&session).contains("peer roster: lead-1, w-1"),
-            "re-sent keyed context must re-apply after the drop"
-        );
-    }
-
-    #[test]
-    fn append_system_context_blocks_renders_pre_marked_pending_context() {
-        let accepted_at = SystemTime::UNIX_EPOCH;
-        let mut state = SessionSystemContextState::default();
-        state
-            .stage_append(
-                &AppendSystemContextRequest {
-                    content: crate::lifecycle::run_primitive::CoreRenderable::text(
-                        "Apply this staged context at the request boundary.".to_string(),
-                    ),
-                    source: Some("rpc/session_inject_context".to_string()),
-                    idempotency_key: Some("ctx-boundary".to_string()),
-                    source_kind: SystemContextSource::Normal,
-                    peer_response_terminal: None,
-                },
-                accepted_at,
-            )
-            .expect("append should stage");
-        let pending = state.pending.clone();
-        state.mark_pending_applied();
-        let mut session = Session::new();
-        session
-            .set_system_context_state(state)
-            .expect("state should serialize");
-
-        session.append_system_context_blocks(&pending);
-
-        let system_prompt = session
-            .messages()
-            .first()
-            .and_then(|message| match message {
-                Message::System(system) => Some(system.content.as_str()),
-                _ => None,
-            })
-            .unwrap_or_default();
-        assert!(system_prompt.contains("Apply this staged context at the request boundary."));
-        let state = session
-            .system_context_state()
-            .expect("append should persist typed context state");
-        assert_eq!(state.applied.len(), 1);
-        assert_eq!(
-            state.seen["ctx-boundary"].state,
-            SeenSystemContextState::Applied
-        );
-    }
-
-    #[test]
-    fn append_system_context_blocks_renders_pre_marked_context_without_idempotency_key() {
-        let accepted_at = SystemTime::UNIX_EPOCH;
-        let mut state = SessionSystemContextState::default();
-        state
-            .stage_append(
-                &AppendSystemContextRequest {
-                    content: crate::lifecycle::run_primitive::CoreRenderable::text(
-                        "Apply this unkeyed staged context at the request boundary.".to_string(),
-                    ),
-                    source: Some("rpc/session_inject_context".to_string()),
-                    idempotency_key: None,
-                    source_kind: SystemContextSource::Normal,
-                    peer_response_terminal: None,
-                },
-                accepted_at,
-            )
-            .expect("append should stage");
-        let pending = state.pending.clone();
-        state.mark_pending_applied();
-        let mut session = Session::new();
-        session
-            .set_system_context_state(state)
-            .expect("state should serialize");
-
-        session.append_system_context_blocks(&pending);
-
-        let system_prompt = session
-            .messages()
-            .first()
-            .and_then(|message| match message {
-                Message::System(system) => Some(system.content.as_str()),
-                _ => None,
-            })
-            .unwrap_or_default();
-        assert!(
-            system_prompt.contains("Apply this unkeyed staged context at the request boundary.")
-        );
-    }
-
-    /// K5 invariant: the typed `CoreRenderable` travels end-to-end through
-    /// staging — the pending append stores the renderable itself, and the
-    /// ONE lowering to prompt text happens at the transcript render seam.
-    #[test]
-    fn staged_system_context_carries_typed_renderable_to_render_seam() {
-        use crate::lifecycle::run_primitive::CoreRenderable;
-
-        let accepted_at = SystemTime::UNIX_EPOCH;
-        let mut state = SessionSystemContextState::default();
-        let renderable = CoreRenderable::Json {
-            value: serde_json::json!({"alert": "disk-full", "severity": 2}),
-        };
-        state
-            .stage_append(
-                &AppendSystemContextRequest {
-                    content: renderable.clone(),
-                    source: Some("ops/monitor".to_string()),
-                    idempotency_key: Some("alert-1".to_string()),
-                    source_kind: SystemContextSource::Normal,
-                    peer_response_terminal: None,
-                },
-                accepted_at,
-            )
-            .expect("typed renderable append should stage");
-
-        // The pending append owns the typed renderable — no pre-flattened
-        // text shadow exists anywhere on the staging path.
-        assert_eq!(state.pending.len(), 1);
-        assert_eq!(state.pending[0].content, renderable);
-
-        // Lowering happens exactly once, at the render seam, via the single
-        // canonical projection.
-        let rendered = render_system_context_block(&state.pending[0]);
-        assert!(rendered.starts_with(SYSTEM_CONTEXT_RENDER_LABEL));
-        assert!(
-            rendered.contains(renderable.render_text().trim()),
-            "render seam must lower via CoreRenderable::render_text: {rendered}"
-        );
-    }
-
-    #[test]
-    fn append_system_context_blocks_skips_duplicate_idempotency_key() {
-        let first = PendingSystemContextAppend {
-            content: crate::lifecycle::run_primitive::CoreRenderable::text(
-                "Authoritative peer token is birch seventeen.".to_string(),
-            ),
-            source: Some("peer_response_terminal:analyst:req-1".to_string()),
-            idempotency_key: Some("req-1".to_string()),
-            source_kind: SystemContextSource::Normal,
-            peer_response_terminal: None,
-            accepted_at: SystemTime::UNIX_EPOCH,
-        };
-        let duplicate = PendingSystemContextAppend {
-            accepted_at: SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1),
-            ..first.clone()
-        };
-        let mut session = Session::new();
-
-        session.append_system_context_blocks(std::slice::from_ref(&first));
-        session.append_system_context_blocks(std::slice::from_ref(&duplicate));
-
-        let state = session
-            .system_context_state()
-            .expect("append should persist typed context state");
-        assert_eq!(state.applied, vec![first]);
-        let system_prompt = session
-            .messages()
-            .first()
-            .and_then(|message| match message {
-                Message::System(system) => Some(system.content.as_str()),
-                _ => None,
-            })
-            .unwrap_or_default();
-        assert_eq!(
-            system_prompt
-                .matches("Authoritative peer token is birch seventeen.")
+                .messages()
+                .iter()
+                .filter(|message| matches!(message, Message::System(system) if system.content.is_empty()))
                 .count(),
-            1
+            2
         );
-    }
-
-    #[test]
-    fn append_system_context_blocks_skips_conflicting_duplicate_idempotency_key() {
-        let first = PendingSystemContextAppend {
-            content: crate::lifecycle::run_primitive::CoreRenderable::text(
-                "Authoritative peer token is birch seventeen.".to_string(),
+        assert!(matches!(
+            session.append_system_message_idempotent(
+                "different",
+                Some("host".to_string()),
+                Some("key".to_string()),
+                timestamp,
             ),
-            source: Some("peer_response_terminal:analyst:req-1".to_string()),
-            idempotency_key: Some("req-1".to_string()),
-            source_kind: SystemContextSource::Normal,
-            peer_response_terminal: None,
-            accepted_at: SystemTime::UNIX_EPOCH,
-        };
-        let conflicting = PendingSystemContextAppend {
-            content: crate::lifecycle::run_primitive::CoreRenderable::text(
-                "Conflicting peer token should not reach the prompt.".to_string(),
-            ),
-            accepted_at: SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1),
-            ..first.clone()
-        };
-        let mut session = Session::new();
-
-        session.append_system_context_blocks(std::slice::from_ref(&first));
-        session.append_system_context_blocks(std::slice::from_ref(&conflicting));
-
-        let state = session
-            .system_context_state()
-            .expect("append should persist typed context state");
-        assert_eq!(state.applied, vec![first]);
-        let system_prompt = session
-            .messages()
-            .first()
-            .and_then(|message| match message {
-                Message::System(system) => Some(system.content.as_str()),
-                _ => None,
-            })
-            .unwrap_or_default();
-        assert!(system_prompt.contains("Authoritative peer token is birch seventeen."));
-        assert!(!system_prompt.contains("Conflicting peer token should not reach the prompt."));
+            Err(SystemMessageAppendError::Conflict { .. })
+        ));
     }
-
-    // ------------------------------------------------------------------
-    // T9/T10: realtime transcript lane materialization.
-    //
-    // The display-text lane (`AssistantTextDelta`) materializes as
-    // `AssistantBlock::Text`; the spoken-transcript lane
-    // (`AssistantTranscriptDelta`) materializes as
-    // `AssistantBlock::Transcript { source: TranscriptSource::Spoken }`.
-    // These regressions pin both flushes and prove the materializer
-    // dispatches on the per-item `TranscriptLane`.
-    // ------------------------------------------------------------------
-
-    #[test]
     fn realtime_transcript_assistant_transcript_delta_materializes_transcript_block() {
         let mut session = Session::new();
 
@@ -16563,6 +12136,17 @@ mod tests {
 
         session_metadata_document_from_slice(&bytes)
             .expect_err("an unsupported envelope version must fail the partial decode closed");
+    }
+
+    #[test]
+    fn current_session_deserializer_rejects_released_envelope_version() {
+        let session = Session::new();
+        let mut value = serde_json::to_value(&session).expect("session should serialize");
+        value["version"] = serde_json::json!(2);
+        let bytes = serde_json::to_vec(&value).expect("released envelope should serialize");
+
+        Session::from_persisted_bytes(&bytes)
+            .expect_err("ordinary Session decode must accept only current envelope v3");
     }
 
     /// Corrupt values under either reserved key are a read FAULT for the

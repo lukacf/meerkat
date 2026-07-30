@@ -51,6 +51,15 @@ pub trait LlmClient: Send + Sync {
         })
     }
 
+    /// Return an exact witness for the largest serialized JSON body this
+    /// invocation may send. The default is unavailable for custom providers.
+    fn request_pressure(
+        &self,
+        _request: &LlmRequest,
+    ) -> Result<Option<meerkat_core::ProviderRequestPressure>, LlmError> {
+        Ok(None)
+    }
+
     /// Stream a completion request
     ///
     /// Returns a stream of normalized events. The stream completes

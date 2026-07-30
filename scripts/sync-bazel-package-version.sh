@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Sync the hardcoded CARGO_PKG_VERSION literals in
-# meerkat-machine-codegen/BUILD.bazel to the Rust workspace version.
+# Sync the hardcoded CARGO_PKG_VERSION literals in every generated
+# BUILD.bazel file to the Rust workspace version.
 #
 # Bazel does not read CARGO_PKG_VERSION from Cargo.toml the way `cargo` does, so
 # each rust_* target's rustc_env carries the version literal. This script
@@ -17,8 +17,6 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CARGO="${CARGO:-$ROOT/scripts/repo-cargo}"
-BAZEL_BUILD="$ROOT/meerkat-machine-codegen/BUILD.bazel"
-
 VERSION="${1:-}"
 if [ -z "$VERSION" ]; then
     VERSION=$("$CARGO" metadata --manifest-path "$ROOT/Cargo.toml" \
@@ -31,8 +29,15 @@ if [ -z "$VERSION" ]; then
     exit 1
 fi
 
-if [ ! -f "$BAZEL_BUILD" ]; then
-    echo "error: $BAZEL_BUILD not found" >&2
+BAZEL_BUILDS=$(
+    find "$ROOT" -type f -name BUILD.bazel \
+        -not -path "$ROOT/.git/*" \
+        -not -path "$ROOT/target/*" \
+        -exec grep -l '"CARGO_PKG_VERSION":' {} + |
+        sort
+)
+if [ -z "$BAZEL_BUILDS" ]; then
+    echo "error: no BUILD.bazel files contain CARGO_PKG_VERSION" >&2
     exit 1
 fi
 
@@ -41,10 +46,13 @@ echo "Syncing Bazel CARGO_PKG_VERSION to $VERSION"
 # Rewrite every `"CARGO_PKG_VERSION": "<anything>"` literal to the workspace
 # version. The leading-space-tolerant pattern matches the rustc_env entries
 # regardless of indentation.
-if sed --version >/dev/null 2>&1; then
-    sed -i -E "s/(\"CARGO_PKG_VERSION\": *\")[^\"]*(\")/\1${VERSION}\2/" "$BAZEL_BUILD"
-else
-    sed -i '' -E "s/(\"CARGO_PKG_VERSION\": *\")[^\"]*(\")/\1${VERSION}\2/" "$BAZEL_BUILD"
-fi
-
-echo "  Updated: ${BAZEL_BUILD#"$ROOT"/} (CARGO_PKG_VERSION)"
+while IFS= read -r bazel_build; do
+    if sed --version >/dev/null 2>&1; then
+        sed -i -E "s/(\"CARGO_PKG_VERSION\": *\")[^\"]*(\")/\1${VERSION}\2/" "$bazel_build"
+    else
+        sed -i '' -E "s/(\"CARGO_PKG_VERSION\": *\")[^\"]*(\")/\1${VERSION}\2/" "$bazel_build"
+    fi
+    echo "  Updated: ${bazel_build#"$ROOT"/} (CARGO_PKG_VERSION)"
+done <<EOF
+$BAZEL_BUILDS
+EOF

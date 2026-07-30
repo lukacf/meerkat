@@ -1509,7 +1509,51 @@ pub const WORKGRAPH_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::Schem
             apply: migration_0002_attention_query_columns,
         },
     ],
+    initialize_current: initialize_current_workgraph_schema,
+    allowed_existing_versions: &[2],
+    released_predecessors: &[],
+    owned_objects: &[
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "workgraph_items",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Index,
+            name: "idx_workgraph_items_realm_namespace_updated",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "workgraph_attention",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Index,
+            name: "idx_workgraph_attention_realm_namespace_updated",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Index,
+            name: "idx_workgraph_attention_scope_status",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "workgraph_edges",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "workgraph_events",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Index,
+            name: "idx_workgraph_events_realm_namespace_seq",
+        },
+    ],
+    retired_objects: &[],
 };
+
+#[cfg(not(target_arch = "wasm32"))]
+fn initialize_current_workgraph_schema(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+    migration_0001_workgraph_schema(tx)?;
+    migration_0002_attention_query_columns(tx)
+}
 
 #[cfg(not(target_arch = "wasm32"))]
 fn migration_0001_workgraph_schema(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
@@ -1736,12 +1780,9 @@ fn update_attention_tx(
 /// One-time migration adding the indexed `status` / `target_key` query
 /// columns to `workgraph_attention` (SQL filter pushdown + the
 /// active-binding-per-target occupancy guard) and backfilling existing rows.
-/// Runs once per file under the schema ledger; the `table_info` probe keeps
-/// it convergent on files of any vintage (fresh files get the columns via
-/// this migration too — the 0001 DDL deliberately stays at its historical
-/// shape). Rows written by OLDER binaries after this migration carry NULL
-/// columns: every reader of these columns is NULL-tolerant and falls back to
-/// decoding `attention_json`, so mixed-version shared stores stay correct.
+/// The current direct initializer composes this with the historical base DDL.
+/// Ledger v1 is below the supported floor and is refused rather than inferred
+/// or upgraded.
 #[cfg(not(target_arch = "wasm32"))]
 fn migration_0002_attention_query_columns(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
     let existing: Vec<String> = tx
@@ -2836,17 +2877,13 @@ mod tests {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod legacy_schema_tests {
     use super::*;
-    use crate::{
-        AttentionDelegatedAuthority, AttentionProjectionPolicy, GoalAttentionTarget,
-        GoalCreateRequest, WorkAttentionMode, WorkCompletionPolicy, WorkGraphService,
-    };
+    use crate::{AttentionDelegatedAuthority, AttentionProjectionPolicy, WorkAttentionMode};
     use meerkat_core::SessionId;
 
-    /// Ask 24/25 migration pin: a store created by an OLDER binary (no
-    /// status/target_key columns) is backfilled on open, and both the SQL
-    /// filter pushdown and the occupancy guard see its legacy rows.
+    /// The released v2 floor is exact: an unledgered v1 attention table is
+    /// refused without schema/data mutation or a ledger stamp.
     #[tokio::test]
-    async fn legacy_attention_rows_are_backfilled_and_guarded() {
+    async fn unledgered_legacy_attention_rows_are_refused_unmutated() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("workgraph.sqlite3");
         let session_id = SessionId::new();
@@ -2903,47 +2940,33 @@ mod legacy_schema_tests {
             .expect("insert legacy row");
         }
 
-        // Opening the store migrates + backfills.
-        let store = std::sync::Arc::new(crate::SqliteWorkGraphStore::open(&path).expect("open"));
-        {
-            let conn = Connection::open(&path).expect("reopen raw");
-            let (status, target_key): (Option<String>, Option<String>) = conn
-                .query_row(
-                    "SELECT status, target_key FROM workgraph_attention
-                      WHERE binding_id = 'legacy-binding'",
-                    [],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .expect("read backfilled columns");
-            assert_eq!(status.as_deref(), Some("active"));
-            assert_eq!(
-                target_key.as_deref(),
-                Some(format!("session:{session_id}").as_str())
-            );
-        }
-
-        // The occupancy guard sees the backfilled legacy row: a new active
-        // binding on the same target conflicts.
-        let service = WorkGraphService::with_scope(store, "realm", WorkNamespace::default());
-        let error = service
-            .create_goal(GoalCreateRequest {
-                realm_id: None,
-                namespace: None,
-                title: "duplicate target".to_string(),
-                description: None,
-                target: GoalAttentionTarget::Session {
-                    session_id: session_id.clone(),
-                },
-                mode: WorkAttentionMode::Pursue,
-                completion_policy: WorkCompletionPolicy::SelfAttest,
-                delegated_authority: AttentionDelegatedAuthority::AddEvidence,
-                projection_policy: AttentionProjectionPolicy::default(),
-            })
-            .await
-            .expect_err("legacy occupant must conflict with a new active binding");
+        let error = match crate::SqliteWorkGraphStore::open(&path) {
+            Ok(_) => panic!("unledgered owned workgraph schema must be refused"),
+            Err(error) => error,
+        };
         assert!(
-            matches!(error, WorkGraphError::Conflict(_)),
-            "expected typed Conflict, got {error:?}"
+            error.to_string().contains("no ledger row"),
+            "unexpected refusal: {error}"
+        );
+        let conn = Connection::open(&path).expect("reopen raw");
+        let row_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM workgraph_attention", [], |row| {
+                row.get(0)
+            })
+            .expect("legacy row remains");
+        assert_eq!(row_count, 1);
+        let projected_columns: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('workgraph_attention')
+                 WHERE name IN ('status', 'target_key')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("legacy columns");
+        assert_eq!(projected_columns, 0);
+        assert_eq!(
+            meerkat_sqlite::domain_version(&conn, WORKGRAPH_DOMAIN.name).expect("ledger"),
+            None
         );
     }
 }

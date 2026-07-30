@@ -2,11 +2,10 @@
 //!
 //! There are deliberately only three durable reconciliation inputs:
 //! [`IdentityIntentRecord`], [`IdentityLeaseRecord`], and narrowly scoped
-//! [`IdentityOperationReceipt`] custody. [`IdentityDeclarationScopeHead`] is
-//! transaction-ordering metadata for complete provider snapshots, never a
-//! lifecycle input; [`IdentityConvergenceStatus`] is replaceable output only.
-//! Session, runtime, roster, and wiring state are observed realization, and
-//! reconciliation never persists a second copy of them here.
+//! [`IdentityOperationReceipt`] custody. [`IdentityConvergenceStatus`] is
+//! replaceable output only. Session, runtime, roster, and wiring state are
+//! observed realization, and reconciliation never persists a second copy of
+//! them here.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -18,10 +17,7 @@ use meerkat_contracts::wire::{
 use meerkat_core::lifecycle::InputId;
 use meerkat_core::ops::OperationId;
 use meerkat_core::{
-    BudgetLimits, ContentInput, Session, SessionCheckpointAncestryProof,
-    SessionCheckpointAuthorityBase, SessionCheckpointProvenance, SessionCheckpointRelation,
-    SessionCheckpointStamp, SessionCheckpointState, SessionGeneration, SessionId, SessionLineageId,
-    ToolName, session_checkpoint_relation,
+    BudgetLimits, ContentInput, Session, SessionGeneration, SessionId, SessionLineageId, ToolName,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -29,19 +25,15 @@ use sha2::{Digest, Sha256};
 use crate::ids::{AgentIdentity, MobId, ProfileName};
 
 pub const IDENTITY_INTENT_SCHEMA_VERSION: u32 = 1;
-pub const IDENTITY_DECLARATION_SCOPE_SCHEMA_VERSION: u32 = 1;
 pub const IDENTITY_LEASE_SCHEMA_VERSION: u32 = 1;
 pub const IDENTITY_OPERATION_RECEIPT_SCHEMA_VERSION: u32 = 1;
 pub const IDENTITY_INTENT_MAX_ENCODED_BYTES: usize = 4 * 1024 * 1024;
-pub const IDENTITY_DECLARATION_MANIFEST_MAX_ENCODED_BYTES: usize = 4 * 1024 * 1024;
 pub const IDENTITY_LEASE_MAX_TTL_MS: u64 = 30_000;
 
-/// Stable provider-owned declaration namespace within one mob.
+/// Provider namespace retained as provenance in already-sealed intent rows.
 ///
-/// A scope owns one complete roster/wiring snapshot.  Omission can therefore
-/// mean deletion without allowing one provider to retire another provider's
-/// identities.  It is write-ordering metadata only; the per-identity intent
-/// rows remain the sole desired-state authority consumed by reconciliation.
+/// Reconciliation never reads this value as desired state. It remains part of
+/// the exact authority digest for intent records sealed with it.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct IdentityDeclarationScopeId(String);
@@ -59,87 +51,141 @@ impl IdentityDeclarationScopeId {
     }
 }
 
-/// Transactional ordering index for one complete declaration scope.
-///
-/// This row is deliberately not reconciliation input and owns no member
-/// lifecycle semantics.  It exists so an initially empty scope has a durable
-/// CAS head after restart.  Nonempty scope ownership remains sealed into each
-/// [`IdentityIntentRecord`]; the store may audit/repair this index from those
-/// rows and immutable receipts where possible.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct IdentityDeclarationScopeHead {
-    pub schema_version: u32,
-    pub mob_id: MobId,
-    pub scope_id: IdentityDeclarationScopeId,
-    pub revision: u64,
-    pub operation_id: OperationId,
-    pub request_digest: String,
-    pub compiled_manifest_digest: String,
-    pub declared_member_count: u64,
-    pub authority_digest: String,
-}
-
-impl IdentityDeclarationScopeHead {
-    pub fn canonical_authority_digest(&self) -> Result<String, IdentityIntentError> {
-        #[derive(Serialize)]
-        struct DigestMaterial<'a> {
-            domain: &'static str,
-            schema_version: u32,
-            mob_id: &'a MobId,
-            scope_id: &'a IdentityDeclarationScopeId,
-            revision: u64,
-            operation_id: &'a OperationId,
-            request_digest: &'a str,
-            compiled_manifest_digest: &'a str,
-            declared_member_count: u64,
-        }
-        let bytes = serde_json::to_vec(&DigestMaterial {
-            domain: "meerkat.identity.declaration_scope_head.v1",
-            schema_version: self.schema_version,
-            mob_id: &self.mob_id,
-            scope_id: &self.scope_id,
-            revision: self.revision,
-            operation_id: &self.operation_id,
-            request_digest: &self.request_digest,
-            compiled_manifest_digest: &self.compiled_manifest_digest,
-            declared_member_count: self.declared_member_count,
-        })
-        .map_err(|error| IdentityIntentError::Serialization(error.to_string()))?;
-        Ok(sha256_digest(&bytes))
-    }
-
-    pub fn validate(&self) -> Result<(), IdentityIntentError> {
-        if self.schema_version != IDENTITY_DECLARATION_SCOPE_SCHEMA_VERSION {
-            return Err(IdentityIntentError::UnsupportedSchemaVersion {
-                record: "identity_declaration_scope_head",
-                version: self.schema_version,
-            });
-        }
-        validate_text("mob_id", self.mob_id.as_str())?;
-        validate_text("identity_declaration_scope", self.scope_id.as_str())?;
-        if self.revision == 0 || self.operation_id.0.is_nil() {
-            return Err(IdentityIntentError::InvalidDeclarationScopeHead);
-        }
-        validate_sha256_digest(&self.request_digest)?;
-        validate_sha256_digest(&self.compiled_manifest_digest)?;
-        if self.canonical_authority_digest()? != self.authority_digest {
-            return Err(IdentityIntentError::DigestMismatch);
-        }
-        Ok(())
-    }
-}
-
 /// Exact desired session lineage for a stable member identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DesiredSessionTarget {
     pub session_id: SessionId,
-    /// Stable, content-authority lineage selected by the caller.  Ownership
-    /// lease/fence tokens are deliberately not part of this identity.
+    /// Stable logical lineage selected by the caller for intent identity and
+    /// idempotency slots. This is not physical persistence authority: only
+    /// [`IdentitySessionStoreAuthority`] establishes store currentness.
     pub lineage_id: SessionLineageId,
     pub lineage_generation: SessionGeneration,
     pub authority_policy: DesiredSessionAuthorityPolicy,
+}
+
+/// Store-issued physical identity of one exact committed session boundary.
+///
+/// The physical token variant is private, so callers cannot construct a
+/// caller-authored string and label it durable authority. The only production
+/// constructor consumes [`meerkat_runtime::RuntimeSessionAuthority`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdentitySessionStoreAuthority {
+    session_id: SessionId,
+    store_revision: u64,
+    token: IdentitySessionStoreAuthorityToken,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "profile", rename_all = "snake_case", deny_unknown_fields)]
+enum IdentitySessionStoreAuthorityToken {
+    WholeBlobV1 { blob_sha256: String },
+    HeadCanonicalV1 { committed_head_token: String },
+}
+
+impl IdentitySessionStoreAuthority {
+    pub(crate) fn from_runtime_authority(
+        authority: meerkat_runtime::RuntimeSessionAuthority,
+    ) -> Self {
+        match authority {
+            meerkat_runtime::RuntimeSessionAuthority::WholeBlob(authority) => Self {
+                session_id: authority.session_id().clone(),
+                store_revision: authority.store_revision(),
+                token: IdentitySessionStoreAuthorityToken::WholeBlobV1 {
+                    blob_sha256: authority.blob_sha256().to_string(),
+                },
+            },
+            meerkat_runtime::RuntimeSessionAuthority::HeadCanonical(authority) => Self {
+                session_id: authority.session_id().clone(),
+                store_revision: authority.store_revision(),
+                token: IdentitySessionStoreAuthorityToken::HeadCanonicalV1 {
+                    committed_head_token: authority.committed_head_token().to_string(),
+                },
+            },
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn whole_blob_for_test(
+        session_id: SessionId,
+        store_revision: u64,
+        blob_sha256: impl Into<String>,
+    ) -> Self {
+        Self {
+            session_id,
+            store_revision,
+            token: IdentitySessionStoreAuthorityToken::WholeBlobV1 {
+                blob_sha256: blob_sha256.into(),
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    #[must_use]
+    pub const fn profile(&self) -> meerkat_runtime::RuntimeSessionPersistenceProfile {
+        match &self.token {
+            IdentitySessionStoreAuthorityToken::WholeBlobV1 { .. } => {
+                meerkat_runtime::RuntimeSessionPersistenceProfile::WholeBlobV1
+            }
+            IdentitySessionStoreAuthorityToken::HeadCanonicalV1 { .. } => {
+                meerkat_runtime::RuntimeSessionPersistenceProfile::HeadCanonicalV1
+            }
+        }
+    }
+
+    #[must_use]
+    pub const fn store_revision(&self) -> u64 {
+        self.store_revision
+    }
+
+    #[must_use]
+    pub fn token(&self) -> &str {
+        match &self.token {
+            IdentitySessionStoreAuthorityToken::WholeBlobV1 { blob_sha256 } => blob_sha256,
+            IdentitySessionStoreAuthorityToken::HeadCanonicalV1 {
+                committed_head_token,
+            } => committed_head_token,
+        }
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), IdentityIntentError> {
+        if self.session_id.0.is_nil() || self.store_revision == 0 {
+            return Err(IdentityIntentError::InvalidSessionStoreAuthority);
+        }
+        let valid_token = match &self.token {
+            IdentitySessionStoreAuthorityToken::WholeBlobV1 { blob_sha256 } => {
+                has_prefixed_sha256(blob_sha256, &["row-sha256:"])
+            }
+            IdentitySessionStoreAuthorityToken::HeadCanonicalV1 {
+                committed_head_token,
+            } => has_prefixed_sha256(committed_head_token, &["head-v5-sha256:"]),
+        };
+        if !valid_token {
+            return Err(IdentityIntentError::InvalidSessionStoreAuthority);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn observation_version(&self) -> Result<String, IdentityIntentError> {
+        #[derive(Serialize)]
+        struct ObservationVersionMaterial<'a> {
+            domain: &'static str,
+            authority: &'a IdentitySessionStoreAuthority,
+        }
+
+        self.validate()?;
+        let bytes = serde_json::to_vec(&ObservationVersionMaterial {
+            domain: "meerkat.identity.session_store_authority.v1",
+            authority: self,
+        })
+        .map_err(|error| IdentityIntentError::Serialization(error.to_string()))?;
+        Ok(sha256_digest(&bytes))
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -523,309 +569,6 @@ impl IdentityProfileMemberDeclaration {
     }
 }
 
-/// Public material input.  Compatibility callers name a profile and safe
-/// overlays; advanced callers may supply already-resolved portable material.
-/// Both routes end in the same exact `DesiredMemberMaterial` in the intent.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum IdentityMemberMaterialDeclaration {
-    Profile(IdentityProfileMemberDeclaration),
-    Resolved { material: DesiredMemberMaterial },
-}
-
-impl IdentityMemberMaterialDeclaration {
-    pub fn validate(&self) -> Result<(), IdentityIntentError> {
-        match self {
-            Self::Profile(declaration) => declaration.validate(),
-            Self::Resolved { material } => material.validate(),
-        }
-    }
-}
-
-/// One member in a provider-scoped complete desired snapshot. Session target,
-/// intent revision, and one-shot delivery identity are intentionally absent:
-/// the actor/store transaction reuses or allocates and seals those values.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct IdentityMemberDeclaration {
-    pub material: IdentityMemberMaterialDeclaration,
-    #[serde(default)]
-    pub session_authority_policy: DesiredSessionAuthorityPolicy,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub initial_message: Option<ContentInput>,
-    /// Optional one-time adoption of an exact, already-verified legacy
-    /// checkpoint. The request remains part of the manifest digest and its
-    /// immutable apply receipt, but the ownership fences are never folded
-    /// into checkpoint content authority.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub legacy_import: Option<IdentityLegacyImport>,
-}
-
-impl IdentityMemberDeclaration {
-    pub fn validate(&self) -> Result<(), IdentityIntentError> {
-        self.material.validate()?;
-        if let Some(legacy_import) = &self.legacy_import {
-            legacy_import.validate()?;
-            if self.session_authority_policy != DesiredSessionAuthorityPolicy::RequireExisting
-                || self.initial_message.is_some()
-            {
-                return Err(IdentityIntentError::InvalidLegacyImport);
-            }
-        }
-        Ok(())
-    }
-}
-
-/// One-time adoption evidence for a verified legacy session document.
-///
-/// `continuity_epoch_highwater` seeds only lease ownership. The snapshot-side
-/// fence is retained solely in the request digest as audit evidence and is
-/// deliberately never compared with either the continuity high-water or the
-/// checkpoint stamp.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "migration", rename_all = "snake_case", deny_unknown_fields)]
-pub enum IdentityLegacyImport {
-    AdoptVerifiedLegacy {
-        session: DesiredSessionTarget,
-        checkpoint: SessionCheckpointStamp,
-        continuity_epoch_highwater: u64,
-        snapshot_fence_audit: u64,
-    },
-}
-
-impl IdentityLegacyImport {
-    #[must_use]
-    pub const fn session(&self) -> &DesiredSessionTarget {
-        match self {
-            Self::AdoptVerifiedLegacy { session, .. } => session,
-        }
-    }
-
-    #[must_use]
-    pub const fn checkpoint(&self) -> &SessionCheckpointStamp {
-        match self {
-            Self::AdoptVerifiedLegacy { checkpoint, .. } => checkpoint,
-        }
-    }
-
-    #[must_use]
-    pub const fn continuity_epoch_highwater(&self) -> u64 {
-        match self {
-            Self::AdoptVerifiedLegacy {
-                continuity_epoch_highwater,
-                ..
-            } => *continuity_epoch_highwater,
-        }
-    }
-
-    #[must_use]
-    pub const fn snapshot_fence_audit(&self) -> u64 {
-        match self {
-            Self::AdoptVerifiedLegacy {
-                snapshot_fence_audit,
-                ..
-            } => *snapshot_fence_audit,
-        }
-    }
-
-    pub fn validate(&self) -> Result<(), IdentityIntentError> {
-        let session = self.session();
-        let checkpoint = self.checkpoint();
-        validate_session_target(session)?;
-        if session.authority_policy != DesiredSessionAuthorityPolicy::RequireExisting
-            || checkpoint.provenance() != SessionCheckpointProvenance::RecoveryMigration
-            || checkpoint.session_id() != &session.session_id
-            || checkpoint.lineage_id() != &session.lineage_id
-            || checkpoint.generation() != session.lineage_generation
-            || !matches!(
-                checkpoint.authority_base(),
-                SessionCheckpointAuthorityBase::Legacy {
-                    observed_generation,
-                    observed_checkpoint_revision,
-                    ..
-                } if *observed_generation == session.lineage_generation
-                    && *observed_checkpoint_revision == checkpoint.checkpoint_revision()
-            )
-        {
-            return Err(IdentityIntentError::InvalidLegacyImport);
-        }
-        checkpoint
-            .validate_for_session(&session.session_id)
-            .map_err(session_checkpoint_error)?;
-        self.continuity_epoch_highwater().checked_add(1).ok_or(
-            IdentityIntentError::CounterExhausted {
-                counter: "legacy lease epoch highwater",
-            },
-        )?;
-        // snapshot_fence_audit is intentionally unconstrained: it is
-        // historical audit evidence, not checkpoint or lease authority.
-        let _ = self.snapshot_fence_audit();
-        Ok(())
-    }
-}
-
-/// Actor-compiled, allocation-ready member input for one atomic manifest
-/// apply. Candidate ids are ignored when the store can reuse a valid current
-/// target; they become authority only if selected and committed in the sole
-/// intent row.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IdentityDeclarationMemberPlan {
-    pub material: DesiredMemberMaterial,
-    pub session_authority_policy: DesiredSessionAuthorityPolicy,
-    pub initial_message: Option<ContentInput>,
-    pub candidate_session_id: SessionId,
-    pub candidate_lineage_id: SessionLineageId,
-    pub candidate_initial_delivery_id: Option<InputId>,
-}
-
-impl IdentityDeclarationMemberPlan {
-    pub fn candidate_session_target(&self) -> DesiredSessionTarget {
-        DesiredSessionTarget {
-            session_id: self.candidate_session_id.clone(),
-            lineage_id: self.candidate_lineage_id.clone(),
-            lineage_generation: SessionGeneration::INITIAL,
-            authority_policy: self.session_authority_policy,
-        }
-    }
-
-    pub fn validate(&self) -> Result<(), IdentityIntentError> {
-        self.material.validate()?;
-        validate_session_target(&self.candidate_session_target())?;
-        if self.candidate_initial_delivery_id.is_some() != self.initial_message.is_some()
-            || self
-                .candidate_initial_delivery_id
-                .as_ref()
-                .is_some_and(|delivery_id| delivery_id.0.is_nil())
-        {
-            return Err(IdentityIntentError::InvalidInitialDelivery);
-        }
-        Ok(())
-    }
-}
-
-/// Exact actor-to-store transaction plan. It contains no observed realization
-/// and no actuator authority.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IdentityDeclarationApplyPlan {
-    pub(crate) scope_id: IdentityDeclarationScopeId,
-    pub(crate) operation_id: OperationId,
-    pub(crate) expected_scope: IdentityDeclarationScopePrecondition,
-    pub(crate) request_digest: String,
-    pub(crate) members: BTreeMap<AgentIdentity, IdentityDeclarationMemberPlan>,
-    pub(crate) wiring: BTreeSet<DesiredIdentityEdge>,
-    pub(crate) legacy_imports: BTreeMap<AgentIdentity, IdentityLegacyImport>,
-}
-
-impl IdentityDeclarationApplyPlan {
-    pub(crate) fn from_compiled_manifest(
-        manifest: &IdentityDeclarationManifest,
-        members: BTreeMap<AgentIdentity, IdentityDeclarationMemberPlan>,
-    ) -> Result<Self, IdentityIntentError> {
-        manifest.validate()?;
-        if members.keys().ne(manifest.members.keys()) {
-            return Err(IdentityIntentError::InvalidDeclarationOutcome);
-        }
-        let legacy_imports = manifest
-            .members
-            .iter()
-            .filter_map(|(identity, member)| {
-                member
-                    .legacy_import
-                    .clone()
-                    .map(|legacy_import| (identity.clone(), legacy_import))
-            })
-            .collect();
-        let value = Self {
-            scope_id: manifest.scope_id.clone(),
-            operation_id: manifest.operation_id.clone(),
-            expected_scope: manifest.expected_scope,
-            request_digest: manifest.request_digest()?,
-            members,
-            wiring: manifest.wiring.clone(),
-            legacy_imports,
-        };
-        value.validate()?;
-        Ok(value)
-    }
-
-    #[must_use]
-    pub fn scope_id(&self) -> &IdentityDeclarationScopeId {
-        &self.scope_id
-    }
-
-    #[must_use]
-    pub fn operation_id(&self) -> &OperationId {
-        &self.operation_id
-    }
-
-    #[must_use]
-    pub const fn expected_scope(&self) -> IdentityDeclarationScopePrecondition {
-        self.expected_scope
-    }
-
-    #[must_use]
-    pub fn request_digest(&self) -> &str {
-        &self.request_digest
-    }
-
-    #[must_use]
-    pub fn members(&self) -> &BTreeMap<AgentIdentity, IdentityDeclarationMemberPlan> {
-        &self.members
-    }
-
-    #[must_use]
-    pub fn wiring(&self) -> &BTreeSet<DesiredIdentityEdge> {
-        &self.wiring
-    }
-
-    #[must_use]
-    pub fn legacy_imports(&self) -> &BTreeMap<AgentIdentity, IdentityLegacyImport> {
-        &self.legacy_imports
-    }
-
-    pub fn validate(&self) -> Result<(), IdentityIntentError> {
-        validate_text("identity_declaration_scope", self.scope_id.as_str())?;
-        if self.operation_id.0.is_nil() {
-            return Err(IdentityIntentError::NilOperationId);
-        }
-        if matches!(
-            self.expected_scope,
-            IdentityDeclarationScopePrecondition::Revision { revision: 0 }
-        ) {
-            return Err(IdentityIntentError::InvalidDeclarationRevision);
-        }
-        validate_sha256_digest(&self.request_digest)?;
-        for (identity, member) in &self.members {
-            validate_identity(identity)?;
-            member.validate()?;
-            if let Some(legacy_import) = self.legacy_imports.get(identity) {
-                legacy_import.validate()?;
-                if member.session_authority_policy != DesiredSessionAuthorityPolicy::RequireExisting
-                    || member.initial_message.is_some()
-                {
-                    return Err(IdentityIntentError::InvalidLegacyImport);
-                }
-            }
-        }
-        if self
-            .legacy_imports
-            .keys()
-            .any(|identity| !self.members.contains_key(identity))
-        {
-            return Err(IdentityIntentError::InvalidLegacyImport);
-        }
-        for edge in &self.wiring {
-            if edge.a >= edge.b
-                || !self.members.contains_key(&edge.a)
-                || !self.members.contains_key(&edge.b)
-            {
-                return Err(IdentityIntentError::CrossScopeEdge(edge.clone()));
-            }
-        }
-        Ok(())
-    }
-}
-
 /// Canonical undirected desired edge.  The lexicographically smaller endpoint
 /// is its sole intent owner, avoiding two independently mutable desired facts
 /// for one physical edge.
@@ -852,87 +595,6 @@ impl DesiredIdentityEdge {
     #[must_use]
     pub fn owner(&self) -> &AgentIdentity {
         &self.a
-    }
-}
-
-/// Optional compare-and-set boundary for a complete provider snapshot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "precondition", rename_all = "snake_case", deny_unknown_fields)]
-pub enum IdentityDeclarationScopePrecondition {
-    Any,
-    Missing,
-    Revision { revision: u64 },
-}
-
-/// One complete provider-scoped roster and edge declaration.
-///
-/// This is the high-level actor input.  Callers do not allocate sessions,
-/// lineages, delivery ids, intent revisions, tombstones, or scope revisions.
-/// The actor compiles member material, and one store transaction reuses the
-/// current sealed target or allocates a new target only for a genuinely new
-/// identity.  Every edge must remain inside the scope in schema v1.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct IdentityDeclarationManifest {
-    pub scope_id: IdentityDeclarationScopeId,
-    pub operation_id: OperationId,
-    pub expected_scope: IdentityDeclarationScopePrecondition,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub members: BTreeMap<AgentIdentity, IdentityMemberDeclaration>,
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub wiring: BTreeSet<DesiredIdentityEdge>,
-}
-
-impl IdentityDeclarationManifest {
-    pub fn validate(&self) -> Result<(), IdentityIntentError> {
-        validate_text("identity_declaration_scope", self.scope_id.as_str())?;
-        if self.operation_id.0.is_nil() {
-            return Err(IdentityIntentError::NilOperationId);
-        }
-        if matches!(
-            self.expected_scope,
-            IdentityDeclarationScopePrecondition::Revision { revision: 0 }
-        ) {
-            return Err(IdentityIntentError::InvalidDeclarationRevision);
-        }
-        for (identity, declaration) in &self.members {
-            validate_identity(identity)?;
-            declaration.validate()?;
-        }
-        for edge in &self.wiring {
-            validate_identity(&edge.a)?;
-            validate_identity(&edge.b)?;
-            if edge.a >= edge.b {
-                return Err(IdentityIntentError::NonCanonicalEdge(edge.clone()));
-            }
-            if !self.members.contains_key(&edge.a) || !self.members.contains_key(&edge.b) {
-                return Err(IdentityIntentError::CrossScopeEdge(edge.clone()));
-            }
-        }
-        let encoded = serde_json::to_vec(self)
-            .map_err(|error| IdentityIntentError::Serialization(error.to_string()))?;
-        if encoded.len() > IDENTITY_DECLARATION_MANIFEST_MAX_ENCODED_BYTES {
-            return Err(IdentityIntentError::TooLarge {
-                actual: encoded.len(),
-                maximum: IDENTITY_DECLARATION_MANIFEST_MAX_ENCODED_BYTES,
-            });
-        }
-        Ok(())
-    }
-
-    pub fn request_digest(&self) -> Result<String, IdentityIntentError> {
-        self.validate()?;
-        #[derive(Serialize)]
-        struct DigestMaterial<'a> {
-            domain: &'static str,
-            manifest: &'a IdentityDeclarationManifest,
-        }
-        let bytes = serde_json::to_vec(&DigestMaterial {
-            domain: "meerkat.identity.declaration_request.v1",
-            manifest: self,
-        })
-        .map_err(|error| IdentityIntentError::Serialization(error.to_string()))?;
-        Ok(sha256_digest(&bytes))
     }
 }
 
@@ -1050,10 +712,9 @@ pub struct IdentityIntentRecord {
     /// never authorize that mob's cleanup or materialization.
     pub mob_id: MobId,
     pub intent_revision: u64,
-    /// Provider scope/revision that last authored this row.  Both are absent
-    /// only for explicitly migrated legacy authority and present together for
-    /// a complete declaration manifest. They order writes; reconciliation
-    /// never reads them as desired state.
+    /// Provider scope/revision provenance sealed by the retired declaration
+    /// facade. Both are absent or present together. Reconciliation never reads
+    /// them as desired state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub declaration_scope: Option<IdentityDeclarationScopeId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1167,102 +828,6 @@ impl IdentityIntentRecord {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum IdentityIntentApplyDisposition {
-    Applied,
-    Unchanged,
-}
-
-/// Exact original result retained for an operation id even after later
-/// mutations advance the current desired row.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct IdentityIntentApplyOutcome {
-    pub disposition: IdentityIntentApplyDisposition,
-    pub identity: AgentIdentity,
-    pub intent_revision: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub declaration_scope: Option<IdentityDeclarationScopeId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub declaration_revision: Option<u64>,
-    pub tombstone_generation: Option<u64>,
-    pub initial_delivery_generation_highwater: u64,
-    pub intent_digest: String,
-    pub authority_digest: String,
-    /// Exact store-sealed desired state, including the actor-owned session
-    /// target and stable initial-delivery identity. Lost-ACK replay therefore
-    /// never asks the caller to reconstruct allocation state.
-    pub intent: IdentityIntent,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum IdentityDeclarationManifestApplyDisposition {
-    Applied,
-    Unchanged,
-}
-
-/// Exact immutable result for one complete provider-scope apply operation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct IdentityDeclarationManifestApplyOutcome {
-    pub disposition: IdentityDeclarationManifestApplyDisposition,
-    pub scope_id: IdentityDeclarationScopeId,
-    pub scope_revision: u64,
-    /// Digest of the caller declaration before actor compilation/allocation.
-    pub request_digest: String,
-    /// Digest of the exact sealed per-identity intent outcome map.
-    pub compiled_manifest_digest: String,
-    pub identities: BTreeMap<AgentIdentity, IdentityIntentApplyOutcome>,
-}
-
-impl IdentityDeclarationManifestApplyOutcome {
-    pub fn canonical_compiled_manifest_digest(&self) -> Result<String, IdentityIntentError> {
-        #[derive(Serialize)]
-        struct DigestMaterial<'a> {
-            domain: &'static str,
-            scope_id: &'a IdentityDeclarationScopeId,
-            scope_revision: u64,
-            identities: &'a BTreeMap<AgentIdentity, IdentityIntentApplyOutcome>,
-        }
-        let bytes = serde_json::to_vec(&DigestMaterial {
-            domain: "meerkat.identity.compiled_declaration_manifest.v1",
-            scope_id: &self.scope_id,
-            scope_revision: self.scope_revision,
-            identities: &self.identities,
-        })
-        .map_err(|error| IdentityIntentError::Serialization(error.to_string()))?;
-        Ok(sha256_digest(&bytes))
-    }
-
-    pub fn validate(&self) -> Result<(), IdentityIntentError> {
-        validate_text("identity_declaration_scope", self.scope_id.as_str())?;
-        if self.scope_revision == 0 {
-            return Err(IdentityIntentError::InvalidDeclarationRevision);
-        }
-        validate_sha256_digest(&self.request_digest)?;
-        validate_sha256_digest(&self.compiled_manifest_digest)?;
-        for (identity, outcome) in &self.identities {
-            if identity != &outcome.identity
-                || outcome.declaration_scope.as_ref() != Some(&self.scope_id)
-                || outcome
-                    .declaration_revision
-                    .is_none_or(|revision| revision == 0 || revision > self.scope_revision)
-                || outcome.intent.identity() != identity
-                || outcome.intent_revision == 0
-                || outcome.intent.digest()? != outcome.intent_digest
-            {
-                return Err(IdentityIntentError::InvalidDeclarationOutcome);
-            }
-        }
-        if self.canonical_compiled_manifest_digest()? != self.compiled_manifest_digest {
-            return Err(IdentityIntentError::DigestMismatch);
-        }
-        Ok(())
-    }
-}
-
 /// Current exclusive reconcile claim.  `holder_id` names the logical
 /// controller while `incarnation_id` distinguishes concurrent/restarted
 /// processes.  A new incarnation may take over only after this bounded lease
@@ -1323,24 +888,17 @@ pub enum IdentityLeaseClaimOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IdentityOperationKind {
-    ApplyDeclarationManifest,
     SessionCreationConsumed,
     RetirementProven,
     ExternalBinding,
     InitialDelivery,
 }
 
-/// Scope of one immutable receipt. Manifest idempotency is provider-scoped;
-/// actuator custody remains identity-scoped.
+/// Identity scope of one immutable actuator receipt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "subject", rename_all = "snake_case", deny_unknown_fields)]
 pub enum IdentityOperationSubject {
-    DeclarationScope {
-        scope_id: IdentityDeclarationScopeId,
-    },
-    Identity {
-        identity: AgentIdentity,
-    },
+    Identity { identity: AgentIdentity },
 }
 
 /// Stable lookup slot for an immutable receipt. One-shot slots deliberately
@@ -1349,10 +907,6 @@ pub enum IdentityOperationSubject {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "slot", rename_all = "snake_case", deny_unknown_fields)]
 pub enum IdentityOperationSlot {
-    ApplyDeclarationManifest {
-        scope_id: IdentityDeclarationScopeId,
-        mutation_id: OperationId,
-    },
     SessionCreationConsumed {
         tombstone_generation: u64,
         session_id: SessionId,
@@ -1380,9 +934,6 @@ impl IdentityOperationSlot {
     #[must_use]
     pub const fn kind(&self) -> IdentityOperationKind {
         match self {
-            Self::ApplyDeclarationManifest { .. } => {
-                IdentityOperationKind::ApplyDeclarationManifest
-            }
             Self::SessionCreationConsumed { .. } => IdentityOperationKind::SessionCreationConsumed,
             Self::RetirementProven { .. } => IdentityOperationKind::RetirementProven,
             Self::ExternalBinding { .. } => IdentityOperationKind::ExternalBinding,
@@ -1396,13 +947,10 @@ impl IdentityOperationSlot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum IdentityOperationReceiptPayload {
-    ApplyDeclarationManifest {
-        outcome: IdentityDeclarationManifestApplyOutcome,
-    },
     /// Sealed only after the first exact target session is observed. Once
     /// present, later absence is evidence loss and can never recreate history.
     SessionCreationConsumed {
-        checkpoint: SessionCheckpointStamp,
+        authority: IdentitySessionStoreAuthority,
     },
     RetirementProven {
         absent_authority_digest: String,
@@ -1428,9 +976,6 @@ impl IdentityOperationReceiptPayload {
     #[must_use]
     pub const fn kind(&self) -> IdentityOperationKind {
         match self {
-            Self::ApplyDeclarationManifest { .. } => {
-                IdentityOperationKind::ApplyDeclarationManifest
-            }
             Self::SessionCreationConsumed { .. } => IdentityOperationKind::SessionCreationConsumed,
             Self::RetirementProven { .. } => IdentityOperationKind::RetirementProven,
             Self::ExternalBinding { .. } => IdentityOperationKind::ExternalBinding,
@@ -1483,12 +1028,9 @@ impl IdentityOperationReceipt {
         #[derive(Serialize)]
         #[serde(tag = "operation", rename_all = "snake_case")]
         enum ReceiptRequestMaterial<'a> {
-            ApplyDeclarationManifest {
-                request_digest: &'a str,
-            },
             SessionCreationConsumed {
                 tombstone_generation: u64,
-                checkpoint: &'a SessionCheckpointStamp,
+                authority: &'a IdentitySessionStoreAuthority,
             },
             RetirementProven {
                 tombstone_generation: u64,
@@ -1513,15 +1055,10 @@ impl IdentityOperationReceipt {
         }
 
         let payload = match &self.payload {
-            IdentityOperationReceiptPayload::ApplyDeclarationManifest { outcome } => {
-                ReceiptRequestMaterial::ApplyDeclarationManifest {
-                    request_digest: &outcome.request_digest,
-                }
-            }
-            IdentityOperationReceiptPayload::SessionCreationConsumed { checkpoint } => {
+            IdentityOperationReceiptPayload::SessionCreationConsumed { authority } => {
                 ReceiptRequestMaterial::SessionCreationConsumed {
                     tombstone_generation: self.tombstone_generation.unwrap_or(0),
-                    checkpoint,
+                    authority,
                 }
             }
             IdentityOperationReceiptPayload::RetirementProven {
@@ -1586,12 +1123,8 @@ impl IdentityOperationReceipt {
             });
         }
         validate_text("mob_id", self.mob_id.as_str())?;
-        match &self.subject {
-            IdentityOperationSubject::DeclarationScope { scope_id } => {
-                validate_text("identity_declaration_scope", scope_id.as_str())?;
-            }
-            IdentityOperationSubject::Identity { identity } => validate_identity(identity)?,
-        }
+        let IdentityOperationSubject::Identity { identity } = &self.subject;
+        validate_identity(identity)?;
         if self.receipt_id.0.is_nil() {
             return Err(IdentityIntentError::InvalidOperationReceipt);
         }
@@ -1603,49 +1136,21 @@ impl IdentityOperationReceipt {
         }
         let normalized_tombstone = self.tombstone_generation.unwrap_or(0);
         match &self.payload {
-            IdentityOperationReceiptPayload::ApplyDeclarationManifest { outcome } => {
-                let (
-                    IdentityOperationSubject::DeclarationScope {
-                        scope_id: subject_scope,
-                    },
-                    IdentityOperationSlot::ApplyDeclarationManifest {
-                        scope_id: slot_scope,
-                        mutation_id,
-                    },
-                ) = (&self.subject, &self.slot)
-                else {
-                    return Err(IdentityIntentError::InvalidOperationReceipt);
-                };
-                if mutation_id != &self.receipt_id
-                    || subject_scope != slot_scope
-                    || subject_scope != &outcome.scope_id
-                    || self.intent_revision.is_some()
-                    || self.intent_digest.is_some()
-                    || self.intent_authority_digest.is_some()
-                    || self.tombstone_generation.is_some()
-                    || self.audit_lease_epoch.is_some()
-                {
-                    return Err(IdentityIntentError::InvalidOperationReceipt);
-                }
-                outcome.validate()?;
-            }
-            IdentityOperationReceiptPayload::SessionCreationConsumed { checkpoint } => {
+            IdentityOperationReceiptPayload::SessionCreationConsumed { authority } => {
                 validate_identity_receipt_authority(self)?;
                 let IdentityOperationSlot::SessionCreationConsumed {
                     tombstone_generation,
                     session_id,
                     lineage_id,
-                    lineage_generation,
+                    lineage_generation: _,
                 } = &self.slot
                 else {
                     return Err(IdentityIntentError::InvalidOperationReceipt);
                 };
-                checkpoint
-                    .validate_for_session(session_id)
-                    .map_err(session_checkpoint_error)?;
+                authority.validate()?;
                 if *tombstone_generation != normalized_tombstone
-                    || checkpoint.lineage_id() != lineage_id
-                    || checkpoint.generation() != *lineage_generation
+                    || authority.session_id() != session_id
+                    || lineage_id.as_str().is_empty()
                 {
                     return Err(IdentityIntentError::InvalidOperationReceipt);
                 }
@@ -1731,9 +1236,7 @@ impl IdentityOperationReceipt {
 fn validate_identity_receipt_authority(
     receipt: &IdentityOperationReceipt,
 ) -> Result<(), IdentityIntentError> {
-    if !matches!(&receipt.subject, IdentityOperationSubject::Identity { .. })
-        || receipt.intent_revision.is_none_or(|revision| revision == 0)
-    {
+    if receipt.intent_revision.is_none_or(|revision| revision == 0) {
         return Err(IdentityIntentError::InvalidOperationReceipt);
     }
     let Some(intent_digest) = &receipt.intent_digest else {
@@ -2035,20 +1538,6 @@ impl IdentityResourceObservation {
     }
 }
 
-/// Full-document-verified checkpoint identity. Private fields ensure callers
-/// cannot label a partial or digest-unverified stamp as Matching.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VerifiedIdentitySessionCheckpoint {
-    stamp: SessionCheckpointStamp,
-}
-
-impl VerifiedIdentitySessionCheckpoint {
-    #[must_use]
-    pub fn stamp(&self) -> &SessionCheckpointStamp {
-        &self.stamp
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum IdentitySessionObservationState {
     Unavailable {
@@ -2058,13 +1547,7 @@ enum IdentitySessionObservationState {
         absence_version: String,
     },
     Matching {
-        checkpoint: VerifiedIdentitySessionCheckpoint,
-        version: String,
-    },
-    RecoverableDivergence {
-        checkpoint: VerifiedIdentitySessionCheckpoint,
-        target: IdentityTargetObservationVersion,
-        detail: String,
+        authority: IdentitySessionStoreAuthority,
     },
     AmbiguousDivergence {
         evidence_digest: String,
@@ -2089,122 +1572,27 @@ enum IdentitySessionObservationState {
     },
 }
 
-/// Proof-bearing session/transcript observation. The generated classifier
-/// receives only [`IdentitySessionCondition`]; the actor retains this exact
-/// target-local witness to mint a resource-scoped permit.
+/// Store-authorized session observation. The generated classifier receives
+/// only [`IdentitySessionCondition`]; the actor retains the exact private
+/// physical authority for receipt custody and bounded convergence checks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IdentitySessionObservation {
     state: IdentitySessionObservationState,
 }
 
 impl IdentitySessionObservation {
-    pub fn matching(
+    pub(crate) fn matching(
         desired: &DesiredSessionTarget,
-        canonical: &Session,
-        projection: &Session,
-        version: String,
+        observed: &Session,
+        authority: IdentitySessionStoreAuthority,
     ) -> Result<Self, IdentityIntentError> {
-        let canonical_stamp = verified_checkpoint_for_desired(desired, canonical)?;
-        let projection_stamp = verified_checkpoint_for_desired(desired, projection)?;
-        if session_checkpoint_relation(canonical, projection).map_err(session_checkpoint_error)?
-            != SessionCheckpointRelation::Exact
-            || canonical_stamp != projection_stamp
-        {
-            return Err(IdentityIntentError::AmbiguousSessionCheckpoint);
+        validate_session_target(desired)?;
+        authority.validate()?;
+        if observed.id() != &desired.session_id || authority.session_id() != &desired.session_id {
+            return Err(IdentityIntentError::SessionStoreAuthorityMismatch);
         }
-        IdentityTargetObservationVersion::Version {
-            version: version.clone(),
-        }
-        .validate()?;
         Ok(Self {
-            state: IdentitySessionObservationState::Matching {
-                checkpoint: VerifiedIdentitySessionCheckpoint {
-                    stamp: canonical_stamp,
-                },
-                version,
-            },
-        })
-    }
-
-    pub fn recoverable_missing_target(
-        desired: &DesiredSessionTarget,
-        canonical: &Session,
-        absence_version: String,
-    ) -> Result<Self, IdentityIntentError> {
-        let stamp = verified_checkpoint_for_desired(desired, canonical)?;
-        let target = IdentityTargetObservationVersion::Absent { absence_version };
-        target.validate()?;
-        Ok(Self {
-            state: IdentitySessionObservationState::RecoverableDivergence {
-                checkpoint: VerifiedIdentitySessionCheckpoint { stamp },
-                target,
-                detail: "verified canonical checkpoint can be projected into proved absence"
-                    .to_string(),
-            },
-        })
-    }
-
-    /// Construct a repairable typed mismatch only when exact checkpoint
-    /// ancestry proves forward projection, intra-turn rollback, or legacy
-    /// migration. Every other decodable mismatch stays ambiguous.
-    pub fn recoverable_divergence(
-        desired: &DesiredSessionTarget,
-        canonical: &Session,
-        projection: &Session,
-        projection_source_blob: Option<&[u8]>,
-        ancestry: Option<&SessionCheckpointAncestryProof>,
-        version: String,
-    ) -> Result<Self, IdentityIntentError> {
-        let canonical_stamp = verified_checkpoint_for_desired(desired, canonical)?;
-        let relation =
-            session_checkpoint_relation(canonical, projection).map_err(session_checkpoint_error)?;
-        let recoverable = match projection
-            .try_checkpoint_state()
-            .map_err(session_checkpoint_error)?
-        {
-            SessionCheckpointState::Verified(projection_stamp) => match relation {
-                SessionCheckpointRelation::LeftRevisionNewer => {
-                    checkpoint_base_names(&canonical_stamp, &projection_stamp)
-                        || ancestry
-                            .is_some_and(|proof| proof.proves(&projection_stamp, &canonical_stamp))
-                }
-                SessionCheckpointRelation::LeftRevisionOlder => {
-                    projection_stamp.provenance()
-                        == SessionCheckpointProvenance::IntraTurnCheckpoint
-                        && checkpoint_base_names(&projection_stamp, &canonical_stamp)
-                }
-                _ => false,
-            },
-            SessionCheckpointState::LegacyUnverified { .. } => {
-                matches!(relation, SessionCheckpointRelation::RightLegacyUnverified)
-                    && canonical_stamp.provenance()
-                        == SessionCheckpointProvenance::RecoveryMigration
-                    && projection_source_blob
-                        .and_then(|source_blob| {
-                            SessionCheckpointStamp::recovery_migration(
-                                projection,
-                                source_blob,
-                                canonical_stamp.generation(),
-                                canonical_stamp.checkpoint_revision(),
-                            )
-                            .ok()
-                        })
-                        .is_some_and(|expected| expected == canonical_stamp)
-            }
-        };
-        if !recoverable {
-            return Err(IdentityIntentError::AmbiguousSessionCheckpoint);
-        }
-        let target = IdentityTargetObservationVersion::Version { version };
-        target.validate()?;
-        Ok(Self {
-            state: IdentitySessionObservationState::RecoverableDivergence {
-                checkpoint: VerifiedIdentitySessionCheckpoint {
-                    stamp: canonical_stamp,
-                },
-                target,
-                detail: format!("proved checkpoint repair relation: {relation:?}"),
-            },
+            state: IdentitySessionObservationState::Matching { authority },
         })
     }
 
@@ -2313,9 +1701,6 @@ impl IdentitySessionObservation {
             }
             IdentitySessionObservationState::Missing { .. } => IdentitySessionCondition::Missing,
             IdentitySessionObservationState::Matching { .. } => IdentitySessionCondition::Matching,
-            IdentitySessionObservationState::RecoverableDivergence { .. } => {
-                IdentitySessionCondition::RecoverableDivergence
-            }
             IdentitySessionObservationState::AmbiguousDivergence { .. } => {
                 IdentitySessionCondition::AmbiguousDivergence
             }
@@ -2340,15 +1725,18 @@ impl IdentitySessionObservation {
                     absence_version: absence_version.clone(),
                 })
             }
-            IdentitySessionObservationState::Matching { version, .. }
-            | IdentitySessionObservationState::Malformed { version, .. }
+            IdentitySessionObservationState::Matching { authority } => {
+                Some(IdentityTargetObservationVersion::Version {
+                    version: authority.observation_version()?,
+                })
+            }
+            IdentitySessionObservationState::Malformed { version, .. }
             | IdentitySessionObservationState::IrrecoverablyCorrupt { version, .. } => {
                 Some(IdentityTargetObservationVersion::Version {
                     version: version.clone(),
                 })
             }
-            IdentitySessionObservationState::RecoverableDivergence { target, .. }
-            | IdentitySessionObservationState::AmbiguousDivergence { target, .. } => {
+            IdentitySessionObservationState::AmbiguousDivergence { target, .. } => {
                 Some(target.clone())
             }
             IdentitySessionObservationState::Unavailable { .. }
@@ -2360,16 +1748,12 @@ impl IdentitySessionObservation {
         Ok(target)
     }
 
-    /// Return the full-document-verified checkpoint carried by a matching or
-    /// proved-recoverable observation. Receipt creation uses this exact stamp;
-    /// ownership lease data never enters the checkpoint witness.
+    /// Return the exact store-issued authority carried by a matching
+    /// observation. No Session payload fact can construct this carrier.
     #[must_use]
-    pub fn verified_checkpoint(&self) -> Option<&SessionCheckpointStamp> {
+    pub fn store_authority(&self) -> Option<&IdentitySessionStoreAuthority> {
         match &self.state {
-            IdentitySessionObservationState::Matching { checkpoint, .. }
-            | IdentitySessionObservationState::RecoverableDivergence { checkpoint, .. } => {
-                Some(checkpoint.stamp())
-            }
+            IdentitySessionObservationState::Matching { authority } => Some(authority),
             IdentitySessionObservationState::Unavailable { .. }
             | IdentitySessionObservationState::Missing { .. }
             | IdentitySessionObservationState::AmbiguousDivergence { .. }
@@ -2378,45 +1762,6 @@ impl IdentitySessionObservation {
             | IdentitySessionObservationState::IrrecoverablyCorrupt { .. } => None,
         }
     }
-}
-
-fn verified_checkpoint_for_desired(
-    desired: &DesiredSessionTarget,
-    session: &Session,
-) -> Result<SessionCheckpointStamp, IdentityIntentError> {
-    let stamp = match session
-        .try_checkpoint_state()
-        .map_err(session_checkpoint_error)?
-    {
-        SessionCheckpointState::Verified(stamp) => stamp,
-        SessionCheckpointState::LegacyUnverified { .. } => {
-            return Err(IdentityIntentError::AmbiguousSessionCheckpoint);
-        }
-    };
-    if stamp.session_id() != &desired.session_id
-        || stamp.lineage_id() != &desired.lineage_id
-        || stamp.generation() != desired.lineage_generation
-    {
-        return Err(IdentityIntentError::AmbiguousSessionCheckpoint);
-    }
-    Ok(stamp)
-}
-
-fn checkpoint_base_names(child: &SessionCheckpointStamp, parent: &SessionCheckpointStamp) -> bool {
-    matches!(
-        child.authority_base(),
-        SessionCheckpointAuthorityBase::Typed { anchor }
-            if anchor.session_id == *parent.session_id()
-                && anchor.lineage_id == *parent.lineage_id()
-                && anchor.generation == parent.generation()
-                && anchor.checkpoint_revision == parent.checkpoint_revision()
-                && anchor.digest == *parent.digest()
-                && anchor.provenance == parent.provenance()
-    )
-}
-
-fn session_checkpoint_error(error: impl fmt::Display) -> IdentityIntentError {
-    IdentityIntentError::SessionCheckpoint(error.to_string())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2560,14 +1905,12 @@ pub enum IdentityIntentError {
     InvalidText {
         field: &'static str,
     },
-    NilOperationId,
     NilSessionId,
     CreateRequiresInitialGeneration,
     InvalidExternalAddress(String),
     InvalidExternalIdentity(String),
     SelfEdge(AgentIdentity),
     NonCanonicalEdge(DesiredIdentityEdge),
-    CrossScopeEdge(DesiredIdentityEdge),
     EdgeOwnedByDifferentIdentity {
         identity: AgentIdentity,
         edge: DesiredIdentityEdge,
@@ -2583,9 +1926,6 @@ pub enum IdentityIntentError {
     },
     ZeroIntentRevision,
     InvalidDeclarationRevision,
-    InvalidDeclarationScopeHead,
-    InvalidDeclarationOutcome,
-    InvalidLegacyImport,
     InvalidMemberMaterial(String),
     DigestMismatch,
     InvalidLeaseEpoch,
@@ -2597,8 +1937,8 @@ pub enum IdentityIntentError {
     InvalidObservationVersion,
     InvalidActuationPermit,
     ExpiredActuationPermit,
-    AmbiguousSessionCheckpoint,
-    SessionCheckpoint(String),
+    InvalidSessionStoreAuthority,
+    SessionStoreAuthorityMismatch,
     CounterExhausted {
         counter: &'static str,
     },
@@ -2609,9 +1949,6 @@ impl fmt::Display for IdentityIntentError {
         match self {
             Self::InvalidText { field } => {
                 write!(formatter, "{field} must be nonempty canonical text")
-            }
-            Self::NilOperationId => {
-                formatter.write_str("identity intent operation id must be non-nil")
             }
             Self::NilSessionId => formatter.write_str("identity intent session id must be non-nil"),
             Self::CreateRequiresInitialGeneration => formatter
@@ -2631,10 +1968,6 @@ impl fmt::Display for IdentityIntentError {
             Self::NonCanonicalEdge(edge) => {
                 write!(formatter, "desired wiring edge is not canonical: {edge:?}")
             }
-            Self::CrossScopeEdge(edge) => write!(
-                formatter,
-                "identity declaration wiring edge {edge:?} crosses the provider scope"
-            ),
             Self::EdgeOwnedByDifferentIdentity { identity, edge } => write!(
                 formatter,
                 "identity '{identity}' cannot own desired wiring edge {edge:?}; owner is '{}'",
@@ -2655,15 +1988,6 @@ impl fmt::Display for IdentityIntentError {
             }
             Self::InvalidDeclarationRevision => formatter.write_str(
                 "identity declaration scope and nonzero revision must be present together",
-            ),
-            Self::InvalidDeclarationScopeHead => formatter.write_str(
-                "identity declaration scope head is internally incoherent",
-            ),
-            Self::InvalidDeclarationOutcome => formatter.write_str(
-                "identity declaration apply outcome is not bound to the sealed scope revision",
-            ),
-            Self::InvalidLegacyImport => formatter.write_str(
-                "legacy identity adoption requires an exact RecoveryMigration checkpoint, RequireExisting target, no initial delivery, and a reclaimable lease high-water",
             ),
             Self::InvalidMemberMaterial(detail) => {
                 write!(formatter, "invalid desired member material: {detail}")
@@ -2698,12 +2022,11 @@ impl fmt::Display for IdentityIntentError {
             Self::ExpiredActuationPermit => {
                 formatter.write_str("identity actuation permit lease has expired")
             }
-            Self::AmbiguousSessionCheckpoint => formatter.write_str(
-                "session checkpoint evidence does not prove exact coherence or a safe repair relation",
+            Self::InvalidSessionStoreAuthority => formatter
+                .write_str("identity session store authority is internally incoherent"),
+            Self::SessionStoreAuthorityMismatch => formatter.write_str(
+                "store-issued session authority does not match the observed desired session",
             ),
-            Self::SessionCheckpoint(detail) => {
-                write!(formatter, "session checkpoint validation failed: {detail}")
-            }
             Self::CounterExhausted { counter } => {
                 write!(formatter, "identity {counter} counter exhausted")
             }
@@ -2755,6 +2078,17 @@ fn validate_sha256_digest(value: &str) -> Result<(), IdentityIntentError> {
         return Err(IdentityIntentError::DigestMismatch);
     }
     Ok(())
+}
+
+fn has_prefixed_sha256(value: &str, prefixes: &[&str]) -> bool {
+    prefixes.iter().any(|prefix| {
+        value.strip_prefix(prefix).is_some_and(|hex| {
+            hex.len() == 64
+                && hex
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+    })
 }
 
 fn validate_session_target(session: &DesiredSessionTarget) -> Result<(), IdentityIntentError> {
@@ -2927,7 +2261,7 @@ mod tests {
 
         assert_eq!(observation.condition(), IdentitySessionCondition::Malformed);
         assert_eq!(observation.target_precondition().unwrap(), None);
-        assert_eq!(observation.verified_checkpoint(), None);
+        assert_eq!(observation.store_authority(), None);
         assert_eq!(
             observation.malformed_unversioned_detail(),
             Some("persisted Session failed typed decoding")
@@ -2951,10 +2285,85 @@ mod tests {
         }
     }
 
+    fn session_creation_receipt(
+        session_id: SessionId,
+        authority: IdentitySessionStoreAuthority,
+    ) -> IdentityOperationReceipt {
+        let mut receipt = IdentityOperationReceipt {
+            schema_version: IDENTITY_OPERATION_RECEIPT_SCHEMA_VERSION,
+            mob_id: MobId::from("authority-receipt-mob"),
+            subject: IdentityOperationSubject::Identity {
+                identity: AgentIdentity::from("authority-receipt-member"),
+            },
+            effect_kind: IdentityOperationKind::SessionCreationConsumed,
+            slot: IdentityOperationSlot::SessionCreationConsumed {
+                tombstone_generation: 0,
+                lineage_id: SessionLineageId::for_session(&session_id),
+                lineage_generation: SessionGeneration::INITIAL,
+                session_id,
+            },
+            receipt_id: OperationId::new(),
+            intent_revision: Some(1),
+            intent_digest: Some(
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
+            ),
+            intent_authority_digest: Some(
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                    .to_string(),
+            ),
+            tombstone_generation: None,
+            audit_lease_epoch: Some(1),
+            request_digest:
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                    .to_string(),
+            payload: IdentityOperationReceiptPayload::SessionCreationConsumed { authority },
+        };
+        receipt.request_digest = receipt.canonical_request_digest().unwrap();
+        receipt
+    }
+
+    #[test]
+    fn session_creation_receipt_carries_only_exact_store_authority() {
+        let session_id = SessionId::new();
+        let authority = IdentitySessionStoreAuthority::whole_blob_for_test(
+            session_id.clone(),
+            7,
+            "row-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        );
+        let receipt = session_creation_receipt(session_id.clone(), authority.clone());
+
+        receipt.validate().unwrap();
+        let encoded = serde_json::to_value(&receipt).unwrap();
+        assert_eq!(
+            encoded.pointer("/payload/authority/store_revision"),
+            Some(&serde_json::json!(7)),
+        );
+        assert_eq!(
+            encoded.pointer("/payload/authority/token/profile"),
+            Some(&serde_json::json!("whole_blob_v1")),
+        );
+        assert!(
+            encoded.pointer("/payload/authority/checkpoint").is_none(),
+            "receipt authority must not retain Session-owned checkpoint vocabulary",
+        );
+
+        let wrong_authority = IdentitySessionStoreAuthority::whole_blob_for_test(
+            SessionId::new(),
+            8,
+            "row-sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        );
+        let wrong = session_creation_receipt(session_id, wrong_authority);
+        assert!(matches!(
+            wrong.validate(),
+            Err(IdentityIntentError::InvalidOperationReceipt),
+        ));
+    }
+
     #[test]
     fn unversioned_session_corruption_reuses_strict_malformed_condition_serde() {
         let observation =
-            IdentitySessionObservation::malformed_unversioned("unsupported checkpoint schema")
+            IdentitySessionObservation::malformed_unversioned("unsupported persisted schema")
                 .unwrap();
         let encoded = serde_json::to_string(&observation.condition()).unwrap();
         assert_eq!(encoded, r#""malformed""#);
@@ -3291,7 +2700,7 @@ mod tests {
     }
 
     #[test]
-    fn create_if_absent_is_consumed_after_the_first_matching_checkpoint() {
+    fn create_if_absent_is_consumed_after_the_first_matching_store_authority() {
         let mut facts = matching_facts();
         facts.intent = IdentityAuthorityCondition::PresentCreateIfAbsent;
         facts.session_creation_receipt = IdentityReceiptCondition::Missing;
@@ -3537,88 +2946,6 @@ mod tests {
         assert!(matches!(
             record.validate(),
             Err(IdentityIntentError::DigestMismatch)
-        ));
-    }
-
-    #[test]
-    fn empty_declaration_scope_has_a_sealed_restart_cas_head() {
-        let scope_id = IdentityDeclarationScopeId::new("homecore.roster").unwrap();
-        let operation_id = OperationId::new();
-        let manifest = IdentityDeclarationManifest {
-            scope_id: scope_id.clone(),
-            operation_id: operation_id.clone(),
-            expected_scope: IdentityDeclarationScopePrecondition::Missing,
-            members: BTreeMap::new(),
-            wiring: BTreeSet::new(),
-        };
-        let request_digest = manifest.request_digest().unwrap();
-        let compiled_manifest_digest = sha256_digest(b"empty-compiled-manifest");
-        let mut head = IdentityDeclarationScopeHead {
-            schema_version: IDENTITY_DECLARATION_SCOPE_SCHEMA_VERSION,
-            mob_id: MobId::from("homecore"),
-            scope_id,
-            revision: 1,
-            operation_id,
-            request_digest,
-            compiled_manifest_digest,
-            declared_member_count: 0,
-            authority_digest: String::new(),
-        };
-        head.authority_digest = head.canonical_authority_digest().unwrap();
-        head.validate().unwrap();
-
-        let mut stale_after_restart = head.clone();
-        stale_after_restart.revision = 2;
-        assert!(matches!(
-            stale_after_restart.validate(),
-            Err(IdentityIntentError::DigestMismatch)
-        ));
-    }
-
-    #[test]
-    fn declaration_manifest_rejects_cross_scope_wiring() {
-        let mut members = BTreeMap::new();
-        members.insert(
-            AgentIdentity::from("parent-1"),
-            IdentityMemberDeclaration {
-                material: IdentityMemberMaterialDeclaration::Profile(
-                    IdentityProfileMemberDeclaration {
-                        profile_name: ProfileName::from("parent"),
-                        profile_override: None,
-                        model_override: None,
-                        external_addressable_override: None,
-                        context: None,
-                        labels: None,
-                        additional_instructions: None,
-                        system_prompt_override: None,
-                        tool_access_policy: None,
-                        auth_binding: None,
-                        budget_limits: None,
-                        runtime_mode: None,
-                        required_env_keys: Vec::new(),
-                        required_local_callback_tools: Vec::new(),
-                        execution: DesiredExecution::ControllingSession,
-                    },
-                ),
-                session_authority_policy: DesiredSessionAuthorityPolicy::CreateIfAbsent,
-                initial_message: None,
-                legacy_import: None,
-            },
-        );
-        let manifest = IdentityDeclarationManifest {
-            scope_id: IdentityDeclarationScopeId::new("homecore.roster").unwrap(),
-            operation_id: OperationId::new(),
-            expected_scope: IdentityDeclarationScopePrecondition::Any,
-            members,
-            wiring: BTreeSet::from([DesiredIdentityEdge::new(
-                AgentIdentity::from("parent-1"),
-                AgentIdentity::from("outside-scope"),
-            )
-            .unwrap()]),
-        };
-        assert!(matches!(
-            manifest.validate(),
-            Err(IdentityIntentError::CrossScopeEdge(_))
         ));
     }
 

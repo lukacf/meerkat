@@ -116,29 +116,30 @@ Gates: machine-check-drift, machine-authority-docs-gate, verify-machine-poster-c
 audit-generated-headers, runtime-authority-bypass, rmat-audit. TLC step bounds may need
 adjustment (authority-lane precedent). No contracts wire-type changes.
 
-## Bug B (same release): stale runtime snapshot vs store head — AS IMPLEMENTED
+## Bug B (historical): stale runtime snapshot vs store head — SUPERSEDED
 
 meerkat-session/src/persistent.rs load_authoritative_session_base_with_replay_info
 preferred the runtime snapshot whenever present, no freshness comparison; quarantine
 only covered snapshot-absent. Field: snapshot froze at 83 msgs, store head 91; resume
 loaded 83, save rejected by the append-only guard — permanent wedge.
 
-Fix (machine-owned, mirrors the runtime-projection-rollback region): new
-SessionDocumentMachine input `ResolveRuntimeSnapshotReadSource` with THREE typed
-observations extracted by the shell —
+The historical fix used a `SessionDocumentMachine` read-source input with
+three typed observations —
 1. store_head_extends_snapshot: the head strictly extends the snapshot (prefix
    transcript digest equality, the save guard's own continuity proof);
-2. store_head_is_runtime_checkpoint: the head row carries the intra-turn
-   checkpointer's provenance stamp (uncommitted residue; the rollback region
-   converges it at save time — serving it would expose an evicted turn);
+2. store_head_has_atomic_physical_ownership: the store can prove the head row
+   is its current authenticated physical authority rather than an
+   uncommitted projection;
 3. session_is_live: a live session's snapshot lag is transient (the live runtime
    recommits past it); only a COLD load defers to the head.
-Verdict `RuntimeSnapshotReadSourceResolved { read_from_store_head }`: head wins iff
-extends && !checkpoint && !live. Shell mirrors, decides nothing.
+That embedded-checkpoint read-source vocabulary was removed in 0.8.11. Current
+stores issue committed and provisional-tail authority directly; recovery
+classifies a store-bound candidate and never treats a deserialized Session
+checkpoint stamp as authority.
 
 Pins: test_stale_prefix_runtime_snapshot_defers_to_extending_store_head (red-verified
 against the old unconditional snapshot preference),
-test_checkpoint_stamped_ahead_store_head_stays_snapshot_served,
+test_unowned_ahead_store_head_stays_snapshot_served,
 test_diverged_runtime_snapshot_stays_authoritative,
 test_authoritative_load_ignores_newer_raw_store_projection_when_runtime_exists (live),
 and the rewritten cold tail of

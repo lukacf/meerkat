@@ -454,6 +454,11 @@ impl LlmClient for OpenAiRealtimeTextAdapter {
 
 // ---- message / tool / usage conversion helpers ---------------------------
 
+// Realtime exposes one top-level instruction string. Preserve every authored
+// System payload byte-for-byte and join them in transcript order with this
+// stable adapter-owned separator.
+const ORDERED_SYSTEM_INSTRUCTION_SEPARATOR: &str = "\n\n";
+
 /// Convert a meerkat message history into an `instructions` string
 /// (collected from system messages) plus a list of realtime `Item`s for
 /// replay through `conversation.item.create`.
@@ -464,21 +469,10 @@ fn convert_messages(messages: &[Message]) -> Result<(Option<String>, Vec<Item>),
     for msg in messages {
         match msg {
             Message::System(s) => {
-                if !s.content.trim().is_empty() {
-                    instructions_parts.push(s.content.clone());
-                }
+                instructions_parts.push(s.content.clone());
             }
             Message::SystemNotice(notice) => {
-                let rendered = notice.model_projection_text();
-                if !rendered.trim().is_empty() {
-                    items.push(Item::Message {
-                        id: None,
-                        status: None,
-                        phase: None,
-                        role: Role::User,
-                        content: vec![ContentPart::InputText { text: rendered }],
-                    });
-                }
+                instructions_parts.push(notice.model_projection_text());
             }
             Message::User(u) => {
                 let text = u.text_content();
@@ -579,7 +573,7 @@ fn convert_messages(messages: &[Message]) -> Result<(Option<String>, Vec<Item>),
     let instructions = if instructions_parts.is_empty() {
         None
     } else {
-        Some(instructions_parts.join("\n\n"))
+        Some(instructions_parts.join(ORDERED_SYSTEM_INSTRUCTION_SEPARATOR))
     };
     Ok((instructions, items))
 }
@@ -685,8 +679,8 @@ mod tests {
     use super::*;
     use meerkat_core::{
         AssistantImageId, BlobId, BlobRef, BlockAssistantMessage, ImageData, MediaType,
-        ProviderImageMetadata, RevisedPromptDisposition, ServerToolKind, SystemMessage, ToolResult,
-        UserMessage,
+        ProviderImageMetadata, RevisedPromptDisposition, ServerToolKind, SystemMessage,
+        SystemNoticeKind, SystemNoticeMessage, ToolResult, UserMessage,
     };
 
     fn sys(text: &str) -> Message {
@@ -837,6 +831,33 @@ mod tests {
             }
             other => panic!("expected Item::Message, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn convert_messages_preserves_absent_empty_whitespace_and_ordered_systems() {
+        let (absent, _) = convert_messages(&[]).expect("convert absent System");
+        assert_eq!(absent, None);
+
+        let messages = vec![
+            user("work"),
+            sys(""),
+            user("continue"),
+            Message::SystemNotice(SystemNoticeMessage::new(
+                SystemNoticeKind::Generic,
+                "notice",
+            )),
+            sys(" \t "),
+            sys("duplicate"),
+            sys("duplicate"),
+        ];
+        let original = messages.clone();
+        let (ordered, items) = convert_messages(&messages).expect("convert ordered Systems");
+        assert_eq!(messages, original);
+        assert_eq!(
+            ordered.as_deref(),
+            Some("\n\nnotice\n\n \t \n\nduplicate\n\nduplicate")
+        );
+        assert_eq!(items.len(), 2);
     }
 
     #[test]

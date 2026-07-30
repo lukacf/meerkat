@@ -30,11 +30,9 @@
 //!   *defined* as "pending admission work resolved".
 //! - **D2a — total inputs in `ShuttingDown`.** Inputs that legitimately race
 //!   archive/discard teardown (`ClaimTurn`, `AbortClaim`, `BeginTurn`,
-//!   `ResolveStartTurnDisposition`, `ResolveRuntimeKeepAlive`, and the
-//!   runtime-system-context application authorization) are accepted in
+//!   `ResolveStartTurnDisposition`, and `ResolveRuntimeKeepAlive`) are accepted in
 //!   `ShuttingDown` with an explicit no-op or typed
-//!   "session archived" terminal (`TurnAdmissionShutdownTerminalResolved`,
-//!   `RuntimeSystemContextApplicationResolved { SessionArchived }`) instead
+//!   "session archived" terminal (`TurnAdmissionShutdownTerminalResolved`) instead
 //!   of guard rejections, mirroring the existing
 //!   `AuthorizeStartTurnDispatchShuttingDown` -> `Cancelled` precedent.
 
@@ -117,22 +115,6 @@ pub enum RuntimeKeepAlivePersistenceDecision {
     PreserveExisting,
 }
 
-/// Authorization verdict for applying runtime-owned system context to the
-/// live session (the `ApplyRuntimeSystemContext` /
-/// `ApplyRuntimeSystemContextForTurn` session commands).
-///
-/// `SessionArchived` is the typed benign terminal for applications that
-/// arrive while the machine is `ShuttingDown` (archive/discard teardown won
-/// the race): the arrival is legitimate, the application is dropped with the
-/// archived session, and the caller resolves its waiter with the archived
-/// outcome instead of a guard rejection or a dropped reply channel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub enum RuntimeSystemContextApplicationAuthorization {
-    #[default]
-    Authorized,
-    SessionArchived,
-}
-
 /// Typed terminal disposition for turn-admission work that arrives while the
 /// machine is `ShuttingDown` (the session was archived or its live handle
 /// was discarded in favor of durable authority). This is the machine-owned
@@ -190,7 +172,6 @@ machine! {
             AuthorizeStartTurnDispatch,
             AuthorizeCancelAfterBoundary,
             ResolveLastStartTurnPublicTerminal,
-            AuthorizeRuntimeSystemContextApplication,
             ResolvePendingAdmissionDrained,
             AuthorizeSessionTeardown,
             ResolveRuntimeKeepAlive { keep_alive_request: Enum<RuntimeKeepAliveRequest> },
@@ -217,9 +198,6 @@ machine! {
             StartTurnPublicTerminalResolved { terminal: Enum<StartTurnPublicTerminal> },
             RuntimeKeepAliveResolved { decision: Enum<RuntimeKeepAlivePersistenceDecision> },
             PendingAdmissionDrainRequested,
-            RuntimeSystemContextApplicationResolved {
-                authorization: Enum<RuntimeSystemContextApplicationAuthorization>,
-            },
             TurnAdmissionShutdownTerminalResolved { terminal: Enum<TurnAdmissionShutdownTerminal> },
             SessionTeardownAuthorized,
         }
@@ -252,7 +230,6 @@ machine! {
         disposition StartTurnPublicTerminalResolved => local seam NoOwnerRealization,
         disposition RuntimeKeepAliveResolved => local seam NoOwnerRealization,
         disposition PendingAdmissionDrainRequested => local seam NoOwnerRealization,
-        disposition RuntimeSystemContextApplicationResolved => local seam NoOwnerRealization,
         disposition TurnAdmissionShutdownTerminalResolved => local seam NoOwnerRealization,
         disposition SessionTeardownAuthorized => local seam NoOwnerRealization,
 
@@ -602,34 +579,6 @@ machine! {
             update {}
             to ShuttingDown
             emit StartTurnDispatchResolved { authorization: StartTurnDispatchAuthorization::Cancelled }
-        }
-
-        // Machine-owned legality decision for applying runtime-owned system
-        // context to the live session (the ApplyRuntimeSystemContext /
-        // ApplyRuntimeSystemContextForTurn session commands). The shell fires
-        // this before touching the live agent; it decides nothing itself.
-        transition AuthorizeRuntimeSystemContextApplicationActive {
-            per_phase [Idle, Admitted, Running, Completing]
-            on input AuthorizeRuntimeSystemContextApplication
-            update {}
-            to Idle
-            emit RuntimeSystemContextApplicationResolved {
-                authorization: RuntimeSystemContextApplicationAuthorization::Authorized,
-            }
-        }
-
-        // D2a: a context application that lost the race against
-        // archive/discard teardown resolves with the typed SessionArchived
-        // verdict — the appends are dropped with the archived session and the
-        // caller's waiter resolves benignly instead of erroring or hanging.
-        transition AuthorizeRuntimeSystemContextApplicationShuttingDown {
-            on input AuthorizeRuntimeSystemContextApplication
-            guard { self.lifecycle_phase == Phase::ShuttingDown }
-            update {}
-            to ShuttingDown
-            emit RuntimeSystemContextApplicationResolved {
-                authorization: RuntimeSystemContextApplicationAuthorization::SessionArchived,
-            }
         }
 
         transition AuthorizeCancelAfterBoundaryRunning {

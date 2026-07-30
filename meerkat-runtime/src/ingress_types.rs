@@ -8,8 +8,7 @@
 
 use meerkat_core::lifecycle::RuntimeExecutionKind;
 use meerkat_core::lifecycle::run_primitive::{
-    ConversationAppend, ConversationContextAppend, PeerResponseTerminalApplyIntent,
-    RunApplyBoundary,
+    ConversationAppend, PeerResponseTerminalApplyIntent, RunApplyBoundary,
 };
 use meerkat_core::types::HandlingMode;
 use serde::{Deserialize, Serialize};
@@ -105,13 +104,6 @@ pub struct RuntimeInputProjection {
     pub injected_context_appends: Vec<ConversationAppend>,
     pub append: Option<ConversationAppend>,
     pub additional_appends: Vec<ConversationAppend>,
-    pub context_append: Option<ConversationContextAppend>,
-    /// Typed terminal-peer-response fact this projection carries when the
-    /// admitted input is a peer terminal response. The producer threads the
-    /// typed [`meerkat_core::PeerResponseTerminalFact`] all the way to the
-    /// realtime/live consumer instead of re-deriving it from the flattened
-    /// `context_append` prose text.
-    pub peer_response_terminal: Option<meerkat_core::PeerResponseTerminalFact>,
 }
 
 impl RuntimeInputSemantics {
@@ -154,7 +146,7 @@ mod tests {
         assert_eq!(semantics.execution_handling_mode, None);
         assert_eq!(
             semantics.peer_response_terminal_apply_intent,
-            Some(PeerResponseTerminalApplyIntent::AppendContextAndRun)
+            Some(PeerResponseTerminalApplyIntent::AppendContentAndRun)
         );
     }
 

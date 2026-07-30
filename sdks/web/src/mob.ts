@@ -453,7 +453,7 @@ function parseMobAppendSystemContextResult(raw: unknown): MobAppendSystemContext
     'status',
     'Invalid mob append_system_context response: missing status',
   );
-  if (status !== 'staged' && status !== 'duplicate') {
+  if (status !== 'applied' && status !== 'duplicate') {
     throw new Error('Invalid mob append_system_context response: invalid status');
   }
   return {
@@ -1283,7 +1283,7 @@ export class Mob {
     });
   }
 
-  /** Stage runtime system context for a specific member session. */
+  /** Append one ordinary durable ordered System message to a member session. */
   async appendSystemContext(
     agentIdentity: string,
     options: AppendSystemContextOptions,

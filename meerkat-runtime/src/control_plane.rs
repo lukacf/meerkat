@@ -183,7 +183,9 @@ fn spawn_nondirected_runless_terminal_handoff(
     reason: String,
 ) -> crate::tokio::task::JoinHandle<Result<(), RuntimeDriverError>> {
     crate::tokio::spawn(async move {
-        let driver = driver.lock().await;
+        let mut driver = driver.lock().await;
+        let terminal_completion_witness =
+            driver.input_terminal_completion_authorization_witness(&completion_input_ids)?;
         let authority = crate::meerkat_machine::driver::machine_resolve_runtime_completion_result(
             &driver,
             None,
@@ -194,12 +196,16 @@ fn spawn_nondirected_runless_terminal_handoff(
             &[],
             None,
             authority,
+            terminal_completion_witness,
             None,
             Some(&reason),
         )
         .map_err(|error| RuntimeDriverError::RecoveryCorruption {
             reason: format!("runtime termination projection failed: {error}"),
         })?;
+        driver
+            .finalize_input_terminal_completion_batch(bundle.terminal_completion())
+            .await?;
         if let Some(completions) = completions {
             let mut completions = completions.lock().await;
             completions.resolve_authorized_runtime_terminal_bundle(completion_input_ids, bundle);
@@ -294,10 +300,15 @@ pub(crate) async fn publish_and_resolve_runless_runtime_termination_before(
             driver,
         )
         .await?;
+    let terminal_completion_witness = driver
+        .lock()
+        .await
+        .input_terminal_completion_authorization_witness(&persisted_completion_input_ids)?;
     let bundle = crate::completion::authorize_runtime_terminal_bundle(
         &interaction_ids,
         None,
         authority,
+        terminal_completion_witness,
         None,
         Some(reason),
     )
@@ -315,6 +326,9 @@ pub(crate) async fn publish_and_resolve_runless_runtime_termination_before(
         }
         {
             let mut driver = driver.lock().await;
+            driver
+                .finalize_input_terminal_completion_batch(bundle.terminal_completion())
+                .await?;
             driver
                 .finalize_interaction_terminal_outboxes(
                     candidate_owner_input_id,
@@ -430,10 +444,21 @@ async fn drain_recovered_runless_runtime_terminations_classified(
                     error,
                 )
             })?;
+        let terminal_completion_witness = driver
+            .lock()
+            .await
+            .input_terminal_completion_authorization_witness(&input_ids)
+            .map_err(|error| {
+                RunlessTerminalConvergenceError::from_driver(
+                    "authorizing the exact runtime-terminal completion batch",
+                    error,
+                )
+            })?;
         let bundle = crate::completion::authorize_runtime_terminal_bundle(
             &interaction_ids,
             None,
             authority,
+            terminal_completion_witness,
             None,
             Some(&reason),
         )
@@ -444,6 +469,17 @@ async fn drain_recovered_runless_runtime_terminations_classified(
             )
         })?;
         let events = bundle.interaction_events();
+        driver
+            .lock()
+            .await
+            .finalize_input_terminal_completion_batch(bundle.terminal_completion())
+            .await
+            .map_err(|error| {
+                RunlessTerminalConvergenceError::from_driver(
+                    "finalizing the exact runtime-terminal completion receipt",
+                    error,
+                )
+            })?;
         if let crate::meerkat_machine::driver::InteractionTerminalRecoveryPhase::Finalized {
             events: recovered_events,
             finalization,
@@ -578,8 +614,8 @@ async fn has_committed_runless_recovery_carrier(
         return Ok(false);
     }
     let stored_inputs = driver
-        .as_driver()
-        .stored_input_states_snapshot()
+        .pending_terminal_input_states()
+        .await
         .map_err(|error| {
             RunlessTerminalConvergenceError::from_driver(
                 "checking for a committed recovery carrier",
@@ -1517,12 +1553,24 @@ mod tests {
             CompletionOutcome::RuntimeTerminated { ref reason, .. }
                 if reason == "runtime stopped"
         ));
-        let outbox = driver
+        let durable_inputs = driver
             .lock()
             .await
             .as_driver()
             .stored_input_states_snapshot()
-            .expect("snapshot published cancellation-safe carrier")
+            .expect("snapshot published cancellation-safe carrier");
+        let durable_outcome = crate::input_state::input_terminal_completion_outcome(
+            &durable_inputs,
+            &directed_input_id,
+        )
+        .expect("published runtime termination keeps a valid exact receipt")
+        .expect("published runtime termination finalizes its exact receipt");
+        assert!(matches!(
+            durable_outcome,
+            CompletionOutcome::RuntimeTerminated { ref reason, .. }
+                if reason == "runtime stopped"
+        ));
+        let outbox = durable_inputs
             .into_iter()
             .find_map(|stored| stored.state.interaction_terminal_outbox)
             .expect("published directed proof remains compacted");

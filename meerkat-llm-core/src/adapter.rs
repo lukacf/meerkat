@@ -231,6 +231,54 @@ impl LlmClientAdapter {
             | Provider::Other => tag,
         }
     }
+
+    /// Build the exact raw-provider request used by both pressure observation
+    /// and streaming. Keeping this projection in one helper prevents the
+    /// compaction witness from drifting from the eventual provider call.
+    fn build_request(
+        &self,
+        messages: &[Message],
+        tools: &[Arc<ToolDef>],
+        max_tokens: u32,
+        temperature: Option<f32>,
+        provider_params: Option<&ProviderParamsOverride>,
+    ) -> Result<LlmRequest, AgentError> {
+        let effective_params = provider_params
+            .and_then(|params| params.provider_tag.clone())
+            .or_else(|| self.provider_params.clone());
+        let effective_params =
+            self.apply_generic_provider_overrides(effective_params, provider_params);
+        let effective_params = effective_params.map(Self::strip_non_object_provider_tool_overrides);
+        // The per-call host override intentionally wins. HomeCore uses this
+        // escape hatch to raise Fable 5's output allowance while older config
+        // surfaces are being migrated.
+        let effective_max_tokens = provider_params
+            .and_then(|params| params.max_output_tokens)
+            .unwrap_or(max_tokens);
+        let effective_temperature = provider_params
+            .and_then(|params| params.temperature)
+            .or(temperature);
+        let projected_messages =
+            self.client
+                .project_replay_messages(messages)
+                .map_err(|error| {
+                    AgentError::llm(
+                        self.provider.as_str(),
+                        error.failure_reason(),
+                        error.to_string(),
+                    )
+                })?;
+
+        Ok(LlmRequest {
+            model: self.model.clone(),
+            messages: projected_messages,
+            tools: tools.to_vec(),
+            max_tokens: effective_max_tokens,
+            temperature: effective_temperature,
+            stop_sequences: None,
+            provider_params: effective_params,
+        })
+    }
 }
 
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -249,39 +297,8 @@ impl AgentLlmClient for LlmClientAdapter {
         temperature: Option<f32>,
         provider_params: Option<&ProviderParamsOverride>,
     ) -> Result<LlmStreamResult, AgentError> {
-        let effective_params = provider_params
-            .and_then(|params| params.provider_tag.clone())
-            .or_else(|| self.provider_params.clone());
-        let effective_params =
-            self.apply_generic_provider_overrides(effective_params, provider_params);
-        let effective_params = effective_params.map(Self::strip_non_object_provider_tool_overrides);
-        let effective_max_tokens = provider_params
-            .and_then(|params| params.max_output_tokens)
-            .unwrap_or(max_tokens);
-        let effective_temperature = provider_params
-            .and_then(|params| params.temperature)
-            .or(temperature);
-
-        let projected_messages =
-            self.client
-                .project_replay_messages(messages)
-                .map_err(|error| {
-                    AgentError::llm(
-                        self.provider.as_str(),
-                        error.failure_reason(),
-                        error.to_string(),
-                    )
-                })?;
-
-        let request = LlmRequest {
-            model: self.model.clone(),
-            messages: projected_messages,
-            tools: tools.to_vec(),
-            max_tokens: effective_max_tokens,
-            temperature: effective_temperature,
-            stop_sequences: None,
-            provider_params: effective_params,
-        };
+        let request =
+            self.build_request(messages, tools, max_tokens, temperature, provider_params)?;
 
         let mut stream = self.client.stream(&request);
 
@@ -458,6 +475,25 @@ impl AgentLlmClient for LlmClientAdapter {
             stop_reason,
             usage,
         ))
+    }
+
+    fn request_pressure(
+        &self,
+        messages: &[Message],
+        tools: &[Arc<ToolDef>],
+        max_tokens: u32,
+        temperature: Option<f32>,
+        provider_params: Option<&ProviderParamsOverride>,
+    ) -> Result<Option<meerkat_core::ProviderRequestPressure>, AgentError> {
+        let request =
+            self.build_request(messages, tools, max_tokens, temperature, provider_params)?;
+        self.client.request_pressure(&request).map_err(|error| {
+            AgentError::llm(
+                self.provider.as_str(),
+                error.failure_reason(),
+                error.to_string(),
+            )
+        })
     }
 
     fn provider(&self) -> meerkat_core::Provider {

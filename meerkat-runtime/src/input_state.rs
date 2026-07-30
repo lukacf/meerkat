@@ -140,6 +140,37 @@ pub(crate) enum InteractionTerminalCandidate {
 }
 
 impl InteractionTerminalCandidate {
+    pub(crate) fn from_core_apply_terminal(
+        terminal: Option<&meerkat_core::lifecycle::core_executor::CoreApplyTerminal>,
+    ) -> Self {
+        use meerkat_core::lifecycle::core_executor::CoreApplyTerminal;
+        match terminal {
+            Some(CoreApplyTerminal::RunResult(result)) => Self::RunResult {
+                result: result.clone(),
+            },
+            Some(CoreApplyTerminal::CallbackPending {
+                tool_use_id,
+                tool_name,
+                args,
+            }) => Self::CallbackPending {
+                tool_use_id: Some(tool_use_id.clone()),
+                tool_name: tool_name.clone(),
+                args: args.clone(),
+            },
+            Some(CoreApplyTerminal::CallbackBatchPending { pending_tool_calls }) => {
+                Self::CallbackBatchPending {
+                    pending_tool_calls: pending_tool_calls.clone(),
+                }
+            }
+            Some(CoreApplyTerminal::MachineTerminalFailure { error }) => {
+                Self::MachineTerminalFailure {
+                    error: error.clone(),
+                }
+            }
+            Some(CoreApplyTerminal::NoPendingBoundary) | None => Self::CompletedWithoutResult,
+        }
+    }
+
     pub(crate) fn core_apply_terminal(
         &self,
     ) -> Option<meerkat_core::lifecycle::core_executor::CoreApplyTerminal> {
@@ -199,6 +230,263 @@ impl InteractionTerminalCandidate {
             _ => None,
         }
     }
+}
+
+/// Stable identity for one exact terminal-completion batch.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "scope", rename_all = "snake_case")]
+pub(crate) enum InputTerminalCompletionBatchKey {
+    Run { run_id: RunId },
+    RuntimeTermination { owner_input_id: InputId },
+}
+
+impl InputTerminalCompletionBatchKey {
+    pub(crate) fn run_id(&self) -> Option<&RunId> {
+        match self {
+            Self::Run { run_id } => Some(run_id),
+            Self::RuntimeTermination { .. } => None,
+        }
+    }
+}
+
+/// Machine-authorized verdict for the post-terminal finalization step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum InputTerminalCompletionFinalizationVerdict {
+    Succeeded,
+    Failed,
+}
+
+impl InputTerminalCompletionFinalizationVerdict {
+    pub(crate) fn from_runtime_observation(
+        observation: crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation,
+    ) -> Self {
+        match observation {
+            crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Succeeded => {
+                Self::Succeeded
+            }
+            crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Failed => {
+                Self::Failed
+            }
+        }
+    }
+
+    pub(crate) fn runtime_observation(
+        self,
+    ) -> crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation {
+        match self {
+            Self::Succeeded => {
+                crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Succeeded
+            }
+            Self::Failed => {
+                crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Failed
+            }
+        }
+    }
+}
+
+/// Durable phase of one exact input-completion batch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "phase", rename_all = "snake_case")]
+pub(crate) enum InputTerminalCompletionPhase {
+    /// The terminal transaction retained the executor-observed candidate, but
+    /// post-commit projection/checkpoint finalization has not selected the
+    /// public completion class yet.
+    Pending,
+    /// Generated completion authority selected the exact public outcome. Only
+    /// the canonical owner row carries the payload; peers bind it by digest.
+    Finalized {
+        receipt_digest: String,
+        finalization: InputTerminalCompletionFinalizationVerdict,
+    },
+}
+
+/// Durable exact-completion carrier attached to every terminal input row.
+///
+/// The potentially large candidate/outcome payload is stored on exactly one
+/// canonical owner row. Other rows carry only immutable batch identity and
+/// digests, keeping multi-input turns O(one result + batch cardinality).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct InputTerminalCompletion {
+    pub(crate) input_id: InputId,
+    pub(crate) batch_ordinal: u16,
+    pub(crate) batch_key: InputTerminalCompletionBatchKey,
+    pub(crate) owner_input_id: InputId,
+    pub(crate) candidate_digest: String,
+    pub(crate) completion_input_ids_digest: String,
+    pub(crate) requires_session_checkpoint: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) candidate: Option<InteractionTerminalCandidate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) completion_input_ids: Option<Vec<InputId>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) outcome: Option<crate::completion::CompletionOutcome>,
+    pub(crate) phase: InputTerminalCompletionPhase,
+}
+
+impl InputTerminalCompletion {
+    pub(crate) fn validate_row(&self) -> Result<(), String> {
+        if self.candidate_digest.is_empty() || self.completion_input_ids_digest.is_empty() {
+            return Err("terminal completion row carried an empty immutable digest".into());
+        }
+        let owns_payload = self.input_id == self.owner_input_id;
+        if owns_payload != (self.batch_ordinal == 0) {
+            return Err("terminal completion owner/ordinal mismatch".into());
+        }
+        if let InputTerminalCompletionBatchKey::RuntimeTermination { owner_input_id } =
+            &self.batch_key
+            && owner_input_id != &self.owner_input_id
+        {
+            return Err("runless terminal completion key/owner mismatch".into());
+        }
+        if matches!(
+            &self.batch_key,
+            InputTerminalCompletionBatchKey::RuntimeTermination { .. }
+        ) && self.requires_session_checkpoint
+        {
+            return Err("runless terminal completion unexpectedly requires a checkpoint".into());
+        }
+        match (&self.completion_input_ids, owns_payload) {
+            (Some(input_ids), true) => {
+                if input_ids.is_empty() || input_ids.len() > 256 {
+                    return Err("terminal completion recipient set has invalid size".into());
+                }
+                if input_ids
+                    .iter()
+                    .collect::<std::collections::HashSet<_>>()
+                    .len()
+                    != input_ids.len()
+                {
+                    return Err("terminal completion recipient set contains duplicates".into());
+                }
+                if input_ids
+                    .windows(2)
+                    .any(|window| window[0].0 >= window[1].0)
+                {
+                    return Err(
+                        "terminal completion recipient set is not in canonical order".into(),
+                    );
+                }
+                if input_ids.first() != Some(&self.owner_input_id) {
+                    return Err("terminal completion recipient set lost its canonical owner".into());
+                }
+                if interaction_terminal_payload_digest(input_ids)?
+                    != self.completion_input_ids_digest
+                {
+                    return Err("terminal completion recipient digest mismatch".into());
+                }
+            }
+            (None, false) => {}
+            _ => return Err("terminal completion payload ownership is invalid".into()),
+        }
+        match (&self.phase, &self.candidate, &self.outcome, owns_payload) {
+            (InputTerminalCompletionPhase::Pending, Some(candidate), None, true) => {
+                if interaction_terminal_payload_digest(candidate)? != self.candidate_digest {
+                    return Err("terminal completion candidate digest mismatch".into());
+                }
+                match (&self.batch_key, candidate) {
+                    (
+                        InputTerminalCompletionBatchKey::RuntimeTermination { .. },
+                        InteractionTerminalCandidate::RuntimeTerminated { .. },
+                    ) => {}
+                    (
+                        InputTerminalCompletionBatchKey::Run { .. },
+                        InteractionTerminalCandidate::RuntimeTerminated { .. },
+                    )
+                    | (InputTerminalCompletionBatchKey::RuntimeTermination { .. }, _) => {
+                        return Err("terminal completion scope does not match its candidate".into());
+                    }
+                    (InputTerminalCompletionBatchKey::Run { .. }, _) => {}
+                }
+            }
+            (InputTerminalCompletionPhase::Pending, None, None, false) => {}
+            (
+                InputTerminalCompletionPhase::Finalized {
+                    receipt_digest,
+                    finalization,
+                },
+                None,
+                Some(outcome),
+                true,
+            ) => {
+                if interaction_terminal_payload_digest(&(outcome, finalization))? != *receipt_digest
+                {
+                    return Err("terminal completion receipt digest mismatch".into());
+                }
+                match (finalization, outcome) {
+                    (
+                        InputTerminalCompletionFinalizationVerdict::Failed,
+                        crate::completion::CompletionOutcome::CompletedWithFinalizationFailure {
+                            ..
+                        }
+                        | crate::completion::CompletionOutcome::AbandonedWithError { .. },
+                    ) => {}
+                    (
+                        InputTerminalCompletionFinalizationVerdict::Succeeded,
+                        crate::completion::CompletionOutcome::CompletedWithFinalizationFailure {
+                            ..
+                        },
+                    )
+                    | (InputTerminalCompletionFinalizationVerdict::Failed, _) => {
+                        return Err(
+                            "terminal completion outcome contradicts its finalization verdict"
+                                .into(),
+                        );
+                    }
+                    (InputTerminalCompletionFinalizationVerdict::Succeeded, _) => {}
+                }
+            }
+            (InputTerminalCompletionPhase::Finalized { .. }, None, None, false) => {}
+            _ => return Err("terminal completion phase/payload shape is invalid".into()),
+        }
+        Ok(())
+    }
+}
+
+/// Validate one complete terminal-completion batch and return its canonical
+/// owner row. Callers must supply every row in ordinal order.
+pub(crate) fn validate_input_terminal_completion_batch(
+    rows: &[InputTerminalCompletion],
+) -> Result<&InputTerminalCompletion, String> {
+    if rows.is_empty() || rows.len() > 256 {
+        return Err("terminal completion batch has invalid size".into());
+    }
+    let owner = &rows[0];
+    let owner_input_ids = owner
+        .completion_input_ids
+        .as_ref()
+        .ok_or_else(|| "terminal completion batch owner lost recipient set".to_string())?;
+    if owner_input_ids.len() != rows.len() {
+        return Err("terminal completion batch row/recipient cardinality mismatch".into());
+    }
+    for (ordinal, row) in rows.iter().enumerate() {
+        row.validate_row()?;
+        if usize::from(row.batch_ordinal) != ordinal
+            || row.input_id != owner_input_ids[ordinal]
+            || row.batch_key != owner.batch_key
+            || row.owner_input_id != owner.owner_input_id
+            || row.candidate_digest != owner.candidate_digest
+            || row.completion_input_ids_digest != owner.completion_input_ids_digest
+            || row.requires_session_checkpoint != owner.requires_session_checkpoint
+        {
+            return Err("terminal completion batch has split immutable identity".into());
+        }
+        match (&owner.phase, &row.phase) {
+            (InputTerminalCompletionPhase::Pending, InputTerminalCompletionPhase::Pending) => {}
+            (
+                InputTerminalCompletionPhase::Finalized {
+                    receipt_digest: owner_digest,
+                    finalization: owner_finalization,
+                },
+                InputTerminalCompletionPhase::Finalized {
+                    receipt_digest,
+                    finalization,
+                },
+            ) if receipt_digest == owner_digest && finalization == owner_finalization => {}
+            _ => return Err("terminal completion batch has split phase".into()),
+        }
+    }
+    Ok(owner)
 }
 
 /// Durable receipt proving that the exact interaction terminal row was
@@ -760,6 +1048,76 @@ impl StoredInputState {
     }
 }
 
+/// Resolve one exact public completion from a full runtime input snapshot.
+///
+/// `Ok(None)` means no finalized receipt exists. Any partial batch, digest
+/// mismatch, or owner loss is corruption rather than absence.
+pub(crate) fn input_terminal_completion_outcome(
+    states: &[StoredInputState],
+    input_id: &InputId,
+) -> Result<Option<crate::completion::CompletionOutcome>, InputTerminalCompletionReadError> {
+    let Some(stored) = states
+        .iter()
+        .find(|stored| &stored.state.input_id == input_id)
+    else {
+        return Ok(None);
+    };
+    let Some(target) = stored.state.terminal_completion.as_ref() else {
+        if stored.seed.terminal_outcome.is_some() {
+            return if stored.state.terminal_completion_unavailable {
+                Err(InputTerminalCompletionReadError::MigratedReceiptUnavailable)
+            } else {
+                Err(InputTerminalCompletionReadError::Corrupt(
+                    "v5 terminal input lost its exact completion receipt".to_string(),
+                ))
+            };
+        }
+        return Ok(None);
+    };
+    if states.iter().any(|stored| {
+        stored
+            .state
+            .terminal_completion
+            .as_ref()
+            .is_some_and(|completion| {
+                completion.input_id != stored.state.input_id
+                    || stored.seed.terminal_outcome.is_none()
+            })
+    }) {
+        return Err(InputTerminalCompletionReadError::Corrupt(
+            "terminal completion row is not bound to the same terminal input state".to_string(),
+        ));
+    }
+    let mut rows = states
+        .iter()
+        .filter_map(|stored| stored.state.terminal_completion.clone())
+        .filter(|row| row.batch_key == target.batch_key)
+        .collect::<Vec<_>>();
+    rows.sort_by_key(|row| row.batch_ordinal);
+    let owner = validate_input_terminal_completion_batch(&rows)
+        .map_err(InputTerminalCompletionReadError::Corrupt)?;
+    match &owner.phase {
+        InputTerminalCompletionPhase::Pending => Ok(None),
+        InputTerminalCompletionPhase::Finalized { .. } => {
+            owner.outcome.clone().map(Some).ok_or_else(|| {
+                InputTerminalCompletionReadError::Corrupt(
+                    "finalized terminal completion owner lost outcome".to_string(),
+                )
+            })
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum InputTerminalCompletionReadError {
+    #[error(
+        "0.8.10 terminal input predates exact completion receipts; its public outcome cannot be reconstructed"
+    )]
+    MigratedReceiptUnavailable,
+    #[error("{0}")]
+    Corrupt(String),
+}
+
 /// Store-write wrapper for an input-state bundle whose DSL-owned seed facts
 /// came from a generated MeerkatMachine-owned snapshot.
 #[derive(Debug, Clone)]
@@ -847,9 +1205,22 @@ pub struct InputState {
     pub idempotency_key: Option<crate::identifiers::IdempotencyKey>,
     pub recovery_count: u32,
     pub reconstruction_source: Option<ReconstructionSource>,
+    /// Durable pre-finalization candidate or exact finalized public completion
+    /// for this input's terminal batch.
+    pub(crate) terminal_completion: Option<InputTerminalCompletion>,
+    /// One-time v4 -> v5 migration witness: this input was already terminal in
+    /// 0.8.10, which did not retain enough evidence to reconstruct its exact
+    /// public completion. Current-version rows may carry this marker only when
+    /// terminal and receipt-less.
+    pub(crate) terminal_completion_unavailable: bool,
     /// Exact directed-terminal retry carrier, when this input came from the
     /// tracked cross-host flow lane.
     pub(crate) interaction_terminal_outbox: Option<InteractionTerminalOutbox>,
+    /// Original ingress material retained only while crash redelivery,
+    /// durable-tail attribution, or directed-terminal materialization may
+    /// still need it. Authoritative terminal commits retire this payload
+    /// after completion/publication obligations close; terminal history is
+    /// carried by the seed and receipts above.
     pub persisted_input: Option<Input>,
     pub created_at: DateTime<Utc>,
 }
@@ -870,6 +1241,8 @@ impl InputState {
             idempotency_key: None,
             recovery_count: 0,
             reconstruction_source: None,
+            terminal_completion: None,
+            terminal_completion_unavailable: false,
             interaction_terminal_outbox: None,
             persisted_input: None,
             created_at: now,
@@ -897,6 +1270,10 @@ impl InputState {
 // [`StoredInputState`] where shell + seed can be bundled into the wire
 // struct.
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[derive(Serialize, Deserialize)]
 struct InputStateSerde {
     stored_input_state_version: u32,
@@ -921,6 +1298,10 @@ struct InputStateSerde {
     #[serde(skip_serializing_if = "Option::is_none")]
     reconstruction_source: Option<ReconstructionSource>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    terminal_completion: Option<InputTerminalCompletion>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    terminal_completion_unavailable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     interaction_terminal_outbox: Option<InteractionTerminalOutbox>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     persisted_input: Option<Input>,
@@ -938,6 +1319,13 @@ struct InputStateSerde {
 
 impl Serialize for StoredInputState {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if self.state.terminal_completion_unavailable
+            && (self.seed.terminal_outcome.is_none() || self.state.terminal_completion.is_some())
+        {
+            return Err(serde::ser::Error::custom(
+                "terminal completion unavailable marker has an invalid v5 shape",
+            ));
+        }
         let helper = InputStateSerde {
             stored_input_state_version:
                 meerkat_core::generated::session_persistence_version_authority::stored_input_state_version(
@@ -953,6 +1341,8 @@ impl Serialize for StoredInputState {
             recovery_count: self.state.recovery_count,
             history: self.state.history.clone(),
             reconstruction_source: self.state.reconstruction_source.clone(),
+            terminal_completion: self.state.terminal_completion.clone(),
+            terminal_completion_unavailable: self.state.terminal_completion_unavailable,
             interaction_terminal_outbox: self.state.interaction_terminal_outbox.clone(),
             persisted_input: self.state.persisted_input.clone(),
             last_run_id: self.seed.last_run_id.clone(),
@@ -975,16 +1365,48 @@ impl<'de> Deserialize<'de> for StoredInputState {
                 observed_stored_input_state_version,
             )
             .map_err(<D::Error as serde::de::Error>::custom)?;
+        if observed_stored_input_state_version < 5 && helper.terminal_completion.is_some() {
+            return Err(<D::Error as serde::de::Error>::custom(
+                "stored input state before v5 cannot carry a terminal completion receipt",
+            ));
+        }
+        if observed_stored_input_state_version < 5 && helper.terminal_completion_unavailable {
+            return Err(<D::Error as serde::de::Error>::custom(
+                "stored input state before v5 cannot carry a completion-unavailable marker",
+            ));
+        }
         if observed_stored_input_state_version == 3 && helper.interaction_terminal_outbox.is_some()
         {
             return Err(<D::Error as serde::de::Error>::custom(
-                "stored input state v3 cannot carry a v4 interaction terminal outbox",
+                "stored input state v3 cannot carry an interaction terminal outbox",
             ));
         }
         if let Some(outbox) = helper.interaction_terminal_outbox.as_ref() {
             outbox
                 .validate()
                 .map_err(<D::Error as serde::de::Error>::custom)?;
+        }
+        if let Some(completion) = helper.terminal_completion.as_ref() {
+            if completion.input_id != helper.input_id || helper.terminal_outcome.is_none() {
+                return Err(<D::Error as serde::de::Error>::custom(
+                    "terminal completion row is not bound to the same terminal input state",
+                ));
+            }
+            completion
+                .validate_row()
+                .map_err(<D::Error as serde::de::Error>::custom)?;
+        }
+        let terminal_completion_unavailable = if observed_stored_input_state_version < 5 {
+            helper.terminal_outcome.is_some() && helper.terminal_completion.is_none()
+        } else {
+            helper.terminal_completion_unavailable
+        };
+        if terminal_completion_unavailable
+            && (helper.terminal_outcome.is_none() || helper.terminal_completion.is_some())
+        {
+            return Err(<D::Error as serde::de::Error>::custom(
+                "terminal completion unavailable marker has an invalid v5 shape",
+            ));
         }
         let state = InputState {
             input_id: helper.input_id,
@@ -996,6 +1418,8 @@ impl<'de> Deserialize<'de> for StoredInputState {
             idempotency_key: helper.idempotency_key,
             recovery_count: helper.recovery_count,
             reconstruction_source: helper.reconstruction_source,
+            terminal_completion: helper.terminal_completion,
+            terminal_completion_unavailable,
             interaction_terminal_outbox: helper.interaction_terminal_outbox,
             persisted_input: helper.persisted_input,
             created_at: helper.created_at,
@@ -1061,6 +1485,112 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    fn pending_terminal_completion_batch_fixture() -> Vec<StoredInputState> {
+        let mut input_ids = vec![InputId::new(), InputId::new()];
+        input_ids.sort_by_key(|input_id| input_id.0);
+        let owner_input_id = input_ids[0].clone();
+        let candidate = InteractionTerminalCandidate::MachineTerminalFailure {
+            error: meerkat_core::TurnErrorMetadata::runtime_apply_failure(
+                "executor failed after applying the input boundary",
+            ),
+        };
+        let candidate_digest = interaction_terminal_payload_digest(&candidate).unwrap();
+        let completion_input_ids_digest = interaction_terminal_payload_digest(&input_ids).unwrap();
+        let batch_key = InputTerminalCompletionBatchKey::Run {
+            run_id: RunId::new(),
+        };
+        input_ids
+            .iter()
+            .enumerate()
+            .map(|(ordinal, input_id)| {
+                let owns_payload = input_id == &owner_input_id;
+                let mut stored = StoredInputState::new_accepted(input_id.clone());
+                stored.seed.phase = InputLifecycleState::Consumed;
+                stored.seed.terminal_outcome = Some(InputTerminalOutcome::Consumed);
+                stored.state.terminal_completion = Some(InputTerminalCompletion {
+                    input_id: input_id.clone(),
+                    batch_ordinal: ordinal as u16,
+                    batch_key: batch_key.clone(),
+                    owner_input_id: owner_input_id.clone(),
+                    candidate_digest: candidate_digest.clone(),
+                    completion_input_ids_digest: completion_input_ids_digest.clone(),
+                    requires_session_checkpoint: true,
+                    candidate: owns_payload.then(|| candidate.clone()),
+                    completion_input_ids: owns_payload.then(|| input_ids.clone()),
+                    outcome: None,
+                    phase: InputTerminalCompletionPhase::Pending,
+                });
+                stored
+            })
+            .collect()
+    }
+
+    fn restart_terminal_completion_rows(rows: Vec<StoredInputState>) -> Vec<StoredInputState> {
+        rows.into_iter()
+            .map(|row| {
+                let bytes = serde_json::to_vec(&row).unwrap();
+                serde_json::from_slice(&bytes).unwrap()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn restart_after_terminal_transaction_observes_pending_exact_receipt() {
+        let rows = restart_terminal_completion_rows(pending_terminal_completion_batch_fixture());
+        let input_id = rows[1].state.input_id.clone();
+        let carriers = rows
+            .iter()
+            .map(|row| row.state.terminal_completion.clone().unwrap())
+            .collect::<Vec<_>>();
+
+        validate_input_terminal_completion_batch(&carriers).unwrap();
+        assert!(
+            input_terminal_completion_outcome(&rows, &input_id)
+                .unwrap()
+                .is_none(),
+            "a kill after the terminal transaction must recover the candidate, not invent a final outcome"
+        );
+    }
+
+    #[test]
+    fn restart_after_receipt_cas_recovers_exact_public_outcome() {
+        let mut rows = pending_terminal_completion_batch_fixture();
+        let input_id = rows[1].state.input_id.clone();
+        let outcome = crate::completion::CompletionOutcome::CompletedWithFinalizationFailure {
+            error: meerkat_core::TurnErrorMetadata::runtime_apply_failure(
+                "checkpoint rejected the committed snapshot",
+            ),
+        };
+        let finalization = InputTerminalCompletionFinalizationVerdict::Failed;
+        let receipt_digest =
+            interaction_terminal_payload_digest(&(&outcome, finalization)).unwrap();
+        for row in &mut rows {
+            let completion = row.state.terminal_completion.as_mut().unwrap();
+            completion.candidate = None;
+            completion.outcome =
+                (completion.input_id == completion.owner_input_id).then(|| outcome.clone());
+            completion.phase = InputTerminalCompletionPhase::Finalized {
+                receipt_digest: receipt_digest.clone(),
+                finalization,
+            };
+        }
+
+        let mut forged_verdict = serde_json::to_value(&rows[0]).unwrap();
+        forged_verdict["terminal_completion"]["finalization"] = serde_json::json!("succeeded");
+        let error = serde_json::from_value::<StoredInputState>(forged_verdict)
+            .expect_err("the receipt digest must bind the typed finalization verdict");
+        assert!(error.to_string().contains("receipt digest mismatch"));
+
+        let rows = restart_terminal_completion_rows(rows);
+        let recovered = input_terminal_completion_outcome(&rows, &input_id)
+            .unwrap()
+            .expect("a kill after receipt CAS must recover the exact outcome");
+        assert_eq!(
+            serde_json::to_value(recovered).unwrap(),
+            serde_json::to_value(outcome).unwrap()
+        );
     }
 
     #[test]
@@ -1267,25 +1797,6 @@ mod tests {
         assert_eq!(parsed.state.history.len(), 1);
     }
 
-    #[test]
-    fn stored_input_state_v3_fixture_migrates_to_v4() {
-        let fixture = include_str!("../tests/fixtures/stored_input_state_v3.json");
-        let restored: StoredInputState =
-            serde_json::from_str(fixture).expect("serialized v3 fixture must migrate");
-        assert_eq!(restored.seed.phase, InputLifecycleState::Queued);
-        assert_eq!(restored.seed.attempt_count, 2);
-        assert_eq!(restored.state.recovery_count, 1);
-        assert_eq!(restored.seed.admission_sequence, Some(17));
-        assert_eq!(restored.seed.recovery_lane, Some(HandlingMode::Queue));
-        assert!(restored.state.interaction_terminal_outbox.is_none());
-
-        let migrated = serde_json::to_value(&restored).expect("serialize migrated v4 row");
-        assert_eq!(
-            migrated["stored_input_state_version"],
-            meerkat_core::generated::session_persistence_version_authority::STORED_INPUT_STATE_VERSION,
-        );
-    }
-
     /// v0.8.7 regression witness (release-bricking class): a stored-input-state
     /// v4 row whose interaction terminal outbox carries the
     /// pre-durable-callback `callback_pending` candidate shape (no
@@ -1421,15 +1932,56 @@ mod tests {
 
     #[test]
     fn stored_input_state_unlisted_legacy_version_still_fails_closed() {
-        let mut fixture: serde_json::Value =
-            serde_json::from_str(include_str!("../tests/fixtures/stored_input_state_v3.json"))
-                .expect("fixture json");
-        for rejected in [2, 5] {
+        let mut fixture =
+            serde_json::to_value(StoredInputState::new_accepted(InputId::new())).unwrap();
+        for rejected in [2, 3, 6] {
             fixture["stored_input_state_version"] = serde_json::json!(rejected);
             let error = serde_json::from_value::<StoredInputState>(fixture.clone())
                 .expect_err("unlisted historical and future versions must fail closed");
-            assert!(error.to_string().contains("expected current 4"));
+            assert!(error.to_string().contains("expected current 5"));
         }
+    }
+
+    #[test]
+    fn stored_input_state_v4_migrates_to_v5_without_inventing_a_completion_receipt() {
+        let mut fixture =
+            serde_json::to_value(StoredInputState::new_accepted(InputId::new())).unwrap();
+        fixture["stored_input_state_version"] = serde_json::json!(4);
+        fixture
+            .as_object_mut()
+            .expect("stored input state fixture is an object")
+            .remove("terminal_completion");
+
+        let restored: StoredInputState =
+            serde_json::from_value(fixture).expect("0.8.10 v4 input state must migrate");
+        assert!(restored.state.terminal_completion.is_none());
+
+        let migrated = serde_json::to_value(restored).unwrap();
+        assert_eq!(
+            migrated["stored_input_state_version"],
+            meerkat_core::generated::session_persistence_version_authority::STORED_INPUT_STATE_VERSION,
+        );
+
+        let mut terminal_fixture =
+            serde_json::to_value(StoredInputState::new_accepted(InputId::new())).unwrap();
+        terminal_fixture["stored_input_state_version"] = serde_json::json!(4);
+        terminal_fixture["current_state"] = serde_json::json!("consumed");
+        terminal_fixture["terminal_outcome"] = serde_json::json!({ "outcome_type": "consumed" });
+        let restored_terminal: StoredInputState = serde_json::from_value(terminal_fixture)
+            .expect("0.8.10 terminal row must retain an explicit evidence-gap marker");
+        assert!(restored_terminal.state.terminal_completion_unavailable);
+        assert!(matches!(
+            input_terminal_completion_outcome(
+                std::slice::from_ref(&restored_terminal),
+                &restored_terminal.state.input_id,
+            ),
+            Err(InputTerminalCompletionReadError::MigratedReceiptUnavailable)
+        ));
+        let migrated_terminal = serde_json::to_value(restored_terminal).unwrap();
+        assert_eq!(
+            migrated_terminal["terminal_completion_unavailable"],
+            serde_json::json!(true)
+        );
     }
 
     #[test]

@@ -45,6 +45,7 @@ fn rewrite_record_fixture() -> TranscriptRewriteRecord {
     let revision = transcript_messages_digest(&revision_messages).expect("revision digest");
     TranscriptRewriteRecord::new(
         TranscriptRewriteCommit {
+            rewrite_generation: 1,
             parent_revision: parent_revision.clone(),
             revision: revision.clone(),
             selection: TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
@@ -268,6 +269,7 @@ fn wire_session_history_required_fields() {
             WireSessionMessage::System {
                 content: "system".to_string(),
                 created_at: "2026-04-27T00:00:00Z".to_string(),
+                identity: None,
             },
             WireSessionMessage::User {
                 content: meerkat_contracts::WireContentInput::Text("user".to_string()),

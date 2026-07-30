@@ -30,7 +30,7 @@ The Rust SDK is the primary interface. The Python/TypeScript SDKs and all API se
   <Step title="Add the dependency">
     ```toml
     [dependencies]
-    meerkat = "0.8.10"
+    meerkat = "0.8.11"
     tokio = { version = "1", features = ["full"] }
     ```
   </Step>
@@ -39,17 +39,17 @@ The Rust SDK is the primary interface. The Python/TypeScript SDKs and all API se
     <CodeGroup>
     ```toml Default (all providers, no storage)
     [dependencies]
-    meerkat = "0.8.10"
+    meerkat = "0.8.11"
     ```
 
     ```toml Add persistence
     [dependencies]
-    meerkat = { version = "0.8.10", features = ["sqlite-store", "session-store"] }
+    meerkat = { version = "0.8.11", features = ["sqlite-store", "session-store"] }
     ```
 
     ```toml Full harness
     [dependencies]
-    meerkat = { version = "0.8.10", features = [
+    meerkat = { version = "0.8.11", features = [
         "sqlite-store", "session-store", "session-compaction",
         "memory-store-session", "comms", "mcp", "skills", "live"
     ] }
@@ -57,7 +57,7 @@ The Rust SDK is the primary interface. The Python/TypeScript SDKs and all API se
 
     ```toml Minimal (single provider)
     [dependencies]
-    meerkat = { version = "0.8.10", default-features = false, features = ["anthropic"] }
+    meerkat = { version = "0.8.11", default-features = false, features = ["anthropic"] }
     ```
     </CodeGroup>
   </Step>
@@ -180,7 +180,7 @@ println!("Messages: {}", view.state.message_count);
 service.archive(&session_id).await?;
 ```
 
-### Deferred first-turn system prompt override
+### Append a System message at a turn boundary
 
 ```rust
 use meerkat::{
@@ -202,16 +202,16 @@ let created = service.create_session(CreateSessionRequest {
 }).await?;
 
 let result = service.start_turn(&created.session_id, StartTurnRequest {
-    prompt: "Now run with the first-turn override.".into(),
-    system_prompt: Some("You are the deferred first-turn override.".into()),
+    prompt: "Continue under the new instruction.".into(),
+    system_prompt: Some("For this point forward, answer concisely.".into()),
     event_tx: None,
     runtime: StartTurnRuntimeSemantics::default(),
 }).await?;
 ```
 
-`system_prompt` on `StartTurnRequest` is only supported for a deferred session's
-first turn. Once the session has existing history/messages, turn-time
-`system_prompt` overrides are rejected.
+`system_prompt` appends one ordinary ordered `System` message immediately
+before that turn. It may be used on any turn; prior System messages and the
+rest of the transcript remain unchanged.
 
 ### Error handling
 

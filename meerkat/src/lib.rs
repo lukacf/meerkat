@@ -223,11 +223,12 @@ pub use meerkat_schedule::{
     MissingTargetPolicy, MobTargetBinding, Occurrence, OccurrenceFailureClass, OccurrenceFilter,
     OccurrenceId, OccurrenceOrdinal, OccurrencePhase, OverlapPolicy, ResolvedSpawnSnapshot,
     RunnableProbe, SCHEDULE_TOOL_CAPABILITY_UNAVAILABLE, SCHEDULE_TOOL_INVALID_ARGUMENTS,
-    SCHEDULE_TOOL_NOT_FOUND, Schedule, ScheduleDomainError, ScheduleDriver, ScheduleDriverConfig,
-    ScheduleFilter, ScheduleId, SchedulePhase, ScheduleRevision, ScheduleRunnableHost,
-    ScheduleService, ScheduleSpawnTooling, ScheduleStore, ScheduleStoreError, ScheduleStoreKind,
-    ScheduleTargetDelivery, ScheduleTargetProbe, ScheduleToolDispatcher, ScheduleToolError,
-    ScheduledMobAction, ScheduledMobBackendKind, ScheduledMobRuntimeMode, ScheduledSessionAction,
+    SCHEDULE_TOOL_NOT_FOUND, Schedule, ScheduleDeliveryIdentity, ScheduleDomainError,
+    ScheduleDriver, ScheduleDriverConfig, ScheduleFilter, ScheduleId, SchedulePhase,
+    ScheduleRevision, ScheduleRunnableHost, ScheduleService, ScheduleSpawnTooling, ScheduleStore,
+    ScheduleStoreError, ScheduleStoreKind, ScheduleStoreWakeMode, ScheduleTargetDelivery,
+    ScheduleTargetProbe, ScheduleToolDispatcher, ScheduleToolError, ScheduledMobAction,
+    ScheduledMobBackendKind, ScheduledMobRuntimeMode, ScheduledSessionAction,
     SessionMaterializationSpec, SessionTargetBinding, TargetBinding, TargetProbeOutcome,
     TriggerSpec, UpdateScheduleRequest, handle_schedule_tools_call, schedule_tools_list,
 };
@@ -372,14 +373,11 @@ pub use meerkat_session::{
 };
 // Maintenance compositions (offline `rkat storage migrate`): a builder that
 // refuses agent construction, composed with the persistent service to drive
-// machine-owned storage maintenance (bulk legacy-checkpoint adoption).
-pub use meerkat_session::maintenance::MaintenanceAgentBuilder;
+// storage maintenance.
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
-pub use meerkat_session::{
-    CommittedBoundaryRecovery, LegacyCheckpointAdoptionOptions, LegacyCheckpointAdoptionReport,
-};
-// Memory store implementation, re-exported for maintenance verbs that stamp
-// the memory database's schema ledger through its normal constructor.
+pub use meerkat_session::CommittedBoundaryRecovery;
+pub use meerkat_session::maintenance::MaintenanceAgentBuilder;
+// Memory store implementation, re-exported for maintenance verbs.
 #[cfg(feature = "memory-store-session")]
 pub use meerkat_memory::HnswMemoryStore;
 // Durable stored-event row (typed envelope identity) for replay surfaces.

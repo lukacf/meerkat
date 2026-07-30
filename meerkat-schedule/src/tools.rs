@@ -1079,7 +1079,7 @@ fn scheduled_session_action_schema() -> Value {
                     "prompt": content_input_schema(),
                     "system_prompt": {
                         "type": "string",
-                        "description": "Only supported when materializing a new session."
+                        "description": "Appended as an ordinary System message at this scheduled turn boundary."
                     },
                     "render_metadata": { "type": "object" },
                     "skill_refs": {

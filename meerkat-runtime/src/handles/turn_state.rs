@@ -175,8 +175,7 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
         let context = "TurnStateHandle::apply_turn_input";
         let standalone_run_id = match &input {
             TurnExecutionInput::StartConversationRun { run_id, .. }
-            | TurnExecutionInput::StartImmediateAppend { run_id }
-            | TurnExecutionInput::StartImmediateContext { run_id } => Some(run_id),
+            | TurnExecutionInput::StartImmediateAppend { run_id } => Some(run_id),
             _ => None,
         };
         if let Some(run_id) = standalone_run_id {
@@ -200,11 +199,6 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
             },
             TurnExecutionInput::StartImmediateAppend { run_id } => {
                 mm_dsl::MeerkatMachineInput::StartImmediateAppend {
-                    run_id: mm_dsl::RunId::from_domain(&run_id),
-                }
-            }
-            TurnExecutionInput::StartImmediateContext { run_id } => {
-                mm_dsl::MeerkatMachineInput::StartImmediateContext {
                     run_id: mm_dsl::RunId::from_domain(&run_id),
                 }
             }
@@ -455,17 +449,6 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
                 run_id: mm_dsl::RunId::from_domain(&run_id),
             },
             "TurnStateHandle::start_immediate_append",
-        )
-    }
-
-    fn start_immediate_context(&self, run_id: RunId) -> Result<(), DslTransitionError> {
-        self.prepare_standalone_run(&run_id)?;
-        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
-        self.dsl.apply_input(
-            mm_dsl::MeerkatMachineInput::StartImmediateContext {
-                run_id: mm_dsl::RunId::from_domain(&run_id),
-            },
-            "TurnStateHandle::start_immediate_context",
         )
     }
 

@@ -75,12 +75,14 @@ fn heal_legacy_commit_span_digests(
 ) -> Result<(), serde_json::Error> {
     let Some(parent_body) = revisions
         .iter()
+        .rev()
         .find(|body| body.revision == commit.parent_revision)
     else {
         return Ok(());
     };
     let Some(revision_body) = revisions
         .iter()
+        .rev()
         .find(|body| body.revision == commit.revision)
     else {
         return Ok(());
@@ -124,7 +126,8 @@ fn heal_legacy_commit_span_digests(
 pub(super) fn heal_legacy_compaction_rewrite_semantics(
     commits: &mut [TranscriptRewriteCommit],
     revisions: &[TranscriptRevisionBody],
-) {
+) -> bool {
+    let mut changed = false;
     for commit in commits {
         if !commit.selection.is_legacy_untyped() {
             continue;
@@ -138,12 +141,14 @@ pub(super) fn heal_legacy_compaction_rewrite_semantics(
         }
         let Some(parent) = revisions
             .iter()
+            .rev()
             .find(|body| body.revision == commit.parent_revision)
         else {
             continue;
         };
         let Some(revision) = revisions
             .iter()
+            .rev()
             .find(|body| body.revision == commit.revision)
         else {
             continue;
@@ -162,8 +167,10 @@ pub(super) fn heal_legacy_compaction_rewrite_semantics(
             .count();
         if summary_count == 1 {
             commit.selection = TranscriptRewriteSelection::migrated_legacy_compaction(start, end);
+            changed = true;
         }
     }
+    changed
 }
 
 /// Digest format used by pre-0.7.14 transcript revision strings.

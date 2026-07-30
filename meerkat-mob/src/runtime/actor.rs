@@ -120,13 +120,108 @@ pub(super) const RETIRE_LOCAL_TRUST_CLEANUP_CONCURRENCY: usize = 32;
 const STARTUP_FAILURE_AUTONOMOUS_STOP_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const STARTUP_FAILURE_AUTONOMOUS_STOP_DEADLINE: Duration = Duration::from_secs(10);
 
+/// Actor-owned task termination policy at a `JoinError` boundary.
+///
+/// This is deliberately typed instead of inferred from log text: callers use
+/// `requires_fail_stop` to decide whether an effect may have escaped without a
+/// completion and therefore whether this actor incarnation may continue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActorTaskJoinPanicDisposition {
+    AmbiguousEffectFailStop,
+    RetryableIdempotentCleanup,
+    TeardownTerminal,
+}
+
+impl ActorTaskJoinPanicDisposition {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::AmbiguousEffectFailStop => "ambiguous_effect_fail_stop",
+            Self::RetryableIdempotentCleanup => "retryable_idempotent_cleanup",
+            Self::TeardownTerminal => "teardown_terminal",
+        }
+    }
+
+    const fn requires_fail_stop(self) -> bool {
+        matches!(self, Self::AmbiguousEffectFailStop)
+    }
+}
+
+/// Recover one panic from a Tokio join boundary without rendering the raw
+/// `JoinError`: its panic payload can be unbounded, multiline, or secret.
+///
+/// Callers classify cancellation separately. Tokio currently has only
+/// cancellation and panic `JoinError`s, but the non-panic fallback remains
+/// bounded and explicit so a future runtime extension cannot reintroduce a
+/// raw/error-string logging path.
+fn actor_task_join_panic_error(
+    context: &'static str,
+    disposition: ActorTaskJoinPanicDisposition,
+    error: tokio::task::JoinError,
+) -> MobError {
+    let task_id = actor_task_join_error_task_id(&error);
+    #[cfg(not(target_arch = "wasm32"))]
+    let detail = if error.is_panic() {
+        let payload = error.into_panic();
+        super::panic_capture::panic_payload_detail(payload.as_ref())
+    } else {
+        "non-panic abnormal task termination".to_string()
+    };
+    // `tokio_with_wasm` exposes cancellation but not Tokio's panic payload or
+    // task-id API. A non-cancelled join failure is still classified and
+    // fail-closed by the caller, but there are no recoverable bytes to render.
+    #[cfg(target_arch = "wasm32")]
+    let detail = {
+        let _ = error;
+        "panic payload unavailable at wasm task join boundary".to_string()
+    };
+    tracing::error!(
+        context,
+        task_id = %task_id,
+        disposition = disposition.as_str(),
+        panic = %detail,
+        "actor-owned task panicked; payload recovered, sanitized, and classified"
+    );
+    MobError::Internal(format!(
+        "{context} task {task_id} panicked; disposition={}: {detail}",
+        disposition.as_str()
+    ))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn actor_task_join_error_is_panic(error: &tokio::task::JoinError) -> bool {
+    error.is_panic()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn actor_task_join_error_is_panic(error: &tokio::task::JoinError) -> bool {
+    !error.is_cancelled()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn actor_task_join_error_task_id(error: &tokio::task::JoinError) -> String {
+    error.id().to_string()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn actor_task_join_error_task_id(_error: &tokio::task::JoinError) -> String {
+    "unavailable".to_string()
+}
+
 /// The identity lease is deliberately short and bounded. Reconciliation
 /// renews it while work remains queued; a crashed actor therefore leaves no
 /// durable process-lifecycle authority behind for the replacement actor to
 /// recover.
 const IDENTITY_RECONCILE_LEASE_TTL_MS: u64 = crate::identity::IDENTITY_LEASE_MAX_TTL_MS;
-const IDENTITY_RECONCILE_TICK_INTERVAL: Duration = Duration::from_millis(25);
-const IDENTITY_RECONCILE_SCAN_INTERVAL: Duration = Duration::from_secs(1);
+/// Cross-process repair net only. Ordinary reconciliation is causally driven
+/// by startup discovery, actor-owned completions, and the exact in-memory
+/// backoff deadline below. SQLite has no authoritative cross-process identity
+/// notification yet, so retain one deliberately slow PAGE rather than opening
+/// a connection and decoding every intent once per second forever.
+const IDENTITY_RECONCILE_SAFETY_PAGE_INTERVAL: Duration = Duration::from_secs(5 * 60);
+/// Hard per-wake work bound for the cross-process safety net. Large fleets are
+/// visited over successive keyset pages; no timer wake materializes all
+/// identities.
+const IDENTITY_RECONCILE_SAFETY_PAGE_LIMIT: usize = 64;
 /// Exponential actuation-backoff schedule for identities whose member
 /// actuation keeps failing. Before this existed, the "Backoff" disposition
 /// was a status label over an immediate requeue: the terminal-completion
@@ -135,75 +230,9 @@ const IDENTITY_RECONCILE_SCAN_INTERVAL: Duration = Duration::from_secs(1);
 /// a closed callback transport burned a core with zero durable progress).
 const IDENTITY_RECONCILE_BACKOFF_BASE: Duration = Duration::from_millis(250);
 const IDENTITY_RECONCILE_BACKOFF_CAP: Duration = Duration::from_secs(60);
-/// Upper bound on how long a converged identity may substitute its cached,
-/// already-verified session observation for a fresh document read. Session
-/// documents can be large (the HomeCore fixture is 82 MB); re-verifying an
-/// unchanged document at scan cadence costs a full deserialize + canonical
-/// sha256 per identity per second. Drift that is visible in the cheap
-/// per-pass observations (intent revision/digest, lease, runtime lifecycle,
-/// member row, wiring) invalidates the witness immediately; drift visible
-/// only inside the session document itself stays level-triggered with at
-/// most this detection latency.
-const IDENTITY_RECONCILE_CONVERGED_SESSION_REVERIFY_INTERVAL_MS: u64 = 300_000;
-
-/// Admission boundary for the deliberately narrow 0.8.2 recovery slice.
-///
-/// The generic intent/store/classifier substrate remains capable of later
-/// creation, retirement, external binding, and one-shot delivery work. The
-/// production actor must not durably accept those declarations until their
-/// target-local actuators exist. Desired wiring remains sealed as part of the
-/// complete topology snapshot, but non-empty topology is reported as a typed
-/// `RepairBlocked` condition in this release.
-/// Exact operation replay is checked before this predicate, so a committed
-/// result remains replayable after a lost acknowledgement.
-fn identity_recovery_slice_manifest_rejection(
-    manifest: &crate::identity::IdentityDeclarationManifest,
-) -> Option<String> {
-    use crate::identity::{
-        DesiredExecution, DesiredSessionAuthorityPolicy, IdentityDeclarationScopePrecondition,
-        IdentityMemberMaterialDeclaration,
-    };
-
-    if manifest.expected_scope != IdentityDeclarationScopePrecondition::Missing {
-        return Some(
-            "only a first, missing-scope legacy recovery declaration is supported".to_string(),
-        );
-    }
-    if manifest.members.is_empty() {
-        return Some("the legacy recovery declaration must contain a member".to_string());
-    }
-    for (identity, declaration) in &manifest.members {
-        if declaration.session_authority_policy != DesiredSessionAuthorityPolicy::RequireExisting {
-            return Some(format!(
-                "identity '{identity}' must require its existing session"
-            ));
-        }
-        if declaration.legacy_import.is_none() {
-            return Some(format!(
-                "identity '{identity}' requires exact verified legacy-import evidence"
-            ));
-        }
-        if declaration.initial_message.is_some() {
-            return Some(format!(
-                "identity '{identity}' cannot declare a fresh initial message during recovery"
-            ));
-        }
-        let execution = match &declaration.material {
-            IdentityMemberMaterialDeclaration::Profile(declaration) => &declaration.execution,
-            IdentityMemberMaterialDeclaration::Resolved { material } => &material.execution,
-        };
-        if !matches!(execution, DesiredExecution::ControllingSession) {
-            return Some(format!(
-                "identity '{identity}' requires unsupported non-controlling execution"
-            ));
-        }
-    }
-    None
-}
-
 /// A valid row can predate the actor's narrow production support. Refuse it
 /// visibly without claiming a lease or mutating any observed realization.
-fn identity_recovery_slice_intent_rejection(
+fn identity_reconciliation_slice_intent_rejection(
     record: &crate::identity::IdentityIntentRecord,
 ) -> Option<String> {
     use crate::identity::{
@@ -214,16 +243,28 @@ fn identity_recovery_slice_intent_rejection(
         session, member, ..
     } = &record.intent
     else {
-        return Some("absent-intent cleanup is outside the legacy recovery slice".to_string());
+        return Some(
+            "absent-intent cleanup is outside the retained sealed-intent reconciliation slice"
+                .to_string(),
+        );
     };
     if session.authority_policy != DesiredSessionAuthorityPolicy::RequireExisting {
-        return Some("session creation is outside the legacy recovery slice".to_string());
+        return Some(
+            "session creation is outside the retained sealed-intent reconciliation slice"
+                .to_string(),
+        );
     }
     if member.initial_delivery.is_some() {
-        return Some("initial delivery is outside the legacy recovery slice".to_string());
+        return Some(
+            "initial delivery is outside the retained sealed-intent reconciliation slice"
+                .to_string(),
+        );
     }
     if !matches!(member.execution(), DesiredExecution::ControllingSession) {
-        return Some("non-controlling execution is outside the legacy recovery slice".to_string());
+        return Some(
+            "non-controlling execution is outside the retained sealed-intent reconciliation slice"
+                .to_string(),
+        );
     }
     match &record.retirement_plan {
         IdentityRetirementPlan::Targets { .. } => None,
@@ -233,7 +274,7 @@ fn identity_recovery_slice_intent_rejection(
     }
 }
 
-fn identity_recovery_slice_unsupported_obligation(
+fn identity_reconciliation_slice_unsupported_obligation(
     decision: crate::identity::IdentityReconcileDecision,
 ) -> bool {
     use crate::identity::IdentityReconcileDecision;
@@ -257,20 +298,20 @@ fn identity_recovery_slice_unsupported_obligation(
     )
 }
 
-/// Volatile, actor-run-scoped witness that one identity's persisted session
-/// document was fully verified while the pass classified `Converged` under
-/// the exact sealed intent authority recorded here. While that authority is
-/// unchanged and the reverify deadline has not elapsed, steady-state passes
-/// substitute the cached observation for the session-document read. This is
-/// never restart authority: a cold actor starts with an empty map and fully
-/// re-observes every identity.
+/// Volatile, actor-run-scoped witness that one identity's domain session was
+/// read under one stable store-issued boundary while the pass classified
+/// `Converged` under the exact sealed intent authority recorded here. While
+/// that intent and boundary stay unchanged, steady-state passes substitute the
+/// cached observation for the session-document read. This is never restart
+/// authority: a cold actor starts with an empty map and re-observes each
+/// identity through the store boundary.
 #[derive(Debug, Clone)]
 pub(super) struct IdentityConvergedSessionWitness {
     intent_revision: u64,
     intent_digest: String,
     authority_digest: String,
     observation: crate::identity::IdentitySessionObservation,
-    verified_at_ms: u64,
+    persisted_authority: crate::identity::IdentitySessionStoreAuthority,
 }
 
 /// Map threaded through the actor run loop; see
@@ -301,16 +342,11 @@ enum IdentitySessionLoadErrorClass {
 fn identity_session_load_error_class(
     error: &meerkat_core::service::SessionError,
 ) -> IdentitySessionLoadErrorClass {
+    use meerkat_core::SessionStoreError;
     use meerkat_core::service::SessionError;
-    use meerkat_core::{SessionCheckpointError, SessionStoreError};
 
     match error {
         SessionError::PersistenceDisabled | SessionError::Unsupported(_) => {
-            IdentitySessionLoadErrorClass::Malformed
-        }
-        SessionError::Store(source)
-            if source.downcast_ref::<SessionCheckpointError>().is_some() =>
-        {
             IdentitySessionLoadErrorClass::Malformed
         }
         SessionError::Store(source) => match source.downcast_ref::<SessionStoreError>() {
@@ -370,18 +406,27 @@ fn identity_session_observation_from_load_error(
 
 /// Pure observation mapper for the actor's persisted-session read boundary.
 /// Only a successful, explicit `None` is absence. A loaded document is first
-/// assigned an exact serialized target version, then its typed checkpoint is
-/// verified before it can become matching authority.
+/// paired with the stable store-issued authority observed around the read.
+/// Session bytes remain domain evidence only and can never authenticate
+/// themselves.
 fn identity_session_observation_from_persisted_load(
     desired: &crate::identity::DesiredSessionTarget,
     loaded: Result<Option<meerkat_core::Session>, meerkat_core::service::SessionError>,
+    authority: Option<crate::identity::IdentitySessionStoreAuthority>,
 ) -> Result<crate::identity::IdentitySessionObservation, crate::identity::IdentityIntentError> {
     use crate::identity::{IdentitySessionObservation, IdentityTargetObservationVersion};
-    use meerkat_core::checkpoint::SessionCheckpointState;
 
     let session = match loaded {
         Ok(Some(session)) => session,
         Ok(None) => {
+            if let Some(authority) = authority {
+                let version = authority.observation_version()?;
+                return IdentitySessionObservation::ambiguous_divergence(
+                    version.clone(),
+                    IdentityTargetObservationVersion::Version { version },
+                    "store-issued session authority exists but the resume seam returned no session",
+                );
+            }
             return IdentitySessionObservation::missing(format!(
                 "session-absent:{}",
                 desired.session_id
@@ -389,60 +434,42 @@ fn identity_session_observation_from_persisted_load(
         }
         Err(error) => return identity_session_observation_from_load_error(&error),
     };
-    let bytes = match serde_json::to_vec(&session) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            return IdentitySessionObservation::malformed_unversioned(
-                identity_session_error_detail(
-                    "loaded persisted session could not be serialized for exact observation",
-                    &error,
-                ),
-            );
-        }
-    };
-    let evidence_digest = MobActor::identity_evidence_digest(&bytes);
-    let version = evidence_digest.clone();
-    let target = IdentityTargetObservationVersion::Version {
-        version: version.clone(),
-    };
-
-    let checkpoint = match session.try_checkpoint_state() {
-        Ok(SessionCheckpointState::Verified(checkpoint)) => checkpoint,
-        Ok(SessionCheckpointState::LegacyUnverified { .. }) => {
-            return IdentitySessionObservation::ambiguous_divergence(
-                evidence_digest,
-                target,
-                "persisted session checkpoint is legacy-unverified",
-            );
-        }
-        Err(error) => {
-            return IdentitySessionObservation::malformed(
-                evidence_digest,
-                version,
-                identity_session_error_detail(
-                    "persisted session checkpoint verification failed",
-                    &error,
-                ),
-            );
-        }
-    };
-
-    if checkpoint.session_id() != &desired.session_id
-        || checkpoint.lineage_id() != &desired.lineage_id
-        || checkpoint.generation() != desired.lineage_generation
-    {
+    if session.id() != &desired.session_id {
+        let bytes = match serde_json::to_vec(&session) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                return IdentitySessionObservation::malformed_unversioned(
+                    identity_session_error_detail(
+                        "mismatched persisted session could not be serialized for diagnostic evidence",
+                        &error,
+                    ),
+                );
+            }
+        };
+        let evidence_digest = MobActor::identity_evidence_digest(&bytes);
         return IdentitySessionObservation::ambiguous_divergence(
-            evidence_digest,
-            target,
-            "persisted session checkpoint does not match desired session lineage authority",
+            evidence_digest.clone(),
+            IdentityTargetObservationVersion::Version {
+                version: evidence_digest,
+            },
+            "persisted session document identity does not match the desired session",
         );
     }
+    let Some(authority) = authority else {
+        return Ok(IdentitySessionObservation::unavailable(format!(
+            "persisted session '{}' has no store-issued committed authority",
+            desired.session_id
+        )));
+    };
+    let authority_version = authority.observation_version()?;
 
-    match IdentitySessionObservation::matching(desired, &session, &session, version.clone()) {
+    match IdentitySessionObservation::matching(desired, &session, authority) {
         Ok(observation) => Ok(observation),
         Err(error) => IdentitySessionObservation::ambiguous_divergence(
-            evidence_digest,
-            IdentityTargetObservationVersion::Version { version },
+            authority_version.clone(),
+            IdentityTargetObservationVersion::Version {
+                version: authority_version,
+            },
             error.to_string(),
         ),
     }
@@ -452,7 +479,7 @@ fn identity_session_observation_from_persisted_load(
 #[allow(clippy::expect_used)]
 mod identity_session_observation_tests {
     use super::{
-        IdentitySessionLoadErrorClass, MobActor, identity_session_load_error_class,
+        IdentitySessionLoadErrorClass, identity_session_load_error_class,
         identity_session_observation_from_persisted_load,
     };
     use crate::identity::{
@@ -460,16 +487,11 @@ mod identity_session_observation_tests {
         IdentityExternalCeremonyCondition, IdentityExternalTrustCondition,
         IdentityInitialDeliveryCondition, IdentityLeaseCondition, IdentityReceiptCondition,
         IdentityReconcileDecision, IdentityReconcileFacts, IdentityResourceCondition,
-        IdentitySessionCondition, IdentityTargetObservationVersion,
-        classify_identity_reconciliation,
-    };
-    use meerkat_core::checkpoint::{
-        SessionCheckpointError, SessionCheckpointProvenance, SessionCheckpointStamp,
+        IdentitySessionCondition, IdentitySessionStoreAuthority, classify_identity_reconciliation,
     };
     use meerkat_core::service::SessionError;
     use meerkat_core::{
-        Message, Session, SessionGeneration, SessionLineageId, SessionStoreError,
-        types::{SessionId, UserMessage},
+        Session, SessionGeneration, SessionLineageId, SessionStoreError, types::SessionId,
     };
 
     fn desired_for(session: &Session) -> DesiredSessionTarget {
@@ -481,16 +503,15 @@ mod identity_session_observation_tests {
         }
     }
 
-    fn stamped_session() -> (DesiredSessionTarget, Session) {
-        let mut session = Session::with_id(SessionId::new());
+    fn session_and_authority() -> (DesiredSessionTarget, Session, IdentitySessionStoreAuthority) {
+        let session = Session::with_id(SessionId::new());
         let desired = desired_for(&session);
-        let stamp =
-            SessionCheckpointStamp::root(&session, SessionCheckpointProvenance::SessionCreated)
-                .expect("mint exact session checkpoint root");
-        session
-            .install_checkpoint_stamp(stamp)
-            .expect("install exact session checkpoint root");
-        (desired, session)
+        let authority = IdentitySessionStoreAuthority::whole_blob_for_test(
+            session.id().clone(),
+            1,
+            "row-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        );
+        (desired, session, authority)
     }
 
     fn present_facts(session: IdentitySessionCondition) -> IdentityReconcileFacts {
@@ -525,12 +546,6 @@ mod identity_session_observation_tests {
             ),
             (
                 SessionError::Store(Box::new(SessionStoreError::Corrupted(session_id.clone()))),
-                IdentitySessionLoadErrorClass::Malformed,
-            ),
-            (
-                SessionError::Store(Box::new(SessionCheckpointError::UnsupportedSchemaVersion(
-                    99,
-                ))),
                 IdentitySessionLoadErrorClass::Malformed,
             ),
             (
@@ -574,7 +589,7 @@ mod identity_session_observation_tests {
         for (error, expected) in cases {
             assert_eq!(identity_session_load_error_class(&error), expected);
             let observation =
-                identity_session_observation_from_persisted_load(&desired, Err(error))
+                identity_session_observation_from_persisted_load(&desired, Err(error), None)
                     .expect("typed load failure must produce a total observation");
             let expected_condition = match expected {
                 IdentitySessionLoadErrorClass::Malformed => IdentitySessionCondition::Malformed,
@@ -593,54 +608,46 @@ mod identity_session_observation_tests {
             );
         }
 
-        let missing = identity_session_observation_from_persisted_load(&desired, Ok(None))
+        let missing = identity_session_observation_from_persisted_load(&desired, Ok(None), None)
             .expect("explicit successful absence must be observable");
         assert_eq!(missing.condition(), IdentitySessionCondition::Missing);
     }
 
     #[test]
-    fn loaded_checkpoint_corruption_is_versioned_malformed_before_matching() {
-        let (desired, mut session) = stamped_session();
-        session.push(Message::User(UserMessage::text(
-            "mutation after checkpoint stamp".to_string(),
-        )));
-        let exact_bytes = serde_json::to_vec(&session).expect("serialize corrupt checkpoint row");
-        let expected_version = MobActor::identity_evidence_digest(&exact_bytes);
-
-        let observation =
-            identity_session_observation_from_persisted_load(&desired, Ok(Some(session)))
-                .expect("checkpoint corruption must remain a total observation");
-        assert_eq!(observation.condition(), IdentitySessionCondition::Malformed);
-        assert_eq!(
-            observation
-                .target_precondition()
-                .expect("versioned malformed target precondition"),
-            Some(IdentityTargetObservationVersion::Version {
-                version: expected_version,
-            }),
-        );
-        assert_eq!(observation.verified_checkpoint(), None);
-        assert_eq!(observation.malformed_unversioned_detail(), None);
+    fn loaded_session_matches_only_with_exact_store_issued_authority() {
+        let (desired, session, authority) = session_and_authority();
+        let observation = identity_session_observation_from_persisted_load(
+            &desired,
+            Ok(Some(session)),
+            Some(authority.clone()),
+        )
+        .expect("store-authorized session must remain a total observation");
+        assert_eq!(observation.condition(), IdentitySessionCondition::Matching);
+        assert_eq!(observation.store_authority(), Some(&authority));
     }
 
     #[test]
-    fn legacy_or_wrong_desired_checkpoint_authority_remains_ambiguous() {
-        let legacy = Session::with_id(SessionId::new());
-        let legacy_observation = identity_session_observation_from_persisted_load(
-            &desired_for(&legacy),
-            Ok(Some(legacy)),
+    fn body_without_authority_is_unavailable_and_wrong_identity_is_ambiguous() {
+        let session_without_authority = Session::with_id(SessionId::new());
+        let unavailable = identity_session_observation_from_persisted_load(
+            &desired_for(&session_without_authority),
+            Ok(Some(session_without_authority)),
+            None,
         )
-        .expect("legacy checkpoint state must remain observable");
+        .expect("body without authority must remain observable");
         assert_eq!(
-            legacy_observation.condition(),
-            IdentitySessionCondition::AmbiguousDivergence,
+            unavailable.condition(),
+            IdentitySessionCondition::Unavailable,
         );
 
-        let (mut desired, session) = stamped_session();
-        desired.lineage_id = SessionLineageId::for_session(&SessionId::new());
-        let mismatch =
-            identity_session_observation_from_persisted_load(&desired, Ok(Some(session)))
-                .expect("desired lineage mismatch must remain observable");
+        let (mut desired, session, authority) = session_and_authority();
+        desired.session_id = SessionId::new();
+        let mismatch = identity_session_observation_from_persisted_load(
+            &desired,
+            Ok(Some(session)),
+            Some(authority),
+        )
+        .expect("desired session mismatch must remain observable");
         assert_eq!(
             mismatch.condition(),
             IdentitySessionCondition::AmbiguousDivergence,
@@ -660,6 +667,7 @@ mod identity_session_observation_tests {
             Err(SessionError::Store(Box::new(
                 SessionStoreError::Serialization("persisted garbage".to_string()),
             ))),
+            None,
         )
         .expect("permanent corruption observation");
         let transient = identity_session_observation_from_persisted_load(
@@ -667,6 +675,7 @@ mod identity_session_observation_tests {
             Err(SessionError::Store(Box::new(SessionStoreError::Io(
                 std::io::Error::other("database locked"),
             )))),
+            None,
         )
         .expect("transient I/O observation");
 
@@ -702,19 +711,123 @@ enum IdentityMemberActuationDisposition {
     },
 }
 
-/// The rpc-gateway callback bridge reports a permanently closed stdio
-/// transport with exactly this prose; no typed marker crosses the bridge
-/// boundary today, so classification string-matches. Follow-up seam: carry a
-/// typed transport-closed cause through the bridge error instead of prose.
-const CALLBACK_TRANSPORT_CLOSED_MARKER: &str = "callback transport closed";
+/// Exact durable intent observation that owns one volatile scheduling
+/// disposition.
+///
+/// Backoff/park state may suppress work, so identity alone is insufficient:
+/// an old completion must never suppress a replacement declaration. Invalid
+/// rows bind to their exact evidence digest; an unavailable read can receive
+/// a bounded retry delay but can never be permanently parked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum IdentityReconcileAuthorityKey {
+    Exact {
+        intent_revision: u64,
+        intent_digest: String,
+        authority_digest: String,
+    },
+    Missing,
+    Unsupported {
+        evidence_digest: String,
+    },
+    Malformed {
+        evidence_digest: String,
+    },
+    Unavailable,
+}
+
+impl IdentityReconcileAuthorityKey {
+    fn from_intent(record: &crate::identity::IdentityIntentRecord) -> Self {
+        Self::Exact {
+            intent_revision: record.intent_revision,
+            intent_digest: record.intent_digest.clone(),
+            authority_digest: record.authority_digest.clone(),
+        }
+    }
+
+    fn from_permit(permit: &crate::identity::IdentityActuationPermit) -> Self {
+        Self::Exact {
+            intent_revision: permit.intent_revision,
+            intent_digest: permit.intent_digest.clone(),
+            authority_digest: permit.intent_authority_digest.clone(),
+        }
+    }
+
+    fn from_observation(
+        observation: &crate::identity::IdentityStoredObservation<
+            crate::identity::IdentityIntentRecord,
+        >,
+    ) -> Self {
+        match observation {
+            crate::identity::IdentityStoredObservation::Valid(record) => Self::from_intent(record),
+            crate::identity::IdentityStoredObservation::Missing => Self::Missing,
+            crate::identity::IdentityStoredObservation::Unsupported {
+                evidence_digest, ..
+            } => Self::Unsupported {
+                evidence_digest: evidence_digest.clone(),
+            },
+            crate::identity::IdentityStoredObservation::Malformed {
+                evidence_digest, ..
+            } => Self::Malformed {
+                evidence_digest: evidence_digest.clone(),
+            },
+        }
+    }
+
+    const fn intent_revision(&self) -> Option<u64> {
+        match self {
+            Self::Exact {
+                intent_revision, ..
+            } => Some(*intent_revision),
+            Self::Missing
+            | Self::Unsupported { .. }
+            | Self::Malformed { .. }
+            | Self::Unavailable => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct IdentityReconcileCompletionAuthority {
+    intent: IdentityReconcileAuthorityKey,
+    lease_epoch: Option<u64>,
+}
+
+impl IdentityReconcileCompletionAuthority {
+    fn from_permit(permit: &crate::identity::IdentityActuationPermit) -> Self {
+        Self {
+            intent: IdentityReconcileAuthorityKey::from_permit(permit),
+            lease_epoch: Some(permit.lease_epoch),
+        }
+    }
+}
 
 /// Volatile per-identity actuation-backoff record. Scheduling custody only —
 /// never persisted machine state; a cold actor incarnation restarts with a
 /// clean slate and re-observes desired state.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(super) struct IdentityReconcileBackoffState {
+    authority: IdentityReconcileAuthorityKey,
     consecutive_failures: u32,
     next_attempt_at: Instant,
+    /// The deadline wake already put this identity under actor custody.
+    /// Excluding it from the next-deadline calculation prevents an expired
+    /// deadline from becoming an always-ready select branch while a
+    /// materialization completion is still in flight.
+    retry_enqueued: bool,
+}
+
+/// Volatile per-identity terminal block, bound to the exact durable intent
+/// observation that produced it. A changed declaration/row invalidates the
+/// block; a stale completion cannot reinstall it.
+#[derive(Debug, Clone)]
+pub(super) struct IdentityReconcileParkState {
+    authority: IdentityReconcileAuthorityKey,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct IdentityReconcileFailureState {
+    authority: IdentityReconcileAuthorityKey,
+    detail: String,
 }
 
 fn identity_reconcile_backoff_delay(consecutive_failures: u32) -> Duration {
@@ -726,18 +839,27 @@ fn identity_reconcile_backoff_delay(consecutive_failures: u32) -> Duration {
         .min(IDENTITY_RECONCILE_BACKOFF_CAP)
 }
 
-fn identity_member_actuation_disposition(
-    result: &Result<super::handle::MemberSpawnReceipt, MobError>,
-) -> IdentityMemberActuationDisposition {
-    let Err(error) = result else {
-        return IdentityMemberActuationDisposition::Applied;
-    };
+/// Bound repeated retry diagnostics without making a persistent incident
+/// silent. Attempt one is visible immediately; identical retries then report
+/// only at power-of-two checkpoints while durable convergence status retains
+/// the latest full detail.
+fn identity_reconcile_failure_should_log(consecutive_failures: u32) -> bool {
+    consecutive_failures.is_power_of_two()
+}
+
+fn identity_actuation_error_disposition(error: &MobError) -> IdentityMemberActuationDisposition {
+    if let MobError::MemberProvisionFailed {
+        cause: crate::MemberProvisionFailureCause::CallbackTransportClosed { detail },
+    } = error
+    {
+        return IdentityMemberActuationDisposition::ParkedTransportClosed {
+            detail: detail.clone(),
+        };
+    }
     let MobError::StorageError(source) = error else {
-        let detail = error.to_string();
-        if detail.contains(CALLBACK_TRANSPORT_CLOSED_MARKER) {
-            return IdentityMemberActuationDisposition::ParkedTransportClosed { detail };
-        }
-        return IdentityMemberActuationDisposition::Backoff { detail };
+        return IdentityMemberActuationDisposition::Backoff {
+            detail: error.to_string(),
+        };
     };
     match source.downcast_ref::<crate::store::MobStoreError>() {
         Some(crate::store::MobStoreError::CasConflict(detail)) => {
@@ -764,18 +886,30 @@ fn identity_member_actuation_disposition(
     }
 }
 
+fn identity_member_actuation_disposition(
+    result: &Result<super::handle::MemberSpawnReceipt, MobError>,
+) -> IdentityMemberActuationDisposition {
+    match result {
+        Ok(_) => IdentityMemberActuationDisposition::Applied,
+        Err(error) => identity_actuation_error_disposition(error),
+    }
+}
+
 #[cfg(test)]
 mod identity_recovery_slice_tests {
     use super::{
-        IdentityMemberActuationDisposition, identity_member_actuation_disposition,
-        identity_recovery_slice_unsupported_obligation,
+        IDENTITY_RECONCILE_BACKOFF_BASE, IDENTITY_RECONCILE_BACKOFF_CAP,
+        IdentityMemberActuationDisposition, identity_actuation_error_disposition,
+        identity_member_actuation_disposition, identity_reconcile_backoff_delay,
+        identity_reconcile_failure_should_log,
+        identity_reconciliation_slice_unsupported_obligation,
     };
     use crate::identity::IdentityReconcileDecision;
     use crate::{MobError, store::MobStoreError};
 
     #[test]
     fn nonempty_wiring_remains_a_typed_unsupported_obligation() {
-        assert!(identity_recovery_slice_unsupported_obligation(
+        assert!(identity_reconciliation_slice_unsupported_obligation(
             IdentityReconcileDecision::ReconcileWiring
         ));
     }
@@ -802,6 +936,61 @@ mod identity_recovery_slice_tests {
             IdentityMemberActuationDisposition::RepairBlocked { ref detail }
                 if detail == "unsafe member evidence"
         ));
+    }
+
+    #[test]
+    fn member_actuation_parks_only_typed_terminal_transport_cause() {
+        let typed =
+            Err::<super::super::handle::MemberSpawnReceipt, _>(MobError::MemberProvisionFailed {
+                cause: crate::MemberProvisionFailureCause::CallbackTransportClosed {
+                    detail: "stdio callback bridge reached EOF".to_string(),
+                },
+            });
+        assert!(matches!(
+            identity_member_actuation_disposition(&typed),
+            IdentityMemberActuationDisposition::ParkedTransportClosed { ref detail }
+                if detail == "stdio callback bridge reached EOF"
+        ));
+
+        let prose = Err::<super::super::handle::MemberSpawnReceipt, _>(MobError::Internal(
+            "callback transport closed".to_string(),
+        ));
+        assert!(matches!(
+            identity_member_actuation_disposition(&prose),
+            IdentityMemberActuationDisposition::Backoff { ref detail }
+                if detail == "internal error: callback transport closed"
+        ));
+    }
+
+    #[test]
+    fn every_generic_actuation_error_gets_a_typed_bounded_retry_disposition() {
+        assert!(matches!(
+            identity_actuation_error_disposition(&MobError::Internal("transient".to_string())),
+            IdentityMemberActuationDisposition::Backoff { ref detail }
+                if detail == "internal error: transient"
+        ));
+        assert_eq!(
+            identity_reconcile_backoff_delay(0),
+            IDENTITY_RECONCILE_BACKOFF_BASE
+        );
+        assert_eq!(
+            identity_reconcile_backoff_delay(1),
+            IDENTITY_RECONCILE_BACKOFF_BASE
+        );
+        assert_eq!(
+            identity_reconcile_backoff_delay(u32::MAX),
+            IDENTITY_RECONCILE_BACKOFF_CAP
+        );
+    }
+
+    #[test]
+    fn identity_reconcile_failure_logging_uses_bounded_repeat_checkpoints() {
+        let logged = (1..=17)
+            .filter(|attempt| identity_reconcile_failure_should_log(*attempt))
+            .collect::<Vec<_>>();
+        assert_eq!(logged, vec![1, 2, 4, 8, 16]);
+        assert!(!identity_reconcile_failure_should_log(0));
+        assert!(!identity_reconcile_failure_should_log(u32::MAX));
     }
 }
 
@@ -1174,7 +1363,15 @@ impl InitialTurnHandle {
     /// expected and intentionally ignored.
     async fn abort_and_join(self) {
         self.handle.abort();
-        let _ = self.handle.await;
+        if let Err(error) = self.handle.await
+            && actor_task_join_error_is_panic(&error)
+        {
+            let _ = actor_task_join_panic_error(
+                "autonomous initial turn teardown",
+                ActorTaskJoinPanicDisposition::TeardownTerminal,
+                error,
+            );
+        }
     }
 }
 
@@ -1309,6 +1506,7 @@ struct SubmitWorkDispatchRequest {
     interaction_id: Option<meerkat_core::interaction::InteractionId>,
     objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     handling_mode: meerkat_core::types::HandlingMode,
+    external_delivery_identity: Option<crate::store::MobExternalDeliveryIdentity>,
     turn_metadata: Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
     event_tx:
         Option<tokio::sync::mpsc::Sender<meerkat_core::EventEnvelope<meerkat_core::AgentEvent>>>,
@@ -1363,11 +1561,34 @@ fn submit_work_turn_metadata(
     Ok((!merged.is_empty()).then_some(merged))
 }
 
+fn submit_work_runtime_semantics(
+    handling_mode: meerkat_core::types::HandlingMode,
+    turn_metadata: Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
+    external_delivery_identity: Option<&crate::store::MobExternalDeliveryIdentity>,
+) -> meerkat_core::service::StartTurnRuntimeSemantics {
+    let semantics = meerkat_core::service::StartTurnRuntimeSemantics::new(
+        handling_mode,
+        None,
+        Vec::new(),
+        turn_metadata,
+    );
+    match external_delivery_identity {
+        Some(identity) => {
+            semantics.with_input_identity(meerkat_core::service::StartTurnInputIdentity {
+                idempotency_key: identity.idempotency_key.clone(),
+                correlation_id: identity.correlation_id.clone(),
+            })
+        }
+        None => semantics,
+    }
+}
+
 fn unsupported_turn_metadata_fields(
     metadata: &meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata,
     handling_mode: meerkat_core::types::HandlingMode,
     allow_render_metadata: bool,
     allow_interaction_id: bool,
+    allow_transient_turn_context: bool,
 ) -> Vec<&'static str> {
     let mut fields = Vec::new();
     if metadata
@@ -1384,6 +1605,9 @@ fn unsupported_turn_metadata_fields(
     }
     if metadata.additional_instructions.is_some() {
         fields.push("additional_instructions");
+    }
+    if !allow_transient_turn_context && metadata.transient_turn_context.is_some() {
+        fields.push("transient_turn_context");
     }
     if metadata.model.is_some() {
         fields.push("model");
@@ -1425,6 +1649,7 @@ fn validate_member_turn_carriers(
     entry: &RosterEntry,
     remotely_hosted: bool,
     handling_mode: meerkat_core::types::HandlingMode,
+    has_external_delivery_identity: bool,
     turn_metadata: Option<&meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
     has_event_sender: bool,
     has_completion_sender: bool,
@@ -1438,6 +1663,18 @@ fn validate_member_turn_carriers(
             }
         );
     let autonomous = entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost;
+
+    if has_external_delivery_identity && !remotely_hosted && (autonomous || peer_only) {
+        return Err(MobError::UnsupportedForMode {
+            mode: entry.runtime_mode,
+            reason: if autonomous {
+                "stable external input identity is not representable on autonomous inbox delivery"
+            } else {
+                "stable external input identity is not representable on the legacy peer-only lane"
+            }
+            .to_string(),
+        });
+    }
 
     if (has_event_sender || has_completion_sender) && (peer_only || autonomous) {
         return Err(MobError::UnsupportedForMode {
@@ -1464,10 +1701,18 @@ fn validate_member_turn_carriers(
                 .to_string(),
         });
     }
+    if metadata.transient_turn_context.is_some()
+        && handling_mode == meerkat_core::types::HandlingMode::Steer
+    {
+        return Err(MobError::UnsupportedForMode {
+            mode: entry.runtime_mode,
+            reason: "transient turn context requires a queued executor turn".to_string(),
+        });
+    }
     let unsupported = if peer_only {
-        unsupported_turn_metadata_fields(metadata, handling_mode, false, false)
+        unsupported_turn_metadata_fields(metadata, handling_mode, false, false, true)
     } else if autonomous {
-        unsupported_turn_metadata_fields(metadata, handling_mode, true, true)
+        unsupported_turn_metadata_fields(metadata, handling_mode, true, true, false)
     } else {
         Vec::new()
     };
@@ -1901,12 +2146,6 @@ pub(super) static IDENTITY_RECONCILE_REPLY_DELIVERY_FAILURES: std::sync::atomic:
 #[cfg(test)]
 pub(super) static IDENTITY_RECONCILE_SESSION_DOCUMENT_LOADS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
-/// Test-only override (milliseconds; 0 = use the production constant) for the
-/// converged-session reverify deadline, so expiry-driven re-verification is
-/// testable without a five-minute wall-clock wait.
-#[cfg(test)]
-pub(super) static IDENTITY_RECONCILE_SESSION_REVERIFY_OVERRIDE_MS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
 #[cfg(test)]
 static FAIL_SESSION_INGRESS_DETACH_FOR_SESSION: std::sync::Mutex<Option<SessionId>> =
     std::sync::Mutex::new(None);
@@ -2282,6 +2521,11 @@ pub(super) struct PeerDeliveryInflight {
     from: AgentIdentity,
     to: AgentIdentity,
     cancel_token: tokio_util::sync::CancellationToken,
+    /// Tokio task identity captured from the `AbortHandle` returned by
+    /// `JoinSet::spawn`. A panicked task returns no `PeerDeliveryCompletion`,
+    /// so this is the only exact bridge back to the logical delivery id.
+    #[cfg(not(target_arch = "wasm32"))]
+    task_id: tokio::task::Id,
 }
 
 struct SupervisorPrivateTrustInstall {
@@ -4658,6 +4902,11 @@ pub(super) struct MobActor {
     pub(super) pending_spawn_cleanup_anchors: BTreeMap<u64, PendingSpawnCleanupAnchor>,
     pub(super) edge_locks: Arc<super::edge_locks::EdgeLockRegistry>,
     pub(super) lifecycle_tasks: tokio::task::JoinSet<Result<(), MobError>>,
+    /// First completed lifecycle-delivery fault not yet surfaced to a
+    /// lifecycle caller. The actor loop observes JoinErrors immediately so an
+    /// ambiguous effect can fail-stop before another command, but ordinary
+    /// typed delivery failures retain their pre-existing next-call custody.
+    pub(super) pending_lifecycle_delivery_error: Option<MobError>,
     /// Actor-owned detached I/O that must never outlive this actor instance.
     ///
     /// Pending-spawn, flow-run, and autonomous-initial-turn tasks have their
@@ -4729,20 +4978,25 @@ pub(super) struct MobActor {
     /// re-observed from their owning stores before one obligation executes.
     pub(super) identity_reconcile_queue: VecDeque<AgentIdentity>,
     pub(super) identity_reconcile_enqueued: BTreeSet<AgentIdentity>,
+    /// Volatile keyset position for the bounded cross-process safety scan.
+    /// `None` starts a new pass; reaching the end resets it to `None`.
+    pub(super) identity_reconcile_safety_cursor: Option<crate::store::IdentityIntentScanCursor>,
     /// Volatile actuator diagnostics only. They are never classifier input or
     /// restart authority; the next cold process simply re-observes.
-    pub(super) identity_reconcile_failures: Arc<RwLock<BTreeMap<AgentIdentity, String>>>,
-    /// Volatile per-identity actuation-backoff deadlines. Both the tick drain
-    /// and the periodic intent scan refuse to re-actuate an identity before
-    /// its deadline; success (or a fresh declaration) resets it. Scheduling
-    /// custody only, never persisted machine state — guards the 2026-07-29
-    /// hot-retry incident where every failure requeued immediately.
+    pub(super) identity_reconcile_failures:
+        Arc<RwLock<BTreeMap<AgentIdentity, IdentityReconcileFailureState>>>,
+    /// Volatile per-identity actuation-backoff deadlines. The actor arms one
+    /// timer for the earliest deadline and enqueues only due identities;
+    /// startup discovery and the slow cross-process safety scan also refuse
+    /// early re-actuation. Success (or changed durable authority) resets it.
+    /// Scheduling custody only, never persisted machine state — guards the
+    /// 2026-07-29 hot-retry incident where every failure requeued immediately.
     pub(super) identity_reconcile_backoff: BTreeMap<AgentIdentity, IdentityReconcileBackoffState>,
     /// Identities parked after a fatal in-process actuation failure (closed
-    /// callback transport). Parked identities are skipped by the tick drain
-    /// and the intent scan; a fresh declaration manifest or a process restart
-    /// clears the park. Volatile scheduling custody only.
-    pub(super) identity_reconcile_parked: BTreeMap<AgentIdentity, String>,
+    /// callback transport). Parked identities are skipped by causal/deadline
+    /// admission and the safety scan; a changed durable intent or a process
+    /// restart clears the park. Volatile scheduling custody only.
+    pub(super) identity_reconcile_parked: BTreeMap<AgentIdentity, IdentityReconcileParkState>,
     /// Once-per-distinct-payload panic log gate for spawn provisioning tasks
     /// (see `panic_capture` for the 2026-07-29 incident WHY): the
     /// identity-reconcile requeue can re-run a panicking provision
@@ -4907,6 +5161,7 @@ pub(super) enum MemberLiveMutationCompletion {
         agent_identity: AgentIdentity,
         target: MemberLiveMutationTarget,
         result: Result<super::bridge_protocol::BridgeLiveControlOutcome, MobError>,
+        ambiguous_effect: bool,
         reply_tx:
             oneshot::Sender<Result<super::bridge_protocol::BridgeLiveControlOutcome, MobError>>,
     },
@@ -4914,6 +5169,7 @@ pub(super) enum MemberLiveMutationCompletion {
         ticket: u64,
         durable_persistence_confirmed: bool,
         result: Result<(), MobError>,
+        panicked: bool,
     },
     OpenDeliveryAck {
         ticket: u64,
@@ -4930,6 +5186,15 @@ pub(super) struct MemberLiveOpenCleanupObligation {
     reason: String,
     attempts: u32,
     last_error: Option<String>,
+    /// A panic is an invariant failure, not a transient transport verdict.
+    /// Retain durable custody but do not execute the same faulting code again
+    /// in this actor incarnation. Cold recovery reconstructs the obligation
+    /// with this flag clear after repaired code can take over.
+    panic_quarantined: bool,
+    /// The last attempt panicked before durable custody was confirmed. Such
+    /// an obligation remains retryable, but only on the panic-specific slow
+    /// cadence rather than the ordinary transport retry cadence.
+    panic_backoff: bool,
     /// True only while a successful result is in the no-await handle
     /// handoff. This phase must not transiently fence commands that the
     /// acknowledged caller issues immediately after receiving the channel.
@@ -4940,6 +5205,25 @@ pub(super) struct MemberLiveOpenCleanupObligation {
         oneshot::Sender<Result<super::state::MemberLiveOpenDelivery, MobError>>,
         MobError,
     )>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MemberLivePanicDisposition {
+    TerminalFailure,
+    AmbiguousEffect,
+    QuarantinedCleanup,
+    BackoffUntilDurable,
+}
+
+impl MemberLivePanicDisposition {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::TerminalFailure => "terminal_failure",
+            Self::AmbiguousEffect => "ambiguous_effect",
+            Self::QuarantinedCleanup => "quarantined_cleanup",
+            Self::BackoffUntilDurable => "backoff_until_durable",
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -11822,22 +12106,112 @@ impl MobActor {
                     self.peer_delivery_inflight.remove(&completion.id);
                 }
                 Err(error) => {
-                    tracing::debug!(error = %error, "peer delivery task failed");
-                    if self.peer_delivery_tasks.is_empty() {
-                        self.peer_delivery_inflight.clear();
-                    }
+                    let _ = self.reconcile_peer_delivery_join_error(
+                        error,
+                        "peer delivery completion",
+                        ActorTaskJoinPanicDisposition::AmbiguousEffectFailStop,
+                    );
                 }
+            }
+        }
+    }
+
+    fn reconcile_peer_delivery_join_error(
+        &mut self,
+        error: tokio::task::JoinError,
+        context: &'static str,
+        panic_disposition: ActorTaskJoinPanicDisposition,
+    ) -> Option<MobError> {
+        let task_id = actor_task_join_error_task_id(&error);
+        #[cfg(not(target_arch = "wasm32"))]
+        let runtime_task_id = error.id();
+        #[cfg(not(target_arch = "wasm32"))]
+        let delivery = self
+            .peer_delivery_inflight
+            .iter()
+            .find(|(_, delivery)| delivery.task_id == runtime_task_id)
+            .map(|(delivery_id, delivery)| {
+                (*delivery_id, delivery.from.clone(), delivery.to.clone())
+            });
+        #[cfg(target_arch = "wasm32")]
+        let delivery: Option<(PeerDeliveryId, AgentIdentity, AgentIdentity)> = None;
+        let outcome = if error.is_cancelled() {
+            if panic_disposition.requires_fail_stop() {
+                self.durable_uncertainty_fail_stop = true;
+                let cancellation_error = MobError::Internal(format!(
+                    "{context} task {task_id} was cancelled; \
+                     disposition=cancelled_ambiguous_effect_fail_stop"
+                ));
+                tracing::error!(
+                    context,
+                    task_id = %task_id,
+                    delivery_id = ?delivery.as_ref().map(|(id, _, _)| *id),
+                    from = ?delivery.as_ref().map(|(_, from, _)| from),
+                    to = ?delivery.as_ref().map(|(_, _, to)| to),
+                    disposition = "cancelled_ambiguous_effect_fail_stop",
+                    error = %cancellation_error,
+                    "peer delivery task was unexpectedly cancelled; effect outcome is unknown"
+                );
+                Some(cancellation_error)
+            } else {
+                tracing::debug!(
+                    context,
+                    task_id = %task_id,
+                    delivery_id = ?delivery.as_ref().map(|(id, _, _)| *id),
+                    from = ?delivery.as_ref().map(|(_, from, _)| from),
+                    to = ?delivery.as_ref().map(|(_, _, to)| to),
+                    disposition = "cancelled_teardown_terminal",
+                    "peer delivery task was cancelled without a panic"
+                );
+                None
+            }
+        } else {
+            let panic_error = actor_task_join_panic_error(context, panic_disposition, error);
+            if panic_disposition.requires_fail_stop() {
+                self.durable_uncertainty_fail_stop = true;
+            }
+            tracing::error!(
+                context,
+                task_id = %task_id,
+                delivery_id = ?delivery.as_ref().map(|(id, _, _)| *id),
+                from = ?delivery.as_ref().map(|(_, from, _)| from),
+                to = ?delivery.as_ref().map(|(_, _, to)| to),
+                error = %panic_error,
+                "peer delivery effect may have escaped without a typed completion"
+            );
+            Some(panic_error)
+        };
+        if let Some((delivery_id, _, _)) = delivery {
+            self.peer_delivery_inflight.remove(&delivery_id);
+        } else if self.peer_delivery_tasks.is_empty() {
+            // A legacy/pre-registration task id should not strand volatile
+            // backpressure forever. Unknown identity plus a panic has already
+            // fail-stopped normal operation above.
+            self.peer_delivery_inflight.clear();
+        }
+        outcome
+    }
+
+    fn reconcile_actor_io_task_join(&mut self, result: Result<(), tokio::task::JoinError>) {
+        if let Err(error) = result {
+            if error.is_cancelled() {
+                tracing::error!(
+                    task_id = %actor_task_join_error_task_id(&error),
+                    disposition = "cancelled_ambiguous_effect_fail_stop",
+                    "actor-owned I/O task was unexpectedly cancelled; effect outcome is unknown"
+                );
+                self.durable_uncertainty_fail_stop = true;
+            } else {
+                let disposition = ActorTaskJoinPanicDisposition::AmbiguousEffectFailStop;
+                let _ = actor_task_join_panic_error("actor I/O completion", disposition, error);
+                self.durable_uncertainty_fail_stop = true;
             }
         }
     }
 
     fn drain_completed_actor_io_tasks(&mut self) {
         while let Some(result) = self.actor_io_tasks.try_join_next() {
-            if let Err(error) = result
-                && !error.is_cancelled()
-            {
-                tracing::warn!(error = %error, "actor-owned I/O task failed");
-            }
+            self.reconcile_actor_io_task_join(result);
         }
     }
 
@@ -11845,9 +12219,13 @@ impl MobActor {
         self.actor_io_tasks.abort_all();
         while let Some(result) = self.actor_io_tasks.join_next().await {
             if let Err(error) = result
-                && !error.is_cancelled()
+                && actor_task_join_error_is_panic(&error)
             {
-                tracing::warn!(error = %error, "actor-owned I/O task failed during shutdown");
+                let _ = actor_task_join_panic_error(
+                    "actor I/O teardown",
+                    ActorTaskJoinPanicDisposition::TeardownTerminal,
+                    error,
+                );
             }
         }
     }
@@ -11869,40 +12247,50 @@ impl MobActor {
         let id = self.next_peer_delivery_ticket;
         self.next_peer_delivery_ticket = self.next_peer_delivery_ticket.wrapping_add(1);
         let cancel_token = tokio_util::sync::CancellationToken::new();
-        self.peer_delivery_inflight.insert(
-            id,
-            PeerDeliveryInflight {
-                from: plan.from.clone(),
-                to: plan.to.clone(),
-                cancel_token: cancel_token.clone(),
-            },
-        );
-        self.peer_delivery_tasks.spawn(async move {
+        let from = plan.from.clone();
+        let to = plan.to.clone();
+        let task_cancel_token = cancel_token.clone();
+        let abort_handle = self.peer_delivery_tasks.spawn(async move {
             let _permit = permit;
             let result = tokio::select! {
                 result = plan.sender_comms.send(plan.command) => result.map_err(MobError::from),
-                () = cancel_token.cancelled() => Err(MobError::Internal(
+                () = task_cancel_token.cancelled() => Err(MobError::Internal(
                     "peer message delivery canceled because mob topology or lifecycle changed".to_string(),
                 )),
             };
             let _ = reply_tx.send(result);
             PeerDeliveryCompletion { id }
         });
+        self.peer_delivery_inflight.insert(
+            id,
+            PeerDeliveryInflight {
+                from,
+                to,
+                cancel_token,
+                #[cfg(not(target_arch = "wasm32"))]
+                task_id: abort_handle.id(),
+            },
+        );
+        #[cfg(target_arch = "wasm32")]
+        let _ = abort_handle;
     }
 
-    async fn cancel_pending_peer_deliveries(&mut self, reason: &'static str) {
-        self.cancel_peer_deliveries_matching(reason, |_| true).await;
+    async fn cancel_pending_peer_deliveries(
+        &mut self,
+        reason: &'static str,
+    ) -> Result<(), MobError> {
+        self.cancel_peer_deliveries_matching(reason, |_| true).await
     }
 
     async fn cancel_peer_deliveries_for_member(
         &mut self,
         member: &AgentIdentity,
         reason: &'static str,
-    ) {
+    ) -> Result<(), MobError> {
         self.cancel_peer_deliveries_matching(reason, |delivery| {
             &delivery.from == member || &delivery.to == member
         })
-        .await;
+        .await
     }
 
     async fn cancel_peer_deliveries_for_edge(
@@ -11910,25 +12298,25 @@ impl MobActor {
         a: &AgentIdentity,
         b: &AgentIdentity,
         reason: &'static str,
-    ) {
+    ) -> Result<(), MobError> {
         self.cancel_peer_deliveries_matching(reason, |delivery| {
             (&delivery.from == a && &delivery.to == b) || (&delivery.from == b && &delivery.to == a)
         })
-        .await;
+        .await
     }
 
     async fn cancel_peer_deliveries_matching(
         &mut self,
         reason: &'static str,
         mut predicate: impl FnMut(&PeerDeliveryInflight) -> bool,
-    ) {
+    ) -> Result<(), MobError> {
         let ids = self
             .peer_delivery_inflight
             .iter()
             .filter_map(|(id, delivery)| predicate(delivery).then_some(*id))
             .collect::<BTreeSet<_>>();
         if ids.is_empty() {
-            return;
+            return Ok(());
         }
         tracing::debug!(
             mob_id = %self.definition.id,
@@ -11941,6 +12329,7 @@ impl MobActor {
                 delivery.cancel_token.cancel();
             }
         }
+        let mut first_error = None;
         while ids
             .iter()
             .any(|id| self.peer_delivery_inflight.contains_key(id))
@@ -11950,7 +12339,14 @@ impl MobActor {
                     self.peer_delivery_inflight.remove(&completion.id);
                 }
                 Some(Err(error)) => {
-                    tracing::debug!(error = %error, "peer delivery task failed during cancellation");
+                    if let Some(error) = self.reconcile_peer_delivery_join_error(
+                        error,
+                        "peer delivery cancellation",
+                        ActorTaskJoinPanicDisposition::AmbiguousEffectFailStop,
+                    ) && first_error.is_none()
+                    {
+                        first_error = Some(error);
+                    }
                 }
                 None => break,
             }
@@ -11958,6 +12354,7 @@ impl MobActor {
         for id in ids {
             self.peer_delivery_inflight.remove(&id);
         }
+        first_error.map_or(Ok(()), Err)
     }
 
     /// Deliver a lifecycle notification to every active member of the
@@ -11978,6 +12375,9 @@ impl MobActor {
     /// a previously dispatched task is surfaced when this method next drains the
     /// set.
     async fn notify_orchestrator_lifecycle(&mut self, message: String) -> Result<(), MobError> {
+        if let Some(error) = self.pending_lifecycle_delivery_error.take() {
+            return Err(error);
+        }
         // Drain completed lifecycle tasks (non-blocking). A prior delivery that
         // failed is surfaced here rather than dropped: lifecycle delivery owns a
         // real fault, not a log line.
@@ -12013,7 +12413,7 @@ impl MobActor {
         for orchestrator_entry in orchestrator_entries {
             while self.lifecycle_tasks.len() >= MAX_LIFECYCLE_NOTIFICATION_TASKS {
                 match self.lifecycle_tasks.join_next().await {
-                    Some(join_result) => Self::surface_lifecycle_task_outcome(join_result)?,
+                    Some(join_result) => self.surface_lifecycle_task_outcome(join_result)?,
                     None => break,
                 }
             }
@@ -12131,12 +12531,23 @@ impl MobActor {
         Ok(())
     }
 
+    fn retain_lifecycle_delivery_error(&mut self, error: MobError) {
+        if self.pending_lifecycle_delivery_error.is_none() {
+            self.pending_lifecycle_delivery_error = Some(error);
+        } else {
+            tracing::warn!(
+                error = %error,
+                "additional orchestrator lifecycle delivery failure observed while an earlier typed failure remains pending"
+            );
+        }
+    }
+
     /// Drain all completed lifecycle notification tasks without blocking,
     /// surfacing the first delivery fault as a typed [`MobError`].
     fn drain_completed_lifecycle_tasks(&mut self) -> Result<(), MobError> {
         let mut surfaced: Option<MobError> = None;
         while let Some(join_result) = self.lifecycle_tasks.try_join_next() {
-            if let Err(error) = Self::surface_lifecycle_task_outcome(join_result) {
+            if let Err(error) = self.surface_lifecycle_task_outcome(join_result) {
                 // Drain the remainder before returning so the set does not grow
                 // unbounded, but report the first observed delivery fault.
                 if surfaced.is_none() {
@@ -12150,10 +12561,11 @@ impl MobActor {
         }
     }
 
-    /// Interpret a single lifecycle task join result. An aborted task (mob
-    /// teardown) is not a delivery fault; a panicked task or a delivery `Err`
-    /// is.
+    /// Interpret one steady-state lifecycle task result. Teardown uses
+    /// `abort_and_join_lifecycle_tasks`; cancellation at this boundary is
+    /// therefore an ambiguous delivery outcome, not expected teardown.
     fn surface_lifecycle_task_outcome(
+        &mut self,
         join_result: Result<Result<(), MobError>, tokio::task::JoinError>,
     ) -> Result<(), MobError> {
         match join_result {
@@ -12165,10 +12577,29 @@ impl MobActor {
                 );
                 Err(delivery_error)
             }
-            Err(join_error) if join_error.is_cancelled() => Ok(()),
-            Err(join_error) => Err(MobError::Internal(format!(
-                "orchestrator lifecycle delivery task did not complete: {join_error}"
-            ))),
+            Err(join_error) if join_error.is_cancelled() => {
+                let task_id = actor_task_join_error_task_id(&join_error);
+                self.durable_uncertainty_fail_stop = true;
+                tracing::error!(
+                    task_id = %task_id,
+                    disposition = "cancelled_ambiguous_effect_fail_stop",
+                    "orchestrator lifecycle delivery was cancelled; delivery outcome is unknown"
+                );
+                Err(MobError::Internal(format!(
+                    "orchestrator lifecycle delivery task {task_id} was cancelled; \
+                     disposition=cancelled_ambiguous_effect_fail_stop"
+                )))
+            }
+            Err(join_error) => {
+                let disposition = ActorTaskJoinPanicDisposition::AmbiguousEffectFailStop;
+                let error = actor_task_join_panic_error(
+                    "orchestrator lifecycle delivery",
+                    disposition,
+                    join_error,
+                );
+                self.durable_uncertainty_fail_stop = true;
+                Err(error)
+            }
         }
     }
 
@@ -14735,19 +15166,7 @@ impl MobActor {
                     return ScopeAdmission::Denied;
                 };
                 let policy = self.resolve_control_policy_for(principal);
-                let additional_required =
-                    matches!(&cmd, MobCommand::ApplyIdentityDeclarationManifest { .. }).then_some(
-                        [
-                            mob_dsl::ControlScope::SendCommand,
-                            mob_dsl::ControlScope::WireTopology,
-                        ],
-                    );
-                for required in std::iter::once(required).chain(
-                    additional_required
-                        .as_ref()
-                        .into_iter()
-                        .flat_map(|scopes| scopes.iter().copied()),
-                ) {
+                for required in std::iter::once(required) {
                     if let Err(denial) = policy.require(required) {
                         cmd.reject_scope_denied(denial);
                         return ScopeAdmission::Denied;
@@ -16591,7 +17010,17 @@ impl MobActor {
     /// Safe to call repeatedly; completed and cancelled tasks are drained.
     async fn abort_and_join_lifecycle_tasks(&mut self) {
         self.lifecycle_tasks.abort_all();
-        while self.lifecycle_tasks.join_next().await.is_some() {}
+        while let Some(result) = self.lifecycle_tasks.join_next().await {
+            if let Err(error) = result
+                && actor_task_join_error_is_panic(&error)
+            {
+                let _ = actor_task_join_panic_error(
+                    "orchestrator lifecycle delivery teardown",
+                    ActorTaskJoinPanicDisposition::TeardownTerminal,
+                    error,
+                );
+            }
+        }
     }
 
     /// Join barrier for every background task/listener owned directly by the
@@ -16601,18 +17030,32 @@ impl MobActor {
         self.member_live_mutation_tasks.abort_all();
         while let Some(result) = self.member_live_mutation_tasks.join_next().await {
             if let Err(error) = result
-                && !error.is_cancelled()
+                && actor_task_join_error_is_panic(&error)
             {
-                tracing::warn!(
-                    error = %error,
-                    "mutating member-live task failed during actor shutdown"
+                let _ = actor_task_join_panic_error(
+                    "mutating member-live teardown",
+                    ActorTaskJoinPanicDisposition::TeardownTerminal,
+                    error,
                 );
             }
         }
         self.abort_and_join_actor_io_tasks().await;
 
         self.peer_delivery_tasks.abort_all();
-        while self.peer_delivery_tasks.join_next().await.is_some() {}
+        while let Some(result) = self.peer_delivery_tasks.join_next().await {
+            match result {
+                Ok(completion) => {
+                    self.peer_delivery_inflight.remove(&completion.id);
+                }
+                Err(error) => {
+                    let _ = self.reconcile_peer_delivery_join_error(
+                        error,
+                        "peer delivery teardown",
+                        ActorTaskJoinPanicDisposition::TeardownTerminal,
+                    );
+                }
+            }
+        }
         self.peer_delivery_inflight.clear();
 
         self.abort_and_join_lifecycle_tasks().await;
@@ -16677,20 +17120,6 @@ impl MobActor {
     fn enqueue_identity_reconcile(&mut self, identity: AgentIdentity) {
         if self.identity_reconcile_enqueued.insert(identity.clone()) {
             self.identity_reconcile_queue.push_back(identity);
-        }
-    }
-
-    fn enqueue_identity_declaration_outcome(
-        &mut self,
-        outcome: &crate::identity::IdentityDeclarationManifestApplyOutcome,
-    ) {
-        for identity in outcome.identities.keys() {
-            // A fresh declaration is explicit operator input: clear any fatal
-            // park and backoff debt so the new desired state gets an
-            // immediate attempt.
-            self.identity_reconcile_parked.remove(identity);
-            self.identity_reconcile_backoff.remove(identity);
-            self.enqueue_identity_reconcile(identity.clone());
         }
     }
 
@@ -16764,13 +17193,57 @@ impl MobActor {
         }
     }
 
-    async fn record_identity_member_terminal_disposition(
+    async fn record_identity_reconcile_disposition(
         &mut self,
         identity: &AgentIdentity,
-        intent_revision: u64,
-        lease_epoch: u64,
+        authority: &IdentityReconcileCompletionAuthority,
         disposition: IdentityMemberActuationDisposition,
     ) {
+        let current_authority = match self
+            .identity
+            .observe_identity_intent(&self.definition.id, identity)
+            .await
+        {
+            Ok(observation) => IdentityReconcileAuthorityKey::from_observation(&observation),
+            Err(error) => {
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    agent_identity = %identity,
+                    error = %error,
+                    "could not verify identity authority for terminal actuation disposition"
+                );
+                self.schedule_identity_reconcile_pass_error(identity, &error.to_string());
+                return;
+            }
+        };
+        self.clear_stale_identity_reconcile_schedule(identity, &current_authority);
+        // An unavailable intent read uses `Unavailable` only as an ephemeral
+        // scheduling key. If the verification read immediately recovers, bind
+        // the disposition to those exact bytes instead of treating recovery
+        // as a superseding declaration and hot-requeueing the same failure.
+        let effective_authority = if authority.intent == IdentityReconcileAuthorityKey::Unavailable
+        {
+            IdentityReconcileCompletionAuthority {
+                intent: current_authority.clone(),
+                lease_epoch: authority.lease_epoch,
+            }
+        } else {
+            authority.clone()
+        };
+        if current_authority != effective_authority.intent {
+            tracing::info!(
+                mob_id = %self.definition.id,
+                agent_identity = %identity,
+                completed_intent_revision = ?effective_authority.intent.intent_revision(),
+                current_intent_revision = ?current_authority.intent_revision(),
+                "discarding stale identity actuation completion from superseded intent authority"
+            );
+            self.enqueue_identity_reconcile(identity.clone());
+            return;
+        }
+
+        let intent_revision = effective_authority.intent.intent_revision();
+        let lease_epoch = effective_authority.lease_epoch;
         let requeue_now = match disposition {
             IdentityMemberActuationDisposition::Applied => {
                 self.identity_reconcile_failures
@@ -16797,64 +17270,99 @@ impl MobActor {
                 true
             }
             IdentityMemberActuationDisposition::RepairBlocked { detail } => {
-                self.identity_reconcile_failures
-                    .write()
-                    .await
-                    .insert(identity.clone(), detail.clone());
+                self.identity_reconcile_failures.write().await.insert(
+                    identity.clone(),
+                    IdentityReconcileFailureState {
+                        authority: effective_authority.intent.clone(),
+                        detail: detail.clone(),
+                    },
+                );
+                self.identity_reconcile_backoff.remove(identity);
+                self.identity_reconcile_parked.insert(
+                    identity.clone(),
+                    IdentityReconcileParkState {
+                        authority: effective_authority.intent.clone(),
+                    },
+                );
                 self.replace_identity_reconcile_status(
                     identity,
-                    Some(intent_revision),
-                    Some(lease_epoch),
+                    intent_revision,
+                    lease_epoch,
                     crate::identity::IdentityReconcileDecision::RepairBlocked,
                     Some(detail),
                 )
                 .await;
-                true
+                false
             }
             IdentityMemberActuationDisposition::Backoff { detail } => {
-                self.identity_reconcile_failures
-                    .write()
-                    .await
-                    .insert(identity.clone(), detail.clone());
+                self.identity_reconcile_failures.write().await.insert(
+                    identity.clone(),
+                    IdentityReconcileFailureState {
+                        authority: effective_authority.intent.clone(),
+                        detail: detail.clone(),
+                    },
+                );
                 let now = Instant::now();
                 let entry = self
                     .identity_reconcile_backoff
                     .entry(identity.clone())
                     .or_insert(IdentityReconcileBackoffState {
+                        authority: effective_authority.intent.clone(),
                         consecutive_failures: 0,
                         next_attempt_at: now,
+                        retry_enqueued: false,
                     });
+                if entry.authority != effective_authority.intent {
+                    *entry = IdentityReconcileBackoffState {
+                        authority: effective_authority.intent.clone(),
+                        consecutive_failures: 0,
+                        next_attempt_at: now,
+                        retry_enqueued: false,
+                    };
+                }
                 entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
                 let delay = identity_reconcile_backoff_delay(entry.consecutive_failures);
                 entry.next_attempt_at = now.checked_add(delay).unwrap_or(now);
-                tracing::warn!(
-                    agent_identity = %identity,
-                    consecutive_failures = entry.consecutive_failures,
-                    retry_delay_ms = delay.as_millis() as u64,
-                    detail = %detail,
-                    "identity member actuation failed; backing off before the next attempt"
-                );
+                entry.retry_enqueued = false;
+                if identity_reconcile_failure_should_log(entry.consecutive_failures) {
+                    tracing::warn!(
+                        agent_identity = %identity,
+                        consecutive_failures = entry.consecutive_failures,
+                        retry_delay_ms = delay.as_millis() as u64,
+                        detail = %detail,
+                        "identity member actuation failed; backing off before the next attempt"
+                    );
+                }
                 self.replace_identity_reconcile_status(
                     identity,
-                    Some(intent_revision),
-                    Some(lease_epoch),
+                    intent_revision,
+                    lease_epoch,
                     crate::identity::IdentityReconcileDecision::Backoff,
                     Some(detail),
                 )
                 .await;
-                // Deliberately no immediate requeue: the periodic intent scan
-                // re-admits this identity once its backoff deadline passes.
-                // An immediate requeue here plus the 25ms tick was the
-                // 2026-07-29 hot-retry loop.
+                // Deliberately no immediate requeue. The actor sleeps until
+                // the exact earliest backoff deadline and then enqueues only
+                // the identities due at that instant. An immediate requeue
+                // here plus the old 25ms tick was the 2026-07-29 hot-retry
+                // loop.
                 false
             }
             IdentityMemberActuationDisposition::ParkedTransportClosed { detail } => {
-                self.identity_reconcile_failures
-                    .write()
-                    .await
-                    .insert(identity.clone(), detail.clone());
-                self.identity_reconcile_parked
-                    .insert(identity.clone(), detail.clone());
+                self.identity_reconcile_failures.write().await.insert(
+                    identity.clone(),
+                    IdentityReconcileFailureState {
+                        authority: effective_authority.intent.clone(),
+                        detail: detail.clone(),
+                    },
+                );
+                self.identity_reconcile_backoff.remove(identity);
+                self.identity_reconcile_parked.insert(
+                    identity.clone(),
+                    IdentityReconcileParkState {
+                        authority: effective_authority.intent.clone(),
+                    },
+                );
                 tracing::error!(
                     agent_identity = %identity,
                     detail = %detail,
@@ -16862,8 +17370,8 @@ impl MobActor {
                 );
                 self.replace_identity_reconcile_status(
                     identity,
-                    Some(intent_revision),
-                    Some(lease_epoch),
+                    intent_revision,
+                    lease_epoch,
                     crate::identity::IdentityReconcileDecision::RepairBlocked,
                     Some(format!(
                         "parked: {detail}; the callback transport cannot recover in-process"
@@ -16877,7 +17385,7 @@ impl MobActor {
         if requeue_now {
             // Terminal completion is the causal wake. It is serialized by this
             // actor before best-effort reply delivery, so a dropped reply
-            // cannot strand convergence until the periodic intent scan.
+            // cannot strand convergence until the slow safety sweep.
             self.enqueue_identity_reconcile(identity.clone());
             #[cfg(test)]
             IDENTITY_RECONCILE_COMPLETION_REQUEUES
@@ -16885,16 +17393,105 @@ impl MobActor {
         }
     }
 
+    fn clear_stale_identity_reconcile_schedule(
+        &mut self,
+        identity: &AgentIdentity,
+        current_authority: &IdentityReconcileAuthorityKey,
+    ) {
+        let stale_backoff = self
+            .identity_reconcile_backoff
+            .get(identity)
+            .is_some_and(|state| &state.authority != current_authority);
+        if stale_backoff {
+            self.identity_reconcile_backoff.remove(identity);
+        }
+        let stale_park = self
+            .identity_reconcile_parked
+            .get(identity)
+            .is_some_and(|state| &state.authority != current_authority);
+        if stale_park {
+            self.identity_reconcile_parked.remove(identity);
+        }
+    }
+
     /// Whether reconcile scheduling may admit this identity right now. Parked
     /// identities never re-enter; identities under an actuation-backoff
     /// deadline re-enter only once the deadline has passed.
-    fn identity_reconcile_admittable(&self, identity: &AgentIdentity) -> bool {
+    fn identity_reconcile_admittable(
+        &mut self,
+        identity: &AgentIdentity,
+        current_authority: Option<&IdentityReconcileAuthorityKey>,
+    ) -> bool {
+        if let Some(current_authority) = current_authority {
+            self.clear_stale_identity_reconcile_schedule(identity, current_authority);
+        }
         if self.identity_reconcile_parked.contains_key(identity) {
             return false;
         }
         match self.identity_reconcile_backoff.get(identity) {
             Some(backoff) => Instant::now() >= backoff.next_attempt_at,
             None => true,
+        }
+    }
+
+    /// Duration until the exact earliest retry not already under actor
+    /// custody. `None` means the actor needs no reconciliation timer at all.
+    fn identity_reconcile_next_backoff_wait(&self) -> Option<Duration> {
+        let now = Instant::now();
+        self.identity_reconcile_backoff
+            .values()
+            .filter(|state| !state.retry_enqueued)
+            .map(|state| state.next_attempt_at.saturating_duration_since(now))
+            .min()
+    }
+
+    /// Move every retry whose deadline has elapsed into the ordinary actor
+    /// queue. This is O(number of failing identities) in volatile memory and
+    /// performs no store connection, row scan, decode, or session read.
+    fn enqueue_due_identity_reconcile_backoffs(&mut self) {
+        let now = Instant::now();
+        let due = self
+            .identity_reconcile_backoff
+            .iter()
+            .filter(|(_, state)| !state.retry_enqueued && now >= state.next_attempt_at)
+            .map(|(identity, _)| identity.clone())
+            .collect::<Vec<_>>();
+        for identity in due {
+            if let Some(state) = self.identity_reconcile_backoff.get_mut(&identity) {
+                state.retry_enqueued = true;
+            }
+            self.enqueue_identity_reconcile(identity);
+        }
+    }
+
+    /// A pass-level error that escaped the typed classifier must still get an
+    /// exact deadline. Without this fallback, removing the 1Hz full-table
+    /// sweep would strand it; immediately requeueing it would recreate the
+    /// hot loop.
+    fn schedule_identity_reconcile_pass_error(&mut self, identity: &AgentIdentity, detail: &str) {
+        let now = Instant::now();
+        let entry = self
+            .identity_reconcile_backoff
+            .entry(identity.clone())
+            .or_insert(IdentityReconcileBackoffState {
+                authority: IdentityReconcileAuthorityKey::Unavailable,
+                consecutive_failures: 0,
+                next_attempt_at: now,
+                retry_enqueued: false,
+            });
+        entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
+        let delay = identity_reconcile_backoff_delay(entry.consecutive_failures);
+        entry.next_attempt_at = now.checked_add(delay).unwrap_or(now);
+        entry.retry_enqueued = false;
+        if identity_reconcile_failure_should_log(entry.consecutive_failures) {
+            tracing::warn!(
+                mob_id = %self.definition.id,
+                agent_identity = %identity,
+                consecutive_failures = entry.consecutive_failures,
+                retry_delay_ms = delay.as_millis() as u64,
+                detail,
+                "identity reconciliation pass failed; retry scheduled at exact backoff deadline"
+            );
         }
     }
 
@@ -16980,10 +17577,13 @@ impl MobActor {
     async fn observe_identity_session(
         &self,
         desired: &crate::identity::DesiredSessionTarget,
-    ) -> crate::identity::IdentitySessionObservation {
+    ) -> Result<crate::identity::IdentitySessionObservation, MobError> {
         #[cfg(test)]
         IDENTITY_RECONCILE_SESSION_DOCUMENT_LOADS
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let authority_before = self
+            .observe_bounded_persisted_session_authority(desired)
+            .await?;
         // Typed resume-seam read: `load_persisted_session` deliberately
         // hides archived documents, and mapping that hidden state to
         // authoritative Missing let identity reconciliation mark an intact
@@ -17007,18 +17607,29 @@ impl MobActor {
                     || "<no runtime record>".to_string(),
                     |state| state.to_string(),
                 );
-                return crate::identity::IdentitySessionObservation::unavailable(format!(
-                    "session '{}' is archived and not revivable from runtime state {state}; \
+                return Ok(crate::identity::IdentitySessionObservation::unavailable(
+                    format!(
+                        "session '{}' is archived and not revivable from runtime state {state}; \
                      the transcript is intact and preserved — refusing to observe it as missing",
-                    desired.session_id
+                        desired.session_id
+                    ),
                 ));
             }
             Err(error) => Err(error),
         };
-        match identity_session_observation_from_persisted_load(desired, loaded) {
-            Ok(observation) => observation,
-            Err(error) => crate::identity::IdentitySessionObservation::unavailable(format!(
-                "persisted session observation construction failed: {error}"
+        let authority_after = self
+            .observe_bounded_persisted_session_authority(desired)
+            .await?;
+        if authority_after != authority_before {
+            return Err(MobError::Internal(format!(
+                "persisted authority changed while observing session {}",
+                desired.session_id
+            )));
+        }
+        match identity_session_observation_from_persisted_load(desired, loaded, authority_before) {
+            Ok(observation) => Ok(observation),
+            Err(error) => Ok(crate::identity::IdentitySessionObservation::unavailable(
+                format!("persisted session observation construction failed: {error}"),
             )),
         }
     }
@@ -17049,7 +17660,7 @@ impl MobActor {
         }
     }
 
-    /// The 0.8.2 recovery slice proves only an empty local/local topology.
+    /// The retained sealed-intent slice proves only an empty local/local topology.
     /// Direct desired wiring remains sealed in the intent substrate, but any
     /// non-empty desired or observed incident topology is a typed refusal; no
     /// structural, generated-graph, or comms-trust mutation is attempted.
@@ -17064,7 +17675,7 @@ impl MobActor {
         if !desired_incident_wiring.is_empty() {
             return crate::identity::IdentityResourceObservation::Malformed {
                 observed_version: None,
-                detail: "non-empty desired wiring requires a target-atomic graph/trust actuator outside the 0.8.2 recovery slice"
+                detail: "non-empty desired wiring requires a target-atomic graph/trust actuator outside the retained sealed-intent reconciliation slice"
                     .to_string(),
             };
         }
@@ -17110,7 +17721,7 @@ impl MobActor {
                         }
                     }),
                     detail:
-                        "non-empty structural wiring is RepairBlocked in the 0.8.2 recovery slice"
+                        "non-empty structural wiring is RepairBlocked in the retained sealed-intent reconciliation slice"
                             .to_string(),
                 };
             }
@@ -17122,7 +17733,7 @@ impl MobActor {
             if edge.a.0 == identity.as_str() || edge.b.0 == identity.as_str() {
                 return crate::identity::IdentityResourceObservation::Malformed {
                     observed_version: None,
-                    detail: "non-empty generated wiring graph is RepairBlocked in the 0.8.2 recovery slice"
+                    detail: "non-empty generated wiring graph is RepairBlocked in the retained sealed-intent reconciliation slice"
                         .to_string(),
                 };
             }
@@ -17196,7 +17807,7 @@ impl MobActor {
                         if !rows.is_empty() {
                             return crate::identity::IdentityResourceObservation::Malformed {
                                 observed_version: None,
-                                detail: "non-empty source-scoped outgoing trust is RepairBlocked in the 0.8.2 recovery slice"
+                                detail: "non-empty source-scoped outgoing trust is RepairBlocked in the retained sealed-intent reconciliation slice"
                                     .to_string(),
                             };
                         }
@@ -17253,7 +17864,7 @@ impl MobActor {
                 {
                     return crate::identity::IdentityResourceObservation::Malformed {
                         observed_version: None,
-                        detail: "non-empty source-scoped inbound trust is RepairBlocked in the 0.8.2 recovery slice"
+                        detail: "non-empty source-scoped inbound trust is RepairBlocked in the retained sealed-intent reconciliation slice"
                             .to_string(),
                     };
                 }
@@ -17515,67 +18126,137 @@ impl MobActor {
         permit
     }
 
-    async fn enqueue_all_identity_intents(&mut self) {
-        match self
-            .identity
-            .list_identity_intents(&self.definition.id)
-            .await
-        {
-            Ok(intents) => {
-                for (identity, observation) in intents {
-                    match observation {
-                        crate::identity::IdentityStoredObservation::Valid(_) => {
-                            // The scan respects the same park/backoff gate as
-                            // the tick drain, so it cannot resurrect the
-                            // hot-retry loop at 1Hz.
-                            if self.identity_reconcile_admittable(&identity) {
-                                self.enqueue_identity_reconcile(identity);
-                            }
-                        }
-                        crate::identity::IdentityStoredObservation::Unsupported {
-                            evidence_digest,
-                            detail,
-                        } => {
-                            self.replace_identity_reconcile_status(
-                                &identity,
-                                None,
-                                None,
-                                crate::identity::IdentityReconcileDecision::RepairBlocked,
-                                Some(format!(
-                                    "unsupported identity intent row {evidence_digest}: {detail}"
-                                )),
-                            )
-                            .await;
-                        }
-                        crate::identity::IdentityStoredObservation::Malformed {
-                            evidence_digest,
-                            detail,
-                        } => {
-                            self.replace_identity_reconcile_status(
-                                &identity,
-                                None,
-                                None,
-                                crate::identity::IdentityReconcileDecision::RepairBlocked,
-                                Some(format!(
-                                    "malformed identity intent row {evidence_digest}: {detail}"
-                                )),
-                            )
-                            .await;
-                        }
-                        crate::identity::IdentityStoredObservation::Missing => {
-                            tracing::warn!(
-                                mob_id = %self.definition.id,
-                                agent_identity = %identity,
-                                "identity intent scan returned an impossible missing row"
-                            );
-                        }
+    async fn enqueue_identity_intent_observations(
+        &mut self,
+        observations: BTreeMap<
+            AgentIdentity,
+            crate::identity::IdentityStoredObservation<crate::identity::IdentityIntentRecord>,
+        >,
+    ) {
+        for (identity, observation) in observations {
+            match observation {
+                crate::identity::IdentityStoredObservation::Valid(record) => {
+                    // Startup discovery and the slow cross-process safety scan
+                    // both respect the same park/backoff gate as the causal
+                    // queue.
+                    let authority = IdentityReconcileAuthorityKey::from_intent(&record);
+                    if self.identity_reconcile_admittable(&identity, Some(&authority)) {
+                        self.enqueue_identity_reconcile(identity);
                     }
                 }
+                crate::identity::IdentityStoredObservation::Unsupported {
+                    evidence_digest,
+                    detail,
+                } => {
+                    self.replace_identity_reconcile_status(
+                        &identity,
+                        None,
+                        None,
+                        crate::identity::IdentityReconcileDecision::RepairBlocked,
+                        Some(format!(
+                            "unsupported identity intent row {evidence_digest}: {detail}"
+                        )),
+                    )
+                    .await;
+                }
+                crate::identity::IdentityStoredObservation::Malformed {
+                    evidence_digest,
+                    detail,
+                } => {
+                    self.replace_identity_reconcile_status(
+                        &identity,
+                        None,
+                        None,
+                        crate::identity::IdentityReconcileDecision::RepairBlocked,
+                        Some(format!(
+                            "malformed identity intent row {evidence_digest}: {detail}"
+                        )),
+                    )
+                    .await;
+                }
+                crate::identity::IdentityStoredObservation::Missing => {
+                    tracing::warn!(
+                        mob_id = %self.definition.id,
+                        agent_identity = %identity,
+                        "identity intent scan returned an impossible missing row"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Cold discovery is exhaustive but bounded per store read. It may walk
+    /// every page once because a new actor has no causal in-memory queue.
+    async fn enqueue_all_identity_intents(&mut self) {
+        let mut cursor = None;
+        loop {
+            let page = match self
+                .identity
+                .scan_identity_intents_page(
+                    &self.definition.id,
+                    cursor.as_ref(),
+                    crate::store::IDENTITY_INTENT_SCAN_PAGE_MAX,
+                )
+                .await
+            {
+                Ok(page) => page,
+                Err(error) => {
+                    tracing::warn!(
+                        mob_id = %self.definition.id,
+                        error = %error,
+                        "paged identity intent startup discovery failed"
+                    );
+                    return;
+                }
+            };
+            let next = page.next;
+            self.enqueue_identity_intent_observations(page.observations)
+                .await;
+            let Some(next) = next else {
+                return;
+            };
+            if cursor.as_ref().is_some_and(|current| &next <= current) {
+                tracing::error!(
+                    mob_id = %self.definition.id,
+                    "identity intent startup discovery returned a non-advancing cursor"
+                );
+                return;
+            }
+            cursor = Some(next);
+        }
+    }
+
+    /// One timer wake reads and admits at most one bounded keyset page.
+    async fn enqueue_next_identity_intent_safety_page(&mut self) {
+        let after = self.identity_reconcile_safety_cursor.clone();
+        match self
+            .identity
+            .scan_identity_intents_page(
+                &self.definition.id,
+                after.as_ref(),
+                IDENTITY_RECONCILE_SAFETY_PAGE_LIMIT,
+            )
+            .await
+        {
+            Ok(page) => {
+                if let (Some(current), Some(next)) = (after.as_ref(), page.next.as_ref())
+                    && next <= current
+                {
+                    tracing::error!(
+                        mob_id = %self.definition.id,
+                        "identity intent safety scan returned a non-advancing cursor; restarting the scan"
+                    );
+                    self.identity_reconcile_safety_cursor = None;
+                    return;
+                }
+                self.identity_reconcile_safety_cursor = page.next;
+                self.enqueue_identity_intent_observations(page.observations)
+                    .await;
             }
             Err(error) => tracing::warn!(
                 mob_id = %self.definition.id,
                 error = %error,
-                "identity intent scan failed; periodic reconciliation will retry"
+                "bounded identity intent safety scan failed; the same page will retry"
             ),
         }
     }
@@ -17588,11 +18269,9 @@ impl MobActor {
             return;
         };
         self.identity_reconcile_enqueued.remove(&identity);
-        // The park/backoff gate covers EVERY admission path (declaration
-        // enqueue, terminal-completion requeue, intent scan): a queued
-        // identity that is not admittable is dropped here and re-admitted by
-        // the periodic scan once its deadline passes.
-        if !self.identity_reconcile_admittable(&identity) {
+        // The park/backoff gate covers every admission path (startup/safety
+        // discovery, terminal-completion requeue, and exact-deadline wake).
+        if !self.identity_reconcile_admittable(&identity, None) {
             return;
         }
         match self
@@ -17600,46 +18279,112 @@ impl MobActor {
             .await
         {
             Ok(true) => self.enqueue_identity_reconcile(identity),
-            Ok(false) => {}
+            Ok(false) => {
+                // A due retry stays marked under actor custody while an async
+                // member materialization is pending; its serialized
+                // completion will either clear or reschedule the backoff. If
+                // no async completion owns it and no typed disposition
+                // replaced the deadline, release it back to the timer without
+                // resetting the accumulated failure debt.
+                if !self.pending_spawns.contains_member(&identity)
+                    && let Some(backoff) = self.identity_reconcile_backoff.get_mut(&identity)
+                    && backoff.retry_enqueued
+                {
+                    let delay = identity_reconcile_backoff_delay(backoff.consecutive_failures);
+                    let now = Instant::now();
+                    backoff.next_attempt_at = now.checked_add(delay).unwrap_or(now);
+                    backoff.retry_enqueued = false;
+                }
+            }
             Err(error) => {
-                tracing::warn!(
-                    mob_id = %self.definition.id,
-                    agent_identity = %identity,
-                    error = %error,
-                    "identity reconciliation pass failed; periodic scan will retry"
-                );
+                self.schedule_identity_reconcile_pass_error(&identity, &error.to_string());
             }
         }
     }
 
-    /// Return the cached converged session observation when it still proves
-    /// the exact sealed intent authority and the reverify deadline has not
-    /// elapsed; otherwise discard it.
-    fn identity_converged_session_observation(
+    /// Return the cached converged session observation only while both the
+    /// sealed intent authority and the runtime store's exact bounded physical
+    /// boundary authority still match. Authority read failure propagates:
+    /// integrity observation never falls back to a Session body.
+    async fn identity_converged_session_observation(
+        &self,
         session_witnesses: &mut IdentityConvergedSessionWitnesses,
         identity: &AgentIdentity,
         intent: &crate::identity::IdentityIntentRecord,
-        now_ms: u64,
-    ) -> Option<crate::identity::IdentitySessionObservation> {
-        let witness = session_witnesses.get(identity)?;
-        #[cfg(test)]
-        let reverify_interval_ms = match IDENTITY_RECONCILE_SESSION_REVERIFY_OVERRIDE_MS
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
-            0 => IDENTITY_RECONCILE_CONVERGED_SESSION_REVERIFY_INTERVAL_MS,
-            override_ms => override_ms,
+        desired: &crate::identity::DesiredSessionTarget,
+    ) -> Result<Option<crate::identity::IdentitySessionObservation>, MobError> {
+        let Some(witness) = session_witnesses.get(identity).cloned() else {
+            return Ok(None);
         };
-        #[cfg(not(test))]
-        let reverify_interval_ms = IDENTITY_RECONCILE_CONVERGED_SESSION_REVERIFY_INTERVAL_MS;
         let current = witness.intent_revision == intent.intent_revision
             && witness.intent_digest == intent.intent_digest
             && witness.authority_digest == intent.authority_digest
-            && now_ms.saturating_sub(witness.verified_at_ms) < reverify_interval_ms;
+            && witness.persisted_authority.session_id() == &desired.session_id;
         if !current {
             session_witnesses.remove(identity);
-            return None;
+            return Ok(None);
         }
-        Some(witness.observation.clone())
+        match self.session_service.persisted_session_authority_read_cost() {
+            super::session_service::PersistedSessionAuthorityReadCost::Unsupported => {
+                return Err(MobError::from(
+                    meerkat_core::service::SessionError::Unsupported(format!(
+                        "session service cannot cheaply revalidate exact persisted authority for {}",
+                        desired.session_id
+                    )),
+                ));
+            }
+            super::session_service::PersistedSessionAuthorityReadCost::Bounded => {}
+        }
+        let observed = self
+            .session_service
+            .observe_persisted_session_authority(&desired.session_id)
+            .await
+            .map_err(MobError::from)?;
+        let Some(observed) = observed else {
+            return Err(MobError::Internal(format!(
+                "persisted authority disappeared for converged session {}",
+                desired.session_id
+            )));
+        };
+        if observed != witness.persisted_authority {
+            session_witnesses.remove(identity);
+            return Ok(None);
+        }
+        Ok(Some(witness.observation))
+    }
+
+    /// Observe the small store-issued identity of the current persisted
+    /// boundary. There is deliberately no Session-body fallback.
+    async fn observe_bounded_persisted_session_authority(
+        &self,
+        desired: &crate::identity::DesiredSessionTarget,
+    ) -> Result<Option<crate::identity::IdentitySessionStoreAuthority>, MobError> {
+        match self.session_service.persisted_session_authority_read_cost() {
+            super::session_service::PersistedSessionAuthorityReadCost::Unsupported => {
+                return Err(MobError::from(
+                    meerkat_core::service::SessionError::Unsupported(format!(
+                        "session service cannot observe exact bounded persisted authority for {}",
+                        desired.session_id
+                    )),
+                ));
+            }
+            super::session_service::PersistedSessionAuthorityReadCost::Bounded => {}
+        }
+        let authority = self
+            .session_service
+            .observe_persisted_session_authority(&desired.session_id)
+            .await
+            .map_err(MobError::from)?;
+        if let Some(authority) = authority.as_ref()
+            && authority.session_id() != &desired.session_id
+        {
+            return Err(MobError::Internal(format!(
+                "persisted authority is bound to {}, not observed session {}",
+                authority.session_id(),
+                desired.session_id
+            )));
+        }
+        Ok(authority)
     }
 
     async fn reconcile_identity_once(
@@ -17699,14 +18444,19 @@ impl MobActor {
                         IdentityLeaseCondition::Unavailable,
                     ),
                 );
-                self.replace_identity_reconcile_status(
+                let authority = IdentityReconcileCompletionAuthority {
+                    intent: IdentityReconcileAuthorityKey::Unavailable,
+                    lease_epoch: None,
+                };
+                self.record_identity_reconcile_disposition(
                     identity,
-                    None,
-                    None,
-                    decision,
-                    Some(error.to_string()),
+                    &authority,
+                    IdentityMemberActuationDisposition::Backoff {
+                        detail: error.to_string(),
+                    },
                 )
                 .await;
+                debug_assert_eq!(decision, IdentityReconcileDecision::Backoff);
                 return Ok(IdentityReconcilePassDisposition::Outcome(false));
             }
         };
@@ -17718,14 +18468,16 @@ impl MobActor {
             | IdentityStoredObservation::Malformed { .. } => None,
         };
         if let Some(record) = intent_record.as_ref()
-            && let Some(reason) = identity_recovery_slice_intent_rejection(record)
+            && let Some(reason) = identity_reconciliation_slice_intent_rejection(record)
         {
-            self.replace_identity_reconcile_status(
+            let authority = IdentityReconcileCompletionAuthority {
+                intent: IdentityReconcileAuthorityKey::from_intent(record),
+                lease_epoch: None,
+            };
+            self.record_identity_reconcile_disposition(
                 identity,
-                Some(record.intent_revision),
-                None,
-                IdentityReconcileDecision::RepairBlocked,
-                Some(reason),
+                &authority,
+                IdentityMemberActuationDisposition::RepairBlocked { detail: reason },
             )
             .await;
             return Ok(IdentityReconcilePassDisposition::Outcome(false));
@@ -17744,14 +18496,23 @@ impl MobActor {
                         IdentityLeaseCondition::Unavailable,
                     ),
                 );
-                self.replace_identity_reconcile_status(
+                let authority = IdentityReconcileCompletionAuthority {
+                    intent: intent_record
+                        .as_ref()
+                        .map_or(IdentityReconcileAuthorityKey::Unavailable, |record| {
+                            IdentityReconcileAuthorityKey::from_intent(record)
+                        }),
+                    lease_epoch: None,
+                };
+                self.record_identity_reconcile_disposition(
                     identity,
-                    intent_record.as_ref().map(|record| record.intent_revision),
-                    None,
-                    decision,
-                    Some(error.to_string()),
+                    &authority,
+                    IdentityMemberActuationDisposition::Backoff {
+                        detail: error.to_string(),
+                    },
                 )
                 .await;
+                debug_assert_eq!(decision, IdentityReconcileDecision::Backoff);
                 return Ok(IdentityReconcilePassDisposition::Outcome(false));
             }
         };
@@ -17791,14 +18552,35 @@ impl MobActor {
             )));
         }
         if lease_condition != IdentityLeaseCondition::HeldByCurrentIncarnation {
-            self.replace_identity_reconcile_status(
-                identity,
-                intent_record.as_ref().map(|record| record.intent_revision),
-                None,
-                preliminary,
-                None,
-            )
-            .await;
+            if preliminary == IdentityReconcileDecision::Backoff {
+                let authority = IdentityReconcileCompletionAuthority {
+                    intent: intent_record
+                        .as_ref()
+                        .map_or(IdentityReconcileAuthorityKey::Unavailable, |record| {
+                            IdentityReconcileAuthorityKey::from_intent(record)
+                        }),
+                    lease_epoch: None,
+                };
+                self.record_identity_reconcile_disposition(
+                    identity,
+                    &authority,
+                    IdentityMemberActuationDisposition::Backoff {
+                        detail: format!(
+                            "identity lease observation classified as {lease_condition:?}"
+                        ),
+                    },
+                )
+                .await;
+            } else {
+                self.replace_identity_reconcile_status(
+                    identity,
+                    intent_record.as_ref().map(|record| record.intent_revision),
+                    None,
+                    preliminary,
+                    None,
+                )
+                .await;
+            }
             return Ok(IdentityReconcilePassDisposition::Outcome(false));
         }
         let Some(intent_record) = intent_record else {
@@ -17845,12 +18627,13 @@ impl MobActor {
         // below stays fresh, so realization drift that those observations can
         // see keeps its scan-cadence repair latency.
         let witness_session_observation = if allow_session_witness {
-            Self::identity_converged_session_observation(
+            self.identity_converged_session_observation(
                 session_witnesses,
                 identity,
                 &intent_record,
-                now_ms,
+                session,
             )
+            .await?
         } else {
             session_witnesses.remove(identity);
             None
@@ -17858,7 +18641,7 @@ impl MobActor {
         let session_observed_from_witness = witness_session_observation.is_some();
         let session_observation = match witness_session_observation {
             Some(observation) => observation,
-            None => self.observe_identity_session(session).await,
+            None => self.observe_identity_session(session).await?,
         };
         #[cfg(feature = "runtime-adapter")]
         let (runtime_observation, runtime_target_observation) =
@@ -17963,6 +18746,15 @@ impl MobActor {
         }
         if !session_observed_from_witness {
             if decision == IdentityReconcileDecision::Converged {
+                let persisted_authority = session_observation
+                    .store_authority()
+                    .cloned()
+                    .ok_or_else(|| {
+                        MobError::Internal(format!(
+                            "converged session observation had no store-issued authority for {}",
+                            session.session_id
+                        ))
+                    })?;
                 session_witnesses.insert(
                     identity.clone(),
                     IdentityConvergedSessionWitness {
@@ -17970,7 +18762,7 @@ impl MobActor {
                         intent_digest: intent_record.intent_digest.clone(),
                         authority_digest: intent_record.authority_digest.clone(),
                         observation: session_observation.clone(),
-                        verified_at_ms: now_ms,
+                        persisted_authority,
                     },
                 );
             } else {
@@ -17978,9 +18770,9 @@ impl MobActor {
             }
         }
         let unsupported_obligation_detail =
-            identity_recovery_slice_unsupported_obligation(decision).then(|| {
+            identity_reconciliation_slice_unsupported_obligation(decision).then(|| {
                 format!(
-                    "generated obligation {decision:?} has no actuator in the 0.8.2 legacy recovery slice"
+                    "generated obligation {decision:?} has no actuator in the retained sealed-intent reconciliation slice"
                 )
             });
         let reported_decision = if unsupported_obligation_detail.is_some() {
@@ -17988,12 +18780,14 @@ impl MobActor {
         } else {
             decision
         };
+        let current_intent_authority = IdentityReconcileAuthorityKey::from_intent(&intent_record);
         let prior_actuator_failure = self
             .identity_reconcile_failures
             .read()
             .await
             .get(identity)
-            .cloned();
+            .filter(|failure| failure.authority == current_intent_authority)
+            .map(|failure| failure.detail.clone());
         let classification_detail = matches!(
             decision,
             IdentityReconcileDecision::Backoff
@@ -18005,20 +18799,56 @@ impl MobActor {
                 "fresh identity observations classified as {facts:?}; runtime={runtime_observation:?}; member={member_observation:?}; wiring={wiring_observation:?}"
             )
         });
+        let disposition_detail = unsupported_obligation_detail
+            .clone()
+            .or(prior_actuator_failure.clone())
+            .or(classification_detail.clone());
+        let completion_authority = IdentityReconcileCompletionAuthority {
+            intent: current_intent_authority,
+            lease_epoch: Some(active_lease.epoch),
+        };
+        if decision == IdentityReconcileDecision::Converged {
+            self.identity_reconcile_backoff.remove(identity);
+            self.identity_reconcile_parked.remove(identity);
+            self.identity_reconcile_failures
+                .write()
+                .await
+                .remove(identity);
+        }
+        if unsupported_obligation_detail.is_some() {
+            self.record_identity_reconcile_disposition(
+                identity,
+                &completion_authority,
+                IdentityMemberActuationDisposition::RepairBlocked {
+                    detail: disposition_detail.unwrap_or_else(|| {
+                        format!("unsupported identity recovery obligation {decision:?}")
+                    }),
+                },
+            )
+            .await;
+            return Ok(IdentityReconcilePassDisposition::Outcome(false));
+        }
+        if decision == IdentityReconcileDecision::Backoff {
+            self.record_identity_reconcile_disposition(
+                identity,
+                &completion_authority,
+                IdentityMemberActuationDisposition::Backoff {
+                    detail: disposition_detail.unwrap_or_else(|| {
+                        "fresh identity observations requested retry backoff".to_string()
+                    }),
+                },
+            )
+            .await;
+            return Ok(IdentityReconcilePassDisposition::Outcome(false));
+        }
         self.replace_identity_reconcile_status(
             identity,
             Some(intent_record.intent_revision),
             Some(active_lease.epoch),
             reported_decision,
-            unsupported_obligation_detail
-                .clone()
-                .or(prior_actuator_failure)
-                .or(classification_detail),
+            disposition_detail,
         )
         .await;
-        if unsupported_obligation_detail.is_some() {
-            return Ok(IdentityReconcilePassDisposition::Outcome(false));
-        }
 
         let action: Result<bool, MobError> = async {
             match decision {
@@ -18027,12 +18857,12 @@ impl MobActor {
                     else {
                         return Ok(true);
                     };
-                    let checkpoint = session_observation
-                        .verified_checkpoint()
+                    let authority = session_observation
+                        .store_authority()
                         .cloned()
                         .ok_or_else(|| {
                             MobError::Internal(
-                                "session-creation receipt decision had no verified checkpoint"
+                                "session-creation receipt decision had no store-issued authority"
                                     .to_string(),
                             )
                         })?;
@@ -18059,7 +18889,7 @@ impl MobActor {
                         audit_lease_epoch: Some(write_lease.epoch),
                         request_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000".to_string(),
                         payload: IdentityOperationReceiptPayload::SessionCreationConsumed {
-                            checkpoint,
+                            authority,
                         },
                     };
                     receipt.request_digest = receipt
@@ -18098,6 +18928,9 @@ impl MobActor {
                         target,
                     );
                     #[cfg(feature = "runtime-adapter")]
+                    let completion_authority =
+                        IdentityReconcileCompletionAuthority::from_permit(&permit);
+                    #[cfg(feature = "runtime-adapter")]
                     {
                         let runtime = self.runtime_adapter.as_ref().ok_or_else(|| {
                             MobError::Internal("identity runtime adapter is unavailable".to_string())
@@ -18134,12 +18967,12 @@ impl MobActor {
                                 reason,
                                 ..
                             } => {
-                                self.replace_identity_reconcile_status(
+                                self.record_identity_reconcile_disposition(
                                     identity,
-                                    Some(intent_record.intent_revision),
-                                    Some(write_lease.epoch),
-                                    IdentityReconcileDecision::RepairBlocked,
-                                    Some(reason),
+                                    &completion_authority,
+                                    IdentityMemberActuationDisposition::RepairBlocked {
+                                        detail: reason,
+                                    },
                                 )
                                 .await;
                                 Ok(false)
@@ -18147,12 +18980,10 @@ impl MobActor {
                             meerkat_runtime::RuntimeSessionRegistrationOutcome::Backoff {
                                 reason,
                             } => {
-                                self.replace_identity_reconcile_status(
+                                self.record_identity_reconcile_disposition(
                                     identity,
-                                    Some(intent_record.intent_revision),
-                                    Some(write_lease.epoch),
-                                    IdentityReconcileDecision::Backoff,
-                                    Some(reason),
+                                    &completion_authority,
+                                    IdentityMemberActuationDisposition::Backoff { detail: reason },
                                 )
                                 .await;
                                 Ok(false)
@@ -18191,6 +19022,8 @@ impl MobActor {
                         .validate_identity_actuation_permit(&permit)
                         .await
                         .map_err(MobError::from)?;
+                    let completion_authority =
+                        IdentityReconcileCompletionAuthority::from_permit(&permit);
                     let mut spec = super::spec_compiler::spawn_spec_from_desired_member(
                         identity,
                         session,
@@ -18210,27 +19043,27 @@ impl MobActor {
                     ) {
                         Ok(external_tools) => spec.external_tools = external_tools,
                         Err(super::IdentityLocalExternalToolsError::Missing) => {
-                            self.replace_identity_reconcile_status(
+                            self.record_identity_reconcile_disposition(
                                 identity,
-                                Some(intent_record.intent_revision),
-                                Some(write_lease.epoch),
-                                IdentityReconcileDecision::Backoff,
-                                Some(format!(
-                                    "process-local external-tool services are not registered for sealed materialization {key}"
-                                )),
+                                &completion_authority,
+                                IdentityMemberActuationDisposition::Backoff {
+                                    detail: format!(
+                                        "process-local external-tool services are not registered for sealed materialization {key}"
+                                    ),
+                                },
                             )
                             .await;
                             return Ok(false);
                         }
                         Err(super::IdentityLocalExternalToolsError::Unavailable { reason }) => {
-                            self.replace_identity_reconcile_status(
+                            self.record_identity_reconcile_disposition(
                                 identity,
-                                Some(intent_record.intent_revision),
-                                Some(write_lease.epoch),
-                                IdentityReconcileDecision::Backoff,
-                                Some(format!(
-                                    "process-local external-tool services are unavailable for sealed materialization {key}: {reason}"
-                                )),
+                                &completion_authority,
+                                IdentityMemberActuationDisposition::Backoff {
+                                    detail: format!(
+                                        "process-local external-tool services are unavailable for sealed materialization {key}: {reason}"
+                                    ),
+                                },
                             )
                             .await;
                             return Ok(false);
@@ -18238,14 +19071,14 @@ impl MobActor {
                         Err(super::IdentityLocalExternalToolsError::AuthorityMismatch {
                             registered,
                         }) => {
-                            self.replace_identity_reconcile_status(
+                            self.record_identity_reconcile_disposition(
                                 identity,
-                                Some(intent_record.intent_revision),
-                                Some(write_lease.epoch),
-                                IdentityReconcileDecision::RepairBlocked,
-                                Some(format!(
-                                    "process-local external-tool authority mismatch: expected {key}, registered {registered}"
-                                )),
+                                &completion_authority,
+                                IdentityMemberActuationDisposition::RepairBlocked {
+                                    detail: format!(
+                                        "process-local external-tool authority mismatch: expected {key}, registered {registered}"
+                                    ),
+                                },
                             )
                             .await;
                             return Ok(false);
@@ -18253,14 +19086,14 @@ impl MobActor {
                         Err(super::IdentityLocalExternalToolsError::DefinitionMismatch {
                             detail,
                         }) => {
-                            self.replace_identity_reconcile_status(
+                            self.record_identity_reconcile_disposition(
                                 identity,
-                                Some(intent_record.intent_revision),
-                                Some(write_lease.epoch),
-                                IdentityReconcileDecision::RepairBlocked,
-                                Some(format!(
-                                    "process-local external-tool definition mismatch for sealed materialization {key}: {detail}"
-                                )),
+                                &completion_authority,
+                                IdentityMemberActuationDisposition::RepairBlocked {
+                                    detail: format!(
+                                        "process-local external-tool definition mismatch for sealed materialization {key}: {detail}"
+                                    ),
+                                },
                             )
                             .await;
                             return Ok(false);
@@ -18279,10 +19112,9 @@ impl MobActor {
                     match reply_rx.try_recv() {
                         Ok(reply) => {
                             let disposition = identity_member_actuation_disposition(&reply);
-                            self.record_identity_member_terminal_disposition(
+                            self.record_identity_reconcile_disposition(
                                 identity,
-                                intent_record.intent_revision,
-                                write_lease.epoch,
+                                &completion_authority,
                                 disposition,
                             )
                             .await;
@@ -18294,10 +19126,9 @@ impl MobActor {
                                     .to_string(),
                             ));
                             let disposition = identity_member_actuation_disposition(&reply);
-                            self.record_identity_member_terminal_disposition(
+                            self.record_identity_reconcile_disposition(
                                 identity,
-                                intent_record.intent_revision,
-                                write_lease.epoch,
+                                &completion_authority,
                                 disposition,
                             )
                             .await;
@@ -18309,7 +19140,7 @@ impl MobActor {
                             // before attempting reply delivery. Drop this
                             // internal observer deliberately: convergence is
                             // causally driven by actor custody, never by a
-                            // detached reply waiter or the periodic scan.
+                            // detached reply waiter or the safety sweep.
                             drop(reply_rx);
                             Ok(false)
                         }
@@ -18342,180 +19173,16 @@ impl MobActor {
         match action {
             Ok(requeue) => Ok(IdentityReconcilePassDisposition::Outcome(requeue)),
             Err(error) => {
-                self.replace_identity_reconcile_status(
+                let disposition = identity_actuation_error_disposition(&error);
+                self.record_identity_reconcile_disposition(
                     identity,
-                    Some(intent_record.intent_revision),
-                    Some(active_lease.epoch),
-                    decision,
-                    Some(error.to_string()),
+                    &completion_authority,
+                    disposition,
                 )
                 .await;
                 Ok(IdentityReconcilePassDisposition::Outcome(false))
             }
         }
-    }
-
-    async fn apply_identity_declaration_manifest(
-        &mut self,
-        manifest: crate::identity::IdentityDeclarationManifest,
-    ) -> Result<crate::identity::IdentityDeclarationManifestApplyOutcome, MobError> {
-        manifest.validate().map_err(|error| {
-            MobError::WiringError(format!("invalid identity declaration manifest: {error}"))
-        })?;
-        let request_digest = manifest.request_digest().map_err(|error| {
-            MobError::WiringError(format!(
-                "identity declaration request digest failed: {error}"
-            ))
-        })?;
-
-        // Replay must precede every environment-dependent compilation step.
-        // A lost acknowledgement remains replayable even after a realm
-        // profile, skill path, or base-prompt source changes or disappears.
-        if let Some(outcome) = self
-            .identity
-            .replay_identity_declaration(
-                &self.definition.id,
-                &manifest.scope_id,
-                &manifest.operation_id,
-                &request_digest,
-            )
-            .await
-            .map_err(MobError::from)?
-        {
-            self.enqueue_identity_declaration_outcome(&outcome);
-            return Ok(outcome);
-        }
-
-        if let Some(reason) = identity_recovery_slice_manifest_rejection(&manifest) {
-            return Err(MobError::WiringError(format!(
-                "identity declaration is outside the 0.8.2 legacy recovery slice: {reason}"
-            )));
-        }
-
-        let mut compiled_members = BTreeMap::new();
-        for (agent_identity, member) in &manifest.members {
-            if let Some(legacy_import) = &member.legacy_import {
-                let expected_session = legacy_import.session();
-                let persisted = self
-                    .session_service
-                    .load_persisted_session(&expected_session.session_id)
-                    .await
-                    .map_err(|error| {
-                        MobError::WiringError(format!(
-                            "legacy identity import for '{agent_identity}' could not observe session {}: {error}",
-                            expected_session.session_id
-                        ))
-                    })?
-                    .ok_or_else(|| {
-                        MobError::WiringError(format!(
-                            "legacy identity import for '{agent_identity}' requires existing session {}",
-                            expected_session.session_id
-                        ))
-                    })?;
-                match persisted.try_checkpoint_state().map_err(|error| {
-                    MobError::WiringError(format!(
-                        "legacy identity import checkpoint for '{agent_identity}' is invalid: {error}"
-                    ))
-                })? {
-                    meerkat_core::checkpoint::SessionCheckpointState::Verified(checkpoint)
-                        if &checkpoint == legacy_import.checkpoint() => {}
-                    meerkat_core::checkpoint::SessionCheckpointState::Verified(_) => {
-                        return Err(MobError::WiringError(format!(
-                            "legacy identity import checkpoint for '{agent_identity}' no longer matches the sealed request"
-                        )));
-                    }
-                    meerkat_core::checkpoint::SessionCheckpointState::LegacyUnverified { .. } => {
-                        return Err(MobError::WiringError(format!(
-                            "legacy identity import checkpoint for '{agent_identity}' is not typed authority"
-                        )));
-                    }
-                }
-            }
-            let material = match &member.material {
-                crate::identity::IdentityMemberMaterialDeclaration::Resolved { material } => {
-                    material.validate().map_err(|error| {
-                        MobError::WiringError(format!(
-                            "resolved desired material for '{agent_identity}' is invalid: {error}"
-                        ))
-                    })?;
-                    material.clone()
-                }
-                crate::identity::IdentityMemberMaterialDeclaration::Profile(declaration) => {
-                    let resolved_profile = if declaration.profile_override.is_none() {
-                        Some(
-                            self.definition
-                                .resolve_profile(
-                                    &declaration.profile_name,
-                                    self.realm_profile_store.as_ref(),
-                                )
-                                .await?,
-                        )
-                    } else {
-                        None
-                    };
-                    super::spec_compiler::compile_desired_member_material(
-                        super::spec_compiler::CompileDesiredMemberMaterialParams {
-                            agent_identity,
-                            declaration,
-                            resolved_profile: resolved_profile.as_ref(),
-                            definition: &self.definition,
-                            base_prompt: self.spawn_base_prompt_source.as_deref(),
-                            non_portable_disabled: Vec::new(),
-                        },
-                    )
-                    .await?
-                }
-            };
-            let (candidate_session_id, candidate_lineage_id) = member
-                .legacy_import
-                .as_ref()
-                .map(|legacy_import| {
-                    (
-                        legacy_import.session().session_id.clone(),
-                        legacy_import.session().lineage_id.clone(),
-                    )
-                })
-                .unwrap_or_else(|| {
-                    let session_id = meerkat_core::SessionId::new();
-                    let lineage_id = meerkat_core::SessionLineageId::for_session(&session_id);
-                    (session_id, lineage_id)
-                });
-            let candidate_initial_delivery_id = member
-                .initial_message
-                .as_ref()
-                .map(|_| meerkat_core::lifecycle::InputId::new());
-            compiled_members.insert(
-                agent_identity.clone(),
-                crate::identity::IdentityDeclarationMemberPlan {
-                    material,
-                    session_authority_policy: member.session_authority_policy,
-                    initial_message: member.initial_message.clone(),
-                    candidate_session_id,
-                    candidate_lineage_id,
-                    candidate_initial_delivery_id,
-                },
-            );
-        }
-        let plan = crate::identity::IdentityDeclarationApplyPlan::from_compiled_manifest(
-            &manifest,
-            compiled_members,
-        )
-        .map_err(|error| {
-            MobError::WiringError(format!(
-                "compiled identity declaration plan is invalid: {error}"
-            ))
-        })?;
-        let outcome = self
-            .identity
-            .apply_identity_declaration(&self.definition.id, &plan)
-            .await
-            .map_err(MobError::from)?;
-        #[cfg(any(test, feature = "test-support"))]
-        super::trigger_identity_recovery_fail_stop(
-            super::IdentityRecoveryFailStopPoint::ManifestCommittedBeforeReply,
-        );
-        self.enqueue_identity_declaration_outcome(&outcome);
-        Ok(outcome)
     }
 
     #[inline(never)]
@@ -19247,13 +19914,14 @@ impl MobActor {
                     let _ = ack_tx.send(());
                 }
                 MobCommand::RunFlow {
+                    run_id,
                     flow_id,
                     activation_params,
                     scoped_event_tx,
                     reply_tx,
                 } => {
                     let result = self
-                        .handle_run_flow(flow_id, activation_params, scoped_event_tx)
+                        .handle_run_flow(run_id, flow_id, activation_params, scoped_event_tx)
                         .await;
                     let _ = reply_tx.send(result);
                 }
@@ -20186,21 +20854,6 @@ impl MobActor {
                             .map(|material| material.to_snapshot()),
                     );
                 }
-                MobCommand::ApplyIdentityDeclarationManifest { manifest, reply_tx } => {
-                    let result = self
-                        .apply_identity_declaration_manifest(*manifest)
-                        .await;
-                    #[cfg(any(test, feature = "test-support"))]
-                    {
-                        if reply_tx.send(result).is_ok() {
-                            super::trigger_identity_recovery_fail_stop(
-                                super::IdentityRecoveryFailStopPoint::ManifestReplySent,
-                            );
-                        }
-                    }
-                    #[cfg(not(any(test, feature = "test-support")))]
-                    let _ = reply_tx.send(result);
-                }
                 MobCommand::GetIdentityIntent {
                     agent_identity,
                     reply_tx,
@@ -20208,29 +20861,6 @@ impl MobActor {
                     let result = self
                         .identity
                         .observe_identity_intent(&self.definition.id, &agent_identity)
-                        .await
-                        .map_err(MobError::from);
-                    let _ = reply_tx.send(result);
-                }
-                MobCommand::GetIdentityDeclarationReceipt {
-                    scope_id,
-                    operation_id,
-                    reply_tx,
-                } => {
-                    let subject = crate::identity::IdentityOperationSubject::DeclarationScope {
-                        scope_id: scope_id.clone(),
-                    };
-                    let slot = crate::identity::IdentityOperationSlot::ApplyDeclarationManifest {
-                        scope_id,
-                        mutation_id: operation_id,
-                    };
-                    let result = self
-                        .identity
-                        .observe_identity_operation_receipt(
-                            &self.definition.id,
-                            &subject,
-                            &slot,
-                        )
                         .await
                         .map_err(MobError::from);
                     let _ = reply_tx.send(result);
@@ -20321,12 +20951,17 @@ impl MobActor {
                                 let mut stop_result =
                                     self.fail_all_pending_spawns("mob is stopping").await;
                                 if stop_result.is_ok() {
-                                    self.cancel_pending_peer_deliveries("mob is stopping").await;
+                                    if let Err(error) =
+                                        self.cancel_pending_peer_deliveries("mob is stopping").await
+                                    {
+                                        stop_result = Err(error);
+                                    }
                                     // Lifecycle delivery is a real fault, not
                                     // best-effort: fold a failure into the stop
                                     // result rather than swallowing it. Cleanup
                                     // still proceeds so the mob can stop.
-                                    if !stop_intent_preexisting
+                                    if stop_result.is_ok()
+                                        && !stop_intent_preexisting
                                         && let Err(error) = self
                                             .notify_orchestrator_lifecycle(format!(
                                                 "Mob '{}' is stopping.",
@@ -20344,7 +20979,9 @@ impl MobActor {
                                     // Cancel checkpointer gates before stopping host loops so
                                     // in-flight saves that complete after the loop stops don't
                                     // race with subsequent external cleanup (e.g. DML deletes).
-                                    self.provisioner.cancel_all_checkpointers().await;
+                                    if stop_result.is_ok() {
+                                        self.provisioner.cancel_all_checkpointers().await;
+                                    }
                                 }
                                 if stop_result.is_ok() {
                                     let loop_result = self.stop_all_autonomous_members().await;
@@ -20621,7 +21258,7 @@ impl MobActor {
                         // chance to Dispose every exact host-row custody key.
                         self.fail_all_pending_spawns("mob is completing").await?;
                         self.cancel_pending_peer_deliveries("mob is completing")
-                            .await;
+                            .await?;
                         self.handle_complete().await
                     }
                     .await;
@@ -20639,8 +21276,7 @@ impl MobActor {
                         // Destroy is terminal for the current ownership model:
                         // once a mob is destroyed, the actor task exits and no
                         // further commands are accepted.
-                        self.lifecycle_tasks.abort_all();
-                        while self.lifecycle_tasks.join_next().await.is_some() {}
+                        self.abort_and_join_lifecycle_tasks().await;
                         return ActorLoopControl::BreakActor;
                     }
                 }
@@ -20665,7 +21301,7 @@ impl MobActor {
                         )?;
                         self.fail_all_pending_spawns("mob is resetting").await?;
                         self.cancel_pending_peer_deliveries("mob is resetting")
-                            .await;
+                            .await?;
                         self.handle_reset(prior_state).await
                     }
                     .await;
@@ -20914,8 +21550,12 @@ impl MobActor {
                             return ActorLoopControl::SkipBoundary;
                         }
                     } else {
-                        self.cancel_pending_peer_deliveries("mob runtime is shutting down")
-                            .await;
+                        if let Err(error) = self
+                            .cancel_pending_peer_deliveries("mob runtime is shutting down")
+                            .await
+                        {
+                            result = Err(error);
+                        }
                         if let Err(error) = self.cancel_all_flow_tasks().await {
                             tracing::warn!(error = %error, "shutdown flow cancellation encountered errors");
                             if result.is_ok() {
@@ -21048,62 +21688,175 @@ impl MobActor {
         // a cold incarnation always re-verifies every session document.
         let mut identity_session_witnesses = IdentityConvergedSessionWitnesses::new();
         let mut host_status_poll = tokio::time::interval(super::handle::HOST_STATUS_POLL_INTERVAL);
-        let mut identity_reconcile_tick = tokio::time::interval(IDENTITY_RECONCILE_TICK_INTERVAL);
-        let mut identity_reconcile_scan = tokio::time::interval(IDENTITY_RECONCILE_SCAN_INTERVAL);
+        let mut identity_reconcile_safety_scan =
+            tokio::time::interval(IDENTITY_RECONCILE_SAFETY_PAGE_INTERVAL);
         #[cfg(not(target_arch = "wasm32"))]
         host_status_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         #[cfg(not(target_arch = "wasm32"))]
-        identity_reconcile_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        #[cfg(not(target_arch = "wasm32"))]
-        identity_reconcile_scan.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        identity_reconcile_safety_scan
+            .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         // Consume interval's immediate first tick. Bind/rebind already perform
         // an eager observation; the periodic driver starts one cadence later.
         host_status_poll.tick().await;
-        identity_reconcile_tick.tick().await;
-        identity_reconcile_scan.tick().await;
+        identity_reconcile_safety_scan.tick().await;
+        enum RegularActorWake {
+            Routed(Option<RoutedMobCommand>),
+            HostStatusPoll,
+            IdentityReconcile,
+            IdentityBackoffDeadline,
+            IdentitySafetyScan,
+        }
         'actor: loop {
+            // Detached completion paths can re-enter through `continue` or
+            // `SkipBoundary`, bypassing the ordinary post-command boundary.
+            // Honor fail-stop before polling any new work so a confirmed
+            // durable panic quarantine transfers ownership to cold recovery.
+            if self.durable_uncertainty_fail_stop {
+                tracing::error!(
+                    mob_id = %self.definition.id,
+                    "durable mutation outcome remained uncertain; crash-quiescing and terminating mob actor for cold replay"
+                );
+                self.quiesce_volatile_producers_after_fail_stop().await;
+                command_rx.close();
+                break;
+            }
             self.drain_completed_actor_io_tasks();
             self.drain_completed_peer_delivery_tasks();
+            if let Err(error) = self.drain_completed_lifecycle_tasks() {
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    error = %error,
+                    "orchestrator lifecycle completion reconciliation failed"
+                );
+                self.retain_lifecycle_delivery_error(error);
+            }
+            self.drain_completed_member_live_mutations().await;
+            if self.durable_uncertainty_fail_stop {
+                // A drain may have just classified an actor-owned task as an
+                // ambiguous effect. Re-enter the loop-top fail-stop before
+                // selecting or dispatching even one more command.
+                continue;
+            }
+            let actor_io_pending = !self.actor_io_tasks.is_empty();
+            let peer_delivery_pending = !self.peer_delivery_tasks.is_empty();
+            let lifecycle_pending = !self.lifecycle_tasks.is_empty();
             let member_live_mutation_pending = !self.member_live_mutation_tasks.is_empty();
-            let routed = if let Some(routed) = deferred_commands.pop_front() {
-                routed
-            } else {
+            let identity_reconcile_pending = !self.identity_reconcile_queue.is_empty();
+            let identity_reconcile_backoff_wait = self.identity_reconcile_next_backoff_wait();
+            let deferred_command_pending = !deferred_commands.is_empty();
+            // Task completions are the actor's fault boundary. The outer
+            // biased select observes every ready JoinError before either a
+            // deferred or newly received command can be admitted. The inner
+            // select retains fairness for the always-ready identity lane
+            // versus new commands and timers.
+            let regular_wake = async {
                 tokio::select! {
-                    routed = command_rx.recv() => {
-                        let Some(routed) = routed else {
-                            break;
-                        };
-                        routed
+                    routed = command_rx.recv() => RegularActorWake::Routed(routed),
+                    _tick = host_status_poll.tick() => RegularActorWake::HostStatusPoll,
+                    // Queue admission is itself the causal wake. Tokio's
+                    // default select fairness arbitrates this always-ready
+                    // branch with commands and timers, so a self-requeued
+                    // identity cannot monopolize the actor.
+                    _ready = std::future::ready(()), if identity_reconcile_pending => {
+                        RegularActorWake::IdentityReconcile
                     }
-                    _tick = host_status_poll.tick() => {
-                        self.spawn_periodic_host_status_polls(&mut host_status_polls_in_flight).await;
-                        continue;
-                    }
-                    _tick = identity_reconcile_tick.tick() => {
-                        self.reconcile_next_identity(&mut identity_session_witnesses).await;
-                        continue;
-                    }
-                    _tick = identity_reconcile_scan.tick() => {
-                        self.enqueue_all_identity_intents().await;
-                        continue;
-                    }
-                    joined = self.member_live_mutation_tasks.join_next(),
-                        if member_live_mutation_pending =>
-                    {
-                        if let Some(joined) = joined
-                            && let Err(error) =
-                                self.reconcile_joined_member_live_mutation(
-                                    joined,
-                                    MemberLiveReconcileMode::Background,
-                                ).await
-                        {
-                            tracing::warn!(
-                                mob_id = %self.definition.id,
-                                error = %error,
-                                "mutating member-live completion reconciliation failed"
-                            );
+                    _deadline = async move {
+                        match identity_reconcile_backoff_wait {
+                            Some(wait) => tokio::time::sleep(wait).await,
+                            None => std::future::pending::<()>().await,
                         }
+                    } => RegularActorWake::IdentityBackoffDeadline,
+                    _tick = identity_reconcile_safety_scan.tick() => {
+                        RegularActorWake::IdentitySafetyScan
+                    }
+                }
+            };
+            let deferred_command = async { deferred_commands.pop_front() };
+            let routed = tokio::select! {
+                biased;
+                joined = self.actor_io_tasks.join_next(), if actor_io_pending => {
+                    if let Some(joined) = joined {
+                        self.reconcile_actor_io_task_join(joined);
+                    }
+                    continue;
+                }
+                joined = self.peer_delivery_tasks.join_next(), if peer_delivery_pending => {
+                    if let Some(joined) = joined {
+                        match joined {
+                            Ok(completion) => {
+                                self.peer_delivery_inflight.remove(&completion.id);
+                            }
+                            Err(error) => {
+                                let _ = self.reconcile_peer_delivery_join_error(
+                                    error,
+                                    "peer delivery completion",
+                                    ActorTaskJoinPanicDisposition::AmbiguousEffectFailStop,
+                                );
+                            }
+                        }
+                    }
+                    continue;
+                }
+                joined = self.lifecycle_tasks.join_next(), if lifecycle_pending => {
+                    if let Some(joined) = joined
+                        && let Err(error) = self.surface_lifecycle_task_outcome(joined)
+                    {
+                        tracing::warn!(
+                            mob_id = %self.definition.id,
+                            error = %error,
+                            "orchestrator lifecycle completion reconciliation failed"
+                        );
+                        self.retain_lifecycle_delivery_error(error);
+                    }
+                    continue;
+                }
+                joined = self.member_live_mutation_tasks.join_next(),
+                    if member_live_mutation_pending =>
+                {
+                    if let Some(joined) = joined
+                        && let Err(error) =
+                            self.reconcile_joined_member_live_mutation(
+                                joined,
+                                MemberLiveReconcileMode::Background,
+                            ).await
+                    {
+                        tracing::warn!(
+                            mob_id = %self.definition.id,
+                            error = %error,
+                            "mutating member-live completion reconciliation failed"
+                        );
+                    }
+                    continue;
+                }
+                deferred = deferred_command, if deferred_command_pending => {
+                    let Some(routed) = deferred else {
                         continue;
+                    };
+                    routed
+                }
+                wake = regular_wake => {
+                    match wake {
+                        RegularActorWake::Routed(Some(routed)) => routed,
+                        RegularActorWake::Routed(None) => break,
+                        RegularActorWake::HostStatusPoll => {
+                            self.spawn_periodic_host_status_polls(
+                                &mut host_status_polls_in_flight,
+                            )
+                            .await;
+                            continue;
+                        }
+                        RegularActorWake::IdentityReconcile => {
+                            self.reconcile_next_identity(&mut identity_session_witnesses).await;
+                            continue;
+                        }
+                        RegularActorWake::IdentityBackoffDeadline => {
+                            self.enqueue_due_identity_reconcile_backoffs();
+                            continue;
+                        }
+                        RegularActorWake::IdentitySafetyScan => {
+                            self.enqueue_next_identity_intent_safety_page().await;
+                            continue;
+                        }
                     }
                 }
             };
@@ -22219,22 +22972,39 @@ impl MobActor {
         ops_registry: Option<Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>>,
         reply_tx: oneshot::Sender<Result<super::handle::MemberSpawnReceipt, MobError>>,
     ) {
+        let requested_identity = AgentIdentity::from(spec.identity.as_str());
+        macro_rules! reject_spawn_before_custody {
+            ($stage:literal, $error:expr) => {{
+                let error = $error;
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    agent_identity = %requested_identity,
+                    spawn_source = spawn_source.as_str(),
+                    stage = $stage,
+                    error = %error,
+                    "member spawn rejected before asynchronous spawn custody"
+                );
+                let _ = reply_tx.send(Err(error));
+                return;
+            }};
+        }
         let suppress_autonomous_initial_prompt =
             matches!(spawn_source, super::handle::SpawnSource::IdentityReconcile);
         if suppress_autonomous_initial_prompt != identity_member_permit.is_some() {
-            let _ = reply_tx.send(Err(MobError::Internal(
+            reject_spawn_before_custody!(
+                "source_permit_contract",
+                MobError::Internal(
                 "identity member actuation permits must be carried only by identity reconciliation spawns"
                     .to_string(),
-            )));
-            return;
+                )
+            );
         }
         let spawner = match owner_bridge_session_id.as_ref() {
             Some(owner_session_id) => self.spawner_for_bridge_session(owner_session_id).await,
             None => None,
         };
         if let Err(error) = self.customize_spawn_spec(spawn_source, spawner.as_ref(), &mut spec) {
-            let _ = reply_tx.send(Err(error));
-            return;
+            reject_spawn_before_custody!("customize_spawn_spec", error);
         }
         // Multi-host §7.3: a placed spawn takes the remote materialization
         // lane wholesale (compile → digest-authorized ladder open at enqueue
@@ -22242,11 +23012,13 @@ impl MobActor {
         #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
         if spec.placement.is_some() {
             if identity_member_permit.is_some() {
-                let _ = reply_tx.send(Err(MobError::WiringError(
+                reject_spawn_before_custody!(
+                    "identity_placement_contract",
+                    MobError::WiringError(
                     "identity reconciliation does not materialize placed members in this release slice"
                         .to_string(),
-                )));
-                return;
+                    )
+                );
             }
             self.enqueue_spawn_remote(
                 spec,
@@ -22261,10 +23033,12 @@ impl MobActor {
         }
         #[cfg(not(all(feature = "runtime-adapter", not(target_arch = "wasm32"))))]
         if spec.placement.is_some() {
-            let _ = reply_tx.send(Err(MobError::WiringError(
-                "placed spawns require the runtime-adapter mob build".to_string(),
-            )));
-            return;
+            reject_spawn_before_custody!(
+                "placement_capability",
+                MobError::WiringError(
+                    "placed spawns require the runtime-adapter mob build".to_string(),
+                )
+            );
         }
         let allow_reserved_flow_identity = spawn_source.allows_reserved_flow_identity();
         let super::handle::SpawnMemberSpec {
@@ -22294,8 +23068,7 @@ impl MobActor {
         } = spec;
         let agent_identity = AgentIdentity::from(identity.as_str());
         if let Err(error) = self.preview_spawn_command_admission(&agent_identity) {
-            let _ = reply_tx.send(Err(error));
-            return;
+            reject_spawn_before_custody!("command_admission", error);
         }
         // Normalize launch-mode resume/fork details for the provisioning path.
         let resume_bridge_session_id = launch_mode.resume_bridge_session_id().cloned();
@@ -22774,26 +23547,26 @@ impl MobActor {
         ) = match prepare_result {
             Ok(prepared) => prepared,
             Err(error) => {
-                let _ = reply_tx.send(Err(error));
-                return;
+                reject_spawn_before_custody!("prepare", error);
             }
         };
 
         // ---------- Resume fast-path: skip async provisioning ----------
         if let Some(member_ref) = resume_member_ref {
             let Some(bridge_session_id) = member_ref.bridge_session_id().cloned() else {
-                let _ = reply_tx.send(Err(MobError::Internal(format!(
-                    "resumed member '{agent_identity}' has no bridge session id"
-                ))));
-                return;
+                reject_spawn_before_custody!(
+                    "resume_bridge_session",
+                    MobError::Internal(format!(
+                        "resumed member '{agent_identity}' has no bridge session id"
+                    ))
+                );
             };
             if let Err(error) = self.preview_spawn_admission(
                 &agent_identity,
                 &authorized_profile_material,
                 Some(&bridge_session_id),
             ) {
-                let _ = reply_tx.send(Err(error));
-                return;
+                reject_spawn_before_custody!("resume_admission", error);
             }
             if let (Some(owner_bridge_session_id), Some(ops_registry)) =
                 (owner_bridge_session_id.clone(), ops_registry.clone())
@@ -22802,8 +23575,7 @@ impl MobActor {
                     .bind_member_owner_context(&member_ref, owner_bridge_session_id, ops_registry)
                     .await
             {
-                let _ = reply_tx.send(Err(error));
-                return;
+                reject_spawn_before_custody!("resume_owner_context", error);
             }
             let operation_id = self
                 .provisioner
@@ -22817,16 +23589,14 @@ impl MobActor {
             let operation_id = match operation_id {
                 Ok(operation_id) => operation_id,
                 Err(error) => {
-                    let _ = reply_tx.send(Err(error));
-                    return;
+                    reject_spawn_before_custody!("resume_operation_authority", error);
                 }
             };
             // Go straight to finalization — no async provisioning task needed.
             let fence = match self.issue_fence_token() {
                 Ok(fence) => fence,
                 Err(error) => {
-                    let _ = reply_tx.send(Err(error));
-                    return;
+                    reject_spawn_before_custody!("resume_fence", error);
                 }
             };
             // Machine-owned generation mint (ADJ-24): INITIAL when the
@@ -22834,8 +23604,7 @@ impl MobActor {
             let generation = match self.mint_spawn_generation(&agent_identity) {
                 Ok(generation) => generation,
                 Err(error) => {
-                    let _ = reply_tx.send(Err(error));
-                    return;
+                    reject_spawn_before_custody!("resume_generation", error);
                 }
             };
             let rollback_authority = match self
@@ -22845,8 +23614,7 @@ impl MobActor {
             {
                 Ok(authority) => authority,
                 Err(error) => {
-                    let _ = reply_tx.send(Err(error));
-                    return;
+                    reject_spawn_before_custody!("resume_rollback_authority", error);
                 }
             };
             let provision = PendingProvision::new(
@@ -22884,16 +23652,26 @@ impl MobActor {
             ))
             .await
             .map(|outcome| outcome.receipt);
+            if let Err(error) = result.as_ref() {
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    agent_identity = %agent_identity,
+                    spawn_source = spawn_source.as_str(),
+                    stage = "resume_finalize",
+                    error = %error,
+                    "member spawn failed before asynchronous spawn custody"
+                );
+            }
             let _ = reply_tx.send(result);
             return;
         }
 
         // Normal provisioning path — resume path already returned above.
         let Some(mut provision_input) = maybe_provision_input else {
-            let _ = reply_tx.send(Err(MobError::Internal(
-                "provision input missing for normal spawn path".into(),
-            )));
-            return;
+            reject_spawn_before_custody!(
+                "provision_input",
+                MobError::Internal("provision input missing for normal spawn path".into())
+            );
         };
         let admitted_bridge_session_id = provision_input.admitted_bridge_session_id();
         let spawn_bridge_session_id = match provision_input.binding() {
@@ -22907,8 +23685,7 @@ impl MobActor {
             &authorized_profile_material,
             spawn_bridge_session_id,
         ) {
-            let _ = reply_tx.send(Err(error));
-            return;
+            reject_spawn_before_custody!("spawn_admission", error);
         }
 
         let spawn_ticket = self.next_spawn_ticket;
@@ -22922,15 +23699,13 @@ impl MobActor {
             match self.stage_orchestrator_spawn(&agent_identity, &admitted_bridge_session_id) {
                 Ok(authority) => authority,
                 Err(error) => {
-                    let _ = reply_tx.send(Err(error));
-                    return;
+                    reject_spawn_before_custody!("orchestrator_spawn_stage", error);
                 }
             };
         if let Err(error) = provision_input
             .install_generated_self_owned_operation_owner(&generated_self_owned_operation_owner)
         {
-            let _ = reply_tx.send(Err(error));
-            return;
+            reject_spawn_before_custody!("operation_owner_install", error);
         }
 
         // External provisioning installs supervisor-bridge recipient trust
@@ -22951,8 +23726,7 @@ impl MobActor {
                 "enqueue_spawn external provision",
             )
         {
-            let _ = reply_tx.send(Err(error));
-            return;
+            reject_spawn_before_custody!("recipient_trust_obligation", error);
         }
 
         let pending = PendingSpawn {
@@ -22985,6 +23759,15 @@ impl MobActor {
         let spawn_started = match generated_self_owned_operation_owner.start(&pending) {
             Ok(started) => started,
             Err(error) => {
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    agent_identity = %pending.agent_identity,
+                    spawn_source = spawn_source.as_str(),
+                    spawn_ticket,
+                    stage = "operation_owner_start",
+                    error = %error,
+                    "member spawn failed before asynchronous spawn custody"
+                );
                 let _ = pending.reply_tx.send(Err(error));
                 return;
             }
@@ -22999,58 +23782,83 @@ impl MobActor {
         let task = tokio::spawn(async move {
             let panic_member_identity = spawn_member_identity.clone();
             // Panic boundary (see `panic_capture` for the 2026-07-29 incident
-            // WHY): recover + log the payload once per distinct payload and
+            // WHY): recover + log the payload at bounded repeat checkpoints and
             // feed the typed SpawnProvisioned failure path — never a silent
             // `Err(_)` that the identity-reconcile requeue can retry into a
             // 99%-CPU panic/symbolication furnace.
-            let provision_result = super::panic_capture::run_spawn_provision_guarded(
+            // The nested result deliberately makes the guarded future itself
+            // infallible: an outer Err can therefore only be a caught panic,
+            // while ordinary provisioning failures remain the inner result.
+            // A panic cannot certify whether external materialization happened.
+            let guarded_provision = super::panic_capture::run_spawn_provision_guarded(
                 panic_log_ledger.as_ref(),
                 &panic_mob_id,
                 "spawn provisioning task",
                 &panic_member_identity,
                 async {
-                let provision_request = provision_input.into_request(session_service).await?;
-                let spawn_receipt = provisioner.provision_member(provision_request).await?;
-                if let Some(bridge_session_id) =
-                    spawn_receipt.member_ref.bridge_session_id().cloned()
-                {
-                    let mut progress = pending_progress
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    progress.bridge_session_id = Some(bridge_session_id);
-                    progress.operation_id = Some(spawn_receipt.operation_id.clone());
-                }
-                #[cfg(test)]
-                {
-                    let delay_ms = SPAWN_PROVISIONED_COMMAND_DELAY_MS
-                        .load(std::sync::atomic::Ordering::Relaxed);
-                    if delay_ms > 0 {
-                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    let provision_result: Result<_, MobError> = async {
+                        let provision_request =
+                            provision_input.into_request(session_service).await?;
+                        let spawn_receipt =
+                            provisioner.provision_member(provision_request).await?;
+                        if let Some(bridge_session_id) =
+                            spawn_receipt.member_ref.bridge_session_id().cloned()
+                        {
+                            let mut progress = pending_progress
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            progress.bridge_session_id = Some(bridge_session_id);
+                            progress.operation_id = Some(spawn_receipt.operation_id.clone());
+                        }
+                        #[cfg(test)]
+                        {
+                            let delay_ms = SPAWN_PROVISIONED_COMMAND_DELAY_MS
+                                .load(std::sync::atomic::Ordering::Relaxed);
+                            if delay_ms > 0 {
+                                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                            }
+                        }
+                        if spawn_runtime_mode == crate::MobRuntimeMode::AutonomousHost
+                            && let Err(capability_error) =
+                                Self::ensure_autonomous_dispatch_capability_for_provisioner(
+                                    &provisioner,
+                                    &spawn_member_identity,
+                                    &spawn_receipt.member_ref,
+                                )
+                                .await
+                        {
+                            if let Err(retire_error) =
+                                provisioner.retire_member(&spawn_receipt.member_ref).await
+                            {
+                                return Err(MobError::Internal(format!(
+                                    "autonomous capability check failed for '{spawn_member_identity}': {capability_error}; cleanup retire failed for member '{:?}': {retire_error}",
+                                    spawn_receipt.member_ref
+                                )));
+                            }
+                            return Err(capability_error);
+                        }
+                        Ok(spawn_receipt)
                     }
-                }
-                if spawn_runtime_mode == crate::MobRuntimeMode::AutonomousHost
-                    && let Err(capability_error) =
-                        Self::ensure_autonomous_dispatch_capability_for_provisioner(
-                            &provisioner,
-                            &spawn_member_identity,
-                            &spawn_receipt.member_ref,
-                        )
-                        .await
-                {
-                    if let Err(retire_error) =
-                        provisioner.retire_member(&spawn_receipt.member_ref).await
-                    {
-                        return Err(MobError::Internal(format!(
-                            "autonomous capability check failed for '{spawn_member_identity}': {capability_error}; cleanup retire failed for member '{:?}': {retire_error}",
-                            spawn_receipt.member_ref
-                        )));
-                    }
-                    return Err(capability_error);
-                }
-                Ok(spawn_receipt)
+                    .await;
+                    Ok::<_, MobError>(provision_result)
                 },
             )
             .await;
+            let provision_result = match guarded_provision {
+                Ok(result) => result,
+                Err(panic_error) => {
+                    tracing::error!(
+                        spawn_ticket,
+                        member = %panic_member_identity,
+                        disposition = "external_cleanup_uncertain",
+                        error = %panic_error,
+                        "spawn provisioning panic cannot certify external cleanup"
+                    );
+                    Err(MobError::ExternalMemberCleanupUncertain {
+                        reason: panic_error.to_string(),
+                    })
+                }
+            };
 
             if let Err(send_error) = command_tx
                 .send(RoutedMobCommand::internal(MobCommand::SpawnProvisioned {
@@ -23058,19 +23866,36 @@ impl MobActor {
                     result: provision_result,
                 }))
                 .await
-                && let MobCommand::SpawnProvisioned {
-                    result: Ok(spawn_receipt),
-                    ..
-                } = send_error.0.cmd
-                && let Err(cleanup_error) =
-                    provisioner.retire_member(&spawn_receipt.member_ref).await
             {
-                tracing::warn!(
-                    spawn_ticket,
-                    member_ref = ?spawn_receipt.member_ref,
-                    error = %cleanup_error,
-                    "spawn completion dropped; failed cleanup retire for provisioned member"
-                );
+                match send_error.0.cmd {
+                    MobCommand::SpawnProvisioned {
+                        result: Ok(spawn_receipt),
+                        ..
+                    } => match provisioner.retire_member(&spawn_receipt.member_ref).await {
+                        Ok(()) => tracing::warn!(
+                            spawn_ticket,
+                            member_ref = ?spawn_receipt.member_ref,
+                            "spawn completion dropped because the actor is gone; provisioned member was retired"
+                        ),
+                        Err(cleanup_error) => tracing::warn!(
+                            spawn_ticket,
+                            member_ref = ?spawn_receipt.member_ref,
+                            error = %cleanup_error,
+                            "spawn completion dropped; failed cleanup retire for provisioned member"
+                        ),
+                    },
+                    MobCommand::SpawnProvisioned {
+                        result: Err(error), ..
+                    } => tracing::warn!(
+                        spawn_ticket,
+                        error = %error,
+                        "spawn completion dropped because the actor is gone; preserving the typed provisioning failure"
+                    ),
+                    _ => tracing::error!(
+                        spawn_ticket,
+                        "spawn task recovered a non-spawn command after completion delivery failed"
+                    ),
+                }
             }
         });
         if let Err(error) = self
@@ -23713,6 +24538,7 @@ impl MobActor {
         restore_wiring: Option<RestoreWiringPlan>,
         reply_tx: oneshot::Sender<Result<super::handle::MemberSpawnReceipt, MobError>>,
     ) {
+        let requested_identity = AgentIdentity::from(spec.identity.as_str());
         let abandonment_origin = respawn_origin.clone();
         let result = self
             .enqueue_spawn_remote_inner(
@@ -23745,6 +24571,14 @@ impl MobActor {
             } else {
                 error
             };
+            tracing::warn!(
+                mob_id = %self.definition.id,
+                agent_identity = %requested_identity,
+                spawn_lane = "remote",
+                reply_withheld = !may_reply,
+                error = %error,
+                "remote member spawn failed before asynchronous spawn custody"
+            );
             if may_reply {
                 let _ = reply_tx.send(Err(error));
             }
@@ -24597,32 +25431,54 @@ impl MobActor {
         let task = tokio::spawn(async move {
             let panic_member_identity = spawn_member_identity.clone();
             // Panic boundary (see `panic_capture` for the 2026-07-29 incident
-            // WHY): recover + log the payload once per distinct payload and
+            // WHY): recover + log the payload at bounded repeat checkpoints and
             // feed the typed SpawnProvisioned failure path — never a silent
             // `Err(_)` that an eager requeue can retry into a furnace.
-            let provision_result = super::panic_capture::run_spawn_provision_guarded(
+            // As above, the outer result is reserved for caught panics so
+            // cleanup uncertainty cannot be confused with an ordinary typed
+            // materialization failure that certified rollback.
+            let guarded_provision = super::panic_capture::run_spawn_provision_guarded(
                 panic_log_ledger.as_ref(),
                 &panic_mob_id,
                 "remote spawn dispatch task",
                 &panic_member_identity,
                 async {
-                    let materialized = provisioner
-                        .materialize_member(super::provisioner::MaterializeMemberRequest {
-                            host_peer,
-                            payload,
-                            peer_name,
-                            owner_bridge_session_id: owner_session,
-                            ops_registry,
-                            provision_operation_id,
-                            operation_anchor:
-                                super::provisioner::PlacedProvisionOperationAnchor::NewPending,
-                            timeout: super::provisioner::MATERIALIZE_BRIDGE_TIMEOUT,
-                        })
-                        .await?;
-                    Ok(materialized.receipt)
+                    let provision_result: Result<_, MobError> = async {
+                        let materialized = provisioner
+                            .materialize_member(super::provisioner::MaterializeMemberRequest {
+                                host_peer,
+                                payload,
+                                peer_name,
+                                owner_bridge_session_id: owner_session,
+                                ops_registry,
+                                provision_operation_id,
+                                operation_anchor:
+                                    super::provisioner::PlacedProvisionOperationAnchor::NewPending,
+                                timeout: super::provisioner::MATERIALIZE_BRIDGE_TIMEOUT,
+                            })
+                            .await?;
+                        Ok(materialized.receipt)
+                    }
+                    .await;
+                    Ok::<_, MobError>(provision_result)
                 },
             )
             .await;
+            let provision_result = match guarded_provision {
+                Ok(result) => result,
+                Err(panic_error) => {
+                    tracing::error!(
+                        spawn_ticket,
+                        member = %panic_member_identity,
+                        disposition = "external_cleanup_uncertain",
+                        error = %panic_error,
+                        "remote spawn dispatch panic cannot certify materialization cleanup"
+                    );
+                    Err(MobError::ExternalMemberCleanupUncertain {
+                        reason: panic_error.to_string(),
+                    })
+                }
+            };
             if let Err(send_error) = command_tx
                 .send(RoutedMobCommand::internal(MobCommand::SpawnProvisioned {
                     spawn_ticket,
@@ -24630,11 +25486,23 @@ impl MobActor {
                 }))
                 .await
             {
-                tracing::warn!(
-                    spawn_ticket,
-                    error = %send_error,
-                    "remote spawn completion dropped (actor gone); host row is an orphan seed"
-                );
+                match send_error.0.cmd {
+                    MobCommand::SpawnProvisioned { result: Ok(_), .. } => tracing::warn!(
+                        spawn_ticket,
+                        "remote spawn completion dropped because the actor is gone; host row is an orphan seed"
+                    ),
+                    MobCommand::SpawnProvisioned {
+                        result: Err(error), ..
+                    } => tracing::warn!(
+                        spawn_ticket,
+                        error = %error,
+                        "remote spawn completion dropped because the actor is gone; preserving the typed materialization failure"
+                    ),
+                    _ => tracing::error!(
+                        spawn_ticket,
+                        "remote spawn task recovered a non-spawn command after completion delivery failed"
+                    ),
+                }
             }
         });
         if let Err(error) = self
@@ -24774,7 +25642,22 @@ impl MobActor {
             } = pending;
             let identity_reconcile_authority = identity_member_permit
                 .as_ref()
-                .map(|permit| (permit.intent_revision, permit.lease_epoch));
+                .map(IdentityReconcileCompletionAuthority::from_permit);
+            if let Err(error) = &result
+                && error.external_member_cleanup_is_uncertain()
+            {
+                // A caught provisioning panic cannot prove whether an
+                // external member or host row was created. Keep every durable
+                // recovery anchor intact and stop this incarnation; it must
+                // never flow through the ordinary "failure means cleanup"
+                // path below, even when no recipient-trust peer was involved.
+                self.durable_uncertainty_fail_stop = true;
+                tracing::error!(
+                    member = %agent_identity,
+                    error = %error,
+                    "spawn completion cannot certify external cleanup; fail-stopping actor for cold recovery"
+                );
+            }
             // Close the external recipient-trust obligation window recorded at
             // enqueue only when terminality is certified. A successful
             // provision resolves it; an ordinary failure means the provisioner
@@ -24789,7 +25672,6 @@ impl MobActor {
                         "spawn provisioned batch confirmed",
                     )),
                     Err(error) if error.external_member_cleanup_is_uncertain() => {
-                        self.durable_uncertainty_fail_stop = true;
                         tracing::error!(
                             peer_id,
                             error = %error,
@@ -24966,14 +25848,11 @@ impl MobActor {
                                     )),
                                 };
                                 let reply = Err(error);
-                                if let Some((intent_revision, lease_epoch)) =
-                                    identity_reconcile_authority
-                                {
+                                if let Some(authority) = identity_reconcile_authority.as_ref() {
                                     let disposition = identity_member_actuation_disposition(&reply);
-                                    self.record_identity_member_terminal_disposition(
+                                    self.record_identity_reconcile_disposition(
                                         &agent_identity,
-                                        intent_revision,
-                                        lease_epoch,
+                                        authority,
                                         disposition,
                                     )
                                     .await;
@@ -25004,14 +25883,11 @@ impl MobActor {
                                     )),
                                 };
                                 let reply = Err(error);
-                                if let Some((intent_revision, lease_epoch)) =
-                                    identity_reconcile_authority
-                                {
+                                if let Some(authority) = identity_reconcile_authority.as_ref() {
                                     let disposition = identity_member_actuation_disposition(&reply);
-                                    self.record_identity_member_terminal_disposition(
+                                    self.record_identity_reconcile_disposition(
                                         &agent_identity,
-                                        intent_revision,
-                                        lease_epoch,
+                                        authority,
                                         disposition,
                                     )
                                     .await;
@@ -25116,15 +25992,10 @@ impl MobActor {
                     "spawn failed"
                 ),
             }
-            if let Some((intent_revision, lease_epoch)) = identity_reconcile_authority {
+            if let Some(authority) = identity_reconcile_authority.as_ref() {
                 let disposition = identity_member_actuation_disposition(&reply);
-                self.record_identity_member_terminal_disposition(
-                    &agent_identity,
-                    intent_revision,
-                    lease_epoch,
-                    disposition,
-                )
-                .await;
+                self.record_identity_reconcile_disposition(&agent_identity, authority, disposition)
+                    .await;
             }
             if may_reply {
                 let reply_delivered = reply_tx.send(reply).is_ok();
@@ -27921,15 +28792,71 @@ impl MobActor {
         .await
     }
 
+    fn member_live_task_panic_log_key(
+        operation: &str,
+        agent_identity: &AgentIdentity,
+        target: &MemberLiveMutationTarget,
+        disposition: MemberLivePanicDisposition,
+    ) -> String {
+        let target_kind = match target {
+            MemberLiveMutationTarget::Placed { .. } => "placed",
+            MemberLiveMutationTarget::Local { .. } => "local",
+        };
+        format!(
+            "member-live:{operation}:{agent_identity}:{target_kind}:{}",
+            disposition.as_str()
+        )
+    }
+
+    fn member_live_task_panic_log_gate() -> &'static meerkat_core::panic_payload::PanicPayloadLogGate
+    {
+        static PANIC_LOG_GATE: std::sync::OnceLock<
+            meerkat_core::panic_payload::PanicPayloadLogGate,
+        > = std::sync::OnceLock::new();
+        PANIC_LOG_GATE.get_or_init(meerkat_core::panic_payload::PanicPayloadLogGate::default)
+    }
+
+    fn clear_member_live_task_panic_log(
+        operation: &str,
+        agent_identity: &AgentIdentity,
+        target: &MemberLiveMutationTarget,
+        disposition: MemberLivePanicDisposition,
+    ) {
+        Self::member_live_task_panic_log_gate().clear(&Self::member_live_task_panic_log_key(
+            operation,
+            agent_identity,
+            target,
+            disposition,
+        ));
+    }
+
     fn member_live_task_panic_error(
         operation: &str,
         agent_identity: &AgentIdentity,
         target: &MemberLiveMutationTarget,
+        disposition: MemberLivePanicDisposition,
         payload: Box<dyn std::any::Any + Send>,
     ) -> MobError {
         let detail = super::panic_capture::panic_payload_detail(payload.as_ref());
+        let log_decision = Self::member_live_task_panic_log_gate().observe(
+            &Self::member_live_task_panic_log_key(operation, agent_identity, target, disposition),
+            &detail,
+        );
+        if log_decision.should_log {
+            tracing::error!(
+                member = %agent_identity,
+                operation,
+                target_kind,
+                disposition = disposition.as_str(),
+                panic = %detail,
+                repeated_sightings = log_decision.repeated_sightings,
+                "actor-owned member-live task panicked; payload recovered, sanitized, and routed through its typed completion"
+            );
+        }
         MobError::Internal(format!(
-            "actor-owned member-live {operation} panicked for member '{agent_identity}' at {target:?}: {detail}"
+            "actor-owned member-live {operation} panicked for member '{agent_identity}' at \
+             {target:?}; disposition={}: {detail}",
+            disposition.as_str()
         ))
     }
 
@@ -27949,6 +28876,15 @@ impl MobActor {
     fn member_live_cleanup_retry_delay(attempts: u32) -> std::time::Duration {
         let shift = attempts.saturating_sub(1).min(5);
         std::time::Duration::from_millis(100_u64.saturating_mul(1_u64 << shift))
+    }
+
+    fn member_live_cleanup_panic_retry_delay(attempts: u32) -> std::time::Duration {
+        // A caught panic already ran the process panic hook (including
+        // symbolication). If durable custody is not yet confirmed, retain the
+        // volatile fence and retry slowly rather than feeding an invariant
+        // fault into the ordinary sub-second transport cadence.
+        let shift = attempts.saturating_sub(1).min(5);
+        std::time::Duration::from_secs(30_u64.saturating_mul(1_u64 << shift))
     }
 
     fn member_live_cleanup_target_record(
@@ -28083,6 +29019,8 @@ impl MobActor {
                 reason: reason.to_string(),
                 attempts: 0,
                 last_error,
+                panic_quarantined: false,
+                panic_backoff: false,
                 delivery_pending_ack: false,
                 caller_acknowledged: false,
                 delivery_confirmation: None,
@@ -28133,6 +29071,8 @@ impl MobActor {
                     reason: reason.to_string(),
                     attempts: 0,
                     last_error: Some(persist_error.to_string()),
+                    panic_quarantined: false,
+                    panic_backoff: false,
                     delivery_pending_ack: false,
                     caller_acknowledged: false,
                     delivery_confirmation: None,
@@ -28159,6 +29099,8 @@ impl MobActor {
                 reason: reason.to_string(),
                 attempts: 0,
                 last_error: None,
+                panic_quarantined: false,
+                panic_backoff: false,
                 delivery_pending_ack: true,
                 caller_acknowledged: false,
                 delivery_confirmation: None,
@@ -28210,6 +29152,10 @@ impl MobActor {
                 "member-live cleanup ticket {ticket} has no actor-owned obligation"
             )));
         };
+        if obligation.panic_quarantined {
+            self.member_live_open_cleanup_inflight.remove(&ticket);
+            return Ok(());
+        }
         let supervisor_bridge = Arc::clone(&self.supervisor_bridge);
         let member_live_host = self.member_live_host.clone();
         let agent_identity = obligation.agent_identity.clone();
@@ -28221,6 +29167,9 @@ impl MobActor {
         let durable_persistence_confirmed = obligation.durable_persistence_confirmed;
         let runtime_metadata = Arc::clone(&self.runtime_metadata);
         let mob_id = self.definition.id.clone();
+        let panic_runtime_metadata = Arc::clone(&runtime_metadata);
+        let panic_mob_id = mob_id.clone();
+        let panic_durable_record = durable_record.clone();
         self.member_live_mutation_tasks.spawn(async move {
             if !delay.is_zero() {
                 tokio::time::sleep(delay).await;
@@ -28259,24 +29208,106 @@ impl MobActor {
                 };
                 (persistence_confirmed, result)
             };
-            let (durable_persistence_confirmed, result) = std::panic::AssertUnwindSafe(cleanup)
-                .catch_unwind()
-                .await
-                .unwrap_or_else(|payload| {
-                    (
-                        durable_persistence_confirmed,
-                        Err(Self::member_live_task_panic_error(
+            let (durable_persistence_confirmed, result, panicked) =
+                match std::panic::AssertUnwindSafe(cleanup).catch_unwind().await {
+                    Ok((durable_persistence_confirmed, result)) => {
+                        Self::clear_member_live_task_panic_log(
                             "open cleanup",
                             &agent_identity,
                             &panic_target,
+                            MemberLivePanicDisposition::QuarantinedCleanup,
+                        );
+                        Self::clear_member_live_task_panic_log(
+                            "open cleanup",
+                            &agent_identity,
+                            &panic_target,
+                            MemberLivePanicDisposition::BackoffUntilDurable,
+                        );
+                        (durable_persistence_confirmed, result, false)
+                    }
+                    Err(payload) => {
+                        // The faulting future may have persisted the row before
+                        // unwinding. Re-establish exact durable custody before
+                        // authorizing a cold-recovery fail-stop. This second
+                        // boundary is independently caught because persistence
+                        // code is exactly what may have faulted.
+                        let (durable_persistence_confirmed, confirmation_failure) =
+                            if durable_persistence_confirmed {
+                                (true, None)
+                            } else {
+                                match std::panic::AssertUnwindSafe(
+                                    Self::confirm_member_live_open_cleanup_persistence(
+                                        panic_runtime_metadata.as_ref(),
+                                        &panic_mob_id,
+                                        &panic_durable_record,
+                                    ),
+                                )
+                                .catch_unwind()
+                                .await
+                                {
+                                    Ok(Ok(())) => {
+                                        Self::clear_member_live_task_panic_log(
+                                            "open cleanup custody confirmation",
+                                            &agent_identity,
+                                            &panic_target,
+                                            MemberLivePanicDisposition::BackoffUntilDurable,
+                                        );
+                                        (true, None)
+                                    }
+                                    Ok(Err(error)) => {
+                                        Self::clear_member_live_task_panic_log(
+                                            "open cleanup custody confirmation",
+                                            &agent_identity,
+                                            &panic_target,
+                                            MemberLivePanicDisposition::BackoffUntilDurable,
+                                        );
+                                        tracing::error!(
+                                            member = %agent_identity,
+                                            target = ?panic_target,
+                                            disposition = MemberLivePanicDisposition::BackoffUntilDurable.as_str(),
+                                            error = %error,
+                                            "post-panic member-live cleanup custody confirmation failed"
+                                        );
+                                        (false, Some(error.to_string()))
+                                    }
+                                    Err(payload) => {
+                                        let error = Self::member_live_task_panic_error(
+                                            "open cleanup custody confirmation",
+                                            &agent_identity,
+                                            &panic_target,
+                                            MemberLivePanicDisposition::BackoffUntilDurable,
+                                            payload,
+                                        );
+                                        (false, Some(error.to_string()))
+                                    }
+                                }
+                            };
+                        let disposition = if durable_persistence_confirmed {
+                            MemberLivePanicDisposition::QuarantinedCleanup
+                        } else {
+                            MemberLivePanicDisposition::BackoffUntilDurable
+                        };
+                        let panic_error = Self::member_live_task_panic_error(
+                            "open cleanup",
+                            &agent_identity,
+                            &panic_target,
+                            disposition,
                             payload,
-                        )),
-                    )
-                });
+                        );
+                        let panic_error = match confirmation_failure {
+                            None => panic_error,
+                            Some(confirmation_failure) => MobError::Internal(format!(
+                                "{panic_error}; exact durable cleanup custody remains unconfirmed: {confirmation_failure}"
+                            )),
+                        };
+                        (durable_persistence_confirmed, Err(panic_error), true)
+                    }
+                };
             MemberLiveMutationCompletion::OpenCleanup {
                 ticket,
                 durable_persistence_confirmed,
                 result,
+                panicked,
             }
         });
         Ok(())
@@ -28285,9 +29316,12 @@ impl MobActor {
     fn schedule_retained_member_live_open_cleanups(&mut self) -> Result<(), MobError> {
         let tickets = self
             .member_live_open_cleanup_obligations
-            .keys()
-            .copied()
-            .filter(|ticket| !self.member_live_open_cleanup_inflight.contains(ticket))
+            .iter()
+            .filter(|(ticket, obligation)| {
+                !obligation.panic_quarantined
+                    && !self.member_live_open_cleanup_inflight.contains(ticket)
+            })
+            .map(|(ticket, _)| *ticket)
             .collect::<Vec<_>>();
         for ticket in tickets {
             self.spawn_member_live_open_cleanup_attempt(ticket, std::time::Duration::ZERO)?;
@@ -28385,6 +29419,8 @@ impl MobActor {
                     reason: record.reason.clone(),
                     attempts: 0,
                     last_error: None,
+                    panic_quarantined: false,
+                    panic_backoff: false,
                     delivery_pending_ack: false,
                     caller_acknowledged: false,
                     delivery_confirmation: None,
@@ -28468,18 +29504,32 @@ impl MobActor {
                 agent_identity,
                 target,
                 result,
+                ambiguous_effect,
                 reply_tx,
             } => {
                 let completion_gate = self
                     .member_live_mutation_target_current(&agent_identity, &target)
                     .await;
-                let _ = reply_tx.send(completion_gate.and(result));
+                let result = match (completion_gate, result) {
+                    (Ok(()), result) => result,
+                    (Err(gate_error), Err(operation_error)) if ambiguous_effect => {
+                        // Do not let a later incarnation mismatch erase the
+                        // fact that this non-idempotent control may already
+                        // have taken effect on the admitted incarnation.
+                        Err(MobError::Internal(format!(
+                            "stale-incarnation Control outcome has an ambiguous effect and must not be retried blindly: operation={operation_error}; incarnation={gate_error}"
+                        )))
+                    }
+                    (Err(gate_error), _) => Err(gate_error),
+                };
+                let _ = reply_tx.send(result);
                 Ok(())
             }
             MemberLiveMutationCompletion::OpenCleanup {
                 ticket,
                 durable_persistence_confirmed,
                 result,
+                panicked,
             } => {
                 self.member_live_open_cleanup_inflight.remove(&ticket);
                 let obligation = self
@@ -28491,6 +29541,59 @@ impl MobActor {
                         ))
                     })?;
                 obligation.durable_persistence_confirmed |= durable_persistence_confirmed;
+                if !panicked {
+                    obligation.panic_backoff = false;
+                }
+                if panicked {
+                    let Err(error) = result else {
+                        return Err(MobError::Internal(format!(
+                            "member-live cleanup ticket {ticket} carried a panic disposition with a successful result"
+                        )));
+                    };
+                    let error_text = error.to_string();
+                    obligation.attempts = obligation.attempts.saturating_add(1);
+                    obligation.last_error = Some(error_text.clone());
+                    let attempts = obligation.attempts;
+                    let durable_custody_confirmed = obligation.durable_persistence_confirmed;
+                    obligation.panic_quarantined = durable_custody_confirmed;
+                    obligation.panic_backoff = !durable_custody_confirmed;
+
+                    // A waiting Open caller has not observed success. Return a
+                    // terminal failure now and restore cleanup ownership so a
+                    // cold actor recovery closes the exact channel instead of
+                    // transferring it after an invariant failure.
+                    if let Some(confirmation) = obligation.delivery_confirmation.take() {
+                        obligation.caller_acknowledged = false;
+                        obligation.delivery_pending_ack = false;
+                        let _ = confirmation.send(Err(MobError::Internal(error_text.clone())));
+                    }
+                    if let Some((reply_tx, _terminal_error)) = obligation.terminal_reply.take() {
+                        let _ = reply_tx.send(Err(MobError::Internal(error_text.clone())));
+                    }
+
+                    if durable_custody_confirmed {
+                        // Only an exact durable row authorizes process exit.
+                        // Cold recovery reconstructs this obligation; the
+                        // current incarnation must not re-run faulting cleanup.
+                        self.durable_uncertainty_fail_stop = true;
+                        return Err(error);
+                    }
+
+                    // No durable owner exists yet. Keep the volatile mutation
+                    // fence and retry on a panic-specific slow cadence; once a
+                    // later attempt confirms the row, another panic transfers
+                    // custody to cold recovery through fail-stop.
+                    return match mode {
+                        MemberLiveReconcileMode::Background => {
+                            self.spawn_member_live_open_cleanup_attempt(
+                                ticket,
+                                Self::member_live_cleanup_panic_retry_delay(attempts),
+                            )?;
+                            Ok(())
+                        }
+                        MemberLiveReconcileMode::Lifecycle => Err(error),
+                    };
+                }
                 match result {
                     Ok(()) => {
                         let Some(durable_record) = self
@@ -28644,9 +29747,44 @@ impl MobActor {
                 self.reconcile_member_live_mutation_completion(completion, mode)
                     .await
             }
-            Err(error) => Err(MobError::Internal(format!(
-                "actor-owned mutating member-live task terminated without a completion: {error}"
-            ))),
+            Err(error) if error.is_cancelled() => {
+                let task_id = actor_task_join_error_task_id(&error);
+                self.durable_uncertainty_fail_stop = true;
+                tracing::error!(
+                    task_id = %task_id,
+                    disposition = "cancelled_ambiguous_effect_fail_stop",
+                    "actor-owned mutating member-live task was cancelled without a completion; effect outcome is unknown"
+                );
+                Err(MobError::Internal(format!(
+                    "actor-owned mutating member-live task {task_id} was cancelled without a \
+                     completion; disposition=cancelled_ambiguous_effect_fail_stop"
+                )))
+            }
+            Err(error) => {
+                let disposition = ActorTaskJoinPanicDisposition::AmbiguousEffectFailStop;
+                let error = actor_task_join_panic_error(
+                    "mutating member-live completion",
+                    disposition,
+                    error,
+                );
+                self.durable_uncertainty_fail_stop = true;
+                Err(error)
+            }
+        }
+    }
+
+    async fn drain_completed_member_live_mutations(&mut self) {
+        while let Some(joined) = self.member_live_mutation_tasks.try_join_next() {
+            if let Err(error) = self
+                .reconcile_joined_member_live_mutation(joined, MemberLiveReconcileMode::Background)
+                .await
+            {
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    error = %error,
+                    "mutating member-live completion reconciliation failed"
+                );
+            }
         }
     }
 
@@ -28668,16 +29806,21 @@ impl MobActor {
                 self.member_live_open_cleanup_obligations.len()
             )));
         }
-        if first_error.is_some() {
+        if first_error.is_some() && !self.durable_uncertainty_fail_stop {
             let retries = self
                 .member_live_open_cleanup_obligations
                 .iter()
-                .filter(|(ticket, _)| !self.member_live_open_cleanup_inflight.contains(ticket))
+                .filter(|(ticket, obligation)| {
+                    !obligation.panic_quarantined
+                        && !self.member_live_open_cleanup_inflight.contains(ticket)
+                })
                 .map(|(ticket, obligation)| {
-                    (
-                        *ticket,
-                        Self::member_live_cleanup_retry_delay(obligation.attempts.max(1)),
-                    )
+                    let delay = if obligation.panic_backoff {
+                        Self::member_live_cleanup_panic_retry_delay(obligation.attempts.max(1))
+                    } else {
+                        Self::member_live_cleanup_retry_delay(obligation.attempts.max(1))
+                    };
+                    (*ticket, delay)
                 })
                 .collect::<Vec<_>>();
             for (ticket, delay) in retries {
@@ -28711,7 +29854,7 @@ impl MobActor {
             cleanup_tasks.spawn(async move {
                 let panic_identity = agent_identity.clone();
                 let panic_target = target.clone();
-                std::panic::AssertUnwindSafe(async move {
+                let attempted = std::panic::AssertUnwindSafe(async move {
                     let status = match Self::member_live_status_for_target_owned(
                         &supervisor_bridge,
                         member_live_host.as_ref(),
@@ -28736,15 +29879,25 @@ impl MobActor {
                     .await
                 })
                 .catch_unwind()
-                .await
-                .unwrap_or_else(|payload| {
-                    Err(Self::member_live_task_panic_error(
+                .await;
+                match attempted {
+                    Ok(result) => {
+                        Self::clear_member_live_task_panic_log(
+                            "lifecycle cleanup",
+                            &panic_identity,
+                            &panic_target,
+                            MemberLivePanicDisposition::TerminalFailure,
+                        );
+                        result
+                    }
+                    Err(payload) => Err(Self::member_live_task_panic_error(
                         "lifecycle cleanup",
                         &panic_identity,
                         &panic_target,
+                        MemberLivePanicDisposition::TerminalFailure,
                         payload,
-                    ))
-                })
+                    )),
+                }
             });
         }
         let mut first_error = None;
@@ -28757,10 +29910,26 @@ impl MobActor {
                     }
                 }
                 Err(error) => {
+                    let task_error = if error.is_cancelled() {
+                        let task_id = actor_task_join_error_task_id(&error);
+                        tracing::error!(
+                            task_id = %task_id,
+                            disposition = "cancelled_retryable_idempotent_cleanup",
+                            "member-live lifecycle cleanup task was cancelled"
+                        );
+                        MobError::Internal(format!(
+                            "{context}: member-live lifecycle cleanup task {task_id} was \
+                             cancelled; disposition=cancelled_retryable_idempotent_cleanup"
+                        ))
+                    } else {
+                        actor_task_join_panic_error(
+                            "member-live lifecycle cleanup",
+                            ActorTaskJoinPanicDisposition::RetryableIdempotentCleanup,
+                            error,
+                        )
+                    };
                     if first_error.is_none() {
-                        first_error = Some(MobError::Internal(format!(
-                            "{context}: member live cleanup task terminated without a result: {error}"
-                        )));
+                        first_error = Some(task_error);
                     }
                 }
             }
@@ -28910,6 +30079,12 @@ impl MobActor {
                     .await;
                     let (result, ambiguous) = match attempted {
                         Ok(result) => {
+                            Self::clear_member_live_task_panic_log(
+                                "Open",
+                                &completion_identity,
+                                &target,
+                                MemberLivePanicDisposition::AmbiguousEffect,
+                            );
                             let ambiguous = Self::member_live_open_error_is_ambiguous(&result);
                             (result, ambiguous)
                         }
@@ -28918,6 +30093,7 @@ impl MobActor {
                                 "Open",
                                 &completion_identity,
                                 &target,
+                                MemberLivePanicDisposition::AmbiguousEffect,
                                 payload,
                             )),
                             true,
@@ -28963,12 +30139,21 @@ impl MobActor {
                     .catch_unwind()
                     .await;
                     let (result, ambiguous) = match attempted {
-                        Ok(result) => result,
+                        Ok(result) => {
+                            Self::clear_member_live_task_panic_log(
+                                "Open",
+                                &completion_identity,
+                                &target,
+                                MemberLivePanicDisposition::AmbiguousEffect,
+                            );
+                            result
+                        }
                         Err(payload) => (
                             Err(Self::member_live_task_panic_error(
                                 "Open",
                                 &completion_identity,
                                 &target,
+                                MemberLivePanicDisposition::AmbiguousEffect,
                                 payload,
                             )),
                             true,
@@ -29014,7 +30199,7 @@ impl MobActor {
                     expected_member: expected_member.clone(),
                 };
                 self.actor_io_tasks.spawn(async move {
-                    let result = std::panic::AssertUnwindSafe(
+                    let attempted = std::panic::AssertUnwindSafe(
                         super::member_live_proxy::close_remote_member_live_channel(
                             &bridge,
                             &peer,
@@ -29023,15 +30208,25 @@ impl MobActor {
                         ),
                     )
                     .catch_unwind()
-                    .await
-                    .unwrap_or_else(|payload| {
-                        Err(Self::member_live_task_panic_error(
+                    .await;
+                    let result = match attempted {
+                        Ok(result) => {
+                            Self::clear_member_live_task_panic_log(
+                                "Close",
+                                &completion_identity,
+                                &target,
+                                MemberLivePanicDisposition::AmbiguousEffect,
+                            );
+                            result
+                        }
+                        Err(payload) => Err(Self::member_live_task_panic_error(
                             "Close",
                             &completion_identity,
                             &target,
+                            MemberLivePanicDisposition::AmbiguousEffect,
                             payload,
-                        ))
-                    });
+                        )),
+                    };
                     let _ = command_tx
                         .send(RoutedMobCommand::internal(
                             MobCommand::PlacedBehaviorCompleted {
@@ -29060,22 +30255,32 @@ impl MobActor {
                 };
                 self.actor_io_tasks.spawn(async move {
                     let timeout = super::member_live_proxy::LIVE_CHANNEL_BRIDGE_TIMEOUT;
-                    let result = std::panic::AssertUnwindSafe(async {
+                    let attempted = std::panic::AssertUnwindSafe(async {
                         tokio::time::timeout(timeout, live_host.close(&session_id, &channel_id))
                             .await
                             .map_err(|_| Self::member_live_timeout_error("close", timeout))?
                             .map_err(Self::member_live_error_to_mob_error)
                     })
                     .catch_unwind()
-                    .await
-                    .unwrap_or_else(|payload| {
-                        Err(Self::member_live_task_panic_error(
+                    .await;
+                    let result = match attempted {
+                        Ok(result) => {
+                            Self::clear_member_live_task_panic_log(
+                                "Close",
+                                &agent_identity,
+                                &target,
+                                MemberLivePanicDisposition::AmbiguousEffect,
+                            );
+                            result
+                        }
+                        Err(payload) => Err(Self::member_live_task_panic_error(
                             "Close",
                             &agent_identity,
                             &target,
+                            MemberLivePanicDisposition::AmbiguousEffect,
                             payload,
-                        ))
-                    });
+                        )),
+                    };
                     let _ = reply_tx.send(result);
                 });
             }
@@ -29116,7 +30321,7 @@ impl MobActor {
                     expected_member: expected_member.clone(),
                 };
                 self.actor_io_tasks.spawn(async move {
-                    let result = std::panic::AssertUnwindSafe(
+                    let attempted = std::panic::AssertUnwindSafe(
                         super::member_live_proxy::remote_member_live_status(
                             &bridge,
                             &peer,
@@ -29125,15 +30330,25 @@ impl MobActor {
                         ),
                     )
                     .catch_unwind()
-                    .await
-                    .unwrap_or_else(|payload| {
-                        Err(Self::member_live_task_panic_error(
+                    .await;
+                    let result = match attempted {
+                        Ok(result) => {
+                            Self::clear_member_live_task_panic_log(
+                                "Status",
+                                &completion_identity,
+                                &target,
+                                MemberLivePanicDisposition::TerminalFailure,
+                            );
+                            result
+                        }
+                        Err(payload) => Err(Self::member_live_task_panic_error(
                             "Status",
                             &completion_identity,
                             &target,
+                            MemberLivePanicDisposition::TerminalFailure,
                             payload,
-                        ))
-                    });
+                        )),
+                    };
                     let _ = command_tx
                         .send(RoutedMobCommand::internal(
                             MobCommand::PlacedBehaviorCompleted {
@@ -29162,7 +30377,7 @@ impl MobActor {
                 };
                 self.actor_io_tasks.spawn(async move {
                     let timeout = super::member_live_proxy::LIVE_CHANNEL_BRIDGE_TIMEOUT;
-                    let result = std::panic::AssertUnwindSafe(async {
+                    let attempted = std::panic::AssertUnwindSafe(async {
                         tokio::time::timeout(timeout, live_host.status(&session_id, channel_id))
                             .await
                             .map_err(|_| Self::member_live_timeout_error("status", timeout))?
@@ -29173,15 +30388,25 @@ impl MobActor {
                             .map_err(Self::member_live_error_to_mob_error)
                     })
                     .catch_unwind()
-                    .await
-                    .unwrap_or_else(|payload| {
-                        Err(Self::member_live_task_panic_error(
+                    .await;
+                    let result = match attempted {
+                        Ok(result) => {
+                            Self::clear_member_live_task_panic_log(
+                                "Status",
+                                &agent_identity,
+                                &target,
+                                MemberLivePanicDisposition::TerminalFailure,
+                            );
+                            result
+                        }
+                        Err(payload) => Err(Self::member_live_task_panic_error(
                             "Status",
                             &agent_identity,
                             &target,
+                            MemberLivePanicDisposition::TerminalFailure,
                             payload,
-                        ))
-                    });
+                        )),
+                    };
                     let _ = reply_tx.send(result);
                 });
             }
@@ -29234,7 +30459,7 @@ impl MobActor {
                     expected_member: expected_member.clone(),
                 };
                 self.member_live_mutation_tasks.spawn(async move {
-                    let result = std::panic::AssertUnwindSafe(
+                    let attempted = std::panic::AssertUnwindSafe(
                         super::member_live_proxy::control_remote_member_live_channel(
                             &bridge,
                             &peer,
@@ -29244,19 +30469,35 @@ impl MobActor {
                         ),
                     )
                     .catch_unwind()
-                    .await
-                    .unwrap_or_else(|payload| {
-                        Err(Self::member_live_task_panic_error(
-                            "Control",
-                            &completion_identity,
-                            &target,
-                            payload,
-                        ))
-                    });
+                    .await;
+                    let (result, ambiguous_effect) = match attempted {
+                        Ok(result) => {
+                            Self::clear_member_live_task_panic_log(
+                                "Control",
+                                &completion_identity,
+                                &target,
+                                MemberLivePanicDisposition::AmbiguousEffect,
+                            );
+                            let ambiguous_effect =
+                                matches!(&result, Err(MobError::BridgeRequestTimedOut { .. }));
+                            (result, ambiguous_effect)
+                        }
+                        Err(payload) => (
+                            Err(Self::member_live_task_panic_error(
+                                "Control",
+                                &completion_identity,
+                                &target,
+                                MemberLivePanicDisposition::AmbiguousEffect,
+                                payload,
+                            )),
+                            true,
+                        ),
+                    };
                     MemberLiveMutationCompletion::Control {
                         agent_identity: completion_identity,
                         target,
                         result,
+                        ambiguous_effect,
                         reply_tx,
                     }
                 });
@@ -29276,7 +30517,7 @@ impl MobActor {
                 };
                 self.member_live_mutation_tasks.spawn(async move {
                     let timeout = super::member_live_proxy::LIVE_CHANNEL_BRIDGE_TIMEOUT;
-                    let result = std::panic::AssertUnwindSafe(async {
+                    let attempted = std::panic::AssertUnwindSafe(async {
                         tokio::time::timeout(
                             timeout,
                             live_host.control(&session_id, &channel_id, verb),
@@ -29286,19 +30527,35 @@ impl MobActor {
                         .map_err(Self::member_live_error_to_mob_error)
                     })
                     .catch_unwind()
-                    .await
-                    .unwrap_or_else(|payload| {
-                        Err(Self::member_live_task_panic_error(
-                            "Control",
-                            &completion_identity,
-                            &target,
-                            payload,
-                        ))
-                    });
+                    .await;
+                    let (result, ambiguous_effect) = match attempted {
+                        Ok(result) => {
+                            Self::clear_member_live_task_panic_log(
+                                "Control",
+                                &completion_identity,
+                                &target,
+                                MemberLivePanicDisposition::AmbiguousEffect,
+                            );
+                            let ambiguous_effect =
+                                matches!(&result, Err(MobError::BridgeRequestTimedOut { .. }));
+                            (result, ambiguous_effect)
+                        }
+                        Err(payload) => (
+                            Err(Self::member_live_task_panic_error(
+                                "Control",
+                                &completion_identity,
+                                &target,
+                                MemberLivePanicDisposition::AmbiguousEffect,
+                                payload,
+                            )),
+                            true,
+                        ),
+                    };
                     MemberLiveMutationCompletion::Control {
                         agent_identity: completion_identity,
                         target,
                         result,
+                        ambiguous_effect,
                         reply_tx,
                     }
                 });
@@ -30807,7 +32064,7 @@ impl MobActor {
         }
 
         self.cancel_peer_deliveries_for_edge(local, peer_member_identity, "members are unwiring")
-            .await;
+            .await?;
 
         // Cursor-fence the exact durable occurrence before any remote trust
         // mutation. If append later returns an error after writing, only a
@@ -32218,7 +33475,7 @@ impl MobActor {
                 &peer_member_identity,
                 "members are unwiring",
             )
-            .await;
+            .await?;
             let _unwire_handoff = self.apply_unwire_members_idempotent(&edge)?;
             if let Err(error) = self
                 .unwire_peer_only_recipient(
@@ -32362,7 +33619,7 @@ impl MobActor {
         }
 
         self.cancel_peer_deliveries_for_edge(&local, &peer_member_identity, "members are unwiring")
-            .await;
+            .await?;
 
         // Submit DSL input first. Already-absent idempotency is a generated
         // no-op transition; only `WiringGraphChanged` means rollback must
@@ -34426,7 +35683,7 @@ impl MobActor {
             );
         }
         self.cancel_peer_deliveries_for_member(agent_identity, "member is retiring")
-            .await;
+            .await?;
         if let Some(old_generation) = rematerializing_generation {
             self.remote_flow_tickets
                 .note_member_rematerializing(agent_identity, old_generation);
@@ -38904,7 +40161,14 @@ impl MobActor {
                 )
             })?;
         self.cancel_pending_peer_deliveries("mob is destroying")
-            .await;
+            .await
+            .map_err(|error| {
+                Self::incomplete_destroy_error(
+                    report.clone(),
+                    "peer delivery cancellation during destroy failed",
+                    error,
+                )
+            })?;
         if destroy_input_needed && self.has_orchestrator {
             self.apply_dsl_signal(
                 mob_dsl::MobMachineSignal::StopOrchestrator,
@@ -43692,9 +44956,10 @@ impl MobActor {
             content,
             origin,
             injected_context,
-            interaction_id,
+            mut interaction_id,
             objective_id,
             handling_mode,
+            external_delivery_identity,
             turn_metadata,
             event_tx,
             completion_tx,
@@ -43827,6 +45092,23 @@ impl MobActor {
             entry.fence_token
         };
 
+        if let Some(identity) = &external_delivery_identity {
+            identity.validate()?;
+            let correlation = uuid::Uuid::parse_str(&identity.correlation_id).map_err(|_| {
+                MobError::Internal(
+                    "external-delivery correlation identity is not a UUID".to_string(),
+                )
+            })?;
+            let correlation = meerkat_core::interaction::InteractionId(correlation);
+            if interaction_id.is_some_and(|existing| existing != correlation) {
+                return Err(MobError::Internal(
+                    "external-delivery correlation conflicts with supplied transcript identity"
+                        .to_string(),
+                ));
+            }
+            interaction_id = Some(correlation);
+        }
+
         // Per-turn LLM identity fields require a queued executor boundary.
         // Reject Steer explicitly before the more general carrier and host
         // capability checks below.
@@ -43851,14 +45133,41 @@ impl MobActor {
         let turn_metadata = submit_work_turn_metadata(turn_metadata, interaction_id, objective_id)?;
         let remotely_hosted =
             super::member_runtime_is_host_owned(self.dsl_authority.state(), &entry.agent_identity);
+        if remotely_hosted
+            && !injected_context.is_empty()
+            && turn_metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.transient_turn_context.is_some())
+        {
+            return Err(MobError::UnsupportedForMode {
+                mode: entry.runtime_mode,
+                reason: "remote member delivery cannot combine injected_context with transient_turn_context"
+                    .to_string(),
+            });
+        }
         validate_member_turn_carriers(
             &entry,
             remotely_hosted,
             handling_mode,
+            external_delivery_identity.is_some(),
             turn_metadata.as_ref(),
             event_tx.is_some(),
             completion_tx.is_some(),
         )?;
+        #[cfg(feature = "runtime-adapter")]
+        let local_external_identity_supported = self.runtime_adapter.is_some();
+        #[cfg(not(feature = "runtime-adapter"))]
+        let local_external_identity_supported = false;
+        if external_delivery_identity.is_some()
+            && !remotely_hosted
+            && !local_external_identity_supported
+        {
+            return Err(MobError::UnsupportedForMode {
+                mode: entry.runtime_mode,
+                reason: "stable external input identity requires a runtime-backed member"
+                    .to_string(),
+            });
+        }
 
         // Only representable carriers reach the concrete executor capability
         // check. Actor-global adapter presence is not evidence that a direct,
@@ -44073,6 +45382,7 @@ impl MobActor {
                     interaction_id: effective_interaction_id,
                     objective_id,
                     handling_mode,
+                    external_delivery_identity,
                     turn_metadata,
                     event_tx,
                     completion_tx,
@@ -44653,6 +45963,7 @@ impl MobActor {
                         agent_identity,
                     )?),
                     handling_mode: meerkat_core::types::HandlingMode::Queue,
+                    external_delivery_identity: None,
                     turn_metadata: None,
                     event_tx: None,
                     completion_tx: None,
@@ -44905,6 +46216,7 @@ impl MobActor {
             interaction_id,
             objective_id,
             handling_mode,
+            external_delivery_identity,
             turn_metadata,
             event_tx,
             completion_tx,
@@ -44956,10 +46268,21 @@ impl MobActor {
             .transpose()?;
         let placed_input_id = match (&placed_identity, ack_mode) {
             (Some(_), crate::mob_machine::SubmitWorkAckMode::IngressAccepted) => {
-                // Transport dedup is independent from transcript identity on
-                // this ack-only lane. Preserve caller absence in transcript
-                // metadata and mint one retry-stable transport key.
-                Some(meerkat_core::time_compat::new_uuid_v7().to_string())
+                // A caller-stable external delivery derives the remote
+                // protocol's UUID-shaped dedup token from its exact
+                // idempotency key. Ordinary callers retain one fresh key per
+                // admitted SubmitWork.
+                Some(external_delivery_identity.as_ref().map_or_else(
+                    || meerkat_core::time_compat::new_uuid_v7().to_string(),
+                    |identity| {
+                        WorkRef::for_external_delivery(
+                            &self.definition.id,
+                            &entry.agent_identity,
+                            &identity.idempotency_key,
+                        )
+                        .to_string()
+                    },
+                ))
             }
             (Some(_), crate::mob_machine::SubmitWorkAckMode::TurnCompleted) => Some(
                 interaction_id
@@ -45052,11 +46375,10 @@ impl MobActor {
                 prompt: content,
                 system_prompt: None,
                 event_tx: None,
-                runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
+                runtime: submit_work_runtime_semantics(
                     handling_mode,
-                    None,
-                    Vec::new(),
                     turn_metadata,
+                    external_delivery_identity.as_ref(),
                 ),
             };
             return match ack_mode {
@@ -45128,11 +46450,10 @@ impl MobActor {
                         prompt: content,
                         system_prompt: None,
                         event_tx,
-                        runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
+                        runtime: submit_work_runtime_semantics(
                             handling_mode,
-                            None,
-                            Vec::new(),
                             turn_metadata,
+                            external_delivery_identity.as_ref(),
                         ),
                     };
                     return Ok(SubmitWorkDispatchCompletion::AwaitTurnAdmission {
@@ -45227,11 +46548,10 @@ impl MobActor {
                     prompt: content,
                     system_prompt: None,
                     event_tx,
-                    runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
+                    runtime: submit_work_runtime_semantics(
                         handling_mode,
-                        None,
-                        Vec::new(),
                         turn_metadata,
+                        external_delivery_identity.as_ref(),
                     ),
                 };
                 tracing::debug!(
@@ -45779,6 +47099,7 @@ impl MobActor {
 
     async fn handle_run_flow(
         &mut self,
+        requested_run_id: Option<RunId>,
         flow_id: FlowId,
         activation_params: serde_json::Value,
         scoped_event_tx: Option<mpsc::Sender<meerkat_core::ScopedAgentEvent>>,
@@ -45786,7 +47107,28 @@ impl MobActor {
         self.ensure_pending_spawn_alignment("handle_run_flow preflight")?;
         self.ensure_flow_tracker_alignment("handle_run_flow preflight")
             .await?;
-        let run_id = RunId::new();
+        let run_id = requested_run_id.unwrap_or_default();
+        if let Some(existing) = self.run_store.get_run(&run_id).await? {
+            if existing.mob_id != self.definition.id
+                || existing.flow_id != flow_id
+                || existing.activation_params != activation_params
+            {
+                return Err(MobError::Internal(format!(
+                    "stable external flow run '{run_id}' was reused for different mob, flow, or activation parameters"
+                )));
+            }
+            let terminal =
+                crate::run::mob_machine_run_status_is_terminal(&existing.run_id, &existing.status)?;
+            if !terminal
+                && !self.run_tasks.contains_key(&run_id)
+                && !self.run_cancel_tokens.contains_key(&run_id)
+            {
+                return Err(MobError::Internal(format!(
+                    "stable external flow run '{run_id}' is durable but has no live execution tracker; it is held for recovery instead of being reported as resumable"
+                )));
+            }
+            return Ok(run_id);
+        }
         self.preview_run_flow_command_admission(&run_id)?;
         let config = FlowRunConfig::from_definition(flow_id, &self.definition)?;
         let run_flow = MobRun::run_flow_input(&run_id, &config)?;

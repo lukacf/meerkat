@@ -2,23 +2,17 @@
 //!
 //! Chapters are instantiated per declared capability:
 //!
-//! | backend              | baseline | incremental | transcript_rewrite | guarded_projection | append_only | legacy_data |
-//! |----------------------|----------|-------------|--------------------|--------------------|-------------|-------------|
-//! | `SqliteSessionStore` | yes      | yes         | yes                | yes                | yes         | yes         |
-//! | `MemoryStore`        | yes      | yes         | yes                | yes                | yes         | yes         |
-//! | `JsonlStore`         | yes      | no (by design) | yes             | yes                | yes         | yes         |
+//! | backend              | baseline | incremental | transcript_rewrite | guarded_projection | append_only |
+//! |----------------------|----------|-------------|--------------------|--------------------|-------------|
+//! | `SqliteSessionStore` | yes      | yes         | yes                | yes                | yes         |
+//! | `MemoryStore`        | yes      | yes         | yes                | yes                | yes         |
+//! | `JsonlStore`         | yes      | no (by design) | yes             | yes                | yes         |
 //!
 //! Blob chapters run over `FsBlobStore` and `MemoryBlobStore`; artifact
 //! chapters over `FsArtifactStore` and `MemoryArtifactStore`. The
 //! capability-discovery swallow test runs the reference forwarding and
 //! swallowing wrappers over the incremental backends.
 //!
-//! The JSONL factory overrides `install_session_document` to write the raw
-//! legacy fixture bytes as the per-session `.jsonl` file, so the legacy-data
-//! chapter exercises a true byte-level N−1 medium for at least one durable
-//! backend (SQLite keeps the decode-and-save default: its row schema is not
-//! reachable from the public API).
-
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use std::sync::Arc;
@@ -83,26 +77,6 @@ impl SessionStoreFactory for JsonlFactory {
         let store = meerkat_store::JsonlStore::new(self.dir.path().to_path_buf());
         store.init().await.map_err(factory_failure)?;
         Ok(Arc::new(store) as Arc<dyn SessionStore>)
-    }
-
-    /// True byte-level install: write the raw fixture document as the
-    /// session's `.jsonl` file — the exact medium a 0.7.x fleet left behind
-    /// (the `.jsonl` file is the only durable truth; the index projection
-    /// self-heals on open).
-    async fn install_session_document(&self, document: &[u8]) -> Result<(), ConformanceFailure> {
-        let install_failure =
-            |detail: String| ConformanceFailure::new("factory", "install_session_document", detail);
-        let value: serde_json::Value =
-            serde_json::from_slice(document).map_err(|error| install_failure(error.to_string()))?;
-        let id = value
-            .get("id")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| install_failure("session document carries no id".to_string()))?;
-        std::fs::create_dir_all(self.dir.path())
-            .map_err(|error| install_failure(error.to_string()))?;
-        std::fs::write(self.dir.path().join(format!("{id}.jsonl")), document)
-            .map_err(|error| install_failure(error.to_string()))?;
-        Ok(())
     }
 }
 
@@ -254,13 +228,6 @@ mod memory_store {
     }
 
     #[tokio::test]
-    async fn legacy_data() {
-        chapters::legacy_data(&MemoryFactory::new())
-            .await
-            .expect("MemoryStore must pass the legacy-data chapter");
-    }
-
-    #[tokio::test]
     async fn transcript_rewrite() {
         chapters::transcript_rewrite(&MemoryFactory::new())
             .await
@@ -364,13 +331,6 @@ mod sqlite_store {
     }
 
     #[tokio::test]
-    async fn legacy_data() {
-        chapters::legacy_data(&SqliteFactory::new())
-            .await
-            .expect("SqliteSessionStore must pass the legacy-data chapter");
-    }
-
-    #[tokio::test]
     async fn transcript_rewrite() {
         chapters::transcript_rewrite(&SqliteFactory::new())
             .await
@@ -421,13 +381,6 @@ mod jsonl_store {
         chapters::append_only(&JsonlFactory::new())
             .await
             .expect("JsonlStore must pass the append-only chapter");
-    }
-
-    #[tokio::test]
-    async fn legacy_data() {
-        chapters::legacy_data(&JsonlFactory::new())
-            .await
-            .expect("JsonlStore must pass the legacy-data chapter");
     }
 
     /// The JSONL rewrite path (`save_transcript_rewrite`) is the primary

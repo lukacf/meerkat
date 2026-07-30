@@ -59,7 +59,7 @@ where
     // (a wrapper that writes elsewhere would pass the capability check while
     // failing the storage contract). Content equality, not mere presence.
     let step = "wrapper_delegates_storage";
-    let session = fixtures::session_with_texts(&["capability probe one", "capability probe two"]);
+    let session = fixtures::session_with_texts(&["capability probe one", "capability probe two"])?;
     steps.wrap(step, wrapped.save(&session).await)?;
     let through_inner = steps
         .wrap(step, inner.load(session.id()).await)?
@@ -96,7 +96,7 @@ where
     let root = TranscriptStrandId::root();
 
     // Direction 1: wrapper capability writes → inner store reads.
-    let forward = fixtures::session_with_texts(&["identity forward one", "identity forward two"]);
+    let forward = fixtures::session_with_texts(&["identity forward one", "identity forward two"])?;
     steps.wrap(
         step,
         wrapped_inc
@@ -143,7 +143,7 @@ where
     )?;
 
     // Direction 2: inner capability writes → wrapper capability/base reads.
-    let reverse = fixtures::session_with_texts(&["identity reverse one"]);
+    let reverse = fixtures::session_with_texts(&["identity reverse one"])?;
     steps.wrap(
         step,
         inner_inc

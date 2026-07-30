@@ -70,18 +70,17 @@ impl ReservedMetadataKey {
             key,
             crate::session::SESSION_METADATA_KEY
                 | crate::session::SESSION_BUILD_STATE_KEY
-                | crate::session::SESSION_SYSTEM_CONTEXT_STATE_KEY
+                // Frozen 0.8.10 import input. It remains reserved so callers
+                // cannot spoof released state, but it has no live-session API.
+                | "session_system_context_state"
                 | crate::session::SESSION_DEFERRED_TURN_STATE_KEY
                 | crate::session::SESSION_PENDING_CALLBACK_BATCH_KEY
                 | crate::session::SESSION_TOOL_VISIBILITY_STATE_KEY
                 | crate::session::SESSION_LIFECYCLE_TERMINAL_KEY
                 | crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY
-                | crate::session::SESSION_TRANSCRIPT_HISTORY_CHECKPOINT_DIGEST_KEY
-                | crate::session::SESSION_CHECKPOINT_STAMP_KEY
-                | crate::session::SESSION_RUNTIME_CHECKPOINT_PROVENANCE_KEY
                 | crate::memory::SESSION_COMPACTION_PROJECTION_INTENTS_KEY
                 | crate::SESSION_REALTIME_TRANSCRIPT_STATE_KEY
-        )
+        ) || crate::session::is_released_checkpoint_metadata_key(key)
     }
 
     /// Whether this classification belongs to the Meerkat namespace

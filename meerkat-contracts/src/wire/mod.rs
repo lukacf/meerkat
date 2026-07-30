@@ -229,8 +229,8 @@ pub use session::{
     WireContentBlock, WireContentInput, WireInterruptOutcome, WirePromptInput, WireProviderMeta,
     WireSessionHistory, WireSessionInfo, WireSessionMessage, WireSessionSummary,
     WireSessionTranscriptRevision, WireSessionTranscriptRevisionEntry,
-    WireSessionTranscriptRevisionList, WireStopReason, WireToolResult, WireToolResultContent,
-    WireTranscriptSource,
+    WireSessionTranscriptRevisionList, WireStopReason, WireSystemMessageIdentity, WireToolResult,
+    WireToolResultContent, WireTranscriptSource,
 };
 pub use skills::{SkillEntry, SkillInspectResponse, SkillListResponse, SkillSourceProvenance};
 pub use spec_digest::{SpecDigestError, portable_member_spec_digest};

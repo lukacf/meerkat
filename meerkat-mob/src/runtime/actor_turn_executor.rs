@@ -165,6 +165,16 @@ impl ActorFlowTurnExecutor {
                 Ok(()) => {
                     tracing::debug!(run_id = %run_id, "detached timed-out turn finished");
                 }
+                Err(error) if error.is_panic() => {
+                    let payload = error.into_panic();
+                    let panic_detail = super::panic_capture::panic_payload_detail(payload.as_ref());
+                    tracing::error!(
+                        run_id = %run_id,
+                        panic = %panic_detail,
+                        disposition = "detached",
+                        "detached timed-out turn bridge panicked; payload recovered and retained timeout disposition remains terminal"
+                    );
+                }
                 Err(error) => {
                     tracing::warn!(
                         run_id = %run_id,
@@ -178,12 +188,16 @@ impl ActorFlowTurnExecutor {
         // Recover the payload (see `panic_capture` for the 2026-07-29
         // incident WHY): a swallowed panic payload at an actor task boundary
         // left a provisioning furnace invisible in the field. This join runs
-        // once per detached turn (no retry), so no rate limit is needed.
+        // once per detached turn (no retry), so no rate limit is needed. The
+        // MobMachine-owned `Detached` timeout disposition was committed and
+        // returned before this reconciliation task was spawned; an unwind here
+        // is terminal diagnostic fallout, never authority to retry the turn.
         if let Err(payload) = AssertUnwindSafe(reconcile).catch_unwind().await {
             let panic_detail = super::panic_capture::panic_payload_detail(payload.as_ref());
             tracing::error!(
                 run_id = %run_id,
                 panic = %panic_detail,
+                disposition = "detached",
                 "panic while joining detached timed-out turn"
             );
         }

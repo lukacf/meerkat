@@ -41,16 +41,10 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AuthorizeDurableTailRecoveryRepairRetired`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `AuthorizeDurableTailRecoveryCommitLegacyIdle`
+- `AuthorizeDurableTailRecoveryCommitCompletedRetainInputsIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `AuthorizeDurableTailRecoveryCommitLegacyRetired`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
-- `AuthorizeDurableTailRecoveryCommitLegacyRetainInputsIdle`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
-- `AuthorizeDurableTailRecoveryCommitLegacyRetainInputsRetired`
+- `AuthorizeDurableTailRecoveryCommitCompletedRetainInputsRetired`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `AuthorizeDurableTailRecoveryHoldIdle`
@@ -141,12 +135,6 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `meerkat_machine`
   - scenarios: (unclaimed)
 - `UpdateDeferredSessionLlmIdentity`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
-- `AuthorizeDeferredSessionSystemContextAppendStaged`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
-- `AuthorizeDeferredSessionSystemContextAppendPromoting`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `AuthorizeDeferredSessionMachineArchivedResume`
@@ -2471,15 +2459,6 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `StartImmediateAppendRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `StartImmediateContextInitializing`
-  - anchors: `meerkat_machine`
-  - scenarios: (unclaimed)
-- `StartImmediateContextAttached`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
-- `StartImmediateContextRunning`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
 - `PrimitiveAppliedConversation`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
@@ -3030,6 +3009,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ResolveLiveBoundaryContextReceiptRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveBoundaryUnavailableRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ConsumeOnAcceptIdle`
@@ -5957,6 +5939,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `meerkat_machine`
   - scenarios: (unclaimed)
 - `LiveBoundaryContextReceiptResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveBoundaryUnavailableNormalized`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `TurnRunCompleted`

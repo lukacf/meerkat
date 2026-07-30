@@ -306,8 +306,8 @@ fn session_document_authority_matches_codegen_output() {
 }
 
 // NOTE: `SessionDurableConfigAuthorityMachine` was retired under LUC-524
-// (P0 Dogma Invariant 1). Its semantic admission decisions (metadata/build-state
-// persist, build-state restore, system-prompt mutation) folded into the
+// (P0 Dogma Invariant 1). Its surviving semantic admission decisions
+// (metadata/build-state persist and build-state restore) folded into the
 // canonical `SessionDocumentMachine` durable-config region — covered by
 // `session_document_matches_codegen_output` above. The meerkat-core
 // `session_durable_config_authority` module is now a hand-written shell adapter

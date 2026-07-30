@@ -78,6 +78,9 @@ pub struct StartTurnParams {
     /// excluded from semantic-memory indexing.
     #[serde(default)]
     pub injected_context: Option<Vec<ContentInput>>,
+    /// Request-only host context for this runtime-owned logical turn.
+    #[serde(default)]
+    pub transient_turn_context: Option<meerkat_core::lifecycle::run_primitive::TurnRequestContext>,
 }
 
 /// Parameters for `turn/interrupt` — canonical wire type from contracts.
@@ -130,6 +133,7 @@ pub struct TurnOverrides {
         TurnMetadataOverride<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
     >,
     pub auth_binding: Option<TurnMetadataOverride<meerkat_core::AuthBindingRef>>,
+    pub transient_turn_context: Option<meerkat_core::lifecycle::run_primitive::TurnRequestContext>,
 }
 
 impl TurnOverrides {
@@ -144,6 +148,7 @@ impl TurnOverrides {
             && self.structured_output_retries.is_none()
             && self.provider_params.is_none()
             && self.auth_binding.is_none()
+            && self.transient_turn_context.is_none()
     }
 }
 
@@ -232,6 +237,7 @@ pub async fn start_turn_with_params(
         structured_output_retries: params.structured_output_retries,
         provider_params: params.provider_params,
         auth_binding: params.auth_binding,
+        transient_turn_context: params.transient_turn_context,
     };
 
     let result = match runtime

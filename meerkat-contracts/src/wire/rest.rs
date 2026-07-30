@@ -39,6 +39,11 @@ pub struct RestCreateSessionRequest {
     /// Injected context is excluded from semantic-memory indexing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub injected_context: Option<Vec<ContentInput>>,
+    /// Host-regenerated text projected only into provider requests for the
+    /// first logical turn. It is persisted with the pending runtime input for
+    /// crash retry, but never appended to Session history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transient_turn_context: Option<meerkat_core::lifecycle::run_primitive::TurnRequestContext>,
     /// Typed per-request system-prompt policy: omit/`null` to inherit, a
     /// string to set an explicit prompt, or `{"action": "disable"}` to
     /// suppress every prompt source.
@@ -139,6 +144,10 @@ pub struct RestContinueSessionRequest {
     /// excluded from semantic-memory indexing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub injected_context: Option<Vec<ContentInput>>,
+    /// Host-regenerated text projected only into provider requests for this
+    /// logical turn; never appended to Session history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transient_turn_context: Option<meerkat_core::lifecycle::run_primitive::TurnRequestContext>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
     /// JSON schema for structured output extraction (wrapper or raw schema).
@@ -190,11 +199,13 @@ pub struct RestContinueSessionRequest {
     pub additional_instructions: Option<Vec<String>>,
 }
 
-/// `POST /sessions/{id}/system_context` — append runtime system context.
+/// `POST /sessions/{id}/system_context` — append one ordinary durable ordered
+/// System message at the admitted transcript boundary.
 ///
 /// The body is the typed [`CoreRenderable`] owner rather than a bare `text`
 /// string; a plain-text client payload still deserializes via
-/// `CoreRenderable`'s tagged `text` variant.
+/// `CoreRenderable`'s tagged `text` variant. The rendered string is preserved
+/// exactly, including empty and whitespace-only content.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RestAppendSystemContextRequest {

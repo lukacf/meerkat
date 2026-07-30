@@ -33,8 +33,8 @@ use tokio::sync::{Notify, mpsc, oneshot, watch};
 
 use meerkat_contracts::wire::supervisor_bridge::{
     BRIDGE_TURN_OUTCOME_ACK_MAX, BridgeDeliveryRejectionCause, BridgeHostRuntimeIncarnation,
-    BridgeTrackedInputCancelOutcome, BridgeTurnOutcomeAck, BridgeTurnOutcomeRecord,
-    WireFlowFailureDetail, WireFlowTurnOutcome,
+    BridgeMemberIncarnation, BridgeTrackedInputCancelOutcome, BridgeTurnOutcomeAck,
+    BridgeTurnOutcomeRecord, WireFlowFailureDetail, WireFlowTurnOutcome,
 };
 use meerkat_core::event::{AgentEvent, EventEnvelope, EventSourceIdentity};
 use meerkat_core::interaction::InteractionId;
@@ -65,8 +65,21 @@ pub(crate) const TURN_OUTCOME_PAGE_MAX: usize = 64;
 /// authority is bounded to at most 16 MiB plus small row framing per member.
 pub(crate) const TURN_OUTCOME_RETAINED_MAX: usize = 256;
 
-/// Long-poll fallback re-read tick (DEC-P6E-4).
-const POLL_FALLBACK_TICK: Duration = Duration::from_millis(250);
+/// Slow safety re-read for facts that have no causal wake (DEC-P6E-4).
+///
+/// Session-event and host-projection subscriptions are the ordinary wake
+/// sources. This timer only bounds cross-process projection drift and a
+/// missing/closed subscription; it must not turn every idle member long-poll
+/// into four durable-log reads per second.
+const POLL_SAFETY_TICK: Duration = Duration::from_secs(5);
+
+/// Retry ladder after a causal wake raced ahead of its durable projection.
+///
+/// The first retry keeps normal completion latency low. Repeated empty/error
+/// reads back off to the same slow safety cadence instead of hammering the
+/// runtime/event stores throughout the 30-second terminal-bind window.
+const CAUSAL_RETRY_MIN: Duration = Duration::from_millis(100);
+const CAUSAL_RETRY_MAX: Duration = POLL_SAFETY_TICK;
 
 /// Bounded liveness window after generated completion authority resolves.
 /// A projection that misses this budget leaves the durable Pending row in
@@ -84,6 +97,10 @@ const TERMINAL_SEQ_SCAN_PAGE: usize = 256;
 
 const EVENT_SEQUENCE_EXHAUSTED: &str =
     "member event sequence space is exhausted; no successor cursor can be represented";
+
+fn advance_causal_retry(delay: Duration) -> Duration {
+    delay.saturating_mul(2).min(CAUSAL_RETRY_MAX)
+}
 
 fn checked_event_sequence_successor(
     sequence: u64,
@@ -829,6 +846,69 @@ impl Drop for ActiveTurnWatcherClaim {
     }
 }
 
+/// Await one optional session-event signal. A closed stream disables itself
+/// before returning so callers cannot busy-select a permanently-ready EOF.
+async fn wait_for_optional_event_signal(stream: &mut Option<meerkat_core::EventStream>) -> bool {
+    let Some(active) = stream.as_mut() else {
+        return std::future::pending::<bool>().await;
+    };
+    if active.next().await.is_some() {
+        true
+    } else {
+        *stream = None;
+        false
+    }
+}
+
+/// Decide whether the broad host projection changed in a way that can affect
+/// one exact member poll. Host actors republish this watch after every served
+/// command, so treating every version bump as causal would merely replace the
+/// old fixed timer with load-driven durable-store polling.
+fn projection_change_requires_poll(
+    projection: &HostObservationProjection,
+    session_key: &str,
+    expected_member: &BridgeMemberIncarnation,
+    event_frontier_exclusive: u64,
+) -> bool {
+    let Some(facts) = projection.sessions.get(session_key) else {
+        return true;
+    };
+    &facts.incarnation != expected_member
+        || facts
+            .turn_outcomes
+            .iter()
+            .any(|record| record.terminal_seq < event_frontier_exclusive)
+}
+
+/// Await one relevant host-projection signal. Unrelated host command
+/// publications are consumed inside this helper without waking a durable log
+/// read. As with the event helper, a closed watch is removed after its single
+/// terminal wake.
+async fn wait_for_relevant_projection_signal(
+    projection: &mut Option<watch::Receiver<HostObservationProjection>>,
+    session_key: &str,
+    expected_member: &BridgeMemberIncarnation,
+    event_frontier_exclusive: u64,
+) -> bool {
+    loop {
+        let Some(active) = projection.as_mut() else {
+            return std::future::pending::<bool>().await;
+        };
+        if active.changed().await.is_err() {
+            *projection = None;
+            return false;
+        }
+        if projection_change_requires_poll(
+            &active.borrow(),
+            session_key,
+            expected_member,
+            event_frontier_exclusive,
+        ) {
+            return true;
+        }
+    }
+}
+
 async fn run_pending_recovery_reconciler<F, Fut>(
     mut projection: watch::Receiver<HostObservationProjection>,
     mut recover_once: F,
@@ -837,6 +917,7 @@ async fn run_pending_recovery_reconciler<F, Fut>(
     Fut: Future<Output = usize>,
 {
     let mut backoff = PENDING_RECOVERY_RETRY_MIN;
+    let mut previous_pending_count = 0usize;
     loop {
         let pending_count = recover_once().await;
         if pending_count == 0 {
@@ -844,22 +925,33 @@ async fn run_pending_recovery_reconciler<F, Fut>(
                 return;
             }
             backoff = PENDING_RECOVERY_RETRY_MIN;
+            previous_pending_count = 0;
             continue;
         }
 
-        tokio::select! {
-            changed = projection.changed() => {
-                if changed.is_err() {
-                    return;
+        if previous_pending_count != 0 && previous_pending_count != pending_count {
+            backoff = PENDING_RECOVERY_RETRY_MIN;
+        }
+        previous_pending_count = pending_count;
+
+        // Projection changes are useful shutdown/liveness signals, but are not
+        // proof that runtime readiness changed for a durable Pending row. Keep
+        // one absolute retry deadline across any number of unrelated host
+        // projection updates so degraded recovery cannot become an unbounded
+        // zero-delay loop on a busy host.
+        let retry_at = tokio::time::Instant::now() + backoff;
+        loop {
+            tokio::select! {
+                biased;
+                () = tokio::time::sleep_until(retry_at) => break,
+                changed = projection.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
                 }
-                backoff = PENDING_RECOVERY_RETRY_MIN;
-            }
-            () = tokio::time::sleep(backoff) => {
-                backoff = backoff
-                    .saturating_mul(2)
-                    .min(PENDING_RECOVERY_RETRY_MAX);
             }
         }
+        backoff = backoff.saturating_mul(2).min(PENDING_RECOVERY_RETRY_MAX);
     }
 }
 
@@ -993,9 +1085,30 @@ impl HostMemberObservation {
         let Some(adapter) = self.session_service.runtime_adapter() else {
             return 0;
         };
-        let projection = self.projection.borrow().clone();
+        // Project only Pending custody out of the actor watch. Cloning the
+        // whole projection here also cloned every retained outcome payload
+        // (up to 16 MiB per member) on each degraded retry even though
+        // recovery never reads those rows.
+        let pending_projection = {
+            let projection = self.projection.borrow();
+            projection
+                .sessions
+                .iter()
+                .map(|(session_text, facts)| {
+                    (
+                        session_text.clone(),
+                        facts.incarnation.clone(),
+                        facts.generation,
+                        facts.fence_token,
+                        facts.pending_turns.clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
         let mut pending_count = 0usize;
-        for (session_text, facts) in projection.sessions {
+        for (session_text, incarnation, generation, fence_token, pending_turns) in
+            pending_projection
+        {
             let Ok(session) = SessionId::parse(&session_text) else {
                 tracing::error!(
                     session_id = %session_text,
@@ -1003,20 +1116,20 @@ impl HostMemberObservation {
                 );
                 continue;
             };
-            for pending in facts.pending_turns {
+            for pending in pending_turns {
                 pending_count = pending_count.saturating_add(1);
-                if pending.generation != facts.generation
-                    || pending.fence_token != facts.fence_token
-                    || facts.incarnation.generation != facts.generation
-                    || facts.incarnation.fence_token != facts.fence_token
-                    || facts.incarnation.member_session_id != session_text
+                if pending.generation != generation
+                    || pending.fence_token != fence_token
+                    || incarnation.generation != generation
+                    || incarnation.fence_token != fence_token
+                    || incarnation.member_session_id != session_text
                 {
                     tracing::error!(
                         session_id = %session,
                         input_id = %pending.input_id,
                         pending_generation = pending.generation,
                         pending_fence_token = pending.fence_token,
-                        projected_incarnation = ?facts.incarnation,
+                        projected_incarnation = ?incarnation,
                         "Pending recovery projection key differs from its exact current residency; retaining Pending"
                     );
                     continue;
@@ -1079,11 +1192,11 @@ impl HostMemberObservation {
                     );
                     continue;
                 };
-                if journal.member_incarnation() != &facts.incarnation {
+                if journal.member_incarnation() != &incarnation {
                     tracing::error!(
                         session_id = %session,
                         input_id = %pending.input_id,
-                        expected = ?facts.incarnation,
+                        expected = ?incarnation,
                         journal = ?journal.member_incarnation(),
                         "accepted Pending recovery found a journal for a different residency; retaining Pending"
                     );
@@ -1108,7 +1221,7 @@ impl HostMemberObservation {
                         .accept_input_with_completion_for_member_residency(
                             &session,
                             persisted_input,
-                            Some(&facts.incarnation),
+                            Some(&incarnation),
                         )
                         .await
                     {
@@ -1171,7 +1284,7 @@ impl HostMemberObservation {
                 let admission = DirectedTurnAdmission {
                     input_id: pending.input_id.clone(),
                     window: DirectedTurnWindow {
-                        expected_member: facts.incarnation.clone(),
+                        expected_member: incarnation.clone(),
                         subscription,
                         window_start: pending.window_start,
                         generation: pending.generation,
@@ -1631,12 +1744,15 @@ impl HostMemberObservation {
         let deadline = tokio::time::Instant::now() + wait;
         // Long-poll wake: subscribe the live session stream as the SIGNAL and
         // re-read the DURABLE log after each wake — the durable log is the
-        // single read authority; detached projection lag costs one extra
-        // wake/read cycle (DEC-P6E-4).
-        let mut wake =
+        // single read authority. A wake that races the detached projection
+        // enters the bounded settle ladder below (DEC-P6E-4).
+        let mut event_wake =
             MobSessionService::subscribe_session_events(self.session_service.as_ref(), session)
                 .await
                 .ok();
+        let mut projection_wake = Some(self.projection.clone());
+        let session_key = session.to_string();
+        let mut causal_retry = None;
         loop {
             // Outcomes are published through the host projection rather than
             // the durable event log. Refresh that sidecar on every long-poll
@@ -1691,22 +1807,34 @@ impl HostMemberObservation {
                 });
             }
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            let tick = remaining.min(POLL_FALLBACK_TICK);
-            match wake.as_mut() {
-                Some(stream) => {
-                    tokio::select! {
-                        item = stream.next() => {
-                            if item.is_none() {
-                                // Stream ended (session teardown): a finished
-                                // stream must never be re-polled — fall back
-                                // to the tick for the rest of the window.
-                                wake = None;
-                            }
-                        }
-                        () = tokio::time::sleep(tick) => {}
+            let delay = causal_retry.unwrap_or(POLL_SAFETY_TICK);
+            let tick = remaining.min(delay);
+            tokio::select! {
+                signalled = wait_for_optional_event_signal(&mut event_wake) => {
+                    if signalled {
+                        // The live event may precede its detached durable
+                        // projection. Re-read immediately, then use the bounded
+                        // settle ladder if the row has not landed yet.
+                        causal_retry = Some(CAUSAL_RETRY_MIN);
                     }
                 }
-                None => tokio::time::sleep(tick).await,
+                signalled = wait_for_relevant_projection_signal(
+                    &mut projection_wake,
+                    &session_key,
+                    &facts.incarnation,
+                    from_seq,
+                ) => {
+                    if signalled {
+                        // Turn-outcome sidecars are projection-owned and may
+                        // become answerable without another session event.
+                        causal_retry = Some(CAUSAL_RETRY_MIN);
+                    }
+                }
+                () = tokio::time::sleep(tick) => {
+                    if let Some(delay) = causal_retry {
+                        causal_retry = Some(advance_causal_retry(delay));
+                    }
+                }
             }
         }
     }
@@ -1762,10 +1890,13 @@ impl HostMemberObservation {
                 });
             }
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            let tick = remaining.min(POLL_FALLBACK_TICK);
+            // `notified()` was created before the snapshot, so this is the
+            // race-free local condition-variable pattern: the exact ring signal
+            // or the caller's own deadline is sufficient. A periodic tick only
+            // re-locks the same unchanged in-memory rows.
             tokio::select! {
                 () = notified => {}
-                () = tokio::time::sleep(tick) => {}
+                () = tokio::time::sleep(remaining) => {}
             }
         }
     }
@@ -2865,6 +2996,7 @@ async fn refresh_terminal_attribution(
 ) -> Option<DirectedTurnRuntimeAttribution> {
     use meerkat_runtime::service_ext::SessionServiceRuntimeExt as _;
 
+    let mut retry_delay = CAUSAL_RETRY_MIN;
     loop {
         match adapter
             .input_state_by_idempotency_key(session, pending_input_id)
@@ -2919,7 +3051,8 @@ async fn refresh_terminal_attribution(
             );
             return None;
         }
-        tokio::time::sleep(remaining.min(POLL_FALLBACK_TICK)).await;
+        tokio::time::sleep(remaining.min(retry_delay)).await;
+        retry_delay = advance_causal_retry(retry_delay);
     }
 }
 
@@ -2972,7 +3105,7 @@ async fn run_directed_turn_watcher(
     } = admission;
     let DirectedTurnWindow {
         expected_member,
-        mut subscription,
+        subscription,
         window_start,
         generation,
         fence_token,
@@ -3093,7 +3226,8 @@ async fn run_directed_turn_watcher(
         }
     };
 
-    let mut subscription_open = true;
+    let mut event_wake = Some(subscription);
+    let mut retry_delay = CAUSAL_RETRY_MIN;
     let mut traced_watermark = None;
     loop {
         match scan_durable_terminals(&session, window_start, &attribution.expected_content, &log)
@@ -3188,18 +3322,19 @@ async fn run_directed_turn_watcher(
             );
             return;
         }
-        let tick = remaining.min(POLL_FALLBACK_TICK);
-        if subscription_open {
-            tokio::select! {
-                event = subscription.next() => {
-                    if event.is_none() {
-                        subscription_open = false;
-                    }
+        let tick = remaining.min(retry_delay);
+        tokio::select! {
+            signalled = wait_for_optional_event_signal(&mut event_wake) => {
+                if signalled {
+                    // A causal event makes an immediate durable re-read useful;
+                    // if its projection is still catching up, the next empty
+                    // pass resumes at the minimum bounded delay.
+                    retry_delay = CAUSAL_RETRY_MIN;
                 }
-                () = tokio::time::sleep(tick) => {}
             }
-        } else {
-            tokio::time::sleep(tick).await;
+            () = tokio::time::sleep(tick) => {
+                retry_delay = advance_causal_retry(retry_delay);
+            }
         }
     }
 }
@@ -3450,6 +3585,30 @@ mod tests {
         ) -> Result<Option<Vec<(u64, EventEnvelope<AgentEvent>)>>, MemberObservationError> {
             self.entered.notify_one();
             self.release.notified().await;
+            Ok(Some(Vec::new()))
+        }
+
+        async fn latest_seq(
+            &self,
+            _session: &SessionId,
+        ) -> Result<Option<u64>, MemberObservationError> {
+            Ok(Some(0))
+        }
+    }
+
+    struct CountingEmptyLog {
+        reads: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl DurableEventLogRead for CountingEmptyLog {
+        async fn read_from(
+            &self,
+            _session: &SessionId,
+            _from_seq: u64,
+            _max_rows: usize,
+        ) -> Result<Option<Vec<(u64, EventEnvelope<AgentEvent>)>>, MemberObservationError> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
             Ok(Some(Vec::new()))
         }
 
@@ -3877,6 +4036,72 @@ mod tests {
                 "same_generation_fence_rotation={same_generation_fence_rotation}: {error:?}"
             );
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_durable_poll_uses_slow_safety_sweep() {
+        let session = SessionId::new();
+        let expected = incarnation(&session, 3, 5);
+        let facts = SessionObservationFacts {
+            mob_id: expected.mob_id.clone(),
+            agent_identity: expected.agent_identity.clone(),
+            generation: expected.generation,
+            fence_token: expected.fence_token,
+            incarnation: expected.clone(),
+            generation_start_seq: 1,
+            pending_turns: Vec::new(),
+            turn_outcomes: Vec::new(),
+        };
+        let (_projection_tx, projection_rx) = watch::channel(HostObservationProjection {
+            sessions: BTreeMap::from([(session.to_string(), facts)]),
+        });
+        let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let log = Arc::new(CountingEmptyLog {
+            reads: Arc::clone(&reads),
+        });
+        let (pending_tx, _pending_rx) = mpsc::channel(1);
+        let (outcome_ack_tx, _outcome_ack_rx) = mpsc::channel(1);
+        let observation = Arc::new(HostMemberObservation::new(
+            BridgeHostRuntimeIncarnation::new(),
+            Arc::new(BoundarySessionService::default()),
+            Some(log),
+            projection_rx,
+            pending_tx,
+            outcome_ack_tx,
+        ));
+        let poll_observation = Arc::clone(&observation);
+        let poll_session = session.clone();
+        let poll_expected = expected.clone();
+        let poll = tokio::spawn(async move {
+            poll_observation
+                .poll_events(
+                    &poll_session,
+                    MemberEventsPollRequest {
+                        expected_member: &poll_expected,
+                        cursor: MemberObservationCursor::Tail,
+                        max: 1,
+                        wait: POLL_SAFETY_TICK * 2,
+                        outcome_acks: &[],
+                        max_outcomes: 1,
+                    },
+                )
+                .await
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
+
+        tokio::time::advance(POLL_SAFETY_TICK - Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            1,
+            "idle durable polling must not restore the historical 250ms scan"
+        );
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(reads.load(Ordering::SeqCst), 2);
+        poll.abort();
     }
 
     #[tokio::test]
@@ -5046,6 +5271,100 @@ mod tests {
             .expect("second pass reattaches without a host restart");
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
         task.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pending_projection_churn_cannot_bypass_retry_deadline() {
+        let (projection_tx, projection_rx) = watch::channel(HostObservationProjection::default());
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let task_attempts = Arc::clone(&attempts);
+        let task = tokio::spawn(run_pending_recovery_reconciler(projection_rx, move || {
+            let attempts = Arc::clone(&task_attempts);
+            async move {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                1
+            }
+        }));
+        tokio::task::yield_now().await;
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+
+        // Busy host-projection traffic is not runtime-readiness evidence. It
+        // may be consumed for closure detection, but cannot trigger another
+        // durable recovery pass before the absolute retry deadline.
+        for _ in 0..32 {
+            projection_tx.send_replace(HostObservationProjection::default());
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+
+        tokio::time::advance(PENDING_RECOVERY_RETRY_MIN).await;
+        tokio::task::yield_now().await;
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        task.abort();
+    }
+
+    #[test]
+    fn causal_retry_reaches_safety_cadence_without_overflow() {
+        let mut delay = CAUSAL_RETRY_MIN;
+        let mut observed = Vec::new();
+        for _ in 0..16 {
+            observed.push(delay);
+            delay = advance_causal_retry(delay);
+        }
+        assert_eq!(observed.first().copied(), Some(CAUSAL_RETRY_MIN));
+        assert_eq!(delay, CAUSAL_RETRY_MAX);
+        assert!(
+            observed.windows(2).all(|pair| pair[0] <= pair[1]),
+            "causal retry delay must be monotonic"
+        );
+    }
+
+    #[test]
+    fn broad_projection_wake_is_causal_only_for_exact_member_poll() {
+        let session = SessionId::new();
+        let expected = incarnation(&session, 3, 5);
+        let facts = SessionObservationFacts {
+            incarnation: expected.clone(),
+            mob_id: expected.mob_id.clone(),
+            agent_identity: expected.agent_identity.clone(),
+            generation: expected.generation,
+            fence_token: expected.fence_token,
+            generation_start_seq: 1,
+            pending_turns: Vec::new(),
+            turn_outcomes: vec![outcome("directed")],
+        };
+        let projection = HostObservationProjection {
+            sessions: BTreeMap::from([(session.to_string(), facts)]),
+        };
+
+        assert!(
+            !projection_change_requires_poll(&projection, &session.to_string(), &expected, 7),
+            "a sidecar at the event frontier is not answerable yet"
+        );
+        assert!(
+            projection_change_requires_poll(&projection, &session.to_string(), &expected, 8),
+            "an exact-member sidecar below the event frontier must wake the poll"
+        );
+        assert!(projection_change_requires_poll(
+            &HostObservationProjection::default(),
+            &session.to_string(),
+            &expected,
+            7,
+        ));
+
+        let mut replacement = projection;
+        replacement
+            .sessions
+            .get_mut(&session.to_string())
+            .expect("session facts")
+            .incarnation
+            .fence_token += 1;
+        assert!(projection_change_requires_poll(
+            &replacement,
+            &session.to_string(),
+            &expected,
+            7,
+        ));
     }
 
     #[test]

@@ -8,6 +8,20 @@ struct MutationGuardedControlEntry {
 }
 
 impl MeerkatMachine {
+    async fn lock_current_control_durability_ready_session_mutation_gate(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<crate::tokio::sync::OwnedMutexGuard<()>, RuntimeControlPlaneError> {
+        self.lock_current_durability_ready_session_mutation_gate(session_id)
+            .await
+            .map_err(|error| match error {
+                RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                } => RuntimeControlPlaneError::NotFound(Self::logical_runtime_id(session_id)),
+                error => RuntimeControlPlaneError::StoreError(error.to_string()),
+            })
+    }
+
     /// Capture every incarnation-local control handle from one current entry
     /// while its exact mutation gate is retained. Logical RuntimeControlPlane
     /// commands linearize at M acquisition: replacement may win before M, but
@@ -220,12 +234,33 @@ impl MeerkatMachine {
             MeerkatMachineCommand::Ingest { runtime_id, input } => {
                 let (session_id, driver, completions, _wake_tx) =
                     self.lookup_entry(&runtime_id).await?;
-                let mutation_gate = self.session_mutation_gate(&session_id).await.ok_or(
-                    RuntimeControlPlaneError::InvalidState {
-                        state: RuntimeState::Destroyed,
-                    },
-                )?;
-                let mut gate_guard = Some(Arc::clone(&mutation_gate).lock_owned().await);
+                let ready_guard = self
+                    .lock_current_durability_ready_session_mutation_gate(&session_id)
+                    .await
+                    .map_err(|error| match error {
+                        RuntimeDriverError::NotReady {
+                            state: RuntimeState::Destroyed,
+                        } => RuntimeControlPlaneError::InvalidState {
+                            state: RuntimeState::Destroyed,
+                        },
+                        error => RuntimeControlPlaneError::StoreError(error.to_string()),
+                    })?;
+                let mutation_gate = {
+                    let sessions = self.sessions.read().await;
+                    let entry = sessions.get(&session_id).ok_or(
+                        RuntimeControlPlaneError::InvalidState {
+                            state: RuntimeState::Destroyed,
+                        },
+                    )?;
+                    if !Arc::ptr_eq(&entry.driver, &driver) || entry.runtime_id != runtime_id {
+                        return Err(RuntimeControlPlaneError::Internal(
+                            "direct Ingest runtime attachment changed before gate capture"
+                                .to_string(),
+                        ));
+                    }
+                    Arc::clone(&entry.mutation_gate)
+                };
+                let mut gate_guard = Some(ready_guard);
                 let (
                     wake_tx,
                     effect_tx,
@@ -576,9 +611,14 @@ impl MeerkatMachine {
                 )
                 .await;
                 let mutation_guard = self
-                    .lock_current_session_mutation_gate(&session_id)
+                    .lock_current_durability_ready_session_mutation_gate(&session_id)
                     .await
-                    .ok_or_else(|| RuntimeControlPlaneError::NotFound(runtime_id.clone()))?;
+                    .map_err(|error| match error {
+                        RuntimeDriverError::NotReady {
+                            state: RuntimeState::Destroyed,
+                        } => RuntimeControlPlaneError::NotFound(runtime_id.clone()),
+                        error => RuntimeControlPlaneError::StoreError(error.to_string()),
+                    })?;
                 let MutationGuardedControlEntry { driver, .. } = self
                     .capture_current_control_entry_under_mutation_guard(
                         &runtime_id,
@@ -650,9 +690,14 @@ impl MeerkatMachine {
                 )
                 .await;
                 let mutation_guard = self
-                    .lock_current_session_mutation_gate(&session_id)
+                    .lock_current_durability_ready_session_mutation_gate(&session_id)
                     .await
-                    .ok_or_else(|| RuntimeControlPlaneError::NotFound(runtime_id.clone()))?;
+                    .map_err(|error| match error {
+                        RuntimeDriverError::NotReady {
+                            state: RuntimeState::Destroyed,
+                        } => RuntimeControlPlaneError::NotFound(runtime_id.clone()),
+                        error => RuntimeControlPlaneError::StoreError(error.to_string()),
+                    })?;
                 let MutationGuardedControlEntry {
                     driver,
                     completions,
@@ -711,15 +756,20 @@ impl MeerkatMachine {
             MeerkatMachineCommand::Reset { runtime_id } => {
                 // Resolve only the logical SessionId before M. The driver and
                 // completion handles are incarnation-local and must be
-                // captured after `lock_current_session_mutation_gate` has
-                // revalidated the exact current gate; otherwise an A -> B
+                // captured after the durability-ready mutation gate has
+                // revalidated the exact current entry; otherwise an A -> B
                 // replacement while waiting can reset A's driver while
                 // applying B's DSL transition.
                 let (session_id, _, _, _) = self.lookup_entry(&runtime_id).await?;
                 let _gate_guard = self
-                    .lock_current_session_mutation_gate(&session_id)
+                    .lock_current_durability_ready_session_mutation_gate(&session_id)
                     .await
-                    .ok_or_else(|| RuntimeControlPlaneError::NotFound(runtime_id.clone()))?;
+                    .map_err(|error| match error {
+                        RuntimeDriverError::NotReady {
+                            state: RuntimeState::Destroyed,
+                        } => RuntimeControlPlaneError::NotFound(runtime_id.clone()),
+                        error => RuntimeControlPlaneError::StoreError(error.to_string()),
+                    })?;
                 let (locked_session_id, driver, completions, _wake_tx) =
                     self.lookup_entry(&runtime_id).await?;
                 if locked_session_id != session_id {
@@ -1008,6 +1058,9 @@ impl MeerkatMachine {
                 baseline_model,
                 realtime_capable,
             } => {
+                let _mutation_guard = self
+                    .lock_current_control_durability_ready_session_mutation_gate(&session_id)
+                    .await?;
                 self.apply_session_dsl_input(
                     &session_id,
                     crate::meerkat_machine::dsl::MeerkatMachineInput::SetModelRoutingBaseline {
@@ -1037,6 +1090,10 @@ impl MeerkatMachine {
                 session_id,
                 request,
             } => {
+                let mut _mutation_guard = Some(
+                    self.lock_current_control_durability_ready_session_mutation_gate(&session_id)
+                        .await?,
+                );
                 let request = *request;
                 let request_key = switch_request_key(request.request_id);
                 match &request.intent.duration {
@@ -1126,10 +1183,17 @@ impl MeerkatMachine {
                                     ));
                                 }
                             };
-                            if let Err(err) =
+                            drop(_mutation_guard.take());
+                            let reconfigure_result =
                                 Box::pin(self.execute_meerkat_machine_session_command(reconfigure))
-                                    .await
-                            {
+                                    .await;
+                            _mutation_guard = Some(
+                                self.lock_current_control_durability_ready_session_mutation_gate(
+                                    &session_id,
+                                )
+                                .await?,
+                            );
+                            if let Err(err) = reconfigure_result {
                                 self.restore_session_dsl_state(&session_id, previous_dsl_state)
                                     .await;
                                 return Err(RuntimeControlPlaneError::Internal(err.to_string()));
@@ -1184,6 +1248,9 @@ impl MeerkatMachine {
                 ))
             }
             MeerkatMachineCommand::AdmitModelRoutingAssistantTurn { session_id } => {
+                let _mutation_guard = self
+                    .lock_current_control_durability_ready_session_mutation_gate(&session_id)
+                    .await?;
                 self.apply_session_dsl_input(
                     &session_id,
                     crate::meerkat_machine::dsl::MeerkatMachineInput::AdmitModelRoutingAssistantTurn,
@@ -1197,6 +1264,9 @@ impl MeerkatMachine {
                 session_id,
                 request,
             } => {
+                let _mutation_guard = self
+                    .lock_current_control_durability_ready_session_mutation_gate(&session_id)
+                    .await?;
                 let request = *request;
                 let operation_key = image_operation_key(request.operation_id);
                 self.apply_session_dsl_input(
@@ -1258,6 +1328,9 @@ impl MeerkatMachine {
                 operation_id,
                 reason,
             } => {
+                let _mutation_guard = self
+                    .lock_current_control_durability_ready_session_mutation_gate(&session_id)
+                    .await?;
                 let operation_key = image_operation_key(operation_id);
                 let expected_reason = routing_image_plan_denial(&reason);
                 let terminal =
@@ -1343,6 +1416,9 @@ impl MeerkatMachine {
                 session_id,
                 operation_id,
             } => {
+                let _mutation_guard = self
+                    .lock_current_control_durability_ready_session_mutation_gate(&session_id)
+                    .await?;
                 let operation_key = image_operation_key(operation_id);
                 let state = self.session_dsl_state(&session_id).await?;
                 let target_model = state
@@ -1384,6 +1460,9 @@ impl MeerkatMachine {
                 observation,
                 provider_text,
             } => {
+                let _mutation_guard = self
+                    .lock_current_control_durability_ready_session_mutation_gate(&session_id)
+                    .await?;
                 let operation_key = image_operation_key(operation_id);
                 let (observation, http_status_code, error_code) =
                     routing_image_terminal_observation(&observation);
@@ -1435,6 +1514,9 @@ impl MeerkatMachine {
                 operation_id,
                 terminal,
             } => {
+                let _mutation_guard = self
+                    .lock_current_control_durability_ready_session_mutation_gate(&session_id)
+                    .await?;
                 let operation_key = image_operation_key(operation_id);
                 self.apply_session_dsl_input(
                     &session_id,
@@ -1471,6 +1553,9 @@ impl MeerkatMachine {
                 session_id,
                 operation_id,
             } => {
+                let _mutation_guard = self
+                    .lock_current_control_durability_ready_session_mutation_gate(&session_id)
+                    .await?;
                 let operation_key = image_operation_key(operation_id);
                 let state = self.session_dsl_state(&session_id).await?;
                 let operation_phase = state

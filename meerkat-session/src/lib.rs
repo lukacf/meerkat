@@ -56,8 +56,7 @@ pub use compactor::DefaultCompactor;
 
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 pub use persistent::{
-    CommittedBoundaryRecovery, LegacyCheckpointAdoptionOptions, LegacyCheckpointAdoptionReport,
-    LiveSessionActorTurnBoundaryLease, MachineServiceTurnCommitProtocol,
+    CommittedBoundaryRecovery, LiveSessionActorTurnBoundaryLease, MachineServiceTurnCommitProtocol,
     MachineSessionArchiveProtocol, PersistentSessionService,
 };
 

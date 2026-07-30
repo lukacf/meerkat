@@ -233,7 +233,7 @@ test(
         source: "web-live-smoke",
         idempotencyKey: "wasm-ctx-46",
       });
-      assert.ok(["staged", "duplicate"].includes(staged.status));
+      assert.ok(["applied", "duplicate"].includes(staged.status));
 
       const subscription = session.subscribe();
       try {
@@ -317,7 +317,7 @@ test(
         source: "web-live-smoke",
         idempotencyKey: "wasm-swarm-47",
       });
-      assert.ok(["staged", "duplicate"].includes(appended.status));
+      assert.ok(["applied", "duplicate"].includes(appended.status));
 
       const subscription = await mob.member("reviewer-1").subscribe();
       try {

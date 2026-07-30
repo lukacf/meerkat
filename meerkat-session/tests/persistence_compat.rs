@@ -2,9 +2,9 @@
 //!
 //! Every store read path deserializes persisted rows through typed serde and
 //! the generated `session_persistence_version_authority`. Session envelopes
-//! and metadata accept exactly the current version. Stored input state also
-//! admits the explicitly modeled v3-to-v4 migration; every other missing,
-//! legacy, or future version FAILS CLOSED with a typed rejection.
+//! and metadata accept exactly the current version. Stored input state admits
+//! the explicitly modeled v4-to-v5 migration from the 0.8.10 floor; every
+//! older, missing, or future version FAILS CLOSED with a typed rejection.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -15,75 +15,6 @@ use meerkat_core::{SESSION_METADATA_SCHEMA_VERSION, SESSION_VERSION, Session, Se
 use serde_json::{Value, json};
 
 const AUTHORITY_REJECTION: &str = "generated session persistence version authority rejected";
-
-/// v0.8.7 event-log regression witness: every pre-0.8.8 session that used
-/// external callbacks (IDE hosts, production gateways) carries durable
-/// `run_failed` lines whose `callback_pending` reason predates `tool_use_id`,
-/// and `interaction_callback_pending` lines that predate
-/// `pending_tool_calls`. The projector and session event reads replay these
-/// exact lines; they must keep decoding under `EVENT_SCHEMA_VERSION` 2.
-#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
-#[test]
-fn v087_callback_event_log_lines_still_decode() {
-    let run_failed_line = json!({
-        "seq": 41,
-        "schema_version": meerkat_session::event_store::EVENT_SCHEMA_VERSION,
-        "timestamp": { "secs_since_epoch": 1, "nanos_since_epoch": 0 },
-        "source": { "type": "session", "session_id": "00000000-0000-0000-0000-000000000001" },
-        "stream_seq": 41,
-        "event": {
-            "type": "run_failed",
-            "session_id": "00000000-0000-0000-0000-000000000001",
-            "error_report": {
-                "class": "callback_pending",
-                "reason": {
-                    "reason_type": "callback_pending",
-                    "tool_name": "external",
-                    "args": { "value": 1 }
-                },
-                "message": "external callback pending: external"
-            }
-        }
-    });
-    let stored: meerkat_session::event_store::StoredEvent = serde_json::from_value(run_failed_line)
-        .expect("v0.8.7 run_failed callback_pending line must decode");
-    let meerkat_core::event::AgentEvent::RunFailed { error_report, .. } = &stored.event else {
-        panic!("line decodes as RunFailed");
-    };
-    let Some(meerkat_core::event::AgentErrorReason::CallbackPending { tool_use_id, .. }) =
-        error_report.reason.as_ref()
-    else {
-        panic!("reason decodes as CallbackPending");
-    };
-    assert!(
-        tool_use_id.is_empty(),
-        "the pre-0.8.8 line has no callback identity; it must decode as empty, not fail"
-    );
-
-    let interaction_callback_line = json!({
-        "seq": 42,
-        "schema_version": meerkat_session::event_store::EVENT_SCHEMA_VERSION,
-        "timestamp": { "secs_since_epoch": 2, "nanos_since_epoch": 0 },
-        "source": { "type": "session", "session_id": "00000000-0000-0000-0000-000000000001" },
-        "stream_seq": 42,
-        "event": {
-            "type": "interaction_callback_pending",
-            "interaction_id": "00000000-0000-0000-0000-000000000002",
-            "tool_name": "external",
-            "args": { "value": 1 }
-        }
-    });
-    let stored: meerkat_session::event_store::StoredEvent =
-        serde_json::from_value(interaction_callback_line)
-            .expect("v0.8.7 interaction_callback_pending line must decode");
-    let meerkat_core::event::AgentEvent::InteractionCallbackPending {
-        pending_tool_calls, ..
-    } = &stored.event
-    else {
-        panic!("line decodes as InteractionCallbackPending");
-    };
-    assert!(pending_tool_calls.is_empty());
-}
 
 fn session_envelope(version: Option<Value>) -> Value {
     let mut envelope = json!({
@@ -225,12 +156,13 @@ fn future_session_metadata_schema_version_fails_closed_on_session_read() {
 fn stored_input_state_version_is_pinned_to_current() {
     // The runtime crate owns `StoredInputState` serde; this pins the shared
     // constant so the rejection tests there and the authority here agree.
-    // v4 adds the durable interaction-terminal outbox. The generated
-    // authority deliberately accepts a v3 row and upgrades its version to v4;
-    // the runtime fixture test pins the corresponding shape migration.
-    assert_eq!(STORED_INPUT_STATE_VERSION, 4);
-    assert_eq!(restore_stored_input_state_version(3), Ok(4));
-    assert_eq!(restore_stored_input_state_version(4), Ok(4));
+    // v5 adds the exact durable completion outcome. The supported 0.8.10
+    // floor wrote v4, so the generated authority admits only v4-to-v5 plus
+    // current v5; v3 and older versions are intentionally retired.
+    assert_eq!(STORED_INPUT_STATE_VERSION, 5);
+    assert!(restore_stored_input_state_version(3).is_err());
+    assert_eq!(restore_stored_input_state_version(4), Ok(5));
+    assert_eq!(restore_stored_input_state_version(5), Ok(5));
     assert_eq!(SESSION_VERSION, 2);
     assert_eq!(SESSION_METADATA_SCHEMA_VERSION, 2);
 }
@@ -248,8 +180,7 @@ mod runtime_backed_llm_reconfigure_tests {
     use meerkat_core::types::{ContentInput, RunResult};
     use meerkat_core::{
         AgentLlmClient, LlmStreamResult, Message, Provider, Session, SessionLlmIdentity,
-        SessionLlmRequestPolicy, SystemContextStateError, SystemContextStateHandle,
-        SystemPromptOverride, ToolDef,
+        SessionLlmRequestPolicy, SystemPromptOverride, ToolDef, TransientTurnContextStateHandle,
     };
     use meerkat_runtime::{InMemoryRuntimeStore, RuntimeStore};
     use meerkat_session::{
@@ -337,7 +268,7 @@ mod runtime_backed_llm_reconfigure_tests {
             }
         }
 
-        fn session_clone(&self) -> Result<Session, SystemContextStateError> {
+        fn session_clone(&self) -> Result<Session, AgentError> {
             Ok(self.session.clone())
         }
 
@@ -349,15 +280,8 @@ mod runtime_backed_llm_reconfigure_tests {
             ObservedSessionTailKind::Empty
         }
 
-        fn apply_runtime_system_context(
-            &mut self,
-            _appends: &[meerkat_core::PendingSystemContextAppend],
-        ) {
-        }
-
-        fn system_context_state(&self) -> SystemContextStateHandle {
-            SystemContextStateHandle::new(Default::default())
-                .expect("test system-context state should restore")
+        fn transient_turn_context_state(&self) -> TransientTurnContextStateHandle {
+            TransientTurnContextStateHandle::new()
         }
     }
 

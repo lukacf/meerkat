@@ -16,7 +16,9 @@ use meerkat_core::types::{
 };
 use meerkat_session::EphemeralSessionService;
 use meerkat_session::ephemeral::{
-    ObservedSessionTailKind, SessionAgent, SessionAgentBuilder, SessionAgentTurnInput,
+    HeadCanonicalRuntimeBoundaryAcknowledgeOutcome, HeadCanonicalRuntimeBoundaryAuthority,
+    HeadCanonicalRuntimeBoundaryPrepareRequest, ObservedSessionTailKind,
+    PreparedHeadCanonicalRuntimeBoundary, SessionAgent, SessionAgentBuilder, SessionAgentTurnInput,
     SessionSnapshot,
 };
 use std::sync::Arc;
@@ -39,6 +41,23 @@ pub struct FactoryAgent {
     /// to fire `AdvanceSessionContext` on every canonical session-truth
     /// mutation (W2-E / issue #264). `None` on `StandaloneEphemeral` builds.
     session_context: Option<Arc<dyn meerkat_core::handles::SessionContextHandle>>,
+    /// Small actor-local acknowledgement carrier for the exact prepared
+    /// head-canonical successor. No Session clone or full document is parked.
+    pending_head_canonical_boundary: Option<PendingFactoryHeadCanonicalBoundary>,
+    /// Bounded exact receipt retained only until the next successor is
+    /// prepared, allowing component roots to retry a lost acknowledgement.
+    acknowledged_head_canonical_boundary: Option<PendingFactoryHeadCanonicalBoundary>,
+}
+
+#[derive(Clone)]
+struct PendingFactoryHeadCanonicalBoundary {
+    authority: HeadCanonicalRuntimeBoundaryAuthority,
+    observed_head_token: Option<String>,
+    request_projection_token: String,
+    /// Shared head-only carrier plus small receipt facts. Cloning it is one
+    /// Arc bump for the mutation; it neither clones nor retains a
+    /// Session/whole document.
+    prepared: PreparedHeadCanonicalRuntimeBoundary,
 }
 
 fn build_agent_error_to_session_error(
@@ -121,6 +140,13 @@ impl FactoryAgent {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl SessionAgent for FactoryAgent {
+    fn take_run_checkpoint_receipt(
+        &mut self,
+        expected_run_id: &meerkat_core::RunId,
+    ) -> Result<Option<meerkat_core::RunCheckpointReceipt>, meerkat_core::error::AgentError> {
+        self.agent.take_run_checkpoint_receipt(expected_run_id)
+    }
+
     async fn run_with_events(
         &mut self,
         prompt: meerkat_core::types::ContentInput,
@@ -178,6 +204,8 @@ impl SessionAgent for FactoryAgent {
             ));
         }
         self.agent.set_runtime_execution_kind(input.execution_kind);
+        self.agent
+            .set_active_turn_request_contexts(input.transient_turn_contexts);
         if input.typed_turn_appends.is_empty()
             && input.transcript_identity.is_none()
             && input.injected_context.is_empty()
@@ -277,50 +305,30 @@ impl SessionAgent for FactoryAgent {
             })
     }
 
-    fn update_system_prompt(
+    fn append_system_messages(
         &mut self,
-        system_prompt: String,
+        contents: Vec<String>,
     ) -> Result<(), meerkat_core::error::AgentError> {
-        let mut build_state = self
-            .agent
-            .session()
-            .try_build_state()
-            .map_err(|err| {
-                meerkat_core::error::AgentError::InternalError(format!(
-                    "failed to restore session build state for system prompt update: {err}"
-                ))
-            })?
-            .ok_or_else(|| {
-                meerkat_core::error::AgentError::InternalError(
-                    "session is missing build state for system prompt update".to_string(),
-                )
-            })?;
-        self.agent
-            .session_mut()
-            .set_system_prompt_with_source(
-                system_prompt.clone(),
-                meerkat_core::session_durable_config_authority::SessionSystemPromptSource::DirectMutation,
-            )
-            .map_err(|err| {
-                meerkat_core::error::AgentError::ConfigError(format!(
-                    "system prompt update was rejected by durable-config authority: {err}"
-                ))
-            })?;
-        // A deferred first-turn override changes the canonical base itself.
-        // Keep the exact bytes and their typed intent together so live
-        // open/refresh never has to reconstruct either fact from transcript
-        // shape or stale create-time policy.
-        build_state.system_prompt = meerkat_core::SystemPromptOverride::Set(system_prompt.clone());
-        build_state.assembled_system_prompt = Some(system_prompt);
-        self.agent
-            .session_mut()
-            .set_build_state(build_state)
-            .map_err(|err| {
-                meerkat_core::error::AgentError::InternalError(format!(
-                    "failed to persist canonical system prompt update: {err}"
-                ))
-            })?;
+        for content in contents {
+            self.agent.session_mut().append_system_message(content);
+        }
         Ok(())
+    }
+
+    fn append_system_message_control(
+        &mut self,
+        req: meerkat_core::AppendSystemContextRequest,
+    ) -> Result<meerkat_core::service::AppendSystemContextStatus, meerkat_core::error::AgentError>
+    {
+        self.agent
+            .session_mut()
+            .append_system_message_idempotent(
+                req.content.render_text(),
+                req.source,
+                req.idempotency_key,
+                meerkat_core::types::message_timestamp_now(),
+            )
+            .map_err(|error| meerkat_core::error::AgentError::ConfigError(error.to_string()))
     }
 
     fn stage_external_tool_filter(
@@ -407,10 +415,6 @@ impl SessionAgent for FactoryAgent {
             .await
     }
 
-    fn sync_system_context_state(&mut self) -> Result<(), meerkat_core::SystemContextStateError> {
-        self.agent.sync_system_context_state_to_session()
-    }
-
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
     fn sync_session_from_durable_snapshot(
         &mut self,
@@ -424,14 +428,6 @@ impl SessionAgent for FactoryAgent {
             )));
         }
 
-        let system_context_state = session
-            .try_system_context_state()
-            .map_err(|err| {
-                meerkat_core::error::AgentError::InternalError(format!(
-                    "failed to restore durable system-context state during live session sync: {err}"
-                ))
-            })?
-            .unwrap_or_default();
         let deferred_turn_state = session.try_deferred_turn_state().map_err(|err| {
             meerkat_core::error::AgentError::InternalError(format!(
                 "failed to restore durable deferred-turn state during live session sync: {err}"
@@ -462,14 +458,6 @@ impl SessionAgent for FactoryAgent {
             })?;
         *self.agent.session_mut() = session;
 
-        let state_handle = self.agent.system_context_state();
-        state_handle
-            .replace_from_generated_restore(system_context_state)
-            .map_err(|err| {
-                meerkat_core::error::AgentError::InternalError(format!(
-                    "generated system-context authority rejected durable session sync: {err}"
-                ))
-            })?;
         Ok(())
     }
 
@@ -526,8 +514,231 @@ impl SessionAgent for FactoryAgent {
         self.agent.external_tool_surface_snapshot()
     }
 
-    fn session_clone(&self) -> Result<Session, meerkat_core::SystemContextStateError> {
-        self.agent.session_with_system_context_state()
+    fn session_clone(&self) -> Result<Session, meerkat_core::error::AgentError> {
+        Ok(self.agent.session().clone())
+    }
+
+    fn install_immutable_session_labels(
+        &mut self,
+        labels: &std::collections::BTreeMap<String, String>,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        if labels.is_empty() {
+            return Ok(());
+        }
+        let labels = serde_json::to_value(labels).map_err(|error| {
+            meerkat_core::error::AgentError::InternalError(format!(
+                "failed to encode immutable session labels: {error}"
+            ))
+        })?;
+        if self
+            .agent
+            .session()
+            .metadata()
+            .get(meerkat_session::SESSION_LABELS_KEY)
+            != Some(&labels)
+        {
+            self.agent
+                .session_mut()
+                .set_metadata(meerkat_session::SESSION_LABELS_KEY, labels);
+        }
+        Ok(())
+    }
+
+    fn classify_callback_result_ingress(
+        &self,
+        results: &[meerkat_core::ToolResult],
+    ) -> Result<meerkat_core::session::CallbackResultIngress, meerkat_core::error::AgentError> {
+        self.agent
+            .session()
+            .classify_callback_result_ingress(results)
+    }
+
+    async fn prepare_head_canonical_runtime_boundary(
+        &mut self,
+        request: HeadCanonicalRuntimeBoundaryPrepareRequest,
+    ) -> Result<PreparedHeadCanonicalRuntimeBoundary, meerkat_core::error::AgentError> {
+        let (authority, observed_head, deferred_turn_state, request_projection_token, blob_store) =
+            request.into_parts();
+        let observed_head_token = observed_head
+            .as_ref()
+            .map(meerkat_core::session_store::session_head_cas_token)
+            .transpose()
+            .map_err(|error| {
+                meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to bind observed head for head-canonical preparation: {error}"
+                ))
+            })?;
+        if let Some(pending) = self.pending_head_canonical_boundary.as_ref() {
+            if pending.authority == authority
+                && pending.observed_head_token == observed_head_token
+                && pending.request_projection_token == request_projection_token
+            {
+                return Ok(pending.prepared.clone());
+            }
+            return Err(meerkat_core::error::AgentError::InternalError(
+                "head-canonical re-prepare does not match the unacknowledged exact request projection"
+                    .to_string(),
+            ));
+        }
+        let suffix_start_u64 = observed_head.as_ref().map_or(0, |head| head.message_count);
+        let suffix_start = usize::try_from(suffix_start_u64).map_err(|_| {
+            meerkat_core::error::AgentError::InternalError(
+                "head-canonical predecessor message count exceeds the host index range".to_string(),
+            )
+        })?;
+
+        // Normalize only the uncommitted suffix. Rewriting the retained
+        // prefix would invalidate the physical head proof and turn ordinary
+        // persistence back into O(document) work.
+        self.agent
+            .session_mut()
+            .externalize_media(blob_store.as_ref(), suffix_start)
+            .await
+            .map_err(|error| {
+                meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to externalize head-canonical session suffix: {error}"
+                ))
+            })?;
+        self.agent
+            .session_mut()
+            .set_deferred_turn_state(deferred_turn_state)
+            .map_err(|error| {
+                meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to project deferred-turn state into head-canonical successor: {error}"
+                ))
+            })?;
+        let mutation = match &authority {
+            HeadCanonicalRuntimeBoundaryAuthority::Root => {
+                if observed_head.is_some() {
+                    return Err(meerkat_core::error::AgentError::InternalError(
+                        "head-canonical root preparation observed an existing physical head"
+                            .to_string(),
+                    ));
+                }
+                meerkat_core::session_store::PreparedHeadCanonicalMutation::prepare_root(
+                    self.agent.session(),
+                )
+                .map(
+                    meerkat_core::lifecycle::core_executor::PreparedHeadCanonicalPhysicalMutation::from,
+                )
+            }
+            HeadCanonicalRuntimeBoundaryAuthority::Successor {
+                boundary_head, ..
+            } => {
+                let observed_head = observed_head.ok_or_else(|| {
+                    meerkat_core::error::AgentError::InternalError(
+                        "head-canonical successor preparation is missing its physical predecessor head"
+                            .to_string(),
+                    )
+                })?;
+                let rewrite_required =
+                    meerkat_core::session_store::PreparedHeadCanonicalRewriteMutation::is_required(
+                        self.agent.session(),
+                        &observed_head,
+                    )
+                    .map_err(|error| {
+                        meerkat_core::error::AgentError::InternalError(format!(
+                            "failed to classify head-canonical physical mutation: {error}"
+                        ))
+                    })?;
+                if rewrite_required {
+                    meerkat_core::session_store::PreparedHeadCanonicalRewriteMutation::prepare_successor(
+                        self.agent.session(),
+                        boundary_head,
+                        observed_head,
+                    )
+                    .map(
+                        meerkat_core::lifecycle::core_executor::PreparedHeadCanonicalPhysicalMutation::from,
+                    )
+                } else {
+                    meerkat_core::session_store::PreparedHeadCanonicalMutation::prepare(
+                        self.agent.session(),
+                        Some(observed_head),
+                    )
+                    .map(
+                        meerkat_core::lifecycle::core_executor::PreparedHeadCanonicalPhysicalMutation::from,
+                    )
+                }
+            }
+        }
+        .map_err(|error| {
+                meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to prepare head-canonical boundary: {error}"
+                ))
+            })?;
+        let committed =
+            meerkat_core::lifecycle::core_executor::BoundSessionCommit::head_canonical_physical_from_session(
+                self.agent.session(),
+                mutation,
+            )
+            .map_err(|error| {
+                meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to seal head-canonical successor boundary: {error}"
+                ))
+            })?;
+        let prepared =
+            PreparedHeadCanonicalRuntimeBoundary::new(committed.clone()).map_err(|error| {
+                meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to bind actor-prepared head-canonical boundary: {error}"
+                ))
+            })?;
+        self.pending_head_canonical_boundary = Some(PendingFactoryHeadCanonicalBoundary {
+            authority,
+            observed_head_token,
+            request_projection_token,
+            prepared: prepared.clone(),
+        });
+        self.acknowledged_head_canonical_boundary = None;
+        Ok(prepared)
+    }
+
+    fn acknowledge_head_canonical_runtime_boundary(
+        &mut self,
+        successor_head_token: &str,
+    ) -> Result<HeadCanonicalRuntimeBoundaryAcknowledgeOutcome, meerkat_core::error::AgentError>
+    {
+        let (carrier, outcome) = if let Some(pending) =
+            self.pending_head_canonical_boundary.as_ref()
+        {
+            (
+                pending,
+                HeadCanonicalRuntimeBoundaryAcknowledgeOutcome::Applied,
+            )
+        } else if let Some(acknowledged) = self.acknowledged_head_canonical_boundary.as_ref() {
+            (
+                acknowledged,
+                HeadCanonicalRuntimeBoundaryAcknowledgeOutcome::AlreadyAcknowledgedExact,
+            )
+        } else {
+            return Err(meerkat_core::error::AgentError::InternalError(
+                "factory agent has no prepared or acknowledged head-canonical boundary".to_string(),
+            ));
+        };
+        let committed = carrier.prepared.committed().clone();
+        let boundary = committed.head_canonical().ok_or_else(|| {
+            meerkat_core::error::AgentError::InternalError(
+                "factory agent pending boundary is not head-canonical".to_string(),
+            )
+        })?;
+        if boundary.mutation().successor_head_token() != successor_head_token {
+            return Err(meerkat_core::error::AgentError::InternalError(
+                "head-canonical acknowledgement head token does not match the factory actor's successor"
+                    .to_string(),
+            ));
+        }
+        if outcome == HeadCanonicalRuntimeBoundaryAcknowledgeOutcome::AlreadyAcknowledgedExact {
+            return Ok(outcome);
+        }
+        boundary
+            .mutation()
+            .acknowledge_session(self.agent.session_mut(), successor_head_token)
+            .map_err(|error| {
+                meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to acknowledge committed head-canonical successor: {error}"
+                ))
+            })?;
+        self.acknowledged_head_canonical_boundary = self.pending_head_canonical_boundary.take();
+        Ok(outcome)
     }
 
     fn durable_llm_identity(&self) -> Option<meerkat_core::SessionLlmIdentity> {
@@ -539,27 +750,6 @@ impl SessionAgent for FactoryAgent {
 
     fn observed_session_tail(&self) -> ObservedSessionTailKind {
         meerkat_core::pending_continuation::observe_session_tail(self.agent.session().messages())
-    }
-
-    fn apply_runtime_system_context(
-        &mut self,
-        appends: &[meerkat_core::PendingSystemContextAppend],
-    ) {
-        self.agent
-            .session_mut()
-            .append_system_context_blocks(appends);
-        let state = self
-            .agent
-            .session()
-            .system_context_state()
-            .unwrap_or_default();
-        let state_handle = self.agent.system_context_state();
-        if let Err(err) = state_handle.replace_from_generated_restore(state) {
-            tracing::warn!(
-                error = %err,
-                "generated system-context authority rejected runtime context restore"
-            );
-        }
     }
 
     fn append_external_user_content(
@@ -606,8 +796,8 @@ impl SessionAgent for FactoryAgent {
         Ok(outcome)
     }
 
-    fn system_context_state(&self) -> meerkat_core::SystemContextStateHandle {
-        self.agent.system_context_state()
+    fn transient_turn_context_state(&self) -> meerkat_core::TransientTurnContextStateHandle {
+        self.agent.transient_turn_context_state()
     }
 
     fn event_injector(&self) -> Option<Arc<dyn meerkat_core::EventInjector>> {
@@ -1142,6 +1332,8 @@ impl SessionAgentBuilder for FactoryAgentBuilder {
         Ok(FactoryAgent {
             agent,
             session_context,
+            pending_head_canonical_boundary: None,
+            acknowledged_head_canonical_boundary: None,
         })
     }
 }
@@ -1689,6 +1881,8 @@ mod tests {
         Ok(FactoryAgent {
             agent,
             session_context: None,
+            pending_head_canonical_boundary: None,
+            acknowledged_head_canonical_boundary: None,
         })
     }
 
@@ -1732,6 +1926,95 @@ mod tests {
         assert!(
             agent.session().try_deferred_turn_state().unwrap().is_none(),
             "failed sync must not install raw deferred-turn metadata into the live session"
+        );
+        Ok(())
+    }
+
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn factory_head_canonical_prepare_is_exactly_retryable_after_dropped_reply()
+    -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let mut agent = build_factory_agent_with_mock(
+            &temp,
+            AgentBuildConfig {
+                ..AgentBuildConfig::new("claude-sonnet-4-5")
+            },
+        )
+        .await?;
+        let blob_store: Arc<dyn meerkat_core::BlobStore> = Arc::new(MemoryBlobStore::default());
+        let request = || {
+            HeadCanonicalRuntimeBoundaryPrepareRequest::try_new(
+                HeadCanonicalRuntimeBoundaryAuthority::root(),
+                None,
+                meerkat_core::SessionDeferredTurnState::default(),
+                meerkat_session::ephemeral::HeadCanonicalDeferredProjectionSource::LiveActorState,
+                None,
+                "factory-root-retry-test",
+                Arc::clone(&blob_store),
+            )
+        };
+
+        let first = SessionAgent::prepare_head_canonical_runtime_boundary(
+            &mut agent,
+            request().map_err(|error| error.to_string())?,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        let expected_token = first.successor_head_token().to_string();
+        // Simulate cancellation after the actor produced the reply: the
+        // caller drops its carrier while the actor retains the prepared
+        // mutation awaiting exact retry or durable acknowledgement.
+        drop(first);
+
+        let retried = SessionAgent::prepare_head_canonical_runtime_boundary(
+            &mut agent,
+            request().map_err(|error| error.to_string())?,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        assert_eq!(retried.successor_head_token(), expected_token.as_str());
+
+        let mismatched = HeadCanonicalRuntimeBoundaryPrepareRequest::try_new(
+            HeadCanonicalRuntimeBoundaryAuthority::root(),
+            None,
+            meerkat_core::SessionDeferredTurnState::default(),
+            meerkat_session::ephemeral::HeadCanonicalDeferredProjectionSource::LiveActorState,
+            None,
+            "factory-root-retry-test-changed-role",
+            blob_store,
+        )
+        .map_err(|error| error.to_string())?;
+        let error =
+            match SessionAgent::prepare_head_canonical_runtime_boundary(&mut agent, mismatched)
+                .await
+            {
+                Ok(_) => {
+                    return Err(
+                        "a changed request projection replaced the pending head-canonical boundary"
+                            .to_string(),
+                    );
+                }
+                Err(error) => error,
+            };
+        assert!(
+            error.to_string().contains("does not match"),
+            "unexpected mismatch error: {error}"
+        );
+
+        let applied =
+            SessionAgent::acknowledge_head_canonical_runtime_boundary(&mut agent, &expected_token)
+                .map_err(|error| error.to_string())?;
+        assert_eq!(
+            applied,
+            HeadCanonicalRuntimeBoundaryAcknowledgeOutcome::Applied
+        );
+        let retried_ack =
+            SessionAgent::acknowledge_head_canonical_runtime_boundary(&mut agent, &expected_token)
+                .map_err(|error| error.to_string())?;
+        assert_eq!(
+            retried_ack,
+            HeadCanonicalRuntimeBoundaryAcknowledgeOutcome::AlreadyAcknowledgedExact
         );
         Ok(())
     }
@@ -2014,6 +2297,7 @@ mod tests {
             &mut agent,
             SessionAgentTurnInput {
                 prompt: "inspect".to_string().into(),
+                transient_turn_contexts: Vec::new(),
                 injected_context: Vec::new(),
                 handling_mode: HandlingMode::Queue,
                 render_metadata: None,
@@ -2086,6 +2370,7 @@ mod tests {
             &mut agent,
             SessionAgentTurnInput {
                 prompt: "inspect".to_string().into(),
+                transient_turn_contexts: Vec::new(),
                 injected_context: Vec::new(),
                 handling_mode: HandlingMode::Queue,
                 render_metadata: None,
@@ -2325,8 +2610,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deferred_first_turn_prompt_update_refreshes_canonical_assembled_bytes()
-    -> Result<(), String> {
+    async fn system_message_append_is_only_an_ordered_transcript_event() -> Result<(), String> {
         let mut builder = FactoryAgentBuilder::new(AgentFactory::minimal(), Config::default());
         builder.default_llm_client = Some(Arc::new(MockLlmClient::default()));
         let mut request = make_session_request("claude-sonnet-4-5");
@@ -2338,25 +2622,19 @@ mod tests {
             .await
             .map_err(|error| format!("build failed: {error}"))?;
 
-        SessionAgent::update_system_prompt(&mut agent, "deferred override".to_string())
-            .map_err(|error| format!("prompt update failed: {error}"))?;
+        SessionAgent::append_system_messages(&mut agent, vec!["turn instruction".to_string()])
+            .map_err(|error| format!("System append failed: {error}"))?;
 
-        let build_state = agent
+        let systems = agent
             .session()
-            .build_state()
-            .ok_or_else(|| "updated agent lost session build state".to_string())?;
-        assert_eq!(
-            build_state.system_prompt,
-            meerkat_core::SystemPromptOverride::Set("deferred override".to_string())
-        );
-        assert_eq!(
-            build_state.assembled_system_prompt.as_deref(),
-            Some("deferred override")
-        );
-        assert!(matches!(
-            agent.session().messages().first(),
-            Some(Message::System(system)) if system.content == "deferred override"
-        ));
+            .messages()
+            .iter()
+            .filter_map(|message| match message {
+                Message::System(system) => Some(system.content.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(systems, ["create-time prompt", "turn instruction"]);
         Ok(())
     }
 

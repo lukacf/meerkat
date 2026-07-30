@@ -28,6 +28,12 @@ impl FailDeleteOpsLifecycleOnceStore {
 
 #[async_trait::async_trait]
 impl meerkat_runtime::store::RuntimeStore for FailDeleteOpsLifecycleOnceStore {
+    fn session_persistence_profile(
+        &self,
+    ) -> meerkat_runtime::store::RuntimeSessionPersistenceProfile {
+        meerkat_runtime::store::RuntimeStore::session_persistence_profile(self.inner.as_ref())
+    }
+
     fn supports_compaction_projection_outbox(&self) -> bool {
         meerkat_runtime::store::RuntimeStore::supports_compaction_projection_outbox(
             self.inner.as_ref(),
@@ -61,17 +67,28 @@ impl meerkat_runtime::store::RuntimeStore for FailDeleteOpsLifecycleOnceStore {
     async fn commit_session_snapshot(
         &self,
         runtime_id: &meerkat_runtime::LogicalRuntimeId,
-        session_delta: meerkat_runtime::store::SessionDelta,
+        session_delta: meerkat_runtime::store::SerializedSessionSnapshot,
     ) -> Result<(), meerkat_runtime::store::RuntimeStoreError> {
         self.inner
             .commit_session_snapshot(runtime_id, session_delta)
             .await
     }
 
+    async fn commit_prepared_whole_blob_rewrite_boundary(
+        &self,
+        runtime_id: &meerkat_runtime::LogicalRuntimeId,
+        boundary: meerkat_runtime::store::PreparedWholeBlobRewriteStoreParts,
+    ) -> Result<meerkat_runtime::RuntimeSessionAuthority, meerkat_runtime::store::RuntimeStoreError>
+    {
+        self.inner
+            .commit_prepared_whole_blob_rewrite_boundary(runtime_id, boundary)
+            .await
+    }
+
     async fn atomic_apply(
         &self,
         runtime_id: &meerkat_runtime::LogicalRuntimeId,
-        session_delta: Option<meerkat_runtime::store::SessionDelta>,
+        session_delta: Option<meerkat_runtime::store::SerializedSessionSnapshot>,
         receipt: meerkat_core::lifecycle::RunBoundaryReceipt,
         input_updates: Vec<meerkat_runtime::input_state::InputStatePersistenceRecord>,
         session_store_key: Option<meerkat_core::SessionId>,
@@ -112,7 +129,7 @@ impl meerkat_runtime::store::RuntimeStore for FailDeleteOpsLifecycleOnceStore {
     async fn load_session_snapshot(
         &self,
         runtime_id: &meerkat_runtime::LogicalRuntimeId,
-    ) -> Result<Option<Vec<u8>>, meerkat_runtime::store::RuntimeStoreError> {
+    ) -> Result<Option<std::sync::Arc<Vec<u8>>>, meerkat_runtime::store::RuntimeStoreError> {
         self.inner.load_session_snapshot(runtime_id).await
     }
 

@@ -491,10 +491,19 @@ impl AnthropicClient {
     fn build_request_body(&self, request: &LlmRequest) -> Result<Value, LlmError> {
         let mut messages = Vec::new();
         let mut system_messages = Vec::new();
+        let mut leading_system_prefix = true;
 
         for msg in &request.messages {
+            if !matches!(msg, Message::System(_)) {
+                leading_system_prefix = false;
+            }
             match msg {
                 Message::System(s) => {
+                    if !leading_system_prefix {
+                        return Err(LlmError::InvalidInputShape {
+                            message: "Anthropic Messages cannot faithfully represent a System message after non-System transcript content".to_string(),
+                        });
+                    }
                     system_messages.push(s.content.clone());
                 }
                 Message::SystemNotice(notice) => {
@@ -1004,6 +1013,10 @@ fn merge_usage(target: &mut Usage, update: &AnthropicUsage) {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl LlmClient for AnthropicClient {
+    fn system_message_wire_capability(&self) -> meerkat_core::SystemMessageWireCapability {
+        meerkat_core::SystemMessageWireCapability::LeadingPrefixOnly
+    }
+
     fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
         project_anthropic_replay_messages(messages)
     }
@@ -1816,15 +1829,18 @@ mod tests {
     }
 
     #[test]
-    fn ordered_system_messages_are_preserved_as_distinct_anthropic_blocks() {
+    fn leading_system_messages_are_preserved_as_distinct_anthropic_blocks() {
         let client = AnthropicClient::new("test-key".to_string()).unwrap();
+        assert_eq!(
+            client.system_message_wire_capability(),
+            meerkat_core::SystemMessageWireCapability::LeadingPrefixOnly
+        );
         let messages = vec![
-            Message::User(UserMessage::text("work")),
             Message::System(SystemMessage::new("")),
-            Message::User(UserMessage::text("continue")),
             Message::System(SystemMessage::new(" \t ")),
             Message::System(SystemMessage::new("duplicate")),
             Message::System(SystemMessage::new("duplicate")),
+            Message::User(UserMessage::text("work")),
         ];
         let request = LlmRequest::new("claude-sonnet-4-6", messages.clone());
 
@@ -1839,11 +1855,26 @@ mod tests {
         assert_eq!(system[2]["text"], "duplicate");
         assert_eq!(system[3]["text"], "duplicate");
         let projected_messages = body["messages"].as_array().expect("messages array");
-        assert_eq!(projected_messages.len(), 2);
+        assert_eq!(projected_messages.len(), 1);
         assert_eq!(projected_messages[0]["role"], "user");
         assert_eq!(projected_messages[0]["content"], "work");
-        assert_eq!(projected_messages[1]["role"], "user");
-        assert_eq!(projected_messages[1]["content"], "continue");
+    }
+
+    #[test]
+    fn mid_thread_system_message_is_rejected_instead_of_hoisted() {
+        let client = AnthropicClient::new("test-key".to_string()).unwrap();
+        let request = LlmRequest::new(
+            "claude-sonnet-4-6",
+            vec![
+                Message::User(UserMessage::text("work")),
+                Message::System(SystemMessage::new("late instruction")),
+            ],
+        );
+
+        let error = client
+            .build_request_body(&request)
+            .expect_err("mid-thread System must not be hoisted");
+        assert!(matches!(error, LlmError::InvalidInputShape { .. }));
     }
 
     // =========================================================================

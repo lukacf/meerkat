@@ -29,6 +29,11 @@ for arg in "$@"; do
   esac
 done
 
+if ! command -v rg >/dev/null 2>&1; then
+  echo "deprecated-backend scan requires ripgrep (rg); refusing a false-green scan" >&2
+  exit 2
+fi
+
 lower_prefix='red'
 lower_suffix='b'
 upper_prefix='Red'

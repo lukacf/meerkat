@@ -761,8 +761,10 @@ where
     /// Enables hot-swapping the model/provider on a live session without
     /// rebuilding the agent. The new client takes effect on the next
     /// `run()` / `run_with_events()` call.
-    pub fn replace_client(&mut self, client: Arc<C>) {
+    pub fn replace_client(&mut self, client: Arc<C>) -> Result<(), AgentError> {
+        Self::preflight_client_transcript(client.as_ref(), self.session.messages())?;
         self.client = client;
+        Ok(())
     }
 
     /// Apply the live LLM request policy paired with an identity hot-swap.
@@ -779,9 +781,10 @@ where
         &mut self,
         client: Arc<C>,
         policy: crate::SessionLlmRequestPolicy,
-    ) {
-        self.replace_client(client);
+    ) -> Result<(), AgentError> {
+        self.replace_client(client)?;
         self.apply_llm_request_policy(policy);
+        Ok(())
     }
 
     /// Atomically apply an explicit live LLM identity hot-swap.
@@ -810,6 +813,7 @@ where
                     .to_string(),
             ));
         }
+        Self::preflight_client_transcript(client.as_ref(), self.session.messages())?;
 
         let target_profile = self
             .effective_model_registry
@@ -1189,6 +1193,71 @@ where
     /// Get mutable access to the session (for setting metadata)
     pub fn session_mut(&mut self) -> &mut Session {
         &mut self.session
+    }
+
+    fn preflight_client_transcript(client: &C, messages: &[Message]) -> Result<(), AgentError> {
+        let capability = client.system_message_wire_capability();
+        if let Some(incompatible_index) = capability.first_incompatible_index(messages) {
+            return Err(AgentError::SystemMessageWireIncompatible {
+                provider: client.provider(),
+                capability,
+                incompatible_index,
+            });
+        }
+        Ok(())
+    }
+
+    /// Validate the full canonical transcript against the active concrete
+    /// provider wire without changing agent or session state.
+    ///
+    /// Builders use this after restoring a durable session so an incompatible
+    /// provider/config selection fails before the session is materialized.
+    pub fn preflight_active_client_transcript(&self) -> Result<(), AgentError> {
+        Self::preflight_client_transcript(self.client.as_ref(), self.session.messages())
+    }
+
+    fn preflight_turn_appends(&self, appends: &[ConversationAppend]) -> Result<(), AgentError> {
+        self.preflight_active_client_transcript()?;
+        let capability = self.client.system_message_wire_capability();
+        if matches!(capability, crate::SystemMessageWireCapability::Interleaved) {
+            return Ok(());
+        }
+
+        let mut prefix_open = self
+            .session
+            .messages()
+            .iter()
+            .all(|message| matches!(message, Message::System(_)));
+        for (offset, append) in appends.iter().enumerate() {
+            if append.role == ConversationAppendRole::System {
+                if !prefix_open {
+                    return Err(AgentError::SystemMessageWireIncompatible {
+                        provider: self.client.provider(),
+                        capability,
+                        incompatible_index: self.session.messages().len() + offset,
+                    });
+                }
+            } else {
+                prefix_open = false;
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate an ordinary tail append of `System` messages against the
+    /// active concrete provider wire without mutating the session.
+    pub fn preflight_system_message_append(&self, count: usize) -> Result<(), AgentError> {
+        let capability = self.client.system_message_wire_capability();
+        if let Some(incompatible_index) =
+            capability.first_incompatible_index_after_system_append(self.session.messages(), count)
+        {
+            return Err(AgentError::SystemMessageWireIncompatible {
+                provider: self.client.provider(),
+                capability,
+                incompatible_index,
+            });
+        }
+        Ok(())
     }
 
     /// Consume the latest successful provisional write for `run_id`.
@@ -1768,6 +1837,10 @@ where
             self.clear_runtime_execution_kind();
             return Err(err);
         }
+        if let Err(error) = self.preflight_turn_appends(&typed_turn_appends) {
+            self.clear_runtime_execution_kind();
+            return Err(error);
+        }
         if let Err(error) = self.prepare_compaction_ingress().await {
             self.clear_runtime_execution_kind();
             return Err(error);
@@ -1954,6 +2027,10 @@ where
         {
             self.clear_runtime_execution_kind();
             return Err(err);
+        }
+        if let Err(error) = self.preflight_active_client_transcript() {
+            self.clear_runtime_execution_kind();
+            return Err(error);
         }
         if let Err(error) = self.prepare_compaction_ingress().await {
             self.clear_runtime_execution_kind();

@@ -507,19 +507,19 @@ pub(super) fn validate_transcript_revision_edge(
         .map(serde_json::to_vec)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
-    let start = u64::try_from(start).map_err(|_| {
+    let durable_start = u64::try_from(start).map_err(|_| {
         TranscriptEditError::HistoryStateMalformed(
             "rewrite start exceeds durable u64 row coordinates".to_string(),
         )
     })?;
-    let end = u64::try_from(end).map_err(|_| {
+    let durable_end = u64::try_from(end).map_err(|_| {
         TranscriptEditError::HistoryStateMalformed(
             "rewrite end exceeds durable u64 row coordinates".to_string(),
         )
     })?;
     let expected_result_prefix = edge
         .parent_row_prefix()
-        .replace_serialized_range(start, end, &replacement_rows)
+        .replace_serialized_range(durable_start, durable_end, &replacement_rows)
         .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
     if &expected_result_prefix != edge.result_witness().row_prefix() {
         return Err(TranscriptEditError::HistoryStateMalformed(format!(

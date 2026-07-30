@@ -618,7 +618,16 @@ fn openai_realtime_history_events(seed_messages: &[Message]) -> Result<Vec<Clien
                     content: vec![ContentPart::OutputText { text }],
                 }))
             }
-            Message::System(_) | Message::SystemNotice(_) | Message::ToolResults { .. } => Ok(None),
+            Message::SystemNotice(notice) => Ok(Some(Item::Message {
+                id: None,
+                status: None,
+                phase: None,
+                role: Role::User,
+                content: vec![ContentPart::InputText {
+                    text: notice.model_projection_text(),
+                }],
+            })),
+            Message::System(_) | Message::ToolResults { .. } => Ok(None),
         }
     }
 
@@ -626,9 +635,9 @@ fn openai_realtime_history_events(seed_messages: &[Message]) -> Result<Vec<Clien
     // - canonical committed dialogue is replayed back to the provider as text
     //   message items so the rebuilt session retains actual conversational
     //   structure instead of only a prose recap
-    // - every System and SystemNotice row is projected once through the
-    //   provider's singular top-level `instructions` field. Replaying either
-    //   as a conversation item would duplicate instruction authority.
+    // - only the validated leading System prefix uses the provider's singular
+    //   top-level `instructions` field
+    // - SystemNotice remains an explicit in-place user-role history event.
 
     let mut projected = Vec::new();
     for message in seed_messages {
@@ -862,8 +871,8 @@ fn openai_projection_session_update(
 ///
 /// Instructions are derived exclusively from
 /// `snapshot.ordered_system_instructions`. This is the deterministic provider
-/// projection of every durable transcript System and SystemNotice row, in
-/// transcript order and with exact content preserved. When present it is used
+/// projection of the durable transcript's contiguous leading System prefix,
+/// with exact content preserved. When present it is used
 /// directly without re-walking the seed messages — non-instruction history is replayed as
 /// `conversation.item.create` events by `seed_history_projection` after
 /// this update lands.
@@ -1190,11 +1199,9 @@ fn openai_realtime_instructions(
     ordered_system_instructions: Option<&str>,
     language_pin: Option<String>,
 ) -> Option<String> {
-    // `ordered_system_instructions` is the provider-neutral lowering of every
-    // ordered durable System and SystemNotice row. The provider supports only
-    // one top-level field, so the lowering owner joins exact message content
-    // with one stable separator. Seed instruction rows are deliberately not
-    // replayed as history items: doing both would duplicate their authority.
+    // `ordered_system_instructions` is the provider-neutral lowering of the
+    // validated contiguous leading System prefix. SystemNotice remains an
+    // in-place history event and is never promoted into this field.
     // Language pin goes first so output_text and output_audio_transcript
     // stay coherent with the caller's expected language even when
     // transcription confidence on input dips. The pin is the typed
@@ -5953,9 +5960,10 @@ async fn execute_openai_live_command_with_budget(
             // projection snapshot — `seed_history_projection` is the same
             // routine the factory uses at open-time. It mints
             // `ConversationItemCreate` events on the sender side and waits
-            // for provider acknowledgements. System and SystemNotice rows are
-            // omitted here because their single provider-visible projection is
-            // the ordered top-level `instructions` field.
+            // for provider acknowledgements. The validated leading System
+            // prefix is omitted here because its single provider-visible
+            // projection is the top-level `instructions` field. SystemNotice
+            // remains an explicit in-place history item.
             session
                 .seed_history_projection(
                     &snapshot.seed_messages,
@@ -7005,6 +7013,7 @@ mod tests {
                 )),
             ],
         )
+        .expect("sample transcript has only a leading System prefix")
     }
 
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -7043,7 +7052,7 @@ mod tests {
             Ok(_) => panic!("blank target must fail"),
             Err(error) => error,
         };
-        assert!(matches!(error, LlmError::InvalidRequest { .. }));
+        assert!(matches!(error, LlmError::InvalidInputShape { .. }));
     }
 
     #[test]
@@ -7248,12 +7257,11 @@ mod tests {
     }
 
     #[test]
-    fn session_updates_project_arbitrary_position_systems_and_notices_exactly_once() {
+    fn session_config_rejects_arbitrary_position_systems_instead_of_hoisting_them() {
         let notice = meerkat_core::SystemNoticeMessage::new(
             meerkat_core::SystemNoticeKind::Generic,
             "NOTICE IS AN INSTRUCTION",
         );
-        let notice_projection = notice.model_projection_text();
         let messages = vec![
             Message::User(meerkat_core::UserMessage::text("before")),
             Message::System(meerkat_core::SystemMessage::new("")),
@@ -7263,55 +7271,30 @@ mod tests {
             Message::System(meerkat_core::SystemMessage::new(" \t ")),
             Message::System(meerkat_core::SystemMessage::new("duplicate")),
         ];
-        let original_messages = messages.clone();
-        let open_config = RealtimeSessionOpenConfig::new(
+        let error = RealtimeSessionOpenConfig::new(
             RealtimeTurningMode::ProviderManaged,
             sample_realtime_identity(),
             Vec::new(),
             messages,
-        );
-        let policy = OpenAiRealtimePolicy::resolve(&open_config.llm_identity);
-        let expected_projection =
-            format!("\n\nduplicate\n\n{notice_projection}\n\n \t \n\nduplicate");
-
-        for update in [
-            openai_session_update(&open_config, &policy),
-            openai_projection_session_update(&open_config, &policy),
-        ] {
-            let instructions = update
-                .config
-                .instructions
-                .expect("ordered transcript instructions should produce instructions");
-            let language_pin = policy
-                .output_language_instruction
-                .as_deref()
-                .expect("sample policy carries the language pin");
-            assert_eq!(
-                instructions.strip_prefix(&format!("{language_pin}\n\n")),
-                Some(expected_projection.as_str()),
-                "instruction content/order or stable separator changed"
-            );
-        }
-        assert_eq!(
-            open_config.seed_messages(),
-            original_messages.as_slice(),
-            "provider projection must not mutate the canonical input transcript"
-        );
+        )
+        .expect_err("mid-thread Systems must not be hoisted");
+        assert!(matches!(error, LlmError::InvalidRequest { .. }));
     }
 
     #[test]
-    fn session_updates_project_notice_only_transcripts() {
+    fn notice_only_transcript_is_not_promoted_to_top_level_instructions() {
         let notice = meerkat_core::SystemNoticeMessage::new(
             meerkat_core::SystemNoticeKind::Generic,
             "NOTICE IS AN INSTRUCTION",
         );
-        let expected = notice.model_projection_text();
+        let notice_projection = notice.model_projection_text();
         let open_config = RealtimeSessionOpenConfig::new(
             RealtimeTurningMode::ProviderManaged,
             sample_realtime_identity(),
             Vec::new(),
             vec![Message::SystemNotice(notice)],
-        );
+        )
+        .expect("SystemNotice remains an in-place history event");
         let policy = OpenAiRealtimePolicy::resolve(&open_config.llm_identity);
 
         for update in [
@@ -7322,11 +7305,25 @@ mod tests {
                 .config
                 .instructions
                 .expect("the typed output-language policy should produce instructions");
-            assert!(
-                instructions.ends_with(&expected),
-                "SystemNotice projection must reach the provider instructions: {instructions}"
-            );
+            assert!(!instructions.contains("NOTICE IS AN INSTRUCTION"));
         }
+        let events = openai_realtime_history_events(open_config.seed_messages())
+            .expect("SystemNotice should project as an in-place history event");
+        assert!(matches!(
+            events.as_slice(),
+            [ClientEvent::ConversationItemCreate { item, .. }]
+                if matches!(
+                    item.as_ref(),
+                    Item::Message {
+                        role: Role::User,
+                        content,
+                        ..
+                    } if matches!(
+                        content.as_slice(),
+                        [ContentPart::InputText { text }] if text == &notice_projection
+                    )
+                )
+        ));
     }
 
     #[test]
@@ -7838,7 +7835,9 @@ mod tests {
                 },
             },
         ])));
-        let config = config.with_seed_messages(seed_messages);
+        let config = config
+            .with_seed_messages(seed_messages)
+            .expect("added user image preserves System-prefix shape");
         let raw_factory = Arc::new(FakeOpenAiLiveFactory {
             opened_sessions: Mutex::new(VecDeque::new()),
             attached_sessions: Mutex::new(VecDeque::from(vec![Ok(
@@ -7899,7 +7898,9 @@ mod tests {
                 },
             },
         ])));
-        let config = config.with_seed_messages(seed_messages);
+        let config = config
+            .with_seed_messages(seed_messages)
+            .expect("added user image preserves System-prefix shape");
         let seen = Arc::new(Mutex::new(Vec::new()));
         let raw_factory = Arc::new(FakeOpenAiLiveFactory {
             opened_sessions: Mutex::new(VecDeque::new()),

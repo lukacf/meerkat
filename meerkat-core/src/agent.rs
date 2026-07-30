@@ -61,6 +61,16 @@ pub use runner::{AgentControlStateError, AgentRunner, SnapshotProjectionError};
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait AgentLlmClient: Send + Sync {
+    /// Describe whether this concrete client wire preserves canonical ordered
+    /// `System` messages.
+    ///
+    /// The restrictive default fails closed for custom clients. Clients may
+    /// opt into `Interleaved` only when their actual request lowering keeps
+    /// every System message at its exact transcript position.
+    fn system_message_wire_capability(&self) -> crate::SystemMessageWireCapability {
+        crate::SystemMessageWireCapability::default()
+    }
+
     /// Stream a response from the LLM
     async fn stream_response(
         &self,

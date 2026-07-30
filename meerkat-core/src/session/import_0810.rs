@@ -340,7 +340,13 @@ fn validate_released_system_context_state_0810(
             message,
         )))
     };
-    let mut keyed = BTreeMap::new();
+    let mut keyed: BTreeMap<
+        String,
+        (
+            FrozenSeenSystemContextState0810,
+            &FrozenSystemContextAppend0810,
+        ),
+    > = BTreeMap::new();
     for (lifecycle, appends) in [
         (
             FrozenSeenSystemContextState0810::Applied,
@@ -355,7 +361,7 @@ fn validate_released_system_context_state_0810(
             let Some(key) = append.idempotency_key.as_ref() else {
                 continue;
             };
-            if keyed.insert(key, (lifecycle, append)).is_some() {
+            if keyed.insert(key.clone(), (lifecycle, append)).is_some() {
                 return Err(invalid(format!(
                     "released 0.8.10 system-context state repeats idempotency key `{key}`"
                 )));
@@ -369,7 +375,7 @@ fn validate_released_system_context_state_0810(
         ));
     }
     for (key, seen) in &state.seen {
-        let Some((lifecycle, append)) = keyed.get(key.as_str()) else {
+        let Some((lifecycle, append)) = keyed.get(key) else {
             return Err(invalid(format!(
                 "released 0.8.10 system-context seen key `{key}` has no stored append"
             )));
@@ -395,7 +401,7 @@ fn validate_released_system_context_state_0810(
         ));
     }
     for key in &state.active_turn_pending_keys {
-        let Some((FrozenSeenSystemContextState0810::Pending, _)) = keyed.get(key.as_str()) else {
+        let Some((FrozenSeenSystemContextState0810::Pending, _)) = keyed.get(key) else {
             return Err(invalid(format!(
                 "released 0.8.10 active-turn key `{key}` is not pending"
             )));
@@ -435,15 +441,6 @@ fn released_session_from_serde(
         }
         None => SessionRealtimeTranscriptProjection::empty(&serde_repr.id),
     };
-    let terminal_notice_index =
-        TerminalNoticeSemanticIndex::try_from_messages(&serde_repr.messages).map_err(|error| {
-            Released0810ImportError::Malformed(serde_json::Error::io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                error.to_string(),
-            )))
-        })?;
-    let mut history_caches = Box::<SessionHistoryCaches>::default();
-    history_caches.terminal_notice_index = terminal_notice_index;
     Ok(Session {
         version: RELEASED_SESSION_ENVELOPE_VERSION,
         id: serde_repr.id,
@@ -452,7 +449,7 @@ fn released_session_from_serde(
         updated_at: serde_repr.updated_at,
         metadata,
         realtime_transcript: Box::new(realtime_transcript),
-        history_caches,
+        history_caches: Box::default(),
         transcript_history_metadata_validation:
             TranscriptHistoryMetadataValidation::RequiresValidation,
         usage: serde_repr.usage,

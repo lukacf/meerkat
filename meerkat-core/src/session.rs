@@ -508,8 +508,6 @@ pub(crate) fn transcript_messages_digest_uncounted(
     Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
 }
 
-pub(crate) use digest_accumulator::take_verification_sample as digest_accumulator_take_verification_sample;
-
 fn sha256_json_digest<T: Serialize + ?Sized>(value: &T) -> Result<String, serde_json::Error> {
     crate::digest_observability::record_content_digest_computation();
     let bytes = serde_json::to_vec(value)?;
@@ -899,7 +897,7 @@ impl<'de> Deserialize<'de> for Session {
                 "released 0.8.10 transcript history requires the explicit one-time importer",
             ));
         }
-        let mut history_caches = Box::<SessionHistoryCaches>::default();
+        let history_caches = Box::<SessionHistoryCaches>::default();
         let mut session = Session {
             version,
             id: serde_repr.id,
@@ -1255,7 +1253,7 @@ impl Session {
             );
         }
         let realtime_transcript = Box::new(SessionRealtimeTranscriptProjection::empty(&id));
-        let mut history_caches = Box::<SessionHistoryCaches>::default();
+        let history_caches = Box::<SessionHistoryCaches>::default();
         let mut session = Self {
             version,
             id,
@@ -4988,7 +4986,7 @@ impl Session {
         if !self.live_transcript_extends_history_head(&state, &live_revision)? {
             return Err(TranscriptEditError::HistoryStateMalformed(format!(
                 "audited transcript head {} is not a prefix ancestor of live revision {live_revision}",
-                state.head
+                state.head()
             )));
         }
         self.install_validated_transcript_history_state(state)
@@ -5205,7 +5203,7 @@ impl Session {
         let prior_history = self.validated_transcript_history_state()?;
         let rewrite_generation = prior_history
             .as_ref()
-            .and_then(ValidatedTranscriptHistory::last_commit)
+            .and_then(|history| history.last_commit())
             .map_or(Some(1), |commit| commit.rewrite_generation.checked_add(1))
             .ok_or_else(|| {
                 TranscriptEditError::HistoryStateMalformed(
@@ -6140,15 +6138,21 @@ mod tests {
             let control_state = control
                 .transcript_history_state()?
                 .ok_or_else(|| std::io::Error::other("control history missing"))?;
-            assert_eq!(subject_state.head, control_state.head, "head at {index}");
             assert_eq!(
-                subject_state.commits, control_state.commits,
+                subject_state.head(),
+                control_state.head(),
+                "head at {index}"
+            );
+            assert_eq!(
+                subject_state.commits().collect::<Vec<_>>(),
+                control_state.commits().collect::<Vec<_>>(),
                 "commits at {index}"
             );
             let project = |state: &TranscriptHistoryState| {
                 let mut bodies = state
-                    .revisions
-                    .iter()
+                    .materialize_revision_bodies()
+                    .expect("audited bodies should materialize")
+                    .into_iter()
                     .map(|body| (body.revision.clone(), body.messages.clone()))
                     .collect::<Vec<_>>();
                 bodies.sort_by(|left, right| left.0.cmp(&right.0));
@@ -6177,6 +6181,90 @@ mod tests {
         SystemNoticePeer, Usage, UserMessage,
     };
     use std::sync::Arc;
+
+    fn rewrite_record_at(
+        state: &TranscriptHistoryState,
+        edge_index: usize,
+    ) -> TranscriptRewriteRecord {
+        let commit = state
+            .commit(edge_index)
+            .unwrap_or_else(|| panic!("rewrite occurrence {edge_index} should exist"))
+            .clone();
+        let parent_body = state
+            .materialize_occurrence_parent(edge_index)
+            .unwrap_or_else(|error| {
+                panic!("rewrite occurrence {edge_index} parent should materialize: {error}")
+            });
+        let revision_body = state
+            .materialize_occurrence_child(edge_index)
+            .unwrap_or_else(|error| {
+                panic!("rewrite occurrence {edge_index} child should materialize: {error}")
+            });
+        TranscriptRewriteRecord::new(commit, parent_body, revision_body).unwrap_or_else(|error| {
+            panic!("rewrite occurrence {edge_index} should validate: {error}")
+        })
+    }
+
+    fn released_0810_document(
+        session: &Session,
+        head: String,
+        revisions: Vec<TranscriptRevisionBody>,
+    ) -> serde_json::Value {
+        let state = session
+            .transcript_history_state()
+            .expect("current history should decode")
+            .expect("current history should exist");
+        let mut commits = serde_json::to_value(state.commits().cloned().collect::<Vec<_>>())
+            .expect("commits should serialize");
+        for commit in commits.as_array_mut().expect("commit vector") {
+            let fields = commit.as_object_mut().expect("commit object");
+            fields.remove("rewrite_generation");
+            let selection = fields
+                .get_mut("selection")
+                .and_then(serde_json::Value::as_object_mut)
+                .expect("selection object");
+            if matches!(
+                selection.get("type").and_then(serde_json::Value::as_str),
+                Some("edit_message_range" | "compaction_message_range")
+            ) {
+                let range = selection
+                    .remove("range")
+                    .and_then(|value| value.as_object().cloned())
+                    .expect("typed range object");
+                *selection = serde_json::Map::from_iter([
+                    (
+                        "type".to_string(),
+                        serde_json::Value::String("message_range".to_string()),
+                    ),
+                    (
+                        "start".to_string(),
+                        range.get("start").cloned().expect("range start"),
+                    ),
+                    (
+                        "end".to_string(),
+                        range.get("end").cloned().expect("range end"),
+                    ),
+                ]);
+            }
+        }
+
+        let mut document = serde_json::to_value(session).expect("current session should serialize");
+        document["version"] = serde_json::json!(2);
+        let metadata = document["metadata"]
+            .as_object_mut()
+            .expect("metadata object");
+        metadata.remove(SESSION_TRANSCRIPT_REWRITE_PREFIX_AUTHORITY_KEY);
+        metadata.insert(
+            SESSION_TRANSCRIPT_HISTORY_STATE_KEY.to_string(),
+            serde_json::json!({
+                "head": head,
+                "commits": commits,
+                "revisions": revisions,
+                "digest_format": TRANSCRIPT_DIGEST_FORMAT_CURRENT,
+            }),
+        );
+        document
+    }
 
     fn transient_context(text: &str) -> TurnRequestContext {
         TurnRequestContext::new(text.to_string()).expect("non-empty transient context")
@@ -6677,19 +6765,27 @@ mod tests {
         let session: Session =
             serde_json::from_value(serde_json::to_value(&session).unwrap()).unwrap();
         let history = session.transcript_history_state().unwrap().unwrap();
+        let current_commit = history.commit(0).expect("current rewrite commit");
         assert_eq!(
-            history.commits[0].selection.semantic(),
+            current_commit.selection.semantic(),
             TranscriptRewriteSemantic::Edit,
             "new generic rewrites retain an explicit typed edit marker after roundtrip"
         );
-        assert_eq!(history.commits[0].reason.kind, "compaction");
+        assert_eq!(current_commit.reason.kind, "compaction");
 
-        let mut legacy = history;
-        legacy.commits[0].selection = TranscriptRewriteSelection::MessageRange { start: 0, end: 2 };
-        let legacy: TranscriptHistoryState =
-            serde_json::from_value(serde_json::to_value(legacy).unwrap()).unwrap();
+        let mut legacy_value =
+            serde_json::to_value(rewrite_record_at(&history, 0)).expect("record wire");
+        let legacy = legacy_value.as_object_mut().expect("record object");
+        legacy.remove("digest_format");
+        legacy.get_mut("commit").expect("legacy commit")["selection"] = serde_json::json!({
+            "type": "message_range",
+            "start": 0,
+            "end": 2,
+        });
+        let legacy: TranscriptRewriteRecord =
+            serde_json::from_value(legacy_value).expect("legacy record should heal");
         assert_eq!(
-            legacy.commits[0].selection.semantic(),
+            legacy.commit.selection.semantic(),
             TranscriptRewriteSemantic::Compaction,
             "marker-absent prior data derives compaction from typed transcript evidence"
         );
@@ -6708,7 +6804,11 @@ mod tests {
             .unwrap();
         let history = ordinary.transcript_history_state().unwrap().unwrap();
         assert_eq!(
-            history.commits[0].selection.semantic(),
+            history
+                .commit(0)
+                .expect("ordinary rewrite commit")
+                .selection
+                .semantic(),
             TranscriptRewriteSemantic::Edit,
             "free-form reason must not upgrade an ordinary edit"
         );
@@ -6806,29 +6906,30 @@ mod tests {
     /// session a full verification, and a digest-inconsistent body must fail it.
     #[test]
     fn sealed_transcript_history_refuses_unverified_corrupt_graph() {
-        let bogus = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
-        let messages = vec![Message::User(UserMessage::text("hello".to_string()))];
-        let state = TranscriptHistoryState {
-            digest_format: TRANSCRIPT_DIGEST_FORMAT_CURRENT,
-            head: bogus.to_string(),
-            commits: Vec::new(),
-            parent_transitions: Vec::new(),
-            rewrite_prefix: Default::default(),
-            revisions: vec![TranscriptRevisionBody {
-                revision: bogus.to_string(),
-                parent_revision: None,
-                messages: messages.clone(),
-                created_at: SystemTime::now(),
-            }],
-        };
+        let mut source = Session::new();
+        source.push(Message::User(UserMessage::text("hello".to_string())));
+        source
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+                vec![Message::User(UserMessage::text("hello again".to_string()))],
+                TranscriptRewriteReason::new("unit-test"),
+                Some("unit-test".to_string()),
+                None,
+            )
+            .expect("consistent rewrite should commit");
+        let mut state = source
+            .metadata()
+            .get(SESSION_TRANSCRIPT_HISTORY_STATE_KEY)
+            .cloned()
+            .expect("consistent graph metadata");
+        state["anchor"]["messages"][0] =
+            serde_json::to_value(Message::User(UserMessage::text("tampered".to_string())))
+                .expect("tampered message");
         let mut session = Session::new();
-        for message in &messages {
+        for message in source.messages() {
             session.push(message.clone());
         }
-        session.set_metadata_unchecked_for_test(
-            SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
-            serde_json::to_value(&state).expect("serialize corrupt state"),
-        );
+        session.set_metadata_unchecked_for_test(SESSION_TRANSCRIPT_HISTORY_STATE_KEY, state);
         assert!(
             session.validated_transcript_history_state().is_err(),
             "an unverified session must not be able to mint a proof for a \
@@ -6842,34 +6943,32 @@ mod tests {
     /// re-running the whole-graph validator.
     #[test]
     fn sealed_transcript_history_verifies_and_seals_consistent_graph() {
-        let messages = vec![Message::User(UserMessage::text("hello".to_string()))];
-        let revision = transcript_messages_digest(&messages).expect("content digest");
-        let state = TranscriptHistoryState {
-            digest_format: TRANSCRIPT_DIGEST_FORMAT_CURRENT,
-            head: revision.clone(),
-            commits: Vec::new(),
-            parent_transitions: Vec::new(),
-            rewrite_prefix: Default::default(),
-            revisions: vec![TranscriptRevisionBody {
-                revision: revision.clone(),
-                parent_revision: None,
-                messages: messages.clone(),
-                created_at: SystemTime::now(),
-            }],
-        };
+        let mut source = Session::new();
+        source.push(Message::User(UserMessage::text("hello".to_string())));
+        let commit = source
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+                vec![Message::User(UserMessage::text("hello again".to_string()))],
+                TranscriptRewriteReason::new("unit-test"),
+                Some("unit-test".to_string()),
+                None,
+            )
+            .expect("consistent rewrite should commit");
+        let state = source
+            .metadata()
+            .get(SESSION_TRANSCRIPT_HISTORY_STATE_KEY)
+            .cloned()
+            .expect("consistent graph metadata");
         let mut session = Session::new();
-        for message in &messages {
+        for message in source.messages() {
             session.push(message.clone());
         }
-        session.set_metadata_unchecked_for_test(
-            SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
-            serde_json::to_value(&state).expect("serialize consistent state"),
-        );
+        session.set_metadata_unchecked_for_test(SESSION_TRANSCRIPT_HISTORY_STATE_KEY, state);
         let sealed = session
             .validated_transcript_history_state()
             .expect("a consistent graph must seal")
             .expect("history metadata is present");
-        assert_eq!(sealed.state().head, revision);
+        assert_eq!(sealed.state().head(), commit.revision);
     }
 
     /// K4 invariant: synthetic-notice refresh is ONE atomic transcript edit —
@@ -6979,20 +7078,22 @@ mod tests {
             .expect("history state should decode")
             .expect("rewrite should create history state");
         assert_eq!(session.messages().len(), 895);
-        assert_eq!(state.commits.len(), 1, "ordinary appends are not rewrites");
+        assert_eq!(state.commit_count(), 1, "ordinary appends are not rewrites");
+        let retained_bodies = state
+            .materialize_revision_bodies()
+            .expect("audited bodies should materialize");
         assert_eq!(
-            state.revisions.len(),
+            retained_bodies.len(),
             2,
             "one real rewrite retains only its two audited endpoints"
         );
-        assert_eq!(state.head, commit.revision);
+        assert_eq!(state.head(), commit.revision);
         assert_ne!(
             session.transcript_revision().expect("live revision"),
-            state.head,
+            state.head(),
             "the live append tail is Session authority, not a mechanical graph head"
         );
-        let retained_message_entries = state
-            .revisions
+        let retained_message_entries = retained_bodies
             .iter()
             .map(|body| body.messages.len())
             .sum::<usize>();
@@ -7052,10 +7153,13 @@ mod tests {
             .transcript_history_state()
             .expect("history state")
             .expect("seed rewrite history");
-        assert_eq!(state.commits.len(), 1);
+        assert_eq!(state.commit_count(), 1);
         assert_eq!(session.transcript_rewrite_generation().unwrap(), 1);
         assert_eq!(
-            state.revisions.len(),
+            state
+                .materialize_revision_bodies()
+                .expect("audited bodies should materialize")
+                .len(),
             2,
             "mechanical refreshes do not mint retained live-head bodies"
         );
@@ -7074,20 +7178,15 @@ mod tests {
                 None,
             )
             .expect("seed rewrite");
-        let mut state = session
+        let state = session
             .transcript_history_state()
             .expect("state")
             .expect("history");
-        state.revisions.push(TranscriptRevisionBody {
-            revision: "sha256:corrupt-old-body".to_string(),
-            parent_revision: Some(state.head.clone()),
-            messages: vec![Message::User(UserMessage::text("tampered".to_string()))],
-            created_at: SystemTime::now(),
-        });
-        session.set_metadata_unchecked_for_test(
-            SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
-            serde_json::to_value(state).expect("corrupt history value"),
-        );
+        let mut state = serde_json::to_value(state.as_ref()).expect("current history value");
+        state["anchor"]["messages"][0] =
+            serde_json::to_value(Message::User(UserMessage::text("tampered".to_string())))
+                .expect("tampered message");
+        session.set_metadata_unchecked_for_test(SESSION_TRANSCRIPT_HISTORY_STATE_KEY, state);
 
         assert!(
             serde_json::to_vec(&session).is_err(),
@@ -7096,10 +7195,11 @@ mod tests {
     }
 
     /// The compatibility floor is 0.8.10. Its current-digest graph could still
-    /// carry full mechanical append bodies; snapshot ingress validates that
-    /// exact released shape before canonicalizing to audited endpoints.
+    /// carry full mechanical append bodies; the explicit one-time importer
+    /// validates that exact released shape before canonicalizing to audited
+    /// endpoints.
     #[test]
-    fn released_0_8_10_mechanical_history_is_compacted_at_snapshot_boundary() {
+    fn released_0_8_10_mechanical_history_is_compacted_at_import_boundary() {
         let mut session = Session::new();
         session.push(Message::User(UserMessage::text("seed".to_string())));
         session
@@ -7111,52 +7211,52 @@ mod tests {
                 None,
             )
             .expect("seed rewrite");
-        let mut state = session
+        let state = session
             .transcript_history_state()
             .expect("state")
             .expect("history");
-        let mut messages = session.messages().to_vec();
-        let mut parent = state.head.clone();
+        let mut revisions = state
+            .materialize_revision_bodies()
+            .expect("released audit bodies should materialize");
+        let mut parent = state.head().to_string();
         for index in 0..8 {
-            messages.push(Message::User(UserMessage::text(format!(
+            session.push(Message::User(UserMessage::text(format!(
                 "0.8.10 ordinary append {index}"
             ))));
-            let revision = transcript_messages_digest(&messages).expect("revision digest");
-            state.revisions.push(TranscriptRevisionBody {
+            let revision = transcript_messages_digest(session.messages()).expect("revision digest");
+            revisions.push(TranscriptRevisionBody {
                 revision: revision.clone(),
                 parent_revision: Some(parent),
-                messages: messages.clone(),
+                messages: session.messages().to_vec(),
                 created_at: SystemTime::now(),
             });
             parent = revision;
         }
-        state.head = parent;
-        session.messages.replace(messages);
-        session.set_metadata_unchecked_for_test(
-            SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
-            serde_json::to_value(state).expect("uncompacted history"),
-        );
+        let released = released_0810_document(&session, parent, revisions);
+        let released = serde_json::to_vec(&released).expect("released document bytes");
+        let imported =
+            import_released_0810_session(&released).expect("released document should import");
         assert_eq!(
-            session.transcript_history_metadata_validation,
-            TranscriptHistoryMetadataValidation::RequiresValidation
+            imported.receipt().evidence(),
+            Released0810ImportEvidence::StoreAuthorizationRequired
         );
-
-        let snapshot = serde_json::to_vec(&session)
-            .expect("valid unchecked history should serialize after validation");
-        let snapshot: serde_json::Value = serde_json::from_slice(&snapshot).expect("snapshot JSON");
-        let compact: TranscriptHistoryState = serde_json::from_value(
-            snapshot["metadata"][SESSION_TRANSCRIPT_HISTORY_STATE_KEY].clone(),
-        )
-        .expect("compacted history");
+        let compact = imported
+            .session()
+            .transcript_history_state()
+            .expect("imported history")
+            .expect("imported graph");
 
         assert_eq!(
-            compact.revisions.len(),
+            compact
+                .materialize_revision_bodies()
+                .expect("compact bodies should materialize")
+                .len(),
             2,
-            "snapshot boundary should retain only the two audited endpoints"
+            "import boundary should retain only the two audited endpoints"
         );
         assert_eq!(
-            compact.head,
-            compact.commits.last().expect("rewrite commit").revision
+            compact.head(),
+            compact.last_commit().expect("rewrite commit").revision
         );
         validate_transcript_history_state(&compact).expect("compacted history remains valid");
     }
@@ -7198,28 +7298,19 @@ mod tests {
             .transcript_history_state()
             .expect("stale state")
             .expect("stale history");
-        let stale_commit = stale_state.commits.last().expect("stale commit").clone();
-        let stale_body = stale_state
-            .revisions
-            .iter()
-            .find(|body| body.revision == stale_commit.revision)
-            .expect("stale revision body")
-            .clone();
-        let mut forged = restored
+        let restored_state = restored
             .transcript_history_state()
             .expect("restored state")
             .expect("restored history");
-        forged.commits.push(stale_commit);
-        forged.revisions.push(stale_body);
-        forged.head = forged
-            .commits
-            .last()
-            .expect("forged commit")
-            .revision
-            .clone();
+        let mut records = (0..restored_state.commit_count())
+            .map(|index| rewrite_record_at(&restored_state, index))
+            .collect::<Vec<_>>();
+        let mut stale_record = rewrite_record_at(&stale_state, 1);
+        stale_record.commit.rewrite_generation = 3;
+        records.push(stale_record);
 
         assert!(
-            validate_transcript_history_state(&forged).is_err(),
+            TranscriptHistoryState::from_rewrite_records(records).is_err(),
             "an old B<-A body edge cannot authorize stale B->C after B->A restored A"
         );
     }
@@ -7247,30 +7338,32 @@ mod tests {
             )
             .expect("B back to A");
 
-        let mut value = serde_json::to_value(&session).expect("current session serializes");
-        let metadata = value["metadata"].as_object_mut().expect("metadata object");
-        metadata.remove(SESSION_TRANSCRIPT_REWRITE_PREFIX_AUTHORITY_KEY);
-        let graph = metadata[SESSION_TRANSCRIPT_HISTORY_STATE_KEY]
-            .as_object_mut()
-            .expect("graph object");
-        graph.remove("rewrite_prefix");
-        for commit in graph["commits"].as_array_mut().expect("commit array") {
-            commit
-                .as_object_mut()
-                .expect("commit object")
-                .remove("rewrite_generation");
-        }
-
-        let restored: Session =
-            serde_json::from_value(value).expect("0.8.10 cyclic graph remains supported");
-        let state = restored
+        let current = session
+            .transcript_history_state()
+            .expect("current history decodes")
+            .expect("current history exists");
+        let released = released_0810_document(
+            &session,
+            current.head().to_string(),
+            current
+                .materialize_revision_bodies()
+                .expect("released bodies should materialize"),
+        );
+        let released = serde_json::to_vec(&released).expect("released document bytes");
+        let imported =
+            import_released_0810_session(&released).expect("0.8.10 cyclic graph remains supported");
+        assert_eq!(
+            imported.receipt().evidence(),
+            Released0810ImportEvidence::StoreAuthorizationRequired
+        );
+        let state = imported
+            .session()
             .transcript_history_state()
             .expect("history decodes")
             .expect("history exists");
         assert_eq!(
             state
-                .commits
-                .iter()
+                .commits()
                 .map(|commit| commit.rewrite_generation)
                 .collect::<Vec<_>>(),
             vec![1, 2],
@@ -7280,7 +7373,7 @@ mod tests {
     }
 
     #[test]
-    fn transcript_history_rejects_orphan_head_parent_cycle() {
+    fn transcript_history_rejects_cyclic_edge_base() {
         let mut session = Session::new();
         session.push(Message::User(UserMessage::text("P".to_string())));
         session
@@ -7292,35 +7385,21 @@ mod tests {
                 None,
             )
             .expect("valid seed rewrite");
-        let mut state = session
+        let state = session
             .transcript_history_state()
             .expect("state")
             .expect("history");
-        let x_messages = vec![Message::User(UserMessage::text("X".to_string()))];
-        let y_messages = vec![Message::User(UserMessage::text("Y".to_string()))];
-        let x = transcript_messages_digest(&x_messages).expect("X digest");
-        let y = transcript_messages_digest(&y_messages).expect("Y digest");
-        state.revisions.push(TranscriptRevisionBody {
-            revision: x.clone(),
-            parent_revision: Some(y.clone()),
-            messages: x_messages,
-            created_at: SystemTime::now(),
-        });
-        state.revisions.push(TranscriptRevisionBody {
-            revision: y,
-            parent_revision: Some(x.clone()),
-            messages: y_messages,
-            created_at: SystemTime::now(),
-        });
-        state.head = x;
-        session.set_metadata_unchecked_for_test(
-            SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
-            serde_json::to_value(state).expect("cyclic state"),
-        );
+        let mut state = serde_json::to_value(state.as_ref()).expect("current history value");
+        let child_revision = state["edges"][0]["commit"]["revision"]
+            .as_str()
+            .expect("edge child revision")
+            .to_string();
+        state["edges"][0]["base_revision"] = serde_json::Value::String(child_revision);
+        session.set_metadata_unchecked_for_test(SESSION_TRANSCRIPT_HISTORY_STATE_KEY, state);
 
         assert!(
             serde_json::to_vec(&session).is_err(),
-            "cyclic orphan head lineage must fail instead of looping"
+            "a cyclic compact-edge base must fail instead of looping"
         );
     }
 
@@ -7361,18 +7440,16 @@ mod tests {
             .expect("state")
             .expect("history");
         assert_eq!(
-            state.head, second.revision,
+            state.head(),
+            second.revision,
             "graph head remains the latest audited endpoint"
         );
         assert_eq!(session.transcript_revision().unwrap(), first.revision);
+        let recurred_body = state
+            .materialize_revision(&first.revision)
+            .expect("recurred H body");
         assert_eq!(
-            state
-                .revisions
-                .iter()
-                .find(|body| body.revision == first.revision)
-                .expect("recurred H body")
-                .parent_revision,
-            h_parent,
+            recurred_body.parent_revision, h_parent,
             "reusing an audited digest must not rewrite its occurrence metadata"
         );
         validate_transcript_history_state(&state).expect("audited graph remains valid");
@@ -7428,15 +7505,15 @@ mod tests {
             SystemNoticeKind::McpPending,
             "stale",
         )));
-        let mut state = session
+        let state = session
             .transcript_history_state()
             .expect("state")
             .expect("history");
-        state.revisions[0].messages[0] = Message::User(UserMessage::text("tampered".to_string()));
-        session.set_metadata_unchecked_for_test(
-            SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
-            serde_json::to_value(state).expect("corrupt state"),
-        );
+        let mut state = serde_json::to_value(state.as_ref()).expect("current history value");
+        state["anchor"]["messages"][0] =
+            serde_json::to_value(Message::User(UserMessage::text("tampered".to_string())))
+                .expect("tampered message");
+        session.set_metadata_unchecked_for_test(SESSION_TRANSCRIPT_HISTORY_STATE_KEY, state);
         let before_messages = session.messages.clone();
         let before_metadata = session.metadata.clone();
         let before_updated_at = session.updated_at;
@@ -7894,18 +7971,9 @@ mod tests {
             .transcript_history_state()
             .expect("history state should decode")
             .expect("history state should exist");
-        let parent_body = state
-            .revisions
-            .iter()
-            .find(|body| body.revision == commit.parent_revision)
-            .expect("parent body retained")
-            .clone();
-        let revision_body = state
-            .revisions
-            .iter()
-            .find(|body| body.revision == commit.revision)
-            .expect("revision body retained")
-            .clone();
+        let record = rewrite_record_at(&state, 0);
+        let parent_body = record.parent_body;
+        let revision_body = record.revision_body;
 
         let mut forged_body = revision_body;
         forged_body.messages[0] = Message::System(SystemMessage::new("tampered prefix"));
@@ -7998,33 +8066,14 @@ mod tests {
             .transcript_history_state()
             .expect("history state should decode")
             .expect("history state should exist");
-        let records = state.commits.iter().map(|commit| {
-            let parent_body = state
-                .revisions
-                .iter()
-                .find(|body| body.revision == commit.parent_revision)
-                .expect("parent body retained")
-                .clone();
-            let revision_body = state
-                .revisions
-                .iter()
-                .find(|body| body.revision == commit.revision)
-                .expect("revision body retained")
-                .clone();
-            TranscriptRewriteRecord::new(commit.clone(), parent_body, revision_body)
-                .expect("record should validate")
-        });
+        let records =
+            (0..state.commit_count()).map(|edge_index| rewrite_record_at(&state, edge_index));
 
         let replayed = TranscriptHistoryState::from_rewrite_records(records)
             .expect("rewrite replay should accept normal-turn bridge revisions")
             .expect("rewrite records should exist");
-        assert_eq!(replayed.head, second_commit.revision);
-        assert!(
-            replayed
-                .revisions
-                .iter()
-                .any(|body| body.revision == bridge_parent)
-        );
+        assert_eq!(replayed.head(), second_commit.revision);
+        assert!(replayed.contains_revision(&bridge_parent));
     }
 
     #[test]
@@ -8043,7 +8092,7 @@ mod tests {
         let parent = base.transcript_revision().expect("parent revision");
 
         let mut first = base.clone();
-        let first_commit = first
+        first
             .commit_transcript_rewrite(
                 TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
                 vec![Message::BlockAssistant(BlockAssistantMessage {
@@ -8066,7 +8115,7 @@ mod tests {
             .expect("first state exists");
 
         let mut second = base;
-        let second_commit = second
+        second
             .commit_transcript_rewrite(
                 TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
                 vec![Message::BlockAssistant(BlockAssistantMessage {
@@ -8088,26 +8137,9 @@ mod tests {
             .expect("second state decodes")
             .expect("second state exists");
 
-        let record = |state: &TranscriptHistoryState, commit: &TranscriptRewriteCommit| {
-            let parent_body = state
-                .revisions
-                .iter()
-                .find(|body| body.revision == commit.parent_revision)
-                .expect("parent body retained")
-                .clone();
-            let revision_body = state
-                .revisions
-                .iter()
-                .find(|body| body.revision == commit.revision)
-                .expect("revision body retained")
-                .clone();
-            TranscriptRewriteRecord::new(commit.clone(), parent_body, revision_body)
-                .expect("record should validate")
-        };
-
         let err = TranscriptHistoryState::from_rewrite_records(vec![
-            record(&first_state, &first_commit),
-            record(&second_state, &second_commit),
+            rewrite_record_at(&first_state, 0),
+            rewrite_record_at(&second_state, 0),
         ])
         .expect_err("branched rewrite records must not replay as a linear source history");
         assert!(
@@ -8207,12 +8239,7 @@ mod tests {
             .transcript_history_state()
             .expect("history state should decode")
             .expect("history state should exist");
-        assert!(
-            state
-                .revisions
-                .iter()
-                .any(|body| body.revision == replaced_digest)
-        );
+        assert!(state.contains_revision(&replaced_digest));
         validate_transcript_history_state(&state).expect("history state remains valid");
     }
 
@@ -8290,7 +8317,7 @@ mod tests {
             .transcript_history_state()
             .expect("history state should decode")
             .expect("history state should exist");
-        assert_eq!(state.head, rewrite.revision);
+        assert_eq!(state.head(), rewrite.revision);
         validate_transcript_history_state(&state).expect("audited graph remains valid");
     }
 
@@ -8347,9 +8374,7 @@ mod tests {
             .expect("history state should decode")
             .expect("history state should exist");
         let restored_body_created_at = state
-            .revisions
-            .iter()
-            .find(|body| body.revision == restore.revision)
+            .materialize_revision(&restore.revision)
             .expect("restored body should be retained")
             .created_at;
         assert!(
@@ -8437,7 +8462,7 @@ mod tests {
             .transcript_history_state()
             .expect("history state should decode")
             .expect("history state should exist");
-        assert_eq!(full.head, second.revision);
+        assert_eq!(full.head(), second.revision);
         let projection = ValidatedTranscriptHistory::seal_owned(full)
             .expect("full graph should seal")
             .project_at_revision(&bridge_revision)
@@ -8460,12 +8485,13 @@ mod tests {
             .expect("projected history decodes")
             .expect("projected history exists");
         assert_eq!(
-            projected.head, bridge_revision,
+            projected.head(),
+            bridge_revision,
             "generic pruning must not rewind a selected bridge to the latest audited commit"
         );
-        assert_eq!(projected.commits.len(), 1);
+        assert_eq!(projected.commit_count(), 1);
         assert_eq!(
-            projected.commits.last().map(|commit| &commit.revision),
+            projected.last_commit().map(|commit| &commit.revision),
             Some(&first.revision)
         );
     }
@@ -8536,7 +8562,7 @@ mod tests {
                 .expect("parent graph should decode")
                 .expect("parent graph should exist");
             assert_eq!(
-                before_graph.commits.len(),
+                before_graph.commit_count(),
                 usize::try_from(generation - 1).expect("test generation fits usize")
             );
 
@@ -8554,11 +8580,11 @@ mod tests {
                 .expect("rewrite graph should decode")
                 .expect("rewrite graph should exist");
             assert_eq!(
-                after_graph.commits.len(),
+                after_graph.commit_count(),
                 usize::try_from(generation).expect("test generation fits usize")
             );
             assert_eq!(
-                after_graph.commits.last(),
+                after_graph.last_commit(),
                 Some(commit),
                 "the projection must end at this occurrence, not a later equal digest"
             );
@@ -8568,7 +8594,7 @@ mod tests {
             .project_at_revision(&first_b.revision)
             .expect("content lookup should remain available");
         assert_eq!(
-            latest_b.commits.len(),
+            latest_b.commit_count(),
             3,
             "digest-only lookup intentionally selects the latest matching occurrence"
         );

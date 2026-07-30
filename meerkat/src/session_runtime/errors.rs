@@ -336,5 +336,5 @@ pub enum LiveChannelVerbError {
     ResultProjection { message: String },
     /// Refresh could not rebuild the session open config.
     #[error("failed to build session config: {0}")]
-    RefreshConfig(#[source] SessionError),
+    RefreshConfig(#[source] RealtimeSessionOpenProjectionError),
 }

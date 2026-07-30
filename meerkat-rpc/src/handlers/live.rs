@@ -170,12 +170,16 @@ fn live_open_projection_error_code(error: &RealtimeSessionOpenProjectionError) -
         RealtimeSessionOpenProjectionError::Seed(LiveSeedProjectionError::ZeroWindow) => {
             crate::error::INVALID_PARAMS
         }
+        RealtimeSessionOpenProjectionError::Llm(
+            meerkat_client::error::LlmError::InvalidInputShape { .. },
+        ) => crate::error::INVALID_PARAMS,
         RealtimeSessionOpenProjectionError::Session(_)
         | RealtimeSessionOpenProjectionError::Seed(
             LiveSeedProjectionError::Session(_)
             | LiveSeedProjectionError::Serialization(_)
             | LiveSeedProjectionError::SizeOverflow,
-        ) => crate::error::INTERNAL_ERROR,
+        )
+        | RealtimeSessionOpenProjectionError::Llm(_) => crate::error::INTERNAL_ERROR,
     }
 }
 
@@ -385,9 +389,12 @@ fn live_verb_error_response(id: Option<RpcId>, error: LiveChannelVerbError) -> R
         | LiveChannelVerbError::ResultProjection { message } => {
             RpcResponse::error(id, error::INTERNAL_ERROR, message)
         }
-        error @ (LiveChannelVerbError::CommitOmitted
-        | LiveChannelVerbError::HostCommit { .. }
-        | LiveChannelVerbError::RefreshConfig(_)) => {
+        LiveChannelVerbError::RefreshConfig(source) => RpcResponse::error(
+            id,
+            live_open_projection_error_code(&source),
+            format!("failed to build session config: {source}"),
+        ),
+        error @ (LiveChannelVerbError::CommitOmitted | LiveChannelVerbError::HostCommit { .. }) => {
             RpcResponse::error(id, error::INTERNAL_ERROR, error.to_string())
         }
     }
@@ -1630,11 +1637,12 @@ mod tests {
             test_live_identity(),
             Vec::new(),
             vec![
-                Message::User(UserMessage::text("hi")),
                 Message::System(SystemMessage::new("first")),
                 Message::System(SystemMessage::new("second")),
+                Message::User(UserMessage::text("hi")),
             ],
-        );
+        )
+        .expect("test seed must be representable");
         let session_id = SessionId::new();
         let snapshot = build_live_projection_snapshot(&session_id, &open_config, None);
         assert_eq!(
@@ -1652,7 +1660,8 @@ mod tests {
             test_live_identity(),
             Vec::new(),
             vec![Message::User(UserMessage::text("ordinary dialogue"))],
-        );
+        )
+        .expect("ordinary dialogue must be representable");
         let session_id = SessionId::new();
         let snapshot = build_live_projection_snapshot(&session_id, &open_config, None);
         assert_eq!(snapshot.ordered_system_instructions, None);
@@ -1783,6 +1792,16 @@ mod tests {
         assert_eq!(
             super::live_open_projection_error_code(&internal),
             error::INTERNAL_ERROR
+        );
+
+        let unsupported_shape = RealtimeSessionOpenProjectionError::Llm(
+            meerkat_client::error::LlmError::InvalidInputShape {
+                message: "interleaved System messages are unsupported".to_string(),
+            },
+        );
+        assert_eq!(
+            super::live_open_projection_error_code(&unsupported_shape),
+            error::INVALID_PARAMS
         );
     }
 
@@ -2108,7 +2127,8 @@ mod tests {
             test_live_identity(),
             Vec::new(),
             Vec::new(),
-        );
+        )
+        .expect("test seed must be representable");
         let session_id = SessionId::new();
         let snapshot =
             build_live_projection_snapshot(&session_id, &open_config, Some(resolved.clone()));

@@ -1248,7 +1248,6 @@ pub struct RuntimeTurnMetadata {
     /// recovery. It is never accepted from or serialized onto a public wire
     /// surface; runtime batch merge preserves admission order.
     #[serde(skip)]
-    #[cfg_attr(feature = "schema", schemars(skip))]
     pub transient_turn_context_appends: Vec<TurnRequestContext>,
     /// Override model for this turn (hot-swap on materialized sessions).
     #[serde(default, skip_serializing_if = "Option::is_none")]

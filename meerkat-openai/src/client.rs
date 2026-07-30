@@ -1164,8 +1164,12 @@ impl OpenAiClient {
     ) -> Result<(Vec<Value>, Option<String>), LlmError> {
         let mut items = Vec::new();
         let mut instructions = Vec::new();
+        let mut leading_system_prefix = true;
 
         for msg in messages {
+            if !matches!(msg, Message::System(_)) {
+                leading_system_prefix = false;
+            }
             match msg {
                 Message::System(s) => match system_mode {
                     SystemMessageMode::IncludeInInput => {
@@ -1176,6 +1180,11 @@ impl OpenAiClient {
                         }));
                     }
                     SystemMessageMode::ExtractToInstructions => {
+                        if !leading_system_prefix {
+                            return Err(LlmError::InvalidInputShape {
+                                message: "the private ChatGPT Responses backend cannot faithfully represent a System message after non-System transcript content".to_string(),
+                            });
+                        }
                         instructions.push(s.content.clone());
                     }
                 },
@@ -1951,6 +1960,14 @@ fn ensure_additional_properties_false(value: &mut Value) {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl LlmClient for OpenAiClient {
+    fn system_message_wire_capability(&self) -> meerkat_core::SystemMessageWireCapability {
+        if self.is_chatgpt_backend_wire() {
+            meerkat_core::SystemMessageWireCapability::LeadingPrefixOnly
+        } else {
+            meerkat_core::SystemMessageWireCapability::Interleaved
+        }
+    }
+
     fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
         project_openai_replay_messages(messages, OpenAiReplayProjectionMode::Responses)
     }
@@ -4265,6 +4282,10 @@ mod tests {
     #[test]
     fn ordered_system_messages_remain_interleaved_on_standard_responses_wire() {
         let client = OpenAiClient::new("test-key".to_string());
+        assert_eq!(
+            client.system_message_wire_capability(),
+            meerkat_core::SystemMessageWireCapability::Interleaved
+        );
         let messages = vec![
             Message::User(UserMessage::text("work")),
             Message::System(meerkat_core::SystemMessage::new("")),
@@ -4294,15 +4315,18 @@ mod tests {
     }
 
     #[test]
-    fn chatgpt_backend_lifts_every_ordered_system_message_without_losing_users() {
+    fn chatgpt_backend_lifts_only_a_leading_system_prefix() {
         let client = OpenAiClient::new("test-key".to_string()).with_chatgpt_backend_wire();
+        assert_eq!(
+            client.system_message_wire_capability(),
+            meerkat_core::SystemMessageWireCapability::LeadingPrefixOnly
+        );
         let messages = vec![
-            Message::User(UserMessage::text("work")),
             Message::System(meerkat_core::SystemMessage::new("")),
-            Message::User(UserMessage::text("continue")),
             Message::System(meerkat_core::SystemMessage::new(" \t ")),
             Message::System(meerkat_core::SystemMessage::new("duplicate")),
             Message::System(meerkat_core::SystemMessage::new("duplicate")),
+            Message::User(UserMessage::text("work")),
         ];
         let request = LlmRequest::new("gpt-5.5", messages.clone());
 
@@ -4310,11 +4334,26 @@ mod tests {
         assert_eq!(request.messages, messages);
         assert_eq!(body["instructions"], "\n\n \t \n\nduplicate\n\nduplicate");
         let input = body["input"].as_array().expect("input array");
-        assert_eq!(input.len(), 2);
+        assert_eq!(input.len(), 1);
         assert_eq!(input[0]["role"], "user");
         assert_eq!(input[0]["content"], "work");
-        assert_eq!(input[1]["role"], "user");
-        assert_eq!(input[1]["content"], "continue");
+    }
+
+    #[test]
+    fn chatgpt_backend_rejects_mid_thread_system_instead_of_hoisting_it() {
+        let client = OpenAiClient::new("test-key".to_string()).with_chatgpt_backend_wire();
+        let request = LlmRequest::new(
+            "gpt-5.5",
+            vec![
+                Message::User(UserMessage::text("work")),
+                Message::System(meerkat_core::SystemMessage::new("late instruction")),
+            ],
+        );
+
+        let error = client
+            .build_request_body(&request)
+            .expect_err("mid-thread System must not be hoisted");
+        assert!(matches!(error, LlmError::InvalidInputShape { .. }));
     }
 
     #[test]

@@ -520,6 +520,10 @@ fn ensure_additional_properties_false(value: &mut Value) {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl LlmClient for OpenAiCompatibleClient {
+    fn system_message_wire_capability(&self) -> meerkat_core::SystemMessageWireCapability {
+        meerkat_core::SystemMessageWireCapability::Interleaved
+    }
+
     fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
         let mode = match self.mode {
             OpenAiCompatibleMode::Responses => OpenAiReplayProjectionMode::Responses,
@@ -961,6 +965,19 @@ mod tests {
 
     #[test]
     fn chat_completions_preserves_ordered_system_messages_exactly_in_place() {
+        let client = OpenAiCompatibleClient::new(
+            OpenAiCompatibleMode::ChatCompletions,
+            "test-model".to_string(),
+            "http://localhost".to_string(),
+            None,
+            true,
+            false,
+            false,
+        );
+        assert_eq!(
+            client.system_message_wire_capability(),
+            meerkat_core::SystemMessageWireCapability::Interleaved
+        );
         let messages = vec![
             Message::User(UserMessage::text("work")),
             Message::System(meerkat_core::SystemMessage::new("")),

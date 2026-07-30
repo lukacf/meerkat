@@ -387,12 +387,21 @@ impl GeminiClient {
     fn build_request_body(&self, request: &LlmRequest) -> Result<Value, LlmError> {
         let mut contents = Vec::new();
         let mut system_instruction_parts = Vec::new();
+        let mut leading_system_prefix = true;
 
         let mut tool_name_by_id: HashMap<String, String> = HashMap::new();
 
         for msg in &request.messages {
+            if !matches!(msg, Message::System(_)) {
+                leading_system_prefix = false;
+            }
             match msg {
                 Message::System(s) => {
+                    if !leading_system_prefix {
+                        return Err(LlmError::InvalidInputShape {
+                            message: "Gemini generateContent cannot faithfully represent a System message after non-System transcript content".to_string(),
+                        });
+                    }
                     system_instruction_parts.push(serde_json::json!({"text": s.content}));
                 }
                 Message::SystemNotice(notice) => {
@@ -1758,6 +1767,10 @@ fn join_index(prefix: &str, index: usize) -> String {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl LlmClient for GeminiClient {
+    fn system_message_wire_capability(&self) -> meerkat_core::SystemMessageWireCapability {
+        meerkat_core::SystemMessageWireCapability::LeadingPrefixOnly
+    }
+
     fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
         project_gemini_replay_messages(messages)
     }
@@ -2068,16 +2081,19 @@ mod tests {
     use tokio::net::TcpListener;
 
     #[test]
-    fn ordered_system_messages_are_preserved_as_distinct_gemini_parts()
+    fn leading_system_messages_are_preserved_as_distinct_gemini_parts()
     -> Result<(), Box<dyn std::error::Error>> {
         let client = GeminiClient::new("test-key".to_string());
+        assert_eq!(
+            client.system_message_wire_capability(),
+            meerkat_core::SystemMessageWireCapability::LeadingPrefixOnly
+        );
         let messages = vec![
-            Message::User(UserMessage::text("work")),
             Message::System(meerkat_core::SystemMessage::new("")),
-            Message::User(UserMessage::text("continue")),
             Message::System(meerkat_core::SystemMessage::new(" \t ")),
             Message::System(meerkat_core::SystemMessage::new("duplicate")),
             Message::System(meerkat_core::SystemMessage::new("duplicate")),
+            Message::User(UserMessage::text("work")),
         ];
         let request = LlmRequest::new("gemini-3.1-pro-preview", messages.clone());
 
@@ -2092,11 +2108,28 @@ mod tests {
         assert_eq!(parts[2]["text"], "duplicate");
         assert_eq!(parts[3]["text"], "duplicate");
         let contents = body["contents"].as_array().ok_or("missing contents")?;
-        assert_eq!(contents.len(), 2);
+        assert_eq!(contents.len(), 1);
         assert_eq!(contents[0]["role"], "user");
         assert_eq!(contents[0]["parts"][0]["text"], "work");
-        assert_eq!(contents[1]["role"], "user");
-        assert_eq!(contents[1]["parts"][0]["text"], "continue");
+        Ok(())
+    }
+
+    #[test]
+    fn mid_thread_system_message_is_rejected_instead_of_hoisted()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let client = GeminiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gemini-3.1-pro-preview",
+            vec![
+                Message::User(UserMessage::text("work")),
+                Message::System(meerkat_core::SystemMessage::new("late instruction")),
+            ],
+        );
+
+        let error = client
+            .build_request_body(&request)
+            .expect_err("mid-thread System must not be hoisted");
+        assert!(matches!(error, LlmError::InvalidInputShape { .. }));
         Ok(())
     }
 

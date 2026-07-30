@@ -395,7 +395,8 @@ mod tests {
             },
             Vec::new(),
             Vec::new(),
-        );
+        )
+        .expect("empty seed must be representable");
 
         let mut session = factory.open_session(&open_config).await.unwrap();
 
@@ -433,7 +434,8 @@ mod tests {
             },
             Vec::new(),
             Vec::new(),
-        );
+        )
+        .expect("empty seed must be representable");
 
         let mut session = factory.open_session(&open_config).await.unwrap();
         session
@@ -465,7 +467,8 @@ mod tests {
             },
             Vec::new(),
             Vec::new(),
-        );
+        )
+        .expect("empty seed must be representable");
         match factory.open_session(&open_config).await {
             Ok(_) => panic!("expected InvalidRequest, got a session"),
             Err(err) => assert!(matches!(err, LlmError::InvalidRequest { .. })),
@@ -489,7 +492,8 @@ mod tests {
             identity,
             Vec::new(),
             Vec::new(),
-        );
+        )
+        .expect("empty seed must be representable");
         match factory.attach_external_session(&target, &open_config).await {
             Ok(_) => panic!("expected InvalidRequest, got a session"),
             Err(err) => assert!(matches!(err, LlmError::InvalidRequest { .. })),

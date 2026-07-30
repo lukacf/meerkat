@@ -14433,7 +14433,7 @@ ORDER BY runtime_id";
                 .transcript_history_state()
                 .unwrap()
                 .unwrap()
-                .commits
+                .commits()
                 .last()
                 .unwrap()
                 .clone();

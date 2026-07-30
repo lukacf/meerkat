@@ -83,6 +83,7 @@ pub mod storage_durability;
 pub mod storage_layout;
 pub mod streaming_tool;
 pub mod surface_metadata;
+pub mod system_message_wire;
 pub mod time_compat;
 pub mod tool_catalog;
 pub mod tool_execution;
@@ -174,6 +175,7 @@ pub use surface_metadata::{
     SurfaceMetadata, SurfaceMetadataError, is_reserved_meerkat_label_key,
     is_reserved_meerkat_metadata_key, validate_public_app_context, validate_public_labels,
 };
+pub use system_message_wire::SystemMessageWireCapability;
 
 pub use completion_feed::{
     CompletionBatch, CompletionEnrichmentData, CompletionEnrichmentProvider, CompletionEntry,
@@ -323,9 +325,8 @@ pub use service::{
     SessionTranscriptRevisionPage, SessionTranscriptRevisionQuery, SessionTranscriptRewriteRequest,
     SessionTranscriptRewriteResult, SessionUsage, SessionView, StageToolResultsDisposition,
     StageToolResultsRequest, StageToolResultsResult, StartTurnRequest, TranscriptEditError,
-    TranscriptEditRunningBehavior, TranscriptReplacement, TranscriptRewriteCommit,
-    TranscriptRewriteReason, TranscriptRewriteSelection, TranscriptRewriteSemantic,
-    TurnToolOverlay,
+    TranscriptEditRunningBehavior, TranscriptReplacement, TranscriptRewriteReason,
+    TranscriptRewriteSelection, TranscriptRewriteSemantic, TurnToolOverlay,
 };
 pub use session::{
     AuthorizedSessionToolVisibilityState, ConsumedDeferredTurnInputs, DeferredFirstTurnPhase,

@@ -382,12 +382,13 @@ pub async fn build_resumed_agent_config(
         .session_metadata()
         .ok_or_else(|| MobError::Internal("missing durable session metadata".to_string()))?;
     apply_resumed_session_metadata(&mut config, &metadata)?;
+    // Resume is transcript materialization, not prompt authorship. The
+    // durable ordered System rows already carry every authored instruction;
+    // carrying current builder prompt inputs into the factory would create a
+    // false singleton/current-prompt reconciliation authority.
+    config.system_prompt = SystemPromptOverride::Inherit;
+    config.additional_instructions = None;
     config.resume_session = Some(resumed_session);
-    // Preserve the current canonical builder inputs on resume. The factory
-    // assembles `system_prompt` plus `additional_instructions` exactly once
-    // before reconciling them with the durable prompt, while `app_context`
-    // remains current non-prompt build metadata.
-    //
     // Shell environment is process-local launch authority and must not be
     // replayed into a resumed session.
     config.shell_env = None;
@@ -1640,7 +1641,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_build_resumed_agent_config_preserves_current_prompt_and_builder_inputs() {
+    async fn test_build_resumed_agent_config_clears_prompt_authorship_inputs() {
         let def = sample_definition();
         let lead = def.profiles[&ProfileName::from("lead")]
             .as_inline()
@@ -1687,14 +1688,13 @@ mod tests {
         .expect("build_resumed_agent_config");
 
         assert_eq!(
-            config.system_prompt.as_set_prompt(),
-            Some(current_prompt),
-            "resume must pass the explicit current assembled prompt into factory reconciliation",
+            config.system_prompt,
+            SystemPromptOverride::Inherit,
+            "resume must not carry a current prompt into factory materialization",
         );
-        assert_eq!(
-            config.additional_instructions,
-            Some(additional_instructions),
-            "neutral resume must preserve customizer sections for canonical prompt assembly",
+        assert!(
+            config.additional_instructions.is_none(),
+            "resume must not re-author additional instructions",
         );
         assert_eq!(
             config.app_context,
@@ -1707,7 +1707,7 @@ mod tests {
         );
         assert!(
             config.resume_session.is_some(),
-            "prompt reconciliation remains a resume-only build",
+            "the durable session remains the sole transcript authority",
         );
     }
 

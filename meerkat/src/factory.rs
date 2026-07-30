@@ -5724,16 +5724,11 @@ impl AgentFactory {
                 extra_sections.push(instruction.as_str());
             }
         }
-        let resume_session_is_precreated_empty = build_config
-            .resume_session
-            .as_ref()
-            .is_some_and(|session| session.messages().is_empty());
-        // Prompt assembly materializes the initial System event only for a new
-        // transcript. Rebuilding or resuming an existing transcript is
-        // observationally invisible: a per-turn System belongs on
-        // StartTurn/RuntimeTurnMetadata, never on the materialization seam.
-        let should_apply_system_prompt =
-            build_config.resume_session.is_none() || resume_session_is_precreated_empty;
+        // Durable metadata distinguishes a real resume from a fresh,
+        // preallocated empty session. A real resume authors nothing even when
+        // its transcript is empty; only a fresh build without durable metadata
+        // may materialize its initial System message.
+        let should_apply_system_prompt = resumed_session_metadata.is_none();
         #[cfg(not(target_arch = "wasm32"))]
         let system_prompt = if should_apply_system_prompt {
             Some(
@@ -9440,6 +9435,7 @@ mod tests {
                 Vec::new(),
                 Vec::new(),
             )
+            .expect("empty seed must be representable")
         }
 
         fn recording_wrapper(

@@ -22,22 +22,21 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
-#[cfg(test)]
-use crate::TranscriptRewriteSelection;
 use crate::session::{
     SESSION_TRANSCRIPT_HISTORY_STATE_KEY, SESSION_TRANSCRIPT_REWRITE_PREFIX_AUTHORITY_KEY,
     SessionHeadMetadataIdentity, SessionHeadMetadataProjection, SessionMeta,
     TranscriptRevisionBody,
 };
 use crate::time_compat::SystemTime;
-use crate::types::{Message, SessionId, SystemMessage, Usage};
+use crate::types::{Message, SessionId, Usage};
 use crate::{
     ComponentEventPrefixAuthority, PreparedComponentEventSuffix, Session, SessionComponentKind,
     TranscriptGraphPrefixAccumulator, TranscriptHistoryState, TranscriptRevisionEdge,
-    TranscriptRewriteCommit, TranscriptRewriteParentTransition, TranscriptRewritePrefixAccumulator,
-    TranscriptRewriteRecord, ValidatedTranscriptHistory, VerifiedComponentEventSequence,
-    transcript_messages_digest,
+    TranscriptRewriteCommit, TranscriptRewritePrefixAccumulator, TranscriptRewriteRecord,
+    ValidatedTranscriptHistory, VerifiedComponentEventSequence, transcript_messages_digest,
 };
+#[cfg(test)]
+use crate::{TranscriptRewriteParentTransition, TranscriptRewriteSelection};
 
 fn session_realtime_component_root(
     session: &Session,
@@ -235,7 +234,7 @@ fn validate_live_transcript_history_head_coherence(
         reason: format!(
             "{subject} transcript graph audited head {} is neither the exact live revision \
              {live_revision} nor its retained prefix ancestor",
-            state.head
+            state.head()
         ),
     })
 }
@@ -404,13 +403,14 @@ fn validate_plain_save_transcript_history_preservation(
                 .to_string(),
         });
     };
-    let previous_commits = previous_state.commits.as_slice();
-    let incoming_commits = incoming_state.commits.as_slice();
-    if incoming_commits != previous_commits {
+    if incoming_state.commit_count() != previous_state.commit_count()
+        || !incoming_state.extends_exact_graph(previous_state)
+    {
         return Err(SessionStoreError::InvalidTranscriptRewrite {
             id: incoming.id().clone(),
-            reason: "incoming append-only save would change retained transcript rewrite commits"
-                .to_string(),
+            reason:
+                "incoming append-only save would change retained compact transcript graph authority"
+                    .to_string(),
         });
     }
     incoming
@@ -438,96 +438,7 @@ fn validate_plain_save_transcript_history_preservation(
         "incoming append-only save",
     )?;
 
-    let mut canonical_revisions = std::collections::BTreeSet::from([incoming_state.head.clone()]);
-    for commit in &incoming_state.commits {
-        canonical_revisions.insert(commit.parent_revision.clone());
-        canonical_revisions.insert(commit.revision.clone());
-    }
-    let mut seen = std::collections::BTreeSet::new();
-    if incoming_state.revisions.iter().any(|body| {
-        !canonical_revisions.contains(&body.revision) || !seen.insert(body.revision.clone())
-    }) {
-        return Err(SessionStoreError::InvalidTranscriptRewrite {
-            id: incoming.id().clone(),
-            reason: "incoming append-only save carries non-canonical mechanical revision bodies"
-                .to_string(),
-        });
-    }
-
-    validate_audited_revision_bodies_preserved(incoming, previous_state, incoming_state)
-}
-
-fn validate_audited_revision_bodies_preserved(
-    incoming: &Session,
-    previous_state: &TranscriptHistoryState,
-    incoming_state: &TranscriptHistoryState,
-) -> Result<(), SessionStoreError> {
-    let mut audited_revisions = std::collections::BTreeSet::new();
-    for commit in &previous_state.commits {
-        audited_revisions.insert(commit.parent_revision.as_str());
-        audited_revisions.insert(commit.revision.as_str());
-    }
-    for revision in audited_revisions {
-        let previous_body = previous_state
-            .revisions
-            .iter()
-            .find(|body| body.revision == revision)
-            .ok_or_else(|| SessionStoreError::InvalidTranscriptRewrite {
-                id: incoming.id().clone(),
-                reason: format!("previous transcript history omits audited body {revision}"),
-            })?;
-        let incoming_body = incoming_state
-            .revisions
-            .iter()
-            .find(|body| body.revision == revision)
-            .ok_or_else(|| SessionStoreError::InvalidTranscriptRewrite {
-                id: incoming.id().clone(),
-                reason: format!("incoming append-only save drops audited body {revision}"),
-            })?;
-        if previous_body.parent_revision != incoming_body.parent_revision
-            || previous_body.created_at != incoming_body.created_at
-            || !audited_bodies_are_equivalent(&previous_body.messages, &incoming_body.messages)?
-        {
-            return Err(SessionStoreError::InvalidTranscriptRewrite {
-                id: incoming.id().clone(),
-                reason: format!(
-                    "incoming append-only save changes audited transcript body {revision}"
-                ),
-            });
-        }
-    }
     Ok(())
-}
-
-/// Whether two audited revision bodies carry the same transcript.
-///
-/// Structural equality is the fast path: `Message: PartialEq` short-circuits
-/// on the first difference and costs no hashing, and byte/structural equality
-/// implies digest equality, so an equal verdict is strictly stronger than the
-/// digest compare it replaces.
-///
-/// The digest compare is kept as the FALLBACK, and it is not optional.
-/// Canonicalization deliberately erases what `PartialEq` compares: transcript
-/// message identity and `created_at` are reset to sentinels, and inline vs
-/// blob image forms collapse to one blob identity
-/// (`canonicalize_messages_for_digest`). Digest-equal but structurally
-/// different audited bodies therefore exist in the wild — the first save after
-/// blob-store enablement, a body re-derived through a heal path, a resume that
-/// re-projects the same conversation under a new runtime authority. Rejecting
-/// those would freeze the session's writes fail-closed, which is exactly the
-/// class of bug this guard exists to prevent, not to cause.
-fn audited_bodies_are_equivalent(
-    previous_body: &[Message],
-    incoming_body: &[Message],
-) -> Result<bool, SessionStoreError> {
-    if previous_body == incoming_body {
-        return Ok(true);
-    }
-    let previous_digest =
-        transcript_messages_digest(previous_body).map_err(SessionStoreError::from)?;
-    let incoming_digest =
-        transcript_messages_digest(incoming_body).map_err(SessionStoreError::from)?;
-    Ok(previous_digest == incoming_digest)
 }
 
 fn validate_rewrite_save_retains_previous_commits(
@@ -544,16 +455,15 @@ fn validate_rewrite_save_retains_previous_commits(
     let Some(previous_state) = previous_state.as_ref() else {
         return Ok(());
     };
-    if incoming_state.commits.len() < previous_state.commits.len()
-        || incoming_state.commits[..previous_state.commits.len()] != previous_state.commits
-    {
+    if !incoming_state.extends_exact_graph(previous_state) {
         return Err(SessionStoreError::InvalidTranscriptRewrite {
             id: incoming.id().clone(),
-            reason: "incoming rewrite save would drop retained transcript rewrite commits"
-                .to_string(),
+            reason:
+                "incoming rewrite save would change retained compact transcript graph authority"
+                    .to_string(),
         });
     }
-    validate_audited_revision_bodies_preserved(incoming, previous_state, incoming_state)
+    Ok(())
 }
 
 /// Validate that an authoritative projection write still targets the row that
@@ -666,7 +576,7 @@ pub fn run_boundary_snapshot_save_guard(
                                 "incoming transcript history state is malformed: {err}"
                             ),
                         })?
-                    && !sealed.commits.is_empty()
+                    && sealed.commit_count() != 0
                 {
                     validate_live_transcript_history_head_coherence(
                         incoming,
@@ -701,7 +611,7 @@ pub fn run_boundary_snapshot_save_guard(
             let commits = find_transcript_rewrite_commit_chain_extending_session(
                 &sealed,
                 previous,
-                &state.head,
+                state.head(),
             )?;
             if commits.is_none()
                 && run_boundary_context_summary_retained_source_projection_save_guard(
@@ -714,7 +624,7 @@ pub fn run_boundary_snapshot_save_guard(
                 return Err(append_error);
             };
             let Some(commit) = commits.first() else {
-                if state.commits.is_empty() {
+                if state.commit_count() == 0 {
                     return Err(append_error);
                 }
                 // Empty chain: the persisted row is already at (or past) the
@@ -783,18 +693,13 @@ fn run_boundary_commitless_history_projection_save_guard(
     else {
         return Ok(false);
     };
-    if !state.commits.is_empty() {
+    if state.commit_count() != 0 {
         return Ok(false);
     }
 
     let incoming_revision =
         transcript_messages_digest(incoming.messages()).map_err(SessionStoreError::from)?;
-    if state.head != incoming_revision
-        || !state
-            .revisions
-            .iter()
-            .any(|body| body.revision == incoming_revision)
-    {
+    if state.head() != incoming_revision || !state.contains_revision(&incoming_revision) {
         return Ok(false);
     }
 
@@ -805,7 +710,7 @@ fn run_boundary_commitless_history_projection_save_guard(
     }
 
     let Some(previous) = previous else {
-        return Ok(state.commits.is_empty());
+        return Ok(state.commit_count() == 0);
     };
     if previous
         .transcript_history_state()
@@ -818,10 +723,10 @@ fn run_boundary_commitless_history_projection_save_guard(
         return Ok(false);
     }
 
-    let previous_revision =
-        transcript_messages_digest(previous.messages()).map_err(SessionStoreError::from)?;
-    Ok(incoming_revision == previous_revision
-        || transcript_history_revision_extends(&state, &incoming_revision, &previous_revision))
+    // The append-only guard above already proved the exact previous rows are
+    // the incoming prefix. A zero-edge compact graph has no occurrence beyond
+    // its anchor from which to derive a separate digest ancestry relation.
+    Ok(true)
 }
 
 fn run_boundary_context_summary_retained_source_projection_save_guard(
@@ -829,7 +734,7 @@ fn run_boundary_context_summary_retained_source_projection_save_guard(
     previous: &Session,
     state: &ValidatedTranscriptHistory,
 ) -> Result<bool, SessionStoreError> {
-    if state.commits.is_empty() {
+    if state.commit_count() == 0 {
         return Ok(false);
     }
 
@@ -903,18 +808,23 @@ pub fn find_transcript_rewrite_commit_chain_extending<'a>(
     let mut visited = std::collections::BTreeSet::new();
     loop {
         if incoming_revision == cursor {
-            return Some(chain);
+            return state
+                .unique_revision_position(cursor)
+                .is_some()
+                .then_some(chain);
         }
         if !visited.insert(cursor.to_string()) {
             return None;
         }
-        let commit = state.commits.iter().find(|commit| {
+        let commit = state.commits().find(|commit| {
             (commit.parent_revision == cursor
-                || transcript_history_revision_extends(state, &commit.parent_revision, cursor))
-                && transcript_history_revision_extends(state, incoming_revision, &commit.revision)
+                || state.revision_extends(&commit.parent_revision, cursor))
+                && (incoming_revision == state.head()
+                    || state.revision_extends(incoming_revision, &commit.revision))
         });
         let Some(commit) = commit else {
-            return transcript_history_revision_extends(state, incoming_revision, cursor)
+            return state
+                .revision_extends(incoming_revision, cursor)
                 .then_some(chain);
         };
         cursor = &commit.revision;
@@ -922,39 +832,15 @@ pub fn find_transcript_rewrite_commit_chain_extending<'a>(
     }
 }
 
-/// Per-save-operation memo for the rewrite-chain search.
+/// Per-save-operation observability for rewrite-chain searches.
 ///
-/// The search is re-entered many times per boundary save: the
-/// storage-normalization wrapper re-runs the core walk once per retained
-/// commit on a direct miss, and the save callers run the whole wrapper twice
-/// (raw previous, then blob-normalized previous). Without a memo every
-/// re-entry recomputes the same full-document continuation digests, which is
-/// the superlinear grind behind the 2026-07 fleet-boot save burn (task #38).
-///
-/// Soundness: verdicts are keyed by revision DIGEST strings, and a sealed
-/// graph digest-verifies every retained body
-/// (`validate_transcript_history_state` hashes each body against its
-/// `revision`), so a memoized verdict is a fact about canonical content, not
-/// about graph position. Body PRESENCE is not content-addressed, so the memo
-/// additionally binds to the exact sealed graph it first observed
-/// ([`Self::bind_state`]) and self-clears if handed a different one.
-///
-/// Lifecycle rule: a memo must live and die within ONE save operation and
-/// may only be shared by search invocations that observe the same sealed
-/// graph and the same blob store. Never hold one process-globally — a
-/// process-global verification memo was deleted this same wave for blessing
-/// corrupted bytes.
+/// Compact graphs carry exact occurrence edges and row-prefix lineage, so the
+/// search no longer caches materialized historical bodies or their digests.
+/// The counter remains as the stable caller-facing measurement surface:
+/// compact core searches add zero, while adapters may record explicit external
+/// digest passes.
 #[derive(Debug, Default)]
 pub struct RewriteChainSearchMemo {
-    /// Identity of the sealed graph the cached facts were derived from.
-    state_tag: Option<usize>,
-    /// `(revision, ancestor_revision)` ->
-    /// [`revision_body_preserves_append_continuation_prefix`] verdict.
-    continuation: std::collections::HashMap<(String, String), bool>,
-    /// Descendant revision -> every ancestor its parent chain reaches
-    /// (the [`transcript_history_revision_extends`] relation, computed once
-    /// per descendant instead of one linear graph walk per query).
-    ancestors: std::collections::HashMap<String, std::collections::HashSet<String>>,
     /// Full content-digest passes computed by searches under this memo.
     digests_computed: u64,
 }
@@ -973,84 +859,6 @@ impl RewriteChainSearchMemo {
     pub fn record_external_digests(&mut self, passes: u64) {
         self.digests_computed = self.digests_computed.saturating_add(passes);
     }
-
-    /// Bind the memo to the exact sealed graph in play; facts derived from a
-    /// different graph are discarded (body presence is not content-addressed,
-    /// so cross-graph reuse would not be identity-preserving).
-    fn bind_state(&mut self, state: &TranscriptHistoryState) {
-        let tag = std::ptr::from_ref(state) as usize;
-        if self.state_tag != Some(tag) {
-            self.continuation.clear();
-            self.ancestors.clear();
-            self.state_tag = Some(tag);
-        }
-    }
-
-    /// Memoized [`transcript_history_revision_extends`]. The first query for
-    /// a descendant materializes its full ancestor set with one bounded
-    /// parent-chain walk; every later query is a set lookup.
-    fn revision_extends(
-        &mut self,
-        state: &TranscriptHistoryState,
-        descendant: &str,
-        ancestor: &str,
-    ) -> bool {
-        if descendant == ancestor {
-            return true;
-        }
-        if !self.ancestors.contains_key(descendant) {
-            let mut ancestors = std::collections::HashSet::new();
-            let mut visited = std::collections::HashSet::new();
-            let mut cursor = descendant;
-            while let Some(body) = state.revisions.iter().find(|body| body.revision == cursor) {
-                // Parent pointers are metadata, not digest-covered: bound the
-                // walk so a cyclic parent chain terminates (exactly the
-                // fail-closed bound of the unmemoized walk).
-                if !visited.insert(body.revision.clone()) {
-                    break;
-                }
-                let Some(parent) = body.parent_revision.as_deref() else {
-                    break;
-                };
-                ancestors.insert(parent.to_string());
-                cursor = parent;
-            }
-            self.ancestors.insert(descendant.to_string(), ancestors);
-        }
-        self.ancestors[descendant].contains(ancestor)
-    }
-
-    /// Memoized [`revision_body_preserves_append_continuation_prefix`].
-    ///
-    /// `ancestor_messages` MUST be content whose transcript digest is
-    /// `ancestor_revision` (every call site passes either a digest-verified
-    /// retained body or the previous transcript whose digest was computed at
-    /// search entry), so the verdict is fully determined by the key.
-    fn continuation_preserved(
-        &mut self,
-        state: &TranscriptHistoryState,
-        revision: &str,
-        ancestor_messages: &[Message],
-        ancestor_revision: &str,
-    ) -> Result<bool, SessionStoreError> {
-        let key = (revision.to_string(), ancestor_revision.to_string());
-        if let Some(&verdict) = self.continuation.get(&key) {
-            return Ok(verdict);
-        }
-        let digests_before = crate::digest_observability::session_content_digest_computations();
-        let verdict = revision_body_preserves_append_continuation_prefix(
-            state,
-            revision,
-            ancestor_messages,
-            ancestor_revision,
-        )?;
-        self.digests_computed = self.digests_computed.saturating_add(
-            crate::digest_observability::session_content_digest_computations()
-                .saturating_sub(digests_before),
-        );
-        self.continuation.insert(key, verdict);
-        Ok(verdict)
-    }
 }
 
 /// Find a rewrite chain whose first parent may be an append-only continuation
@@ -1062,13 +870,10 @@ impl RewriteChainSearchMemo {
 /// not equal to the persisted row's digest, but its retained parent body proves
 /// a normal append path from that persisted row.
 ///
-/// The graph arrives already proved. This walk reads revision strings and
-/// retained bodies as authority, so it needs the whole-graph validation to have
-/// happened — but every caller stands immediately downstream of a session that
-/// already established it, and re-deriving it here cost one full
-/// canonicalize-and-hash pass over every retained body per call (the
-/// storage-normalization wrapper calls this once per retained commit). Demanding
-/// [`ValidatedTranscriptHistory`] keeps the requirement and drops the repetition.
+/// The graph arrives already proved. Exact graph occurrence order handles
+/// audited endpoints; if the saved snapshot falls inside a later rewrite
+/// parent's append suffix, exact durable-row lineage proves that relation
+/// without materializing either historical document.
 pub fn find_transcript_rewrite_commit_chain_extending_session<'a>(
     state: &'a ValidatedTranscriptHistory,
     previous: &Session,
@@ -1084,50 +889,69 @@ pub fn find_transcript_rewrite_commit_chain_extending_session<'a>(
 }
 
 /// [`find_transcript_rewrite_commit_chain_extending_session`] with a
-/// caller-owned [`RewriteChainSearchMemo`], so the repeated invocations one
-/// boundary save performs (per-commit wrapper fallback, raw-then-normalized
-/// previous) share continuation verdicts and ancestor walks instead of
-/// recomputing full-document digests per re-entry. The decision function is
-/// unchanged: same inputs yield the same chain (or refusal) as the
-/// memo-less form.
+/// caller-owned [`RewriteChainSearchMemo`]. Compact graph searches themselves
+/// do not compute semantic digests; the memo remains the accounting surface for
+/// explicit caller-side work.
 ///
 /// # Errors
 ///
-/// Propagates digest failures over the previous transcript or a retained
-/// revision body, exactly as the memo-less form does.
+/// Propagates exact durable-row lineage serialization failures.
 pub fn find_transcript_rewrite_commit_chain_extending_session_with_memo<'a>(
     state: &'a ValidatedTranscriptHistory,
     previous: &Session,
     incoming_revision: &str,
-    memo: &mut RewriteChainSearchMemo,
+    _memo: &mut RewriteChainSearchMemo,
 ) -> Result<Option<Vec<&'a TranscriptRewriteCommit>>, SessionStoreError> {
     let _digest_site = crate::digest_observability::enter_digest_site(
         crate::digest_observability::DIGEST_SITE_REWRITE_CHAIN_WALK,
     );
     let state = state.state();
-    memo.bind_state(state);
     let previous_revision = previous
         .transcript_content_digest()
         .map_err(SessionStoreError::from)?;
+    if incoming_revision == state.head() {
+        let previous_history = previous.transcript_history_state().map_err(|error| {
+            SessionStoreError::InvalidTranscriptRewrite {
+                id: previous.id().clone(),
+                reason: format!("previous transcript history state is malformed: {error}"),
+            }
+        })?;
+        if let Some(previous_history) = previous_history.as_ref() {
+            if state.extends_exact_graph(previous_history) {
+                return Ok(Some(
+                    state
+                        .commits()
+                        .skip(previous_history.commit_count())
+                        .collect(),
+                ));
+            }
+        } else {
+            let previous_count = u64::try_from(previous.messages().len())
+                .map_err(|_| SessionStoreError::Corrupted(previous.id().clone()))?;
+            let previous_prefix = match previous.exact_message_row_prefix_at(previous_count) {
+                Some(prefix) => prefix,
+                None => SessionMessageRowPrefixAccumulator::from_messages(previous.messages())?,
+            };
+            if previous_count == state.anchor().row_prefix().row_count()
+                && previous_prefix == *state.anchor().row_prefix()
+            {
+                return Ok(Some(state.commits().collect()));
+            }
+        }
+    }
     let mut chain = Vec::new();
     let mut cursor = previous_revision.as_str();
     let mut visited = std::collections::BTreeSet::new();
     loop {
         if incoming_revision == cursor {
-            return Ok(Some(chain));
+            return Ok(state
+                .unique_revision_position(cursor)
+                .is_some()
+                .then_some(chain));
         }
         if !visited.insert(cursor.to_string()) {
             return Ok(None);
         }
-
-        let Some(cursor_messages) = transcript_history_messages_for_revision(
-            state,
-            cursor,
-            &previous_revision,
-            previous.messages(),
-        ) else {
-            return Ok(None);
-        };
 
         // Exact graph edges are authoritative: a commit recorded directly
         // against this cursor advances the walk (and keeps that commit on
@@ -1135,105 +959,116 @@ pub fn find_transcript_rewrite_commit_chain_extending_session_with_memo<'a>(
         // cursor itself, or any revision this walk already visited, cannot
         // make progress and is never selected.
         let mut selected = None;
-        for commit in &state.commits {
+        for commit in state.commits() {
             if commit.revision == cursor || visited.contains(&commit.revision) {
                 continue;
             }
-            if !memo.revision_extends(state, incoming_revision, &commit.revision) {
+            if incoming_revision != state.head()
+                && !state.revision_extends(incoming_revision, &commit.revision)
+            {
                 continue;
             }
-            if commit.parent_revision == cursor {
+            if commit.parent_revision == cursor
+                || state.revision_extends(&commit.parent_revision, cursor)
+            {
                 selected = Some(commit);
                 break;
             }
         }
 
-        // With no exact edge, a plain append continuation from this cursor
-        // completes the proof: the incoming transcript preserves the
-        // cursor's content and no further rewrite edge is needed. Proving
-        // this before declaring a missing edge keeps ordinary append
-        // continuation exact and independent of graph depth.
-        if selected.is_none() {
-            if memo.continuation_preserved(state, incoming_revision, cursor_messages, cursor)? {
-                return Ok(Some(chain));
+        // The persisted snapshot may lie between an audited endpoint and the
+        // parent of the next rewrite. Prove that exceptional relation from the
+        // edge's exact row-lineage transition. This scans only compact edges
+        // and the relevant parent delta; it never reconstructs a full body.
+        if selected.is_none() && chain.is_empty() && cursor == previous_revision {
+            for index in 0..state.commit_count() {
+                let edge = state
+                    .edge(index)
+                    .ok_or_else(|| SessionStoreError::Corrupted(previous.id().clone()))?;
+                if incoming_revision != state.head()
+                    && !state.revision_extends(incoming_revision, edge.revision())
+                {
+                    continue;
+                }
+                if compact_edge_parent_extends_session(state, index, previous)? {
+                    selected = Some(edge.commit());
+                    break;
+                }
             }
         }
 
         let Some(commit) = selected else {
-            return Ok(None);
+            return Ok(state
+                .revision_extends(incoming_revision, cursor)
+                .then_some(chain));
         };
         cursor = &commit.revision;
         chain.push(commit);
     }
 }
 
-fn transcript_history_messages_for_revision<'a>(
-    state: &'a TranscriptHistoryState,
-    revision: &str,
-    previous_revision: &str,
-    previous_messages: &'a [Message],
-) -> Option<&'a [Message]> {
-    if revision == previous_revision {
-        return Some(previous_messages);
-    }
-    state
-        .revisions
-        .iter()
-        .find(|body| body.revision == revision)
-        .map(|body| body.messages.as_slice())
-}
-
-fn revision_body_preserves_append_continuation_prefix(
+fn compact_edge_parent_extends_session(
     state: &TranscriptHistoryState,
-    revision: &str,
-    ancestor_messages: &[Message],
-    ancestor_revision: &str,
+    edge_index: usize,
+    previous: &Session,
 ) -> Result<bool, SessionStoreError> {
-    if revision == ancestor_revision {
-        return Ok(true);
+    let edge = state
+        .edge(edge_index)
+        .ok_or_else(|| SessionStoreError::Corrupted(previous.id().clone()))?;
+    let previous_count = u64::try_from(previous.messages().len())
+        .map_err(|_| SessionStoreError::Corrupted(previous.id().clone()))?;
+    let base_prefix = if edge_index == 0 {
+        state.anchor().row_prefix()
+    } else {
+        state
+            .edge(edge_index - 1)
+            .map(TranscriptRevisionEdge::result_witness)
+            .map(|witness| witness.row_prefix())
+            .ok_or_else(|| SessionStoreError::Corrupted(previous.id().clone()))?
+    };
+    if base_prefix.row_count() != edge.messages_before_base() as u64
+        || previous_count < base_prefix.row_count()
+        || previous_count > edge.messages_before() as u64
+    {
+        return Ok(false);
     }
-    let Some(body) = state
-        .revisions
-        .iter()
-        .find(|body| body.revision == revision)
-    else {
+    let previous_prefix = match previous.exact_message_row_prefix_at(previous_count) {
+        Some(prefix) => prefix,
+        None => SessionMessageRowPrefixAccumulator::from_messages(previous.messages())?,
+    };
+    if previous_count == base_prefix.row_count() {
+        return Ok(previous_prefix == *base_prefix);
+    }
+    if previous_count == edge.messages_before() as u64 {
+        return Ok(previous_prefix == *edge.parent_row_prefix());
+    }
+
+    let mut derived = base_prefix.clone();
+    if let Some((at, replacement)) = edge.parent_advance().exact_splice() {
+        let rows = replacement
+            .iter()
+            .map(|message| serde_json::to_vec(message).map_err(SessionStoreError::from))
+            .collect::<Result<Vec<_>, _>>()?;
+        let start =
+            u64::try_from(at).map_err(|_| SessionStoreError::Corrupted(previous.id().clone()))?;
+        let end = start
+            .checked_add(
+                u64::try_from(replacement.len())
+                    .map_err(|_| SessionStoreError::Corrupted(previous.id().clone()))?,
+            )
+            .ok_or_else(|| SessionStoreError::Corrupted(previous.id().clone()))?;
+        derived = derived.replace_serialized_range(start, end, &rows)?;
+    }
+    let appended_count = usize::try_from(previous_count - base_prefix.row_count())
+        .map_err(|_| SessionStoreError::Corrupted(previous.id().clone()))?;
+    let Some(appended) = edge.parent_advance().appended().get(..appended_count) else {
         return Ok(false);
     };
-    if body.messages.len() >= ancestor_messages.len() {
-        let prefix_revision = transcript_messages_digest(&body.messages[..ancestor_messages.len()])
-            .map_err(SessionStoreError::from)?;
-        if prefix_revision == ancestor_revision {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-fn transcript_history_revision_extends(
-    state: &TranscriptHistoryState,
-    descendant: &str,
-    ancestor: &str,
-) -> bool {
-    if descendant == ancestor {
-        return true;
-    }
-    let mut cursor = descendant;
-    // Parent pointers are metadata, not digest-covered: bound the walk so a
-    // crafted cyclic revision-parent chain fails closed instead of hanging.
-    let mut visited = std::collections::BTreeSet::new();
-    while let Some(body) = state.revisions.iter().find(|body| body.revision == cursor) {
-        if !visited.insert(body.revision.clone()) {
-            return false;
-        }
-        let Some(parent) = body.parent_revision.as_deref() else {
-            return false;
-        };
-        if parent == ancestor {
-            return true;
-        }
-        cursor = parent;
-    }
-    false
+    let serialized = appended
+        .iter()
+        .map(|message| serde_json::to_vec(message).map_err(SessionStoreError::from))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(derived.extend_serialized_rows(&serialized)? == previous_prefix)
 }
 
 fn transcript_rewrite_bridge_save_guard(
@@ -1249,13 +1084,13 @@ fn transcript_rewrite_bridge_save_guard(
         incoming_message_digest,
         "incoming",
     )?;
-    if !transcript_history_revision_extends(incoming_state, &incoming_state.head, &commit.revision)
-    {
+    if !incoming_state.contains_exact_commit(commit) {
         return Err(SessionStoreError::InvalidTranscriptRewrite {
             id: incoming.id().clone(),
             reason: format!(
                 "incoming audited transcript head {} does not extend rewrite revision {}",
-                incoming_state.head, commit.revision
+                incoming_state.head(),
+                commit.revision
             ),
         });
     }
@@ -1362,17 +1197,16 @@ pub fn transcript_rewrite_save_guard(
     // Without both checks, a caller could pair the live body at an older
     // rewrite with a valid graph that already contains later commits, persist
     // graph/live incoherence, and still pass the membership check below.
-    if incoming_state.commits.last() != Some(commit) || incoming_state.head != commit.revision {
+    if incoming_state.last_commit() != Some(commit) || incoming_state.head() != commit.revision {
         return Err(SessionStoreError::InvalidTranscriptRewrite {
             id: incoming.id().clone(),
             reason: format!(
                 "incoming rewrite graph does not end at the supplied audited occurrence \
                  (graph head {}, supplied revision {}, graph tail generation {:?}, supplied generation {})",
-                incoming_state.head,
+                incoming_state.head(),
                 commit.revision,
                 incoming_state
-                    .commits
-                    .last()
+                    .last_commit()
                     .map(|latest| latest.rewrite_generation),
                 commit.rewrite_generation
             ),
@@ -1400,8 +1234,7 @@ fn validate_transcript_rewrite_commit_bodies(
     incoming_state: &ValidatedTranscriptHistory,
 ) -> Result<(), SessionStoreError> {
     if !incoming_state
-        .commits
-        .iter()
+        .commits()
         .any(|persisted| persisted == commit)
     {
         return Err(SessionStoreError::InvalidTranscriptRewrite {
@@ -1411,8 +1244,7 @@ fn validate_transcript_rewrite_commit_bodies(
                 commit.parent_revision,
                 commit.revision,
                 incoming_state
-                    .commits
-                    .iter()
+                    .commits()
                     .map(|commit| (&commit.parent_revision, &commit.revision))
                     .collect::<Vec<_>>()
             ),
@@ -1667,7 +1499,7 @@ fn proved_session_rewrite_prefix_authority(
                 "failed to read the already-validated transcript rewrite-prefix authority: {error}"
             ),
         })?
-        .map(|history| history.state().rewrite_prefix.clone());
+        .map(|history| history.rewrite_prefix().clone());
     if let (Some(explicit), Some(graph)) = (explicit.as_ref(), graph_authority.as_ref())
         && explicit != graph
     {
@@ -1697,7 +1529,12 @@ fn session_message_row_prefix_empty_digest() -> [u8; 32] {
 }
 
 fn encode_session_message_row_prefix_digest(digest: &[u8; 32]) -> String {
-    format!("{SESSION_MESSAGE_ROW_PREFIX_DIGEST_PREFIX}{digest:x}")
+    let mut encoded = String::with_capacity(64);
+    for byte in digest {
+        std::fmt::Write::write_fmt(&mut encoded, format_args!("{byte:02x}"))
+            .expect("writing to a String cannot fail");
+    }
+    format!("{SESSION_MESSAGE_ROW_PREFIX_DIGEST_PREFIX}{encoded}")
 }
 
 fn decode_session_message_row_prefix_digest(value: &str) -> Option<[u8; 32]> {
@@ -1755,6 +1592,7 @@ struct SessionMessageRowPrefixAccumulatorWire {
 /// from its exact parent, bounds, and replacement rows in O(delta), without
 /// retaining removed rows or rescanning the unchanged document.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SessionMessageRowPrefixAccumulator {
     version: u16,
     row_count: u64,
@@ -2256,7 +2094,7 @@ fn head_metadata_cell_carries_key(key: &str) -> bool {
         key,
         SESSION_TRANSCRIPT_HISTORY_STATE_KEY
             | SESSION_TRANSCRIPT_REWRITE_PREFIX_AUTHORITY_KEY
-            | crate::session::SESSION_REALTIME_TRANSCRIPT_STATE_KEY
+            | crate::SESSION_REALTIME_TRANSCRIPT_STATE_KEY
     )
 }
 
@@ -2706,7 +2544,7 @@ impl SessionHead {
                 message_row_prefix.clone(),
             ),
         };
-        let mut head = Self {
+        let head = Self {
             id: session.id().clone(),
             version: session.version(),
             strand,
@@ -3929,7 +3767,10 @@ impl PreparedHeadCanonicalRewritePreflight {
         }
         let pending = history
             .prove_commit_suffix_after(&observed_head.rewrite_prefix)
-            .map_err(SessionStoreError::from)?;
+            .map_err(|error| SessionStoreError::InvalidTranscriptRewrite {
+                id: session.id().clone(),
+                reason: format!("failed to prove pending rewrite suffix: {error}"),
+            })?;
         if pending.edges().is_empty() {
             return Ok(None);
         }
@@ -4190,7 +4031,10 @@ impl PreparedHeadCanonicalRewriteMutation {
                 }
                 let pending_edges = history
                     .prove_commit_suffix_after(&observed_head.rewrite_prefix)
-                    .map_err(SessionStoreError::from)?
+                    .map_err(|error| SessionStoreError::InvalidTranscriptRewrite {
+                        id: session.id().clone(),
+                        reason: format!("failed to prove pending rewrite suffix: {error}"),
+                    })?
                     .edges()
                     .to_vec();
                 (history, pending_edges, None)
@@ -5587,7 +5431,10 @@ pub fn strand_layout_for_history(
         .ok_or_else(|| SessionStoreError::Corrupted(id.clone()))?;
     if !session
         .live_transcript_extends_history_head(state, "")
-        .map_err(SessionStoreError::from)?
+        .map_err(|error| SessionStoreError::InvalidTranscriptRewrite {
+            id: id.clone(),
+            reason: format!("failed to prove compact migration live tail: {error}"),
+        })?
     {
         return Err(SessionStoreError::InvalidTranscriptRewrite {
             id: id.clone(),
@@ -6008,7 +5855,10 @@ mod tests {
         let state = session
             .transcript_history_state()?
             .expect("rewrite mints history state");
-        let commit = state.commits[0].clone();
+        let commit = state
+            .commit(0)
+            .expect("one rewrite mints one compact edge")
+            .clone();
         let parent_body = session
             .transcript_revision_body(&commit.parent_revision)?
             .expect("parent body retained");
@@ -6053,13 +5903,9 @@ mod tests {
         Ok(())
     }
 
-    /// A first-boundary adoption graph whose rewrite records are INDIVIDUALLY
-    /// valid but whose commit chain does not link must be rejected. The
-    /// retired per-commit
-    /// loop this arm used to run never checked chain linkage, so this shape
-    /// was silently accepted; the sealed whole-graph proof the arm now
-    /// demands includes the chain walk. Behaviour change in the safe
-    /// direction — this test pins it.
+    /// A first-boundary adoption graph assembled by grafting an unrelated
+    /// compact edge must be rejected. Opaque graph construction prevents this
+    /// shape in memory; corrupt durable JSON is the adversarial ingress.
     #[test]
     #[allow(clippy::expect_used)]
     fn adoption_arm_rejects_a_graph_whose_commit_chain_does_not_link()
@@ -6096,29 +5942,25 @@ mod tests {
         let state_b = lineage_b
             .transcript_history_state()?
             .expect("lineage B graph");
-        // Splice: A's record followed by B's record. B's parent is neither
-        // A's revision nor an extension of it; every body is present and
-        // digest-consistent, so each record validates in isolation.
-        let mut spliced = state_a;
-        spliced.commits.extend(state_b.commits.iter().cloned());
-        for body in &state_b.revisions {
-            if !spliced
-                .revisions
-                .iter()
-                .any(|existing| existing.revision == body.revision)
-            {
-                spliced.revisions.push(body.clone());
-            }
-        }
-        spliced.head = state_b.head.clone();
+        let mut spliced = serde_json::to_value(&state_a)?;
+        let unrelated = serde_json::to_value(&state_b)?;
+        let unrelated_edge = unrelated["edges"]
+            .as_array()
+            .and_then(|edges| edges.first())
+            .cloned()
+            .ok_or_else(|| std::io::Error::other("lineage B edge missing"))?;
+        spliced["edges"]
+            .as_array_mut()
+            .ok_or_else(|| std::io::Error::other("lineage A edge array missing"))?
+            .push(unrelated_edge);
 
-        // The incoming live transcript matches the spliced head exactly, so
-        // the retired per-commit loop's only other check (head == incoming
-        // digest) would have passed and the graph would have been adopted.
+        // The live transcript comes from the grafted lineage. Strict graph
+        // decode/validation must reject the unrelated occurrence rather than
+        // treating its content revision as portable authority.
         let mut incoming = lineage_b.clone();
         incoming.set_metadata_unchecked_for_test(
             crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
-            serde_json::to_value(&spliced)?,
+            spliced,
         );
 
         let error = run_boundary_snapshot_save_guard(&incoming, None)
@@ -6534,15 +6376,17 @@ mod tests {
             Some("unit-test".to_string()),
             Some(first_commit.revision.clone()),
         )?;
-        let mut poisoned_state = first
+        let poisoned_state = first
             .transcript_history_state()?
             .ok_or_else(|| "second rewrite should retain history state".to_string())?;
-        poisoned_state.head = first_commit.revision.clone();
+        let mut poisoned_wire = serde_json::to_value(poisoned_state)?;
+        poisoned_wire["edges"][1]["commit"]["revision"] =
+            serde_json::Value::String(first_commit.revision.clone());
 
         let mut poisoned = first_snapshot;
         poisoned.set_metadata_unchecked_for_test(
             crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
-            serde_json::to_value(poisoned_state)?,
+            poisoned_wire,
         );
 
         assert!(matches!(
@@ -6585,7 +6429,7 @@ mod tests {
         let later_state = later
             .transcript_history_state()?
             .ok_or_else(|| "second rewrite should retain history state".to_string())?;
-        assert_eq!(later_state.head, second_commit.revision);
+        assert_eq!(later_state.head(), second_commit.revision);
 
         // Keep the live transcript at the first rewrite but substitute the
         // independently valid graph through the second rewrite. The supplied
@@ -7146,7 +6990,7 @@ mod tests {
     }
 
     #[test]
-    fn run_boundary_guard_rejects_mutated_prior_audited_body_metadata()
+    fn run_boundary_guard_rejects_mutated_compact_edge_metadata()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut previous = Session::new();
         previous.push(Message::User(UserMessage::text("A".to_string())));
@@ -7171,38 +7015,30 @@ mod tests {
             Some("unit-test".to_string()),
             None,
         )?;
-        let mut state = incoming
+        let state = incoming
             .transcript_history_state()?
             .ok_or_else(|| std::io::Error::other("incoming history missing"))?;
-        let old_parent = state.commits[0].parent_revision.clone();
-        state
-            .revisions
-            .iter_mut()
-            .find(|body| body.revision == old_parent)
-            .ok_or_else(|| std::io::Error::other("old audited parent missing"))?
-            .parent_revision = Some("sha256:forged-lineage-parent".to_string());
+        let mut state_wire = serde_json::to_value(state)?;
+        state_wire["edges"][0]["parent_created_at"] =
+            serde_json::to_value(crate::time_compat::UNIX_EPOCH)?;
         incoming.set_metadata_unchecked_for_test(
             crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
-            serde_json::to_value(state)?,
+            state_wire,
         );
 
         assert!(matches!(
             run_boundary_snapshot_save_guard(&incoming, Some(&previous)),
-            Err(SessionStoreError::InvalidTranscriptRewrite { reason, .. })
-                if reason.contains("changes audited transcript body")
+            Err(SessionStoreError::InvalidTranscriptRewrite { .. })
         ));
         Ok(())
     }
 
-    /// Required pin for the audited-body fast path: canonical digests
-    /// deliberately erase transcript message identity and `created_at`, so two
-    /// audited bodies can be digest-equal (same transcript) while
-    /// `Message: PartialEq` says they differ. The structural compare is only a
-    /// FAST PATH; the digest compare must still admit the save. A bare
-    /// `PartialEq` here would reject every boundary save of an affected
-    /// session fail-closed and freeze its writes.
+    /// Compact graph authority binds exact anchor and edge bytes, including
+    /// bookkeeping that the semantic transcript digest deliberately erases.
+    /// A caller cannot re-project historical messages under fresh identities
+    /// while retaining the old graph-prefix authority.
     #[test]
-    fn append_only_guard_admits_digest_equal_audited_body_with_rebuilt_bookkeeping()
+    fn append_only_guard_rejects_digest_equal_compact_anchor_with_rebuilt_bookkeeping()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut previous = Session::new();
         previous.push(Message::User(UserMessage::text("A".to_string())));
@@ -7215,62 +7051,39 @@ mod tests {
         )?;
 
         let mut incoming = previous.clone();
-        let mut state = incoming
+        let state = incoming
             .transcript_history_state()?
             .ok_or_else(|| std::io::Error::other("incoming history missing"))?;
-        // Re-project every audited body the way a re-derivation path does:
-        // fresh construction bookkeeping, identical conversation content. The
-        // revision strings are unchanged because the digest erases exactly
-        // these fields.
+        let original_anchor = state.anchor().messages().to_vec();
+        let mut rebuilt_anchor = original_anchor.clone();
         let mut rebuilt_any = false;
-        for body in &mut state.revisions {
-            for message in &mut body.messages {
-                if let Message::User(user) = message {
-                    user.identity = user.identity.with_run_id(crate::lifecycle::RunId::new());
-                    user.created_at = chrono::Utc::now();
-                    rebuilt_any = true;
-                }
+        for message in &mut rebuilt_anchor {
+            if let Message::User(user) = message {
+                user.identity = user.identity.with_run_id(crate::lifecycle::RunId::new());
+                user.created_at = chrono::Utc::now();
+                rebuilt_any = true;
             }
         }
-        assert!(rebuilt_any, "fixture must rebuild at least one body");
+        assert!(rebuilt_any, "fixture must rebuild at least one anchor row");
+        assert_ne!(original_anchor, rebuilt_anchor);
+        assert_eq!(
+            transcript_messages_digest(&original_anchor)?,
+            transcript_messages_digest(&rebuilt_anchor)?
+        );
+        let mut state_wire = serde_json::to_value(state)?;
+        state_wire["anchor"]["messages"] = serde_json::to_value(&rebuilt_anchor)?;
         incoming.set_metadata_unchecked_for_test(
             crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
-            serde_json::to_value(state)?,
+            state_wire,
         );
         incoming.push(Message::User(UserMessage::text(
             "ordinary append".to_string(),
         )));
 
-        // Sanity: the bodies really are structurally different but
-        // digest-identical, i.e. the fixture exercises the fallback.
-        let previous_state = previous
-            .transcript_history_state()?
-            .ok_or_else(|| std::io::Error::other("previous history missing"))?;
-        let incoming_state = incoming
-            .transcript_history_state()?
-            .ok_or_else(|| std::io::Error::other("incoming history missing"))?;
-        let audited = previous_state.commits[0].parent_revision.clone();
-        let previous_body = previous_state
-            .revisions
-            .iter()
-            .find(|body| body.revision == audited)
-            .ok_or_else(|| std::io::Error::other("previous audited body missing"))?;
-        let incoming_body = incoming_state
-            .revisions
-            .iter()
-            .find(|body| body.revision == audited)
-            .ok_or_else(|| std::io::Error::other("incoming audited body missing"))?;
-        assert_ne!(previous_body.messages, incoming_body.messages);
-        assert_eq!(
-            transcript_messages_digest(&previous_body.messages)?,
-            transcript_messages_digest(&incoming_body.messages)?
-        );
-        assert!(audited_bodies_are_equivalent(
-            &previous_body.messages,
-            &incoming_body.messages
-        )?);
-
-        append_only_save_guard(&incoming, Some(&previous))?;
+        assert!(matches!(
+            append_only_save_guard(&incoming, Some(&previous)),
+            Err(SessionStoreError::InvalidTranscriptRewrite { .. })
+        ));
         Ok(())
     }
 
@@ -7747,6 +7560,73 @@ mod tests {
     }
 
     #[test]
+    fn recurrence_requires_occurrence_authority_for_rewrite_chain_selection()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("A".to_string())));
+        let initial = session.clone();
+        let original_message = session.messages()[0].clone();
+        let a = session.transcript_revision()?;
+
+        let first = session.commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+            vec![Message::User(UserMessage::text("B".to_string()))],
+            crate::TranscriptRewriteReason::new("recurrence-test"),
+            Some("unit-test".to_string()),
+            Some(a.clone()),
+        )?;
+        let after_first = session.clone();
+        let second = session.commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+            vec![original_message],
+            crate::TranscriptRewriteReason::new("recurrence-test"),
+            Some("unit-test".to_string()),
+            Some(first.revision.clone()),
+        )?;
+        assert_eq!(second.revision, a, "the graph must be A -> B -> A");
+
+        let state = session
+            .transcript_history_state()?
+            .ok_or_else(|| std::io::Error::other("missing recurrence graph"))?;
+        assert!(
+            find_transcript_rewrite_commit_chain_extending(&state, &a, &a).is_none(),
+            "digest-only chain selection must fail closed across recurring A"
+        );
+
+        let validated = session
+            .validated_transcript_history_state()?
+            .ok_or_else(|| std::io::Error::other("missing validated recurrence graph"))?;
+        let from_initial = find_transcript_rewrite_commit_chain_extending_session(
+            &validated,
+            &initial,
+            state.head(),
+        )?
+        .ok_or_else(|| std::io::Error::other("exact anchor should select recurrence chain"))?;
+        assert_eq!(
+            from_initial
+                .iter()
+                .map(|commit| commit.rewrite_generation)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+
+        let from_first = find_transcript_rewrite_commit_chain_extending_session(
+            &validated,
+            &after_first,
+            state.head(),
+        )?
+        .ok_or_else(|| std::io::Error::other("exact graph prefix should select recurrence tail"))?;
+        assert_eq!(
+            from_first
+                .iter()
+                .map(|commit| commit.rewrite_generation)
+                .collect::<Vec<_>>(),
+            vec![2]
+        );
+        Ok(())
+    }
+
+    #[test]
     fn run_boundary_guard_rejects_dropped_retained_rewrite_commits()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut base = Session::new();
@@ -7781,7 +7661,7 @@ mod tests {
         let previous_revision = previous.transcript_revision()?;
 
         let mut incoming = previous.clone();
-        let new_commit = incoming.commit_transcript_rewrite(
+        incoming.commit_transcript_rewrite(
             TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
             vec![Message::BlockAssistant(BlockAssistantMessage {
                 blocks: vec![AssistantBlock::Text {
@@ -7796,19 +7676,25 @@ mod tests {
             Some("unit-test".to_string()),
             Some(previous_revision),
         )?;
-        let mut state = incoming
+        let state = incoming
             .transcript_history_state()?
             .ok_or_else(|| std::io::Error::other("incoming rewrite should retain history"))?;
-        state.commits = vec![new_commit];
+        let mut state_wire = serde_json::to_value(state)?;
+        let edges = state_wire["edges"]
+            .as_array_mut()
+            .ok_or_else(|| std::io::Error::other("compact graph edge array missing"))?;
+        if edges.len() != 2 {
+            return Err(std::io::Error::other("fixture expected exactly two compact edges").into());
+        }
+        edges.remove(0);
         incoming.set_metadata_unchecked_for_test(
             crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
-            serde_json::to_value(state)?,
+            state_wire,
         );
 
         assert!(matches!(
             run_boundary_snapshot_save_guard(&incoming, Some(&previous)),
-            Err(SessionStoreError::InvalidTranscriptRewrite { reason, .. })
-                if reason.contains("drop retained transcript rewrite commits")
+            Err(SessionStoreError::InvalidTranscriptRewrite { .. })
         ));
         Ok(())
     }

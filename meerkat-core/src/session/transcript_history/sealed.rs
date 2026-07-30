@@ -5,6 +5,7 @@ use super::graph::{
     TranscriptRevisionEdge, TranscriptRewriteCommit, TranscriptRewritePrefixAccumulator,
     TranscriptRewriteRecord,
 };
+#[cfg(test)]
 use super::validate::validate_transcript_history_state;
 use crate::session::TranscriptEditError;
 
@@ -245,6 +246,16 @@ impl ValidatedTranscriptHistory {
     #[must_use]
     pub fn final_audited_live_tail_base(&self) -> Option<usize> {
         self.state.last_commit().map(|commit| commit.messages_after)
+    }
+
+    /// Final exact rewrite occurrence proved by this seal.
+    ///
+    /// This inherent forwarding method is intentional: function-item call
+    /// sites such as `Option::and_then(ValidatedTranscriptHistory::last_commit)`
+    /// cannot use method lookup through `Deref`.
+    #[must_use]
+    pub fn last_commit(&self) -> Option<&TranscriptRewriteCommit> {
+        self.state.last_commit()
     }
 
     #[must_use]

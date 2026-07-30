@@ -426,7 +426,6 @@ impl SystemMessageAppendError {
     /// surface-level control error.
     pub fn into_control_error(self, id: &SessionId) -> SessionControlError {
         match self {
-            Self::InvalidRequest(message) => SessionControlError::InvalidRequest { message },
             Self::Conflict { key, .. } => SessionControlError::Conflict {
                 id: id.clone(),
                 key,

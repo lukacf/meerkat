@@ -9000,6 +9000,10 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
             }
         };
         self.reject_if_archived_session(id, &session).await?;
+        self.inner
+            .preflight_detached_system_message_append(&session, 1)
+            .await
+            .map_err(SessionControlError::Session)?;
         let status = session
             .append_system_message_idempotent(
                 req.content.render_text(),

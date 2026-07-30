@@ -2634,15 +2634,13 @@ where
                 "failed to load compaction transcript history: {error}"
             ))
         })?;
-        let commits = history
-            .as_ref()
-            .map(|history| history.commits.as_slice())
-            .unwrap_or_default();
         for projection in &projections {
-            if !commits
-                .iter()
-                .any(|commit| projection.matches_transcript_rewrite(self.session.id(), commit))
-            {
+            let is_backed_by_history = history.as_ref().is_some_and(|history| {
+                history
+                    .commits()
+                    .any(|commit| projection.matches_transcript_rewrite(self.session.id(), commit))
+            });
+            if !is_backed_by_history {
                 return Err(AgentError::InternalError(format!(
                     "runtime compaction outbox projection {} is not backed by the session transcript graph",
                     projection.revision()
@@ -6037,6 +6035,7 @@ mod tests {
     struct HotSwapLimitRecordingClient {
         model: String,
         seen_max_tokens: Mutex<Vec<u32>>,
+        system_message_wire_capability: crate::SystemMessageWireCapability,
     }
 
     impl HotSwapLimitRecordingClient {
@@ -6044,6 +6043,16 @@ mod tests {
             Self {
                 model: model.to_string(),
                 seen_max_tokens: Mutex::new(Vec::new()),
+                system_message_wire_capability: crate::SystemMessageWireCapability::Interleaved,
+            }
+        }
+
+        fn leading_prefix_only(model: &str) -> Self {
+            Self {
+                model: model.to_string(),
+                seen_max_tokens: Mutex::new(Vec::new()),
+                system_message_wire_capability:
+                    crate::SystemMessageWireCapability::LeadingPrefixOnly,
             }
         }
 
@@ -6356,6 +6365,10 @@ mod tests {
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
     #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     impl AgentLlmClient for HotSwapLimitRecordingClient {
+        fn system_message_wire_capability(&self) -> crate::SystemMessageWireCapability {
+            self.system_message_wire_capability
+        }
+
         async fn stream_response(
             &self,
             _messages: &[Message],
@@ -11059,22 +11072,24 @@ mod tests {
             .await;
         agent.config.max_turns = Some(1);
 
-        agent.replace_client_with_request_policy(
-            client.clone(),
-            crate::SessionLlmRequestPolicy {
-                model: "new-model".to_string(),
-                provider_params: Some(ProviderParamsOverride {
-                    temperature: Some(0.2),
-                    ..Default::default()
-                }),
-                provider_tool_defaults: Some(ProviderTag::OpenAi(OpenAiProviderTag {
-                    web_search: Some(OpaqueProviderBody::from_value(
-                        &serde_json::json!({"type": "web_search"}),
-                    )),
-                    ..Default::default()
-                })),
-            },
-        );
+        agent
+            .replace_client_with_request_policy(
+                client.clone(),
+                crate::SessionLlmRequestPolicy {
+                    model: "new-model".to_string(),
+                    provider_params: Some(ProviderParamsOverride {
+                        temperature: Some(0.2),
+                        ..Default::default()
+                    }),
+                    provider_tool_defaults: Some(ProviderTag::OpenAi(OpenAiProviderTag {
+                        web_search: Some(OpaqueProviderBody::from_value(
+                            &serde_json::json!({"type": "web_search"}),
+                        )),
+                        ..Default::default()
+                    })),
+                },
+            )
+            .expect("compatible replacement client should be admitted");
 
         let result = agent
             .run("policy follows identity".to_string().into())
@@ -11281,6 +11296,100 @@ mod tests {
             .expect("the original client should remain live");
         assert_eq!(primary.seen_max_tokens(), vec![8192]);
         assert!(unknown.seen_max_tokens().is_empty());
+    }
+
+    #[tokio::test]
+    async fn explicit_hot_swap_rejects_incompatible_system_shape_before_live_mutation() {
+        let registry = fallback_activation_test_registry();
+        let primary = Arc::new(HotSwapLimitRecordingClient::new("primary"));
+        let incompatible = Arc::new(HotSwapLimitRecordingClient::leading_prefix_only("backup"));
+        let mut session = explicit_hot_swap_session("primary");
+        session.push(Message::User(UserMessage::text("ordinary turn")));
+        session.push(Message::System(crate::SystemMessage::new(
+            "instruction added at this exact point",
+        )));
+        let mut agent = with_test_turn_state_handle_for_session(
+            AgentBuilder::new()
+                .model("primary")
+                .max_tokens_per_turn(16_384)
+                .with_effective_model_registry(Arc::clone(&registry)),
+            session,
+        )
+        .with_tool_visibility_owner(explicit_test_visibility_owner())
+        .build_standalone(primary.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+        .await;
+        agent.config.max_turns = Some(1);
+        let before =
+            serde_json::to_value(agent.session()).expect("pre-swap session should serialize");
+
+        let error = agent
+            .hot_swap_llm_identity(
+                incompatible.clone(),
+                explicit_hot_swap_identity("backup"),
+                explicit_hot_swap_policy("backup"),
+            )
+            .expect_err("target wire must reject the interleaved System shape");
+        assert!(matches!(
+            error,
+            AgentError::SystemMessageWireIncompatible {
+                provider: crate::Provider::OpenAI,
+                capability: crate::SystemMessageWireCapability::LeadingPrefixOnly,
+                incompatible_index: 1,
+            }
+        ));
+        assert_eq!(
+            serde_json::to_value(agent.session()).expect("rejected-swap session should serialize"),
+            before,
+            "failed wire preflight must not change transcript or durable metadata"
+        );
+        assert_eq!(
+            agent
+                .active_model_profile
+                .as_ref()
+                .map(crate::ModelProfileWitness::model),
+            Some("primary")
+        );
+
+        agent
+            .run("old client remains active".into())
+            .await
+            .expect("the original client should remain live");
+        assert_eq!(primary.seen_max_tokens(), vec![8192]);
+        assert!(incompatible.seen_max_tokens().is_empty());
+    }
+
+    #[tokio::test]
+    async fn direct_client_replacement_rejects_incompatible_system_shape_before_mutation() {
+        let primary = Arc::new(HotSwapLimitRecordingClient::new("primary"));
+        let incompatible = Arc::new(HotSwapLimitRecordingClient::leading_prefix_only("backup"));
+        let mut session = explicit_hot_swap_session("primary");
+        session.push(Message::User(UserMessage::text("ordinary turn")));
+        session.push(Message::System(crate::SystemMessage::new(
+            "instruction added at this exact point",
+        )));
+        let mut agent = with_test_turn_state_handle_for_session(AgentBuilder::new(), session)
+            .build_standalone(primary.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+        agent.config.max_turns = Some(1);
+
+        let error = agent
+            .replace_client(incompatible.clone())
+            .expect_err("replacement wire must reject the interleaved System shape");
+        assert!(matches!(
+            error,
+            AgentError::SystemMessageWireIncompatible {
+                capability: crate::SystemMessageWireCapability::LeadingPrefixOnly,
+                incompatible_index: 1,
+                ..
+            }
+        ));
+
+        agent
+            .run("old client remains active".into())
+            .await
+            .expect("the original client should remain live");
+        assert_eq!(primary.seen_max_tokens(), vec![8192]);
+        assert!(incompatible.seen_max_tokens().is_empty());
     }
 
     #[tokio::test]

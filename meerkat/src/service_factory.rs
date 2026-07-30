@@ -31,7 +31,7 @@ use tokio_with_wasm::alias::sync::mpsc;
 #[cfg(feature = "session-store")]
 use crate::PersistenceBundle;
 use crate::{AgentBuildConfig, AgentFactory, BuildAgentError, DynAgent};
-use meerkat_client::LlmClient;
+use meerkat_client::{LlmClient, LlmClientAdapter};
 
 /// Wrapper around [`DynAgent`] implementing [`SessionAgent`].
 pub struct FactoryAgent {
@@ -268,8 +268,11 @@ impl SessionAgent for FactoryAgent {
         Ok(())
     }
 
-    fn replace_client(&mut self, client: std::sync::Arc<dyn meerkat_core::AgentLlmClient>) {
-        self.agent.replace_client(client);
+    fn replace_client(
+        &mut self,
+        client: std::sync::Arc<dyn meerkat_core::AgentLlmClient>,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        self.agent.replace_client(client)
     }
 
     fn hot_swap_llm_identity(
@@ -309,10 +312,18 @@ impl SessionAgent for FactoryAgent {
         &mut self,
         contents: Vec<String>,
     ) -> Result<(), meerkat_core::error::AgentError> {
+        self.agent.preflight_system_message_append(contents.len())?;
         for content in contents {
             self.agent.session_mut().append_system_message(content);
         }
         Ok(())
+    }
+
+    fn preflight_system_message_append(
+        &self,
+        count: usize,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        self.agent.preflight_system_message_append(count)
     }
 
     fn append_system_message_control(
@@ -320,6 +331,7 @@ impl SessionAgent for FactoryAgent {
         req: meerkat_core::AppendSystemContextRequest,
     ) -> Result<meerkat_core::service::AppendSystemContextStatus, meerkat_core::error::AgentError>
     {
+        self.agent.preflight_system_message_append(1)?;
         self.agent
             .session_mut()
             .append_system_message_idempotent(
@@ -1102,6 +1114,69 @@ impl FactoryAgentBuilder {
 impl SessionAgentBuilder for FactoryAgentBuilder {
     type Agent = FactoryAgent;
 
+    async fn preflight_detached_system_message_append(
+        &self,
+        session: &Session,
+        count: usize,
+    ) -> Result<(), SessionError> {
+        let metadata = session.try_session_metadata().map_err(|error| {
+            SessionError::Agent(meerkat_core::AgentError::ConfigError(format!(
+                "failed to restore durable LLM identity for System-message wire preflight: {error}"
+            )))
+        })?;
+        let identity = metadata
+            .map(|metadata| metadata.llm_identity())
+            .ok_or_else(|| {
+                SessionError::Agent(meerkat_core::AgentError::ConfigError(
+                    "detached System-message wire preflight requires durable LLM identity"
+                        .to_string(),
+                ))
+            })?;
+        let raw_client = match self.default_llm_client.clone() {
+            Some(client) => client,
+            None => self
+                .factory
+                .build_llm_client_for_identity(&self.resolve_config().await?, &identity)
+                .await
+                .map_err(|error| {
+                    build_agent_error_to_session_error(
+                        BuildAgentError::LlmClient(error),
+                        Some(identity.provider),
+                        identity.auth_binding.as_ref(),
+                    )
+                })?,
+        };
+        let client: Arc<dyn meerkat_core::AgentLlmClient> = Arc::new(
+            LlmClientAdapter::try_for_provider_identity(
+                raw_client,
+                identity.model.clone(),
+                identity.provider,
+            )
+            .map_err(|error| {
+                SessionError::Agent(meerkat_core::AgentError::BuildError(error.to_string()))
+            })?,
+        );
+        let decorator = self
+            .default_agent_llm_client_decorator
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let client = AgentFactory::decorate_agent_llm_client(client, decorator.as_ref());
+        let capability = client.system_message_wire_capability();
+        if let Some(incompatible_index) =
+            capability.first_incompatible_index_after_system_append(session.messages(), count)
+        {
+            return Err(SessionError::Agent(
+                meerkat_core::AgentError::SystemMessageWireIncompatible {
+                    provider: client.provider(),
+                    capability,
+                    incompatible_index,
+                },
+            ));
+        }
+        Ok(())
+    }
+
     async fn abort_absent_session_compaction_stages(
         &self,
         session_id: &meerkat_core::SessionId,
@@ -1328,6 +1403,9 @@ impl SessionAgentBuilder for FactoryAgentBuilder {
                 auth_binding_error_context.as_ref(),
             )
         })?;
+        agent
+            .preflight_active_client_transcript()
+            .map_err(SessionError::Agent)?;
 
         Ok(FactoryAgent {
             agent,

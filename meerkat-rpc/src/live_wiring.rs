@@ -131,6 +131,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
         )
+        .expect("empty seed must be representable")
     }
 
     /// The credential chain's binary link: the factory `rkat-rpc` wires must

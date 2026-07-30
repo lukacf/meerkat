@@ -410,7 +410,8 @@ fn decode_released_0810_revision_chain<E>(
 where
     E: serde::de::Error,
 {
-    let mut materialized = std::collections::HashMap::with_capacity(entries.len());
+    let mut materialized: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::with_capacity(entries.len());
     let mut bodies: Vec<TranscriptRevisionBody> = Vec::with_capacity(entries.len());
     for entry in entries {
         let messages = match (entry.messages, entry.rebase) {
@@ -489,7 +490,7 @@ pub(crate) fn canonicalize_released_0810_checkpoint_history(
         commits,
         revisions,
     } = validate_released_0810_wire(wire)?;
-    let commits = crate::session::checkpoint_rewrite_commits_value(&commits)?;
+    let commits = released_0810_checkpoint_rewrite_commits_value(&commits)?;
     let mut revisions = revisions
         .into_iter()
         .map(|body| {
@@ -509,6 +510,26 @@ pub(crate) fn canonicalize_released_0810_checkpoint_history(
         "commits": commits,
         "revisions": revisions,
     }))
+}
+
+/// Project current in-memory commit values back onto the exact released
+/// 0.8.10 checkpoint witness shape.
+///
+/// Validation assigns occurrence generations before returning the commits,
+/// but those generations did not exist in the released bytes and therefore
+/// must not participate in their frozen checkpoint digest.
+fn released_0810_checkpoint_rewrite_commits_value(
+    commits: &[TranscriptRewriteCommit],
+) -> Result<serde_json::Value, serde_json::Error> {
+    let mut value = serde_json::to_value(commits)?;
+    if let Some(commits) = value.as_array_mut() {
+        for commit in commits {
+            if let Some(fields) = commit.as_object_mut() {
+                fields.remove("rewrite_generation");
+            }
+        }
+    }
+    Ok(value)
 }
 
 struct ValidatedReleased0810Wire {
@@ -1218,11 +1239,11 @@ impl PersistentTranscriptEdges {
         });
     }
 
-    const fn len(&self) -> usize {
+    fn len(&self) -> usize {
         self.chain.len
     }
 
-    const fn is_empty(&self) -> bool {
+    fn is_empty(&self) -> bool {
         self.chain.len == 0
     }
 
@@ -1767,6 +1788,119 @@ impl TranscriptHistoryState {
         &self.graph_prefix
     }
 
+    /// Whether `prefix` is the exact structural prefix of this graph.
+    ///
+    /// Both values are construction- or decode-validated, so matching the
+    /// rolling graph prefix at the predecessor's occurrence count binds the
+    /// anchor and every exact ordered edge without materializing historical
+    /// bodies or comparing a parallel commit vector.
+    #[must_use]
+    pub(crate) fn extends_exact_graph(&self, prefix: &Self) -> bool {
+        let prefix_count = prefix.commit_count();
+        if prefix_count > self.commit_count() {
+            return false;
+        }
+        if prefix_count == 0 {
+            let expected_graph_prefix =
+                TranscriptGraphPrefixAccumulator::from_anchor(prefix.anchor()).ok();
+            return self.anchor() == prefix.anchor()
+                && prefix.rewrite_prefix() == &TranscriptRewritePrefixAccumulator::empty()
+                && expected_graph_prefix.as_ref() == Some(prefix.graph_prefix());
+        }
+        self.graph_prefix_at(prefix_count) == Some(prefix.graph_prefix())
+    }
+
+    /// Unique logical occurrence position of one content revision.
+    ///
+    /// The child of every rewrite edge is a new logical occurrence even when
+    /// its content digest equals its parent (`A -> A`). The parent of a later
+    /// edge reuses the preceding child only when both labels are equal; a
+    /// different parent label is an append-derived intermediate endpoint.
+    ///
+    /// Any digest that labels more than one of those logical occurrences is
+    /// ambiguous by digest alone and returns `None`; callers holding a commit
+    /// or graph prefix must use that exact occurrence authority instead.
+    #[must_use]
+    pub(crate) fn unique_revision_position(&self, revision: &str) -> Option<usize> {
+        fn observe(
+            candidate: &str,
+            candidate_position: usize,
+            revision: &str,
+            found: &mut Option<usize>,
+            ambiguous: &mut bool,
+        ) {
+            if candidate == revision && found.replace(candidate_position).is_some() {
+                *ambiguous = true;
+            }
+        }
+
+        let mut position = 0usize;
+        let mut found = None;
+        let mut ambiguous = false;
+        let mut preceding_child = self.anchor.revision();
+
+        observe(
+            self.anchor.revision(),
+            position,
+            revision,
+            &mut found,
+            &mut ambiguous,
+        );
+        for edge in self.edges.ordered() {
+            if edge.parent_revision() != preceding_child {
+                position += 1;
+                observe(
+                    edge.parent_revision(),
+                    position,
+                    revision,
+                    &mut found,
+                    &mut ambiguous,
+                );
+            }
+
+            // A rewrite always mints a new occurrence. Do not collapse an
+            // exact-content no-op edge: its generation is still durable
+            // authority and digest-only callers cannot choose either side.
+            position += 1;
+            observe(
+                edge.revision(),
+                position,
+                revision,
+                &mut found,
+                &mut ambiguous,
+            );
+            preceding_child = edge.revision();
+        }
+        if ambiguous { None } else { found }
+    }
+
+    /// Digest-only ancestry, restricted to unique logical occurrences.
+    ///
+    /// Equality does not bypass occurrence resolution: in `A -> B -> A`, even
+    /// `revision_extends(A, A)` is ambiguous. Exact commit/generation or graph
+    /// prefix authority is required to distinguish those two `A` occurrences.
+    #[must_use]
+    pub(crate) fn revision_extends(&self, descendant: &str, ancestor: &str) -> bool {
+        match (
+            self.unique_revision_position(descendant),
+            self.unique_revision_position(ancestor),
+        ) {
+            (Some(descendant), Some(ancestor)) => descendant >= ancestor,
+            _ => false,
+        }
+    }
+
+    /// Whether this graph contains this exact rewrite occurrence.
+    #[must_use]
+    pub(crate) fn contains_exact_commit(&self, commit: &TranscriptRewriteCommit) -> bool {
+        commit
+            .rewrite_generation
+            .checked_sub(1)
+            .and_then(|index| usize::try_from(index).ok())
+            .and_then(|index| self.commit(index))
+            == Some(commit)
+    }
+
     /// Compact graph identity after an exact positive occurrence count.
     ///
     /// `None` for zero means the physical head predates any retained graph.
@@ -2021,6 +2155,7 @@ impl TranscriptHistoryState {
         let mut bodies = Vec::new();
         for revision in std::iter::once(self.anchor.revision.as_str()).chain(
             self.edges
+                .ordered()
                 .iter()
                 .flat_map(|edge| [edge.parent_revision(), edge.revision()]),
         ) {
@@ -2792,6 +2927,50 @@ mod tests {
         records
     }
 
+    fn recurrence_chain() -> Vec<TranscriptRewriteRecord> {
+        let a = body(vec![message("A")], None);
+        let b = body(vec![message("B")], Some(&a.revision));
+        let first = TranscriptRewriteRecord::new(
+            TranscriptRewriteCommit {
+                rewrite_generation: 1,
+                parent_revision: a.revision.clone(),
+                revision: b.revision.clone(),
+                selection: TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+                original_span_digest: transcript_messages_digest(&a.messages).expect("digest A"),
+                replacement_digest: transcript_messages_digest(&b.messages).expect("digest B"),
+                messages_before: 1,
+                messages_after: 1,
+                reason: TranscriptRewriteReason::new("recurrence-test"),
+                actor: None,
+                committed_at: SystemTime::UNIX_EPOCH,
+            },
+            a.clone(),
+            b.clone(),
+        )
+        .expect("A to B record");
+        let returned_a = body(a.messages.clone(), Some(&b.revision));
+        let second = TranscriptRewriteRecord::new(
+            TranscriptRewriteCommit {
+                rewrite_generation: 2,
+                parent_revision: b.revision.clone(),
+                revision: returned_a.revision.clone(),
+                selection: TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+                original_span_digest: transcript_messages_digest(&b.messages).expect("digest B"),
+                replacement_digest: transcript_messages_digest(&returned_a.messages)
+                    .expect("digest returned A"),
+                messages_before: 1,
+                messages_after: 1,
+                reason: TranscriptRewriteReason::new("recurrence-test"),
+                actor: None,
+                committed_at: SystemTime::UNIX_EPOCH,
+            },
+            b,
+            returned_a,
+        )
+        .expect("B to A record");
+        vec![first, second]
+    }
+
     fn rebuild(records: &[TranscriptRewriteRecord]) -> TranscriptHistoryState {
         TranscriptHistoryState::from_rewrite_records(records.to_vec())
             .expect("rebuild from records")
@@ -2809,20 +2988,80 @@ mod tests {
     }
 
     fn assert_same_graph(left: &TranscriptHistoryState, right: &TranscriptHistoryState) {
-        assert_eq!(left.head, right.head);
-        assert_eq!(left.commits, right.commits);
-        assert_eq!(left.parent_transitions, right.parent_transitions);
         assert_eq!(
-            left.revisions
-                .iter()
-                .map(|body| (&body.revision, &body.messages))
-                .collect::<Vec<_>>(),
-            right
-                .revisions
-                .iter()
-                .map(|body| (&body.revision, &body.messages))
-                .collect::<Vec<_>>()
+            serde_json::to_value(left).expect("left graph serializes"),
+            serde_json::to_value(right).expect("right graph serializes"),
+            "compact graph wires differ"
         );
+    }
+
+    fn zero_edge_prefix(anchor_body: &TranscriptRevisionBody) -> TranscriptHistoryState {
+        let anchor = TranscriptRevisionAnchor {
+            revision: anchor_body.revision.clone(),
+            messages: anchor_body.messages.clone(),
+            row_prefix: SessionMessageRowPrefixAccumulator::from_messages(&anchor_body.messages)
+                .expect("anchor row prefix"),
+            created_at: anchor_body.created_at,
+        };
+        TranscriptHistoryState {
+            format: TRANSCRIPT_HISTORY_FORMAT_CURRENT,
+            graph_prefix: TranscriptGraphPrefixAccumulator::from_anchor(&anchor)
+                .expect("anchor graph prefix"),
+            anchor: Arc::new(anchor),
+            edges: PersistentTranscriptEdges::empty(),
+            rewrite_prefix: TranscriptRewritePrefixAccumulator::empty(),
+            digest_format: TRANSCRIPT_DIGEST_FORMAT_CURRENT,
+        }
+    }
+
+    #[test]
+    fn exact_graph_extension_accepts_only_the_same_zero_edge_anchor_authority() {
+        let records = rewrite_chain(2);
+        let full = rebuild(&records);
+        let prefix = zero_edge_prefix(&records[0].parent_body);
+        assert!(
+            full.extends_exact_graph(&prefix),
+            "the exact anchor is the zero-occurrence prefix of its rewrite graph"
+        );
+
+        let foreign_anchor = body(vec![message("foreign anchor")], None);
+        assert!(
+            !full.extends_exact_graph(&zero_edge_prefix(&foreign_anchor)),
+            "a different anchor cannot authorize a zero-occurrence prefix"
+        );
+
+        let mut malformed = prefix;
+        malformed.rewrite_prefix =
+            TranscriptRewritePrefixAccumulator::from_commits(&[records[0].commit.clone()])
+                .expect("one-commit prefix");
+        assert!(
+            !full.extends_exact_graph(&malformed),
+            "zero edges cannot carry a non-empty rewrite prefix"
+        );
+    }
+
+    #[test]
+    fn digest_only_ancestry_refuses_nonconsecutive_revision_recurrence() {
+        let records = recurrence_chain();
+        let state = rebuild(&records);
+        let a = records[0].commit.parent_revision.as_str();
+        let b = records[0].commit.revision.as_str();
+
+        assert_eq!(state.unique_revision_position(a), None);
+        assert!(state.unique_revision_position(b).is_some());
+        assert!(
+            !state.revision_extends(a, b),
+            "the later A cannot make digest-only A authorize the exact B occurrence"
+        );
+        assert!(
+            !state.revision_extends(b, a),
+            "the earlier A cannot make digest-only A authorize B in the other direction"
+        );
+        assert!(
+            !state.revision_extends(a, a),
+            "digest equality cannot bypass ambiguous A occurrence identity"
+        );
+        assert!(state.revision_extends(b, b));
     }
 
     #[test]
@@ -2902,15 +3141,9 @@ mod tests {
     }
 
     #[test]
-    fn a_proved_graph_missing_an_endpoint_body_cannot_launder_a_corrupted_record() {
+    fn a_proved_prefix_cannot_launder_a_corrupted_tail_record() {
         let records = rewrite_chain(2);
-        let mut state = rebuild(&records);
-        state
-            .revisions
-            .retain(|body| body.revision != records[1].commit.revision);
-        // `seal` refuses a graph missing a commit endpoint, so a marker adopted
-        // over a graph that lost one is the only way this branch is reachable.
-        let proved = ValidatedTranscriptHistory::adopt_session_validated(Arc::new(state));
+        let proved = sealed(&records[..1]);
         let mut corrupted = records.clone();
         corrupted[1].revision_body.messages[3] = message("corrupted tail");
         let error =
@@ -2965,69 +3198,46 @@ mod tests {
         assert_same_graph(&decoded, &state);
     }
 
-    /// 0.8.10 wrote a physical log cursor into the graph. It remains accepted as
-    /// ignored input at the compatibility floor, but it is never carried into
-    /// current authority or emitted again.
+    /// A physical log cursor belongs only to the frozen 0.8.10 importer. The
+    /// current compact graph decoder refuses it rather than silently accepting
+    /// store position as session-document authority.
     #[test]
-    fn an_0_8_10_replay_cursor_is_ignored_and_not_reserialized() {
+    fn a_replay_cursor_is_refused_by_the_current_graph_decoder() {
         let state = rebuild(&rewrite_chain(2));
         let mut wire = serde_json::to_value(&state).expect("graph serializes");
         wire["replay_cursor"] = serde_json::json!({
             "seq": 41,
             "commits": 2,
-            "last_commit_revision": state.commits[1].revision,
+            "last_commit_revision": &state.commit(1).expect("second commit").revision,
         });
-        let decoded: TranscriptHistoryState =
-            serde_json::from_value(wire).expect("0.8.10 graph decodes");
-        assert_same_graph(&decoded, &state);
-        let current_wire = serde_json::to_value(decoded).expect("current graph serializes");
         assert!(
-            current_wire.get("replay_cursor").is_none(),
-            "the retired marker must not survive a current round trip: {current_wire}"
+            serde_json::from_value::<TranscriptHistoryState>(wire).is_err(),
+            "current graph ingress must reject the retired physical cursor"
         );
     }
 
     #[test]
-    fn an_0_8_10_graph_derives_missing_parent_transition_evidence_once() {
+    fn current_graph_refuses_missing_parent_advance_evidence() {
         let state = rebuild(&rewrite_chain(3));
         let mut wire = serde_json::to_value(&state).expect("graph serializes");
-        wire.as_object_mut()
-            .expect("graph wire is an object")
-            .remove("parent_transitions");
-
-        let decoded: TranscriptHistoryState =
-            serde_json::from_value(wire).expect("0.8.10 graph decodes");
-        assert_same_graph(&decoded, &state);
-        let current_wire = serde_json::to_value(decoded).expect("current graph serializes");
-        let expected_parent_transitions = serde_json::to_value(&state.parent_transitions)
-            .expect("parent-transition evidence serializes");
-        assert_eq!(
-            current_wire.get("parent_transitions"),
-            Some(&expected_parent_transitions),
-            "the first current save must persist validator-derived transition evidence"
+        wire["edges"][0]
+            .as_object_mut()
+            .expect("edge wire is an object")
+            .remove("parent_advance");
+        assert!(
+            serde_json::from_value::<TranscriptHistoryState>(wire).is_err(),
+            "current ingress cannot synthesize missing parent-advance evidence"
         );
     }
 
     #[test]
-    fn explicitly_empty_parent_transition_evidence_cannot_be_healed_as_legacy() {
+    fn null_parent_advance_evidence_is_malformed() {
         let state = rebuild(&rewrite_chain(2));
         let mut wire = serde_json::to_value(&state).expect("graph serializes");
-        wire["parent_transitions"] = serde_json::json!([]);
-
-        let decoded: TranscriptHistoryState =
-            serde_json::from_value(wire).expect("typed graph shape decodes");
-        let error = ValidatedTranscriptHistory::seal_owned(decoded)
-            .expect_err("explicitly forged current evidence must fail closed");
+        wire["edges"][0]["parent_advance"] = serde_json::Value::Null;
         assert!(
-            matches!(error, TranscriptEditError::HistoryStateMalformed(_)),
-            "unexpected error: {error}"
-        );
-
-        let mut null_wire = serde_json::to_value(&state).expect("graph serializes");
-        null_wire["parent_transitions"] = serde_json::Value::Null;
-        assert!(
-            serde_json::from_value::<TranscriptHistoryState>(null_wire).is_err(),
-            "a present null evidence field is malformed current state, not a legacy omission"
+            serde_json::from_value::<TranscriptHistoryState>(wire).is_err(),
+            "null parent-advance evidence is malformed current state"
         );
     }
 }

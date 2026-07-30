@@ -20,7 +20,9 @@ use crate::tool_scope::{
     EXTERNAL_TOOL_FILTER_METADATA_KEY, GeneratedToolVisibilityOwner,
     INHERITED_TOOL_FILTER_METADATA_KEY, ToolFilter, ToolScope, validate_inherited_filter_witnesses,
 };
-use crate::types::{Message, OutputSchema};
+#[cfg(test)]
+use crate::types::Message;
+use crate::types::OutputSchema;
 #[cfg(all(meerkat_internal_agent_factory_build, not(test)))]
 use std::any::Any;
 #[cfg(all(meerkat_internal_agent_factory_build, not(test)))]
@@ -144,6 +146,14 @@ pub enum AgentBuildPolicyError {
     CompactionMemoryReconcile { message: String },
     #[error("durable compaction-memory stages require a resultful runtime commit coordinator")]
     MissingCompactionCommitCoordinator,
+    #[error(
+        "provider {provider:?} cannot represent System message at transcript index {incompatible_index} with wire capability {capability:?}"
+    )]
+    SystemMessageWireIncompatible {
+        provider: crate::Provider,
+        capability: crate::SystemMessageWireCapability,
+        incompatible_index: usize,
+    },
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -516,7 +526,7 @@ impl AgentBuilder {
         if runtime_tool_visibility_owner_required && self.model_routing_handle.is_none() {
             return Err(AgentBuildPolicyError::MissingModelRoutingHandle);
         }
-        let session = self.session.unwrap_or_default();
+        let mut session = self.session.unwrap_or_default();
         let transient_turn_context_state = crate::session::TransientTurnContextStateHandle::new();
 
         // Build-time prompt composition can materialize only the first event
@@ -536,6 +546,16 @@ impl AgentBuilder {
                 // standalone core construction stays unprompted unless asked.
                 session.append_system_message(SystemPromptConfig::new().compose().await);
             }
+        }
+        let system_message_wire_capability = client.system_message_wire_capability();
+        if let Some(incompatible_index) =
+            system_message_wire_capability.first_incompatible_index(session.messages())
+        {
+            return Err(AgentBuildPolicyError::SystemMessageWireIncompatible {
+                provider: client.provider(),
+                capability: system_message_wire_capability,
+                incompatible_index,
+            });
         }
 
         let budget = Budget::new(self.budget_limits.unwrap_or_default());

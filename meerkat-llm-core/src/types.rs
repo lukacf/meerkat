@@ -35,6 +35,15 @@ pub type LlmStream<'a> = Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> +
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait LlmClient: Send + Sync {
+    /// Describe whether this concrete provider wire preserves canonical
+    /// ordered `System` messages.
+    ///
+    /// The restrictive default prevents a custom client from silently
+    /// hoisting an interleaved System message into a leading provider field.
+    fn system_message_wire_capability(&self) -> meerkat_core::SystemMessageWireCapability {
+        meerkat_core::SystemMessageWireCapability::default()
+    }
+
     /// Project canonical Meerkat transcript history into the provider-safe
     /// replay history for this client.
     ///

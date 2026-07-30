@@ -3855,7 +3855,7 @@ impl SessionRuntime {
         &self,
         session_id: &SessionId,
         turning_mode: meerkat_contracts::RealtimeTurningMode,
-    ) -> Result<RealtimeSessionOpenConfig, SessionError> {
+    ) -> Result<RealtimeSessionOpenConfig, RealtimeSessionOpenProjectionError> {
         let snapshot = self.realm_context_snapshot();
         let cleanup = self.archive_runtime_cleanup();
         self.live_orchestrator(&snapshot, cleanup)
@@ -3871,7 +3871,7 @@ impl SessionRuntime {
         &self,
         session_id: &SessionId,
         turning_mode: meerkat_contracts::RealtimeTurningMode,
-    ) -> Result<RealtimeSessionOpenConfig, SessionError> {
+    ) -> Result<RealtimeSessionOpenConfig, RealtimeSessionOpenProjectionError> {
         self.realtime_session_open_config(session_id, turning_mode)
             .await
     }
@@ -3897,7 +3897,7 @@ impl SessionRuntime {
         &self,
         session_id: &SessionId,
         turning_mode: meerkat_contracts::RealtimeTurningMode,
-    ) -> Result<RealtimeSessionOpenConfig, SessionError> {
+    ) -> Result<RealtimeSessionOpenConfig, RealtimeSessionOpenProjectionError> {
         let snapshot = self.realm_context_snapshot();
         let cleanup = self.archive_runtime_cleanup();
         self.live_orchestrator(&snapshot, cleanup)

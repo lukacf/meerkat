@@ -362,6 +362,16 @@ pub enum AgentError {
     ConcurrencyLimitExceeded,
     #[error("Configuration error: {0}")]
     ConfigError(String),
+    /// The selected provider wire cannot faithfully encode the canonical
+    /// ordered placement of a `System` message.
+    #[error(
+        "provider {provider:?} cannot represent System message at transcript index {incompatible_index} with wire capability {capability:?}"
+    )]
+    SystemMessageWireIncompatible {
+        provider: crate::Provider,
+        capability: crate::SystemMessageWireCapability,
+        incompatible_index: usize,
+    },
     #[error("Invalid tool in access policy: {tool}")]
     InvalidToolAccess { tool: String },
     #[error("Skill resolution failed for {skill_key:?}: {reason}")]

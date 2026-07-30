@@ -10,6 +10,11 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUTPUT_FILE="$ROOT_DIR/artifacts/session_control_public_name_scan.txt"
 
+if ! command -v rg >/dev/null 2>&1; then
+  echo "session-control public-name scan requires ripgrep (rg); refusing a false-green scan" >&2
+  exit 2
+fi
+
 TERMS=(
   "session/runtime_state"
   "session/accept_input"

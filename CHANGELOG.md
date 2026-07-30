@@ -216,19 +216,23 @@ via cargo-semver-checks against the published baselines).
   create-time field, does not replace an earlier System message, and is not
   inferred from transcript text or position. Resume preserves the exact
   ordered prefix; compaction retains every System message in relative order;
-  provider adapters preserve the entire instruction sequence, lifting all
-  Systems deterministically only where an upstream API requires it.
+  provider adapters preserve exact chronology where their wire supports it.
+  Top-level-only providers accept a contiguous leading System prefix and
+  reject a later System rather than silently hoisting it. Turn admission
+  rejects an unsupported shape before appending durable state; provider/model
+  switches and resume overrides preflight the existing transcript before
+  rebind, with adapter-side input-shape rejection retained as a backstop.
 - Provider lowering never changes that durable meaning. Standard OpenAI
   Responses and OpenAI-compatible Chat Completions preserve System
-  interleaving. Anthropic and Gemini preserve every System as a distinct
-  top-level block or part in transcript order. The private ChatGPT Responses
-  backend and OpenAI Realtime preserve every exact System byte in transcript
-  order using a stable two-newline separator, but their top-level-only
-  instruction fields cannot preserve position relative to user turns. Empty,
-  whitespace-only, and duplicate Systems are never trimmed, deduplicated,
-  replaced, or dropped. Realtime's separate `runtime_system_context` carrier
-  is retired; reconnect and refresh derive only from ordered transcript
-  `System` / `SystemNotice` messages.
+  interleaving. Anthropic and Gemini preserve a leading System prefix as
+  distinct top-level blocks or parts. The private ChatGPT Responses backend
+  and OpenAI Realtime preserve every exact byte in a leading System prefix
+  using a stable two-newline separator. Empty, whitespace-only, and duplicate
+  prefix entries are never trimmed, deduplicated, replaced, or dropped. A
+  non-leading System is an unsupported input shape for those wires. Realtime's
+  separate `runtime_system_context` carrier is retired; reconnect and refresh
+  derive instructions only from the canonical leading System prefix, while
+  `SystemNotice` remains an explicit in-place event.
 - Typed peer terminal-response facts now persist as deduplicated
   `SystemNotice` messages at the conversation tail without mutating any
   ordered `System` message. Active-turn delivery commits the notice to the

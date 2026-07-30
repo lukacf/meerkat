@@ -9671,14 +9671,14 @@ mod tests {
             "ordinary whole-blob appends must leave audited graph bytes untouched"
         );
         let state = session.transcript_history_state().unwrap().unwrap();
-        assert_eq!(state.head, second_commit.revision);
+        assert_eq!(state.head(), second_commit.revision);
         assert_eq!(
-            state.commits.last(),
+            state.commits().last(),
             Some(&second_commit),
             "audited graph must end at the exact latest rewrite occurrence"
         );
         assert_ne!(
-            state.head,
+            state.head(),
             session.transcript_content_digest().unwrap(),
             "live tail authority must remain separate from the audited graph head"
         );

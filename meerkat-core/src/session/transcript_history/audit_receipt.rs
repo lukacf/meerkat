@@ -17,6 +17,7 @@ use crate::session::TranscriptEditError;
 /// checked by [`TranscriptRewritePrefixAccumulator::extend`], so neither a gap
 /// nor a duplicate can be hidden inside one receipt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub struct TranscriptRewriteAuditReceiptBatch {
     start_prefix: TranscriptRewritePrefixAccumulator,

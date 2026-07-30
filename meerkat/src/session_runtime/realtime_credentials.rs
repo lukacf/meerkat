@@ -361,7 +361,8 @@ mod tests {
             identity,
             Vec::new(),
             Vec::new(),
-        );
+        )
+        .expect("empty seed must be representable");
 
         let temp = tempfile::TempDir::new().expect("tempdir");
         let factory =

@@ -3365,7 +3365,7 @@ mod tests {
             .transcript_history_state()
             .unwrap()
             .unwrap()
-            .commits
+            .commits()
             .last()
             .unwrap()
             .clone();

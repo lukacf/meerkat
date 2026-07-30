@@ -236,21 +236,19 @@ pub struct RealtimeSessionOpenConfig {
     /// reusing or concurrently opening from another clone must acquire fresh
     /// custody instead of reusing the original reservation.
     open_projection_lease: RealtimeOpenProjectionLeaseSlot,
-    /// Provider-lowered ordered system-channel instructions for this realtime session.
+    /// Provider-lowered leading System prefix for this realtime session.
     ///
-    /// The canonical owners remain the ordered `Message::System` and
-    /// `Message::SystemNotice` transcript rows. Projection deterministically
-    /// lifts every such row, in transcript order, into this singular field for
-    /// realtime providers whose instruction channel cannot represent
-    /// interleaved system-channel messages.
+    /// The canonical owners remain the ordered transcript messages. Only a
+    /// contiguous leading `Message::System` prefix can be represented
+    /// by a singular top-level instruction field without changing chronology.
     ///
     /// Provider adapters and snapshot builders MUST consume this typed field
     /// when they need one provider instruction value (e.g. the OpenAI Refresh
     /// path rebuilding the realtime `session.update` instructions field). They
     /// MUST NOT re-derive it by inspecting `seed_messages[0]`: System
-    /// messages have no privileged position, and the
-    /// history-event projector drops `Message::System` / `Message::SystemNotice`
-    /// entries. `None` means the session has no ordered system-channel rows;
+    /// messages have no privileged durable position, and the history-event
+    /// projector handles `SystemNotice` rows in place.
+    /// `None` means the session has no leading System rows;
     /// `Some("")` means it has an authored empty System row.
     ordered_system_instructions: Option<String>,
     /// Durable caller-id bindings for committed non-text user inputs. Provider
@@ -282,21 +280,33 @@ pub struct RealtimeSessionOpenConfig {
 }
 
 impl RealtimeSessionOpenConfig {
-    /// Deterministically lower every ordered System/SystemNotice row into the
-    /// singular instruction representation used by realtime providers.
-    #[must_use]
-    pub fn lower_ordered_system_messages(messages: &[Message]) -> Option<String> {
-        let mut systems = messages.iter().filter_map(|message| match message {
-            Message::System(system) => Some(system.content.clone()),
-            Message::SystemNotice(notice) => Some(notice.model_projection_text()),
-            _ => None,
-        });
-        let mut lowered = systems.next()?;
+    /// Lower a contiguous leading System prefix. A later System cannot be
+    /// moved into a top-level instruction field without changing chronology.
+    pub fn lower_leading_system_messages(messages: &[Message]) -> Result<Option<String>, LlmError> {
+        let mut leading_prefix_open = true;
+        let mut systems = Vec::new();
+        for message in messages {
+            match message {
+                Message::System(system) if leading_prefix_open => {
+                    systems.push(system.content.clone());
+                }
+                Message::System(_) => {
+                    return Err(LlmError::InvalidInputShape {
+                        message: "realtime providers with a top-level instruction field cannot faithfully represent a System message after non-System transcript content".to_string(),
+                    });
+                }
+                _ => leading_prefix_open = false,
+            }
+        }
+        let mut systems = systems.into_iter();
+        let Some(mut lowered) = systems.next() else {
+            return Ok(None);
+        };
         for system in systems {
             lowered.push_str("\n\n");
             lowered.push_str(&system);
         }
-        Some(lowered)
+        Ok(Some(lowered))
     }
 
     #[must_use]
@@ -305,25 +315,24 @@ impl RealtimeSessionOpenConfig {
         llm_identity: SessionLlmIdentity,
         visible_tools: Vec<ToolDef>,
         seed_messages: Vec<Message>,
-    ) -> Self {
-        let ordered_system_instructions = Self::lower_ordered_system_messages(&seed_messages);
-        Self::new_with_projection(
+    ) -> Result<Self, LlmError> {
+        let ordered_system_instructions = Self::lower_leading_system_messages(&seed_messages)?;
+        Ok(Self::new_with_projection(
             turning_mode,
             llm_identity,
             visible_tools,
             seed_messages,
             ordered_system_instructions,
-        )
+        ))
     }
 
     /// Construct an open projection from a caller-selected replay seed while
     /// deriving instructions from the complete active materialized transcript.
     ///
-    /// A bounded replay seed may omit old dialogue and System rows. The
-    /// provider's top-level instruction projection must nevertheless cover
-    /// every System/SystemNotice in the active transcript. `canonical_messages`
-    /// is that active materialization only; retained historical rewrite
-    /// strands are never instruction input.
+    /// A bounded replay seed may omit old dialogue and leading System rows.
+    /// The provider's top-level instruction projection is therefore derived
+    /// from the complete active materialization. Any non-leading System makes
+    /// this provider shape unrepresentable and is rejected.
     #[must_use]
     pub fn for_open_from_messages(
         turning_mode: RealtimeTurningMode,
@@ -331,15 +340,15 @@ impl RealtimeSessionOpenConfig {
         visible_tools: Vec<ToolDef>,
         seed_messages: Vec<Message>,
         canonical_messages: &[Message],
-    ) -> Self {
-        let ordered_system_instructions = Self::lower_ordered_system_messages(canonical_messages);
-        Self::new_with_projection(
+    ) -> Result<Self, LlmError> {
+        let ordered_system_instructions = Self::lower_leading_system_messages(canonical_messages)?;
+        Ok(Self::new_with_projection(
             turning_mode,
             llm_identity,
             visible_tools,
             seed_messages,
             ordered_system_instructions,
-        )
+        ))
     }
 
     fn new_with_projection(
@@ -374,11 +383,11 @@ impl RealtimeSessionOpenConfig {
         llm_identity: SessionLlmIdentity,
         visible_tools: Vec<ToolDef>,
         canonical_messages: &[Message],
-    ) -> Self {
-        let mut config = Self::new(turning_mode, llm_identity, visible_tools, Vec::new());
+    ) -> Result<Self, LlmError> {
+        let mut config = Self::new(turning_mode, llm_identity, visible_tools, Vec::new())?;
         config.ordered_system_instructions =
-            Self::lower_ordered_system_messages(canonical_messages);
-        config
+            Self::lower_leading_system_messages(canonical_messages)?;
+        Ok(config)
     }
 
     /// Carry an already-acquired open-projection lease from the runtime's
@@ -399,10 +408,10 @@ impl RealtimeSessionOpenConfig {
         self.open_projection_lease.take()
     }
 
-    /// Provider-lowered ordered System instructions.
+    /// Provider-lowered leading System-prefix instructions.
     ///
-    /// Open configs derive this from every ordered seed System. Refresh-only
-    /// configs derive it from the canonical transcript through
+    /// Open configs derive this from the contiguous leading seed System
+    /// prefix. Refresh-only configs derive it from the canonical transcript through
     /// [`Self::for_refresh_from_messages`].
     #[must_use]
     pub fn ordered_system_instructions(&self) -> Option<&str> {
@@ -422,10 +431,10 @@ impl RealtimeSessionOpenConfig {
     /// Replace the canonical seed while atomically re-deriving its ordered
     /// System projection.
     #[must_use]
-    pub fn with_seed_messages(mut self, seed_messages: Vec<Message>) -> Self {
-        self.ordered_system_instructions = Self::lower_ordered_system_messages(&seed_messages);
+    pub fn with_seed_messages(mut self, seed_messages: Vec<Message>) -> Result<Self, LlmError> {
+        self.ordered_system_instructions = Self::lower_leading_system_messages(&seed_messages)?;
         self.seed_messages = seed_messages;
-        self
+        Ok(self)
     }
 
     /// Builder-style durable user-content idempotency registry.
@@ -564,31 +573,23 @@ mod tests {
     }
 
     #[test]
-    fn open_config_derives_every_ordered_seed_system_without_row_zero_privilege() {
+    fn open_config_derives_exact_leading_system_prefix() {
         let config = RealtimeSessionOpenConfig::new(
             RealtimeTurningMode::ProviderManaged,
             sample_identity(),
             Vec::new(),
             vec![
-                Message::User(UserMessage::text("hello")),
                 Message::System(SystemMessage::new("first")),
-                Message::User(UserMessage::text("continue")),
                 Message::System(SystemMessage::new("")),
-                Message::SystemNotice(SystemNoticeMessage::new(SystemNoticeKind::Generic, "")),
-                Message::SystemNotice(SystemNoticeMessage::new(
-                    SystemNoticeKind::Generic,
-                    "duplicate",
-                )),
-                Message::SystemNotice(SystemNoticeMessage::new(
-                    SystemNoticeKind::Generic,
-                    "duplicate",
-                )),
                 Message::System(SystemMessage::new(" \t ")),
+                Message::SystemNotice(SystemNoticeMessage::new(SystemNoticeKind::Generic, "")),
+                Message::User(UserMessage::text("hello")),
             ],
-        );
+        )
+        .expect("leading System prefix must be representable");
         assert_eq!(
             config.ordered_system_instructions(),
-            Some("first\n\n\n\n\n\nduplicate\n\nduplicate\n\n \t ")
+            Some("first\n\n\n\n \t ")
         );
     }
 
@@ -599,7 +600,8 @@ mod tests {
             sample_identity(),
             Vec::new(),
             vec![Message::User(UserMessage::text("hello"))],
-        );
+        )
+        .expect("ordinary dialogue must be representable");
         assert_eq!(open.ordered_system_instructions(), None);
 
         let refresh = RealtimeSessionOpenConfig::for_refresh_from_messages(
@@ -612,12 +614,9 @@ mod tests {
                 Message::System(SystemMessage::new("")),
                 Message::System(SystemMessage::new(" \t ")),
             ],
-        );
-        assert!(refresh.seed_messages().is_empty());
-        assert_eq!(
-            refresh.ordered_system_instructions(),
-            Some("authoritative\n\n\n\n \t ")
-        );
+        )
+        .expect_err("mid-thread System must not be hoisted");
+        assert!(matches!(refresh, LlmError::InvalidInputShape { .. }));
     }
 
     #[test]
@@ -630,19 +629,16 @@ mod tests {
             Message::User(UserMessage::text("recent")),
         ];
 
-        let config = RealtimeSessionOpenConfig::for_open_from_messages(
+        let error = RealtimeSessionOpenConfig::for_open_from_messages(
             RealtimeTurningMode::ExplicitCommit,
             sample_identity(),
             Vec::new(),
             seed.clone(),
             &active_messages,
-        );
-
-        assert_eq!(config.seed_messages(), seed);
-        assert_eq!(
-            config.ordered_system_instructions(),
-            Some("outside replay window\n\n")
-        );
+        )
+        .expect_err("mid-thread System must not be hoisted");
+        assert!(matches!(error, LlmError::InvalidInputShape { .. }));
+        assert_eq!(seed, vec![Message::User(UserMessage::text("recent"))]);
     }
 
     #[test]
@@ -653,11 +649,13 @@ mod tests {
             Vec::new(),
             vec![Message::System(SystemMessage::new("stale"))],
         )
+        .expect("leading System must be representable")
         .with_seed_messages(vec![
-            Message::User(UserMessage::text("work")),
             Message::System(SystemMessage::new("current")),
             Message::System(SystemMessage::new("")),
-        ]);
+            Message::User(UserMessage::text("work")),
+        ])
+        .expect("leading System prefix must be representable");
 
         assert_eq!(config.ordered_system_instructions(), Some("current\n\n"));
     }

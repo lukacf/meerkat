@@ -133,36 +133,33 @@ fn append_digest_count_is_independent_of_transcript_size() {
     assert_eq!(large, 0, "an append must not re-hash the whole transcript");
 }
 
-/// The two save-guard acceptance branches that are not the plain prefix check
-/// still have a size-independent digest budget. They are resume-shaped, not
-/// turn-shaped, and they hash derived vectors (a suffix, a filtered
-/// subsequence) that no prefix midstate can serve — so their budget is a small
-/// CONSTANT number of full passes, and the point of pinning it is that the
-/// constant does not grow.
+/// System messages are ordinary ordered transcript rows: they may be appended
+/// anywhere and more than once. Appending a later system row must use the same
+/// incremental digest path as every other ordered append.
 #[test]
-fn system_context_append_branch_digest_budget_is_constant() {
+fn ordered_system_message_append_digest_budget_is_constant() {
     fn measure(turns: usize) -> u64 {
         let mut previous = session_with_turns(turns);
-        previous.append_system_message("system".to_string());
+        previous.push(user("before a later system message"));
+        previous.append_system_message("later system message".to_string());
         let mut live = previous.clone();
-        // A runtime system-context append rewrites message 0, which is exactly
-        // the shape the plain prefix check cannot admit.
-        live.append_system_message("system\n\n---\n\nruntime context".to_string());
-        live.push(user("after refresh"));
+        live.append_system_message("another later system message".to_string());
+        live.push(user("after the later system message"));
         let before = session_content_digest_computations();
-        let _ = append_only_save_guard(&live, Some(&previous));
+        append_only_save_guard(&live, Some(&previous)).expect("ordered system append guard");
         session_content_digest_computations() - before
     }
 
     let small = measure(SMALL);
     let large = measure(LARGE);
     println!(
-        "system-context-append branch digest passes: {SMALL} turns => {small}, {LARGE} turns => {large}"
+        "ordered system-message append digest passes: {SMALL} turns => {small}, {LARGE} turns => {large}"
     );
     assert_eq!(
         small, large,
-        "the system-context-append acceptance branch must keep a constant digest budget"
+        "ordinary ordered System appends must keep a transcript-size-independent digest budget"
     );
+    assert_eq!(large, 0, "a System append must not re-hash prior rows");
 }
 
 #[test]
@@ -423,11 +420,12 @@ fn history_bearing_append_digest_count_is_independent_of_transcript_size() {
             .expect("history state decodes")
             .expect("history state present");
         assert_eq!(
-            state.head, rewrite.revision,
+            state.head(),
+            rewrite.revision,
             "graph head must remain the latest audited rewrite endpoint"
         );
         assert_ne!(
-            state.head,
+            state.head(),
             live.transcript_content_digest().expect("live digest"),
             "ordinary append must advance live identity without manufacturing a graph head"
         );

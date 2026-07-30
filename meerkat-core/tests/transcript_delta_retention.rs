@@ -1,24 +1,15 @@
-//! Delta retention for the durable transcript revision graph.
+//! Compact retention for the durable transcript revision graph.
 //!
-//! `session_transcript_history_state_v1` used to retain every past revision
-//! IN FULL, INLINE, forever: a rewrite pushed the parent transcript and the
-//! rewritten transcript as two complete message vectors, so a one-message edit
-//! to a 371-message transcript retained two full copies. Measured on a real
-//! production dump: one identity's durable document was 82.3 MB carrying
-//! 1.29 MB of live conversation, 98 retained revisions averaging 847 KB;
-//! fleet-wide 490.6 MB of documents for 6.55 MB of conversation.
+//! The graph used to retain complete historical transcript bodies. Current
+//! state retains one full anchor plus ordered rewrite-occurrence edges. Each
+//! edge carries only the exact parent advance and rewrite replacement needed to
+//! reconstruct an audited endpoint.
 //!
-//! The durable form is now an anchor plus a chain of inverse splices: the
-//! first retained body carries its messages, every later body carries only
-//! the span that distinguishes it from an earlier one. Retention costs
-//! `O(edit)` per revision instead of `O(document)`.
-//!
-//! These tests pin that through the real seams — `commit_transcript_rewrite`,
-//! `Session` serialization, `Session` deserialization — never by assembling a
-//! graph by hand. Two facts are asserted together throughout: the new bytes
-//! are small, AND the full-body spelling those same typed values would have
-//! produced is large. A bound that only the fix can satisfy is the only bound
-//! worth asserting.
+//! These tests stay outside the representation's private fields. They inspect
+//! the published serde wire for its bounded shape, use `materialize_revision`
+//! for historical reconstruction, and cross a full `Session` durable
+//! round-trip. The contract they pin is compact growth without weakening exact
+//! historical reads.
 
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
@@ -28,14 +19,13 @@ use meerkat_core::types::{
     AssistantBlock, BlockAssistantMessage, ContentBlock, ImageData, Message, StopReason,
     ToolResult, TranscriptMessageIdentity, UserMessage,
 };
-use meerkat_core::{SESSION_TRANSCRIPT_HISTORY_STATE_KEY, Session, TranscriptHistoryState};
-
-// ---------------------------------------------------------------------------
-// Fixtures
-// ---------------------------------------------------------------------------
+use meerkat_core::{
+    SESSION_TRANSCRIPT_HISTORY_STATE_KEY, Session, TranscriptHistoryState, TranscriptRewriteCommit,
+};
 
 const BODY: &str = "with enough body text on every message that a full retained \
                     copy is unmistakably larger than one edited span";
+const CURRENT_GRAPH_FORMAT: &str = "anchor_occurrence_edges_v1";
 
 fn user(text: &str) -> Message {
     Message::User(UserMessage::text(text))
@@ -51,7 +41,6 @@ fn assistant(text: &str) -> Message {
     ))
 }
 
-/// A session with `turns` prior conversational turns and a system prompt.
 fn session_with_turns(turns: usize) -> Session {
     let mut session = Session::new();
     session.append_system_message(format!("system prompt {BODY}"));
@@ -62,7 +51,13 @@ fn session_with_turns(turns: usize) -> Session {
     session
 }
 
-fn rewrite(session: &mut Session, start: usize, end: usize, replacement: Vec<Message>, why: &str) {
+fn rewrite(
+    session: &mut Session,
+    start: usize,
+    end: usize,
+    replacement: Vec<Message>,
+    why: &str,
+) -> TranscriptRewriteCommit {
     session
         .commit_transcript_rewrite(
             TranscriptRewriteSelection::MessageRange { start, end },
@@ -71,28 +66,21 @@ fn rewrite(session: &mut Session, start: usize, end: usize, replacement: Vec<Mes
             Some("delta-retention-test".to_string()),
             None,
         )
-        .expect("rewrite should commit");
+        .expect("rewrite should commit")
 }
 
-// ---------------------------------------------------------------------------
-// Measurement helpers
-// ---------------------------------------------------------------------------
-
-/// The durable transcript-graph value exactly as it sits in session metadata.
 fn history_value(session: &Session) -> serde_json::Value {
     serde_json::to_value(session).expect("session serializes")["metadata"]
         [SESSION_TRANSCRIPT_HISTORY_STATE_KEY]
         .clone()
 }
 
-/// Bytes the retained graph costs in the durable document.
 fn history_bytes(session: &Session) -> usize {
     serde_json::to_vec(&history_value(session))
         .expect("history value serializes")
         .len()
 }
 
-/// Bytes one copy of the live transcript costs.
 fn transcript_bytes(session: &Session) -> usize {
     serde_json::to_vec(session.messages())
         .expect("transcript serializes")
@@ -106,172 +94,162 @@ fn state_of(session: &Session) -> TranscriptHistoryState {
         .expect("fixture retains a transcript graph")
 }
 
-/// The graph value the PRE-DELTA writer would have produced for these exact
-/// typed values.
-///
-/// Not hand-forged content: `TranscriptRevisionBody`'s own `Serialize` IS the
-/// old per-body spelling (`{revision, parent_revision?, messages, created_at}`),
-/// and it is still accepted on decode. This is the counterfactual the byte
-/// bounds below are measured against, and the input to the reconstruction
-/// equality proof.
-fn full_body_encoding(state: &TranscriptHistoryState) -> serde_json::Value {
-    let mut value = serde_json::Map::new();
-    value.insert(
-        "head".to_string(),
-        serde_json::Value::String(state.head.clone()),
-    );
-    if !state.commits.is_empty() {
-        value.insert(
-            "commits".to_string(),
-            serde_json::to_value(&state.commits).expect("commits serialize"),
-        );
-    }
-    if !state.revisions.is_empty() {
-        value.insert(
-            "revisions".to_string(),
-            serde_json::Value::Array(
-                state
-                    .revisions
-                    .iter()
-                    .map(|body| serde_json::to_value(body).expect("full body serializes"))
-                    .collect(),
-            ),
-        );
-    }
-    if state.digest_format != 0 {
-        value.insert(
-            "digest_format".to_string(),
-            serde_json::Value::from(state.digest_format),
-        );
-    }
-    serde_json::Value::Object(value)
-}
-
-fn entries(history: &serde_json::Value) -> &[serde_json::Value] {
-    history["revisions"]
+fn edges(history: &serde_json::Value) -> &[serde_json::Value] {
+    history["edges"]
         .as_array()
-        .expect("durable graph carries a revisions array")
+        .expect("compact durable graph carries an edges array")
 }
 
-/// Guard against a vacuous pass: every byte claim below is only meaningful if
-/// the chain actually spliced something.
-fn assert_chain_is_spliced(history: &serde_json::Value) {
-    let entries = entries(history);
-    assert!(
-        entries.len() >= 2,
-        "fixture must retain more than the anchor"
+fn count_named_field(value: &serde_json::Value, field: &str) -> usize {
+    match value {
+        serde_json::Value::Array(values) => values
+            .iter()
+            .map(|value| count_named_field(value, field))
+            .sum(),
+        serde_json::Value::Object(values) => {
+            usize::from(values.contains_key(field))
+                + values
+                    .values()
+                    .map(|value| count_named_field(value, field))
+                    .sum::<usize>()
+        }
+        _ => 0,
+    }
+}
+
+fn assert_compact_graph_wire(history: &serde_json::Value, expected_edges: usize) {
+    assert_eq!(
+        history["format"], CURRENT_GRAPH_FORMAT,
+        "fixture must use the current compact graph wire"
     );
     assert!(
-        entries[0].get("messages").is_some() && entries[0].get("rebase").is_none(),
-        "the first entry is the chain anchor and carries full messages: {:?}",
-        entries[0]
+        history.get("anchor").is_some(),
+        "compact graph must carry one anchor"
     );
-    for (index, entry) in entries.iter().enumerate().skip(1) {
+    assert!(
+        history["anchor"]["messages"].is_array(),
+        "the anchor is the graph's one retained full transcript"
+    );
+    assert_eq!(
+        edges(history).len(),
+        expected_edges,
+        "one occurrence edge must be retained per audited rewrite"
+    );
+    assert!(
+        history.get("revisions").is_none()
+            && history.get("commits").is_none()
+            && history.get("head").is_none(),
+        "the deleted parallel full-body graph must not reappear"
+    );
+    assert_eq!(
+        count_named_field(history, "messages"),
+        1,
+        "only the anchor may carry a full `messages` vector"
+    );
+    for (index, edge) in edges(history).iter().enumerate() {
         assert!(
-            entry.get("rebase").is_some() && entry.get("messages").is_none(),
-            "entry {index} must be an inverse splice, not a second full copy: {entry:?}"
+            edge["rewrite"]["replacement"].is_array(),
+            "edge {index} must carry an explicit rewrite replacement"
+        );
+        assert!(
+            edge.get("parent_body").is_none() && edge.get("revision_body").is_none(),
+            "edge {index} must not retain full endpoint bodies"
         );
     }
 }
 
-// ---------------------------------------------------------------------------
-// 1. One edited message costs one edited message
-// ---------------------------------------------------------------------------
+fn assert_materialized_messages(
+    state: &TranscriptHistoryState,
+    revision: &str,
+    expected: &serde_json::Value,
+) {
+    let body = state
+        .materialize_revision(revision)
+        .unwrap_or_else(|error| panic!("revision {revision} must materialize: {error}"));
+    assert_eq!(
+        serde_json::to_value(body.messages).expect("materialized messages serialize"),
+        *expected,
+        "revision {revision} must reconstruct byte-faithfully"
+    );
+}
 
-/// A single-message rewrite of a ~400-message transcript must retain bytes
-/// proportional to the EDIT. The pre-delta writer retained two complete
-/// transcripts here; the bound asserted is one that only the delta form can
-/// satisfy, and the counterfactual is measured in the same test so the bound
-/// cannot silently become trivial.
 #[test]
 fn single_message_rewrite_retains_the_edit_not_the_document() {
     let mut session = session_with_turns(200);
     assert_eq!(session.messages().len(), 401);
     let transcript = transcript_bytes(&session);
+    let parent_revision = session.transcript_revision().expect("parent revision");
+    let parent_messages =
+        serde_json::to_value(session.messages()).expect("parent transcript serializes");
 
-    rewrite(
+    let commit = rewrite(
         &mut session,
         200,
         201,
         vec![user(&format!("edited question {BODY}"))],
         "single-message-edit",
     );
+    let child_messages =
+        serde_json::to_value(session.messages()).expect("child transcript serializes");
 
     let history = history_value(&session);
-    assert_chain_is_spliced(&history);
-    let retained = history_bytes(&session);
-
-    // The splice names the anchor and the exact span that moved.
-    let entries = entries(&history);
-    assert_eq!(entries.len(), 2, "one rewrite retains its two endpoints");
-    let rebase = &entries[1]["rebase"];
+    assert_compact_graph_wire(&history, 1);
+    let edge = &edges(&history)[0];
+    assert_eq!(edge["rewrite"]["at"], serde_json::Value::from(200u64));
     assert_eq!(
-        rebase["base"], entries[0]["revision"],
-        "the splice must rebase on the chain anchor"
-    );
-    assert_eq!(rebase["at"], serde_json::Value::from(200u64));
-    assert_eq!(rebase["removed"], serde_json::Value::from(1u64));
-    assert_eq!(
-        rebase["insert"]
+        edge["rewrite"]["replacement"]
             .as_array()
-            .expect("splice payload is an array")
+            .expect("replacement is an array")
             .len(),
         1,
-        "a one-message rewrite carries exactly one message"
+        "a one-message rewrite carries exactly one replacement message"
     );
-
-    // What the old representation would have cost for this same graph.
-    let counterfactual = serde_json::to_vec(&full_body_encoding(&state_of(&session)))
-        .expect("counterfactual serializes")
-        .len();
+    assert_eq!(edge["parent_advance"]["kind"], "exact_append");
     assert!(
-        counterfactual >= transcript * 2,
-        "the pre-delta spelling must carry two full transcripts \
-         (counterfactual {counterfactual} B, one transcript {transcript} B)"
+        edge["parent_advance"]
+            .get("appended")
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(Vec::is_empty),
+        "the first rewrite begins directly at the anchor"
     );
 
-    // The delta form: one anchor transcript plus the edit and its commit.
+    let retained = history_bytes(&session);
     assert!(
         retained < transcript + 4096,
-        "a one-message rewrite must retain one transcript plus the edit, \
-         got {retained} B against a {transcript} B transcript \
-         (pre-delta spelling: {counterfactual} B)"
+        "one rewrite must retain one anchor transcript plus a bounded edge: \
+         {retained} B against a {transcript} B transcript"
     );
+
+    let state = state_of(&session);
+    assert_eq!(state.commit_count(), 1);
+    assert_eq!(state.head(), commit.revision);
+    assert_materialized_messages(&state, &parent_revision, &parent_messages);
+    assert_materialized_messages(&state, &commit.revision, &child_messages);
 }
 
-// ---------------------------------------------------------------------------
-// 2. Stacked rewrites reconstruct exactly what the full-body form held
-// ---------------------------------------------------------------------------
-
-/// Eight stacked rewrites, each separated by ordinary appends. Every rewrite
-/// promotes its live parent and new result into audited endpoint bodies; the
-/// intervening appends themselves must leave the graph bytes untouched. The
-/// delta chain must decode to precisely the graph the full-body spelling of
-/// the same typed values decodes to — reconstruction is not "close enough",
-/// it is equality — while costing a small multiple of ONE transcript rather
-/// than one per retained revision.
 #[test]
-fn stacked_rewrites_reconstruct_the_full_body_graph_exactly() {
+fn stacked_rewrites_reconstruct_exactly_with_compact_growth() {
     let mut session = session_with_turns(120);
-    // Captured OUTSIDE the graph, before anything is encoded: the transcript
-    // each revision names, as it actually existed. This is what a full-body
-    // retention would have stored verbatim, so replaying the splice chain back
-    // to these exact bytes is the reconstruction proof — nothing here is
-    // derived from the encoding under test.
     let mut lived: Vec<(String, serde_json::Value)> = Vec::new();
+
     for round in 0..8 {
         lived.push((
-            session.transcript_revision().expect("live revision"),
-            serde_json::to_value(session.messages()).expect("live transcript serializes"),
+            session.transcript_revision().expect("parent revision"),
+            serde_json::to_value(session.messages()).expect("parent transcript serializes"),
         ));
         let target = 40 + round * 4;
-        rewrite(
+        let commit = rewrite(
             &mut session,
             target,
             target + 1,
             vec![user(&format!("stacked edit {round} {BODY}"))],
             "stacked-edit",
         );
+        lived.push((
+            commit.revision,
+            serde_json::to_value(session.messages()).expect("child transcript serializes"),
+        ));
+
         let audited_graph = session
             .metadata()
             .get(SESSION_TRANSCRIPT_HISTORY_STATE_KEY)
@@ -286,72 +264,49 @@ fn stacked_rewrites_reconstruct_the_full_body_graph_exactly() {
         );
     }
 
-    let state = state_of(&session);
-    assert_eq!(state.commits.len(), 8, "eight audited rewrites");
-    assert!(
-        state.revisions.len() >= 9,
-        "stacked rewrites must retain their endpoints, got {}",
-        state.revisions.len()
-    );
-
-    let delta = history_value(&session);
-    assert_chain_is_spliced(&delta);
-    let full = full_body_encoding(&state);
-
-    let from_delta: TranscriptHistoryState =
-        serde_json::from_value(delta.clone()).expect("delta chain decodes");
-    let from_full: TranscriptHistoryState =
-        serde_json::from_value(full.clone()).expect("full-body graph decodes");
-
-    // Reconstruction: every revision the session actually lived through comes
-    // back out of the splice chain byte for byte.
-    for (revision, messages) in &lived {
-        let body = from_delta
-            .revisions
-            .iter()
-            .find(|body| body.revision == *revision)
-            .unwrap_or_else(|| panic!("revision {revision} must still be retained"));
+    let history = history_value(&session);
+    assert_compact_graph_wire(&history, 8);
+    for (index, edge) in edges(&history).iter().enumerate() {
         assert_eq!(
-            serde_json::to_value(&body.messages).expect("retained body serializes"),
-            *messages,
-            "revision {revision} must replay to the transcript it identifies"
+            edge["rewrite"]["replacement"]
+                .as_array()
+                .expect("replacement array")
+                .len(),
+            1,
+            "edge {index} must retain only its one-message edit"
         );
     }
 
-    // Both spellings of the same graph decode to the same graph, and the chain
-    // round-trips through its own encoding unchanged.
+    let state = state_of(&session);
+    assert_eq!(state.commit_count(), 8);
     assert_eq!(
-        full_body_encoding(&from_delta),
-        full_body_encoding(&from_full),
-        "the splice chain and the full-body spelling must decode identically"
+        state.retained_revision_count(),
+        17,
+        "one anchor plus two exact endpoints per occurrence"
     );
+    for (revision, messages) in &lived {
+        assert_materialized_messages(&state, revision, messages);
+    }
+
+    let decoded: TranscriptHistoryState =
+        serde_json::from_value(history.clone()).expect("compact graph decodes");
     assert_eq!(
-        serde_json::to_value(&from_delta).expect("re-encode"),
-        delta,
-        "re-encoding a decoded chain must reproduce the same durable bytes"
+        serde_json::to_value(&decoded).expect("compact graph re-encodes"),
+        history,
+        "current compact wire must round-trip exactly"
     );
 
     let transcript = transcript_bytes(&session);
-    let delta_len = serde_json::to_vec(&delta).expect("delta serializes").len();
-    let full_len = serde_json::to_vec(&full).expect("full serializes").len();
+    let retained = serde_json::to_vec(&history)
+        .expect("history serializes")
+        .len();
     assert!(
-        full_len > transcript * 8,
-        "the pre-delta spelling must carry a transcript per retained revision \
-         ({full_len} B against a {transcript} B transcript)"
-    );
-    assert!(
-        delta_len < transcript * 2,
-        "eight stacked rewrites must cost about one transcript plus eight edits, \
-         got {delta_len} B against a {transcript} B transcript \
-         (pre-delta spelling: {full_len} B)"
+        retained < transcript * 2,
+        "eight stacked rewrites must cost about one transcript plus bounded \
+         edges: {retained} B against a {transcript} B transcript"
     );
 }
 
-// ---------------------------------------------------------------------------
-// 3. Content addressing still refuses a tampered retained body
-// ---------------------------------------------------------------------------
-
-/// Flip one message's text inside `value`, wherever the delta chain put it.
 fn flip_text(value: &mut serde_json::Value) {
     let message = value
         .as_array_mut()
@@ -366,15 +321,9 @@ fn flip_text(value: &mut serde_json::Value) {
     message["content"] = serde_json::Value::String(format!("{text} flipped"));
 }
 
-/// Both halves of the chain must remain content-addressed. Flipping bytes in
-/// the anchor corrupts every body spliced off it; flipping bytes in a splice
-/// payload corrupts exactly the body that splice reconstructs. Neither may
-/// decode.
 #[test]
-fn tampered_retained_bodies_refuse_typed_at_decode() {
+fn tampered_compact_anchor_or_edge_refuses_typed_decode() {
     let mut session = session_with_turns(6);
-    // A user-message edit, so the splice payload is a text user message the
-    // flip below can reach — the anchor carries them too.
     rewrite(
         &mut session,
         3,
@@ -382,51 +331,24 @@ fn tampered_retained_bodies_refuse_typed_at_decode() {
         vec![user(&format!("edited question {BODY}"))],
         "mid-transcript-edit",
     );
-    let document = serde_json::to_value(&session).expect("session serializes");
-    assert_chain_is_spliced(&document["metadata"][SESSION_TRANSCRIPT_HISTORY_STATE_KEY]);
+    let history = history_value(&session);
+    assert_compact_graph_wire(&history, 1);
+    serde_json::from_value::<TranscriptHistoryState>(history.clone())
+        .expect("unmodified compact graph decodes");
 
-    // Control: the unmutated document decodes, so each refusal below is
-    // caused by its mutation and nothing else.
-    serde_json::from_value::<Session>(document.clone()).expect("unmutated document decodes");
+    let mut anchor_flip = history.clone();
+    flip_text(&mut anchor_flip["anchor"]["messages"]);
+    serde_json::from_value::<TranscriptHistoryState>(anchor_flip)
+        .expect_err("a flipped anchor must refuse typed decode");
 
-    let mut anchor_flip = document.clone();
-    {
-        let entry =
-            &mut anchor_flip["metadata"][SESSION_TRANSCRIPT_HISTORY_STATE_KEY]["revisions"][0usize];
-        flip_text(&mut entry["messages"]);
-    }
-    let error = serde_json::from_value::<Session>(anchor_flip)
-        .expect_err("a flipped chain anchor must refuse typed at decode");
-    assert!(
-        error.to_string().contains("transcript revision body"),
-        "anchor flip must name the revision-body digest mismatch, got: {error}"
-    );
-
-    let mut splice_flip = document;
-    {
-        let entry =
-            &mut splice_flip["metadata"][SESSION_TRANSCRIPT_HISTORY_STATE_KEY]["revisions"][1usize];
-        assert!(
-            entry["rebase"]["insert"]
-                .as_array()
-                .is_some_and(|insert| !insert.is_empty()),
-            "fixture must carry a non-empty splice payload to flip"
-        );
-        flip_text(&mut entry["rebase"]["insert"]);
-    }
-    let error = serde_json::from_value::<Session>(splice_flip)
-        .expect_err("a flipped splice payload must refuse typed at decode");
-    assert!(
-        error.to_string().contains("transcript revision body"),
-        "splice flip must name the revision-body digest mismatch, got: {error}"
-    );
+    let mut edge_flip = history;
+    flip_text(&mut edge_flip["edges"][0]["rewrite"]["replacement"]);
+    serde_json::from_value::<TranscriptHistoryState>(edge_flip)
+        .expect_err("a flipped rewrite replacement must refuse typed decode");
 }
 
-/// Reconstruction is a total function of what the array actually carries: a
-/// splice whose base no earlier entry materializes is unreadable, never
-/// silently empty and never resolved from somewhere else.
 #[test]
-fn a_splice_with_an_unresolvable_base_refuses_typed() {
+fn an_edge_with_an_unresolvable_base_refuses_typed_decode() {
     let mut session = session_with_turns(6);
     rewrite(
         &mut session,
@@ -436,28 +358,14 @@ fn a_splice_with_an_unresolvable_base_refuses_typed() {
         "mid-transcript-edit",
     );
     let mut history = history_value(&session);
-    assert!(
-        history["revisions"][1]["rebase"].is_object(),
-        "entry 1 must be a splice for this test to mean anything"
-    );
-    history["revisions"][1]["rebase"]["base"] =
+    assert_compact_graph_wire(&history, 1);
+    history["edges"][0]["base_revision"] =
         serde_json::Value::String(format!("sha256:{}", "0".repeat(64)));
 
-    let error = serde_json::from_value::<TranscriptHistoryState>(history)
-        .expect_err("an unresolvable base must refuse typed");
-    assert!(
-        error.to_string().contains("rebases on"),
-        "refusal must name the unresolvable base, got: {error}"
-    );
+    serde_json::from_value::<TranscriptHistoryState>(history)
+        .expect_err("an edge with an unresolvable base must refuse typed decode");
 }
 
-// ---------------------------------------------------------------------------
-// 4. The pathological case: an index-0 rewrite shares no prefix
-// ---------------------------------------------------------------------------
-
-/// An index-zero rewrite shares no prefix with its parent, so a prefix-only
-/// delta would degenerate to a full copy. The splice is prefix AND suffix
-/// anchored, so the retained payload is the one replaced message.
 #[test]
 fn index_zero_rewrite_retains_one_message() {
     let mut session = session_with_turns(200);
@@ -474,39 +382,26 @@ fn index_zero_rewrite_retains_one_message() {
     );
 
     let history = history_value(&session);
-    assert_chain_is_spliced(&history);
-    let entries = entries(&history);
-    assert_eq!(entries.len(), 2, "one rewrite retains its two endpoints");
-
-    let rebase = &entries[1]["rebase"];
-    assert_eq!(rebase["at"], serde_json::Value::from(0u64));
-    assert_eq!(rebase["removed"], serde_json::Value::from(1u64));
+    assert_compact_graph_wire(&history, 1);
+    let edge = &edges(&history)[0];
+    assert_eq!(edge["rewrite"]["at"], serde_json::Value::from(0u64));
     assert_eq!(
-        rebase["insert"]
+        edge["rewrite"]["replacement"]
             .as_array()
-            .expect("splice payload is an array")
+            .expect("replacement is an array")
             .len(),
         1,
-        "an index-0 single-message rewrite retains exactly the replaced message"
+        "an index-zero rewrite retains exactly the replaced message"
     );
 
     let retained = history_bytes(&session);
     assert!(
         retained < transcript + 4096,
-        "an index-0 rewrite must stay O(edit): {retained} B against a \
+        "an index-zero rewrite must stay O(edit): {retained} B against a \
          {transcript} B transcript"
     );
 }
 
-// ---------------------------------------------------------------------------
-// 5. Reading an old revision back still returns that exact transcript
-// ---------------------------------------------------------------------------
-
-/// The read path is what retention is FOR. After four stacked rewrites, and
-/// again after a full durable round trip, every retained revision must hand
-/// back the exact transcript it identifies — reconstructed from the splice
-/// chain, compared as serialized bytes rather than by the same `PartialEq` the
-/// encoder uses to find the splice.
 #[test]
 fn retained_revisions_read_back_their_exact_transcripts() {
     let mut session = session_with_turns(60);
@@ -518,17 +413,21 @@ fn retained_revisions_read_back_their_exact_transcripts() {
             serde_json::to_value(session.messages()).expect("transcript serializes"),
         ));
         let target = 20 + round * 3;
-        rewrite(
+        let commit = rewrite(
             &mut session,
             target,
             target + 1,
             vec![user(&format!("edited {round} {BODY}"))],
             "read-back-edit",
         );
+        expected.push((
+            commit.revision,
+            serde_json::to_value(session.messages()).expect("rewritten transcript serializes"),
+        ));
         session.push(user(&format!("after {round} {BODY}")));
         session.push(assistant(&format!("reply {round} {BODY}")));
     }
-    assert_chain_is_spliced(&history_value(&session));
+    assert_compact_graph_wire(&history_value(&session), 4);
 
     let assert_reads_back = |session: &Session, what: &str| {
         for (revision, messages) in &expected {
@@ -537,9 +436,9 @@ fn retained_revisions_read_back_their_exact_transcripts() {
                 .expect("revision read decodes")
                 .unwrap_or_else(|| panic!("{what}: revision {revision} must still be retained"));
             assert_eq!(
-                serde_json::to_value(&restored).expect("restored transcript serializes"),
+                serde_json::to_value(restored).expect("restored transcript serializes"),
                 *messages,
-                "{what}: revision {revision} must read back its exact transcript"
+                "{what}: revision {revision} must read back byte-faithfully"
             );
         }
     };
@@ -549,21 +448,39 @@ fn retained_revisions_read_back_their_exact_transcripts() {
     let raw = serde_json::to_vec(&session).expect("durable document");
     let restored: Session = serde_json::from_slice(&raw).expect("durable document decodes");
     assert_reads_back(&restored, "after a durable round trip");
+    assert_eq!(
+        history_value(&restored),
+        history_value(&session),
+        "durable round-trip must preserve compact graph bytes"
+    );
 }
 
-// ---------------------------------------------------------------------------
-// 6. The splice is byte-faithful over rich content
-// ---------------------------------------------------------------------------
+fn materialized_bodies(session: &Session) -> Vec<(String, serde_json::Value)> {
+    let state = state_of(session);
+    let mut revisions = vec![state.anchor().revision().to_string()];
+    for commit in state.commits() {
+        for revision in [&commit.parent_revision, &commit.revision] {
+            if !revisions.contains(revision) {
+                revisions.push(revision.clone());
+            }
+        }
+    }
+    revisions
+        .into_iter()
+        .map(|revision| {
+            let body = state
+                .materialize_revision(&revision)
+                .unwrap_or_else(|error| panic!("revision {revision} materializes: {error}"));
+            (
+                revision,
+                serde_json::to_value(body.messages).expect("retained body serializes"),
+            )
+        })
+        .collect()
+}
 
-/// The encoder decides "these two messages are the same" with `Message`'s
-/// `PartialEq`, and `AssistantBlock`'s is hand-written (tool-use arguments
-/// compare by their raw JSON bytes). If that equality were ever weaker than
-/// byte equality, a splice would elide a difference and reconstruction would
-/// lose it — invisibly, because the transcript digest erases exactly the
-/// fields most at risk (message `created_at`, transcript identity, image
-/// inline-vs-blob form). This round trip carries all of them.
 #[test]
-fn splices_are_byte_faithful_over_rich_content() {
+fn compact_edges_are_byte_faithful_over_rich_content() {
     let mut session = Session::new();
     session.append_system_message(format!("system prompt {BODY}"));
 
@@ -615,9 +532,6 @@ fn splices_are_byte_faithful_over_rich_content() {
     session.push(assistant(&format!("done {BODY}")));
     session.push(user(&format!("thanks {BODY}")));
 
-    // Rewrite the trailing user message: the tool-use / tool-results pair
-    // stays intact, and every rich message lands in the shared span the
-    // splice elides — which is exactly what must survive verbatim.
     let end = session.messages().len();
     rewrite(
         &mut session,
@@ -628,24 +542,11 @@ fn splices_are_byte_faithful_over_rich_content() {
     );
 
     let history = history_value(&session);
-    assert_chain_is_spliced(&history);
-
-    let bodies = |session: &Session| {
-        state_of(session)
-            .revisions
-            .into_iter()
-            .map(|body| {
-                (
-                    body.revision,
-                    serde_json::to_value(&body.messages).expect("retained body serializes"),
-                )
-            })
-            .collect::<Vec<_>>()
-    };
-    let before = bodies(&session);
+    assert_compact_graph_wire(&history, 1);
+    let before = materialized_bodies(&session);
     assert!(
         serde_json::to_string(&before)
-            .expect("retained bodies serialize")
+            .expect("materialized bodies serialize")
             .contains("tc_rich_1"),
         "fixture must actually retain the rich content it claims to test"
     );
@@ -654,14 +555,14 @@ fn splices_are_byte_faithful_over_rich_content() {
     let restored: Session = serde_json::from_slice(&raw).expect("durable document decodes");
 
     assert_eq!(
-        bodies(&restored),
+        materialized_bodies(&restored),
         before,
-        "splicing must reproduce every retained body byte for byte, including \
-         the fields the transcript digest erases"
+        "compact edges must reproduce retained bodies byte-faithfully, including \
+         fields the transcript digest intentionally excludes"
     );
     assert_eq!(
         history_value(&restored),
         history,
-        "re-encoding the decoded chain must reproduce the same durable bytes"
+        "re-encoding the decoded graph must reproduce the same durable bytes"
     );
 }

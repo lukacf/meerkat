@@ -103,8 +103,13 @@ instruction supplies it on the admitted turn, where it becomes one new ordered
 System event.
 
 Compaction retains every System message in relative order. Provider adapters
-preserve all of them; APIs with a separate system-instruction field lift the
-ordered set deterministically instead of dropping all but one.
+preserve interleaving where the wire supports it. An API with only a leading
+system-instruction field may lift a contiguous leading System prefix; it
+rejects a later System rather than silently changing transcript chronology.
+Turn admission checks that provider shape before appending anything, so a
+rejected System never becomes durable. Provider/model switches and resume
+overrides likewise preflight the complete existing transcript before rebinding.
+Adapter-side input-shape rejection remains the final fail-closed backstop.
 
 ### interrupt
 

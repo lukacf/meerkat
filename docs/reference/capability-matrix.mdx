@@ -187,22 +187,26 @@ adapter projection never rewrites that transcript.
 |---------------|------------------------------|-------------------|
 | Standard OpenAI Responses | Ordinary ordered input item | Preserved |
 | OpenAI-compatible Chat Completions | Ordinary ordered message | Preserved |
-| Anthropic Messages | Ordered top-level system blocks | Lossy: top-level-only |
-| Gemini `generateContent` | Ordered `systemInstruction.parts` | Lossy: top-level-only |
-| Private ChatGPT Responses | One ordered top-level instruction string | Lossy: top-level-only |
-| OpenAI Realtime | One ordered session instruction string | Lossy: top-level-only |
+| Anthropic Messages | Leading System prefix as top-level system blocks | Later System rejected |
+| Gemini `generateContent` | Leading System prefix as `systemInstruction.parts` | Later System rejected |
+| Private ChatGPT Responses | Leading System prefix as one instruction string | Later System rejected |
+| OpenAI Realtime | Leading System prefix as one session instruction string | Later System rejected |
 
-Top-level-only adapters preserve every instruction's exact bytes and transcript
-order, including empty, whitespace-only, and duplicate messages. They use
-distinct blocks or parts when the provider supports them; singular string
-channels use `"\n\n"` as their stable separator. They never trim,
-deduplicate, replace, or silently drop instructions. A backend that cannot
-carry all instruction bytes and order fails locally instead.
+Top-level-only adapters lift only a contiguous leading `System` prefix. Within
+that prefix they preserve exact bytes, order, empty and whitespace-only
+messages, and duplicates. Distinct provider blocks or parts remain distinct;
+singular string channels use `"\n\n"` as their stable separator. If a
+`System` occurs after any non-System transcript message, request construction
+fails locally rather than silently changing chronology.
+The runtime consults the selected client's wire capability before durable turn
+mutation. It also preflights the full existing transcript before a
+provider/model rebind or resume override; adapter rejection is the final
+fail-closed backstop.
 
 Realtime reconstruction has no second instruction authority:
 `runtime_system_context` is retired, and reconnect/refresh derives its
-instruction projection only from canonical transcript `System` and
-`SystemNotice` messages.
+instruction projection only from the canonical transcript's leading `System`
+prefix. `SystemNotice` remains an explicit in-place history event.
 
 Image generation uses provider-owned image profiles rather than `ModelProfile` chat-model flags. OpenAI and Gemini provider crates advertise image targets, supported backend plans, dimensions/aspect ratios, and provider-specific `provider_params`; the runtime exposes one model-facing `generate_image` tool and commits generated outputs as blob-backed assistant image blocks.
 

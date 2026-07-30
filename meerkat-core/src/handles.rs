@@ -951,7 +951,16 @@ impl PeerResponseTerminalFact {
     }
 
     pub fn context_key(&self) -> String {
-        peer_response_terminal_context_key(&self.source.route_identity, self.correlation_id)
+        Self::context_key_for(&self.source.route_identity, self.correlation_id)
+    }
+
+    /// Derive the canonical terminal context key from the typed identity facts
+    /// before the remaining render/status facts are available.
+    pub fn context_key_for(
+        route_identity: &PeerResponseTerminalRouteIdentity,
+        correlation_id: PeerResponseTerminalCorrelationId,
+    ) -> String {
+        peer_response_terminal_context_key(route_identity, correlation_id)
     }
 
     /// Typed render payload accessor for surfaces that summarize the terminal
@@ -2717,7 +2726,6 @@ mod tests {
         PeerResponseTerminalFactError, PeerResponseTerminalProjectionStatus,
         PeerResponseTerminalRenderPayload, PeerResponseTerminalRouteIdentity,
         PeerResponseTerminalSource, PeerResponseTerminalTransportIdentity,
-        peer_response_terminal_context_key,
     };
     use crate::tool_scope::{ExternalToolSurfaceDeltaOperation, ExternalToolSurfaceDeltaPhase};
 
@@ -2856,7 +2864,7 @@ mod tests {
             PeerResponseTerminalCorrelationId::parse("018f6f79-7a82-7c4e-a552-a3b86f9630f1")
                 .expect("correlation id");
         assert_eq!(
-            peer_response_terminal_context_key(&route_identity, correlation_id),
+            PeerResponseTerminalFact::context_key_for(&route_identity, correlation_id),
             "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:018f6f79-7a82-7c4e-a552-a3b86f9630f1"
         );
     }

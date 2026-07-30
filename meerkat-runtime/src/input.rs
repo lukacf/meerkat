@@ -22,7 +22,6 @@ use meerkat_core::{
     PeerResponseTerminalProjectionStatus, PeerResponseTerminalRenderPayload,
     PeerResponseTerminalRouteIdentity, PeerResponseTerminalSource,
     PeerResponseTerminalTransportIdentity, externalize_content_blocks, hydrate_content_blocks,
-    peer_response_terminal_context_key,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -514,7 +513,7 @@ pub(crate) fn peer_response_terminal_idempotency_key(
 ) -> IdempotencyKey {
     let route_identity = PeerResponseTerminalRouteIdentity::from_peer_id(peer_id);
     let correlation_id = PeerResponseTerminalCorrelationId::from_peer_correlation_id(request_id);
-    IdempotencyKey::new(peer_response_terminal_context_key(
+    IdempotencyKey::new(PeerResponseTerminalFact::context_key_for(
         &route_identity,
         correlation_id,
     ))

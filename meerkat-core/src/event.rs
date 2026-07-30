@@ -2609,7 +2609,7 @@ mod tests {
             "reading a commit must not materialize either transcript body"
         );
         assert_eq!(decoded.0, session_id);
-        assert_eq!(decoded.1, record.commit);
+        assert_eq!(decoded.1, vec![record.commit]);
     }
 
     #[test]

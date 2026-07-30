@@ -159,7 +159,7 @@ fn released_importer_requires_json_eof() {
 
     let mut trailing_whitespace = FIXTURE.to_vec();
     trailing_whitespace.extend_from_slice(b"\n\t ");
-    import_released_0810_session(&trailing_whitespace)
+    let _ = import_released_0810_session(&trailing_whitespace)
         .expect("JSON trailing whitespace remains part of the exact accepted document");
 }
 

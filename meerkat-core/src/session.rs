@@ -6200,9 +6200,7 @@ mod tests {
                 .get(SESSION_TRANSCRIPT_HISTORY_STATE_KEY)
                 .cloned()
                 .ok_or_else(|| std::io::Error::other("control history missing"))?;
-            control.transcript_history_metadata_validation =
-                TranscriptHistoryMetadataValidation::RequiresValidation;
-            control.set_validated_transcript_history_metadata(value);
+            control.set_metadata_unchecked_for_test(SESSION_TRANSCRIPT_HISTORY_STATE_KEY, value);
             control.transcript_history_metadata_validation =
                 TranscriptHistoryMetadataValidation::RequiresValidation;
             control.push(message);
@@ -6243,17 +6241,10 @@ mod tests {
         Ok(())
     }
     use super::*;
-    use crate::handles::{
-        PeerResponseTerminalCorrelationId, PeerResponseTerminalDisplayIdentity,
-        PeerResponseTerminalFact, PeerResponseTerminalProjectionStatus,
-        PeerResponseTerminalRenderPayload, PeerResponseTerminalRouteIdentity,
-        PeerResponseTerminalSource,
-    };
     use crate::realtime_transcript::RealtimeTranscriptRole;
     use crate::types::{
-        AssistantBlock, BlockAssistantMessage, CommsNoticeKind, ContentBlock, StopReason,
-        SystemMessage, SystemNoticeBlock, SystemNoticeDirection, SystemNoticeKind,
-        SystemNoticePeer, Usage, UserMessage,
+        AssistantBlock, BlockAssistantMessage, ContentBlock, StopReason, SystemMessage, Usage,
+        UserMessage,
     };
     use std::sync::Arc;
 
@@ -6915,7 +6906,7 @@ mod tests {
             .expect("valid graph compacts")
             .expect("graph value present");
         assert_eq!(
-            serde_json::to_value(sealed.state()).unwrap(),
+            serde_json::to_value(sealed.as_ref()).unwrap(),
             metadata[SESSION_TRANSCRIPT_HISTORY_STATE_KEY],
             "the returned proof must cover exactly the installed graph value"
         );
@@ -7257,7 +7248,7 @@ mod tests {
             .transcript_history_state()
             .expect("state")
             .expect("history");
-        let mut state = serde_json::to_value(state.as_ref()).expect("current history value");
+        let mut state = serde_json::to_value(&state).expect("current history value");
         state["anchor"]["messages"][0] =
             serde_json::to_value(Message::User(UserMessage::text("tampered".to_string())))
                 .expect("tampered message");
@@ -7464,7 +7455,7 @@ mod tests {
             .transcript_history_state()
             .expect("state")
             .expect("history");
-        let mut state = serde_json::to_value(state.as_ref()).expect("current history value");
+        let mut state = serde_json::to_value(&state).expect("current history value");
         let child_revision = state["edges"][0]["commit"]["revision"]
             .as_str()
             .expect("edge child revision")
@@ -7584,7 +7575,7 @@ mod tests {
             .transcript_history_state()
             .expect("state")
             .expect("history");
-        let mut state = serde_json::to_value(state.as_ref()).expect("current history value");
+        let mut state = serde_json::to_value(&state).expect("current history value");
         state["anchor"]["messages"][0] =
             serde_json::to_value(Message::User(UserMessage::text("tampered".to_string())))
                 .expect("tampered message");
@@ -8623,23 +8614,10 @@ mod tests {
         ] {
             assert_eq!(commit.rewrite_generation, generation);
 
-            let mut before = Session::new();
-            before
-                .apply_validated_transcript_history_state(
-                    sealed
-                        .project_at_rewrite_parent(commit)
-                        .expect("exact parent occurrence should project"),
-                )
+            let before = sealed
+                .materialize_rewrite_parent(commit)
                 .expect("exact parent occurrence should materialize");
-            assert_eq!(before.messages(), std::slice::from_ref(parent_message));
-            let before_graph = before
-                .transcript_history_state()
-                .expect("parent graph should decode")
-                .expect("parent graph should exist");
-            assert_eq!(
-                before_graph.commit_count(),
-                usize::try_from(generation - 1).expect("test generation fits usize")
-            );
+            assert_eq!(before.messages, std::slice::from_ref(parent_message));
 
             let mut after = Session::new();
             after

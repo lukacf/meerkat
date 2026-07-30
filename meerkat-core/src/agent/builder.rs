@@ -297,10 +297,11 @@ impl AgentBuilder {
         self
     }
 
-    /// Set the initial System event for a new, empty transcript.
+    /// Append an ordinary ordered System event while building the agent.
     ///
-    /// Rebuilding a non-empty transcript never applies this value; per-turn
-    /// System instructions belong on the turn-admission seam.
+    /// On a resumed transcript this is a new instruction boundary, not a
+    /// replacement for any earlier System event. The concrete provider wire is
+    /// checked before the session is mutated.
     pub fn system_prompt(mut self, prompt: impl Into<String>) -> Self {
         self.system_prompt = Some(prompt.into());
         self
@@ -529,33 +530,40 @@ impl AgentBuilder {
         let mut session = self.session.unwrap_or_default();
         let transient_turn_context_state = crate::session::TransientTurnContextStateHandle::new();
 
-        // Build-time prompt composition can materialize only the first event
-        // of a new transcript. Rebuilding a non-empty transcript is
-        // observationally invisible; per-turn System events enter through the
-        // StartTurn boundary instead.
-        if session.messages().is_empty() {
-            if let Some(prompt) = self.system_prompt {
-                session.append_system_message(prompt);
-            } else if matches!(
+        // An explicitly supplied prompt is an ordinary ordered System append,
+        // including on resume. Only implicit default composition is limited to
+        // a fresh transcript.
+        let system_prompt = if let Some(prompt) = self.system_prompt {
+            Some(prompt)
+        } else if session.messages().is_empty()
+            && matches!(
                 self.default_system_prompt_policy,
                 DefaultSystemPromptPolicy::ComposeDefault
-            ) {
-                // Default-prompt composition only runs when a caller explicitly
-                // opts in. The canonical composition seam (facade/runtime) always
-                // hands core an explicit prompt or none, so it never reaches here;
-                // standalone core construction stays unprompted unless asked.
-                session.append_system_message(SystemPromptConfig::new().compose().await);
-            }
-        }
+            )
+        {
+            // Default-prompt composition only runs when a caller explicitly
+            // opts in. The canonical composition seam (facade/runtime) always
+            // hands core an explicit prompt or none, so it never reaches here;
+            // standalone core construction stays unprompted unless asked.
+            Some(SystemPromptConfig::new().compose().await)
+        } else {
+            None
+        };
         let system_message_wire_capability = client.system_message_wire_capability();
-        if let Some(incompatible_index) =
-            system_message_wire_capability.first_incompatible_index(session.messages())
+        if let Some(incompatible_index) = system_message_wire_capability
+            .first_incompatible_index_after_system_append(
+                session.messages(),
+                usize::from(system_prompt.is_some()),
+            )
         {
             return Err(AgentBuildPolicyError::SystemMessageWireIncompatible {
                 provider: client.provider(),
                 capability: system_message_wire_capability,
                 incompatible_index,
             });
+        }
+        if let Some(prompt) = system_prompt {
+            session.append_system_message(prompt);
         }
 
         let budget = Budget::new(self.budget_limits.unwrap_or_default());
@@ -1175,6 +1183,10 @@ mod tests {
         fn model(&self) -> &'static str {
             "mock-model"
         }
+
+        fn system_message_wire_capability(&self) -> crate::SystemMessageWireCapability {
+            crate::SystemMessageWireCapability::Interleaved
+        }
     }
 
     struct MockTools;
@@ -1676,10 +1688,10 @@ mod tests {
         }
     }
 
-    /// Rebuilding an existing transcript must not materialize build-time prompt
-    /// configuration as a new message.
+    /// An explicit prompt on resume is a new ordered System message at that
+    /// exact boundary; it never replaces or moves the earlier prompt.
     #[tokio::test]
-    async fn test_builder_resume_is_invisible_to_ordered_system_transcript() {
+    async fn test_builder_resume_appends_explicit_system_message_in_order() {
         let client = Arc::new(MockClient);
         let tools = Arc::new(MockTools);
         let store = Arc::new(MockStore);
@@ -1689,18 +1701,22 @@ mod tests {
         existing_session.append_system_message("Original system prompt".to_string());
         existing_session.push(Message::User(UserMessage::text("Hello".to_string())));
 
-        let original = existing_session.messages().to_vec();
         let agent = AgentBuilder::new()
             .resume_session(existing_session)
             .system_prompt("Updated system prompt")
             .build_standalone(client, tools, store)
             .await;
 
-        assert_eq!(
-            agent.session().messages(),
-            original.as_slice(),
-            "materialization cannot inject a System outside an admitted turn"
-        );
+        assert_eq!(agent.session().messages().len(), 3);
+        assert!(matches!(
+            &agent.session().messages()[0],
+            Message::System(message) if message.content == "Original system prompt"
+        ));
+        assert!(matches!(&agent.session().messages()[1], Message::User(_)));
+        assert!(matches!(
+            &agent.session().messages()[2],
+            Message::System(message) if message.content == "Updated system prompt"
+        ));
     }
 
     /// Regression test: Resumed sessions without explicit system_prompt should keep their original
@@ -1723,6 +1739,11 @@ mod tests {
 
         // Original system prompt should be preserved
         let messages = agent.session().messages();
+        assert_eq!(
+            messages.len(),
+            1,
+            "a bare resume must not append any transcript row"
+        );
         match &messages[0] {
             Message::System(sys) => {
                 assert_eq!(

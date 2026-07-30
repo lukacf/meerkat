@@ -2688,7 +2688,7 @@ mod tests {
         let error = TranscriptHistoryState::from_rewrite_records(records)
             .expect_err("audit row order is not legacy occurrence authority");
         assert!(
-            matches!(error, TranscriptEditError::HistoryStateMalformed(message)
+            matches!(error, TranscriptEditError::HistoryStateMalformed(ref message)
                 if message.contains("checkpoint-bound EventStore reconciliation")),
             "unexpected error: {error}"
         );

@@ -6230,9 +6230,11 @@ mod tests {
             .unwrap();
         let stale_pre_finalize = serde_json::to_vec(&session).unwrap();
 
-        let cleaned =
-            compatibility_checkpoint_after_compaction_finalize(&stale_pre_finalize, &[intent])
-                .unwrap();
+        let cleaned = compatibility_checkpoint_after_compaction_finalize(
+            Arc::new(stale_pre_finalize),
+            &[intent],
+        )
+        .unwrap();
         let recovered: meerkat_core::Session = serde_json::from_slice(&cleaned).unwrap();
         assert!(
             recovered
@@ -6353,6 +6355,20 @@ mod tests {
         ) -> Result<(), meerkat_core::lifecycle::CoreExecutorError> {
             self.authority_ack =
                 Some((committed_store_revision, committed_blob_sha256.to_string()));
+            Ok(())
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), meerkat_core::lifecycle::CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), meerkat_core::lifecycle::CoreExecutorError> {
             Ok(())
         }
     }

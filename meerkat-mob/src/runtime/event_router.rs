@@ -370,16 +370,17 @@ async fn run_event_router(
 async fn wait_for_structural_event(
     receiver: &mut Option<crate::store::MobEventReceiver>,
 ) -> Option<(MobId, u64)> {
-    match receiver {
-        Some(receiver) => match receiver.recv().await {
-            Ok(event) => Some((event.mob_id, event.cursor)),
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => None,
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                *receiver = None;
-                None
-            }
-        },
-        None => std::future::pending::<Option<(MobId, u64)>>().await,
+    let Some(active_receiver) = receiver.as_mut() else {
+        return std::future::pending::<Option<(MobId, u64)>>().await;
+    };
+    let received = active_receiver.recv().await;
+    match received {
+        Ok(event) => Some((event.mob_id, event.cursor)),
+        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => None,
+        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+            *receiver = None;
+            None
+        }
     }
 }
 

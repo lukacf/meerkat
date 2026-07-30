@@ -1242,7 +1242,6 @@ mod tests {
             runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
                 meerkat_core::types::HandlingMode::Queue,
                 None,
-                Vec::new(),
                 None,
             ),
         }

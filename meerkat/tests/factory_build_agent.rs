@@ -43,6 +43,10 @@ struct MockLlmClient;
 
 #[async_trait]
 impl LlmClient for MockLlmClient {
+    fn system_message_wire_capability(&self) -> meerkat_core::SystemMessageWireCapability {
+        meerkat_core::SystemMessageWireCapability::Interleaved
+    }
+
     fn project_replay_messages(
         &self,
         messages: &[meerkat_core::Message],
@@ -1514,7 +1518,7 @@ async fn build_agent_with_resume_preserves_explicit_override_masked_fields() {
 }
 
 #[tokio::test]
-async fn repeated_materialization_is_invisible_to_ordered_system_transcript() {
+async fn explicit_resume_prompts_append_without_rewriting_prior_systems() {
     let temp = tempfile::tempdir().unwrap();
     let factory = temp_factory(&temp);
     let mut config = Config::default();
@@ -1573,11 +1577,21 @@ async fn repeated_materialization_is_invisible_to_ordered_system_transcript() {
 
     let agent = factory.build_agent(build_config, &config).await.unwrap();
     assert_eq!(
-        agent.session().messages(),
+        &agent.session().messages()[..original_messages.len()],
         original_messages.as_slice(),
-        "resume materialization must preserve the transcript byte-for-byte"
+        "explicit resume prompt must preserve every prior transcript row"
     );
+    assert_eq!(
+        agent.session().messages().len(),
+        original_messages.len() + 1
+    );
+    assert!(matches!(
+        agent.session().messages().last(),
+        Some(meerkat_core::Message::System(message))
+            if message.content.contains("Persisted system prompt")
+    ));
 
+    let once_resumed_messages = agent.session().messages().to_vec();
     let rematerialized = factory
         .build_agent(
             AgentBuildConfig {
@@ -1593,10 +1607,21 @@ async fn repeated_materialization_is_invisible_to_ordered_system_transcript() {
         .await
         .unwrap();
     assert_eq!(
-        rematerialized.session().messages(),
-        original_messages.as_slice(),
-        "host config drift during break must not inject, replace, or deduplicate any System row"
+        &rematerialized.session().messages()[..once_resumed_messages.len()],
+        once_resumed_messages.as_slice(),
+        "a later explicit resume prompt must append without replacing or deduplicating"
     );
+    assert_eq!(
+        rematerialized.session().messages().len(),
+        once_resumed_messages.len() + 1
+    );
+    assert!(matches!(
+        rematerialized.session().messages().last(),
+        Some(meerkat_core::Message::System(message))
+            if message
+                .content
+                .contains("host config changed while the process was down")
+    ));
 }
 
 #[tokio::test]

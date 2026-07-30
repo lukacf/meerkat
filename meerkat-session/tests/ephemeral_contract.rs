@@ -1370,7 +1370,6 @@ async fn test_turn_tool_overlay_is_cleared_after_canceled_turn() {
                     runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
                         HandlingMode::Queue,
                         Some(overlay),
-                        Vec::new(),
                         None,
                     ),
                     ..turn_req("Slow with overlay")
@@ -1432,7 +1431,6 @@ async fn test_turn_tool_overlay_enforced_by_runtime_and_resets_next_turn() {
                         blocked_tools: Some(vec!["beta".into()]),
                         dispatch_context: Default::default(),
                     }),
-                    Vec::new(),
                     None,
                 ),
                 ..turn_req("overlayed turn")
@@ -1494,7 +1492,6 @@ async fn test_start_turn_returns_error_when_overlay_clear_fails() {
                         blocked_tools: None,
                         dispatch_context: Default::default(),
                     }),
-                    Vec::new(),
                     None,
                 ),
                 ..turn_req("overlay clear fails")

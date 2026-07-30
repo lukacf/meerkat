@@ -124,7 +124,8 @@ pub struct BuildAgentConfigParams<'a> {
     /// resolve `Inherit` to the parent's persisted effective policy before
     /// the spec reaches the actor — and resolves to unrestricted.
     pub tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
-    /// Typed per-spawn system prompt replacement.
+    /// Typed per-spawn system prompt composition override. On resume, an
+    /// explicit value is appended as a new ordered System message.
     pub system_prompt_override: Option<crate::runtime::SpawnSystemPromptOverride>,
 }
 
@@ -363,6 +364,7 @@ pub async fn build_resumed_agent_config(
         resumed_session,
     } = params;
     let inherited_tool_filter = base.inherited_tool_filter.clone();
+    let explicit_resume_system_prompt = base.system_prompt_override.is_some();
     if resumed_session.id() != expected_session_id {
         return Err(MobError::Internal(format!(
             "resume session id mismatch: expected '{}', got '{}'",
@@ -382,12 +384,14 @@ pub async fn build_resumed_agent_config(
         .session_metadata()
         .ok_or_else(|| MobError::Internal("missing durable session metadata".to_string()))?;
     apply_resumed_session_metadata(&mut config, &metadata)?;
-    // Resume is transcript materialization, not prompt authorship. The
-    // durable ordered System rows already carry every authored instruction;
-    // carrying current builder prompt inputs into the factory would create a
-    // false singleton/current-prompt reconciliation authority.
-    config.system_prompt = SystemPromptOverride::Inherit;
-    config.additional_instructions = None;
+    // A bare resume authors nothing. A typed prompt override is explicit new
+    // instruction intent and must survive to the factory, which appends it as
+    // an ordinary System message at this boundary after provider preflight.
+    // Profile-derived prompt material alone is not explicit resume intent.
+    if !explicit_resume_system_prompt {
+        config.system_prompt = SystemPromptOverride::Inherit;
+        config.additional_instructions = None;
+    }
     config.resume_session = Some(resumed_session);
     // Shell environment is process-local launch authority and must not be
     // replayed into a resumed session.
@@ -1638,10 +1642,15 @@ mod tests {
             config.mob_tool_authority_context.is_some(),
             "resolver must synthesize an authority context when profile says enable"
         );
+        assert_eq!(
+            config.system_prompt,
+            SystemPromptOverride::Inherit,
+            "a bare resume must not synthesize a profile-derived System message",
+        );
     }
 
     #[tokio::test]
-    async fn test_build_resumed_agent_config_clears_prompt_authorship_inputs() {
+    async fn test_build_resumed_agent_config_preserves_explicit_prompt_append_intent() {
         let def = sample_definition();
         let lead = def.profiles[&ProfileName::from("lead")]
             .as_inline()
@@ -1689,12 +1698,13 @@ mod tests {
 
         assert_eq!(
             config.system_prompt,
-            SystemPromptOverride::Inherit,
-            "resume must not carry a current prompt into factory materialization",
+            SystemPromptOverride::Set(current_prompt.to_string()),
+            "explicit resume prompt must reach factory as a new ordered System append",
         );
-        assert!(
-            config.additional_instructions.is_none(),
-            "resume must not re-author additional instructions",
+        assert_eq!(
+            config.additional_instructions,
+            Some(additional_instructions),
+            "explicit prompt composition retains its additional instruction sections",
         );
         assert_eq!(
             config.app_context,

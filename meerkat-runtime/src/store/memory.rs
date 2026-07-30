@@ -445,10 +445,10 @@ fn apply_prepared_memory_input_state_mutations(
     for prepared in prepared {
         match prepared.mutation {
             MemoryInputStateMutation::Upsert(bundle) => {
-                store_input_state_prechecked(inner, runtime_id, bundle, prepared.next_revision)
+                store_input_state_prechecked(inner, runtime_id, bundle, prepared.next_revision);
             }
             MemoryInputStateMutation::Delete(input_id) => {
-                delete_input_state_prechecked(inner, runtime_id, &input_id, prepared.next_revision)
+                delete_input_state_prechecked(inner, runtime_id, &input_id, prepared.next_revision);
             }
         }
     }
@@ -903,6 +903,9 @@ impl InMemoryRuntimeStore {
         Ok(committed)
     }
 
+    // RuntimeStore's sealed recovery verb intentionally carries each fenced
+    // boundary component as a separate typed argument.
+    #[allow(clippy::too_many_arguments)]
     async fn atomic_recover_whole_blob(
         &self,
         runtime_id: &LogicalRuntimeId,
@@ -1321,13 +1324,13 @@ fn promote_whole_blob_provisional_locked(
     }
     if let Some(existing) = inner.compaction_projection_outbox.get(&runtime_id.0) {
         for intent in &stored.compaction_projection_intents {
-            if let Some(entry) = existing.get(&intent.projection) {
-                if entry.finalized || entry.intent != *intent {
-                    return Err(RuntimeStoreError::WriteFailed(format!(
-                        "WholeBlob provisional promotion conflicts with compaction rewrite {}",
-                        intent.projection.revision()
-                    )));
-                }
+            if let Some(entry) = existing.get(&intent.projection)
+                && (entry.finalized || entry.intent != *intent)
+            {
+                return Err(RuntimeStoreError::WriteFailed(format!(
+                    "WholeBlob provisional promotion conflicts with compaction rewrite {}",
+                    intent.projection.revision()
+                )));
             }
         }
     }
@@ -2257,10 +2260,10 @@ impl RuntimeStore for InMemoryRuntimeStore {
             .filter(|entry| {
                 filter
                     .created_after
-                    .map_or(true, |after| entry.created_at() >= after)
+                    .is_none_or(|after| entry.created_at() >= after)
                     && filter
                         .updated_after
-                        .map_or(true, |after| entry.updated_at() >= after)
+                        .is_none_or(|after| entry.updated_at() >= after)
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -4513,15 +4516,16 @@ mod tests {
             panic!("exact target authority must permit compensation");
         };
         assert!(compensation.accepts_committed_authority(&restored_authority));
+        let restored = store
+            .load_committed_whole_blob_snapshot(&runtime_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(
-            store
-                .load_committed_whole_blob_snapshot(&runtime_id)
-                .await
-                .unwrap()
-                .unwrap()
-                .session()
-                .system_prompt(),
-            Some("before")
+            restored.session().messages(),
+            &[meerkat_core::types::Message::System(
+                meerkat_core::types::SystemMessage::new("before")
+            )]
         );
     }
 

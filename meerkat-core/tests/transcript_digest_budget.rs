@@ -326,7 +326,7 @@ fn history_bearing_boundary_release_timing() {
     fn median_boundary(turns: usize) -> std::time::Duration {
         let mut live = session_with_turns(turns);
         let end = live.messages().len();
-        let rewrite = live
+        let _rewrite = live
             .commit_transcript_rewrite(
                 TranscriptRewriteSelection::MessageRange {
                     start: end - 1,
@@ -381,17 +381,18 @@ fn history_bearing_append_digest_count_is_independent_of_transcript_size() {
     fn measure(turns: usize) -> u64 {
         let mut live = session_with_turns(turns);
         let end = live.messages().len();
-        live.commit_transcript_rewrite(
-            TranscriptRewriteSelection::MessageRange {
-                start: end - 1,
-                end,
-            },
-            vec![assistant("audited replacement")],
-            TranscriptRewriteReason::new("unit-test"),
-            Some("unit-test".to_string()),
-            None,
-        )
-        .expect("audited rewrite");
+        let rewrite = live
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange {
+                    start: end - 1,
+                    end,
+                },
+                vec![assistant("audited replacement")],
+                TranscriptRewriteReason::new("unit-test"),
+                Some("unit-test".to_string()),
+                None,
+            )
+            .expect("audited rewrite");
         let audited_graph = live
             .metadata()
             .get(meerkat_core::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY)

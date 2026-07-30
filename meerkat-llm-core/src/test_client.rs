@@ -48,6 +48,10 @@ impl Default for TestClient {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl LlmClient for TestClient {
+    fn system_message_wire_capability(&self) -> meerkat_core::SystemMessageWireCapability {
+        meerkat_core::SystemMessageWireCapability::Interleaved
+    }
+
     fn project_replay_messages(
         &self,
         messages: &[meerkat_core::Message],

@@ -602,7 +602,7 @@ fn prepare_head_canonical_recovery_candidate(
 
     let derived_physical_head_token = source.physical_head_cas_token().to_string();
 
-    let observation = observe_durable_tail(committed_authority.messages().len(), &physical_head);
+    let observation = observe_durable_tail(committed_authority.messages().len(), physical_head);
     if observation.tail_run_id.as_ref() != Some(provisional.run_id())
         || observation.run_id_cardinality != RunIdCardinality::SingleRunId
     {
@@ -676,14 +676,14 @@ fn prepare_head_canonical_recovery_candidate(
                 "ambiguous recovery candidate reached document preparation after hold".to_string(),
             ));
         }
-    };
+    }
     // Synthetic repair necessarily advances the outer updated_at with
     // wall-clock time. Re-adopting the exact physical envelope restores the
     // durable timestamp and all non-recovery-owned state. Completed recovery
     // is already byte-for-byte the physical materialization; applying this
     // uniformly keeps the field-ownership rule in one place.
     recovered
-        .adopt_recovered_head_state(&physical_head)
+        .adopt_recovered_head_state(physical_head)
         .map_err(DurableTailRecoveryError::InvalidEvidence)?;
     if recovered.messages().len() < physical_head.messages().len() {
         return Err(DurableTailRecoveryError::InvalidEvidence(format!(

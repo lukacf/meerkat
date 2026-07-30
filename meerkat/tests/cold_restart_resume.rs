@@ -260,17 +260,15 @@ mod tests {
     }
 
     /// Upstream report (0.7.14/0.7.21): every cold restart of a runtime-backed
-    /// session lost the transcript when the host re-sent its explicit
-    /// per-request system prompt on resume (the SDK-gateway shape: member
-    /// specs carry `SystemPromptOverride::Set` on every build).
+    /// session lost the transcript when the host supplied another explicit
+    /// per-request system message on resume.
     ///
     /// During the first lifetime the runtime records system context (comms
     /// roster, host context) beside the persisted ordered transcript. The
-    /// resume build used to blind-replace `messages[0]` with the re-assembled
-    /// base prompt, so the
-    /// resumed projection diverged from the persisted revision, the
-    /// continuity preflight failed closed, and the live session was
-    /// discarded — silent history loss for the caller.
+    /// The resume build used to blind-replace `messages[0]` with the
+    /// re-assembled base prompt. The correct behavior is to preserve every
+    /// existing row and append the explicitly supplied System message at the
+    /// resume boundary.
     #[tokio::test]
     async fn cold_restart_resume_survives_runtime_context_appended_prompt() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -311,9 +309,9 @@ mod tests {
             (session_id, systems)
         };
 
-        // Second host lifetime: resume with the SAME explicit prompt the
-        // gateway would re-send. The interleaved ordinary System message is
-        // durable transcript history and must survive the rebuilt boundary.
+        // Second host lifetime: resume with the SAME explicit prompt. Exact
+        // duplicates are legal ordered messages; no content-based deduplication
+        // may reinterpret caller intent.
         let (service, adapter) = build_service(temp.path()).await;
         let resume_source = service
             .load_authoritative_session(&session_id)
@@ -351,8 +349,19 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(
-            system_rows_after_resume, system_rows_before_restart,
-            "cold resume itself must not author or reapply a System row"
+            &system_rows_after_resume[..system_rows_before_restart.len()],
+            system_rows_before_restart.as_slice(),
+            "resume must preserve all preexisting System rows in exact order"
+        );
+        assert_eq!(
+            system_rows_after_resume.len(),
+            system_rows_before_restart.len() + 1,
+            "the explicitly supplied resume prompt must append exactly one System row"
+        );
+        assert_eq!(
+            system_rows_after_resume.last(),
+            system_rows_before_restart.first(),
+            "the repeated explicit prompt must remain an exact duplicate ordered System row"
         );
         assert!(
             projected.iter().any(|message| {
@@ -366,9 +375,8 @@ mod tests {
         );
     }
 
-    /// Companion to the ordered-System regression: changed host build
-    /// configuration must not author transcript data during resume. A
-    /// post-resume instruction change is an explicit ordinary System append.
+    /// Companion to the ordered-System regression: an explicit changed prompt
+    /// on resume is a new ordinary System message at that exact boundary.
     #[tokio::test]
     async fn cold_restart_resume_survives_changed_explicit_prompt() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -393,14 +401,20 @@ mod tests {
             session_id
         };
 
-        // Second host lifetime: the host's build definition changed. Resume
-        // restores transcript history and does not apply that build field.
+        // Second host lifetime: the caller explicitly supplies changed
+        // instructions while resuming. Existing history remains byte-for-byte
+        // and the new System message is appended at the resume boundary.
         let (service, adapter) = build_service(temp.path()).await;
         let resume_source = service
             .load_authoritative_session(&session_id)
             .await
             .expect("authoritative load after restart")
             .expect("session should survive restart");
+        let system_row_count_before_resume = resume_source
+            .messages()
+            .iter()
+            .filter(|message| matches!(message, meerkat_core::Message::System(_)))
+            .count();
         let mut request = create_request();
         request.system_prompt =
             meerkat::SystemPromptOverride::Set("cold restart resume contract v2".to_string());
@@ -422,28 +436,20 @@ mod tests {
             .await
             .expect("authoritative load after changed-config resume")
             .expect("session should survive changed-config resume");
-        assert!(
-            after_materialize.messages().iter().all(|message| {
-                !matches!(
-                    message,
-                    meerkat_core::Message::System(system)
-                        if system.content.contains("cold restart resume contract v2")
-                )
-            }),
-            "resume must not author the changed build-time System prompt"
+        assert_eq!(
+            after_materialize
+                .messages()
+                .iter()
+                .filter(|message| matches!(message, meerkat_core::Message::System(_)))
+                .count(),
+            system_row_count_before_resume + 1,
+            "explicit changed resume instructions must append exactly one System row"
         );
-
-        service
-            .append_system_context(
-                &session_id,
-                meerkat_core::AppendSystemContextRequest {
-                    content: meerkat_core::CoreRenderable::text("cold restart resume contract v2"),
-                    source: None,
-                    idempotency_key: None,
-                },
-            )
-            .await
-            .expect("append post-resume System instruction");
+        assert!(matches!(
+            after_materialize.messages().last(),
+            Some(meerkat_core::Message::System(system))
+                if system.content.contains("cold restart resume contract v2")
+        ));
         run_prompt(&adapter, &session_id, "second turn after restart").await;
 
         let final_session = service
@@ -475,7 +481,7 @@ mod tests {
             .expect("expected ordered system message");
         assert!(
             system_prompt.contains("cold restart resume contract v2"),
-            "the explicit post-resume System append must be applied: {system_prompt}"
+            "the explicit resume System append must be applied: {system_prompt}"
         );
         let projected = final_session.messages_for_model_boundary();
         assert!(

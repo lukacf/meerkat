@@ -1631,6 +1631,13 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         MobError::SessionUnavailableForResume { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::SessionError
         }
+        // Process-incarnation provisioning terminals are not a public
+        // spawn-many failure family. Keep the exhaustive classifier
+        // fail-closed rather than laundering callback-transport state into a
+        // session or comms result.
+        MobError::MemberProvisionFailed { .. } => {
+            mob_dsl::MobSpawnManyFailureObservationKind::Internal
+        }
         // Capability-contract replacement is a host bind/rebind concern, not
         // a spawn-many provisioning result.
         MobError::HostCapabilityContractViolation { .. } => {
@@ -2677,7 +2684,11 @@ impl SpawnSource {
     }
 }
 
-/// Typed system prompt replacement for a single spawn.
+/// Typed system-prompt composition override for a single spawn.
+///
+/// `Replace` replaces the prompt sources used to compose this spawn's message;
+/// on resume that composed message is appended at the current transcript
+/// boundary and does not replace any earlier System message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]

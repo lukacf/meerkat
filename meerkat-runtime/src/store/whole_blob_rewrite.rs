@@ -150,7 +150,7 @@ impl PreparedWholeBlobRewriteBoundary {
         let session_id = expected_runtime.store_authority().session_id().clone();
         if successor_session.id() != &session_id {
             return Err(RuntimeStoreError::SessionKeyMismatch {
-                expected: session_id.clone(),
+                expected: session_id,
                 actual: successor_session.id().clone(),
             });
         }

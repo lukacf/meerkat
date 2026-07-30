@@ -582,7 +582,6 @@ impl PlacedKickoffReconciler {
             runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
                 intent.handling_mode,
                 None,
-                Vec::new(),
                 Some(
                     meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
                         transcript_identity: meerkat_core::types::TranscriptMessageIdentity {

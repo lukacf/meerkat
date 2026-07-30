@@ -5724,11 +5724,12 @@ impl AgentFactory {
                 extra_sections.push(instruction.as_str());
             }
         }
-        // Durable metadata distinguishes a real resume from a fresh,
-        // preallocated empty session. A real resume authors nothing even when
-        // its transcript is empty; only a fresh build without durable metadata
-        // may materialize its initial System message.
-        let should_apply_system_prompt = resumed_session_metadata.is_none();
+        // A bare resume authors nothing. An explicit prompt decision on resume
+        // is different: it materializes a new ordinary System message at the
+        // current transcript boundary. Core performs the provider-wire
+        // capability check before appending it.
+        let should_apply_system_prompt =
+            resumed_session_metadata.is_none() || prompt_override.is_explicit();
         #[cfg(not(target_arch = "wasm32"))]
         let system_prompt = if should_apply_system_prompt {
             Some(

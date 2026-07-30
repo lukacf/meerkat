@@ -165,6 +165,7 @@ impl ActorFlowTurnExecutor {
                 Ok(()) => {
                     tracing::debug!(run_id = %run_id, "detached timed-out turn finished");
                 }
+                #[cfg(not(target_arch = "wasm32"))]
                 Err(error) if error.is_panic() => {
                     let payload = error.into_panic();
                     let panic_detail = super::panic_capture::panic_payload_detail(payload.as_ref());
@@ -402,7 +403,6 @@ impl ActorFlowTurnExecutor {
                             runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
                                 meerkat_core::types::HandlingMode::Queue,
                                 turn_tool_overlay,
-                                Vec::new(),
                                 None,
                             ),
                         },

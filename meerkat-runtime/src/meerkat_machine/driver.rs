@@ -204,6 +204,9 @@ enum InteractionTerminalBatchScope<'a> {
 }
 
 impl RuntimeCompletionResultAuthority {
+    // This is the mechanical typed projection of one generated effect. Keeping
+    // every authority field explicit makes omissions visible at the seam.
+    #[allow(clippy::too_many_arguments)]
     fn from_generated_effect(
         session_id: SessionId,
         agent_runtime_id: Option<crate::meerkat_machine::dsl::AgentRuntimeId>,
@@ -303,6 +306,7 @@ impl RuntimeCompletionResultAttempt {
         self.authority.result_class
     }
 
+    #[cfg(test)]
     pub(crate) fn allows(
         &self,
         expected: crate::meerkat_machine::dsl::RuntimeCompletionResultClass,
@@ -3068,7 +3072,7 @@ impl DriverEntry {
             .map(|input_id| {
                 self.as_driver()
                     .stored_input_state(input_id)
-                    .and_then(|stored| stored.state.terminal_completion.clone())
+                    .and_then(|stored| stored.state.terminal_completion)
                     .ok_or_else(|| RuntimeDriverError::RecoveryCorruption {
                         reason: format!(
                             "interaction terminal publication lost terminal-completion recipient {input_id}"
@@ -3899,8 +3903,9 @@ impl DriverEntry {
                 error,
             ));
         }
-        if !terminal_input_ids.is_empty() && existing_completion_rows == 0 {
-            if let Err(error) = self.stage_input_terminal_completion_batch(
+        if !terminal_input_ids.is_empty()
+            && existing_completion_rows == 0
+            && let Err(error) = self.stage_input_terminal_completion_batch(
                 InteractionTerminalBatchScope::Run(&run_id),
                 &terminal_input_ids,
                 crate::input_state::InteractionTerminalCandidate::MachineTerminalFailure {
@@ -3909,13 +3914,13 @@ impl DriverEntry {
                     ),
                 },
                 applied_commit.is_some(),
-            ) {
-                return Err(self.fail_terminal_transition(
-                    checkpoint,
-                    "failed_run_completion_batch_stage",
-                    error,
-                ));
-            }
+            )
+        {
+            return Err(self.fail_terminal_transition(
+                checkpoint,
+                "failed_run_completion_batch_stage",
+                error,
+            ));
         }
 
         // A recoverable failed run normally requeues its contributors, but the
@@ -3924,34 +3929,32 @@ impl DriverEntry {
         // Interaction rows, but the owner row retains the complete terminal
         // recipient set so one generated completion finalizes directed and
         // non-directed inputs together.
-        if recoverable {
-            if !terminal_input_ids.is_empty() {
-                let outboxes = match authorized_staged_directed_terminal_outboxes(
-                    self,
-                    InteractionTerminalBatchScope::Run(&run_id),
-                    &terminal_input_ids,
-                    crate::input_state::InteractionTerminalCandidate::MachineTerminalFailure {
-                        error: meerkat_core::TurnErrorMetadata::runtime_apply_failure(
-                            terminal_error.clone(),
-                        ),
-                    },
-                ) {
-                    Ok(outboxes) => outboxes,
-                    Err(error) => {
-                        return Err(self.fail_terminal_transition(
-                            checkpoint,
-                            "failed_run_terminal_outbox_authorization",
-                            error,
-                        ));
-                    }
-                };
-                if let Err(error) = self.stage_interaction_terminal_outboxes(outboxes) {
+        if recoverable && !terminal_input_ids.is_empty() {
+            let outboxes = match authorized_staged_directed_terminal_outboxes(
+                self,
+                InteractionTerminalBatchScope::Run(&run_id),
+                &terminal_input_ids,
+                crate::input_state::InteractionTerminalCandidate::MachineTerminalFailure {
+                    error: meerkat_core::TurnErrorMetadata::runtime_apply_failure(
+                        terminal_error.clone(),
+                    ),
+                },
+            ) {
+                Ok(outboxes) => outboxes,
+                Err(error) => {
                     return Err(self.fail_terminal_transition(
                         checkpoint,
-                        "failed_run_terminal_outbox_stage",
+                        "failed_run_terminal_outbox_authorization",
                         error,
                     ));
                 }
+            };
+            if let Err(error) = self.stage_interaction_terminal_outboxes(outboxes) {
+                return Err(self.fail_terminal_transition(
+                    checkpoint,
+                    "failed_run_terminal_outbox_stage",
+                    error,
+                ));
             }
         }
 
@@ -5687,6 +5690,7 @@ pub(super) async fn load_boundary_receipt_for_runtime(
         .await
 }
 
+#[cfg(test)]
 async fn load_input_states_for_runtime(
     store: &dyn crate::store::RuntimeStore,
     runtime_id: &LogicalRuntimeId,
@@ -6360,6 +6364,7 @@ async fn reconcile_runtime_authority_for_cold_recovery_id(
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn machine_recover_persistent_driver(
     store: &dyn crate::store::RuntimeStore,
     runtime_id: &LogicalRuntimeId,
@@ -6387,6 +6392,7 @@ pub(crate) async fn machine_recover_persistent_driver(
 /// observe/classify/CAS owner. Direct `PersistentRuntimeDriver::recover`
 /// retains the wrapper above for compatibility with callers that have not
 /// established runtime authority yet.
+#[cfg(test)]
 pub(crate) async fn machine_recover_persistent_inputs(
     store: &dyn crate::store::RuntimeStore,
     runtime_id: &LogicalRuntimeId,

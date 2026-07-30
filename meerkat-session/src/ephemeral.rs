@@ -823,6 +823,14 @@ enum SessionCommand {
     ExportSession {
         reply_tx: oneshot::Sender<Result<meerkat_core::Session, AgentError>>,
     },
+    /// Classify a callback-result batch against actor-owned canonical
+    /// transcript state without exporting that state across the command seam.
+    ClassifyCallbackResultIngress {
+        results: Vec<ToolResult>,
+        reply_tx: oneshot::Sender<
+            Result<meerkat_core::session::CallbackResultIngress, AgentError>,
+        >,
+    },
     ReconcileRuntimeCompactionProjections {
         intents: Vec<meerkat_core::CompactionProjectionIntent>,
         reply_tx: oneshot::Sender<Result<(), meerkat_core::error::AgentError>>,
@@ -1595,6 +1603,17 @@ pub trait SessionAgent: Send {
     /// after each turn.
     fn session_clone(&self) -> Result<meerkat_core::Session, AgentError>;
 
+    /// Classify callback-result ingress against the actor-owned canonical
+    /// Session. Implementations with direct session access should override
+    /// this; the default remains exact for lightweight/test agents.
+    fn classify_callback_result_ingress(
+        &self,
+        incoming: &[ToolResult],
+    ) -> Result<meerkat_core::session::CallbackResultIngress, AgentError> {
+        self.session_clone()?
+            .classify_callback_result_ingress(incoming)
+    }
+
     /// Return the durable LLM identity authored by the concrete agent builder.
     ///
     /// Factory-backed agents resolve this through the same model registry path
@@ -2256,6 +2275,38 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         })?;
 
         Ok(session)
+    }
+
+    pub(crate) async fn classify_callback_result_ingress(
+        &self,
+        id: &SessionId,
+        results: Vec<ToolResult>,
+    ) -> Result<meerkat_core::session::CallbackResultIngress, SessionError> {
+        let command_tx = self
+            .sessions
+            .read()
+            .await
+            .get(id)
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?
+            .command_tx
+            .clone();
+        let (reply_tx, reply_rx) = oneshot::channel();
+        command_tx
+            .send(SessionCommand::ClassifyCallbackResultIngress { results, reply_tx })
+            .await
+            .map_err(|_| {
+                SessionError::Agent(AgentError::InternalError(
+                    "Session task has exited".to_string(),
+                ))
+            })?;
+        reply_rx
+            .await
+            .map_err(|_| {
+                SessionError::Agent(AgentError::InternalError(
+                    "Session task dropped the reply channel".to_string(),
+                ))
+            })?
+            .map_err(SessionError::Agent)
     }
 
     /// Reconcile/finalize invisible compaction memory stages from the exact
@@ -4928,6 +4979,9 @@ async fn drain_session_task_commands<A: SessionAgent>(
             SessionCommand::ExportSession { reply_tx } => {
                 let _ = reply_tx.send(agent.session_clone());
             }
+            SessionCommand::ClassifyCallbackResultIngress { results, reply_tx } => {
+                let _ = reply_tx.send(agent.classify_callback_result_ingress(&results));
+            }
             SessionCommand::ReconcileRuntimeCompactionProjections { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(meerkat_core::error::AgentError::Cancelled));
             }
@@ -5775,6 +5829,9 @@ async fn session_task<A: SessionAgent>(
             SessionCommand::ExportSession { reply_tx } => {
                 let _ = reply_tx.send(agent.session_clone());
             }
+            SessionCommand::ClassifyCallbackResultIngress { results, reply_tx } => {
+                let _ = reply_tx.send(agent.classify_callback_result_ingress(&results));
+            }
             SessionCommand::ReconcileRuntimeCompactionProjections { intents, reply_tx } => {
                 let result = agent
                     .reconcile_runtime_compaction_projections(&intents)
@@ -6258,10 +6315,7 @@ mod runtime_turn_metadata_tests {
                 observed_context_texts: Arc::clone(&self.observed_context_texts),
                 run_context_counts: Arc::clone(&self.run_context_counts),
                 fail_flow_overlay_set: self.fail_flow_overlay_set,
-                transient_turn_context_state: meerkat_core::TransientTurnContextStateHandle::new(
-                    Default::default(),
-                )
-                .expect("default system-context state should restore"),
+                transient_turn_context_state: meerkat_core::TransientTurnContextStateHandle::new(),
                 session_context_handle: self.session_context_handle.clone(),
             })
         }
@@ -6456,10 +6510,7 @@ mod runtime_turn_metadata_tests {
                 session_id: SessionId::new(),
                 identity: test_llm_identity(&req.model),
                 turn_state: Arc::clone(&self.turn_state),
-                transient_turn_context_state: meerkat_core::TransientTurnContextStateHandle::new(
-                    Default::default(),
-                )
-                .expect("default system-context state should restore"),
+                transient_turn_context_state: meerkat_core::TransientTurnContextStateHandle::new(),
             })
         }
     }
@@ -6815,7 +6866,6 @@ mod runtime_turn_metadata_tests {
                     runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
                         meerkat_core::types::HandlingMode::Queue,
                         None,
-                        Vec::new(),
                         Some(RuntimeTurnMetadata {
                             execution_kind: Some(RuntimeExecutionKind::ContentTurn),
                             skill_references: Some(vec![canonical.clone()]),
@@ -6898,10 +6948,7 @@ mod injected_context_turn_tests {
                 identity: probe_llm_identity(&req.model),
                 observed_turns: Arc::clone(&self.observed_turns),
                 system_message_wire_capability: self.system_message_wire_capability,
-                transient_turn_context_state: meerkat_core::TransientTurnContextStateHandle::new(
-                    Default::default(),
-                )
-                .expect("default system-context state should restore"),
+                transient_turn_context_state: meerkat_core::TransientTurnContextStateHandle::new(),
             })
         }
     }
@@ -7188,7 +7235,6 @@ mod injected_context_turn_tests {
                     runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
                         meerkat_core::types::HandlingMode::Queue,
                         None,
-                        Vec::new(),
                         Some(metadata),
                     ),
                 },
@@ -7422,10 +7468,8 @@ mod injected_context_turn_tests {
             session: meerkat_core::Session::new(),
             identity: probe_llm_identity("default-guard"),
             observed_turns: Arc::clone(&observed_turns),
-            transient_turn_context_state: meerkat_core::TransientTurnContextStateHandle::new(
-                Default::default(),
-            )
-            .expect("default system-context state should restore"),
+            system_message_wire_capability: meerkat_core::SystemMessageWireCapability::Interleaved,
+            transient_turn_context_state: meerkat_core::TransientTurnContextStateHandle::new(),
         });
 
         let (event_tx, _event_rx) = mpsc::channel(4);
@@ -8674,10 +8718,7 @@ mod inline_video_admission_tests {
                     .committed_identity_before_turn_failure
                     .clone(),
                 run_result_session_id: self.run_result_session_id.clone(),
-                transient_turn_context_state: meerkat_core::TransientTurnContextStateHandle::new(
-                    Default::default(),
-                )
-                .expect("default system-context state should restore"),
+                transient_turn_context_state: meerkat_core::TransientTurnContextStateHandle::new(),
             })
         }
     }

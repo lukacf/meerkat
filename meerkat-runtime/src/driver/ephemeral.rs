@@ -210,6 +210,7 @@ pub(crate) fn new_ingress_dsl_authority() -> SharedIngressDslAuthority {
     ))
 }
 
+#[cfg(test)]
 fn recover_ingress_dsl_authority(
     state: mm_dsl::MeerkatMachineState,
 ) -> mm_dsl::MeerkatMachineAuthority {
@@ -304,6 +305,7 @@ impl EphemeralRuntimeDriver {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn clone_with_isolated_dsl_authority(&self) -> Self {
         let mut clone = self.clone();
         let dsl_state = self.with_dsl_state(Clone::clone);
@@ -2684,17 +2686,21 @@ impl EphemeralRuntimeDriver {
             )));
         }
 
-        let semantics = self
-            .runtime_semantics
-            .get_mut(input_id)
-            .expect("presence checked before generated normalization");
+        let Some(semantics) = self.runtime_semantics.get_mut(input_id) else {
+            return Err(RuntimeDriverError::Internal(format!(
+                "unavailable live-boundary input {input_id} lost admitted runtime semantics \
+                 during generated normalization"
+            )));
+        };
         semantics.execution_handling_mode = Some(HandlingMode::Queue);
         semantics.live_interrupt_required = false;
         let normalized_semantics = *semantics;
-        let state = self
-            .ledger
-            .get_mut(input_id)
-            .expect("presence checked before generated normalization");
+        let Some(state) = self.ledger.get_mut(input_id) else {
+            return Err(RuntimeDriverError::Internal(format!(
+                "unavailable live-boundary input {input_id} disappeared from the input ledger \
+                 during generated normalization"
+            )));
+        };
         state.runtime_semantics = Some(normalized_semantics);
         Ok(())
     }

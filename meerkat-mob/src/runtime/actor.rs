@@ -1566,12 +1566,8 @@ fn submit_work_runtime_semantics(
     turn_metadata: Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
     external_delivery_identity: Option<&crate::store::MobExternalDeliveryIdentity>,
 ) -> meerkat_core::service::StartTurnRuntimeSemantics {
-    let semantics = meerkat_core::service::StartTurnRuntimeSemantics::new(
-        handling_mode,
-        None,
-        Vec::new(),
-        turn_metadata,
-    );
+    let semantics =
+        meerkat_core::service::StartTurnRuntimeSemantics::new(handling_mode, None, turn_metadata);
     match external_delivery_identity {
         Some(identity) => {
             semantics.with_input_identity(meerkat_core::service::StartTurnInputIdentity {
@@ -23872,9 +23868,10 @@ impl MobActor {
                         result: Ok(spawn_receipt),
                         ..
                     } => match provisioner.retire_member(&spawn_receipt.member_ref).await {
-                        Ok(()) => tracing::warn!(
+                        Ok(disposal) => tracing::warn!(
                             spawn_ticket,
                             member_ref = ?spawn_receipt.member_ref,
+                            disposal = ?disposal,
                             "spawn completion dropped because the actor is gone; provisioned member was retired"
                         ),
                         Err(cleanup_error) => tracing::warn!(

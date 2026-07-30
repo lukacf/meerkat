@@ -1138,9 +1138,9 @@ END";
                     .map_err(|error| {
                         migration_data_error(&runtime_id, &input_id, error.to_string())
                     })?;
-                if !input
+                if input
                     .get("turn_append")
-                    .is_some_and(|value| !value.is_null())
+                    .is_none_or(serde_json::Value::is_null)
                 {
                     let is_steer = semantics.live_interrupt_required
                         && semantics.peer_response_terminal_apply_intent.is_none();
@@ -2390,6 +2390,9 @@ END";
         Ok(())
     }
 
+    // The store issues this authority from one exact prepared physical
+    // boundary; each argument is an independently checked part of that seal.
+    #[allow(clippy::too_many_arguments)]
     fn issue_head_canonical_provisional_tail_authority_in_txn(
         tx: &Transaction<'_>,
         runtime_id: &LogicalRuntimeId,
@@ -3841,22 +3844,8 @@ ORDER BY runtime_id";
                 .session_id()
                 .map(|session_id| session_id.to_string())
                 .unwrap_or_else(|| "<unverified>".to_string());
-            let authority = load_head_canonical_authority(conn, &runtime_id).map_err(|error| {
-                tracing::error!(
-                    runtime_id = %runtime_id,
-                    session_id = %session_label,
-                    phase = "activation_preflight",
-                    source_message_count = ?Option::<i64>::None,
-                    boundary_message_count = ?Option::<i64>::None,
-                    physical_message_count = ?Option::<i64>::None,
-                    elapsed_ms = 0_u64,
-                    refusal_class = head_canonical_activation_error_class(&error),
-                    "refused synchronous head-canonical profile activation"
-                );
-                error
-            })?;
-            let marker =
-                load_head_canonical_activation_marker(conn, &runtime_id).map_err(|error| {
+            let authority =
+                load_head_canonical_authority(conn, &runtime_id).inspect_err(|error| {
                     tracing::error!(
                         runtime_id = %runtime_id,
                         session_id = %session_label,
@@ -3868,7 +3857,20 @@ ORDER BY runtime_id";
                         refusal_class = head_canonical_activation_error_class(&error),
                         "refused synchronous head-canonical profile activation"
                     );
-                    error
+                })?;
+            let marker =
+                load_head_canonical_activation_marker(conn, &runtime_id).inspect_err(|error| {
+                    tracing::error!(
+                        runtime_id = %runtime_id,
+                        session_id = %session_label,
+                        phase = "activation_preflight",
+                        source_message_count = ?Option::<i64>::None,
+                        boundary_message_count = ?Option::<i64>::None,
+                        physical_message_count = ?Option::<i64>::None,
+                        elapsed_ms = 0_u64,
+                        refusal_class = head_canonical_activation_error_class(&error),
+                        "refused synchronous head-canonical profile activation"
+                    );
                 })?;
             match (
                 authority.as_ref(),
@@ -7338,6 +7340,9 @@ ORDER BY runtime_id";
             .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
         }
 
+        // This implements the sealed RuntimeStore recovery verb; the arity is
+        // the trait's explicit set of fenced boundary components.
+        #[allow(clippy::too_many_arguments)]
         async fn commit_whole_blob_recovery(
             &self,
             runtime_id: &LogicalRuntimeId,
@@ -7607,11 +7612,7 @@ ORDER BY runtime_id";
                 runtime_id,
                 "commit_head_canonical_provisional_promotion",
             )?;
-            let checkpoint = promotion.into_checkpoint();
-            let authority = checkpoint
-                .head_canonical()
-                .expect("HeadCanonical promotion constructor seals the profile")
-                .clone();
+            let (checkpoint, authority) = promotion.into_parts();
             if authority.session_id() != &session_store_key {
                 return Err(RuntimeStoreError::SessionKeyMismatch {
                     expected: authority.session_id().clone(),
@@ -8806,17 +8807,15 @@ ORDER BY runtime_id";
                                     ));
                                 }
                             }
-                        } else {
-                            insert_ordinary_boundary_witness_in_txn(
-                                &tx,
-                                &runtime_id,
-                                witness,
-                            )?;
-                            tx.commit().map_err(|error| {
-                                RuntimeStoreError::WriteFailed(error.to_string())
-                            })?;
-                            return Ok(result.already_applied_exact());
                         }
+                        insert_ordinary_boundary_witness_in_txn(
+                            &tx,
+                            &runtime_id,
+                            witness,
+                        )?;
+                        tx.commit()
+                            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                        return Ok(result.already_applied_exact());
                     }
 
                     match current_authority.as_ref() {
@@ -9981,6 +9980,7 @@ ORDER BY runtime_id";
                         &tx,
                         &mutation,
                     )
+                    .map(|_outcome| ())
                     .map_err(|error| {
                         map_head_canonical_session_store_error(
                             &runtime_id,
@@ -11564,7 +11564,7 @@ ORDER BY runtime_id";
                     || state.state.idempotency_key.as_ref() != Some(&key)
                 {
                     return Err(uncertain(
-                        indexed_input_id.clone(),
+                        indexed_input_id,
                         format!(
                             "index owner differs from decoded source identity/key \
                              (decoded input {}, decoded key {:?})",
@@ -13028,7 +13028,9 @@ ORDER BY runtime_id";
         use meerkat_core::lifecycle::core_executor::BoundSessionCommit;
         use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
         use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunId};
-        use meerkat_core::session_store::{PreparedHeadCanonicalMutation, SessionStore as _};
+        use meerkat_core::session_store::{
+            IncrementalSessionStore as _, PreparedHeadCanonicalMutation, SessionStore as _,
+        };
         use meerkat_core::types::{
             AssistantBlock, BlockAssistantMessage, Message, StopReason, UserMessage,
         };
@@ -13040,6 +13042,16 @@ ORDER BY runtime_id";
             let path = dir.path().join("sessions.sqlite3");
             let store = SqliteRuntimeStore::new(path).unwrap();
             (dir, store)
+        }
+
+        fn raw_fixture_row(path: &Path, table: &str, column: &str, runtime_id: &str) -> Vec<u8> {
+            let conn = Connection::open(path).unwrap();
+            conn.query_row(
+                &format!("SELECT {column} FROM {table} WHERE runtime_id = ?1"),
+                params![runtime_id],
+                |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
+            )
+            .unwrap()
         }
 
         fn runtime_id() -> LogicalRuntimeId {
@@ -13573,6 +13585,12 @@ ORDER BY runtime_id";
             let boundary_head_token = meerkat_core::session_head_cas_token(&boundary_head).unwrap();
             let boundary_head_json = serde_json::to_vec(&boundary_head).unwrap();
             let session_snapshot = serde_json::to_vec(&session).unwrap();
+            let catalog_entry = crate::store::RuntimeSessionCatalogEntry::from_session(
+                &session,
+                RuntimeSessionPersistenceProfile::WholeBlobV1,
+                None,
+            )
+            .unwrap();
 
             let mut conn = open_runtime_connection(store.path()).unwrap();
             let tx = begin_runtime_transaction(&mut conn).unwrap();
@@ -13585,6 +13603,7 @@ ORDER BY runtime_id";
                     "row-sha256:{:x}",
                     <sha2::Sha256 as sha2::Digest>::digest(&session_snapshot)
                 ),
+                &catalog_entry,
             )
             .unwrap();
             tx.execute(

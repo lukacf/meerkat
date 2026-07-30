@@ -911,6 +911,7 @@ impl CompletionRegistry {
         }
     }
 
+    #[cfg(test)]
     fn authority_mismatch_error(
         authority: &RuntimeCompletionResultAttempt,
         expected: RuntimeCompletionResultClass,
@@ -921,6 +922,7 @@ impl CompletionRegistry {
         ))
     }
 
+    #[cfg(test)]
     fn fail_input_authority_mismatch(
         &mut self,
         input_id: &InputId,
@@ -948,6 +950,7 @@ impl CompletionRegistry {
         self.fail_inputs(input_ids, error);
     }
 
+    #[cfg(test)]
     fn cleanup_from_realized_attempt(
         authority: RuntimeCompletionResultAttempt,
     ) -> CompletionCleanupObservation {
@@ -1056,6 +1059,7 @@ impl CompletionRegistry {
     }
 
     /// Resolve all waiters for an input that completed without producing a RunResult.
+    #[cfg(test)]
     fn resolve_without_result(
         &mut self,
         input_id: &InputId,
@@ -1070,6 +1074,7 @@ impl CompletionRegistry {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn resolve_without_result_authorized(
         &mut self,
         input_id: &InputId,

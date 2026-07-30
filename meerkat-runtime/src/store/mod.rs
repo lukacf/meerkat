@@ -1170,6 +1170,7 @@ impl PreparedWholeBlobRecoveryPromotion {
 #[derive(Debug, Clone)]
 pub struct PreparedHeadCanonicalProvisionalPromotion {
     checkpoint: meerkat_core::RunCheckpointReceipt,
+    authority: HeadCanonicalProvisionalTailAuthority,
 }
 
 impl PreparedHeadCanonicalProvisionalPromotion {
@@ -1177,7 +1178,7 @@ impl PreparedHeadCanonicalProvisionalPromotion {
         checkpoint: meerkat_core::RunCheckpointReceipt,
         run_id: &RunId,
     ) -> Result<Self, RuntimeStoreError> {
-        let authority = checkpoint.head_canonical().ok_or_else(|| {
+        let authority = checkpoint.head_canonical().cloned().ok_or_else(|| {
             RuntimeStoreError::SessionPersistenceAuthorityConflict {
                 runtime_id: checkpoint.session_id().to_string(),
                 detail: "HeadCanonical promotion received a WholeBlob checkpoint".to_string(),
@@ -1190,14 +1191,15 @@ impl PreparedHeadCanonicalProvisionalPromotion {
                     .to_string(),
             });
         }
-        Ok(Self { checkpoint })
+        Ok(Self {
+            checkpoint,
+            authority,
+        })
     }
 
     #[must_use]
     pub fn authority(&self) -> &HeadCanonicalProvisionalTailAuthority {
-        self.checkpoint
-            .head_canonical()
-            .expect("HeadCanonical promotion constructor seals the profile")
+        &self.authority
     }
 
     #[must_use]
@@ -1206,8 +1208,13 @@ impl PreparedHeadCanonicalProvisionalPromotion {
     }
 
     #[must_use]
-    pub(crate) fn into_checkpoint(self) -> meerkat_core::RunCheckpointReceipt {
-        self.checkpoint
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        meerkat_core::RunCheckpointReceipt,
+        HeadCanonicalProvisionalTailAuthority,
+    ) {
+        (self.checkpoint, self.authority)
     }
 }
 
@@ -1842,71 +1849,6 @@ impl PreparedDurableTailRecoverySource {
 
     pub(crate) fn physical_session(&self) -> &Arc<meerkat_core::Session> {
         &self.physical_session
-    }
-
-    /// Verify every exact receipt row for `candidate_run_id` against the
-    /// already-proved physical transcript and seal only the supported-floor
-    /// rows whose missing digest must be enriched atomically with recovery.
-    pub(crate) fn prepare_receipt_digest_enrichments(
-        &self,
-        candidate_run_id: &RunId,
-        receipts: &[PreparedRecoveryReceiptSource],
-    ) -> Result<Vec<PreparedRecoveryReceiptDigestEnrichment>, RuntimeStoreError> {
-        let conflict = |detail: String| RuntimeStoreError::SessionPersistenceAuthorityConflict {
-            runtime_id: self.runtime_authority.session_id().to_string(),
-            detail,
-        };
-        let mut expected_sequence = 1_u64;
-        let mut previous_message_count = 0_usize;
-        let mut enrichments = Vec::new();
-        for source in receipts {
-            let receipt = source.receipt();
-            if &receipt.run_id != candidate_run_id {
-                return Err(conflict(
-                    "recovery receipt source contains a different run identity".to_string(),
-                ));
-            }
-            if receipt.sequence != expected_sequence {
-                return Err(conflict(format!(
-                    "recovery receipt sequence {} is not the required dense sequence {expected_sequence}",
-                    receipt.sequence
-                )));
-            }
-            if receipt.message_count < previous_message_count
-                || receipt.message_count > self.physical_session.messages().len()
-            {
-                return Err(conflict(
-                    "recovery receipt message counts are not monotonic within the verified physical transcript"
-                        .to_string(),
-                ));
-            }
-            let derived_digest = self
-                .physical_session
-                .transcript_prefix_digest(receipt.message_count)
-                .map_err(|error| {
-                    conflict(format!(
-                        "failed to derive verified receipt transcript prefix: {error}"
-                    ))
-                })?;
-            match receipt.conversation_digest.as_deref() {
-                Some(existing) if existing != derived_digest => {
-                    return Err(conflict(format!(
-                        "receipt sequence {} digest differs from the verified physical transcript prefix",
-                        receipt.sequence
-                    )));
-                }
-                Some(_) => {}
-                None => enrichments.push(PreparedRecoveryReceiptDigestEnrichment::new(
-                    source,
-                    derived_digest,
-                )?),
-            }
-            expected_sequence = expected_sequence
-                .checked_add(1)
-                .ok_or_else(|| conflict("recovery receipt sequence overflow".to_string()))?;
-            previous_message_count = receipt.message_count;
-        }
-        Ok(enrichments)
     }
 }
 
@@ -3028,8 +2970,8 @@ impl PreparedRecoveryEvidence {
             .into_iter()
             .map(PreparedRecoveryInputUpdate::seal)
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|detail| conflict(detail))?;
-        validate_recovery_input_update_order(&input_updates).map_err(|detail| conflict(detail))?;
+            .map_err(&conflict)?;
+        validate_recovery_input_update_order(&input_updates).map_err(&conflict)?;
         let lifecycle_target_bytes = lifecycle.store_record().encode()?;
         let lifecycle_target_token = recovery_sha256_token(&lifecycle_target_bytes);
         // The expected version is a first-apply fence, not outcome identity:
@@ -3231,8 +3173,8 @@ impl PreparedRecoveryEvidence {
             .into_iter()
             .map(PreparedRecoveryInputUpdate::seal)
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|detail| conflict(detail))?;
-        validate_recovery_input_update_order(&input_updates).map_err(|detail| conflict(detail))?;
+            .map_err(&conflict)?;
+        validate_recovery_input_update_order(&input_updates).map_err(&conflict)?;
         let lifecycle_target_bytes = lifecycle.store_record().encode()?;
         let lifecycle_target_token = recovery_sha256_token(&lifecycle_target_bytes);
         let _ = lifecycle_expected_version_token(lifecycle)?;
@@ -3499,8 +3441,8 @@ impl PreparedRecoveryEvidence {
             .cloned()
             .map(PreparedRecoveryInputUpdate::seal)
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|detail| conflict(detail))?;
-        validate_recovery_input_update_order(&input_updates).map_err(|detail| conflict(detail))?;
+            .map_err(&conflict)?;
+        validate_recovery_input_update_order(&input_updates).map_err(&conflict)?;
         if input_updates != self.input_updates {
             return Err(conflict(
                 "recovery input effects differ from sealed evidence".to_string(),
@@ -3562,10 +3504,6 @@ impl PreparedRecoveryEvidence {
         &self.candidate_run_id
     }
 
-    pub(crate) fn class(&self) -> crate::meerkat_machine::dsl::DurableTailRecoveryClass {
-        self.class
-    }
-
     pub(crate) fn disposition(
         &self,
     ) -> crate::meerkat_machine::dsl::DurableTailRecoveryDisposition {
@@ -3622,10 +3560,6 @@ impl PreparedRecoveryEvidence {
 
     pub(crate) fn predecessor_nonterminal_input_set_revision(&self) -> RecoveryInputSetRevision {
         self.predecessor_nonterminal_input_set_revision
-    }
-
-    pub(crate) fn exact_witness(&self) -> &str {
-        &self.exact_witness
     }
 }
 
@@ -4629,18 +4563,6 @@ impl PreparedRuntimeSessionCommit {
         }
     }
 
-    /// Sealed recovery evidence, present only for a recovery boundary.
-    #[must_use]
-    pub(crate) fn recovery_evidence(&self) -> Option<&PreparedRecoveryEvidence> {
-        match &self.payload {
-            PreparedRuntimeSessionCommitPayload::Recovery { evidence, .. }
-            | PreparedRuntimeSessionCommitPayload::PromoteWholeBlobRecovery { evidence, .. } => {
-                Some(evidence)
-            }
-            _ => None,
-        }
-    }
-
     pub(crate) fn into_payload(self) -> PreparedRuntimeSessionCommitPayload {
         self.payload
     }
@@ -4661,11 +4583,6 @@ impl PreparedWholeBlobSnapshot {
     #[must_use]
     pub(crate) fn session(&self) -> &meerkat_core::Session {
         self.session.as_ref()
-    }
-
-    #[must_use]
-    pub(crate) fn serialized(&self) -> &SerializedSessionSnapshot {
-        &self.serialized
     }
 
     #[must_use]

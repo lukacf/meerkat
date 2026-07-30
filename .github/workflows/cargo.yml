@@ -561,7 +561,7 @@ jobs:
           # Preserve the exact generated side of the failed comparison. This
           # turns drift diagnostics into actionable evidence for static-only
           # repair instead of requiring a second local Rust build.
-          target/debug/xtask machine-codegen --all
+          make machine-codegen
           exit 1
 
       - name: Upload fresh machine artifacts after drift failure

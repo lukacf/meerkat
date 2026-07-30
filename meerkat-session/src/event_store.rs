@@ -2804,7 +2804,6 @@ impl FileEventStore {
                 last_distinct_rewrite_seq = raw_rewrite.seq;
             }
             rewrite_rows.push(raw_rewrite);
-            rewrite_rows.push(raw_rewrite);
         }
         drop(lines);
         if offset != target.len {

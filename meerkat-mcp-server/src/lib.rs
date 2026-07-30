@@ -4769,7 +4769,6 @@ async fn handle_meerkat_resume(
             runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
                 meerkat_core::types::HandlingMode::Queue,
                 input.turn_tool_overlay.clone().map(Into::into),
-                Vec::new(),
                 Some(meerkat_runtime::runtime_stamped_prompt_turn_metadata(Some(
                     turn_seed_metadata,
                 ))),

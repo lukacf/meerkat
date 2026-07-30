@@ -66,6 +66,7 @@ use crate::traits::{
 };
 
 #[allow(clippy::expect_used)]
+#[cfg(test)]
 pub(crate) fn recover_projected_authority(
     state: dsl::MeerkatMachineState,
     context: &'static str,

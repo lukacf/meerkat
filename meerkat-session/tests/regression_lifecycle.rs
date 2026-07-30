@@ -1109,7 +1109,6 @@ async fn start_turn_forwards_handling_mode_and_render_metadata() {
                 runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
                     HandlingMode::Steer,
                     None,
-                    Vec::new(),
                     Some(
                         meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
                             render_metadata: Some(RenderMetadata {

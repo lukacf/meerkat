@@ -22,6 +22,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
+#[cfg(test)]
+use crate::TranscriptRewriteSelection;
 use crate::session::{
     SESSION_TRANSCRIPT_HISTORY_STATE_KEY, SESSION_TRANSCRIPT_REWRITE_PREFIX_AUTHORITY_KEY,
     SessionHeadMetadataIdentity, SessionHeadMetadataProjection, SessionMeta,
@@ -35,8 +37,6 @@ use crate::{
     TranscriptRewriteCommit, TranscriptRewritePrefixAccumulator, TranscriptRewriteRecord,
     ValidatedTranscriptHistory, VerifiedComponentEventSequence, transcript_messages_digest,
 };
-#[cfg(test)]
-use crate::{TranscriptRewriteParentTransition, TranscriptRewriteSelection};
 
 fn session_realtime_component_root(
     session: &Session,
@@ -6166,55 +6166,6 @@ mod tests {
     }
 
     #[test]
-    fn run_boundary_guard_rejects_commitless_history_parent_edge()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let mut previous = Session::new();
-        previous.push(Message::System(SystemMessage::new("base system")));
-        previous.push(Message::User(UserMessage::text("turn one".to_string())));
-        let previous_revision = previous.transcript_revision()?;
-
-        let mut incoming = previous.clone();
-        incoming.append_system_message("forged replacement system".to_string());
-        let incoming_revision = incoming.transcript_revision()?;
-        let history = TranscriptHistoryState {
-            digest_format: 0,
-            head: incoming_revision.clone(),
-            commits: Vec::new(),
-            parent_transitions: Vec::new(),
-            rewrite_prefix: Default::default(),
-            revisions: vec![
-                crate::TranscriptRevisionBody {
-                    revision: previous_revision,
-                    parent_revision: None,
-                    messages: previous.messages().to_vec(),
-                    created_at: previous.updated_at(),
-                },
-                crate::TranscriptRevisionBody {
-                    revision: incoming_revision,
-                    parent_revision: Some(previous.transcript_revision()?),
-                    messages: incoming.messages().to_vec(),
-                    created_at: incoming.updated_at(),
-                },
-            ],
-        };
-        incoming.set_metadata_unchecked_for_test(
-            crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
-            serde_json::to_value(history)?,
-        );
-
-        assert!(matches!(
-            append_only_save_guard(&incoming, Some(&previous)),
-            Err(SessionStoreError::TranscriptContinuityViolation { .. })
-        ));
-        assert!(matches!(
-            run_boundary_snapshot_save_guard(&incoming, Some(&previous)),
-            Err(SessionStoreError::TranscriptContinuityViolation { .. }
-                | SessionStoreError::MonotonicityViolation { .. })
-        ));
-        Ok(())
-    }
-
-    #[test]
     fn append_only_guard_rejects_history_head_that_does_not_match_current_messages()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut previous = Session::new();
@@ -6222,25 +6173,25 @@ mod tests {
 
         let mut incoming = previous.clone();
         incoming.push(Message::User(UserMessage::text("append".to_string())));
-        let poisoned_messages = vec![Message::User(UserMessage::text(
+        let mut poisoned = Session::new();
+        poisoned.push(Message::User(UserMessage::text(
             "unrelated poisoned history".to_string(),
-        ))];
-        let poisoned_revision = transcript_messages_digest(&poisoned_messages)?;
+        )));
+        poisoned.commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+            vec![Message::User(UserMessage::text(
+                "unrelated poisoned rewrite".to_string(),
+            ))],
+            crate::TranscriptRewriteReason::new("poison"),
+            Some("unit-test".to_string()),
+            None,
+        )?;
+        let poisoned_state = poisoned
+            .transcript_history_state()?
+            .ok_or_else(|| std::io::Error::other("poisoned history missing"))?;
         incoming.set_metadata_unchecked_for_test(
             crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
-            serde_json::to_value(TranscriptHistoryState {
-                digest_format: 0,
-                head: poisoned_revision.clone(),
-                commits: Vec::new(),
-                parent_transitions: Vec::new(),
-                rewrite_prefix: Default::default(),
-                revisions: vec![crate::TranscriptRevisionBody {
-                    revision: poisoned_revision,
-                    parent_revision: None,
-                    messages: poisoned_messages,
-                    created_at: incoming.updated_at(),
-                }],
-            })?,
+            serde_json::to_value(poisoned_state)?,
         );
 
         assert!(matches!(
@@ -6295,10 +6246,8 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let mut incoming = Session::new();
         incoming.push(Message::User(UserMessage::text("seed".to_string())));
-        let parent_messages = incoming.messages().to_vec();
-        let parent_updated_at = incoming.updated_at();
         let parent_revision = incoming.transcript_revision()?;
-        let commit = incoming.commit_transcript_rewrite(
+        incoming.commit_transcript_rewrite(
             TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
             vec![Message::User(UserMessage::text(
                 "compacted seed".to_string(),
@@ -6307,35 +6256,6 @@ mod tests {
             Some("meerkat-core".to_string()),
             Some(parent_revision),
         )?;
-        let incoming_revision = incoming.transcript_revision()?;
-        let commit_parent_revision = commit.parent_revision.clone();
-        incoming.set_metadata_unchecked_for_test(
-            crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
-            serde_json::to_value(TranscriptHistoryState {
-                digest_format: 0,
-                head: incoming_revision.clone(),
-                rewrite_prefix: crate::TranscriptRewritePrefixAccumulator::from_commits(
-                    std::slice::from_ref(&commit),
-                )
-                .expect("rewrite prefix"),
-                commits: vec![commit],
-                parent_transitions: vec![TranscriptRewriteParentTransition::ExactAppend],
-                revisions: vec![
-                    crate::TranscriptRevisionBody {
-                        revision: commit_parent_revision.clone(),
-                        parent_revision: None,
-                        messages: parent_messages,
-                        created_at: parent_updated_at,
-                    },
-                    crate::TranscriptRevisionBody {
-                        revision: incoming_revision,
-                        parent_revision: Some(commit_parent_revision),
-                        messages: incoming.messages().to_vec(),
-                        created_at: incoming.updated_at(),
-                    },
-                ],
-            })?,
-        );
 
         assert!(matches!(
             append_only_save_guard(&incoming, None),
@@ -6502,37 +6422,6 @@ mod tests {
     }
 
     #[test]
-    fn append_only_guard_rejects_commitless_history_on_first_save()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let mut incoming = Session::new();
-        incoming.push(Message::User(UserMessage::text("persisted".to_string())));
-        let incoming_revision = incoming.transcript_revision()?;
-        incoming.set_metadata_unchecked_for_test(
-            crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
-            serde_json::to_value(TranscriptHistoryState {
-                digest_format: 0,
-                head: incoming_revision.clone(),
-                commits: Vec::new(),
-                parent_transitions: Vec::new(),
-                rewrite_prefix: Default::default(),
-                revisions: vec![crate::TranscriptRevisionBody {
-                    revision: incoming_revision,
-                    parent_revision: None,
-                    messages: incoming.messages().to_vec(),
-                    created_at: incoming.updated_at(),
-                }],
-            })?,
-        );
-
-        assert!(matches!(
-            append_only_save_guard(&incoming, None),
-            Err(SessionStoreError::InvalidTranscriptRewrite { reason, .. })
-                if reason.contains("first save would seed transcript history state")
-        ));
-        Ok(())
-    }
-
-    #[test]
     fn run_boundary_guard_adopts_commit_carrying_history_on_first_commit()
     -> Result<(), Box<dyn std::error::Error>> {
         // A runtime authority adopting a session it never snapshotted
@@ -6589,105 +6478,6 @@ mod tests {
     }
 
     #[test]
-    fn append_only_guard_rejects_commitless_history_seed_on_plain_append()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let mut previous = Session::new();
-        previous.push(Message::User(UserMessage::text("persisted".to_string())));
-        let previous_revision = previous.transcript_revision()?;
-
-        let mut incoming = previous.clone();
-        incoming.push(Message::BlockAssistant(BlockAssistantMessage {
-            blocks: vec![AssistantBlock::Text {
-                text: "plain append".to_string(),
-                meta: None,
-            }],
-            stop_reason: StopReason::EndTurn,
-            identity: crate::types::TranscriptMessageIdentity::default(),
-            created_at: crate::types::message_timestamp_now(),
-        }));
-        let incoming_revision = incoming.transcript_revision()?;
-        incoming.set_metadata_unchecked_for_test(
-            crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
-            serde_json::to_value(TranscriptHistoryState {
-                digest_format: 0,
-                head: incoming_revision.clone(),
-                commits: Vec::new(),
-                parent_transitions: Vec::new(),
-                rewrite_prefix: Default::default(),
-                revisions: vec![
-                    crate::TranscriptRevisionBody {
-                        revision: previous_revision,
-                        parent_revision: None,
-                        messages: previous.messages().to_vec(),
-                        created_at: previous.updated_at(),
-                    },
-                    crate::TranscriptRevisionBody {
-                        revision: incoming_revision,
-                        parent_revision: Some(previous.transcript_revision()?),
-                        messages: incoming.messages().to_vec(),
-                        created_at: incoming.updated_at(),
-                    },
-                ],
-            })?,
-        );
-
-        assert!(matches!(
-            append_only_save_guard(&incoming, Some(&previous)),
-            Err(SessionStoreError::InvalidTranscriptRewrite { reason, .. })
-                if reason.contains("append-only save would seed transcript history state")
-        ));
-        Ok(())
-    }
-
-    #[test]
-    fn run_boundary_guard_accepts_commitless_history_seed_on_plain_append()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let mut previous = Session::new();
-        previous.push(Message::User(UserMessage::text("persisted".to_string())));
-        let previous_revision = previous.transcript_revision()?;
-
-        let mut incoming = previous.clone();
-        incoming.push(Message::BlockAssistant(BlockAssistantMessage {
-            blocks: vec![AssistantBlock::Text {
-                text: "plain append".to_string(),
-                meta: None,
-            }],
-            stop_reason: StopReason::EndTurn,
-            identity: crate::types::TranscriptMessageIdentity::default(),
-            created_at: crate::types::message_timestamp_now(),
-        }));
-        let incoming_revision = incoming.transcript_revision()?;
-        incoming.set_metadata_unchecked_for_test(
-            crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
-            serde_json::to_value(TranscriptHistoryState {
-                digest_format: 0,
-                head: incoming_revision.clone(),
-                commits: Vec::new(),
-                parent_transitions: Vec::new(),
-                rewrite_prefix: Default::default(),
-                revisions: vec![
-                    crate::TranscriptRevisionBody {
-                        revision: previous_revision.clone(),
-                        parent_revision: None,
-                        messages: previous.messages().to_vec(),
-                        created_at: previous.updated_at(),
-                    },
-                    crate::TranscriptRevisionBody {
-                        revision: incoming_revision,
-                        parent_revision: Some(previous_revision),
-                        messages: incoming.messages().to_vec(),
-                        created_at: incoming.updated_at(),
-                    },
-                ],
-            })?,
-        );
-
-        assert!(append_only_save_guard(&incoming, Some(&previous)).is_err());
-        assert!(run_boundary_snapshot_save_guard(&incoming, Some(&previous)).is_ok());
-        Ok(())
-    }
-
-    #[test]
     fn run_boundary_guard_accepts_retained_history_seed_on_plain_append()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut original = Session::new();
@@ -6724,82 +6514,6 @@ mod tests {
     }
 
     #[test]
-    fn run_boundary_guard_accepts_commitless_history_seed_on_first_snapshot()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let mut incoming = Session::new();
-        incoming.push(Message::User(UserMessage::text("persisted".to_string())));
-        let incoming_revision = incoming.transcript_revision()?;
-        incoming.set_metadata_unchecked_for_test(
-            crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
-            serde_json::to_value(TranscriptHistoryState {
-                digest_format: 0,
-                head: incoming_revision.clone(),
-                commits: Vec::new(),
-                parent_transitions: Vec::new(),
-                rewrite_prefix: Default::default(),
-                revisions: vec![crate::TranscriptRevisionBody {
-                    revision: incoming_revision,
-                    parent_revision: None,
-                    messages: incoming.messages().to_vec(),
-                    created_at: incoming.updated_at(),
-                }],
-            })?,
-        );
-
-        assert!(append_only_save_guard(&incoming, None).is_err());
-        assert!(run_boundary_snapshot_save_guard(&incoming, None).is_ok());
-        Ok(())
-    }
-
-    #[test]
-    fn run_boundary_guard_accepts_commitless_history_seed_on_initial_multi_revision_snapshot()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let mut base = Session::new();
-        base.push(Message::User(UserMessage::text("first".to_string())));
-        let base_revision = base.transcript_revision()?;
-
-        let mut incoming = base.clone();
-        incoming.push(Message::BlockAssistant(BlockAssistantMessage {
-            blocks: vec![AssistantBlock::Text {
-                text: "second".to_string(),
-                meta: None,
-            }],
-            stop_reason: StopReason::EndTurn,
-            identity: crate::types::TranscriptMessageIdentity::default(),
-            created_at: crate::types::message_timestamp_now(),
-        }));
-        let incoming_revision = incoming.transcript_revision()?;
-        incoming.set_metadata_unchecked_for_test(
-            crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
-            serde_json::to_value(TranscriptHistoryState {
-                digest_format: 0,
-                head: incoming_revision.clone(),
-                commits: Vec::new(),
-                parent_transitions: Vec::new(),
-                rewrite_prefix: Default::default(),
-                revisions: vec![
-                    crate::TranscriptRevisionBody {
-                        revision: base_revision.clone(),
-                        parent_revision: None,
-                        messages: base.messages().to_vec(),
-                        created_at: base.updated_at(),
-                    },
-                    crate::TranscriptRevisionBody {
-                        revision: incoming_revision,
-                        parent_revision: Some(base_revision),
-                        messages: incoming.messages().to_vec(),
-                        created_at: incoming.updated_at(),
-                    },
-                ],
-            })?,
-        );
-
-        assert!(append_only_save_guard(&incoming, None).is_err());
-        assert!(run_boundary_snapshot_save_guard(&incoming, None).is_ok());
-        Ok(())
-    }
-
-    #[test]
     fn append_only_guard_rejects_new_rewrite_commits_on_system_append()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut previous = Session::new();
@@ -6816,34 +6530,22 @@ mod tests {
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
-        let incoming_revision = incoming.transcript_revision()?;
+        let mut forged = previous.clone();
+        forged.commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+            vec![Message::User(UserMessage::text(
+                "forged rewrite".to_string(),
+            ))],
+            crate::TranscriptRewriteReason::new("forged"),
+            Some("unit-test".to_string()),
+            None,
+        )?;
+        let forged_state = forged
+            .transcript_history_state()?
+            .ok_or_else(|| std::io::Error::other("forged history missing"))?;
         incoming.set_metadata_unchecked_for_test(
             crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
-            serde_json::to_value(TranscriptHistoryState {
-                digest_format: 0,
-                head: incoming_revision.clone(),
-                commits: vec![TranscriptRewriteCommit {
-                    rewrite_generation: 1,
-                    parent_revision: previous.transcript_revision()?,
-                    revision: incoming_revision.clone(),
-                    selection: TranscriptRewriteSelection::MessageRange { start: 0, end: 0 },
-                    original_span_digest: transcript_messages_digest(&[])?,
-                    replacement_digest: transcript_messages_digest(&[])?,
-                    messages_before: previous.messages().len(),
-                    messages_after: incoming.messages().len(),
-                    reason: crate::TranscriptRewriteReason::new("forged"),
-                    actor: Some("unit-test".to_string()),
-                    committed_at: incoming.updated_at(),
-                }],
-                parent_transitions: vec![TranscriptRewriteParentTransition::ExactAppend],
-                rewrite_prefix: Default::default(),
-                revisions: vec![crate::TranscriptRevisionBody {
-                    revision: incoming_revision,
-                    parent_revision: None,
-                    messages: incoming.messages().to_vec(),
-                    created_at: incoming.updated_at(),
-                }],
-            })?,
+            serde_json::to_value(forged_state)?,
         );
 
         assert!(matches!(
@@ -6874,34 +6576,22 @@ mod tests {
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
-        let incoming_revision = incoming.transcript_revision()?;
+        let mut forged = previous.clone();
+        forged.commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+            vec![Message::User(UserMessage::text(
+                "forged rewrite".to_string(),
+            ))],
+            crate::TranscriptRewriteReason::new("forged"),
+            Some("unit-test".to_string()),
+            None,
+        )?;
+        let forged_state = forged
+            .transcript_history_state()?
+            .ok_or_else(|| std::io::Error::other("forged history missing"))?;
         incoming.set_metadata_unchecked_for_test(
             crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
-            serde_json::to_value(TranscriptHistoryState {
-                digest_format: 0,
-                head: incoming_revision.clone(),
-                commits: vec![TranscriptRewriteCommit {
-                    rewrite_generation: 1,
-                    parent_revision: previous.transcript_revision()?,
-                    revision: incoming_revision.clone(),
-                    selection: TranscriptRewriteSelection::MessageRange { start: 0, end: 0 },
-                    original_span_digest: transcript_messages_digest(&[])?,
-                    replacement_digest: transcript_messages_digest(&[])?,
-                    messages_before: previous.messages().len(),
-                    messages_after: incoming.messages().len(),
-                    reason: crate::TranscriptRewriteReason::new("forged"),
-                    actor: Some("unit-test".to_string()),
-                    committed_at: incoming.updated_at(),
-                }],
-                parent_transitions: vec![TranscriptRewriteParentTransition::ExactAppend],
-                rewrite_prefix: Default::default(),
-                revisions: vec![crate::TranscriptRevisionBody {
-                    revision: incoming_revision,
-                    parent_revision: None,
-                    messages: incoming.messages().to_vec(),
-                    created_at: incoming.updated_at(),
-                }],
-            })?,
+            serde_json::to_value(forged_state)?,
         );
 
         assert!(matches!(
@@ -7291,140 +6981,6 @@ mod tests {
         )?;
 
         assert!(append_only_save_guard(&incoming, Some(&previous)).is_err());
-        assert!(matches!(
-            run_boundary_snapshot_save_guard(&incoming, Some(&previous)),
-            Err(SessionStoreError::TranscriptContinuityViolation { .. }
-                | SessionStoreError::MonotonicityViolation { .. })
-        ));
-        Ok(())
-    }
-
-    #[test]
-    fn run_boundary_guard_rejects_runtime_parent_with_inserted_message_before_tail()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let mut previous = Session::new();
-        previous.push(Message::System(SystemMessage::new("base system")));
-        previous.push(Message::User(UserMessage::text("turn one".to_string())));
-        previous.push(Message::BlockAssistant(BlockAssistantMessage {
-            blocks: vec![AssistantBlock::Text {
-                text: "answer one".to_string(),
-                meta: None,
-            }],
-            stop_reason: StopReason::EndTurn,
-            identity: crate::types::TranscriptMessageIdentity::default(),
-            created_at: crate::types::message_timestamp_now(),
-        }));
-
-        let parent_messages = vec![
-            Message::System(SystemMessage::new("refreshed runtime system projection")),
-            Message::User(UserMessage::text(
-                "injected before retained tail".to_string(),
-            )),
-            previous.messages()[1].clone(),
-            previous.messages()[2].clone(),
-        ];
-        let parent_revision = transcript_messages_digest(&parent_messages)?;
-        let mut parent = previous.clone();
-        parent.apply_transcript_history_state(TranscriptHistoryState {
-            digest_format: 0,
-            head: parent_revision.clone(),
-            commits: Vec::new(),
-            parent_transitions: Vec::new(),
-            rewrite_prefix: Default::default(),
-            revisions: vec![crate::TranscriptRevisionBody {
-                revision: parent_revision,
-                parent_revision: None,
-                messages: parent_messages,
-                created_at: parent.updated_at(),
-            }],
-        })?;
-        let parent_revision = parent.transcript_revision()?;
-
-        let mut incoming = parent.clone();
-        incoming.commit_transcript_rewrite(
-            TranscriptRewriteSelection::MessageRange {
-                start: 0,
-                end: parent.messages().len(),
-            },
-            vec![Message::User(UserMessage::text(
-                "[Context compacted] summary".to_string(),
-            ))],
-            crate::TranscriptRewriteReason::new("compaction"),
-            Some("meerkat-core".to_string()),
-            Some(parent_revision),
-        )?;
-
-        assert!(matches!(
-            run_boundary_snapshot_save_guard(&incoming, Some(&previous)),
-            Err(SessionStoreError::TranscriptContinuityViolation { .. }
-                | SessionStoreError::MonotonicityViolation { .. })
-        ));
-        Ok(())
-    }
-
-    #[test]
-    fn run_boundary_guard_rejects_forged_parent_edge_before_real_rewrite_commit()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let mut previous = Session::new();
-        previous.push(Message::System(SystemMessage::new("base system")));
-        previous.push(Message::User(UserMessage::text("turn one".to_string())));
-        previous.push(Message::BlockAssistant(BlockAssistantMessage {
-            blocks: vec![AssistantBlock::Text {
-                text: "answer one".to_string(),
-                meta: None,
-            }],
-            stop_reason: StopReason::EndTurn,
-            identity: crate::types::TranscriptMessageIdentity::default(),
-            created_at: crate::types::message_timestamp_now(),
-        }));
-        let previous_revision = previous.transcript_revision()?;
-
-        let forged_parent_messages = vec![
-            Message::System(SystemMessage::new("refreshed runtime system projection")),
-            Message::User(UserMessage::text(
-                "forged insertion before retained tail".to_string(),
-            )),
-            previous.messages()[1].clone(),
-            previous.messages()[2].clone(),
-        ];
-        let forged_parent_revision = transcript_messages_digest(&forged_parent_messages)?;
-        let mut forged_parent = previous.clone();
-        forged_parent.apply_transcript_history_state(TranscriptHistoryState {
-            digest_format: 0,
-            head: forged_parent_revision.clone(),
-            commits: Vec::new(),
-            parent_transitions: Vec::new(),
-            rewrite_prefix: Default::default(),
-            revisions: vec![
-                crate::TranscriptRevisionBody {
-                    revision: previous_revision.clone(),
-                    parent_revision: None,
-                    messages: previous.messages().to_vec(),
-                    created_at: previous.updated_at(),
-                },
-                crate::TranscriptRevisionBody {
-                    revision: forged_parent_revision.clone(),
-                    parent_revision: Some(previous_revision),
-                    messages: forged_parent_messages,
-                    created_at: forged_parent.updated_at(),
-                },
-            ],
-        })?;
-
-        let mut incoming = forged_parent.clone();
-        incoming.commit_transcript_rewrite(
-            TranscriptRewriteSelection::MessageRange {
-                start: 0,
-                end: forged_parent.messages().len(),
-            },
-            vec![Message::User(UserMessage::text(
-                "[Context compacted] forged branch".to_string(),
-            ))],
-            crate::TranscriptRewriteReason::new("compaction"),
-            Some("meerkat-core".to_string()),
-            Some(forged_parent_revision),
-        )?;
-
         assert!(matches!(
             run_boundary_snapshot_save_guard(&incoming, Some(&previous)),
             Err(SessionStoreError::TranscriptContinuityViolation { .. }

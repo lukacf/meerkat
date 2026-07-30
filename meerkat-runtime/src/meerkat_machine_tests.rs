@@ -25829,7 +25829,8 @@ async fn cold_ensure_reconciles_runtime_authority_once_then_recovers_inputs_only
         .expect("load retained session snapshot")
         .expect("retained session snapshot remains present");
     assert_eq!(
-        retained_after, retained_snapshot,
+        retained_after.as_ref(),
+        &retained_snapshot,
         "runtime-shell convergence must not replace or rewrite session content",
     );
     let decoded_after: meerkat_core::Session =
@@ -26632,7 +26633,8 @@ async fn machine_terminal_carrier_validation_rejects_adversarial_witnesses_befor
                 receipt.conversation_digest = Some("00".repeat(32));
             }
         }
-        let session_snapshot = serde_json::to_vec(&session).expect("serialize adversarial session");
+        let session_commit =
+            BoundSessionCommit::sealed(Arc::new(session)).expect("seal adversarial session");
 
         let error = commit_machine_terminal_run(
             &driver,
@@ -26640,7 +26642,7 @@ async fn machine_terminal_carrier_validation_rejects_adversarial_witnesses_befor
             metadata,
             crate::meerkat_machine::driver::MachineTerminalAppliedDraft {
                 receipt,
-                session_snapshot,
+                session: session_commit,
             },
         )
         .await
@@ -26713,7 +26715,7 @@ async fn persistent_machine_terminal_atomic_failure_preserves_pre_commit_truth()
     mark_staged_runtime_turn_machine_failed(&driver, &run_id).await;
     let owner_session_id = SessionId::parse(&runtime_id.to_string())
         .expect("direct driver runtime id should be its session UUID alias");
-    let (session, session_snapshot) = failed_turn_session_snapshot(owner_session_id);
+    let (session, _) = failed_turn_session_snapshot(owner_session_id);
 
     let error = commit_machine_terminal_run(
         &driver,
@@ -26721,7 +26723,8 @@ async fn persistent_machine_terminal_atomic_failure_preserves_pre_commit_truth()
         machine_terminal_tool_failure(),
         crate::meerkat_machine::driver::MachineTerminalAppliedDraft {
             receipt: machine_terminal_receipt(run_id.clone(), vec![input_id.clone()], &session),
-            session_snapshot,
+            session: BoundSessionCommit::sealed(Arc::new(session))
+                .expect("seal failed-turn session"),
         },
     )
     .await
@@ -26789,7 +26792,8 @@ async fn persistent_machine_terminal_commit_recovers_consumed_input_and_failed_t
         machine_terminal_tool_failure(),
         crate::meerkat_machine::driver::MachineTerminalAppliedDraft {
             receipt: machine_terminal_receipt(run_id.clone(), vec![input_id.clone()], &session),
-            session_snapshot: session_snapshot.clone(),
+            session: BoundSessionCommit::sealed(Arc::new(session))
+                .expect("seal failed-turn session"),
         },
     )
     .await
@@ -40427,7 +40431,7 @@ async fn empty_compaction_outbox_skips_the_identity_checkpoint_cycle_after_commi
     .expect("recovery-form reconciliation succeeds");
     assert_eq!(
         checkpoint.as_deref(),
-        Some(seeded.as_slice()),
+        Some(&seeded),
         "recovery returns the reloaded authoritative snapshot"
     );
     assert_eq!(executor.reconcile_intent_counts, vec![0, 0]);

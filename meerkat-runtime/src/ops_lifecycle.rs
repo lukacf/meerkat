@@ -4148,7 +4148,7 @@ mod tests {
                 .complete_operation(
                     &operation_id,
                     OperationResult {
-                        id: operation_id,
+                        id: operation_id.clone(),
                         content: "done".into(),
                         is_error: false,
                         duration_ms: 1,
@@ -4190,7 +4190,7 @@ mod tests {
                 .complete_operation(
                     &operation_id,
                     OperationResult {
-                        id: operation_id,
+                        id: operation_id.clone(),
                         content: "done".into(),
                         is_error: false,
                         duration_ms: 1,

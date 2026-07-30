@@ -29,7 +29,6 @@
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use indexmap::IndexMap;
 use meerkat_core::BlobStore;
 #[allow(unused_imports)] // Used in read() fallback path
 use meerkat_core::Session;
@@ -91,7 +90,7 @@ use crate::ephemeral::{
     LiveSessionActorWitnessSlot, SessionAgentBuilder,
 };
 use crate::event_store::{
-    EventStore, EventStoreError, TranscriptRewriteAuditExpectation, TranscriptRewriteAuditRead,
+    EventStore, TranscriptRewriteAuditExpectation, TranscriptRewriteAuditRead,
     TranscriptRewritePrefixReceipt,
 };
 use crate::projector::SessionProjector;
@@ -762,6 +761,10 @@ struct StoreCheckpointer {
     /// store read must still equal it before a provisional successor may be
     /// written.
     whole_blob_base_authority: std::sync::Mutex<Option<WholeBlobStoreAuthority>>,
+    /// Latest exact store-issued provisional receipt awaiting terminal
+    /// promotion. Keeping the handoff on the checkpointer avoids exporting
+    /// and cloning the accumulated Session merely to recover authority.
+    latest_run_checkpoint_receipt: Mutex<Option<RunCheckpointReceipt>>,
 }
 
 async fn load_committed_whole_blob_session(
@@ -1064,6 +1067,34 @@ fn incremental_internal_error(message: String) -> SessionError {
 }
 
 impl StoreCheckpointer {
+    async fn run_checkpoint_receipt(
+        &self,
+        session_id: &SessionId,
+        expected_run_id: &RunId,
+    ) -> Result<Option<RunCheckpointReceipt>, AgentError> {
+        let _gate = self.gate.cancelled.lock().await;
+        let receipt_slot = self.latest_run_checkpoint_receipt.lock().await;
+        let Some(receipt) = receipt_slot.as_ref() else {
+            return Ok(None);
+        };
+        if receipt.session_id() != session_id {
+            return Err(AgentError::InternalError(format!(
+                "provisional receipt belongs to session {}, not terminal session {session_id}",
+                receipt.session_id()
+            )));
+        }
+        if receipt.run_id() != expected_run_id {
+            return Err(AgentError::InternalError(format!(
+                "provisional receipt belongs to run {}, not terminal run {expected_run_id}",
+                receipt.run_id()
+            )));
+        }
+        // Promotion is retryable and exact-idempotent. Retain the latest
+        // store-issued receipt until a later successful checkpoint replaces
+        // it, so a failed terminal boundary does not erase retry authority.
+        Ok(Some(receipt.clone()))
+    }
+
     async fn checkpoint_whole_blob(
         &self,
         session: &mut Session,
@@ -1688,6 +1719,9 @@ impl meerkat_core::SessionCheckpointer for StoreCheckpointer {
                 session.id()
             ))),
         };
+        if let Ok(receipt) = result.as_ref() {
+            *self.latest_run_checkpoint_receipt.lock().await = receipt.clone();
+        }
         drop(guard);
         result
     }
@@ -2453,7 +2487,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .map(|proved| proved.commits().cloned().collect::<Vec<_>>())
             .unwrap_or_default();
         let expectation = match proved {
-            Some(proved) if !bound_prefix_present => {
+            Some(_) if !bound_prefix_present => {
                 TranscriptRewriteAuditExpectation::LegacyGenerationZero {
                     expected_prefix,
                     ordered_commits: &proved_commits,
@@ -6159,7 +6193,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     "failed to read incoming transcript history for persistence: {err}"
                 )))
             })?;
-        let commits = match incoming_history.as_ref() {
+        let commits: Vec<meerkat_core::TranscriptRewriteCommit> = match incoming_history.as_ref() {
             Some(history) => history
                 .prove_commit_suffix_after(&previous_prefix)
                 .map_err(|error| {
@@ -6796,11 +6830,20 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     "run-bound provisional promotion for session {id} cannot consume control overrides"
                 ))));
             }
-            if let Some(receipt) = self
-                .inner
-                .take_run_checkpoint_receipt(id, expected_run_id)
-                .await?
-            {
+            let checkpointer = self
+                .live_checkpointers
+                .lock()
+                .await
+                .get(id)
+                .cloned()
+                .and_then(|checkpointer| checkpointer.upgrade());
+            if let Some(receipt) = match checkpointer {
+                Some(checkpointer) => checkpointer
+                    .run_checkpoint_receipt(id, expected_run_id)
+                    .await
+                    .map_err(SessionError::Agent)?,
+                None => None,
+            } {
                 let profile = self.runtime_store.session_persistence_profile();
                 let authority_token = match (profile, receipt.authority()) {
                     (
@@ -7695,6 +7738,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             blob_store: Arc::clone(&self.blob_store),
             gate: Arc::clone(&gate),
             whole_blob_base_authority: std::sync::Mutex::new(None),
+            latest_run_checkpoint_receipt: Mutex::new(None),
         });
         let requested_resume_session_id = req
             .build
@@ -8958,6 +9002,7 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
                         .map_err(SessionControlError::Session)?;
                     self.save_normalized_session(session)
                         .await
+                        .map(|_| ())
                         .map_err(SessionControlError::Session)
                 }
                 RuntimeSessionPersistenceProfile::HeadCanonicalV1 => {
@@ -9638,13 +9683,6 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 } = self
                     .prepare_runtime_boundary(id, "direct live session persistence", None)
                     .await?;
-                self.stage_runtime_context_events_for_commit(
-                    id,
-                    prepared_boundary.clone(),
-                    Vec::new(),
-                )
-                .await?;
-
                 let result = self
                     .runtime_store
                     .commit_prepared_session_boundary(

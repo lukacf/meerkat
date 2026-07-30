@@ -130,10 +130,22 @@ pub(crate) fn input_state_payload_is_retirable(state: &StoredInputState) -> bool
                 })
                 .unwrap_or(true)
         });
+    let has_compact_directed_attribution = state
+        .state
+        .interaction_terminal_outbox
+        .as_ref()
+        .is_none_or(|_| {
+            state
+                .state
+                .directed_run_started_attribution
+                .as_ref()
+                .is_some_and(|attribution| !attribution.content_digest().is_empty())
+        });
     lifecycle_terminal
         && completion_closed
         && publication_closed
         && !has_unmaterialized_directed_terminal
+        && has_compact_directed_attribution
 }
 
 #[cfg(test)]
@@ -6656,7 +6668,17 @@ pub(crate) fn pending_terminal_owner_fixture(
         phase,
     };
     outbox.validate().unwrap();
+    let directed_input = crate::mob_adapter::create_tracked_flow_step_input(
+        "fixture-step",
+        meerkat_core::types::ContentInput::Text("fixture-directed-input".to_string()),
+        "fixture-run",
+        None,
+        &input_id.to_string(),
+    )
+    .unwrap();
     let mut state = InputState::new_accepted(input_id);
+    state.directed_run_started_attribution =
+        crate::input_state::DirectedRunStartedAttribution::from_input(&directed_input).unwrap();
     state.interaction_terminal_outbox = Some(outbox);
     let stored = StoredInputState {
         state,

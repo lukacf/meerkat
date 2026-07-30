@@ -2026,6 +2026,18 @@ enum ArchivedResumeAuthorization {
     },
 }
 
+/// Authority carried by a caller-supplied actor seed.
+///
+/// A fresh runtime materialization uses `resume_session` only as the exact
+/// generation-zero actor seed; no durable row exists yet. Every recovery path
+/// instead treats the supplied Session as a locator and reloads the exact
+/// store-owned authority before actor construction.
+#[derive(Clone, Copy)]
+enum ActorSessionSeedAuthority {
+    FreshGenerationZero,
+    DurableCommitted,
+}
+
 impl ArchivedResumeAuthorization {
     fn allows_archived_resume(&self) -> bool {
         matches!(
@@ -4745,6 +4757,28 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         self.create_session_with_admission(
             req,
             Some(admission),
+            ActorSessionSeedAuthority::DurableCommitted,
+            ArchivedResumeAuthorization::RejectArchived,
+            false,
+            None,
+        )
+        .await
+    }
+
+    /// Materialize a machine-prepared fresh session whose supplied Session is
+    /// the exact generation-zero actor seed, not evidence of a prior durable
+    /// commit. WholeBlob still rejects an existing durable authority for the
+    /// same id before constructing the actor.
+    #[doc(hidden)]
+    pub async fn create_fresh_session_with_reserved_admission(
+        &self,
+        req: CreateSessionRequest,
+        admission: crate::ephemeral::RuntimeContextAdmissionGuard,
+    ) -> Result<RunResult, SessionError> {
+        self.create_session_with_admission(
+            req,
+            Some(admission),
+            ActorSessionSeedAuthority::FreshGenerationZero,
             ArchivedResumeAuthorization::RejectArchived,
             false,
             None,
@@ -4766,6 +4800,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         self.create_session_with_admission(
             req,
             Some(admission),
+            ActorSessionSeedAuthority::DurableCommitted,
             ArchivedResumeAuthorization::RejectArchived,
             false,
             Some(actor_witness_slot),
@@ -4787,6 +4822,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         self.create_session_with_admission(
             req,
             Some(admission),
+            ActorSessionSeedAuthority::DurableCommitted,
             ArchivedResumeAuthorization::RejectArchived,
             true,
             Some(actor_witness_slot),
@@ -4804,6 +4840,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         self.create_session_with_admission(
             req,
             Some(admission),
+            ActorSessionSeedAuthority::DurableCommitted,
             ArchivedResumeAuthorization::RejectArchived,
             true,
             None,
@@ -4820,6 +4857,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         self.create_session_with_admission(
             req,
             Some(admission),
+            ActorSessionSeedAuthority::DurableCommitted,
             ArchivedResumeAuthorization::MachinePendingPromotion { authorization },
             false,
             None,
@@ -4838,6 +4876,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         self.create_session_with_admission(
             req,
             Some(admission),
+            ActorSessionSeedAuthority::DurableCommitted,
             ArchivedResumeAuthorization::MachinePendingPromotion { authorization },
             true,
             None,
@@ -4858,6 +4897,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         self.create_session_with_admission(
             req,
             Some(admission),
+            ActorSessionSeedAuthority::DurableCommitted,
             ArchivedResumeAuthorization::MachinePendingPromotion { authorization },
             true,
             Some(actor_witness_slot),
@@ -7578,6 +7618,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         mut req: CreateSessionRequest,
         reserved_create_admission: Option<crate::ephemeral::RuntimeContextAdmissionGuard>,
+        actor_seed_authority: ActorSessionSeedAuthority,
         archived_resume_authorization: ArchivedResumeAuthorization,
         turn_boundary_already_held: bool,
         actor_witness_slot: Option<&LiveSessionActorWitnessSlot>,
@@ -7609,26 +7650,48 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             == RuntimeSessionPersistenceProfile::WholeBlobV1
             && let Some(resume_session_id) = requested_resume_session_id.as_ref()
         {
-            let (exact_session, exact_snapshot) = load_committed_whole_blob_session(
-                self.runtime_store.as_ref(),
-                resume_session_id,
-                "live actor materialization",
-            )
-            .await?
-            .ok_or_else(|| SessionError::NotFound {
-                id: resume_session_id.clone(),
-            })?;
-            req.build
-                .get_or_insert_with(Default::default)
-                .resume_session = Some(exact_session);
-            *checkpointer
-                .whole_blob_base_authority
-                .lock()
-                .map_err(|_| {
-                    SessionError::Agent(AgentError::InternalError(format!(
-                        "WholeBlob actor base authority lock is poisoned for session {resume_session_id}"
-                    )))
-                })? = Some(exact_snapshot.authority().clone());
+            match actor_seed_authority {
+                ActorSessionSeedAuthority::DurableCommitted => {
+                    let (exact_session, exact_snapshot) = load_committed_whole_blob_session(
+                        self.runtime_store.as_ref(),
+                        resume_session_id,
+                        "live actor materialization",
+                    )
+                    .await?
+                    .ok_or_else(|| SessionError::NotFound {
+                        id: resume_session_id.clone(),
+                    })?;
+                    req.build
+                        .get_or_insert_with(Default::default)
+                        .resume_session = Some(exact_session);
+                    *checkpointer
+                        .whole_blob_base_authority
+                        .lock()
+                        .map_err(|_| {
+                            SessionError::Agent(AgentError::InternalError(format!(
+                                "WholeBlob actor base authority lock is poisoned for session {resume_session_id}"
+                            )))
+                        })? = Some(exact_snapshot.authority().clone());
+                }
+                ActorSessionSeedAuthority::FreshGenerationZero => {
+                    let runtime_id = Self::runtime_id_for_session(resume_session_id);
+                    if self
+                        .runtime_store
+                        .load_whole_blob_store_authority(&runtime_id)
+                        .await
+                        .map_err(|error| {
+                            SessionError::Agent(AgentError::InternalError(format!(
+                                "failed to prove fresh WholeBlob materialization for session {resume_session_id}: {error}"
+                            )))
+                        })?
+                        .is_some()
+                    {
+                        return Err(SessionError::Agent(AgentError::InternalError(format!(
+                            "fresh WholeBlob materialization conflicts with existing durable authority for session {resume_session_id}"
+                        ))));
+                    }
+                }
+            }
         }
         let (resume_session_id, resume_session) = {
             let build = req.build.get_or_insert_with(Default::default);
@@ -8192,6 +8255,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         self.create_session_with_admission(
             req,
             None,
+            ActorSessionSeedAuthority::DurableCommitted,
             ArchivedResumeAuthorization::RejectArchived,
             false,
             None,

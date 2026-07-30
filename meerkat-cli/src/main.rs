@@ -20073,6 +20073,7 @@ default_model = "gemma"
                 content: meerkat_core::lifecycle::run_primitive::CoreRenderable::Text {
                     text: "hello".to_string(),
                 },
+                identity: None,
             },
         );
         let run_id = meerkat_core::lifecycle::RunId::new();
@@ -20148,6 +20149,7 @@ default_model = "gemma"
                 content: meerkat_core::lifecycle::run_primitive::CoreRenderable::Text {
                     text: "hello".to_string(),
                 },
+                identity: None,
             },
         );
         let run_id = meerkat_core::lifecycle::RunId::new();

@@ -3636,6 +3636,9 @@ impl EphemeralRuntimeDriver {
         let mut state = InputState::new_accepted(input_id.clone());
         state.durability = Some(input.header().durability);
         state.idempotency_key = input.header().idempotency_key.clone();
+        state.directed_run_started_attribution =
+            crate::input_state::DirectedRunStartedAttribution::from_input(&input)
+                .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
         let existing_superseded_id = self.existing_superseded_input(&input).map(|(id, _)| id);
         let authority = MachineAdmissionAuthority::new(
             input_id.to_string(),

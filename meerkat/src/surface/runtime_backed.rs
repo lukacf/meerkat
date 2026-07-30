@@ -590,7 +590,7 @@ async fn materialize_unique_session_actor_transaction_with_admission<
     let (request, initial_turn) = split_runtime_backed_eager_create_request(request);
 
     let create_result = service
-        .create_session_with_reserved_admission(request, reserved_admission)
+        .create_fresh_session_with_reserved_admission(request, reserved_admission)
         .await;
     let result = match create_result {
         Ok(result) => result,

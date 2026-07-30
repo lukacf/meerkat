@@ -40,8 +40,9 @@ use meerkat_core::service::{
     SessionUsage, SessionView, StartTurnRequest, TurnToolOverlay,
 };
 use meerkat_core::types::{
-    ContentBlock, ContentInput, HandlingMode, Message, RunResult, SessionId, SystemNoticeBlock,
-    SystemNoticeMessage, ToolCallView, ToolDef, ToolProvenance, ToolResult, Usage,
+    CommsNoticeKind, ContentBlock, ContentInput, HandlingMode, Message, RunResult, SessionId,
+    SystemNoticeBlock, SystemNoticeDirection, SystemNoticeKind, SystemNoticeMessage, ToolCallView,
+    ToolDef, ToolProvenance, ToolResult, Usage,
 };
 use meerkat_core::{
     AgentToolDispatcher, AppendSystemContextStatus, EventInjector, EventInjectorError,
@@ -12465,7 +12466,10 @@ async fn test_destroy_retire_admission_failure_after_marker_retains_retry_anchor
     assert!(
         report.errors.iter().any(|error| {
             error.contains("destroy retire admission failed")
-                && error.contains("is not registered with this MeerkatMachine")
+                && error.contains(
+                    "cannot accept routed input until its persistent runtime is cold reloaded",
+                )
+                && error.contains("destroyed")
         }),
         "destroy should surface the failed retire admission: {report:?}"
     );
@@ -40766,32 +40770,51 @@ impl RuntimeBackedRealCommsSessionService {
 }
 
 fn provider_visible_prompt_from_start_turn_request(req: &StartTurnRequest) -> ContentInput {
-    let mut blocks = req.prompt.clone().into_blocks();
+    let mut blocks = if req.runtime.typed_turn_appends.is_empty() {
+        req.prompt.clone().into_blocks()
+    } else {
+        Vec::new()
+    };
     for append in &req.runtime.typed_turn_appends {
-        let meerkat_core::lifecycle::run_primitive::CoreRenderable::SystemNotice {
-            kind,
-            body,
-            blocks: notice_blocks,
-        } = &append.content
-        else {
+        if !matches!(
+            append.role,
+            meerkat_core::lifecycle::run_primitive::ConversationAppendRole::System
+                | meerkat_core::lifecycle::run_primitive::ConversationAppendRole::SystemNotice
+                | meerkat_core::lifecycle::run_primitive::ConversationAppendRole::User
+                | meerkat_core::lifecycle::run_primitive::ConversationAppendRole::InjectedContext
+        ) {
             continue;
-        };
-        let projection =
-            SystemNoticeMessage::with_blocks(*kind, body.clone(), notice_blocks.clone())
-                .model_projection_text();
-        if !projection.trim().is_empty() {
-            blocks.push(ContentBlock::Text { text: projection });
         }
-        for notice_block in notice_blocks {
-            let content = match notice_block {
-                SystemNoticeBlock::Comms { content, .. }
-                | SystemNoticeBlock::ExternalEvent { content, .. } => content,
-                _ => continue,
-            };
-            blocks.extend(content.iter().filter_map(|block| match block {
-                ContentBlock::Image { .. } | ContentBlock::Video { .. } => Some(block.clone()),
-                ContentBlock::Text { .. } | _ => None,
-            }));
+        match &append.content {
+            meerkat_core::lifecycle::run_primitive::CoreRenderable::Blocks {
+                blocks: append_blocks,
+            } => blocks.extend(append_blocks.iter().cloned()),
+            meerkat_core::lifecycle::run_primitive::CoreRenderable::SystemNotice {
+                kind,
+                body,
+                blocks: notice_blocks,
+            } => {
+                let projection =
+                    SystemNoticeMessage::with_blocks(*kind, body.clone(), notice_blocks.clone())
+                        .model_projection_text();
+                blocks.push(ContentBlock::Text { text: projection });
+                for notice_block in notice_blocks {
+                    let content = match notice_block {
+                        SystemNoticeBlock::Comms { content, .. }
+                        | SystemNoticeBlock::ExternalEvent { content, .. } => content,
+                        _ => continue,
+                    };
+                    blocks.extend(content.iter().filter_map(|block| match block {
+                        ContentBlock::Image { .. } | ContentBlock::Video { .. } => {
+                            Some(block.clone())
+                        }
+                        ContentBlock::Text { .. } | _ => None,
+                    }));
+                }
+            }
+            content => blocks.push(ContentBlock::Text {
+                text: content.render_text(),
+            }),
         }
     }
     if blocks.len() == 1
@@ -40800,6 +40823,41 @@ fn provider_visible_prompt_from_start_turn_request(req: &StartTurnRequest) -> Co
         return ContentInput::Text(text);
     }
     ContentInput::Blocks(blocks)
+}
+
+fn is_incoming_terminal_peer_response(
+    append: &AppendSystemContextRequest,
+    expected_peer_id: &str,
+    expected_display_name: &str,
+    expected_request_id: &str,
+    expected_payload: &serde_json::Value,
+) -> bool {
+    let meerkat_core::lifecycle::run_primitive::CoreRenderable::SystemNotice {
+        kind: SystemNoticeKind::Comms,
+        blocks,
+        ..
+    } = &append.content
+    else {
+        return false;
+    };
+    blocks.iter().any(|block| {
+        matches!(
+            block,
+            SystemNoticeBlock::Comms {
+                kind: CommsNoticeKind::ResponseTerminal,
+                direction: SystemNoticeDirection::Incoming,
+                peer: Some(peer),
+                request_id: Some(request_id),
+                status: Some(status),
+                payload: Some(payload),
+                ..
+            } if peer.id.to_string() == expected_peer_id
+                && peer.display_name.as_deref() == Some(expected_display_name)
+                && request_id == expected_request_id
+                && status == "Completed"
+                && payload == expected_payload
+        )
+    })
 }
 
 #[async_trait]
@@ -43146,8 +43204,8 @@ async fn test_peer_response_reaches_requester_in_runtime_backed_real_comms() {
     .await
     .expect("peer response should succeed");
 
-    let requester_response_source =
-        format!("peer_response_terminal:{responder_route_identity}:{request_id}");
+    let requester_response_request_id = request_id.to_string();
+    let requester_response_payload = serde_json::json!({"interpretation":"lighthouse"});
     let requester_response_delivery = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             let appends = service.applied_runtime_system_appends(&sid_requester).await;
@@ -43155,15 +43213,13 @@ async fn test_peer_response_reaches_requester_in_runtime_backed_real_comms() {
                 .iter()
                 .skip(requester_context_baseline)
                 .any(|append| {
-                    let text = append.text();
-                    let source = append.source.as_deref().unwrap_or_default();
-                    let idempotency_key = append.idempotency_key.as_deref().unwrap_or_default();
-                    text.contains("Peer terminal response from")
-                        && text.contains("from test-mob/worker/w-responder")
-                        && text.contains("lighthouse")
-                        && text.contains(&format!("Request ID: {request_id}"))
-                        && source == requester_response_source
-                        && idempotency_key == source
+                    is_incoming_terminal_peer_response(
+                        append,
+                        &responder_route_identity,
+                        &responder_display_identity,
+                        &requester_response_request_id,
+                        &requester_response_payload,
+                    )
                 })
             {
                 break;
@@ -43229,8 +43285,8 @@ async fn test_peer_response_reaches_requester_in_runtime_backed_real_comms() {
         .skip(requester_prompt_baseline)
         .filter(|prompt| {
             let text = prompt.text_content();
-            text.contains("Peer terminal response from")
-                && text.contains(&format!("Request ID: {request_id}"))
+            text.contains("Peer response from")
+                && text.contains(&format!("(to request: {request_id})"))
         })
         .collect::<Vec<_>>();
     assert_eq!(
@@ -43306,8 +43362,13 @@ async fn test_peer_response_reaches_requester_in_runtime_backed_real_comms() {
     let response_context_count = requester_contexts
         .iter()
         .filter(|append| {
-            append.source.as_deref() == Some(requester_response_source.as_str())
-                && append.idempotency_key.as_deref() == Some(requester_response_source.as_str())
+            is_incoming_terminal_peer_response(
+                append,
+                &responder_route_identity,
+                &responder_display_identity,
+                &requester_response_request_id,
+                &requester_response_payload,
+            )
         })
         .count();
     assert_eq!(
@@ -43389,6 +43450,8 @@ async fn test_default_peer_response_inherits_request_steer_while_requester_runni
         .real_comms(&sid_responder)
         .await
         .expect("responder comms");
+    let responder_route_identity = responder_comms.public_key().to_peer_id().to_string();
+    let responder_display_identity = test_comms_name("worker", "w-running-responder");
 
     let requester_runtime_started_notify = service
         .arm_runtime_turn_prompt_barrier(&sid_requester, "body: keep requester busy")
@@ -43505,12 +43568,9 @@ async fn test_default_peer_response_inherits_request_steer_while_requester_runni
 
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(
-        service
-            .applied_runtime_system_appends(&sid_requester)
-            .await
-            .len(),
-        requester_context_baseline,
-        "default response to a steer request should wait for the requester boundary, not cancel the active run"
+        service.applied_runtime_prompts(&sid_requester).await.len(),
+        requester_prompt_baseline + 1,
+        "default response to a steer request must not start another apply or cancel the active run"
     );
 
     service
@@ -43518,6 +43578,8 @@ async fn test_default_peer_response_inherits_request_steer_while_requester_runni
         .await
         .expect("boundary release should let requester drain steered response");
 
+    let requester_response_request_id = request_id.to_string();
+    let requester_response_payload = serde_json::json!({"message":"pong"});
     let requester_delivery = tokio::time::timeout(delivery_observation_timeout, async {
         loop {
             let appends = service.applied_runtime_system_appends(&sid_requester).await;
@@ -43525,9 +43587,13 @@ async fn test_default_peer_response_inherits_request_steer_while_requester_runni
                 .iter()
                 .skip(requester_context_baseline)
                 .any(|append| {
-                    append.text().contains("Peer terminal response from")
-                        && append.text().contains(&format!("Request ID: {request_id}"))
-                        && append.text().contains("\"message\": \"pong\"")
+                    is_incoming_terminal_peer_response(
+                        append,
+                        &responder_route_identity,
+                        &responder_display_identity,
+                        &requester_response_request_id,
+                        &requester_response_payload,
+                    )
                 })
             {
                 break;
@@ -43682,6 +43748,14 @@ async fn test_mcp_send_request_response_terminal_steer_is_visible_to_requester()
     assert_eq!(response_result["kind"], "peer_response");
     assert_eq!(response_result["status"], "sent");
 
+    let responder_peer_id = responder_peer_id.to_string();
+    let responder_display_name = test_comms_name("worker", "w-mcp-responder");
+    let requester_response_request_id = request_id.to_string();
+    let requester_response_payload = serde_json::json!({
+        "request_intent": "checksum_token",
+        "request_subject": "alpha beta gamma",
+        "token": "birch seventeen"
+    });
     let requester_terminal_context = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let appends = service.applied_runtime_system_appends(&sid_requester).await;
@@ -43689,19 +43763,13 @@ async fn test_mcp_send_request_response_terminal_steer_is_visible_to_requester()
                 .iter()
                 .skip(requester_context_baseline)
                 .find(|append| {
-                    append.text().contains("Peer terminal response from")
-                        && append
-                            .text()
-                            .contains("from test-mob/worker/w-mcp-responder")
-                        && append.text().contains(&format!("Request ID: {request_id}"))
-                        && append.text().contains("Status: completed")
-                        && append
-                            .text()
-                            .contains("\"request_intent\": \"checksum_token\"")
-                        && append
-                            .text()
-                            .contains("\"request_subject\": \"alpha beta gamma\"")
-                        && append.text().contains("\"token\": \"birch seventeen\"")
+                    is_incoming_terminal_peer_response(
+                        append,
+                        &responder_peer_id,
+                        &responder_display_name,
+                        &requester_response_request_id,
+                        &requester_response_payload,
+                    )
                 })
                 .cloned()
             {
@@ -43725,14 +43793,13 @@ async fn test_mcp_send_request_response_terminal_steer_is_visible_to_requester()
         }
     };
 
-    let expected_context_key = format!("peer_response_terminal:{responder_peer_id}:{request_id}");
     assert_eq!(
-        requester_terminal_context.source.as_deref(),
-        Some(expected_context_key.as_str())
+        requester_terminal_context.source, None,
+        "typed peer-response input authority, not a synthetic message key, owns deduplication"
     );
     assert_eq!(
-        requester_terminal_context.idempotency_key.as_deref(),
-        Some(expected_context_key.as_str())
+        requester_terminal_context.idempotency_key, None,
+        "ordinary ordered transcript messages must not recover the retired sidecar identity"
     );
 
     let requester_snapshot = service

@@ -1379,6 +1379,18 @@ pub(crate) struct MemberEffectAuthorityGuard {
     _session_guard: crate::tokio::sync::OwnedMutexGuard<()>,
 }
 
+/// Exact residency plus registration-stability interval for member live/open.
+///
+/// Unlike an ordinary member effect, live/open must acquire the dedicated
+/// live-lifecycle gate and then call back into machine mutations. Holding the
+/// session mutation gate here would deadlock that canonical pipeline. The
+/// stable residency slot prevents generation cutover, while the registration
+/// transaction prevents unregister or same-id replacement until open returns.
+pub(crate) struct MemberLiveOpenAuthorityGuard {
+    _slot_guard: crate::tokio::sync::OwnedMutexGuard<()>,
+    _registration_guard: crate::tokio::sync::OwnedMutexGuard<()>,
+}
+
 impl MemberResidencySlot {
     fn peer_only() -> Self {
         Self {
@@ -6363,6 +6375,58 @@ impl MeerkatMachine {
     ) -> Result<MemberEffectAuthorityGuard, RuntimeDriverError> {
         self.lock_optional_member_effect_authority(session_id, Some(expected))
             .await
+    }
+
+    /// Acquire the non-reentrant authority interval required by member
+    /// live/open. This deliberately does not take `mutation_gate`: the shared
+    /// live pipeline owns lifecycle -> mutation ordering internally.
+    pub(crate) async fn lock_member_live_open_authority(
+        &self,
+        session_id: &SessionId,
+        expected: &meerkat_contracts::wire::supervisor_bridge::BridgeMemberIncarnation,
+    ) -> Result<MemberLiveOpenAuthorityGuard, RuntimeDriverError> {
+        let lease = self
+            .acquire_member_effect_authority_lease(session_id, Some(expected))
+            .await?;
+        let MemberEffectAuthorityLease {
+            slot_guard,
+            session_mutation_gate,
+            ..
+        } = lease;
+        let registration_guard = self.lock_session_registration_transaction(session_id).await;
+        {
+            let sessions = self.sessions.read().await;
+            let Some(entry) = sessions.get(session_id) else {
+                return Err(RuntimeDriverError::StaleAuthority {
+                    reason: format!(
+                        "member live/open expected incarnation {expected:?}; runtime session is absent"
+                    ),
+                });
+            };
+            if !Arc::ptr_eq(&entry.mutation_gate, &session_mutation_gate) {
+                return Err(RuntimeDriverError::StaleAuthority {
+                    reason: format!(
+                        "member live/open expected incarnation {expected:?}; runtime session was replaced"
+                    ),
+                });
+            }
+            entry.require_durability_ready().map_err(|required| {
+                RuntimeDriverError::RecoveryRepairBlocked {
+                    evidence_digest: None,
+                    reason: required.to_string(),
+                }
+            })?;
+        }
+        let state = self
+            .existing_session_runtime_state(session_id)
+            .await
+            .unwrap_or(RuntimeState::Destroyed);
+        self.reject_unregistration_drain_ingress(session_id, state)
+            .await?;
+        Ok(MemberLiveOpenAuthorityGuard {
+            _slot_guard: slot_guard,
+            _registration_guard: registration_guard,
+        })
     }
 
     /// The peer-only sibling of [`Self::lock_member_effect_authority`]. A

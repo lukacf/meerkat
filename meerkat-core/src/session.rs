@@ -6195,11 +6195,11 @@ mod tests {
             subject.push(message.clone());
 
             // Force the control down the full validating path.
-            let value = control
-                .metadata()
-                .get(SESSION_TRANSCRIPT_HISTORY_STATE_KEY)
-                .cloned()
-                .ok_or_else(|| std::io::Error::other("control history missing"))?;
+            let value = serde_json::to_value(
+                control
+                    .transcript_history_state()?
+                    .ok_or_else(|| std::io::Error::other("control history missing"))?,
+            )?;
             control.set_metadata_unchecked_for_test(SESSION_TRANSCRIPT_HISTORY_STATE_KEY, value);
             control.transcript_history_metadata_validation =
                 TranscriptHistoryMetadataValidation::RequiresValidation;
@@ -8420,7 +8420,6 @@ mod tests {
             )
             .expect("rewrite should commit");
 
-        std::thread::sleep(std::time::Duration::from_millis(2));
         let restore = session
             .commit_transcript_rewrite(
                 TranscriptRewriteSelection::MessageRange {
@@ -8443,9 +8442,9 @@ mod tests {
             .materialize_revision(&restore.revision)
             .expect("restored body should be retained")
             .created_at;
-        assert!(
-            restored_body_created_at < restore.committed_at,
-            "test requires restore commit to be newer than retained body"
+        assert_eq!(
+            restored_body_created_at, restore.committed_at,
+            "restoring a repeated revision selects its latest occurrence timestamp"
         );
 
         let mut replayed = Session::new();

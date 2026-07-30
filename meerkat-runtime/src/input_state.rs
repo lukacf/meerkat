@@ -23,7 +23,7 @@ use meerkat_core::types::{HandlingMode, SessionId};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::identifiers::PolicyVersion;
+use crate::identifiers::{InputKind, PolicyVersion};
 use crate::ingress_types::RuntimeInputSemantics;
 use crate::input::Input;
 use crate::policy::PolicyDecision;
@@ -1038,6 +1038,21 @@ pub struct StoredInputState {
     pub seed: InputStateSeed,
 }
 
+/// Runtime-issued proof that an exact directed interaction terminal was
+/// durably published. The private fields prevent consumers from fabricating
+/// proof out of public input-shell metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishedDirectedTerminalBinding {
+    input_id: InputId,
+    interaction_id: InteractionId,
+}
+
+impl PublishedDirectedTerminalBinding {
+    pub fn binds(&self, input_id: &InputId, interaction_id: InteractionId) -> bool {
+        &self.input_id == input_id && self.interaction_id == interaction_id
+    }
+}
+
 impl StoredInputState {
     /// Convenience: freshly-accepted bundle.
     pub fn new_accepted(input_id: InputId) -> Self {
@@ -1045,6 +1060,27 @@ impl StoredInputState {
             state: InputState::new_accepted(input_id),
             seed: InputStateSeed::new_accepted(),
         }
+    }
+
+    /// Return a sealed compact binding only after the runtime-private terminal
+    /// outbox validates and carries its durable publication receipt.
+    pub fn published_directed_terminal_binding(
+        &self,
+    ) -> Result<Option<PublishedDirectedTerminalBinding>, String> {
+        let Some(outbox) = self.state.interaction_terminal_outbox.as_ref() else {
+            return Ok(None);
+        };
+        outbox.validate()?;
+        if !matches!(
+            outbox.phase,
+            InteractionTerminalOutboxPhase::Published { .. }
+        ) {
+            return Ok(None);
+        }
+        Ok(Some(PublishedDirectedTerminalBinding {
+            input_id: outbox.input_id.clone(),
+            interaction_id: outbox.interaction_id,
+        }))
     }
 }
 
@@ -1192,6 +1228,69 @@ impl InputStatePersistenceRecord {
 /// `input_last_boundary_sequence` / `input_terminal_outcome` /
 /// `input_attempt_count` / `input_recovery_lane`. Persistence callsites
 /// serialize them via [`InputStateSeed`] bundled on [`StoredInputState`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DirectedInputKind {
+    FlowStep,
+    PeerMessage,
+}
+
+impl DirectedInputKind {
+    pub fn input_kind(self) -> InputKind {
+        match self {
+            Self::FlowStep => InputKind::FlowStep,
+            Self::PeerMessage => InputKind::PeerMessage,
+        }
+    }
+}
+
+/// Compact admission-stamped identity retained after a directed input's
+/// O(payload) replay material is retired.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectedRunStartedAttribution {
+    kind: DirectedInputKind,
+    content_digest: String,
+}
+
+impl DirectedRunStartedAttribution {
+    /// Derive attribution only from a fully validated directed input. Ordinary
+    /// FlowStep and PeerMessage inputs return `None`.
+    pub fn from_input(input: &Input) -> Result<Option<Self>, String> {
+        if crate::input::validated_directed_interaction_id(input)?.is_none() {
+            return Ok(None);
+        }
+        let kind = match input.kind() {
+            InputKind::FlowStep => DirectedInputKind::FlowStep,
+            InputKind::PeerMessage => DirectedInputKind::PeerMessage,
+            other => {
+                return Err(format!(
+                    "directed interaction custody belongs to unsupported {other:?} input kind"
+                ));
+            }
+        };
+        let content_digest = crate::input::directed_input_run_started_content_digest(input)?;
+        Ok(Some(Self {
+            kind,
+            content_digest,
+        }))
+    }
+
+    pub fn kind(&self) -> DirectedInputKind {
+        self.kind
+    }
+
+    pub fn content_digest(&self) -> &str {
+        &self.content_digest
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.content_digest.is_empty() {
+            return Err("directed RunStarted attribution digest is empty".to_string());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct InputState {
     pub input_id: InputId,
@@ -1201,6 +1300,11 @@ pub struct InputState {
     /// Runtime-stamped run semantics captured at admission and persisted so
     /// recovery does not reclassify execution kind from payload shape.
     pub runtime_semantics: Option<RuntimeInputSemantics>,
+    /// Typed input family plus digest of the exact canonical `RunStarted`
+    /// content for a directed FlowStep/Peer input. This compact witness
+    /// survives terminal payload retirement and binds host-journal
+    /// reconstruction without retaining the original O(payload) input.
+    pub directed_run_started_attribution: Option<DirectedRunStartedAttribution>,
     pub durability: Option<crate::input::InputDurability>,
     pub idempotency_key: Option<crate::identifiers::IdempotencyKey>,
     pub recovery_count: u32,
@@ -1237,6 +1341,7 @@ impl InputState {
             updated_at: now,
             policy: None,
             runtime_semantics: None,
+            directed_run_started_attribution: None,
             durability: None,
             idempotency_key: None,
             recovery_count: 0,
@@ -1264,11 +1369,11 @@ impl InputState {
 //
 // `InputStateSerde` is the on-disk contract exercised by
 // `recovery_contract`, `recovery_replay`, and `driver_persistent` tests.
-// Field names, types, defaults, and `skip_serializing_if` markers are kept
-// verbatim from the pre-5G/1 release. Since `InputState` no longer owns the
-// three DSL-authoritative fields, serialization flows through
-// [`StoredInputState`] where shell + seed can be bundled into the wire
-// struct.
+// Legacy field names, types, defaults, and `skip_serializing_if` markers stay
+// stable. The v5 compact directed attribution is additive and defaults absent
+// while v3/v4 rows derive it from their still-retained replay payload.
+// Serialization flows through [`StoredInputState`] so shell + generated seed
+// facts remain one store-bound wire row.
 
 fn is_false(value: &bool) -> bool {
     !*value
@@ -1283,6 +1388,8 @@ struct InputStateSerde {
     policy: Option<PolicySnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     runtime_semantics: Option<RuntimeInputSemantics>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    directed_run_started_attribution: Option<DirectedRunStartedAttribution>,
     #[serde(skip_serializing_if = "Option::is_none")]
     terminal_outcome: Option<InputTerminalOutcome>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1334,6 +1441,10 @@ impl Serialize for StoredInputState {
             current_state: self.seed.phase,
             policy: self.state.policy.clone(),
             runtime_semantics: self.state.runtime_semantics,
+            directed_run_started_attribution: self
+                .state
+                .directed_run_started_attribution
+                .clone(),
             terminal_outcome: self.seed.terminal_outcome.clone(),
             durability: self.state.durability,
             idempotency_key: self.state.idempotency_key.clone(),
@@ -1375,6 +1486,13 @@ impl<'de> Deserialize<'de> for StoredInputState {
                 "stored input state before v5 cannot carry a completion-unavailable marker",
             ));
         }
+        if observed_stored_input_state_version < 5
+            && helper.directed_run_started_attribution.is_some()
+        {
+            return Err(<D::Error as serde::de::Error>::custom(
+                "stored input state before v5 cannot carry compact directed attribution",
+            ));
+        }
         if observed_stored_input_state_version == 3 && helper.interaction_terminal_outbox.is_some()
         {
             return Err(<D::Error as serde::de::Error>::custom(
@@ -1408,12 +1526,44 @@ impl<'de> Deserialize<'de> for StoredInputState {
                 "terminal completion unavailable marker has an invalid v5 shape",
             ));
         }
+        if let Some(stored) = helper.directed_run_started_attribution.as_ref() {
+            stored
+                .validate()
+                .map_err(<D::Error as serde::de::Error>::custom)?;
+        }
+        let payload_directed_attribution = helper
+            .persisted_input
+            .as_ref()
+            .map(DirectedRunStartedAttribution::from_input)
+            .transpose()
+            .map_err(<D::Error as serde::de::Error>::custom)?
+            .flatten();
+        if helper.directed_run_started_attribution.is_some()
+            && helper.persisted_input.is_some()
+            && payload_directed_attribution.is_none()
+        {
+            return Err(<D::Error as serde::de::Error>::custom(
+                "stored directed RunStarted attribution belongs to a non-directed replay payload",
+            ));
+        }
+        if helper.directed_run_started_attribution.is_some()
+            && payload_directed_attribution.is_some()
+            && helper.directed_run_started_attribution != payload_directed_attribution
+        {
+            return Err(<D::Error as serde::de::Error>::custom(
+                "stored directed RunStarted attribution disagrees with the retained replay payload",
+            ));
+        }
+        let directed_run_started_attribution = helper
+            .directed_run_started_attribution
+            .or(payload_directed_attribution);
         let state = InputState {
             input_id: helper.input_id,
             history: helper.history,
             updated_at: helper.updated_at,
             policy: helper.policy,
             runtime_semantics: helper.runtime_semantics,
+            directed_run_started_attribution,
             durability: helper.durability,
             idempotency_key: helper.idempotency_key,
             recovery_count: helper.recovery_count,
@@ -1797,6 +1947,74 @@ mod tests {
         assert_eq!(parsed.state.history.len(), 1);
     }
 
+    #[test]
+    fn v4_directed_attribution_migrates_from_payload_but_ordinary_flow_stays_untracked() {
+        let stable = uuid::Uuid::from_u128(0x00000000000040008000000000000123);
+        let directed = crate::mob_adapter::create_tracked_flow_step_input(
+            "step-1",
+            meerkat_core::types::ContentInput::Text("directed".to_string()),
+            "flow-1",
+            None,
+            &stable.to_string(),
+        )
+        .expect("directed fixture");
+        let mut directed_row = StoredInputState::new_accepted(directed.id().clone());
+        directed_row.state.persisted_input = Some(directed);
+        let mut directed_json = serde_json::to_value(directed_row).expect("serialize fixture");
+        directed_json["stored_input_state_version"] = serde_json::json!(4);
+        directed_json
+            .as_object_mut()
+            .expect("fixture is an object")
+            .remove("directed_run_started_attribution");
+        let migrated: StoredInputState =
+            serde_json::from_value(directed_json).expect("v4 directed row migrates from payload");
+        assert!(migrated.state.directed_run_started_attribution.is_some());
+
+        let ordinary = crate::mob_adapter::create_flow_step_input(
+            "step-2",
+            meerkat_core::types::ContentInput::Text("ordinary".to_string()),
+            "flow-1",
+            2,
+            None,
+        );
+        let mut ordinary_row = StoredInputState::new_accepted(ordinary.id().clone());
+        ordinary_row.state.persisted_input = Some(ordinary);
+        let mut ordinary_json = serde_json::to_value(ordinary_row).expect("serialize fixture");
+        ordinary_json["stored_input_state_version"] = serde_json::json!(4);
+        let restored: StoredInputState =
+            serde_json::from_value(ordinary_json).expect("ordinary v4 flow row remains valid");
+        assert!(restored.state.directed_run_started_attribution.is_none());
+    }
+
+    #[test]
+    fn compact_directed_attribution_must_match_retained_payload() {
+        let stable = uuid::Uuid::from_u128(0x00000000000040008000000000000456);
+        let input = crate::mob_adapter::create_tracked_flow_step_input(
+            "step-1",
+            meerkat_core::types::ContentInput::Text("directed".to_string()),
+            "flow-1",
+            None,
+            &stable.to_string(),
+        )
+        .expect("directed fixture");
+        let mut row = StoredInputState::new_accepted(input.id().clone());
+        row.state.directed_run_started_attribution =
+            DirectedRunStartedAttribution::from_input(&input)
+                .expect("valid attribution derivation");
+        row.state.persisted_input = Some(input);
+        let mut json = serde_json::to_value(row).expect("serialize fixture");
+        json["directed_run_started_attribution"]["content_digest"] =
+            serde_json::json!("wrong-digest");
+
+        let error = serde_json::from_value::<StoredInputState>(json)
+            .expect_err("mismatched compact attribution must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("disagrees with the retained replay payload")
+        );
+    }
+
     /// v0.8.7 regression witness (release-bricking class): a stored-input-state
     /// v4 row whose interaction terminal outbox carries the
     /// pre-durable-callback `callback_pending` candidate shape (no
@@ -1931,15 +2149,21 @@ mod tests {
     }
 
     #[test]
-    fn stored_input_state_unlisted_legacy_version_still_fails_closed() {
+    fn stored_input_state_unknown_versions_still_fail_closed() {
         let mut fixture =
             serde_json::to_value(StoredInputState::new_accepted(InputId::new())).unwrap();
-        for rejected in [2, 3, 6] {
+        for rejected in [2, 6] {
             fixture["stored_input_state_version"] = serde_json::json!(rejected);
             let error = serde_json::from_value::<StoredInputState>(fixture.clone())
-                .expect_err("unlisted historical and future versions must fail closed");
+                .expect_err("unknown historical and future versions must fail closed");
             assert!(error.to_string().contains("expected current 5"));
         }
+
+        // 0.8.10 accepted still-retained v3 input rows lazily, so a supported
+        // 0.8.10 deployment may legitimately present that exact row version.
+        fixture["stored_input_state_version"] = serde_json::json!(3);
+        serde_json::from_value::<StoredInputState>(fixture)
+            .expect("released v3 row retained by 0.8.10 remains supported");
     }
 
     #[test]

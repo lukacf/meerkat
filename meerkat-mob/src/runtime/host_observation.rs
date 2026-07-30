@@ -2485,7 +2485,7 @@ struct DirectedTurnRuntimeAttribution {
     last_boundary_sequence: Option<u64>,
     terminal_outcome: Option<meerkat_runtime::input_state::InputTerminalOutcome>,
     phase: meerkat_runtime::input_state::InputLifecycleState,
-    expected_content: meerkat_core::types::ContentInput,
+    expected_content_digest: String,
     tracking_kind: DirectedTurnTrackingKind,
 }
 
@@ -2496,16 +2496,26 @@ enum DirectedTurnTrackingKind {
 }
 
 impl DirectedTurnRuntimeAttribution {
-    /// Prove that the idempotency lookup, the stored shell, and the persisted
-    /// runtime input all name the exact Pending obligation. A Pending row is
-    /// deliberately not acceptance evidence; only this runtime-owned binding
-    /// can authorize recovery.
+    /// Prove that the idempotency lookup and runtime-owned compact attribution
+    /// name the exact Pending obligation. Nonterminal rows additionally bind
+    /// the retained replay payload; terminal rows remain recoverable after
+    /// that payload is deliberately retired.
     fn from_stored(
         pending_input_id: &str,
         stored: &meerkat_runtime::input_state::StoredInputState,
     ) -> Result<Self, String> {
         use meerkat_runtime::input_state::{InputLifecycleState, InputTerminalOutcome};
 
+        let pending_uuid = uuid::Uuid::parse_str(pending_input_id).map_err(|error| {
+            format!("Pending directed input id '{pending_input_id}' is not a UUID: {error}")
+        })?;
+        let pending_runtime_input_id = meerkat_core::lifecycle::InputId::from_uuid(pending_uuid);
+        if stored.state.input_id != pending_runtime_input_id {
+            return Err(format!(
+                "runtime input id '{}' differs from Pending '{}'",
+                stored.state.input_id, pending_input_id
+            ));
+        }
         let shell_key = stored
             .state
             .idempotency_key
@@ -2517,51 +2527,25 @@ impl DirectedTurnRuntimeAttribution {
                 shell_key.0, pending_input_id
             ));
         }
-        let persisted = stored
+        if stored.state.durability != Some(meerkat_runtime::input::InputDurability::Durable) {
+            return Err("directed-turn runtime input is not durably admitted".to_string());
+        }
+        let compact_attribution = stored
             .state
-            .persisted_input
+            .directed_run_started_attribution
             .as_ref()
-            .ok_or_else(|| "runtime input has no persisted replay payload".to_string())?;
-        if persisted.id() != &stored.state.input_id {
-            return Err(format!(
-                "persisted runtime input id '{}' differs from stored shell '{}'",
-                persisted.id(),
-                stored.state.input_id
-            ));
-        }
-        let header_key = persisted
-            .header()
-            .idempotency_key
-            .as_ref()
-            .ok_or_else(|| "persisted runtime input has no idempotency key".to_string())?;
-        if header_key.0 != pending_input_id {
-            return Err(format!(
-                "persisted input key '{}' differs from Pending '{}'",
-                header_key.0, pending_input_id
-            ));
-        }
-        if persisted.header().durability != meerkat_runtime::input::InputDurability::Durable {
-            return Err("directed-turn runtime input is not durable".to_string());
-        }
-        let expected_content = meerkat_runtime::input::directed_input_run_started_content(
-            persisted,
-        )
-        .map_err(|reason| {
-            format!(
-                "directed-turn idempotency binding points at an invalid {:?} input: {reason}",
-                persisted.kind()
-            )
-        })?;
-        let tracking_kind = match persisted {
-            meerkat_runtime::input::Input::FlowStep(_) => DirectedTurnTrackingKind::FlowStep,
-            meerkat_runtime::input::Input::Peer(_) => DirectedTurnTrackingKind::PeerInteraction,
-            other => {
-                return Err(format!(
-                    "directed-turn validation admitted unsupported {:?} input",
-                    other.kind()
-                ));
+            .ok_or_else(|| {
+                "runtime input has no compact directed RunStarted attribution".to_string()
+            })?;
+        let tracking_kind = match compact_attribution.kind() {
+            meerkat_runtime::input_state::DirectedInputKind::FlowStep => {
+                DirectedTurnTrackingKind::FlowStep
+            }
+            meerkat_runtime::input_state::DirectedInputKind::PeerMessage => {
+                DirectedTurnTrackingKind::PeerInteraction
             }
         };
+        let expected_content_digest = compact_attribution.content_digest().to_string();
         let admission_sequence = stored.seed.admission_sequence.ok_or_else(|| {
             "accepted directed-turn runtime input has no admission sequence".to_string()
         })?;
@@ -2607,6 +2591,64 @@ impl DirectedTurnRuntimeAttribution {
                     .to_string(),
             );
         }
+        if let Some(persisted) = stored.state.persisted_input.as_ref() {
+            if persisted.kind() != compact_attribution.kind().input_kind() {
+                return Err(
+                    "persisted runtime input kind disagrees with admission-stamped kind"
+                        .to_string(),
+                );
+            }
+            if persisted.id() != &stored.state.input_id {
+                return Err(format!(
+                    "persisted runtime input id '{}' differs from stored shell '{}'",
+                    persisted.id(),
+                    stored.state.input_id
+                ));
+            }
+            let header_key = persisted
+                .header()
+                .idempotency_key
+                .as_ref()
+                .ok_or_else(|| "persisted runtime input has no idempotency key".to_string())?;
+            if header_key.0 != pending_input_id {
+                return Err(format!(
+                    "persisted input key '{}' differs from Pending '{}'",
+                    header_key.0, pending_input_id
+                ));
+            }
+            if persisted.header().durability != meerkat_runtime::input::InputDurability::Durable {
+                return Err("directed-turn runtime input is not durable".to_string());
+            }
+            let payload_digest = meerkat_runtime::input::directed_input_run_started_content_digest(
+                persisted,
+            )
+            .map_err(|reason| {
+                format!(
+                    "directed-turn idempotency binding points at an invalid {:?} input: {reason}",
+                    persisted.kind()
+                )
+            })?;
+            if payload_digest != expected_content_digest {
+                return Err(
+                    "persisted directed input disagrees with compact RunStarted attribution"
+                        .to_string(),
+                );
+            }
+        } else if !phase_is_terminal {
+            return Err("nonterminal runtime input has no persisted replay payload".to_string());
+        } else {
+            let published = stored
+                .published_directed_terminal_binding()?
+                .ok_or_else(|| {
+                    "payloadless terminal directed input has no published terminal binding"
+                        .to_string()
+                })?;
+            if !published.binds(&pending_runtime_input_id, InteractionId(pending_uuid)) {
+                return Err(
+                    "published terminal binding differs from the Pending interaction".to_string(),
+                );
+            }
+        }
 
         Ok(Self {
             runtime_input_id: stored.state.input_id.clone(),
@@ -2614,7 +2656,7 @@ impl DirectedTurnRuntimeAttribution {
             last_boundary_sequence: stored.seed.last_boundary_sequence,
             terminal_outcome: stored.seed.terminal_outcome.clone(),
             phase: stored.seed.phase,
-            expected_content,
+            expected_content_digest,
             tracking_kind,
         })
     }
@@ -2622,7 +2664,7 @@ impl DirectedTurnRuntimeAttribution {
     fn same_binding(&self, next: &Self) -> bool {
         self.runtime_input_id == next.runtime_input_id
             && self.admission_sequence == next.admission_sequence
-            && self.expected_content == next.expected_content
+            && self.expected_content_digest == next.expected_content_digest
             && self.tracking_kind == next.tracking_kind
     }
 
@@ -2753,7 +2795,7 @@ struct DurableTerminalScan {
 async fn scan_durable_terminals(
     session: &SessionId,
     window_start: u64,
-    expected_content: &meerkat_core::types::ContentInput,
+    expected_content_digest: &str,
     log: &Arc<dyn DurableEventLogRead>,
 ) -> Result<DurableTerminalScan, MemberObservationError> {
     let watermark = log.latest_seq(session).await?.unwrap_or(0);
@@ -2787,7 +2829,10 @@ async fn scan_durable_terminals(
             if let AgentEvent::RunStarted { input, .. } = &envelope.payload {
                 classifier = meerkat_core::turn_terminal::TurnTerminalClassifier::default();
                 run_started_in_window = true;
-                run_matches_expected_content = input.content() == Some(expected_content);
+                run_matches_expected_content = input.content().is_some_and(|content| {
+                    meerkat_runtime::input::run_started_content_digest(content)
+                        .is_ok_and(|digest| digest == expected_content_digest)
+                });
                 matching_run_starts =
                     matching_run_starts.saturating_add(usize::from(run_matches_expected_content));
             }
@@ -3230,8 +3275,13 @@ async fn run_directed_turn_watcher(
     let mut retry_delay = CAUSAL_RETRY_MIN;
     let mut traced_watermark = None;
     loop {
-        match scan_durable_terminals(&session, window_start, &attribution.expected_content, &log)
-            .await
+        match scan_durable_terminals(
+            &session,
+            window_start,
+            &attribution.expected_content_digest,
+            &log,
+        )
+        .await
         {
             Ok(scan) => {
                 if traced_watermark != Some(scan.watermark) {
@@ -3244,7 +3294,7 @@ async fn run_directed_turn_watcher(
                         watermark = scan.watermark,
                         admission_sequence = attribution.admission_sequence,
                         boundary_sequence = ?attribution.last_boundary_sequence,
-                        expected_content = ?attribution.expected_content,
+                        expected_content_digest = %attribution.expected_content_digest,
                         matching_run_starts = scan.matching_run_starts,
                         terminals = ?scan.terminals,
                         expectation = ?expectation,
@@ -3764,13 +3814,17 @@ mod tests {
     }
 
     fn terminal_attribution(boundary_sequence: u64) -> DirectedTurnRuntimeAttribution {
+        let expected_content_digest = meerkat_runtime::input::run_started_content_digest(
+            &meerkat_core::types::ContentInput::Text("current".to_string()),
+        )
+        .expect("fixture RunStarted content should digest");
         DirectedTurnRuntimeAttribution {
             runtime_input_id: meerkat_core::lifecycle::InputId::new(),
             admission_sequence: 12,
             last_boundary_sequence: Some(boundary_sequence),
             terminal_outcome: Some(meerkat_runtime::input_state::InputTerminalOutcome::Consumed),
             phase: meerkat_runtime::input_state::InputLifecycleState::Consumed,
-            expected_content: meerkat_core::types::ContentInput::Text("current".to_string()),
+            expected_content_digest,
             tracking_kind: DirectedTurnTrackingKind::FlowStep,
         }
     }
@@ -3795,9 +3849,13 @@ mod tests {
         .expect("test directed input id is a UUID");
         let mut stored =
             meerkat_runtime::input_state::StoredInputState::new_accepted(input.id().clone());
+        stored.state.directed_run_started_attribution =
+            meerkat_runtime::input_state::DirectedRunStartedAttribution::from_input(&input)
+                .expect("fixture directed input should validate");
         stored.state.idempotency_key = Some(meerkat_runtime::identifiers::IdempotencyKey::new(
             pending_input_id,
         ));
+        stored.state.durability = Some(meerkat_runtime::input::InputDurability::Durable);
         stored.state.persisted_input = Some(input);
         stored.seed.phase = meerkat_runtime::input_state::InputLifecycleState::Queued;
         stored.seed.admission_sequence = Some(12);
@@ -3853,13 +3911,57 @@ mod tests {
         });
         let mut stored =
             meerkat_runtime::input_state::StoredInputState::new_accepted(input.id().clone());
+        stored.state.directed_run_started_attribution =
+            meerkat_runtime::input_state::DirectedRunStartedAttribution::from_input(&input)
+                .expect("fixture directed peer input should validate");
         stored.state.idempotency_key = Some(meerkat_runtime::identifiers::IdempotencyKey::new(
             pending_input_id,
         ));
+        stored.state.durability = Some(meerkat_runtime::input::InputDurability::Durable);
         stored.state.persisted_input = Some(input);
         stored.seed.phase = meerkat_runtime::input_state::InputLifecycleState::Queued;
         stored.seed.admission_sequence = Some(13);
         stored
+    }
+
+    fn published_payloadless_terminal(
+        stored: meerkat_runtime::input_state::StoredInputState,
+        pending_input_id: &str,
+    ) -> meerkat_runtime::input_state::StoredInputState {
+        let mut json = serde_json::to_value(stored).expect("serialize directed fixture");
+        json["current_state"] = serde_json::json!("consumed");
+        json["terminal_outcome"] = serde_json::json!({ "outcome_type": "consumed" });
+        json["last_run_id"] = serde_json::json!("00000000-0000-4000-8000-0000000000bb");
+        json["last_boundary_sequence"] = serde_json::json!(17);
+        json.as_object_mut()
+            .expect("stored input fixture is an object")
+            .remove("persisted_input");
+        json["interaction_terminal_outbox"] = serde_json::json!({
+            "interaction_id": pending_input_id,
+            "input_id": pending_input_id,
+            "batch_ordinal": 0,
+            "batch_key": {
+                "scope": "run",
+                "run_id": "00000000-0000-4000-8000-0000000000bb"
+            },
+            "owner_session_id": "00000000-0000-4000-8000-0000000000cc",
+            "owner_agent_runtime_id": "runtime-a",
+            "owner_fence_token": 7,
+            "owner_runtime_generation": 3,
+            "owner_runtime_epoch_id": "epoch-3",
+            "candidate_owner_input_id": pending_input_id,
+            "candidate_digest": "candidate-digest",
+            "completion_input_ids_digest": "recipient-digest",
+            "phase": {
+                "phase": "published",
+                "finalization_failed": false,
+                "publication": {
+                    "terminal_seq": 19,
+                    "payload_digest": "published-payload-digest"
+                }
+            }
+        });
+        serde_json::from_value(json).expect("decode published payloadless directed fixture")
     }
 
     fn outcome(input_id: &str) -> BridgeTurnOutcomeRecord {
@@ -5130,7 +5232,15 @@ mod tests {
         assert!(
             DirectedTurnRuntimeAttribution::from_stored(PENDING_ONE, &runtime_id_mismatch)
                 .expect_err("runtime input-id mismatch must fail closed")
-                .contains("persisted runtime input id")
+                .contains("runtime input id")
+        );
+
+        let mut nondurable = stored_directed_turn(PENDING_ONE);
+        nondurable.state.durability = Some(meerkat_runtime::input::InputDurability::Ephemeral);
+        assert!(
+            DirectedTurnRuntimeAttribution::from_stored(PENDING_ONE, &nondurable)
+                .expect_err("nondurable runtime input must fail closed")
+                .contains("not durably admitted")
         );
     }
 
@@ -5143,8 +5253,11 @@ mod tests {
         assert!(!attribution.is_terminal());
         assert_eq!(attribution.admission_sequence, 12);
         assert_eq!(
-            attribution.expected_content,
-            meerkat_core::types::ContentInput::Text("Flow step step-1\ncurrent".to_string())
+            attribution.expected_content_digest,
+            meerkat_runtime::input::run_started_content_digest(
+                &meerkat_core::types::ContentInput::Text("Flow step step-1\ncurrent".to_string())
+            )
+            .expect("expected fixture content should digest")
         );
 
         let mut missing_payload = stored;
@@ -5157,6 +5270,29 @@ mod tests {
     }
 
     #[test]
+    fn payloadless_terminal_requires_exact_published_runtime_binding() {
+        let stored = stored_directed_turn(PENDING_ONE);
+        let mut unproved = stored.clone();
+        unproved.seed.phase = meerkat_runtime::input_state::InputLifecycleState::Consumed;
+        unproved.seed.terminal_outcome =
+            Some(meerkat_runtime::input_state::InputTerminalOutcome::Consumed);
+        unproved.seed.last_run_id = Some(meerkat_core::lifecycle::RunId::new());
+        unproved.seed.last_boundary_sequence = Some(17);
+        unproved.state.persisted_input = None;
+        assert!(
+            DirectedTurnRuntimeAttribution::from_stored(PENDING_ONE, &unproved)
+                .expect_err("payloadless terminal without publication proof must fail closed")
+                .contains("no published terminal binding")
+        );
+
+        let published = published_payloadless_terminal(stored, PENDING_ONE);
+        let attribution = DirectedTurnRuntimeAttribution::from_stored(PENDING_ONE, &published)
+            .expect("published terminal binding authorizes compact recovery");
+        assert!(attribution.is_terminal());
+        assert_eq!(attribution.last_boundary_sequence, Some(17));
+    }
+
+    #[test]
     fn tracked_peer_live_attach_and_pending_recovery_share_exact_attribution() {
         let stored = stored_directed_peer_turn(ACCEPTED_BEFORE_WATCHER);
         let persisted = stored
@@ -5166,6 +5302,8 @@ mod tests {
             .expect("tracked peer remains replayable");
         let expected = meerkat_runtime::input::directed_input_run_started_content(persisted)
             .expect("tracked peer has a canonical RunStarted projection");
+        let expected_digest = meerkat_runtime::input::run_started_content_digest(&expected)
+            .expect("tracked peer projection should digest");
 
         // `admit_directed_turn` and the cold Pending reconciler both enter
         // through this constructor. A peer accepted before watcher attachment
@@ -5181,20 +5319,12 @@ mod tests {
             live.tracking_kind,
             DirectedTurnTrackingKind::PeerInteraction
         );
-        assert_eq!(live.expected_content, expected);
+        assert_eq!(live.expected_content_digest, expected_digest);
         assert_eq!(live.admission_sequence, 13);
+        assert!(expected.text_content().contains("private ambient context"));
+        assert!(expected.text_content().contains("durable placed kickoff"));
         assert!(
-            live.expected_content
-                .text_content()
-                .contains("private ambient context")
-        );
-        assert!(
-            live.expected_content
-                .text_content()
-                .contains("durable placed kickoff")
-        );
-        assert!(
-            matches!(live.expected_content, meerkat_core::types::ContentInput::Blocks(ref blocks) if blocks.iter().any(|block| matches!(block, meerkat_core::types::ContentBlock::Image { .. })))
+            matches!(expected, meerkat_core::types::ContentInput::Blocks(ref blocks) if blocks.iter().any(|block| matches!(block, meerkat_core::types::ContentBlock::Image { .. })))
         );
 
         let mut untracked = stored;

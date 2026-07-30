@@ -11291,6 +11291,7 @@ mod tests {
             "instruction added at this exact point",
         )));
         let mut agent = with_test_turn_state_handle_for_session(AgentBuilder::new(), session)
+            .with_tool_visibility_owner(explicit_test_visibility_owner())
             .build_standalone(primary.clone(), Arc::new(NoTools), Arc::new(NoopStore))
             .await;
         agent.config.max_turns = Some(1);

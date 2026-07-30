@@ -12,8 +12,8 @@ use meerkat_core::lifecycle::run_primitive::{
 use meerkat_core::ops::{OpEvent, OperationId};
 use meerkat_core::service::TurnToolOverlay;
 use meerkat_core::types::{
-    ContentInput, HandlingMode, SystemNoticeBlock, SystemNoticeDirection, SystemNoticeKind,
-    SystemNoticePeer,
+    ContentInput, HandlingMode, ImageData, SystemNoticeBlock, SystemNoticeDirection,
+    SystemNoticeKind, SystemNoticePeer,
 };
 use meerkat_core::{
     BlobStore, BlobStoreError, MissingBlobBehavior, PeerConversationProjection,
@@ -24,6 +24,7 @@ use meerkat_core::{
     PeerResponseTerminalTransportIdentity, externalize_content_blocks, hydrate_content_blocks,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::identifiers::{
     CorrelationId, IdempotencyKey, InputKind, KindId, LogicalRuntimeId, SupersessionKey,
@@ -1176,6 +1177,43 @@ pub fn directed_input_run_started_content(input: &Input) -> Result<ContentInput,
         .ok_or_else(|| "directed runtime input has no turn-start projection".to_string())
 }
 
+/// Stable compact identity for the canonical content carried by a
+/// `RunStarted` event.
+///
+/// Durable directed-input attribution retains this digest after the original
+/// replay payload is retired, so terminal recovery remains exact without
+/// retaining O(payload) state.
+pub fn run_started_content_digest(content: &ContentInput) -> Result<String, String> {
+    let mut canonical = content.clone();
+    if let ContentInput::Blocks(blocks) = &mut canonical {
+        for block in blocks {
+            if let meerkat_core::types::ContentBlock::Image {
+                media_type,
+                data: ImageData::Inline { data },
+            } = block
+            {
+                let canonical_media_type = media_type.clone();
+                let blob_id = meerkat_core::blob::content_blob_id(media_type, data);
+                *block = meerkat_core::types::ContentBlock::Image {
+                    media_type: canonical_media_type,
+                    data: ImageData::Blob { blob_id },
+                };
+            }
+        }
+    }
+    let encoded = serde_json::to_vec(&canonical)
+        .map_err(|error| format!("failed to encode canonical RunStarted content: {error}"))?;
+    let mut digest = Sha256::new();
+    digest.update(b"meerkat:run-started-content:v1\0");
+    digest.update(encoded);
+    Ok(format!("{digest:x}"))
+}
+
+pub fn directed_input_run_started_content_digest(input: &Input) -> Result<String, String> {
+    directed_input_run_started_content(input)
+        .and_then(|content| run_started_content_digest(&content))
+}
+
 /// Lower host-attached injected context entries into typed
 /// `InjectedContext`-role transcript appends, preserving delivery order.
 /// The typed slot the content arrived in mints the transcript role.
@@ -2247,6 +2285,39 @@ mod tests {
         assert!(actual.text_content().contains("inspect this image"));
         assert!(
             matches!(actual, ContentInput::Blocks(ref blocks) if blocks.iter().any(|block| matches!(block, meerkat_core::types::ContentBlock::Image { .. })))
+        );
+    }
+
+    #[test]
+    fn run_started_digest_is_invariant_to_inline_or_blob_image_representation() {
+        let media_type = "image/png";
+        let inline_data = "abc123";
+        let inline = ContentInput::Blocks(vec![
+            meerkat_core::types::ContentBlock::Text {
+                text: "ambient context".to_string(),
+            },
+            meerkat_core::types::ContentBlock::Image {
+                media_type: media_type.to_string(),
+                data: meerkat_core::types::ImageData::Inline {
+                    data: inline_data.to_string(),
+                },
+            },
+        ]);
+        let blob_backed = ContentInput::Blocks(vec![
+            meerkat_core::types::ContentBlock::Text {
+                text: "ambient context".to_string(),
+            },
+            meerkat_core::types::ContentBlock::Image {
+                media_type: media_type.to_string(),
+                data: meerkat_core::types::ImageData::Blob {
+                    blob_id: meerkat_core::blob::content_blob_id(media_type, inline_data),
+                },
+            },
+        ]);
+
+        assert_eq!(
+            run_started_content_digest(&inline).expect("inline digest"),
+            run_started_content_digest(&blob_backed).expect("blob-backed digest"),
         );
     }
 

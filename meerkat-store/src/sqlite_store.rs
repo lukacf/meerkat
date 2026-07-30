@@ -727,7 +727,7 @@ fn metadata_state_id(head_cas_token: &str) -> String {
 }
 
 fn metadata_owner_ref_in_txn(
-    tx: &Transaction<'_>,
+    tx: &Connection,
     id: &SessionId,
     owner: HeadMetadataProjectionOwner,
 ) -> Result<Option<HeadMetadataOwnerRef>, SessionStoreError> {
@@ -751,7 +751,7 @@ fn metadata_owner_ref_in_txn(
 }
 
 fn metadata_state_in_txn(
-    tx: &Transaction<'_>,
+    tx: &Connection,
     id: &SessionId,
     state_id: &str,
 ) -> Result<Option<HeadMetadataStateRow>, SessionStoreError> {
@@ -814,7 +814,7 @@ fn parse_metadata_cell(
 }
 
 fn metadata_cell_in_txn(
-    tx: &Transaction<'_>,
+    tx: &Connection,
     id: &SessionId,
     key: &str,
     exact_value_digest: &str,
@@ -1260,7 +1260,7 @@ fn reconcile_head_metadata_transition_in_txn(
 }
 
 fn current_metadata_cells_in_txn(
-    tx: &Transaction<'_>,
+    tx: &Connection,
     id: &SessionId,
 ) -> Result<BTreeMap<String, Arc<SessionHeadMetadataCell>>, SessionStoreError> {
     let mut statement = tx
@@ -1316,7 +1316,7 @@ struct StoredMetadataDelta {
 }
 
 fn metadata_state_deltas_in_txn(
-    tx: &Transaction<'_>,
+    tx: &Connection,
     id: &SessionId,
     state_id: &str,
 ) -> Result<Vec<StoredMetadataDelta>, SessionStoreError> {
@@ -1349,7 +1349,7 @@ fn metadata_state_deltas_in_txn(
 }
 
 fn materialize_standalone_metadata_state_in_txn(
-    tx: &Transaction<'_>,
+    tx: &Connection,
     id: &SessionId,
     state_id: &str,
 ) -> Result<BTreeMap<String, Arc<SessionHeadMetadataCell>>, SessionStoreError> {
@@ -1435,7 +1435,7 @@ fn metadata_state_for_head_in_txn(
 }
 
 fn attach_head_metadata_projection(
-    tx: &Transaction<'_>,
+    tx: &Connection,
     head: &mut SessionHead,
     owner: HeadMetadataProjectionOwner,
 ) -> Result<(), SessionStoreError> {
@@ -3423,7 +3423,6 @@ fn layout_for_blob_session(
                     splice.splice_end,
                     parent_splice.serialized_replacement(),
                 )?;
-                current_strand = rewrite.parent_strand.clone();
             }
         }
         row_lineage = row_lineage.extend_serialized_rows(&rewrite.serialized_parent_suffix)?;

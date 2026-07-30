@@ -314,9 +314,6 @@ pub struct WireConversationAppend {
     pub blocks: Vec<WireContentBlock>,
 }
 
-/// Typed wire projection of a context-only append.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 /// Typed wire projection of a batched staged input.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

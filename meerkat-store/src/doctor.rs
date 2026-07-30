@@ -53,14 +53,16 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
+#[cfg(test)]
+use meerkat_core::SessionId;
 use meerkat_core::session::TRANSCRIPT_HISTORY_FORMAT_CURRENT;
 use meerkat_core::storage_diagnostics::{
     DatabaseInventory, DiagnoseScope, FindingSeverity, StorageDiagnosis, StorageDiagnosticsError,
     StorageFinding, StorageInventoryEntry, StorageMigrator,
 };
 use meerkat_core::{
-    BlobId, ContentBlock, Message, REALM_MANIFEST_FILE_NAME, SessionId, SystemNoticeBlock,
-    sanitize_realm_id, validate_current_persisted_transcript_history_slice,
+    BlobId, ContentBlock, Message, REALM_MANIFEST_FILE_NAME, SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
+    SystemNoticeBlock, sanitize_realm_id, validate_current_persisted_transcript_history_slice,
 };
 use meerkat_sqlite::JsonColumnBytes;
 use rusqlite::{Connection, OptionalExtension};

@@ -65,7 +65,6 @@ pub fn session_metadata_schema_version() -> u32 {
     SESSION_METADATA_SCHEMA_VERSION
 }
 
-#[must_use]
 pub fn restore_session_envelope_version(
     observed: u32,
 ) -> Result<u32, SessionPersistenceVersionAuthorityError> {

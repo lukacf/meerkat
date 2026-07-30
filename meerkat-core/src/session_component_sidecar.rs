@@ -65,7 +65,7 @@ impl ComponentEventDigest {
     /// Parse a canonical lowercase `sha256:<64 hex digits>` token.
     pub fn parse(value: impl Into<String>) -> Result<Self, SessionComponentSidecarError> {
         let value = value.into();
-        validate_sha256_token(&value).map_err(|_| {
+        validate_sha256_token(&value).map_err(|()| {
             SessionComponentSidecarError::MalformedDigest {
                 subject: "component event",
                 value: value.clone(),
@@ -79,7 +79,7 @@ impl ComponentEventDigest {
     }
 
     fn to_raw(&self) -> Result<[u8; 32], SessionComponentSidecarError> {
-        decode_sha256_token(&self.0).map_err(|_| SessionComponentSidecarError::MalformedDigest {
+        decode_sha256_token(&self.0).map_err(|()| SessionComponentSidecarError::MalformedDigest {
             subject: "component event",
             value: self.0.clone(),
         })
@@ -116,7 +116,7 @@ impl ComponentEventPrefixDigest {
     /// Parse a canonical lowercase `sha256:<64 hex digits>` token.
     pub fn parse(value: impl Into<String>) -> Result<Self, SessionComponentSidecarError> {
         let value = value.into();
-        validate_sha256_token(&value).map_err(|_| {
+        validate_sha256_token(&value).map_err(|()| {
             SessionComponentSidecarError::MalformedDigest {
                 subject: "component event prefix",
                 value: value.clone(),
@@ -130,7 +130,7 @@ impl ComponentEventPrefixDigest {
     }
 
     fn to_raw(&self) -> Result<[u8; 32], SessionComponentSidecarError> {
-        decode_sha256_token(&self.0).map_err(|_| SessionComponentSidecarError::MalformedDigest {
+        decode_sha256_token(&self.0).map_err(|()| SessionComponentSidecarError::MalformedDigest {
             subject: "component event prefix",
             value: self.0.clone(),
         })

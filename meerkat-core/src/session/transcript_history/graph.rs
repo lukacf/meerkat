@@ -380,8 +380,8 @@ struct Released0810HistoryWire {
     #[serde(default)]
     commits: Vec<Released0810Commit>,
     revisions: Vec<Released0810RevisionEntry>,
-    #[serde(default)]
-    digest_format: u32,
+    #[serde(default, rename = "digest_format")]
+    _digest_format: u32,
     #[serde(default, rename = "replay_cursor")]
     _replay_cursor: Option<serde::de::IgnoredAny>,
 }
@@ -1243,10 +1243,6 @@ impl PersistentTranscriptEdges {
         self.chain.len
     }
 
-    fn is_empty(&self) -> bool {
-        self.chain.len == 0
-    }
-
     fn last(&self) -> Option<&TranscriptRevisionEdge> {
         self.chain.tail.as_ref().map(|node| node.edge.as_ref())
     }
@@ -1592,6 +1588,7 @@ impl TranscriptHistoryState {
         Ok(state)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::session) fn from_authorized_first_rewrite(
         parent: TranscriptRevisionBody,
         parent_row_prefix: SessionMessageRowPrefixAccumulator,

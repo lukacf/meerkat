@@ -1169,7 +1169,7 @@ impl Session {
         &mut self,
     ) -> Result<(), TranscriptEditError> {
         let history_wire_kind = transcript_history_wire_kind(&self.metadata)
-            .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
+            .map_err(TranscriptEditError::HistoryStateMalformed)?;
         let Some(history_wire_kind) = history_wire_kind else {
             return Ok(());
         };
@@ -1178,9 +1178,9 @@ impl Session {
                 "released 0.8.10 transcript history requires the explicit one-time importer"
                     .to_string(),
             ));
-        };
+        }
         let state = compact_transcript_history_metadata_for_snapshot(&mut self.metadata)
-            .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?
+            .map_err(TranscriptEditError::HistoryStateMalformed)?
             .ok_or_else(|| {
                 TranscriptEditError::HistoryStateMalformed(
                     "transcript-history graph disappeared during ingress".to_string(),
@@ -1224,6 +1224,7 @@ impl Session {
     /// strand messages. The envelope version is restored fail-closed through
     /// the generated persistence version authority, exactly like
     /// [`Session::deserialize`].
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_head_parts(
         version: u32,
         id: SessionId,
@@ -1437,7 +1438,6 @@ enum TransientTurnContextBoundaryWindow {
     },
     Resolved {
         run_id: RunId,
-        generation: u64,
         request_id: u64,
         contexts: Vec<TurnRequestContext>,
         resolution: TransientTurnContextBoundaryResolution,
@@ -1485,16 +1485,15 @@ impl TransientTurnContextBoundaryCoordinator {
         let parked_owner = match &lifecycle.window {
             TransientTurnContextBoundaryWindow::Parked {
                 run_id,
-                generation,
                 request_id: current,
                 contexts,
-            } if *current == request_id => Some((run_id.clone(), *generation, contexts.clone())),
+                ..
+            } if *current == request_id => Some((run_id.clone(), contexts.clone())),
             _ => None,
         };
-        if let Some((run_id, generation, contexts)) = parked_owner {
+        if let Some((run_id, contexts)) = parked_owner {
             lifecycle.window = TransientTurnContextBoundaryWindow::Resolved {
                 run_id,
-                generation,
                 request_id,
                 contexts,
                 resolution: TransientTurnContextBoundaryResolution::Aborted,
@@ -1679,7 +1678,6 @@ impl PreparedTransientTurnContextBoundary {
         };
         lifecycle.window = TransientTurnContextBoundaryWindow::Resolved {
             run_id: self.expected_run_id.clone(),
-            generation: self.generation,
             request_id: self.request_id,
             contexts,
             resolution,
@@ -1865,12 +1863,7 @@ impl TransientTurnContextStateHandle {
             notified.as_mut().enable();
             let poll = {
                 let lifecycle = self.boundary.lock();
-                if !lifecycle.actor_live {
-                    Err(CoreBoundaryStageError::stale(format!(
-                        "actor incarnation {} was revoked while preparing boundary",
-                        self.boundary.incarnation_id
-                    )))
-                } else {
+                if lifecycle.actor_live {
                     match &lifecycle.window {
                         TransientTurnContextBoundaryWindow::Parked {
                             run_id,
@@ -1898,6 +1891,11 @@ impl TransientTurnContextStateHandle {
                             "run {expected_run_id} ended before transient boundary request {request_id} parked"
                         ))),
                     }
+                } else {
+                    Err(CoreBoundaryStageError::stale(format!(
+                        "actor incarnation {} was revoked while preparing boundary",
+                        self.boundary.incarnation_id
+                    )))
                 }
             };
             match poll {
@@ -1991,12 +1989,7 @@ impl TransientTurnContextStateHandle {
             notified.as_mut().enable();
             let poll = {
                 let mut lifecycle = self.boundary.lock();
-                if !lifecycle.actor_live {
-                    Err(CoreBoundaryStageError::stale(format!(
-                        "actor incarnation {} was revoked while parked",
-                        self.boundary.incarnation_id
-                    )))
-                } else {
+                if lifecycle.actor_live {
                     match &lifecycle.window {
                         TransientTurnContextBoundaryWindow::Parked {
                             request_id: parked_request_id,
@@ -2032,6 +2025,11 @@ impl TransientTurnContextStateHandle {
                             "parked transient request {request_id} lost exact authority"
                         ))),
                     }
+                } else {
+                    Err(CoreBoundaryStageError::stale(format!(
+                        "actor incarnation {} was revoked while parked",
+                        self.boundary.incarnation_id
+                    )))
                 }
             };
             match poll {
@@ -3887,7 +3885,7 @@ impl Session {
         let projection =
             SessionRealtimeTranscriptProjection::from_inline_snapshot(&self.id, state)?;
         self.metadata.remove(SESSION_REALTIME_TRANSCRIPT_STATE_KEY);
-        self.realtime_transcript = Box::new(projection);
+        *self.realtime_transcript = projection;
         Ok(())
     }
 
@@ -3906,9 +3904,8 @@ impl Session {
         &mut self,
         sequence: &crate::VerifiedComponentEventSequence,
     ) -> Result<(), RealtimeTranscriptSidecarError> {
-        self.realtime_transcript = Box::new(
-            SessionRealtimeTranscriptProjection::from_verified_sequence(&self.id, sequence)?,
-        );
+        *self.realtime_transcript =
+            SessionRealtimeTranscriptProjection::from_verified_sequence(&self.id, sequence)?;
         Ok(())
     }
 
@@ -5214,7 +5211,7 @@ impl Session {
         let commit = TranscriptRewriteCommit {
             rewrite_generation,
             parent_revision,
-            revision: revision.clone(),
+            revision,
             selection,
             original_span_digest,
             replacement_digest,
@@ -5224,13 +5221,13 @@ impl Session {
             actor,
             committed_at,
         };
-        return self.finish_compact_transcript_rewrite(
+        self.finish_compact_transcript_rewrite(
             prior_history,
             commit,
             replacement,
             rewritten,
             realtime_rebase,
-        );
+        )
     }
 
     fn finish_compact_transcript_rewrite(

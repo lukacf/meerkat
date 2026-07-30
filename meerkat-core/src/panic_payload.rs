@@ -66,7 +66,7 @@ fn normalized_for_redaction_counted(raw: &str) -> (String, bool, usize) {
             pending_space = !normalized.is_empty();
             continue;
         }
-        let required_bytes = (if pending_space { 1 } else { 0 }) + character.len_utf8();
+        let required_bytes = usize::from(pending_space) + character.len_utf8();
         if normalized.len().saturating_add(required_bytes) > PANIC_PAYLOAD_REDACTION_SCAN_MAX_BYTES
         {
             source_truncated = true;
@@ -258,10 +258,9 @@ fn redact_credentials(input: &str) -> String {
             continue;
         }
 
-        let character = input[cursor..]
-            .chars()
-            .next()
-            .expect("cursor remains on a UTF-8 boundary");
+        let Some(character) = input[cursor..].chars().next() else {
+            break;
+        };
         output.push(character);
         cursor += character.len_utf8();
     }

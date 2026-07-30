@@ -377,19 +377,10 @@ enum SparseMetadataNodeKind {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct SparseMetadataTree {
     root: Option<Arc<SparseMetadataNode>>,
     entry_count: u64,
-}
-
-impl Default for SparseMetadataTree {
-    fn default() -> Self {
-        Self {
-            root: None,
-            entry_count: 0,
-        }
-    }
 }
 
 impl SparseMetadataTree {
@@ -455,8 +446,7 @@ impl SparseMetadataTree {
         let observed = observe_and_prove(self.root.as_ref(), 0, key, &route, &mut siblings)?;
         if observed.as_ref() != expected {
             return Err(format!(
-                "HeadCanonical metadata cell `{key}` expected predecessor {:?}, observed {:?}",
-                expected, observed
+                "HeadCanonical metadata cell `{key}` expected predecessor {expected:?}, observed {observed:?}"
             ));
         }
         let root = update_node(self.root.as_ref(), 0, key, &route, successor)?;

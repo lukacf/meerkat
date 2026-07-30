@@ -1529,10 +1529,11 @@ fn session_message_row_prefix_empty_digest() -> [u8; 32] {
 }
 
 fn encode_session_message_row_prefix_digest(digest: &[u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut encoded = String::with_capacity(64);
     for byte in digest {
-        std::fmt::Write::write_fmt(&mut encoded, format_args!("{byte:02x}"))
-            .expect("writing to a String cannot fail");
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
     }
     format!("{SESSION_MESSAGE_ROW_PREFIX_DIGEST_PREFIX}{encoded}")
 }
@@ -2229,7 +2230,7 @@ impl VerifiedSessionHeadMaterialization {
             .session
             .install_exact_message_row_lineage(ancestor, current)
         {
-            return Err(SessionStoreError::Corrupted(self.head.id.clone()));
+            return Err(SessionStoreError::Corrupted(self.head.id));
         }
         Ok(self)
     }
@@ -2282,11 +2283,11 @@ impl SessionHead {
         session: Session,
     ) -> Result<VerifiedSessionHeadMaterialization, SessionStoreError> {
         if session.id() != &self.id {
-            return Err(SessionStoreError::Corrupted(self.id.clone()));
+            return Err(SessionStoreError::Corrupted(self.id));
         }
         let expected_row_prefix = self.message_row_prefix.clone().ok_or_else(|| {
             SessionStoreError::InvalidTranscriptRewrite {
-                id: self.id.clone(),
+                id: self.id,
                 reason: "current head has no exact message-row authority and cannot be explicitly materialized"
                     .to_string(),
             }
@@ -2294,7 +2295,7 @@ impl SessionHead {
         let actual_row_prefix = session
             .exact_message_row_prefix_at(self.message_count)
             .ok_or_else(|| SessionStoreError::InvalidTranscriptRewrite {
-                id: self.id.clone(),
+                id: self.id,
                 reason:
                     "materialized session does not carry exact durable-row lineage for the current head"
                         .to_string(),
@@ -2577,7 +2578,6 @@ impl SessionHead {
         self.metadata_projection.as_ref()
     }
 
-    #[must_use]
     /// Materialize the complete Session metadata map for an explicit cold
     /// read/summary boundary.
     ///
@@ -2618,7 +2618,7 @@ impl SessionHead {
             }
         })?;
         if !self.metadata.is_empty() {
-            return Err(SessionStoreError::Corrupted(self.id.clone()));
+            return Err(SessionStoreError::Corrupted(self.id));
         }
         if projection.identity() != &expected
             || !projection.is_full_snapshot()
@@ -2627,7 +2627,7 @@ impl SessionHead {
                 .iter()
                 .any(|mutation| !head_metadata_cell_carries_key(mutation.key()))
         {
-            return Err(SessionStoreError::Corrupted(self.id.clone()));
+            return Err(SessionStoreError::Corrupted(self.id));
         }
         let values = projection
             .materialized_values()
@@ -2780,7 +2780,7 @@ impl SessionHead {
                 {
                     proof.prefix.clone()
                 }
-                Some(_) => return Err(SessionStoreError::Corrupted(self.id.clone())),
+                Some(_) => return Err(SessionStoreError::Corrupted(self.id)),
                 None => {
                     if let Some(anchor) = self.row_lineage_anchor.as_ref()
                         && (anchor.rewrite_count != self.rewrite_count
@@ -2799,7 +2799,7 @@ impl SessionHead {
                 }
             };
             if actual != *expected || actual.row_count() != self.message_count {
-                return Err(SessionStoreError::Corrupted(self.id.clone()));
+                return Err(SessionStoreError::Corrupted(self.id));
             }
         }
         // The head revision IS the transcript content digest; verify it on
@@ -2826,15 +2826,15 @@ impl SessionHead {
                     .map_err(|_| SessionStoreError::Corrupted(id.clone()))?;
                 for (key, value) in metadata {
                     if values.insert(key, value).is_some() {
-                        return Err(SessionStoreError::Corrupted(id.clone()));
+                        return Err(SessionStoreError::Corrupted(id));
                     }
                 }
                 metadata = values;
                 Some(projection)
             }
-            (Some(_), _) => return Err(SessionStoreError::Corrupted(id.clone())),
+            (Some(_), _) => return Err(SessionStoreError::Corrupted(id)),
             (None, None) => None,
-            (None, Some(_)) => return Err(SessionStoreError::Corrupted(id.clone())),
+            (None, Some(_)) => return Err(SessionStoreError::Corrupted(id)),
         };
         let mut session = Session::from_head_parts(
             version,
@@ -2861,7 +2861,7 @@ impl SessionHead {
                     .install_verified_realtime_component_sequence(realtime_sequence)
                     .map_err(|_| SessionStoreError::Corrupted(id.clone()))?;
             }
-            _ => return Err(SessionStoreError::Corrupted(id.clone())),
+            _ => return Err(SessionStoreError::Corrupted(id)),
         }
         session
             .normalize_persisted_transcript_history_ingress()
@@ -3258,15 +3258,13 @@ impl PreparedHeadCanonicalMutation {
                 ),
             });
         }
-        let metadata_projection = successor_head
-            .metadata_projection
-            .as_ref()
-            .cloned()
-            .ok_or_else(|| SessionStoreError::InvalidTranscriptRewrite {
+        let metadata_projection = successor_head.metadata_projection.clone().ok_or_else(|| {
+            SessionStoreError::InvalidTranscriptRewrite {
                 id: session.id().clone(),
                 reason: "prepared HeadCanonical successor has no sealed metadata transition"
                     .to_string(),
-            })?;
+            }
+        })?;
         match observed_head.as_ref() {
             Some(predecessor)
                 if metadata_projection.predecessor_identity()
@@ -4354,14 +4352,12 @@ impl PreparedHeadCanonicalRewriteMutation {
         }
         let successor_head_token = session_head_cas_token(&successor_head)?;
         let predecessor_head_token = session_head_cas_token(&observed_head)?;
-        let metadata_projection = successor_head
-            .metadata_projection
-            .as_ref()
-            .cloned()
-            .ok_or_else(|| SessionStoreError::InvalidTranscriptRewrite {
+        let metadata_projection = successor_head.metadata_projection.clone().ok_or_else(|| {
+            SessionStoreError::InvalidTranscriptRewrite {
                 id: session.id().clone(),
                 reason: "prepared rewrite successor has no sealed metadata transition".to_string(),
-            })?;
+            }
+        })?;
         if metadata_projection.predecessor_identity() != observed_head.metadata_identity.as_ref() {
             return Err(SessionStoreError::InvalidTranscriptRewrite {
                 id: session.id().clone(),

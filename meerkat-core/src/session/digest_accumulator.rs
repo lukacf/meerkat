@@ -85,20 +85,6 @@ impl Midstate {
     }
 }
 
-/// SHA-256 midstate over `prefix ++ "[" ++ sorted canonical elements` (no
-/// closing `]`) — the canonical checkpoint DOCUMENT's transcript span. The
-/// canonical document sorts only the immutable `created_at` and `id` before
-/// `messages`, so the prefix is constant per session instance and everything
-/// after the array is turn-sized; finalizing with `"]" ++ suffix` yields the
-/// byte-identical whole-document digest. Keyed by the exact prefix bytes so
-/// a document-framing change reseeds instead of serving a wrong digest.
-#[derive(Debug, Clone)]
-struct FramedMidstate {
-    prefix: Vec<u8>,
-    hasher: Sha256,
-    covered: usize,
-}
-
 #[derive(Debug, Clone, Default)]
 struct AccumulatorState {
     /// Midstate over the identity byte stream of the CURRENT message vector.
@@ -107,8 +93,6 @@ struct AccumulatorState {
     stream_a: Option<Midstate>,
     /// Retained prefix midstates at previously witnessed boundaries.
     boundaries: VecDeque<Midstate>,
-    /// Canonical checkpoint-document midstate, when enabled.
-    framed: Option<FramedMidstate>,
     /// Exact durable-row authority last installed by a verified
     /// head-canonical materialization or acknowledged commit.
     exact_row_anchor: Option<SessionMessageRowPrefixAccumulator>,
@@ -187,7 +171,6 @@ impl TranscriptDigestAccumulator {
         let state = self.state.get_mut().unwrap_or_else(PoisonError::into_inner);
         state.stream_a = None;
         state.boundaries.clear();
-        state.framed = None;
         state.exact_row_anchor = None;
         state.exact_row_current = None;
         state.parked = None;
@@ -218,28 +201,8 @@ impl TranscriptDigestAccumulator {
                     // recompute surface the typed error at the call site.
                     state.stream_a = None;
                     state.boundaries.clear();
-                    state.framed = None;
                     state.epoch = state.epoch.saturating_add(1);
                     return;
-                }
-            }
-        }
-        if state.framed.is_some() {
-            for message in appended {
-                match sorted_canonical_message_bytes(message) {
-                    Ok(bytes) => {
-                        if let Some(framed) = state.framed.as_mut() {
-                            if framed.covered > 0 {
-                                framed.hasher.update(b",");
-                            }
-                            framed.hasher.update(&bytes);
-                            framed.covered += 1;
-                        }
-                    }
-                    Err(_) => {
-                        state.framed = None;
-                        break;
-                    }
                 }
             }
         }
@@ -250,7 +213,6 @@ impl TranscriptDigestAccumulator {
         let state = self.state.get_mut().unwrap_or_else(PoisonError::into_inner);
         if state.stream_a.is_none()
             && state.boundaries.is_empty()
-            && state.framed.is_none()
             && state.exact_row_anchor.is_none()
             && state.exact_row_current.is_none()
         {
@@ -259,7 +221,6 @@ impl TranscriptDigestAccumulator {
         let parked = AccumulatorState {
             stream_a: state.stream_a.take(),
             boundaries: std::mem::take(&mut state.boundaries),
-            framed: state.framed.take(),
             exact_row_anchor: state.exact_row_anchor.take(),
             exact_row_current: state.exact_row_current.take(),
             epoch: state.epoch,
@@ -283,7 +244,6 @@ impl TranscriptDigestAccumulator {
             if lowest_mutated_index.is_some() {
                 state.stream_a = None;
                 state.boundaries.clear();
-                state.framed = None;
                 state.exact_row_anchor = None;
                 state.exact_row_current = None;
                 state.epoch = state.epoch.saturating_add(1);
@@ -299,7 +259,6 @@ impl TranscriptDigestAccumulator {
         }
         state.stream_a = parked.stream_a;
         state.boundaries = parked.boundaries;
-        state.framed = parked.framed;
         state.exact_row_anchor = parked.exact_row_anchor;
         state.exact_row_current = parked.exact_row_current;
     }
@@ -438,64 +397,6 @@ impl TranscriptDigestAccumulator {
         }
         Some(digest)
     }
-
-    /// SHA-256 midstate over `prefix ++ "[" ++ canonical elements of exactly
-    /// this vector` (no closing `]`) — a clone the caller finalizes with
-    /// `"]" ++ suffix` to obtain the byte-identical canonical checkpoint
-    /// document digest.
-    ///
-    /// Serves the retained midstate when it covers exactly this vector under
-    /// exactly this prefix; otherwise reseeds with one full canonicalization
-    /// pass (counted — that is the pass the digest budget observes) and
-    /// retains the result. `None` when the accumulator is parked or a
-    /// message fails to serialize; the caller falls back to the full
-    /// document path — the fail-safe direction.
-    fn framed_document_hasher(&self, messages: &[Message], prefix: &[u8]) -> Option<Sha256> {
-        let mut state = self.locked();
-        if state.parked.is_some() {
-            return None;
-        }
-        if let Some(framed) = state.framed.as_ref()
-            && framed.covered == messages.len()
-            && framed.prefix == prefix
-        {
-            return Some(framed.hasher.clone());
-        }
-        let mut hasher = Sha256::new();
-        hasher.update(prefix);
-        hasher.update(b"[");
-        let mut element_bytes = 0u64;
-        let mut covered = 0usize;
-        for message in messages {
-            let Ok(bytes) = sorted_canonical_message_bytes(message) else {
-                return None;
-            };
-            if covered > 0 {
-                hasher.update(b",");
-                element_bytes = element_bytes.saturating_add(1);
-            }
-            hasher.update(&bytes);
-            element_bytes = element_bytes.saturating_add(bytes.len() as u64);
-            covered += 1;
-        }
-        crate::digest_observability::record_content_digest_bytes(element_bytes);
-        state.framed = Some(FramedMidstate {
-            prefix: prefix.to_vec(),
-            hasher: hasher.clone(),
-            covered,
-        });
-        Some(hasher)
-    }
-}
-
-/// Canonical-sorted bytes of one message: `write_canonical_json` over the
-/// digest-canonicalized message value. This is the per-element form of the
-/// history-witness byte stream (canonical array writing is element-wise).
-fn sorted_canonical_message_bytes(message: &Message) -> Result<Vec<u8>, serde_json::Error> {
-    let canonical = serde_json::to_value(super::canonicalize_message_for_digest(message))?;
-    let mut bytes = Vec::new();
-    crate::digest_observability::write_canonical_json(&canonical, &mut bytes)?;
-    Ok(bytes)
 }
 
 fn record_boundary(state: &mut AccumulatorState, stream: &Midstate) {
@@ -638,6 +539,7 @@ impl TranscriptMessages {
     }
 
     /// SEAM (in-place rewrite of unknown shape): invalidates unconditionally.
+    #[cfg(test)]
     pub(crate) fn mutate_in_place(&mut self) -> &mut Vec<Message> {
         self.accumulator.invalidate();
         Arc::make_mut(&mut self.messages)
@@ -679,13 +581,6 @@ impl TranscriptMessages {
     /// Non-append mutation count of this buffer.
     pub(crate) fn mutation_epoch(&self) -> u64 {
         self.accumulator.epoch()
-    }
-
-    /// Canonical checkpoint-document midstate for the current buffer under
-    /// `prefix`; see [`TranscriptDigestAccumulator::framed_document_hasher`].
-    pub(crate) fn framed_document_hasher(&self, prefix: &[u8]) -> Option<Sha256> {
-        self.accumulator
-            .framed_document_hasher(&self.messages, prefix)
     }
 }
 

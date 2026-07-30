@@ -29,7 +29,6 @@ pub struct ValidatedTranscriptHistory {
 #[derive(Clone, Debug)]
 pub struct ValidatedTranscriptRewriteSuffix<'a> {
     history: &'a ValidatedTranscriptHistory,
-    start_index: usize,
     start_prefix: TranscriptRewritePrefixAccumulator,
     edges: Vec<std::sync::Arc<TranscriptRevisionEdge>>,
 }
@@ -102,7 +101,6 @@ impl ValidatedTranscriptHistory {
         }
         Ok(ValidatedTranscriptRewriteSuffix {
             history: self,
-            start_index,
             start_prefix: start_prefix.clone(),
             edges: self.state.edge_suffix(start_index).ok_or_else(|| {
                 TranscriptEditError::HistoryStateMalformed(
@@ -135,7 +133,6 @@ impl ValidatedTranscriptHistory {
         };
         Ok(ValidatedTranscriptRewriteSuffix {
             history: self,
-            start_index,
             start_prefix,
             edges: self.state.edge_suffix(start_index).ok_or_else(|| {
                 TranscriptEditError::HistoryStateMalformed(

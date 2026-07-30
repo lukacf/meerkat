@@ -150,18 +150,15 @@ pub struct ImportedReleased0810Session {
 }
 
 impl ImportedReleased0810Session {
-    #[must_use]
     pub fn session(&self) -> &Session {
         &self.session
     }
 
-    #[must_use]
     pub fn receipt(&self) -> &Released0810ImportReceipt {
         &self.receipt
     }
 
     /// Split the imported domain state from the single-use adoption receipt.
-    #[must_use]
     pub fn into_parts(self) -> (Session, Released0810ImportReceipt) {
         (self.session, self.receipt)
     }
@@ -208,7 +205,7 @@ pub fn import_released_0810_session(
 
     let mut session = released_session_from_serde(serde_repr)?;
     let history_kind = transcript_history_wire_kind(&session.metadata)
-        .map_err(|error| Released0810ImportError::TranscriptHistory(error.to_string()))?;
+        .map_err(Released0810ImportError::TranscriptHistory)?;
     if matches!(history_kind, Some(TranscriptHistoryWireKind::Current)) {
         return Err(Released0810ImportError::CurrentTranscriptHistory);
     }

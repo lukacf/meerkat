@@ -25,9 +25,10 @@ use meerkat_core::{TurnErrorMetadata, TurnTerminalCauseKind, TurnTerminalOutcome
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+#[cfg(test)]
+use crate::meerkat_machine::driver::RuntimeCompletionResultAttempt;
 use crate::meerkat_machine::driver::{
-    RuntimeCompletionResultAttempt, RuntimeCompletionResultAuthority,
-    RuntimeCompletionResultRealized,
+    RuntimeCompletionResultAuthority, RuntimeCompletionResultRealized,
 };
 use crate::meerkat_machine::dsl::RuntimeCompletionResultClass;
 use crate::tokio::sync::oneshot;

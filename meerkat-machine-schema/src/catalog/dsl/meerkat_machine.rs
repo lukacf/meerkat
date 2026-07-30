@@ -17818,8 +17818,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input LiveBoundaryUnavailable { input_id }
             guard "input_tracked" { self.input_phases.contains_key(input_id) }
             guard "input_is_queued_steer" {
-                self.input_phases.get_cloned(input_id) == InputPhase::Queued
-                && self.input_lane.get_cloned(input_id) == InputLane::Steer
+                self.input_phases.get_cloned(input_id) == Some(InputPhase::Queued)
+                && self.input_lane.get_cloned(input_id) == Some(InputLane::Steer)
             }
             update {}
             to Running

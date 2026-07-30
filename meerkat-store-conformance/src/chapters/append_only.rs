@@ -10,6 +10,7 @@
 //!   guarded saves keyed on its token must keep succeeding. A store that
 //!   resolves "current" as "highest version seen in the window" lets one
 //!   failed attempt make every subsequent guarded save permanently stale.
+//!
 //! The in-crate [`EmulatedCasSessionStore`](crate::EmulatedCasSessionStore)
 //! passes this chapter and doubles as the documented reference for the
 //! contract.

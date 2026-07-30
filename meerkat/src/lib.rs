@@ -259,10 +259,9 @@ pub use meerkat_workgraph::{
     WorkItemFilter, WorkItemId, WorkItemRef, WorkNamespace, WorkOwner, WorkOwnerKey, WorkOwnerKind,
     WorkPriority, WorkStatus, handle_unscoped_workgraph_tools_call, handle_workgraph_tools_call,
     unscoped_workgraph_tools_list, validate_workgraph_attention_projection_current,
-    workgraph_attention_context_append, workgraph_attention_continuation_key,
-    workgraph_attention_projection_from_overlay, workgraph_attention_supersession_key,
-    workgraph_attention_turn_append, workgraph_rest_path_catalog,
-    workgraph_rest_request_response_schema, workgraph_tools_list,
+    workgraph_attention_continuation_key, workgraph_attention_projection_from_overlay,
+    workgraph_attention_supersession_key, workgraph_attention_turn_append,
+    workgraph_rest_path_catalog, workgraph_rest_request_response_schema, workgraph_tools_list,
 };
 
 // AgentFactory and build_agent types

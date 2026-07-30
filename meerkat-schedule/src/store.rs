@@ -652,17 +652,22 @@ fn memory_set_schedule_refill_deadline(
     }
 }
 
+enum MemoryRefillDeadlineProjection {
+    Derive,
+    Exact(Option<DateTime<Utc>>),
+}
+
 fn memory_update_schedule_refill_projection(
     state: &mut MemoryScheduleState,
     previous: Option<&Schedule>,
     schedule: &Schedule,
-    exact_deadline: Option<Option<DateTime<Utc>>>,
+    deadline_projection: MemoryRefillDeadlineProjection,
 ) {
     if schedule.phase != SchedulePhase::Active {
         memory_set_schedule_refill_deadline(state, &schedule.schedule_id, None);
         return;
     }
-    if let Some(deadline) = exact_deadline {
+    if let MemoryRefillDeadlineProjection::Exact(deadline) = deadline_projection {
         memory_set_schedule_refill_deadline(state, &schedule.schedule_id, deadline);
         return;
     }
@@ -716,7 +721,7 @@ impl MemoryScheduleStore {
         &self,
         schedule: AuthorizedScheduleWrite,
         occurrences: Vec<AuthorizedOccurrenceWrite>,
-        exact_refill_deadline: Option<Option<DateTime<Utc>>>,
+        refill_deadline_projection: MemoryRefillDeadlineProjection,
     ) -> Result<Schedule, ScheduleStoreError> {
         let mut state = self.inner.write().await;
         let previous_schedule = state.schedules.get(schedule.schedule_id()).cloned();
@@ -815,7 +820,7 @@ impl MemoryScheduleStore {
             &mut state,
             previous_schedule.as_ref(),
             &committed_schedule,
-            exact_refill_deadline,
+            refill_deadline_projection,
         );
         Ok(committed_schedule)
     }
@@ -959,7 +964,12 @@ impl ScheduleStore for MemoryScheduleStore {
         schedule
             .validate_machine_projection()
             .map_err(ScheduleStoreError::Internal)?;
-        memory_update_schedule_refill_projection(&mut state, previous.as_ref(), &schedule, None);
+        memory_update_schedule_refill_projection(
+            &mut state,
+            previous.as_ref(),
+            &schedule,
+            MemoryRefillDeadlineProjection::Derive,
+        );
         state
             .schedules
             .insert(schedule.schedule_id.clone(), schedule);
@@ -1025,8 +1035,12 @@ impl ScheduleStore for MemoryScheduleStore {
         schedule: AuthorizedScheduleWrite,
         occurrences: Vec<AuthorizedOccurrenceWrite>,
     ) -> Result<Schedule, ScheduleStoreError> {
-        self.commit_schedule_mutation_with_refill(schedule, occurrences, None)
-            .await
+        self.commit_schedule_mutation_with_refill(
+            schedule,
+            occurrences,
+            MemoryRefillDeadlineProjection::Derive,
+        )
+        .await
     }
 
     async fn commit_schedule_refill(
@@ -1035,8 +1049,12 @@ impl ScheduleStore for MemoryScheduleStore {
         occurrences: Vec<AuthorizedOccurrenceWrite>,
         next_refill_at_utc: Option<DateTime<Utc>>,
     ) -> Result<Schedule, ScheduleStoreError> {
-        self.commit_schedule_mutation_with_refill(schedule, occurrences, Some(next_refill_at_utc))
-            .await
+        self.commit_schedule_mutation_with_refill(
+            schedule,
+            occurrences,
+            MemoryRefillDeadlineProjection::Exact(next_refill_at_utc),
+        )
+        .await
     }
 
     async fn record_refill_deadline_if_current(
@@ -1064,7 +1082,7 @@ impl ScheduleStore for MemoryScheduleStore {
             &mut state,
             Some(&schedule),
             &schedule,
-            Some(next_refill_at_utc),
+            MemoryRefillDeadlineProjection::Exact(next_refill_at_utc),
         );
         Ok(())
     }

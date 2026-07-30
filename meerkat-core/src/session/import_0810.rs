@@ -180,6 +180,8 @@ pub enum Released0810ImportError {
     Checkpoint(String),
     #[error("released transcript-history import failed: {0}")]
     TranscriptHistory(String),
+    #[error("released System-context timestamp is outside the supported UTC range")]
+    SystemContextTimestamp,
 }
 
 /// Import one exact Meerkat 0.8.10 Session document.
@@ -278,7 +280,7 @@ fn adopt_released_system_context_into_transcript(
 
         if append.peer_response_terminal.is_some() {
             let mut notice = append.content.into_system_notice_message();
-            notice.created_at = append.accepted_at.into();
+            notice.created_at = released_message_timestamp_0810(append.accepted_at)?;
             let already_present = session.messages().iter().any(|message| {
                 matches!(
                     message,
@@ -299,7 +301,7 @@ fn adopt_released_system_context_into_transcript(
             crate::lifecycle::run_primitive::CoreRenderable::SystemNotice { .. }
         ) {
             let mut notice = append.content.into_system_notice_message();
-            notice.created_at = append.accepted_at.into();
+            notice.created_at = released_message_timestamp_0810(append.accepted_at)?;
             session.push(Message::SystemNotice(notice));
             continue;
         }
@@ -313,7 +315,7 @@ fn adopt_released_system_context_into_transcript(
             rendered,
             append.source,
             append.idempotency_key,
-            append.accepted_at.into(),
+            released_message_timestamp_0810(append.accepted_at)?,
         )));
     }
 
@@ -326,6 +328,18 @@ fn adopt_released_system_context_into_transcript(
         state.active_turn_pending_indices,
     );
     Ok(())
+}
+
+fn released_message_timestamp_0810(
+    timestamp: SystemTime,
+) -> Result<crate::types::MessageTimestamp, Released0810ImportError> {
+    let elapsed = timestamp
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_err(|_| Released0810ImportError::SystemContextTimestamp)?;
+    let seconds = i64::try_from(elapsed.as_secs())
+        .map_err(|_| Released0810ImportError::SystemContextTimestamp)?;
+    chrono::DateTime::<chrono::Utc>::from_timestamp(seconds, elapsed.subsec_nanos())
+        .ok_or(Released0810ImportError::SystemContextTimestamp)
 }
 
 fn validate_released_system_context_state_0810(

@@ -57,6 +57,7 @@ pub fn workgraph_attention_turn_append(
 ) -> ConversationAppend {
     ConversationAppend {
         role: ConversationAppendRole::SystemNotice,
+        identity: None,
         content: CoreRenderable::SystemNotice {
             kind: SystemNoticeKind::Generic,
             body: Some(format!(

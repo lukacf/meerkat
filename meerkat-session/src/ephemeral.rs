@@ -203,7 +203,7 @@ impl HeadCanonicalRuntimeBoundaryPrepareRequest {
         })
     }
 
-    fn into_parts(
+    pub fn into_parts(
         self,
     ) -> (
         HeadCanonicalRuntimeBoundaryAuthority,

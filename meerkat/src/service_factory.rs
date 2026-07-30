@@ -197,8 +197,6 @@ impl SessionAgent for FactoryAgent {
             ));
         }
         self.agent.set_runtime_execution_kind(input.execution_kind);
-        self.agent
-            .set_active_turn_request_contexts(input.transient_turn_contexts);
         if input.typed_turn_appends.is_empty()
             && input.transcript_identity.is_none()
             && input.injected_context.is_empty()

@@ -2287,7 +2287,7 @@ impl SessionHead {
         }
         let expected_row_prefix = self.message_row_prefix.clone().ok_or_else(|| {
             SessionStoreError::InvalidTranscriptRewrite {
-                id: self.id,
+                id: self.id.clone(),
                 reason: "current head has no exact message-row authority and cannot be explicitly materialized"
                     .to_string(),
             }
@@ -2295,14 +2295,14 @@ impl SessionHead {
         let actual_row_prefix = session
             .exact_message_row_prefix_at(self.message_count)
             .ok_or_else(|| SessionStoreError::InvalidTranscriptRewrite {
-                id: self.id,
+                id: self.id.clone(),
                 reason:
                     "materialized session does not carry exact durable-row lineage for the current head"
                         .to_string(),
             })?;
         if actual_row_prefix != expected_row_prefix {
             return Err(SessionStoreError::TranscriptContinuityViolation {
-                id: self.id.clone(),
+                id: self.id,
                 previous_revision: expected_row_prefix.digest().to_string(),
                 incoming_revision: actual_row_prefix.digest().to_string(),
                 reason:
@@ -2323,7 +2323,7 @@ impl SessionHead {
         let actual_token = session_head_cas_token(&projected)?;
         if actual_token != expected_token {
             return Err(SessionStoreError::TranscriptRevisionConflict {
-                id: self.id.clone(),
+                id: self.id,
                 expected: expected_token,
                 actual: actual_token,
             });
@@ -2618,7 +2618,7 @@ impl SessionHead {
             }
         })?;
         if !self.metadata.is_empty() {
-            return Err(SessionStoreError::Corrupted(self.id));
+            return Err(SessionStoreError::Corrupted(self.id.clone()));
         }
         if projection.identity() != &expected
             || !projection.is_full_snapshot()
@@ -2627,7 +2627,7 @@ impl SessionHead {
                 .iter()
                 .any(|mutation| !head_metadata_cell_carries_key(mutation.key()))
         {
-            return Err(SessionStoreError::Corrupted(self.id));
+            return Err(SessionStoreError::Corrupted(self.id.clone()));
         }
         let values = projection
             .materialized_values()

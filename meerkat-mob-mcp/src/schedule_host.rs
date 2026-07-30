@@ -147,6 +147,7 @@ impl ScheduleMobRuntime for MobMcpState {
             MobExternalDeliveryTargetKind::Flow
             | MobExternalDeliveryTargetKind::SpawnHelper
             | MobExternalDeliveryTargetKind::ForkHelper => false,
+            _ => false,
         }
     }
 
@@ -354,7 +355,9 @@ impl SurfaceScheduleMobHost for MobMcpScheduleHost {
             mob_id.clone(),
             schedule_identity,
             target_kind,
-            binding.stable_key()?,
+            binding
+                .stable_key()
+                .map_err(ScheduleDomainError::InvalidSchedule)?,
         )?;
         let (admission_outcome, repair_state) = match self
             .runtime
@@ -633,7 +636,9 @@ impl SurfaceScheduleMobHost for MobMcpScheduleHost {
             mob_id.clone(),
             schedule_identity,
             MobExternalDeliveryTargetKind::MemberSend,
-            binding.stable_key()?,
+            binding
+                .stable_key()
+                .map_err(ScheduleDomainError::InvalidSchedule)?,
         )?;
         let (admission_outcome, repair_state) = match self
             .runtime

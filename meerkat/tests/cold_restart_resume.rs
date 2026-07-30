@@ -164,7 +164,7 @@ mod tests {
     async fn cold_restart_resume_survives_rebookkept_persisted_row() {
         let temp = tempfile::tempdir().expect("tempdir");
 
-        let (session_id, system_rows_before_restart) = {
+        let session_id = {
             let (_manifest, persistence) = meerkat::open_realm_persistence_in(
                 temp.path(),
                 "restart-realm",

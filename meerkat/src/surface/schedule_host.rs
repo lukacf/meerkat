@@ -64,6 +64,7 @@ struct ResolvedScheduledSession {
     materialized_session_id: Option<SessionId>,
 }
 
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 enum AcceptedScheduledInputCompletion {
     Handle(CompletionHandle),
     Terminal(CompletionOutcome),
@@ -117,6 +118,7 @@ impl AcceptedScheduledInput {
         }
     }
 
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn with_runtime_terminal(
         correlation_id: Option<String>,
         terminal: CompletionOutcome,
@@ -1763,6 +1765,7 @@ pub fn immediate_delivery_failure(
 /// replays it so every schedule surface preserves the same result class and
 /// payload. A coarse input-terminal class is never treated as completion
 /// authority.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub async fn runtime_delivery_dispatch_from_admission(
     runtime_adapter: &MeerkatMachine,
     session_id: &SessionId,
@@ -1850,6 +1853,7 @@ pub fn schedule_delivery_idempotency_key(occurrence: &Occurrence) -> String {
     ScheduleDeliveryIdentity::for_occurrence(occurrence).idempotency_key
 }
 
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 fn schedule_v0810_predecessor_delivery_keys(
     occurrence: &Occurrence,
 ) -> impl Iterator<Item = String> + '_ {
@@ -1872,6 +1876,7 @@ fn schedule_v0810_predecessor_delivery_keys(
 /// repeated 0.8.11 reclaims that reused the same old binding. New occurrences
 /// use the driver's 0.8.11 occurrence-stable key. This is intentionally not a
 /// general legacy alias mechanism.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub async fn schedule_runtime_delivery_idempotency_key(
     runtime_adapter: &MeerkatMachine,
     session_id: &SessionId,
@@ -1919,6 +1924,7 @@ pub async fn schedule_runtime_delivery_idempotency_key(
 /// Project the driver's canonical string correlation into the runtime's UUID
 /// carrier. Parsing here makes the schedule/runtime seam fail closed if those
 /// two typed representations ever drift.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub fn schedule_runtime_correlation_id(
     identity: &ScheduleDeliveryIdentity,
 ) -> Result<meerkat_runtime::CorrelationId, ScheduleDomainError> {

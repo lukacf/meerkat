@@ -3551,7 +3551,7 @@ mod tests {
                 return Err(SessionError::NotFound { id: id.clone() }.into());
             }
             Ok(AppendSystemContextResult {
-                status: AppendSystemContextStatus::Staged,
+                status: AppendSystemContextStatus::Applied,
             })
         }
     }

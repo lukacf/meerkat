@@ -1306,7 +1306,7 @@ async fn e2e_cli_mob_rpc_state_machine_probe() -> Result<(), Box<dyn std::error:
     .await?;
     // Verify the append targeted the correct member via identity.
     assert!(!worker_identity.is_empty(), "worker identity should be set");
-    assert_eq!(appended["status"], "staged");
+    assert_eq!(appended["status"], "applied");
 
     let send_err = rpc_call(
         &mut surface,
@@ -1723,7 +1723,7 @@ async fn e2e_scenario_29_cli_mob_rpc_member_turn_probe() -> Result<(), Box<dyn s
         20,
     )
     .await?;
-    assert_eq!(appended["status"], "staged");
+    assert_eq!(appended["status"], "applied");
 
     let send_err = rpc_call(
         &mut surface,

@@ -3185,7 +3185,7 @@ impl SessionServiceControlExt for MockSessionService {
             return Err(SessionError::NotFound { id: id.clone() }.into());
         }
         Ok(AppendSystemContextResult {
-            status: AppendSystemContextStatus::Staged,
+            status: AppendSystemContextStatus::Applied,
         })
     }
 }
@@ -39923,7 +39923,7 @@ impl SessionServiceControlExt for RealCommsSessionService {
             return Err(SessionError::NotFound { id: id.clone() }.into());
         }
         Ok(AppendSystemContextResult {
-            status: AppendSystemContextStatus::Staged,
+            status: AppendSystemContextStatus::Applied,
         })
     }
 }
@@ -40988,7 +40988,7 @@ impl SessionServiceControlExt for RuntimeBackedRealCommsSessionService {
         }
         session_appends.push(req);
         Ok(AppendSystemContextResult {
-            status: AppendSystemContextStatus::Staged,
+            status: AppendSystemContextStatus::Applied,
         })
     }
 }

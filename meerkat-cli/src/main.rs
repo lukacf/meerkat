@@ -19433,7 +19433,7 @@ default_model = "gemma"
                 return Err(meerkat_core::SessionError::NotFound { id: id.clone() }.into());
             }
             Ok(meerkat_core::service::AppendSystemContextResult {
-                status: meerkat_core::service::AppendSystemContextStatus::Staged,
+                status: meerkat_core::service::AppendSystemContextStatus::Applied,
             })
         }
     }

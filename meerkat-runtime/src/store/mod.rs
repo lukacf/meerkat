@@ -2,6 +2,7 @@
 //!
 //! Machine-owned runtime commands durably persist [`RunBoundaryReceipt`] values
 //! atomically with their session and input-state effects.
+#![cfg_attr(target_arch = "wasm32", allow(dead_code))]
 
 pub mod memory;
 #[cfg(feature = "sqlite-store")]

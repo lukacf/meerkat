@@ -31,7 +31,7 @@ use tokio_with_wasm::alias::sync::mpsc;
 #[cfg(feature = "session-store")]
 use crate::PersistenceBundle;
 use crate::{AgentBuildConfig, AgentFactory, BuildAgentError, DynAgent};
-use meerkat_client::{LlmClient, LlmClientAdapter};
+use meerkat_client::LlmClient;
 
 /// Wrapper around [`DynAgent`] implementing [`SessionAgent`].
 pub struct FactoryAgent {
@@ -635,12 +635,11 @@ impl SessionAgent for FactoryAgent {
                     "failed to seal head-canonical successor boundary: {error}"
                 ))
             })?;
-        let prepared =
-            PreparedHeadCanonicalRuntimeBoundary::new(committed.clone()).map_err(|error| {
-                meerkat_core::error::AgentError::InternalError(format!(
-                    "failed to bind actor-prepared head-canonical boundary: {error}"
-                ))
-            })?;
+        let prepared = PreparedHeadCanonicalRuntimeBoundary::new(committed).map_err(|error| {
+            meerkat_core::error::AgentError::InternalError(format!(
+                "failed to bind actor-prepared head-canonical boundary: {error}"
+            ))
+        })?;
         self.pending_head_canonical_boundary = Some(PendingFactoryHeadCanonicalBoundary {
             authority,
             observed_head_token,

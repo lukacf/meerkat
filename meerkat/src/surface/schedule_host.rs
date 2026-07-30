@@ -65,9 +65,9 @@ struct ResolvedScheduledSession {
 }
 
 enum AcceptedScheduledInputCompletion {
-    RuntimeHandle(CompletionHandle),
-    RuntimeTerminal(CompletionOutcome),
-    RuntimeCompletionAuthorityUnavailable { detail: String },
+    Handle(CompletionHandle),
+    Terminal(CompletionOutcome),
+    AuthorityUnavailable { detail: String },
 }
 
 /// Exact target-side admission result for one stable schedule delivery
@@ -100,7 +100,7 @@ impl AcceptedScheduledInput {
         Self {
             correlation_id,
             admission_outcome: ScheduleAdmissionOutcome::Accepted,
-            completion: AcceptedScheduledInputCompletion::RuntimeHandle(handle),
+            completion: AcceptedScheduledInputCompletion::Handle(handle),
         }
     }
 
@@ -111,7 +111,7 @@ impl AcceptedScheduledInput {
         Self {
             correlation_id,
             admission_outcome: ScheduleAdmissionOutcome::Accepted,
-            completion: AcceptedScheduledInputCompletion::RuntimeCompletionAuthorityUnavailable {
+            completion: AcceptedScheduledInputCompletion::AuthorityUnavailable {
                 detail: detail.into(),
             },
         }
@@ -124,7 +124,7 @@ impl AcceptedScheduledInput {
         Self {
             correlation_id,
             admission_outcome: ScheduleAdmissionOutcome::Accepted,
-            completion: AcceptedScheduledInputCompletion::RuntimeTerminal(terminal),
+            completion: AcceptedScheduledInputCompletion::Terminal(terminal),
         }
     }
 
@@ -302,6 +302,7 @@ pub trait SurfaceScheduleSessionHost: Send + Sync {
         dispatch: ScheduledPromptDispatch,
     ) -> Result<DeliveryDispatch, ScheduleDomainError>;
 
+    #[allow(clippy::too_many_arguments)]
     async fn deliver_event(
         &self,
         session_id: &SessionId,
@@ -1521,24 +1522,22 @@ fn schedule_completion_from_runtime_completion(
 ) -> DeliveryCompletion {
     Box::pin(async move {
         let outcome = match completion {
-            AcceptedScheduledInputCompletion::RuntimeHandle(handle) => {
-                match handle.try_wait().await {
-                    Ok(outcome) => outcome,
-                    Err(error) => {
-                        return Err(ScheduleDomainError::DeliveryCompletionFailed {
-                            reason: completion_wait_failure_reason(&error),
-                            detail: format!("runtime completion authority unavailable: {error}"),
-                        });
-                    }
+            AcceptedScheduledInputCompletion::Handle(handle) => match handle.try_wait().await {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    return Err(ScheduleDomainError::DeliveryCompletionFailed {
+                        reason: completion_wait_failure_reason(&error),
+                        detail: format!("runtime completion authority unavailable: {error}"),
+                    });
                 }
-            }
-            AcceptedScheduledInputCompletion::RuntimeTerminal(terminal) => {
+            },
+            AcceptedScheduledInputCompletion::Terminal(terminal) => {
                 return Ok(delivery_terminal_from_completion_outcome(
                     terminal,
                     materialized_session_id,
                 ));
             }
-            AcceptedScheduledInputCompletion::RuntimeCompletionAuthorityUnavailable { detail } => {
+            AcceptedScheduledInputCompletion::AuthorityUnavailable { detail } => {
                 return Err(ScheduleDomainError::DeliveryCompletionFailed {
                     reason: DeliveryCompletionFailureReason::RuntimeCompletionAuthorityUnavailable,
                     detail,

@@ -82,9 +82,11 @@ pub use runtime_schedule_host::{
 };
 pub use schedule_host::{
     AcceptedScheduledInput, MobMemberCurrentSessionScheduleResolver, NoopScheduleMobHost,
-    ScheduleHostHandle, ScheduledPromptDispatch, SharedScheduleTargetAdapter,
-    SurfaceScheduleMobHost, SurfaceScheduleSessionHost, async_completion_dispatch,
-    build_dispatch_from_accepted, immediate_completed_dispatch, immediate_delivery_failure,
+    ScheduleAdmissionOutcome, ScheduleHostHandle, ScheduledPromptDispatch,
+    SharedScheduleTargetAdapter, SurfaceScheduleMobHost, SurfaceScheduleSessionHost,
+    async_completion_dispatch, async_completion_dispatch_with_admission_outcome,
+    build_dispatch_from_accepted, immediate_completed_dispatch,
+    immediate_completed_dispatch_with_admission_outcome, immediate_delivery_failure,
     mob_member_schedule_identity, parse_mob_member_schedule_identity,
     recover_mob_member_identity_from_session_target, schedule_delivery_idempotency_key,
     schedule_host_supported, spawn_schedule_host,

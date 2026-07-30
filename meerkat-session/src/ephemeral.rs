@@ -5450,7 +5450,12 @@ async fn session_task<A: SessionAgent>(
                 match begin_outcome {
                     Ok((BeginOutcome::Running, projection)) => {
                         control.state_tx.send_replace(projection);
-                        if let Err(error) = agent.append_system_messages(system_messages) {
+                        let system_append = if system_messages.is_empty() {
+                            Ok(())
+                        } else {
+                            agent.append_system_messages(system_messages)
+                        };
+                        if let Err(error) = system_append {
                             let _ = agent.set_turn_tool_overlay(None);
                             let resolve_projection = {
                                 let mut slot = lock_turn_admission(&control.turn_admission);

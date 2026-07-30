@@ -6627,18 +6627,18 @@ mod tests {
         let (rebuilt, _) = store.refresh_event_log_index(&session_id, None).await?;
         assert_eq!(rebuilt.last_seq, 129);
         store
-            .note_appended_rows(
-                &session_id,
-                before,
-                after,
-                &appended_bytes,
-                &[AppendedIndexRow {
+            .note_appended_rows(&EventLogAppend {
+                session_id: &session_id,
+                pre_fingerprint: before,
+                post_fingerprint: after,
+                bytes: &appended_bytes,
+                rows: &[AppendedIndexRow {
                     seq: 129,
                     relative_offset: 0,
                     byte_len: u64::try_from(appended_bytes.len())?,
                 }],
-                std::slice::from_ref(&appended),
-            )
+                stored_events: std::slice::from_ref(&appended),
+            })
             .await;
 
         store.reset_decoded_rows();

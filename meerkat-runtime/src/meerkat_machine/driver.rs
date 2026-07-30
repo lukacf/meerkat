@@ -324,7 +324,6 @@ impl RuntimeCompletionResultAttempt {
         drop(self);
     }
 
-    #[cfg(test)]
     pub(crate) fn abandon(self) {
         drop(self);
     }

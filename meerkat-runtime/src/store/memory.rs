@@ -1894,6 +1894,7 @@ impl RuntimeStore for InMemoryRuntimeStore {
             successor_session_id,
             successor_blob_sha256,
             successor_bytes,
+            mut successor_catalog_entry,
             compaction_projection_intents,
         ) = boundary.into_tuple();
         if expected.session_id() != &successor_session_id
@@ -1918,17 +1919,24 @@ impl RuntimeStore for InMemoryRuntimeStore {
             runtime_id,
             &compaction_projection_intents,
         )?;
-        if current.session_id() == &successor_session_id
+        let successor_revision = expected.store_revision().checked_add(1).ok_or_else(|| {
+            RuntimeStoreError::WriteFailed(format!(
+                "WholeBlob store revision exhausted for runtime {runtime_id}"
+            ))
+        })?;
+        let exact_idempotent_successor = current.session_id() == &successor_session_id
             && current.blob_sha256() == successor_blob_sha256
-        {
+            && ((current == &expected && expected.blob_sha256() == successor_blob_sha256)
+                || current.store_revision() == successor_revision);
+        if exact_idempotent_successor {
             return Ok(current.clone());
         }
         if current != &expected {
             return Err(RuntimeStoreError::SessionPersistenceAuthorityConflict {
                 runtime_id: runtime_id.to_string(),
-                detail: format!(
+                detail:
                     "prepared WholeBlob predecessor revision/token does not match current authority"
-                ),
+                        .to_string(),
             });
         }
         // `PreparedWholeBlobRewriteStoreParts` is non-constructible outside the
@@ -1938,19 +1946,24 @@ impl RuntimeStore for InMemoryRuntimeStore {
         // into a second O(document) pass without adding store-local authority.
         // This lock still owns the only fact a backend must revalidate: the
         // exact current predecessor (or exact already-landed successor).
+        successor_catalog_entry.set_runtime_state(
+            inner
+                .session_catalog
+                .get(&runtime_id.0)
+                .and_then(super::RuntimeSessionCatalogEntry::runtime_state),
+        );
         inner.sessions.insert(runtime_id.0.clone(), successor_bytes);
         let successor = WholeBlobStoreAuthority::issued(
             successor_session_id,
-            expected.store_revision().checked_add(1).ok_or_else(|| {
-                RuntimeStoreError::WriteFailed(format!(
-                    "WholeBlob store revision exhausted for runtime {runtime_id}"
-                ))
-            })?,
+            successor_revision,
             successor_blob_sha256,
         )?;
         inner
             .session_authorities
             .insert(runtime_id.0.clone(), successor.clone());
+        inner
+            .session_catalog
+            .insert(runtime_id.0.clone(), successor_catalog_entry);
         inner.projection_quarantine.remove(&runtime_id.0);
         Ok(successor)
     }

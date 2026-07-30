@@ -14,7 +14,7 @@ mod inner {
     use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
     use crate::identifiers::{IdempotencyKey, LogicalRuntimeId};
-    use crate::input_state::{InputStatePersistenceRecord, InputStateSeed, StoredInputState};
+    use crate::input_state::{InputStatePersistenceRecord, StoredInputState};
     use crate::runtime_state::RuntimeState;
     use crate::store::{
         AuthOAuthFlowSnapshotUpdate, CommittedRecoveryBoundary, CommittedWholeBlobProvisionalTail,
@@ -39,8 +39,8 @@ mod inner {
         complete_compaction_projection_intent, decoded_prepared_machine_lifecycle_replacement,
         execute_runtime_store_write_fence, parsed_whole_blob_snapshot,
         prepare_input_state_batch_cas, prepare_machine_lifecycle_replacement,
-        prepare_recovery_input_state_mutations, prepared_whole_blob_snapshot,
-        validate_input_state_batch_read_ids, validate_machine_lifecycle_replacement,
+        prepare_recovery_input_state_mutations, validate_input_state_batch_read_ids,
+        validate_machine_lifecycle_replacement,
     };
 
     const CREATE_RUNTIME_SCHEMA_SQL: &str = r"
@@ -3369,7 +3369,7 @@ END";
                         ),
                     )
                 })?
-                .map_or_else(Default::default, |history| history.rewrite_prefix.clone()),
+                .map_or_else(Default::default, |history| history.rewrite_prefix().clone()),
         };
         let snapshot_bytes = i64::try_from(snapshot.len()).map_err(|_| {
             session_authority_conflict(
@@ -4958,7 +4958,6 @@ ORDER BY runtime_id";
     }
 
     fn validate_prepared_recovery_request_binding(
-        runtime_id: &LogicalRuntimeId,
         session: &meerkat_core::lifecycle::core_executor::BoundSessionCommit,
         evidence: &crate::store::PreparedRecoveryEvidence,
         input_updates: &[InputStatePersistenceRecord],
@@ -7949,7 +7948,9 @@ ORDER BY runtime_id";
                     }
                 };
                 return Ok(match authority {
-                    Some(authority) => PreparedRuntimeSessionCommitResult::committed(authority),
+                    Some(authority) => PreparedRuntimeSessionCommitResult::committed(
+                        RuntimeSessionAuthority::WholeBlob(authority),
+                    ),
                     None => PreparedRuntimeSessionCommitResult::receipt_only(
                         RuntimeSessionPersistenceProfile::WholeBlobV1,
                     ),
@@ -8150,7 +8151,6 @@ ORDER BY runtime_id";
                         Some(&session_store_key),
                     )?;
                     validate_prepared_recovery_request_binding(
-                        runtime_id,
                         &session,
                         &evidence,
                         &input_updates,
@@ -9507,41 +9507,27 @@ ORDER BY runtime_id";
             &self,
             runtime_id: &LogicalRuntimeId,
             boundary: PreparedWholeBlobRewriteStoreParts,
-        ) -> Result<RuntimeSessionAuthority, RuntimeStoreError> {
+        ) -> Result<WholeBlobStoreAuthority, RuntimeStoreError> {
             self.require_whole_blob_session_operation(
                 runtime_id,
                 "commit_prepared_whole_blob_rewrite_boundary",
             )?;
-            let (expected, successor, successor_bytes, compaction_projection_intents) =
-                boundary.into_tuple();
-            if expected.profile() != RuntimeSessionPersistenceProfile::WholeBlobV1
-                || successor.profile() != RuntimeSessionPersistenceProfile::WholeBlobV1
-                || expected.session_id() != successor.session_id()
-                || &LogicalRuntimeId::for_session(successor.session_id()) != runtime_id
+            let (
+                expected,
+                successor_session_id,
+                successor_blob_sha256,
+                successor_bytes,
+                mut successor_catalog_entry,
+                compaction_projection_intents,
+            ) = boundary.into_tuple();
+            if expected.session_id() != &successor_session_id
+                || &LogicalRuntimeId::for_session(&successor_session_id) != runtime_id
             {
                 return Err(session_authority_conflict(
                     runtime_id,
                     "prepared WholeBlob rewrite authorities do not bind this runtime/session",
                 ));
             }
-            let expected_token = expected
-                .whole_blob_document_token()
-                .ok_or_else(|| {
-                    session_authority_conflict(
-                        runtime_id,
-                        "prepared WholeBlob predecessor has no document token",
-                    )
-                })?
-                .to_string();
-            let successor_token = successor
-                .whole_blob_document_token()
-                .ok_or_else(|| {
-                    session_authority_conflict(
-                        runtime_id,
-                        "prepared WholeBlob successor has no document token",
-                    )
-                })?
-                .to_string();
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
             tokio::task::spawn_blocking(move || {
@@ -9552,45 +9538,61 @@ ORDER BY runtime_id";
                     &runtime_id,
                     "whole-BLOB transcript rewrite commit",
                 )?;
-                let current = tx
-                    .query_row(
-                        "SELECT session_snapshot FROM runtime_session_snapshots WHERE runtime_id = ?1",
-                        params![runtime_id_text(&runtime_id)],
-                        |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
-                    )
-                    .optional()
-                    .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?
-                    .ok_or_else(|| {
+                let current =
+                    load_whole_blob_store_authority(&tx, &runtime_id)?.ok_or_else(|| {
                         session_authority_conflict(
                             &runtime_id,
-                            "prepared WholeBlob predecessor is absent",
+                            "prepared WholeBlob predecessor authority is absent",
                         )
                     })?;
-                use sha2::Digest as _;
-                let current_token =
-                    format!("row-sha256:{:x}", sha2::Sha256::digest(&current));
                 ensure_compaction_intents_already_outboxed_list(
                     &tx,
                     &runtime_id,
                     &compaction_projection_intents,
                 )?;
-                if current_token == successor_token {
-                    return Ok(successor);
+                let successor_revision =
+                    expected.store_revision().checked_add(1).ok_or_else(|| {
+                        RuntimeStoreError::WriteFailed(format!(
+                            "WholeBlob store revision exhausted for runtime {runtime_id}"
+                        ))
+                    })?;
+                let exact_idempotent_successor = current.session_id() == &successor_session_id
+                    && current.blob_sha256() == successor_blob_sha256
+                    && ((current == expected
+                        && expected.blob_sha256() == successor_blob_sha256)
+                        || current.store_revision() == successor_revision);
+                if exact_idempotent_successor {
+                    return Ok(current);
                 }
-                if current_token != expected_token {
+                if current != expected {
                     return Err(session_authority_conflict(
                         &runtime_id,
-                        format!(
-                            "prepared WholeBlob predecessor token {expected_token} does not match current {current_token}"
-                        ),
+                        "prepared WholeBlob predecessor revision/token does not match current authority",
                     ));
                 }
                 // The non-constructible prepared carrier already paired this
-                // exact shared byte slice with `successor_token` using the one
-                // final-document hash. Re-hashing it inside the transaction
-                // would add another O(document) pass; the transaction-owned
-                // check is the current predecessor/successor token above.
-                upsert_runtime_snapshot(&tx, &runtime_id, successor_bytes.as_ref())?;
+                // exact shared byte slice with `successor_blob_sha256` using
+                // the one final-document hash. Re-hashing or decoding it here
+                // would add O(document) work; this transaction revalidates only
+                // the store-owned predecessor authority.
+                let runtime_state =
+                    load_runtime_session_catalog_entry_in_txn(&tx, &runtime_id)?
+                        .ok_or_else(|| {
+                        session_authority_conflict(
+                            &runtime_id,
+                            "prepared WholeBlob predecessor has no catalog projection",
+                        )
+                    })?
+                    .runtime_state();
+                successor_catalog_entry.set_runtime_state(runtime_state);
+                let successor = upsert_runtime_snapshot_issued(
+                    &tx,
+                    &runtime_id,
+                    successor_bytes.as_ref(),
+                    &successor_session_id,
+                    &successor_blob_sha256,
+                    &successor_catalog_entry,
+                )?;
                 tx.commit()
                     .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
                 Ok(successor)
@@ -15722,6 +15724,13 @@ ORDER BY runtime_id";
                 .unwrap();
             let stored: Session = serde_json::from_slice(&stored).unwrap();
             assert_eq!(stored.transcript_revision().unwrap(), first_commit.revision);
+            let catalog = store
+                .load_runtime_session_catalog_entry(&runtime_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(catalog.updated_at(), stored.updated_at());
+            assert_eq!(catalog.message_count(), stored.messages().len());
         }
 
         #[tokio::test]

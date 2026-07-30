@@ -369,6 +369,15 @@ impl meerkat_core::lifecycle::CoreExecutor for MachineManagedPostStopExecutor {
             .await
     }
 
+    async fn acknowledge_head_canonical_session_boundary(
+        &mut self,
+        committed_head_token: &str,
+    ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+        self.inner
+            .acknowledge_head_canonical_session_boundary(committed_head_token)
+            .await
+    }
+
     async fn acknowledge_provisional_session_boundary(
         &mut self,
         committed_store_revision: u64,

@@ -552,7 +552,29 @@ jobs:
         run: make verify-sdk-wrapper-freshness
 
       - name: Verify generated machine kernels are not stale
-        run: make machine-check-drift
+        id: machine_drift
+        shell: bash
+        run: |
+          if make machine-check-drift; then
+            exit 0
+          fi
+          # Preserve the exact generated side of the failed comparison. This
+          # turns drift diagnostics into actionable evidence for static-only
+          # repair instead of requiring a second local Rust build.
+          target/debug/xtask machine-codegen --all
+          exit 1
+
+      - name: Upload fresh machine artifacts after drift failure
+        if: ${{ failure() && steps.machine_drift.outcome == 'failure' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: fresh-machine-artifacts
+          path: |
+            specs/machines
+            specs/compositions
+            meerkat-machine-kernels/src/generated
+          if-no-files-found: error
+          retention-days: 1
       # check-rust-release-packaging dry-run-packages every release crate
       # (each `cargo package` compiles the crate in isolation) — ~1h on a
       # 4-core runner. It is release hygiene, re-verified by release_validate

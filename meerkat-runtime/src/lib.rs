@@ -859,8 +859,8 @@ pub use store::{
     PreparedWholeBlobRewriteStoreParts, RecoveryCommitStatus, RuntimeDeliveryAuthorityCasOutcome,
     RuntimeDeliveryAuthorityRecord, RuntimeDeliveryStoreRecord, RuntimeSessionAuthority,
     RuntimeSessionPersistenceProfile, RuntimeStore, RuntimeStoreError, RuntimeStoreWriteFence,
-    RuntimeStoreWriteFenceOutcome, SerializedSessionSnapshot, WholeBlobProvisionalTailAuthority,
-    WholeBlobStoreAuthority,
+    RuntimeStoreWriteFenceOutcome, SerializedSessionSnapshot, VerifiedCommittedWholeBlobPayload,
+    WholeBlobProvisionalTailAuthority, WholeBlobStoreAuthority,
 };
 pub use traits::{
     DestroyReport, RecoveryReport, RecycleReport, ResetReport, RetireReport, RuntimeControlPlane,

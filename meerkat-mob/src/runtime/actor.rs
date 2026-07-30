@@ -28843,6 +28843,10 @@ impl MobActor {
             &detail,
         );
         if log_decision.should_log {
+            let target_kind = match target {
+                MemberLiveMutationTarget::Placed { .. } => "placed",
+                MemberLiveMutationTarget::Local { .. } => "local",
+            };
             tracing::error!(
                 member = %agent_identity,
                 operation,

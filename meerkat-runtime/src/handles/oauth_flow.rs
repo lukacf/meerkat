@@ -1929,7 +1929,7 @@ mod tests {
             &self,
             _runtime_id: &LogicalRuntimeId,
             _boundary: crate::store::PreparedWholeBlobRewriteStoreParts,
-        ) -> Result<crate::store::RuntimeSessionAuthority, RuntimeStoreError> {
+        ) -> Result<crate::store::WholeBlobStoreAuthority, RuntimeStoreError> {
             Err(RuntimeStoreError::Unsupported(
                 "commit_prepared_whole_blob_rewrite_boundary".to_string(),
             ))

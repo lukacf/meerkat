@@ -309,7 +309,6 @@ impl RealtimeSessionOpenConfig {
         Ok(Some(lowered))
     }
 
-    #[must_use]
     pub fn new(
         turning_mode: RealtimeTurningMode,
         llm_identity: SessionLlmIdentity,
@@ -333,7 +332,6 @@ impl RealtimeSessionOpenConfig {
     /// The provider's top-level instruction projection is therefore derived
     /// from the complete active materialization. Any non-leading System makes
     /// this provider shape unrepresentable and is rejected.
-    #[must_use]
     pub fn for_open_from_messages(
         turning_mode: RealtimeTurningMode,
         llm_identity: SessionLlmIdentity,
@@ -377,7 +375,6 @@ impl RealtimeSessionOpenConfig {
     /// Construct a refresh-only projection. Refresh has no seed replay, but its
     /// provider instructions are still derived here from the ordinary ordered
     /// System rows at the projection boundary.
-    #[must_use]
     pub fn for_refresh_from_messages(
         turning_mode: RealtimeTurningMode,
         llm_identity: SessionLlmIdentity,
@@ -430,7 +427,6 @@ impl RealtimeSessionOpenConfig {
 
     /// Replace the canonical seed while atomically re-deriving its ordered
     /// System projection.
-    #[must_use]
     pub fn with_seed_messages(mut self, seed_messages: Vec<Message>) -> Result<Self, LlmError> {
         self.ordered_system_instructions = Self::lower_leading_system_messages(&seed_messages)?;
         self.seed_messages = seed_messages;

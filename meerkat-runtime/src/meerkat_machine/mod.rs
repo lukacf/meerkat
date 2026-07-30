@@ -1029,9 +1029,6 @@ pub(crate) use driver::{
     machine_recover_persistent_inputs_from_observed, machine_recycle_preserving_work,
     machine_reset, machine_retire, machine_stop_runtime, prepare_runtime_loop_batch_start,
 };
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) use driver::{machine_recover_persistent_driver, machine_recover_persistent_inputs};
-
 pub(crate) mod driver;
 
 mod comms_drain;

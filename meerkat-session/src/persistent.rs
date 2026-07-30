@@ -8121,7 +8121,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                         "generated session document authority rejected archive for session {id}: {err}"
                     )))
                 })?;
-            let (disposition, _write_document, retire_runtime) = effects
+            let (disposition, write_document, retire_runtime) = effects
                 .iter()
                 .find_map(|effect| match effect {
                     SessionDocumentEffect::SessionArchiveResolved {

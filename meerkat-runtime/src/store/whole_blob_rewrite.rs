@@ -14,7 +14,10 @@ use meerkat_core::{
     TranscriptRewriteCommit, TranscriptRewritePrefixAccumulator,
 };
 
-use super::{CommittedWholeBlobSnapshot, RuntimeStoreError, WholeBlobStoreAuthority};
+use super::{
+    CommittedWholeBlobSnapshot, RuntimeSessionCatalogEntry, RuntimeSessionPersistenceProfile,
+    RuntimeStoreError, WholeBlobStoreAuthority,
+};
 
 static PREPARED_WHOLE_BLOB_SUCCESSOR_DOCUMENT_HASHES: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
@@ -131,6 +134,7 @@ pub struct PreparedWholeBlobRewriteBoundary {
     successor: Arc<Session>,
     successor_bytes: Arc<Vec<u8>>,
     successor_blob_sha256: String,
+    successor_catalog_entry: RuntimeSessionCatalogEntry,
     compaction_projection_intents: Arc<[CompactionProjectionIntent]>,
     audit_receipt: Arc<TranscriptRewriteAuditReceiptBatch>,
 }
@@ -224,6 +228,11 @@ impl PreparedWholeBlobRewriteBoundary {
             },
         )?;
         let successor = Arc::new(successor_session);
+        let successor_catalog_entry = RuntimeSessionCatalogEntry::from_session(
+            successor.as_ref(),
+            RuntimeSessionPersistenceProfile::WholeBlobV1,
+            None,
+        )?;
         let compaction_projection_intents: Arc<[CompactionProjectionIntent]> =
             super::validated_compaction_projection_intents(successor.as_ref())?.into();
         let carrier = BoundSessionCommit::sealed(Arc::clone(&successor)).map_err(|error| {
@@ -246,6 +255,7 @@ impl PreparedWholeBlobRewriteBoundary {
             successor,
             successor_bytes,
             successor_blob_sha256,
+            successor_catalog_entry,
             compaction_projection_intents,
             audit_receipt: Arc::new(audit_receipt),
         })
@@ -260,6 +270,7 @@ impl PreparedWholeBlobRewriteBoundary {
             successor_session_id: self.successor.id().clone(),
             successor_blob_sha256: self.successor_blob_sha256.clone(),
             successor_bytes: Arc::clone(&self.successor_bytes),
+            successor_catalog_entry: self.successor_catalog_entry.clone(),
             compaction_projection_intents: Arc::clone(&self.compaction_projection_intents),
         }
     }
@@ -322,6 +333,7 @@ pub struct PreparedWholeBlobRewriteStoreParts {
     successor_session_id: SessionId,
     successor_blob_sha256: String,
     successor_bytes: Arc<Vec<u8>>,
+    successor_catalog_entry: RuntimeSessionCatalogEntry,
     compaction_projection_intents: Arc<[CompactionProjectionIntent]>,
 }
 
@@ -364,6 +376,7 @@ impl PreparedWholeBlobRewriteStoreParts {
         SessionId,
         String,
         Arc<Vec<u8>>,
+        RuntimeSessionCatalogEntry,
         Arc<[CompactionProjectionIntent]>,
     ) {
         (
@@ -371,6 +384,7 @@ impl PreparedWholeBlobRewriteStoreParts {
             self.successor_session_id,
             self.successor_blob_sha256,
             self.successor_bytes,
+            self.successor_catalog_entry,
             self.compaction_projection_intents,
         )
     }

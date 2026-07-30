@@ -38,6 +38,84 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
+/// Stable logical lineage selected for session identity and fork semantics.
+///
+/// This is domain identity only. It carries no persistence, verification, or
+/// store-currentness authority.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct SessionLineageId(String);
+
+impl SessionLineageId {
+    pub fn new(value: impl Into<String>) -> Result<Self, InvalidSessionLineageId> {
+        let value = value.into();
+        if value.trim().is_empty() {
+            return Err(InvalidSessionLineageId);
+        }
+        Ok(Self(value))
+    }
+
+    #[must_use]
+    pub fn for_session(session_id: &SessionId) -> Self {
+        Self(format!("session:{session_id}"))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for SessionLineageId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl<'de> Deserialize<'de> for SessionLineageId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidSessionLineageId;
+
+impl std::fmt::Display for InvalidSessionLineageId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("session lineage id must not be empty")
+    }
+}
+
+impl std::error::Error for InvalidSessionLineageId {}
+
+/// Logical generation inside one session lineage.
+///
+/// Runtime restarts and store revisions do not change this value.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(transparent)]
+pub struct SessionGeneration(u64);
+
+impl SessionGeneration {
+    pub const INITIAL: Self = Self(0);
+
+    #[must_use]
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
 mod digest_accumulator;
 mod head_metadata;
 mod import_0810;

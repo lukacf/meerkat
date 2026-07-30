@@ -9757,7 +9757,7 @@ async fn persistent_destroy_durable_commit_observes_canonical_destroy_truth() {
             &self,
             runtime_id: &LogicalRuntimeId,
             boundary: crate::store::PreparedWholeBlobRewriteStoreParts,
-        ) -> Result<crate::store::RuntimeSessionAuthority, crate::store::RuntimeStoreError>
+        ) -> Result<crate::store::WholeBlobStoreAuthority, crate::store::RuntimeStoreError>
         {
             self.inner
                 .commit_prepared_whole_blob_rewrite_boundary(runtime_id, boundary)
@@ -25326,7 +25326,7 @@ impl RuntimeStore for RuntimeCommitAtomicityStore {
         &self,
         runtime_id: &LogicalRuntimeId,
         boundary: crate::store::PreparedWholeBlobRewriteStoreParts,
-    ) -> Result<crate::store::RuntimeSessionAuthority, crate::store::RuntimeStoreError> {
+    ) -> Result<crate::store::WholeBlobStoreAuthority, crate::store::RuntimeStoreError> {
         self.session_snapshot_commits.fetch_add(1, Ordering::SeqCst);
         self.inner
             .commit_prepared_whole_blob_rewrite_boundary(runtime_id, boundary)

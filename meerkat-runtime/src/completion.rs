@@ -958,6 +958,7 @@ impl CompletionRegistry {
         self.fail_inputs(input_ids, error);
     }
 
+    #[cfg(test)]
     fn cleanup_from_realized_attempt(
         authority: RuntimeCompletionResultAttempt,
     ) -> CompletionCleanupObservation {

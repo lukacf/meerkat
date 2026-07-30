@@ -3142,11 +3142,11 @@ mod tests {
             Arc::new(meerkat_schedule::MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
         let service = ScheduleService::new(store);
         let mut target = materialize_on_demand_target();
-        let TargetBinding::Session(SessionTargetBinding::MaterializeOnDemandSession {
-            create,
-            action,
-            ..
-        }) = &mut target
+        let TargetBinding::Session(binding) = &mut target else {
+            panic!("expected materialized session target");
+        };
+        let SessionTargetBinding::MaterializeOnDemandSession { create, action, .. } =
+            binding.as_mut()
         else {
             panic!("expected materialized session target");
         };

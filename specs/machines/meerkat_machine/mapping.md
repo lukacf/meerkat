@@ -3104,6 +3104,24 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AbandonInputStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ArchiveTerminalInputIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ArchiveTerminalInputAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ArchiveTerminalInputRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ArchiveTerminalInputRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ArchiveTerminalInputStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ArchiveTerminalInputDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RegisterOpAlreadyRegisteredRejectedIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -5941,9 +5959,6 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `LiveBoundaryContextReceiptResolved`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `LiveBoundaryUnavailableNormalized`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
 - `TurnRunCompleted`
   - anchors: `meerkat_machine`
   - scenarios: (unclaimed)
@@ -6047,6 +6062,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
 - `AdmissionResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveBoundaryUnavailableNormalized`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `AdmissionValidationResolved`

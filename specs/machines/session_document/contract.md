@@ -88,10 +88,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ## Helpers
 - `phase_allows_initial_turn_overrides`(phase: SessionFirstTurnPhase) -> `Bool`
 - `should_store_initial_prompt`(phase: SessionFirstTurnPhase, prompt_has_content: Bool) -> `Bool`
-- `append_is_empty`(trimmed_text_byte_count: u64) -> `Bool`
-- `append_is_conflict`(idempotency_key_present: Bool, existing_key_conflicts: Bool) -> `Bool`
-- `append_is_duplicate`(idempotency_key_present: Bool, existing_key_matches: Bool, existing_key_conflicts: Bool) -> `Bool`
-- `append_is_new`(idempotency_key_present: Bool, existing_key_matches: Bool, existing_key_conflicts: Bool) -> `Bool`
 - `realtime_delta_is_duplicate`(delta_id_present: Bool, delta_id_seen: Bool) -> `Bool`
 - `realtime_lane_accepts`(item_has_text: Bool, current_lane: RealtimeTranscriptLaneKind, requested_lane: RealtimeTranscriptLaneKind) -> `Bool`
 - `realtime_should_mark_ready_after_write`(response_completed: Bool, text_after_write_present: Bool) -> `Bool`

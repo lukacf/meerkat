@@ -825,6 +825,7 @@ enum SessionCommand {
     },
     /// Classify a callback-result batch against actor-owned canonical
     /// transcript state without exporting that state across the command seam.
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
     ClassifyCallbackResultIngress {
         results: Vec<ToolResult>,
         reply_tx: oneshot::Sender<
@@ -2277,6 +2278,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         Ok(session)
     }
 
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
     pub(crate) async fn classify_callback_result_ingress(
         &self,
         id: &SessionId,
@@ -4979,6 +4981,7 @@ async fn drain_session_task_commands<A: SessionAgent>(
             SessionCommand::ExportSession { reply_tx } => {
                 let _ = reply_tx.send(agent.session_clone());
             }
+            #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
             SessionCommand::ClassifyCallbackResultIngress { results, reply_tx } => {
                 let _ = reply_tx.send(agent.classify_callback_result_ingress(&results));
             }
@@ -5829,6 +5832,7 @@ async fn session_task<A: SessionAgent>(
             SessionCommand::ExportSession { reply_tx } => {
                 let _ = reply_tx.send(agent.session_clone());
             }
+            #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
             SessionCommand::ClassifyCallbackResultIngress { results, reply_tx } => {
                 let _ = reply_tx.send(agent.classify_callback_result_ingress(&results));
             }
@@ -6159,7 +6163,6 @@ async fn session_task<A: SessionAgent>(
 mod runtime_turn_metadata_tests {
     use super::*;
     use async_trait::async_trait;
-    use meerkat_core::handles::SessionContextHandle;
     use meerkat_core::handles::TurnStateHandle;
     use meerkat_core::lifecycle::RuntimeExecutionKind;
     use meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata;
@@ -6236,15 +6239,6 @@ mod runtime_turn_metadata_tests {
     #[derive(Debug, Default)]
     struct RecordingSessionContextHandle {
         ticks: Mutex<Vec<u64>>,
-    }
-
-    impl RecordingSessionContextHandle {
-        fn ticks(&self) -> Vec<u64> {
-            self.ticks
-                .lock()
-                .expect("session context ticks lock poisoned")
-                .clone()
-        }
     }
 
     impl meerkat_core::handles::SessionContextHandle for RecordingSessionContextHandle {

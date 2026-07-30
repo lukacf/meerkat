@@ -1941,6 +1941,7 @@ impl FileEventStore {
         Ok(Some(head.body))
     }
 
+    #[cfg(test)]
     async fn read_exact_event_log_head(
         &self,
         session_id: &SessionId,

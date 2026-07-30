@@ -2331,7 +2331,6 @@ mod tests {
             &mut agent,
             SessionAgentTurnInput {
                 prompt: "inspect".to_string().into(),
-                transient_turn_contexts: Vec::new(),
                 injected_context: Vec::new(),
                 handling_mode: HandlingMode::Queue,
                 render_metadata: None,
@@ -2404,7 +2403,6 @@ mod tests {
             &mut agent,
             SessionAgentTurnInput {
                 prompt: "inspect".to_string().into(),
-                transient_turn_contexts: Vec::new(),
                 injected_context: Vec::new(),
                 handling_mode: HandlingMode::Queue,
                 render_metadata: None,

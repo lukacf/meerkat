@@ -35,7 +35,6 @@
 //! `meerkat-live`, so they compile unconditionally; everything consuming
 //! `LiveAdapterHost` sits behind the `live` feature gate.
 
-use meerkat_core::error::AgentError;
 use meerkat_core::service::SessionError;
 use meerkat_core::types::{Message, SessionId};
 use meerkat_core::{Session, SessionLlmIdentity, SessionToolVisibilityState};
@@ -471,7 +470,7 @@ fn checked_message_chars(
 fn checked_unselected_message_chars(
     costs: &[usize],
     selected: &[bool],
-    range: std::ops::Range<usize>,
+    mut range: std::ops::Range<usize>,
 ) -> Result<usize, LiveSeedProjectionError> {
     range.try_fold(0usize, |total, index| {
         if selected[index] {
@@ -657,7 +656,7 @@ mod orchestrator {
     use meerkat_core::service::{
         CreateSessionRequest, InitialTurnPolicy, SessionError, SessionService,
     };
-    use meerkat_core::types::{ContentInput, Message, SessionId};
+    use meerkat_core::types::{ContentInput, SessionId};
     use meerkat_core::{
         DeferredPromptPolicy, RealtimeOpenProjectionAdmission, SessionLlmIdentity,
         SurfaceSessionRecoveryOverrides,
@@ -1168,7 +1167,7 @@ mod orchestrator {
                         .export_realtime_refresh_session_snapshot(session_id)
                         .await?
                 }
-                Err(error) => return Err(error),
+                Err(error) => return Err(RealtimeSessionOpenProjectionError::Session(error)),
             };
             let llm_identity = self.service.live_session_llm_identity(session_id).await?;
             let visible_tools = self.service.live_visible_tool_defs(session_id).await?;

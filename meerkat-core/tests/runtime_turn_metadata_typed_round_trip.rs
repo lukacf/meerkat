@@ -43,6 +43,8 @@ fn sample_metadata() -> RuntimeTurnMetadata {
             "first ordered system message".into(),
             "second ordered system message".into(),
         ],
+        transient_turn_context: None,
+        transient_turn_context_appends: Vec::new(),
         model: Some(ModelId::new("claude-opus-4-8")),
         provider: Some(Provider::Anthropic),
         self_hosted_server_id: None,

@@ -7664,12 +7664,12 @@ mod tests {
         assert!(identity.is_canonical_empty());
         assert!(root.metadata_projection().mutations().is_empty());
         let persisted = root.clone();
-        store
+        let _ = store
             .in_write_txn(move |tx| apply_prepared_head_canonical_mutation_in_txn(tx, &persisted))
             .await
             .unwrap();
         let exact_retry = root.clone();
-        store
+        let _ = store
             .in_write_txn(move |tx| apply_prepared_head_canonical_mutation_in_txn(tx, &exact_retry))
             .await
             .expect("canonical empty root must be exactly retryable");
@@ -7681,7 +7681,7 @@ mod tests {
         let (mut session, root) =
             prepared_root_with_metadata("application", serde_json::json!({"value": 1}));
         let persisted = root.clone();
-        store
+        let _ = store
             .in_write_txn(move |tx| apply_prepared_head_canonical_mutation_in_txn(tx, &persisted))
             .await
             .unwrap();
@@ -7718,7 +7718,7 @@ mod tests {
             "ordinary transcript deltas must retain metadata identity"
         );
         let persisted = successor.clone();
-        store
+        let _ = store
             .in_write_txn(move |tx| apply_prepared_head_canonical_mutation_in_txn(tx, &persisted))
             .await
             .unwrap();
@@ -7819,7 +7819,7 @@ mod tests {
         let (mut session, root) =
             prepared_root_with_metadata("application", serde_json::json!({"value": 1}));
         let persisted = root.clone();
-        store
+        let _ = store
             .in_write_txn(move |tx| apply_prepared_head_canonical_mutation_in_txn(tx, &persisted))
             .await
             .unwrap();
@@ -7870,7 +7870,7 @@ mod tests {
             .unwrap();
         let successor = PreparedHeadCanonicalMutation::prepare(&session, Some(observed)).unwrap();
         let persisted = successor.clone();
-        store
+        let _ = store
             .in_write_txn(move |tx| apply_prepared_head_canonical_mutation_in_txn(tx, &persisted))
             .await
             .unwrap();

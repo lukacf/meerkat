@@ -14,12 +14,12 @@ use meerkat_core::lifecycle::core_executor::CoreApplyTerminal;
 use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
 use meerkat_core::service::{
     CreateSessionRequest, DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions,
-    SessionError, SessionHistoryQuery, SessionQuery, SessionService, SessionServiceControlExt,
-    SessionServiceHistoryExt, StartTurnRequest, TurnToolOverlay,
+    SessionError, SessionHistoryQuery, SessionQuery, SessionService, SessionServiceHistoryExt,
+    StartTurnRequest, TurnToolOverlay,
 };
 use meerkat_core::types::{AssistantBlock, HandlingMode, RunResult, SessionId, StopReason, Usage};
 use meerkat_core::{
-    CancelAfterBoundaryCommand, CancelAfterBoundarySender, HookDecision, HookEngine,
+    CancelAfterBoundaryCommand, CancelAfterBoundarySender, ContentInput, HookDecision, HookEngine,
     HookExecutionReport, HookId, HookInvocation, HookOutcome, HookPoint, HookReasonCode, RunId,
     Session, SessionDeferredTurnState, TransientTurnContextStateHandle,
 };

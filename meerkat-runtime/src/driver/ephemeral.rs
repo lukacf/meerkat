@@ -345,6 +345,7 @@ impl EphemeralRuntimeDriver {
         Arc::clone(&self.dsl.0)
     }
 
+    #[cfg(test)]
     pub(crate) fn replace_runtime_authority(&mut self, authority: mm_dsl::MeerkatMachineAuthority) {
         *self.dsl.lock() = authority;
         self.sync_control_projection_from_dsl_authority();

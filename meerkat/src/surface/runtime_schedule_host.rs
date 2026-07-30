@@ -4,13 +4,15 @@ use async_trait::async_trait;
 
 #[cfg(feature = "comms")]
 use super::configure_peer_ingress;
+use super::schedule_host::{
+    runtime_delivery_dispatch_from_admission, schedule_runtime_correlation_id,
+    schedule_runtime_delivery_idempotency_key,
+};
 use super::{
     NoopScheduleMobHost, ScheduledPromptDispatch, SharedScheduleTargetAdapter,
     SurfaceScheduleMobHost, SurfaceScheduleSessionHost, default_persistent_executor,
     default_persistent_executor_with_workgraph_service, materialize_session,
-    recover_mob_member_identity_from_session_target, runtime_delivery_dispatch_from_admission,
-    schedule_host_supported, schedule_runtime_correlation_id,
-    schedule_runtime_delivery_idempotency_key, spawn_schedule_host,
+    recover_mob_member_identity_from_session_target, schedule_host_supported, spawn_schedule_host,
 };
 use crate::{
     Config, CreateSessionRequest, PersistentSessionService, ScheduleDomainError, ScheduleService,

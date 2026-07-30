@@ -3501,7 +3501,7 @@ ORDER BY runtime_id";
                         physical_message_count = ?Option::<i64>::None,
                         elapsed_ms = u64::try_from(process_started.elapsed().as_millis())
                             .unwrap_or(u64::MAX),
-                        refusal_class = head_canonical_activation_error_class(&error),
+                        refusal_class = head_canonical_activation_error_class(error),
                         "refused synchronous head-canonical profile activation"
                     );
                     return Err(error);
@@ -3854,7 +3854,7 @@ ORDER BY runtime_id";
                         boundary_message_count = ?Option::<i64>::None,
                         physical_message_count = ?Option::<i64>::None,
                         elapsed_ms = 0_u64,
-                        refusal_class = head_canonical_activation_error_class(&error),
+                        refusal_class = head_canonical_activation_error_class(error),
                         "refused synchronous head-canonical profile activation"
                     );
                 })?;

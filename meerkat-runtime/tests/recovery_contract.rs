@@ -1337,7 +1337,7 @@ async fn whole_blob_recovery_uses_latest_same_run_candidate_sequence() {
 #[cfg(feature = "sqlite-store")]
 #[tokio::test]
 async fn head_canonical_recovery_uses_only_store_owned_source_and_migrates_floor_receipt() {
-    use meerkat_core::SessionStore as _;
+    use meerkat_core::HeadCanonicalSessionStore as _;
     use meerkat_core::lifecycle::core_executor::BoundSessionCommit;
     use meerkat_core::session_store::PreparedHeadCanonicalMutation;
     use meerkat_core::types::{
@@ -1632,7 +1632,7 @@ async fn head_canonical_recovery_uses_only_store_owned_source_and_migrates_floor
 #[cfg(feature = "sqlite-store")]
 #[tokio::test]
 async fn head_canonical_incomplete_intent_is_discarded_without_advancing_the_session() {
-    use meerkat_core::SessionStore as _;
+    use meerkat_core::HeadCanonicalSessionStore as _;
     use meerkat_core::lifecycle::core_executor::BoundSessionCommit;
     use meerkat_core::session_store::PreparedHeadCanonicalMutation;
     use meerkat_core::types::{
@@ -1735,7 +1735,7 @@ async fn head_canonical_incomplete_intent_is_discarded_without_advancing_the_ses
 #[cfg(feature = "sqlite-store")]
 #[tokio::test]
 async fn head_canonical_recovery_uses_latest_same_run_physical_candidate() {
-    use meerkat_core::SessionStore as _;
+    use meerkat_core::HeadCanonicalSessionStore as _;
     use meerkat_core::lifecycle::core_executor::BoundSessionCommit;
     use meerkat_core::session_store::PreparedHeadCanonicalMutation;
     use meerkat_core::types::{

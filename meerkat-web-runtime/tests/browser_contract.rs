@@ -231,7 +231,7 @@ async fn browser_contract_requires_bootstrap_and_uses_runtime_backed_sessions_to
         .expect("append system context"),
     );
     assert_eq!(staged["handle"], handle);
-    assert_eq!(staged["status"], "staged");
+    assert_eq!(staged["status"], "applied");
 
     let before: Value =
         serde_json::from_str(&get_session_state(handle).expect("session state before turn"))

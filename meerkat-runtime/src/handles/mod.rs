@@ -152,6 +152,7 @@ impl HandleDslAuthority {
     }
 
     /// Wrap an existing shared DSL authority with a runtime-owned teardown gate.
+    #[cfg(test)]
     pub(crate) fn from_shared_with_teardown_gate(
         inner: Arc<Mutex<mm_dsl::MeerkatMachineAuthority>>,
         teardown_gate: Arc<HandleTeardownGate>,

@@ -11269,6 +11269,7 @@ pub struct State {
         std::collections::BTreeMap<String, AdmissionExistingQueuedActionKind>,
     pub admission_authorized_existing_targets: std::collections::BTreeMap<String, String>,
     pub admission_idempotency_inputs: std::collections::BTreeMap<String, String>,
+    pub input_idempotency_keys: std::collections::BTreeMap<String, String>,
     pub recovered_admitted_inputs: std::collections::BTreeSet<String>,
     pub recovered_admitted_lanes: std::collections::BTreeMap<String, InputLane>,
     pub op_statuses: std::collections::BTreeMap<String, OperationStatus>,
@@ -12399,6 +12400,21 @@ pub mod inputs {
         pub attempt_count: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ArchiveTerminalInput {
+        pub input_id: String,
+        pub phase: InputPhase,
+        pub terminal_kind: InputTerminalKind,
+        pub superseded_by: Option<String>,
+        pub aggregate_id: Option<String>,
+        pub abandon_reason: Option<InputAbandonReason>,
+        pub abandon_attempt_count: Option<u64>,
+        pub attempt_count: u64,
+        pub run_id: Option<RunId>,
+        pub boundary_sequence: Option<u64>,
+        pub admission_sequence: Option<u64>,
+        pub idempotency_key: Option<String>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecordBoundarySeq {
         pub input_id: String,
         pub run_id: RunId,
@@ -13297,6 +13313,7 @@ pub enum Input {
     SupersedeInput(inputs::SupersedeInput),
     CoalesceInput(inputs::CoalesceInput),
     AbandonInput(inputs::AbandonInput),
+    ArchiveTerminalInput(inputs::ArchiveTerminalInput),
     RecordBoundarySeq(inputs::RecordBoundarySeq),
     RegisterOp(inputs::RegisterOp),
     StartOp(inputs::StartOp),
@@ -13646,6 +13663,7 @@ impl Input {
             Self::SupersedeInput(_) => InputKind::SupersedeInput,
             Self::CoalesceInput(_) => InputKind::CoalesceInput,
             Self::AbandonInput(_) => InputKind::AbandonInput,
+            Self::ArchiveTerminalInput(_) => InputKind::ArchiveTerminalInput,
             Self::RecordBoundarySeq(_) => InputKind::RecordBoundarySeq,
             Self::RegisterOp(_) => InputKind::RegisterOp,
             Self::StartOp(_) => InputKind::StartOp,
@@ -13990,6 +14008,7 @@ pub enum InputKind {
     SupersedeInput,
     CoalesceInput,
     AbandonInput,
+    ArchiveTerminalInput,
     RecordBoundarySeq,
     RegisterOp,
     StartOp,
@@ -14234,12 +14253,6 @@ pub mod effects {
         pub boundary_sequence: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct LiveBoundaryUnavailableNormalized {
-        pub input_id: String,
-        pub execution_handling_mode: InputLane,
-        pub live_interrupt_required: bool,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct TurnRunCompleted {
         pub run_id: RunId,
         pub outcome: TurnTerminalOutcome,
@@ -14415,6 +14428,12 @@ pub mod effects {
         pub interrupt_yielding: bool,
         pub wake_if_idle: bool,
         pub execution_handling_mode: Option<InputLane>,
+        pub live_interrupt_required: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveBoundaryUnavailableNormalized {
+        pub input_id: String,
+        pub execution_handling_mode: InputLane,
         pub live_interrupt_required: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -15104,7 +15123,6 @@ pub enum Effect {
     TurnRunStarted(effects::TurnRunStarted),
     TurnBoundaryApplied(effects::TurnBoundaryApplied),
     LiveBoundaryContextReceiptResolved(effects::LiveBoundaryContextReceiptResolved),
-    LiveBoundaryUnavailableNormalized(effects::LiveBoundaryUnavailableNormalized),
     TurnRunCompleted(effects::TurnRunCompleted),
     DurableTailRecoveryAuthorized(effects::DurableTailRecoveryAuthorized),
     DurableTailRecoveryCommitAuthorized(effects::DurableTailRecoveryCommitAuthorized),
@@ -15140,6 +15158,7 @@ pub enum Effect {
     InitiateRecycle(effects::InitiateRecycle),
     IngressAccepted(effects::IngressAccepted),
     AdmissionResolved(effects::AdmissionResolved),
+    LiveBoundaryUnavailableNormalized(effects::LiveBoundaryUnavailableNormalized),
     AdmissionValidationResolved(effects::AdmissionValidationResolved),
     AdmissionIdempotencyResolved(effects::AdmissionIdempotencyResolved),
     RecoveredInputLifecycleNormalized(effects::RecoveredInputLifecycleNormalized),
@@ -15277,7 +15296,6 @@ pub enum EffectKind {
     TurnRunStarted,
     TurnBoundaryApplied,
     LiveBoundaryContextReceiptResolved,
-    LiveBoundaryUnavailableNormalized,
     TurnRunCompleted,
     DurableTailRecoveryAuthorized,
     DurableTailRecoveryCommitAuthorized,
@@ -15313,6 +15331,7 @@ pub enum EffectKind {
     InitiateRecycle,
     IngressAccepted,
     AdmissionResolved,
+    LiveBoundaryUnavailableNormalized,
     AdmissionValidationResolved,
     AdmissionIdempotencyResolved,
     RecoveredInputLifecycleNormalized,
@@ -16868,6 +16887,12 @@ pub enum TransitionId {
     AbandonInputRunning,
     AbandonInputRetired,
     AbandonInputStopped,
+    ArchiveTerminalInputIdle,
+    ArchiveTerminalInputAttached,
+    ArchiveTerminalInputRunning,
+    ArchiveTerminalInputRetired,
+    ArchiveTerminalInputStopped,
+    ArchiveTerminalInputDestroyed,
     RegisterOpAlreadyRegisteredRejectedIdle,
     RegisterOpAlreadyRegisteredRejectedAttached,
     RegisterOpAlreadyRegisteredRejectedRunning,
@@ -18025,6 +18050,7 @@ pub fn initial_state() -> State {
         admission_authorized_existing_actions: Default::default(),
         admission_authorized_existing_targets: Default::default(),
         admission_idempotency_inputs: Default::default(),
+        input_idempotency_keys: Default::default(),
         recovered_admitted_inputs: Default::default(),
         recovered_admitted_lanes: Default::default(),
         op_statuses: Default::default(),

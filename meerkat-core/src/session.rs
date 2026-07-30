@@ -11262,6 +11262,7 @@ mod tests {
             Err(SystemMessageAppendError::Conflict { .. })
         ));
     }
+    #[test]
     fn realtime_transcript_assistant_transcript_delta_materializes_transcript_block() {
         let mut session = Session::new();
 

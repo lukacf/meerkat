@@ -56,9 +56,9 @@ use meerkat_core::service::{
     StageToolResultsRequest, StageToolResultsResult, StartTurnRequest,
 };
 use meerkat_core::session_document::{
-    LiveSessionAuthorityKind, LiveSessionAuthorityReason, RuntimeCheckpointProjectionDisposition,
-    SessionArchiveDisposition, SessionArchiveRuntimeObservation, SessionDocumentEffect,
-    SessionDocumentKey, SessionDocumentMachineAuthority, TranscriptEditKind,
+    LiveSessionAuthorityKind, LiveSessionAuthorityReason, SessionArchiveDisposition,
+    SessionArchiveRuntimeObservation, SessionDocumentEffect, SessionDocumentKey,
+    SessionDocumentMachineAuthority, TranscriptEditKind,
 };
 use meerkat_core::session_store::{IncrementalSessionStore, SessionHead, session_head_cas_token};
 use meerkat_core::types::{RunResult, SessionId, ToolResult};
@@ -701,11 +701,12 @@ fn write_deferred_turn_state(
     })
 }
 
+#[cfg(test)]
 fn rollback_tool_visibility_state_snapshot(
     session: &Session,
 ) -> Result<Option<meerkat_core::SessionToolVisibilityState>, SessionError> {
-    // This production rollback path must not promote legacy tool_scope_* metadata
-    // into canonical runtime-backed visibility authority.
+    // Regression probes must not promote legacy tool_scope_* metadata into
+    // canonical runtime-backed visibility authority.
     session.try_tool_visibility_state().map_err(|err| {
         SessionError::Agent(AgentError::InternalError(format!(
             "invalid canonical tool visibility state: {err}"
@@ -1058,14 +1059,6 @@ async fn append_transcript_rewrite_receipt_for_commits(
     .await
 }
 
-fn incremental_store_error(error: SessionStoreError) -> SessionError {
-    SessionError::Store(Box::new(error))
-}
-
-fn incremental_internal_error(message: String) -> SessionError {
-    SessionError::Agent(meerkat_core::error::AgentError::InternalError(message))
-}
-
 impl StoreCheckpointer {
     async fn run_checkpoint_receipt(
         &self,
@@ -1084,10 +1077,10 @@ impl StoreCheckpointer {
             )));
         }
         if receipt.run_id() != expected_run_id {
-            return Err(AgentError::InternalError(format!(
-                "provisional receipt belongs to run {}, not terminal run {expected_run_id}",
-                receipt.run_id()
-            )));
+            // The checkpointer lives across turns. Until the current run
+            // produces its first successful checkpoint, the retained receipt
+            // legitimately names the previous run and is simply inapplicable.
+            return Ok(None);
         }
         // Promotion is retryable and exact-idempotent. Retain the latest
         // store-issued receipt until a later successful checkpoint replaces
@@ -1757,9 +1750,8 @@ impl LiveSessionActorTurnBoundaryLease {
 
 pub struct PersistentSessionService<B: SessionAgentBuilder> {
     inner: EphemeralSessionService<B>,
-    store: Arc<dyn SessionStore>,
-    /// Incremental capability of `store`, resolved once at construction via
-    /// `SessionStore::as_incremental`. When present, projection writes go
+    /// Incremental capability resolved once from the construction-time
+    /// `SessionStore`. When present, projection writes go
     /// through the O(delta) incremental contract; the whole-blob compat path
     /// remains for stores without the capability.
     incremental: Option<Arc<dyn IncrementalSessionStore>>,
@@ -1774,9 +1766,9 @@ pub struct PersistentSessionService<B: SessionAgentBuilder> {
     checkpointer_gates: Mutex<HashMap<SessionId, Arc<CheckpointerGate>>>,
     /// Weak access to the exact checkpointer installed in each live actor.
     ///
-    /// Final provisional promotion uses this only to advance actor-local
-    /// committed-base fencing after RuntimeStore returns exact authority. It
-    /// is not a receipt/discovery registry and never retains an actor.
+    /// Final provisional promotion reuses the exact store-issued receipt
+    /// retained by that checkpointer, then advances actor-local committed-base
+    /// fencing. The map itself owns neither receipts nor actors.
     live_checkpointers: Mutex<HashMap<SessionId, std::sync::Weak<StoreCheckpointer>>>,
     /// Gates lazy live-session recovery and archive against each other so a
     /// stored-only session is rebuilt at most once and archived snapshots
@@ -1922,7 +1914,6 @@ fn pending_blob_is_definitively_invalid(error: &meerkat_core::ImageBlobIntegrity
 /// Looks for `SESSION_LABELS_KEY` and deserializes the value as
 /// `BTreeMap<String, String>`. Returns an empty map on missing or
 /// malformed data.
-#[allow(dead_code)]
 fn extract_labels_from_metadata(
     metadata: &serde_json::Map<String, serde_json::Value>,
 ) -> BTreeMap<String, String> {
@@ -1939,18 +1930,6 @@ fn extract_labels_from_metadata(
             }
         },
         None => BTreeMap::new(),
-    }
-}
-
-fn summary_from_meta(meta: meerkat_core::SessionMeta) -> SessionSummary {
-    SessionSummary {
-        session_id: meta.id,
-        created_at: meta.created_at,
-        updated_at: meta.updated_at,
-        message_count: meta.message_count,
-        total_tokens: meta.total_tokens,
-        is_active: false,
-        labels: extract_labels_from_metadata(&meta.metadata),
     }
 }
 
@@ -3390,45 +3369,6 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             })
     }
 
-    /// Mirror the store-owned durable-tail recovery outcome onto the session
-    /// service vocabulary. The runtime recovery seam loads and seals the exact
-    /// authority/head evidence, drives both generated machines, and atomically
-    /// commits the recovered head; this shell supplies only stable identity and
-    /// serves the exact committed document it receives.
-    async fn attempt_durable_tail_recovery(
-        &self,
-        id: &SessionId,
-    ) -> Result<Option<Session>, SessionError> {
-        match self.store_owned_durable_tail_recovery_outcome(id).await? {
-            meerkat_runtime::recovery::DurableTailRecoveryOutcome::Committed {
-                disposition,
-                boundary_sequence,
-                recovered,
-            } => {
-                tracing::info!(
-                    session_id = %id,
-                    ?disposition,
-                    boundary_sequence,
-                    recovered_messages = recovered.messages().len(),
-                    "durable-tail recovery served the recovered document"
-                );
-                Ok(Some(*recovered))
-            }
-            meerkat_runtime::recovery::DurableTailRecoveryOutcome::AlreadyAligned { recovered } => {
-                tracing::info!(
-                    session_id = %id,
-                    recovered_messages = recovered.messages().len(),
-                    "durable-tail recovery served the exact already-aligned document"
-                );
-                Ok(Some(*recovered))
-            }
-            meerkat_runtime::recovery::DurableTailRecoveryOutcome::Held => Ok(None),
-            meerkat_runtime::recovery::DurableTailRecoveryOutcome::Refused => {
-                Err(SessionError::DurableTailRecoveryRefused { id: id.clone() })
-            }
-        }
-    }
-
     async fn discard_stale_live_session_if_needed(
         &self,
         id: &SessionId,
@@ -4658,10 +4598,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         runtime_store: Arc<dyn RuntimeStore>,
         blob_store: Arc<dyn BlobStore>,
     ) -> Self {
-        let incremental = store.clone().as_incremental();
+        let incremental = store.as_incremental();
         Self {
             inner: EphemeralSessionService::new(builder, active_session_capacity),
-            store,
             incremental,
             runtime_store,
             blob_store,
@@ -6398,55 +6337,6 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         Ok(())
     }
 
-    async fn resolve_runtime_checkpoint_projection_disposition(
-        &self,
-        id: &SessionId,
-        durable_terminal: Option<SessionLifecycleTerminal>,
-    ) -> Result<RuntimeCheckpointProjectionDisposition, SessionError> {
-        let lifecycle_seed = match durable_terminal {
-            // An explicit durable document terminal is canonical. Active +
-            // Retired can be the machine-owned midpoint of explicit revival,
-            // so runtime compatibility evidence must not override it.
-            Some(terminal) => terminal,
-            None if self
-                .session_archived_by_authority_with_terminal(id, None)
-                .await? =>
-            {
-                SessionLifecycleTerminal::Archived
-            }
-            None => SessionLifecycleTerminal::Active,
-        };
-        let mut authority = SessionDocumentMachineAuthority::new();
-        let document_key = SessionDocumentKey::new(id.to_string());
-        authority
-            .recover_session_lifecycle_terminal(document_key.clone(), lifecycle_seed.into())
-            .map_err(|error| {
-                SessionError::Agent(AgentError::InternalError(format!(
-                    "generated session document authority rejected runtime-checkpoint lifecycle recovery for session {id}: {error}"
-                )))
-            })?;
-        let effects = authority
-            .resolve_runtime_checkpoint_projection(document_key)
-            .map_err(|error| {
-                SessionError::Agent(AgentError::InternalError(format!(
-                    "generated session document authority rejected runtime-checkpoint projection resolution for session {id}: {error}"
-                )))
-            })?;
-        effects
-            .iter()
-            .find_map(|effect| match effect {
-                SessionDocumentEffect::RuntimeCheckpointProjectionResolved { disposition } => {
-                    Some(*disposition)
-                }
-                _ => None,
-            })
-            .ok_or_else(|| {
-                SessionError::Agent(AgentError::InternalError(format!(
-                    "generated session document authority returned no runtime-checkpoint projection disposition for session {id}"
-                )))
-            })
-    }
-
     pub async fn prepare_live_transient_turn_context_boundary(
         &self,
         id: &SessionId,
@@ -6466,6 +6356,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         Ok(prepared.into_stage_output(None))
     }
 
+    #[cfg(test)]
     async fn fail_closed_runtime_projection_update(
         &self,
         id: &SessionId,
@@ -6484,29 +6375,6 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     session_id = %id,
                     error = %discard_error,
                     "failed to discard live session after runtime-backed projection update failure"
-                );
-            }
-        }
-        SessionError::Store(Box::new(error))
-    }
-
-    async fn fail_closed_runtime_projection_preflight(
-        &self,
-        id: &SessionId,
-        error: SessionStoreError,
-    ) -> SessionError {
-        tracing::error!(
-            session_id = %id,
-            error = %error,
-            "session-store projection continuity preflight failed before runtime authority commit; failing closed"
-        );
-        match self.discard_live_session_unfenced(id).await {
-            Ok(()) | Err(SessionError::NotFound { .. }) => {}
-            Err(discard_error) => {
-                tracing::warn!(
-                    session_id = %id,
-                    error = %discard_error,
-                    "failed to discard live session after runtime-backed projection preflight failure"
                 );
             }
         }
@@ -7536,30 +7404,6 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 }
 
 impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
-    async fn synchronize_live_session_after_archived_revival(
-        &self,
-        id: &SessionId,
-        active: &Session,
-    ) -> Result<(), SessionError> {
-        if !self.inner.has_live_session(id).await? {
-            return Ok(());
-        }
-        match self
-            .inner
-            .sync_session_from_durable_snapshot(id, active.clone())
-            .await
-        {
-            Ok(()) => Ok(()),
-            Err(SessionError::NotFound { .. }) if !self.inner.has_live_session(id).await? => {
-                // The live task may exit between the presence probe and the
-                // command send. No stale live projection remains to overwrite
-                // the promoted durable document in that case.
-                Ok(())
-            }
-            Err(error) => Err(error),
-        }
-    }
-
     /// Promote an archived document back to Active under explicit machine
     /// control. This is the durable half of retired-session revival; ordinary
     /// create/resume remains unable to cross the absorbing Archived terminal.

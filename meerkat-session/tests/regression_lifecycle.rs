@@ -13,7 +13,7 @@ use meerkat_core::lifecycle::RunId;
 use meerkat_core::ops::OperationId;
 use meerkat_core::service::{
     CreateSessionRequest, DeferredPromptPolicy, InitialTurnPolicy, SessionError, SessionQuery,
-    SessionService, SessionServiceControlExt, StartTurnRequest, TurnToolOverlay,
+    SessionService, StartTurnRequest, TurnToolOverlay,
 };
 use meerkat_core::types::{
     HandlingMode, RenderClass, RenderMetadata, RenderSalience, RunResult, SessionId, Usage,

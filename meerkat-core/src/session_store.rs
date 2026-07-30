@@ -2766,10 +2766,10 @@ impl SessionHead {
     ) -> Result<Session, SessionStoreError> {
         validate_session_head_component_roots(&self)?;
         if messages.len() as u64 != self.message_count {
-            return Err(SessionStoreError::Corrupted(self.id.clone()));
+            return Err(SessionStoreError::Corrupted(self.id));
         }
         if serialized_rows.len() != messages.len() {
-            return Err(SessionStoreError::Corrupted(self.id.clone()));
+            return Err(SessionStoreError::Corrupted(self.id));
         }
         let verified_row_prefix = self.message_row_prefix.clone();
         if let Some(expected) = verified_row_prefix.as_ref() {

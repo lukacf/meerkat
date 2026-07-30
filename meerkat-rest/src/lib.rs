@@ -5864,7 +5864,7 @@ async fn continue_session_inner(
             provider: llm_binding.provider,
             override_comms: Default::default(),
             self_hosted_server_id: llm_binding.self_hosted_server_id,
-            output_schema: req.output_schema,
+            output_schema: req.output_schema.clone(),
             structured_output_retries: req.structured_output_retries,
             hooks_override: req.hooks_override.clone().unwrap_or_default(),
             comms_name: req.comms_name.clone(),
@@ -10007,6 +10007,7 @@ mod tests {
                 content: CoreRenderable::Text {
                     text: "after archive".to_string(),
                 },
+                identity: None,
             },
         );
         let mut executor = RestSessionRuntimeExecutor {

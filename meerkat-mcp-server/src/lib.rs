@@ -4615,6 +4615,7 @@ async fn handle_meerkat_resume(
         let model_for_plan = model.clone();
         let prompt_for_plan = prompt.clone();
         let system_prompt_for_plan = input.system_prompt.clone();
+        let transient_turn_context_for_plan = input.transient_turn_context.clone();
         let event_tx_for_plan = event_tx.clone();
         let skill_references_for_plan = skill_references.clone();
         let requested_callback_tools_for_plan = requested_callback_tools.clone();
@@ -4667,7 +4668,7 @@ async fn handle_meerkat_resume(
                         .system_prompts
                         .push(system_prompt);
                 }
-                if let Some(context) = input.transient_turn_context.clone() {
+                if let Some(context) = transient_turn_context_for_plan {
                     build
                         .initial_turn_metadata
                         .get_or_insert_with(Default::default)

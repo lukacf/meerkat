@@ -4177,6 +4177,7 @@ mod tests {
                 content: CoreRenderable::Text {
                     text: "after archive".to_string(),
                 },
+                identity: None,
             },
         );
         let mut executor =

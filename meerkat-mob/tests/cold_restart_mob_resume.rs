@@ -13,7 +13,10 @@
 #![cfg(not(target_arch = "wasm32"))]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use meerkat::{AgentFactory, Config, FactoryAgentBuilder, SessionHistoryQuery, SessionStore};
+use meerkat::{
+    AgentFactory, Config, FactoryAgentBuilder, SessionHistoryQuery, SessionServiceControlExt,
+    SessionStore,
+};
 use meerkat_core::session_store::IncrementalSessionStore as _;
 use meerkat_core::types::HandlingMode;
 use meerkat_core::{CommsCommand, PeerRoute, SendReceipt};
@@ -1703,8 +1706,11 @@ async fn wait_for_head_canonical_authority_convergence(
             );
             let physical_token = meerkat_core::session_store::session_head_cas_token(physical_head)
                 .expect("physical head has a canonical CAS token");
-            if authority.boundary_head() == Some(physical_head)
-                && authority.boundary_head_cas_token() == Some(physical_token.as_str())
+            let authority = authority
+                .head_canonical()
+                .expect("head-canonical runtime authority");
+            if authority.boundary_head() == physical_head
+                && authority.committed_head_token() == physical_token
             {
                 let session = store
                     .load(session_id)
@@ -1837,10 +1843,10 @@ async fn mob_cold_restart_resume_after_kill_between_commit_points() {
         committed_boundary_authority.profile(),
         meerkat_runtime::store::RuntimeSessionPersistenceProfile::HeadCanonicalV1
     );
-    let boundary_head = committed_boundary_authority
-        .boundary_head()
-        .expect("head-canonical boundary authority")
-        .clone();
+    let committed_boundary_authority = committed_boundary_authority
+        .head_canonical()
+        .expect("head-canonical boundary authority");
+    let boundary_head = committed_boundary_authority.boundary_head().clone();
     let boundary_messages = store_1
         .load_messages(
             &w1_sid,
@@ -1904,8 +1910,8 @@ async fn mob_cold_restart_resume_after_kill_between_commit_points() {
         "ahead physical head must bind the exact materialized transcript"
     );
     assert_ne!(
-        Some(ahead_token.as_str()),
-        committed_boundary_authority.boundary_head_cas_token(),
+        ahead_token,
+        committed_boundary_authority.committed_head_token(),
         "the physical head must remain strictly ahead of retained runtime authority"
     );
     assert!(

@@ -7820,6 +7820,16 @@ mod tests {
         session.push(Message::User(UserMessage::text(format!(
             "verbose context {label} two"
         ))));
+        if session.transcript_history_state().unwrap().is_none() {
+            let exact_row_prefix =
+                crate::SessionMessageRowPrefixAccumulator::from_messages(session.messages())
+                    .unwrap();
+            assert!(
+                session
+                    .install_exact_message_row_lineage(exact_row_prefix.clone(), exact_row_prefix),
+                "compaction fixture must carry exact durable-row authority"
+            );
+        }
         let messages_before = session.messages().len();
         let replacement = vec![Message::User(UserMessage::compaction_summary(format!(
             "compacted {label}"

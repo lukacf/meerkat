@@ -236,21 +236,12 @@ pub struct RealtimeSessionOpenConfig {
     /// reusing or concurrently opening from another clone must acquire fresh
     /// custody instead of reusing the original reservation.
     open_projection_lease: RealtimeOpenProjectionLeaseSlot,
-    /// Provider-lowered ordered System messages for this realtime session.
+    /// Exact canonical System payload sequence at projection time.
     ///
-    /// The canonical owners remain the ordered transcript messages. Providers
-    /// with a singular top-level instruction field collect every System
-    /// payload in authored System-message order for that field.
-    ///
-    /// Provider adapters and snapshot builders MUST consume this typed field
-    /// when they need one provider instruction value (e.g. the OpenAI Refresh
-    /// path rebuilding the realtime `session.update` instructions field). They
-    /// MUST NOT re-derive it by inspecting `seed_messages[0]`: System
-    /// messages have no privileged durable position, and the history-event
-    /// projector handles `SystemNotice` rows in place.
-    /// `None` means the session has no System rows;
-    /// `Some("")` means it has an authored empty System row.
-    ordered_system_instructions: Option<String>,
+    /// This is a refresh drift witness, not a provider instruction field.
+    /// Provider adapters replay the actual `Message::System` rows from
+    /// `seed_messages` in their authored transcript positions.
+    canonical_system_messages: Vec<String>,
     /// Durable caller-id bindings for committed non-text user inputs. Provider
     /// adapters rebuild this registry on reconnect before accepting retries.
     pub user_content_identities: Vec<RealtimeUserContentIdentity>,
@@ -280,23 +271,16 @@ pub struct RealtimeSessionOpenConfig {
 }
 
 impl RealtimeSessionOpenConfig {
-    /// Collect every System payload in authored System-message order for a
-    /// provider's singular top-level instruction field.
+    /// Collect exact System payloads in authored System-message order.
     #[must_use]
-    pub fn lower_ordered_system_messages(messages: &[Message]) -> Option<String> {
-        let systems = messages.iter().filter_map(|message| match message {
-            Message::System(system) => Some(system.content.clone()),
-            _ => None,
-        });
-        let mut systems = systems.into_iter();
-        let Some(mut lowered) = systems.next() else {
-            return None;
-        };
-        for system in systems {
-            lowered.push_str("\n\n");
-            lowered.push_str(&system);
-        }
-        Some(lowered)
+    pub fn canonical_system_messages(messages: &[Message]) -> Vec<String> {
+        messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::System(system) => Some(system.content.clone()),
+                _ => None,
+            })
+            .collect()
     }
 
     pub fn new(
@@ -305,22 +289,21 @@ impl RealtimeSessionOpenConfig {
         visible_tools: Vec<ToolDef>,
         seed_messages: Vec<Message>,
     ) -> Result<Self, LlmError> {
-        let ordered_system_instructions = Self::lower_ordered_system_messages(&seed_messages);
+        let canonical_system_messages = Self::canonical_system_messages(&seed_messages);
         Ok(Self::new_with_projection(
             turning_mode,
             llm_identity,
             visible_tools,
             seed_messages,
-            ordered_system_instructions,
+            canonical_system_messages,
         ))
     }
 
     /// Construct an open projection from a caller-selected replay seed while
-    /// deriving instructions from the complete active materialized transcript.
+    /// retaining the complete canonical System subsequence as a drift witness.
     ///
-    /// A bounded replay seed may omit old dialogue and System rows.
-    /// The provider's top-level instruction projection is therefore derived
-    /// from the complete active materialization.
+    /// The replay seed applies the same ordered window policy to every role.
+    /// Any retained System row is replayed natively at its transcript position.
     pub fn for_open_from_messages(
         turning_mode: RealtimeTurningMode,
         llm_identity: SessionLlmIdentity,
@@ -328,13 +311,13 @@ impl RealtimeSessionOpenConfig {
         seed_messages: Vec<Message>,
         canonical_messages: &[Message],
     ) -> Result<Self, LlmError> {
-        let ordered_system_instructions = Self::lower_ordered_system_messages(canonical_messages);
+        let canonical_system_messages = Self::canonical_system_messages(canonical_messages);
         Ok(Self::new_with_projection(
             turning_mode,
             llm_identity,
             visible_tools,
             seed_messages,
-            ordered_system_instructions,
+            canonical_system_messages,
         ))
     }
 
@@ -343,7 +326,7 @@ impl RealtimeSessionOpenConfig {
         llm_identity: SessionLlmIdentity,
         visible_tools: Vec<ToolDef>,
         seed_messages: Vec<Message>,
-        ordered_system_instructions: Option<String>,
+        canonical_system_messages: Vec<String>,
     ) -> Self {
         Self {
             turning_mode,
@@ -351,7 +334,7 @@ impl RealtimeSessionOpenConfig {
             visible_tools,
             seed_messages,
             open_projection_lease: RealtimeOpenProjectionLeaseSlot::default(),
-            ordered_system_instructions,
+            canonical_system_messages,
             user_content_identities: Vec::new(),
             user_content_tombstones: Vec::new(),
             canonical_user_image_decoded_bytes: None,
@@ -361,9 +344,8 @@ impl RealtimeSessionOpenConfig {
         }
     }
 
-    /// Construct a refresh-only projection. Refresh has no seed replay, but its
-    /// provider instructions are still derived here from the ordinary ordered
-    /// System rows at the projection boundary.
+    /// Construct a refresh-only projection. Refresh has no seed replay; the
+    /// exact System sequence is retained only to detect a required reopen.
     pub fn for_refresh_from_messages(
         turning_mode: RealtimeTurningMode,
         llm_identity: SessionLlmIdentity,
@@ -371,8 +353,7 @@ impl RealtimeSessionOpenConfig {
         canonical_messages: &[Message],
     ) -> Result<Self, LlmError> {
         let mut config = Self::new(turning_mode, llm_identity, visible_tools, Vec::new())?;
-        config.ordered_system_instructions =
-            Self::lower_ordered_system_messages(canonical_messages);
+        config.canonical_system_messages = Self::canonical_system_messages(canonical_messages);
         Ok(config)
     }
 
@@ -394,30 +375,26 @@ impl RealtimeSessionOpenConfig {
         self.open_projection_lease.take()
     }
 
-    /// Provider-lowered ordered System-message instructions.
-    ///
-    /// Open configs derive this from every seed System message. Refresh-only
-    /// configs derive it from the canonical transcript through
-    /// [`Self::for_refresh_from_messages`].
+    /// Exact canonical System payload sequence used for refresh drift checks.
     #[must_use]
-    pub fn ordered_system_instructions(&self) -> Option<&str> {
-        self.ordered_system_instructions.as_deref()
+    pub fn canonical_system_messages_ref(&self) -> &[String] {
+        &self.canonical_system_messages
     }
 
     /// Immutable canonical seed transcript paired with
-    /// [`Self::ordered_system_instructions`].
+    /// [`Self::canonical_system_messages_ref`].
     ///
     /// Mutation is intentionally unavailable: changing the seed after
-    /// construction would invalidate the derived ordered-System projection.
+    /// construction would invalidate the canonical System drift witness.
     #[must_use]
     pub fn seed_messages(&self) -> &[Message] {
         &self.seed_messages
     }
 
-    /// Replace the canonical seed while atomically re-deriving its ordered
-    /// System projection.
+    /// Replace the canonical seed while atomically re-deriving its System
+    /// drift witness.
     pub fn with_seed_messages(mut self, seed_messages: Vec<Message>) -> Result<Self, LlmError> {
-        self.ordered_system_instructions = Self::lower_ordered_system_messages(&seed_messages);
+        self.canonical_system_messages = Self::canonical_system_messages(&seed_messages);
         self.seed_messages = seed_messages;
         Ok(self)
     }
@@ -574,8 +551,8 @@ mod tests {
         )
         .expect("ordered System messages must be representable");
         assert_eq!(
-            config.ordered_system_instructions(),
-            Some("first\n\n\n\n \t \n\nlater")
+            config.canonical_system_messages_ref(),
+            &["first", "", " \t ", "later"]
         );
     }
 
@@ -588,7 +565,7 @@ mod tests {
             vec![Message::User(UserMessage::text("hello"))],
         )
         .expect("ordinary dialogue must be representable");
-        assert_eq!(open.ordered_system_instructions(), None);
+        assert!(open.canonical_system_messages_ref().is_empty());
 
         let refresh = RealtimeSessionOpenConfig::for_refresh_from_messages(
             RealtimeTurningMode::ExplicitCommit,
@@ -603,13 +580,13 @@ mod tests {
         )
         .expect("every ordered System row is projected");
         assert_eq!(
-            refresh.ordered_system_instructions(),
-            Some("authoritative\n\n\n\n \t ")
+            refresh.canonical_system_messages_ref(),
+            &["authoritative", "", " \t "]
         );
     }
 
     #[test]
-    fn bounded_open_seed_derives_instructions_from_full_active_materialization() {
+    fn bounded_open_seed_retains_full_system_drift_witness() {
         let recent = Message::User(UserMessage::text("recent"));
         let seed = vec![recent.clone()];
         let active_messages = vec![
@@ -628,14 +605,14 @@ mod tests {
         )
         .expect("all System rows in the full materialization are projected");
         assert_eq!(
-            config.ordered_system_instructions(),
-            Some("outside replay window\n\n")
+            config.canonical_system_messages_ref(),
+            &["outside replay window", ""]
         );
         assert_eq!(seed, vec![recent]);
     }
 
     #[test]
-    fn replacing_seed_atomically_rederives_ordered_system_projection() {
+    fn replacing_seed_atomically_rederives_system_drift_witness() {
         let config = RealtimeSessionOpenConfig::new(
             RealtimeTurningMode::ExplicitCommit,
             sample_identity(),
@@ -650,6 +627,6 @@ mod tests {
         ])
         .expect("ordered System messages must be representable");
 
-        assert_eq!(config.ordered_system_instructions(), Some("current\n\n"));
+        assert_eq!(config.canonical_system_messages_ref(), &["current", ""]);
     }
 }

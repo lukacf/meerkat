@@ -491,19 +491,30 @@ impl AnthropicClient {
     fn build_request_body(&self, request: &LlmRequest) -> Result<Value, LlmError> {
         let mut messages = Vec::new();
         let mut system_messages = Vec::new();
+        let mut leading_system_prefix = true;
 
-        for msg in &request.messages {
+        for (index, msg) in request.messages.iter().enumerate() {
             match msg {
                 Message::System(s) => {
+                    if !leading_system_prefix {
+                        return Err(LlmError::InvalidInputShape {
+                            message: format!(
+                                "Anthropic Messages cannot represent System message at transcript \
+                                 index {index}; System rows must form a leading prefix"
+                            ),
+                        });
+                    }
                     system_messages.push(s.content.clone());
                 }
                 Message::SystemNotice(notice) => {
+                    leading_system_prefix = false;
                     messages.push(serde_json::json!({
                         "role": "user",
                         "content": Self::system_notice_anthropic_content(notice)
                     }));
                 }
                 Message::User(u) => {
+                    leading_system_prefix = false;
                     if meerkat_core::has_non_text_content(&u.content) {
                         let content_array: Vec<Value> = u
                             .content
@@ -522,6 +533,7 @@ impl AnthropicClient {
                     }
                 }
                 Message::BlockAssistant(a) => {
+                    leading_system_prefix = false;
                     // Ordered blocks with thinking support
                     let mut content = Vec::new();
 
@@ -630,6 +642,7 @@ impl AnthropicClient {
                     }));
                 }
                 Message::ToolResults { results, .. } => {
+                    leading_system_prefix = false;
                     let mut content = Vec::new();
 
                     for r in results {
@@ -1816,14 +1829,14 @@ mod tests {
     }
 
     #[test]
-    fn all_system_messages_are_preserved_as_distinct_anthropic_blocks() {
+    fn leading_system_messages_are_preserved_as_distinct_anthropic_blocks() {
         let client = AnthropicClient::new("test-key".to_string()).unwrap();
         let messages = vec![
             Message::System(SystemMessage::new("")),
-            Message::User(UserMessage::text("work")),
             Message::System(SystemMessage::new(" \t ")),
             Message::System(SystemMessage::new("duplicate")),
             Message::System(SystemMessage::new("duplicate")),
+            Message::User(UserMessage::text("work")),
         ];
         let request = LlmRequest::new("claude-sonnet-4-6", messages.clone());
 
@@ -1841,6 +1854,22 @@ mod tests {
         assert_eq!(projected_messages.len(), 1);
         assert_eq!(projected_messages[0]["role"], "user");
         assert_eq!(projected_messages[0]["content"], "work");
+    }
+
+    #[test]
+    fn interleaved_system_message_is_rejected_without_mutating_input() {
+        let client = AnthropicClient::new("test-key".to_string()).unwrap();
+        let messages = vec![
+            Message::User(UserMessage::text("work")),
+            Message::System(SystemMessage::new("late instruction")),
+        ];
+        let request = LlmRequest::new("claude-sonnet-4-6", messages.clone());
+
+        assert!(matches!(
+            client.build_request_body(&request),
+            Err(LlmError::InvalidInputShape { .. })
+        ));
+        assert_eq!(request.messages, messages);
     }
 
     // =========================================================================

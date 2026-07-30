@@ -1629,7 +1629,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_carries_constructor_derived_ordered_system_projection() {
+    fn snapshot_carries_exact_constructor_derived_system_rows() {
         use meerkat_core::types::{Message, SystemMessage, UserMessage};
 
         let open_config = RealtimeSessionOpenConfig::new(
@@ -1638,21 +1638,28 @@ mod tests {
             Vec::new(),
             vec![
                 Message::System(SystemMessage::new("first")),
-                Message::System(SystemMessage::new("second")),
                 Message::User(UserMessage::text("hi")),
+                Message::System(SystemMessage::new("")),
+                Message::System(SystemMessage::new("first")),
+                Message::System(SystemMessage::new(" \t ")),
             ],
         )
         .expect("test seed must be representable");
         let session_id = SessionId::new();
         let snapshot = build_live_projection_snapshot(&session_id, &open_config, None);
         assert_eq!(
-            snapshot.ordered_system_instructions.as_deref(),
-            Some("first\n\nsecond")
+            snapshot.canonical_system_messages,
+            vec![
+                "first".to_string(),
+                String::new(),
+                "first".to_string(),
+                " \t ".to_string(),
+            ]
         );
     }
 
     #[test]
-    fn snapshot_ordered_system_instructions_is_none_without_system_rows() {
+    fn snapshot_system_rows_are_empty_without_system_messages() {
         use meerkat_core::types::{Message, UserMessage};
 
         let open_config = RealtimeSessionOpenConfig::new(
@@ -1664,7 +1671,7 @@ mod tests {
         .expect("ordinary dialogue must be representable");
         let session_id = SessionId::new();
         let snapshot = build_live_projection_snapshot(&session_id, &open_config, None);
-        assert_eq!(snapshot.ordered_system_instructions, None);
+        assert_eq!(snapshot.canonical_system_messages, Vec::<String>::new());
     }
 
     #[test]
@@ -1734,7 +1741,7 @@ mod tests {
             snapshot_version: 1,
             seed_messages: Vec::new(),
             visible_tools: Vec::new(),
-            ordered_system_instructions: None,
+            canonical_system_messages: Vec::new(),
             model_id: "gpt-realtime-2".into(),
             provider_id: meerkat_core::Provider::OpenAI,
             audio_config: None,
@@ -2295,7 +2302,7 @@ mod tests {
             snapshot_version: 7,
             seed_messages: vec![],
             visible_tools: vec![],
-            ordered_system_instructions: None,
+            canonical_system_messages: vec![],
             model_id: "gpt-realtime-2".into(),
             provider_id: meerkat_core::Provider::OpenAI,
             audio_config: None,
@@ -2475,7 +2482,7 @@ mod tests {
                 snapshot_version: 0,
                 seed_messages: vec![],
                 visible_tools: vec![],
-                ordered_system_instructions: None,
+                canonical_system_messages: vec![],
                 model_id: "gpt-realtime-2".into(),
                 provider_id: meerkat_core::Provider::OpenAI,
                 audio_config: None,

@@ -3988,7 +3988,7 @@ mod tests {
             snapshot_version: 1,
             seed_messages: vec![],
             visible_tools: vec![],
-            ordered_system_instructions: None,
+            canonical_system_messages: vec![],
             model_id: "model-a".into(),
             provider_id: meerkat_core::Provider::Other,
             audio_config: None,

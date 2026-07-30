@@ -169,9 +169,9 @@ duplicating work:\n\n";
 /// One message removed by compaction plus its source transcript offset.
 ///
 /// The source offset is part of the compactor contract because reconstructing
-/// it from the returned discard slice loses leading retained messages (most
-/// commonly the system prompt) and cannot represent non-contiguous custom
-/// compaction strategies without guessing.
+/// it from the returned discard slice loses retained messages outside the
+/// discarded region and cannot represent non-contiguous custom compaction
+/// strategies without guessing.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompactionDiscard {
     /// Offset of `message` in the full pre-compaction transcript.

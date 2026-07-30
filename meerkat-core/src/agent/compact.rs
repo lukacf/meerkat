@@ -670,7 +670,8 @@ where
         }
     };
 
-    // 4. Rebuild history — extract system prompt from messages directly
+    // 4. Rebuild history. Validation below requires every ordinary System row
+    // to remain verbatim at its mapped relative position.
     let result = compactor.rebuild_history(messages, &summary_text);
     if let Err(error) = validate_compaction_rebuild(
         messages,

@@ -217,20 +217,20 @@ via cargo-semver-checks against the published baselines).
   inferred from transcript text or position. Resume preserves the exact
   ordered prefix; compaction retains every System message in relative order;
   provider adapters preserve exact chronology where their wire supports it.
-  Top-level-only providers collect every System payload in authored
-  System-message order without constraining its transcript position. System
-  placement is never a turn-admission, resume, or provider/model-rebind
-  restriction.
+  A limited provider wire returns a typed projection error when it cannot
+  represent the requested shape; it never makes the durable Session invalid,
+  blocks System-message authorship, or rewrites existing history. Rebinding to
+  an exact provider can execute that Session unchanged.
 - Provider lowering never changes that durable meaning. Standard OpenAI
-  Responses and OpenAI-compatible Chat Completions preserve System
-  interleaving. Anthropic and Gemini collect all System rows as distinct
-  top-level blocks or parts. The private ChatGPT Responses backend and OpenAI
-  Realtime preserve every exact byte in authored System-message order using a
-  stable two-newline separator. Empty, whitespace-only, and duplicate entries
-  are never trimmed, deduplicated, replaced, or dropped. Realtime's separate
-  `runtime_system_context` carrier is retired; reconnect and refresh derive
-  instructions only from all canonical System rows, while `SystemNotice`
-  remains an explicit in-place event.
+  Responses, OpenAI-compatible Chat Completions, and OpenAI Realtime preserve
+  System interleaving. Anthropic and Gemini accept a leading System prefix;
+  the private ChatGPT Responses backend accepts one leading System row.
+  Other shapes receive a typed non-retryable provider projection error. Empty,
+  whitespace-only, and duplicate entries are never trimmed,
+  deduplicated, delimiter-joined, replaced, or dropped. Realtime's separate
+  `runtime_system_context` carrier is retired; reconnect applies the same
+  ordered replay-window policy to every role and replays retained System rows
+  in place, while `SystemNotice` remains an explicit history event.
 - Typed peer terminal-response facts now persist as deduplicated
   `SystemNotice` messages at the conversation tail without mutating any
   ordered `System` message. Active-turn delivery commits the notice to the

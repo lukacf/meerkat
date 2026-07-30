@@ -104,10 +104,11 @@ System event.
 
 Compaction retains every System message in relative order. Provider adapters
 preserve each System at its exact position where the wire accepts ordinary
-`role=system` messages. An API with only a top-level instruction field collects
-every System payload in authored System-message order. Provider projection
-never changes, rejects, or rewrites the durable transcript based on where a
-System row appears.
+`role=system` messages. A provider with only a top-level instruction field
+cannot silently hoist or merge later System rows: its request projection
+returns a typed error while the ordered row remains valid durable history.
+Provider capability never changes, rejects, or rewrites the durable Session
+itself.
 
 ### interrupt
 

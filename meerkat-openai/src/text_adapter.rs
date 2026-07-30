@@ -10,9 +10,9 @@
 //! 1. Open a WebSocket to `wss://api.openai.com/v1/realtime?model=<model>`
 //!    via `oai-rt-rs` (GA protocol; no `OpenAI-Beta` header).
 //! 2. `session.update` → `type: "realtime"`, `output_modalities: Text`,
-//!    tool definitions, and any system prompt as `instructions`.
+//!    and tool definitions.
 //! 3. Replay the full message history as `conversation.item.create`
-//!    events (user/assistant messages, function_call, function_call_output).
+//!    events (including System messages in their exact authored positions).
 //! 4. `response.create` with `output_modalities: Text` triggers inference.
 //! 5. Translate `response.output_text.delta`,
 //!    `response.function_call_arguments.delta`/`…done`, and `response.done`
@@ -278,7 +278,7 @@ impl LlmClient for OpenAiRealtimeTextAdapter {
             let mut projected_request = request.clone();
             projected_request.messages = self.project_replay_messages(&request.messages)?;
             let request = &projected_request;
-            let (instructions, history_items) = convert_messages(&request.messages)?;
+            let history_items = convert_messages(&request.messages)?;
             let tools = build_tools(request);
 
             // Connect WS — GA protocol (no OpenAI-Beta header).
@@ -290,11 +290,12 @@ impl LlmClient for OpenAiRealtimeTextAdapter {
             .await
             .map_err(map_oai_error)?;
 
-            // session.update → text-only output, declare tools, set instructions.
+            // session.update → text-only output and declared tools. Canonical
+            // System messages are conversation items, never session config.
             let session_update = SessionUpdate {
                 config: SessionUpdateConfig {
                     output_modalities: Some(OutputModalities::Text),
-                    instructions: instructions.clone(),
+                    instructions: None,
                     tools: Some(tools.clone()),
                     ..SessionUpdateConfig::default()
                 },
@@ -336,7 +337,7 @@ impl LlmClient for OpenAiRealtimeTextAdapter {
             let response_config = ResponseConfig {
                 conversation: Some(ConversationMode::None),
                 output_modalities: Some(OutputModalities::Text),
-                instructions: instructions.clone(),
+                instructions: None,
                 tools: Some(tools.clone()),
                 max_output_tokens: Some(max_output_tokens),
                 temperature,
@@ -454,22 +455,23 @@ impl LlmClient for OpenAiRealtimeTextAdapter {
 
 // ---- message / tool / usage conversion helpers ---------------------------
 
-// Realtime exposes one top-level instruction string. Preserve every authored
-// System payload byte-for-byte and join them in transcript order with this
-// stable adapter-owned separator.
-const ORDERED_SYSTEM_INSTRUCTION_SEPARATOR: &str = "\n\n";
-
-/// Convert a meerkat message history into an `instructions` string
-/// (collected from system messages) plus a list of realtime `Item`s for
-/// replay through `conversation.item.create`.
-fn convert_messages(messages: &[Message]) -> Result<(Option<String>, Vec<Item>), LlmError> {
-    let mut instructions_parts: Vec<String> = Vec::new();
+/// Convert canonical history into realtime conversation items without
+/// changing role or order.
+fn convert_messages(messages: &[Message]) -> Result<Vec<Item>, LlmError> {
     let mut items: Vec<Item> = Vec::new();
 
     for msg in messages {
         match msg {
             Message::System(s) => {
-                instructions_parts.push(s.content.clone());
+                items.push(Item::Message {
+                    id: None,
+                    status: None,
+                    phase: None,
+                    role: Role::System,
+                    content: vec![ContentPart::InputText {
+                        text: s.content.clone(),
+                    }],
+                });
             }
             Message::SystemNotice(notice) => {
                 items.push(Item::Message {
@@ -578,12 +580,7 @@ fn convert_messages(messages: &[Message]) -> Result<(Option<String>, Vec<Item>),
         }
     }
 
-    let instructions = if instructions_parts.is_empty() {
-        None
-    } else {
-        Some(instructions_parts.join(ORDERED_SYSTEM_INSTRUCTION_SEPARATOR))
-    };
-    Ok((instructions, items))
+    Ok(items)
 }
 
 fn build_tools(request: &LlmRequest) -> Vec<Tool> {
@@ -823,17 +820,15 @@ mod tests {
     }
 
     #[test]
-    fn convert_system_and_user_produces_instructions_and_one_user_item() {
-        let (instructions, items) =
-            convert_messages(&[sys("You are a helper."), user("Hi!")]).expect("convert");
-        assert_eq!(instructions.as_deref(), Some("You are a helper."));
-        assert_eq!(items.len(), 1);
+    fn convert_system_and_user_preserves_both_conversation_items() {
+        let items = convert_messages(&[sys("You are a helper."), user("Hi!")]).expect("convert");
+        assert_eq!(items.len(), 2);
         match &items[0] {
             Item::Message { role, content, .. } => {
-                assert_eq!(*role, Role::User);
+                assert_eq!(*role, Role::System);
                 assert_eq!(content.len(), 1);
                 match &content[0] {
-                    ContentPart::InputText { text } => assert_eq!(text, "Hi!"),
+                    ContentPart::InputText { text } => assert_eq!(text, "You are a helper."),
                     other => panic!("unexpected content part: {other:?}"),
                 }
             }
@@ -842,33 +837,55 @@ mod tests {
     }
 
     #[test]
-    fn convert_messages_collects_all_systems_and_preserves_interleaved_notice() {
-        let (absent, _) = convert_messages(&[]).expect("convert absent System");
-        assert_eq!(absent, None);
-
+    fn convert_messages_preserves_interleaved_systems_exactly() {
         let messages = vec![
             sys(""),
-            sys(" \t "),
-            sys("duplicate"),
-            sys("duplicate"),
             user("work"),
+            sys(" \t "),
             Message::SystemNotice(SystemNoticeMessage::new(
                 SystemNoticeKind::Generic,
                 "notice",
             )),
+            sys("duplicate"),
             user("continue"),
-            sys("late instruction"),
+            sys("duplicate"),
         ];
         let original = messages.clone();
-        let (ordered, items) = convert_messages(&messages).expect("convert ordered Systems");
+        let items = convert_messages(&messages).expect("convert ordered Systems");
         assert_eq!(messages, original);
+        assert_eq!(items.len(), 7);
+        let roles = items
+            .iter()
+            .map(|item| match item {
+                Item::Message { role, .. } => *role,
+                other => panic!("unexpected item: {other:?}"),
+            })
+            .collect::<Vec<_>>();
         assert_eq!(
-            ordered.as_deref(),
-            Some("\n\n \t \n\nduplicate\n\nduplicate\n\nlate instruction")
+            roles,
+            vec![
+                Role::System,
+                Role::User,
+                Role::System,
+                Role::User,
+                Role::System,
+                Role::User,
+                Role::System,
+            ]
         );
-        assert_eq!(items.len(), 3);
         assert!(matches!(
-            &items[1],
+            &items[2],
+            Item::Message {
+                role: Role::System,
+                content,
+                ..
+            } if matches!(
+                content.as_slice(),
+                [ContentPart::InputText { text }] if text == " \t "
+            )
+        ));
+        assert!(matches!(
+            &items[3],
             Item::Message {
                 role: Role::User,
                 content,
@@ -882,7 +899,7 @@ mod tests {
 
     #[test]
     fn convert_assistant_history_emits_output_text() {
-        let (_, items) = convert_messages(&[user("ping"), asst("pong")]).expect("convert");
+        let items = convert_messages(&[user("ping"), asst("pong")]).expect("convert");
         assert_eq!(items.len(), 2);
         match &items[1] {
             Item::Message { role, content, .. } => {
@@ -921,7 +938,7 @@ mod tests {
             created_at: meerkat_core::types::message_timestamp_now(),
         };
 
-        let (_, items) =
+        let items =
             convert_messages(&[user("work"), asst_with_tool, tool_results]).expect("convert");
         assert_eq!(items.len(), 3);
         match &items[1] {

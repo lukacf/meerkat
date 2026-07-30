@@ -387,21 +387,32 @@ impl GeminiClient {
     fn build_request_body(&self, request: &LlmRequest) -> Result<Value, LlmError> {
         let mut contents = Vec::new();
         let mut system_instruction_parts = Vec::new();
+        let mut leading_system_prefix = true;
 
         let mut tool_name_by_id: HashMap<String, String> = HashMap::new();
 
-        for msg in &request.messages {
+        for (index, msg) in request.messages.iter().enumerate() {
             match msg {
                 Message::System(s) => {
+                    if !leading_system_prefix {
+                        return Err(LlmError::InvalidInputShape {
+                            message: format!(
+                                "Gemini GenerateContent cannot represent System message at \
+                                 transcript index {index}; System rows must form a leading prefix"
+                            ),
+                        });
+                    }
                     system_instruction_parts.push(serde_json::json!({"text": s.content}));
                 }
                 Message::SystemNotice(notice) => {
+                    leading_system_prefix = false;
                     contents.push(serde_json::json!({
                         "role": "user",
                         "parts": Self::system_notice_gemini_parts(notice)
                     }));
                 }
                 Message::User(u) => {
+                    leading_system_prefix = false;
                     if meerkat_core::has_non_text_content(&u.content) {
                         let parts: Vec<Value> = u
                             .content
@@ -420,6 +431,7 @@ impl GeminiClient {
                     }
                 }
                 Message::BlockAssistant(a) => {
+                    leading_system_prefix = false;
                     // Ordered blocks with ProviderMeta
                     let mut parts = Vec::new();
 
@@ -476,6 +488,7 @@ impl GeminiClient {
                     }));
                 }
                 Message::ToolResults { results, .. } => {
+                    leading_system_prefix = false;
                     // Per spec section 2.3: thoughtSignature NEVER on functionResponse
                     // Signature belongs on functionCall, not on the response
                     let mut parts: Vec<Value> = Vec::new();
@@ -2068,15 +2081,15 @@ mod tests {
     use tokio::net::TcpListener;
 
     #[test]
-    fn all_system_messages_are_preserved_as_distinct_gemini_parts()
+    fn leading_system_messages_are_preserved_as_distinct_gemini_parts()
     -> Result<(), Box<dyn std::error::Error>> {
         let client = GeminiClient::new("test-key".to_string());
         let messages = vec![
             Message::System(meerkat_core::SystemMessage::new("")),
-            Message::User(UserMessage::text("work")),
             Message::System(meerkat_core::SystemMessage::new(" \t ")),
             Message::System(meerkat_core::SystemMessage::new("duplicate")),
             Message::System(meerkat_core::SystemMessage::new("duplicate")),
+            Message::User(UserMessage::text("work")),
         ];
         let request = LlmRequest::new("gemini-3.1-pro-preview", messages.clone());
 
@@ -2095,6 +2108,22 @@ mod tests {
         assert_eq!(contents[0]["role"], "user");
         assert_eq!(contents[0]["parts"][0]["text"], "work");
         Ok(())
+    }
+
+    #[test]
+    fn interleaved_system_message_is_rejected_without_mutating_input() {
+        let client = GeminiClient::new("test-key".to_string());
+        let messages = vec![
+            Message::User(UserMessage::text("work")),
+            Message::System(meerkat_core::SystemMessage::new("late instruction")),
+        ];
+        let request = LlmRequest::new("gemini-3.1-pro-preview", messages.clone());
+
+        assert!(matches!(
+            client.build_request_body(&request),
+            Err(LlmError::InvalidInputShape { .. })
+        ));
+        assert_eq!(request.messages, messages);
     }
 
     fn assistant_image_block() -> AssistantBlock {

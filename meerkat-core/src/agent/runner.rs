@@ -2400,6 +2400,40 @@ mod skill_activation_effect_tests {
         }
     }
 
+    struct ProjectionRejectingLlmClient;
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentLlmClient for ProjectionRejectingLlmClient {
+        async fn stream_response(
+            &self,
+            _messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+        ) -> Result<super::super::LlmStreamResult, AgentError> {
+            Err(AgentError::llm(
+                "anthropic",
+                crate::error::LlmFailureReason::ProviderError(
+                    crate::error::LlmProviderError::non_retryable(
+                        crate::error::LlmProviderErrorKind::InvalidRequest,
+                        serde_json::json!({"message": "unrepresentable ordered transcript"}),
+                    ),
+                ),
+                "provider request projection rejected the ordered transcript",
+            ))
+        }
+
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Anthropic
+        }
+
+        fn model(&self) -> &'static str {
+            "shape-limited-model"
+        }
+    }
+
     struct NoTools;
 
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -3090,6 +3124,81 @@ mod skill_activation_effect_tests {
             initial_message_count,
             "fail-closed rejection must not commit any transcript message"
         );
+    }
+
+    #[tokio::test]
+    async fn provider_projection_failure_does_not_retract_authored_system_row() {
+        use crate::agent::test_turn_state_handle::TestTurnStateHandle;
+
+        let mut session = crate::Session::new();
+        session
+            .set_build_state(crate::SessionBuildState::default())
+            .expect("test session build state should serialize");
+        session.push(Message::User(UserMessage::text("existing turn")));
+        let original_messages = session.messages().to_vec();
+        let mut agent = AgentBuilder::new()
+            .resume_session(session)
+            .with_turn_state_handle(Arc::new(TestTurnStateHandle::new()))
+            .with_runtime_execution_kind_for_test(
+                crate::lifecycle::RuntimeExecutionKind::ContentTurn,
+            )
+            .build_standalone(
+                Arc::new(ProjectionRejectingLlmClient),
+                Arc::new(NoTools),
+                Arc::new(NoopStore),
+            )
+            .await;
+
+        let (tx, _rx) = mpsc::channel::<AgentEvent>(8);
+        let error = agent
+            .run_with_events_and_typed_turn_appends(
+                "projected prompt".to_string().into(),
+                vec![
+                    crate::lifecycle::run_primitive::ConversationAppend {
+                        role: ConversationAppendRole::System,
+                        identity: None,
+                        content: CoreRenderable::Text {
+                            text: "late instruction".to_string(),
+                        },
+                    },
+                    crate::lifecycle::run_primitive::ConversationAppend {
+                        role: ConversationAppendRole::User,
+                        identity: None,
+                        content: CoreRenderable::Text {
+                            text: "projected prompt".to_string(),
+                        },
+                    },
+                ],
+                Vec::new(),
+                None,
+                tx,
+            )
+            .await
+            .expect_err("limited provider projection must fail typed");
+
+        assert!(matches!(
+            error,
+            AgentError::Llm {
+                reason: crate::error::LlmFailureReason::ProviderError(_),
+                ..
+            }
+        ));
+        assert_eq!(
+            &agent.session().messages()[..original_messages.len()],
+            original_messages
+        );
+        assert_eq!(
+            agent.session().messages().len(),
+            original_messages.len() + 2
+        );
+        assert!(matches!(
+            &agent.session().messages()[original_messages.len()],
+            Message::System(system) if system.content == "late instruction"
+        ));
+        assert!(matches!(
+            &agent.session().messages()[original_messages.len() + 1],
+            Message::User(user) if user.text_content() == "projected prompt"
+        ));
     }
 
     /// Runtime-mode lowering owner: an `InjectedContext`-role typed append

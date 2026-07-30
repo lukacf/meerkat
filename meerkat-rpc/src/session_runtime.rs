@@ -12491,12 +12491,26 @@ mod tests {
             .await
             .expect("realtime_session_open_config");
 
-        let ordered_system_instructions = open_config
-            .ordered_system_instructions()
-            .expect("appended system context must be represented by a transcript row");
+        let canonical_system_messages = open_config.canonical_system_messages_ref();
+        let live_session = runtime
+            .service
+            .export_live_session(&session_id)
+            .await
+            .expect("export live session");
+        let expected_system_messages =
+            meerkat_client::RealtimeSessionOpenConfig::canonical_system_messages(
+                live_session.messages(),
+            );
+        assert_eq!(
+            canonical_system_messages,
+            expected_system_messages.as_slice(),
+            "live projection must preserve the exact canonical System row sequence"
+        );
         assert!(
-            ordered_system_instructions.contains("Authoritative peer token is birch seventeen."),
-            "canonical transcript projection must carry appended system context: {ordered_system_instructions}"
+            canonical_system_messages
+                .iter()
+                .any(|message| message.contains("Authoritative peer token is birch seventeen.")),
+            "canonical transcript projection must carry appended system context: {canonical_system_messages:?}"
         );
     }
 
@@ -12563,23 +12577,30 @@ mod tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        let ordered_system_instructions = open_config
-            .ordered_system_instructions()
-            .expect("expected ordered System projection");
+        let projected_systems = open_config.canonical_system_messages_ref();
 
         assert_eq!(
             seed_systems, canonical_systems,
             "live seed must preserve the complete canonical System subsequence"
         );
-        assert!(
-            !ordered_system_instructions.contains("[Session Build Instructions]"),
-            "live projection must not re-render canonical instructions with a competing marker: {ordered_system_instructions}"
+        assert_eq!(
+            projected_systems,
+            canonical_systems.as_slice(),
+            "live projection must preserve the exact canonical System row sequence"
         );
         assert!(
-            ordered_system_instructions.contains("Remember user-provided codewords verbatim.")
-                && ordered_system_instructions
-                    .contains("Use the most recent authoritative terminal peer response."),
-            "expected ordered System projection to include all durable additional instructions: {ordered_system_instructions}"
+            projected_systems
+                .iter()
+                .all(|message| !message.contains("[Session Build Instructions]")),
+            "live projection must not re-render canonical instructions with a competing marker: {projected_systems:?}"
+        );
+        assert!(
+            projected_systems
+                .iter()
+                .any(|message| message.contains("Remember user-provided codewords verbatim."))
+                && projected_systems.iter().any(|message| message
+                    .contains("Use the most recent authoritative terminal peer response.")),
+            "expected System subsequence to include all durable additional instructions: {projected_systems:?}"
         );
     }
 
@@ -12671,23 +12692,30 @@ mod tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        let ordered_system_instructions = open_config
-            .ordered_system_instructions()
-            .expect("expected ordered System projection after recovery");
+        let projected_systems = open_config.canonical_system_messages_ref();
 
         assert_eq!(
             seed_systems, canonical_systems,
             "recovered live seed must preserve the complete canonical System subsequence"
         );
-        assert!(
-            !ordered_system_instructions.contains("[Session Build Instructions]"),
-            "recovered live projection must not re-render canonical instructions with a competing marker: {ordered_system_instructions}"
+        assert_eq!(
+            projected_systems,
+            canonical_systems.as_slice(),
+            "recovered live projection must preserve the exact canonical System row sequence"
         );
         assert!(
-            ordered_system_instructions.contains("Remember user-provided codewords verbatim.")
-                && ordered_system_instructions
-                    .contains("Prefer the latest authoritative peer response over stale memory."),
-            "expected recovered realtime projection to include all durable additional instructions: {ordered_system_instructions}"
+            projected_systems
+                .iter()
+                .all(|message| !message.contains("[Session Build Instructions]")),
+            "recovered live projection must not re-render canonical instructions with a competing marker: {projected_systems:?}"
+        );
+        assert!(
+            projected_systems
+                .iter()
+                .any(|message| message.contains("Remember user-provided codewords verbatim."))
+                && projected_systems.iter().any(|message| message
+                    .contains("Prefer the latest authoritative peer response over stale memory.")),
+            "expected recovered System subsequence to include all durable additional instructions: {projected_systems:?}"
         );
     }
 
@@ -12854,12 +12882,10 @@ mod tests {
                     )
                     .await
                     .expect("realtime_session_open_config");
-                let has_context =
-                    open_config
-                        .ordered_system_instructions()
-                        .is_some_and(|instructions| {
-                            instructions.to_lowercase().contains("birch seventeen")
-                        });
+                let has_context = open_config
+                    .canonical_system_messages_ref()
+                    .iter()
+                    .any(|message| message.to_lowercase().contains("birch seventeen"));
                 if has_context {
                     break open_config;
                 }
@@ -12869,12 +12895,21 @@ mod tests {
         .await
         .expect("terminal peer response should reach realtime projection");
 
-        let ordered_system_instructions = open_config
-            .ordered_system_instructions()
-            .expect("terminal peer response must be represented by a transcript system row");
+        let canonical_system_messages = open_config.canonical_system_messages_ref();
+        let seed_system_messages =
+            meerkat_client::RealtimeSessionOpenConfig::canonical_system_messages(
+                open_config.seed_messages(),
+            );
+        assert_eq!(
+            canonical_system_messages,
+            seed_system_messages.as_slice(),
+            "live projection must preserve the exact replayed System row sequence"
+        );
         assert!(
-            ordered_system_instructions.contains("birch seventeen"),
-            "expected transcript-owned realtime projection to carry terminal peer response: {ordered_system_instructions}"
+            canonical_system_messages
+                .iter()
+                .any(|message| message.contains("birch seventeen")),
+            "expected transcript-owned realtime projection to carry terminal peer response: {canonical_system_messages:?}"
         );
     }
 
@@ -13030,8 +13065,9 @@ mod tests {
                     .await
                     .expect("realtime_session_open_config");
                 let has_context = open_config
-                    .ordered_system_instructions()
-                    .is_some_and(|instructions| instructions.contains("birch seventeen"));
+                    .canonical_system_messages_ref()
+                    .iter()
+                    .any(|message| message.contains("birch seventeen"));
                 if has_context {
                     break open_config;
                 }
@@ -13041,12 +13077,21 @@ mod tests {
         .await
         .expect("recovered realtime projection should restore typed terminal peer response");
 
-        let ordered_system_instructions = open_config
-            .ordered_system_instructions()
-            .expect("recovered peer response must be represented by a transcript system row");
+        let canonical_system_messages = open_config.canonical_system_messages_ref();
+        let seed_system_messages =
+            meerkat_client::RealtimeSessionOpenConfig::canonical_system_messages(
+                open_config.seed_messages(),
+            );
+        assert_eq!(
+            canonical_system_messages,
+            seed_system_messages.as_slice(),
+            "recovered live projection must preserve the exact replayed System row sequence"
+        );
         assert!(
-            ordered_system_instructions.contains("birch seventeen"),
-            "expected recovery to restore transcript-owned terminal peer response: {ordered_system_instructions}"
+            canonical_system_messages
+                .iter()
+                .any(|message| message.contains("birch seventeen")),
+            "expected recovery to restore transcript-owned terminal peer response: {canonical_system_messages:?}"
         );
     }
 

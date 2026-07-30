@@ -187,23 +187,23 @@ adapter projection never rewrites that transcript.
 |---------------|------------------------------|-------------------|
 | Standard OpenAI Responses | Ordinary ordered input item | Preserved |
 | OpenAI-compatible Chat Completions | Ordinary ordered message | Preserved |
-| Anthropic Messages | All System rows as top-level system blocks | Authored System-row order |
-| Gemini `generateContent` | All System rows as `systemInstruction.parts` | Authored System-row order |
-| Private ChatGPT Responses | All System rows as one instruction string | Authored System-row order |
-| OpenAI Realtime | All System rows as one session instruction string | Authored System-row order |
+| OpenAI Realtime | Ordinary ordered conversation item | Preserved |
+| Anthropic Messages | Distinct top-level system blocks | Leading prefix only |
+| Gemini `generateContent` | Distinct `systemInstruction.parts` | Leading prefix only |
+| Private ChatGPT Responses | Singular instruction string | One leading row only |
 
-Top-level-only adapters collect every `System` payload without requiring a
-leading prefix. They preserve exact bytes, authored System-message order,
-empty and whitespace-only messages, and duplicates. Distinct provider blocks
-or parts remain distinct; singular string channels use `"\n\n"` as their
-stable separator. System placement is never a session-admission or
-provider-rebind restriction.
+Provider limitations never redefine Session validity. Meerkat authors every
+System row as ordinary ordered history. A limited provider request projection
+returns a typed, non-retryable error when the resulting transcript is
+unrepresentable; rebinding to an exact provider can execute the same Session
+unchanged. Adapters never hoist, merge, or delimiter-join distinct canonical
+System rows.
 
-Realtime reconstruction has no second instruction authority:
-`runtime_system_context` is retired, and reconnect/refresh derives its
-instruction projection only from all canonical `System` rows in authored
-System-message order. `SystemNotice` remains an explicit in-place history
-event.
+Realtime reconstruction applies the same ordered replay-window policy to every
+role and replays each retained System row as an in-conversation System item.
+`runtime_system_context` remains retired, and the provider's separate session
+instructions field is not a shadow transcript authority. `SystemNotice`
+remains an explicit in-place history event.
 
 Image generation uses provider-owned image profiles rather than `ModelProfile` chat-model flags. OpenAI and Gemini provider crates advertise image targets, supported backend plans, dimensions/aspect ratios, and provider-specific `provider_params`; the runtime exposes one model-facing `generate_image` tool and commits generated outputs as blob-backed assistant image blocks.
 

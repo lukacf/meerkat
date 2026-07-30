@@ -292,8 +292,8 @@ impl AgentBuilder {
     /// Append an ordinary ordered System event while building the agent.
     ///
     /// On a resumed transcript this is a new instruction boundary, not a
-    /// replacement for any earlier System event. The concrete provider wire is
-    /// checked before the session is mutated.
+    /// replacement for any earlier System event. Provider projection cannot
+    /// suppress or reposition the authored row.
     pub fn system_prompt(mut self, prompt: impl Into<String>) -> Self {
         self.system_prompt = Some(prompt.into());
         self

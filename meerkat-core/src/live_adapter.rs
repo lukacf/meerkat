@@ -160,9 +160,9 @@ pub enum LiveAdapterCommand {
     /// identity (model swaps require close + reopen — OpenAI Realtime has
     /// no mutable `model` field) and issuing a single `session.update`
     /// carrying the new instructions / tools / audio config. The
-    /// snapshot's `ordered_system_instructions` is derived from every
-    /// canonical System row in authored System-message order and applied as
-    /// provider session config, not as a second out-of-band authority.
+    /// snapshot's `canonical_system_messages` is an exact drift witness.
+    /// A changed sequence requires provider-specific append handling or
+    /// close + reopen; it is never flattened into session instructions.
     ///
     /// Adapters that do not support live re-config should treat this as a
     /// no-op or surface a typed error observation.
@@ -759,10 +759,9 @@ pub struct LiveProjectionSnapshot {
     // `ToolDef` does not yet derive `JsonSchema`; same treatment.
     #[cfg_attr(feature = "schema", schemars(with = "Vec<serde_json::Value>"))]
     pub visible_tools: Vec<ToolDef>,
-    /// Provider-facing singular lowering of every `Message::System` row in
-    /// authored System-message order. This is a projection, never session
-    /// metadata or durable authority for a privileged initial message.
-    pub ordered_system_instructions: Option<String>,
+    /// Exact System payload sequence at projection time. Provider adapters use
+    /// it only to detect drift; the actual messages remain in `seed_messages`.
+    pub canonical_system_messages: Vec<String>,
     pub model_id: String,
     // Typed in memory (the realtime refresh guard compares
     // `Provider == Provider`), but presented as a plain canonical provider
@@ -1312,7 +1311,7 @@ mod tests {
                 snapshot_version: 42,
                 seed_messages: vec![],
                 visible_tools: vec![],
-                ordered_system_instructions: Some("You are helpful.".into()),
+                canonical_system_messages: vec!["You are helpful.".into()],
                 model_id: "test-model-a".into(),
                 provider_id: Provider::OpenAI,
                 audio_config: None,
@@ -1335,7 +1334,12 @@ mod tests {
             snapshot_version: 7,
             seed_messages: vec![],
             visible_tools: vec![],
-            ordered_system_instructions: Some("first\n\n\n\nduplicate\n\nduplicate".into()),
+            canonical_system_messages: vec![
+                "first".into(),
+                "".into(),
+                "duplicate".into(),
+                "duplicate".into(),
+            ],
             model_id: "test-model-a".into(),
             provider_id: Provider::OpenAI,
             audio_config: None,
@@ -1348,8 +1352,8 @@ mod tests {
         assert!(!json.contains("runtime_system_context"));
         let deser: LiveProjectionSnapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(
-            deser.ordered_system_instructions.as_deref(),
-            Some("first\n\n\n\nduplicate\n\nduplicate")
+            deser.canonical_system_messages,
+            vec!["first", "", "duplicate", "duplicate"]
         );
     }
 
@@ -1871,7 +1875,7 @@ mod tests {
             snapshot_version: 1,
             seed_messages: vec![],
             visible_tools: vec![],
-            ordered_system_instructions: None,
+            canonical_system_messages: vec![],
             model_id: "test-model-a".into(),
             provider_id: Provider::OpenAI,
             audio_config: None,

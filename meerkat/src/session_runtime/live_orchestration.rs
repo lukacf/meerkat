@@ -2,10 +2,9 @@
 //!
 //! Populated by W2-A. Hosts the surface-agnostic helper free functions
 //! that build live projection snapshots and decide when a live channel
-//! needs a forced close vs in-place refresh. Canonical ordered
-//! `Message::System` rows are deterministically collected in authored
-//! System-message order into the provider's singular
-//! `RealtimeSessionOpenConfig.ordered_system_instructions` projection.
+//! needs a forced close vs in-place refresh. Canonical `Message::System` rows
+//! remain ordinary ordered seed messages and are never flattened into
+//! provider session instructions.
 //!
 //! Gated by the `live` feature on the `meerkat` facade so surfaces
 //! that don't ship a live channel (CLI today, MCP-server, embedded
@@ -98,12 +97,7 @@ pub fn build_live_projection_snapshot_for_runtime(
         snapshot_version: 0,
         seed_messages: open_config.seed_messages().to_vec(),
         visible_tools: open_config.visible_tools.clone(),
-        // The typed field is the provider lowering of all canonical ordered
-        // System rows. Never re-derive it from a privileged
-        // `seed_messages[0]`.
-        ordered_system_instructions: open_config
-            .ordered_system_instructions()
-            .map(ToOwned::to_owned),
+        canonical_system_messages: open_config.canonical_system_messages_ref().to_vec(),
         model_id: open_config.llm_identity.model.clone(),
         provider_id: open_config.llm_identity.provider,
         audio_config: None,
@@ -424,21 +418,12 @@ pub enum RealtimeSessionOpenProjectionError {
 }
 
 fn realtime_projection_messages_full(session: &Session) -> Result<Vec<Message>, SessionError> {
-    // Every ordered System row has a separate top-level projection derived
-    // from the complete active materialized transcript. SystemNotice remains
-    // an explicit in-place provider history event.
-    Ok(session
-        .messages()
-        .iter()
-        .filter(|message| !matches!(message, Message::System(_)))
-        .cloned()
-        .collect())
+    Ok(session.messages().to_vec())
 }
 
 /// Project replayable dialogue/tool history for realtime delivery.
 ///
-/// System rows are deliberately absent: the open config derives their ordered
-/// top-level projection separately from the full active transcript.
+/// Every System row remains in its authored transcript position.
 pub fn realtime_projection_messages(session: &Session) -> Result<Vec<Message>, SessionError> {
     realtime_projection_messages_full(session)
 }
@@ -476,8 +461,8 @@ fn checked_unselected_message_chars(
 
 /// Select a bounded, deterministic projection. Existing typed compaction
 /// summary content is the optional head; the tail is retained only at complete
-/// conversational-turn boundaries, with contiguous injected context glued to
-/// the user message it accompanied.
+/// conversational-turn boundaries, with contiguous System, SystemNotice, and
+/// injected-context rows glued to the user message they precede.
 pub fn realtime_projection_messages_with_window(
     session: &Session,
     window: LiveSeedWindow,
@@ -523,10 +508,11 @@ pub fn realtime_projection_messages_with_window(
         ) {
             let mut start = index;
             while start > tail_start
-                && matches!(
-                    &projected[start - 1],
-                    Message::User(user) if user.transcript_role.is_injected_context()
-                )
+                && match &projected[start - 1] {
+                    Message::System(_) | Message::SystemNotice(_) => true,
+                    Message::User(user) => user.transcript_role.is_injected_context(),
+                    _ => false,
+                }
             {
                 start -= 1;
             }
@@ -1138,8 +1124,9 @@ mod orchestrator {
 
         /// Build an in-place refresh projection without hydrating or replaying
         /// canonical history. Provider refresh consumes identity, tools, and
-        /// ordered System instructions only; open/reconnect remains the sole
-        /// history hydration boundary.
+        /// provider-owned config only. Canonical System-message drift forces
+        /// close + reopen; open/reconnect remains the sole history hydration
+        /// boundary.
         pub async fn live_refresh_config_for_session(
             &self,
             session_id: &SessionId,
@@ -3063,7 +3050,7 @@ mod prompt_truth_tests {
     };
     use meerkat_core::types::{
         AssistantBlock, BlockAssistantMessage, Message, SessionId, StopReason, SystemMessage,
-        UserMessage,
+        SystemNoticeKind, SystemNoticeMessage, UserMessage,
     };
     use meerkat_core::{Provider, Session, SessionLlmIdentity};
     use meerkat_llm_core::realtime_session::RealtimeSessionOpenConfig;
@@ -3110,20 +3097,20 @@ mod prompt_truth_tests {
 
         assert_eq!(
             realtime_projection_messages(&session).expect("full projection"),
-            Vec::<Message>::new()
+            session.messages()
         );
         assert_eq!(
-            RealtimeSessionOpenConfig::lower_ordered_system_messages(session.messages()).as_deref(),
-            Some("transcript fallback")
+            RealtimeSessionOpenConfig::canonical_system_messages(session.messages()),
+            vec!["transcript fallback"]
         );
     }
 
     #[test]
-    fn ordered_system_lowering_distinguishes_absence_from_authored_whitespace() {
+    fn system_message_subsequence_distinguishes_absence_from_authored_whitespace() {
         let empty_session = Session::new();
-        assert_eq!(
-            RealtimeSessionOpenConfig::lower_ordered_system_messages(empty_session.messages()),
-            None
+        assert!(
+            RealtimeSessionOpenConfig::canonical_system_messages(empty_session.messages())
+                .is_empty()
         );
 
         let mut session = Session::new();
@@ -3133,8 +3120,8 @@ mod prompt_truth_tests {
             Message::User(UserMessage::text("work")),
         ]);
         assert_eq!(
-            RealtimeSessionOpenConfig::lower_ordered_system_messages(session.messages()).as_deref(),
-            Some("\n\n \t ")
+            RealtimeSessionOpenConfig::canonical_system_messages(session.messages()),
+            vec!["", " \t "]
         );
     }
 
@@ -3150,14 +3137,11 @@ mod prompt_truth_tests {
         ]);
         assert_eq!(
             realtime_projection_messages(&session).expect("full projection"),
-            vec![
-                Message::User(UserMessage::text("old user")),
-                assistant_text("old assistant"),
-            ]
+            session.messages()
         );
         assert_eq!(
-            RealtimeSessionOpenConfig::lower_ordered_system_messages(session.messages()).as_deref(),
-            Some("initial instruction\n\ncurrent instruction")
+            RealtimeSessionOpenConfig::canonical_system_messages(session.messages()),
+            vec!["initial instruction", "current instruction"]
         );
     }
 
@@ -3215,7 +3199,7 @@ mod prompt_truth_tests {
     }
 
     #[test]
-    fn live_seed_window_keeps_system_summary_and_newest_complete_turn() {
+    fn live_seed_window_keeps_summary_and_newest_complete_turn() {
         let session = window_test_session();
         let full = realtime_projection_messages(&session).expect("full projection");
         let costs = full
@@ -3223,7 +3207,7 @@ mod prompt_truth_tests {
             .map(serialized_message_chars)
             .collect::<Result<Vec<_>, _>>()
             .expect("serialized costs");
-        let budget = costs[0] + costs[4..].iter().sum::<usize>();
+        let budget = costs[1] + costs[5..].iter().sum::<usize>();
 
         let projection = realtime_projection_messages_with_window(
             &session,
@@ -3231,8 +3215,8 @@ mod prompt_truth_tests {
         )
         .expect("bounded projection");
 
-        let mut expected = full[..1].to_vec();
-        expected.extend_from_slice(&full[4..]);
+        let mut expected = full[1..2].to_vec();
+        expected.extend_from_slice(&full[5..]);
         assert_eq!(projection.messages, expected);
         let selected_chars = projection
             .messages
@@ -3246,7 +3230,7 @@ mod prompt_truth_tests {
         assert_eq!(
             projection.status,
             LiveSeedProjectionStatus::Windowed {
-                dropped_messages: 3,
+                dropped_messages: 4,
                 included_compaction_summary: true,
             }
         );
@@ -3261,8 +3245,8 @@ mod prompt_truth_tests {
             .map(serialized_message_chars)
             .collect::<Result<Vec<_>, _>>()
             .expect("serialized costs");
-        let latest_turn_chars = costs[4..].iter().sum::<usize>();
-        let budget = costs[0] + latest_turn_chars - 1;
+        let latest_turn_chars = costs[5..].iter().sum::<usize>();
+        let budget = costs[1] + latest_turn_chars - 1;
 
         let projection = realtime_projection_messages_with_window(
             &session,
@@ -3278,14 +3262,54 @@ mod prompt_truth_tests {
         assert_eq!(
             projection.status,
             LiveSeedProjectionStatus::Windowed {
-                dropped_messages: 6,
+                dropped_messages: 7,
                 included_compaction_summary: true,
             }
         );
     }
 
     #[test]
-    fn huge_active_system_is_not_charged_to_bounded_dialogue_replay() {
+    fn live_seed_window_keeps_the_complete_ordered_prefix_of_the_newest_turn() {
+        let mut session = Session::new();
+        session.push_batch(vec![
+            Message::User(UserMessage::text("old user")),
+            assistant_text("old assistant"),
+            Message::System(SystemMessage::new("new rule")),
+            Message::SystemNotice(SystemNoticeMessage::new(
+                SystemNoticeKind::Generic,
+                "boundary notice",
+            )),
+            Message::User(UserMessage::injected_context("ambient context")),
+            Message::User(UserMessage::text("recent user")),
+            assistant_text("recent assistant"),
+        ]);
+        let full = realtime_projection_messages(&session).expect("full projection");
+        let budget = full[2..]
+            .iter()
+            .map(serialized_message_chars)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("serialized costs")
+            .into_iter()
+            .sum::<usize>();
+
+        let projection = realtime_projection_messages_with_window(
+            &session,
+            LiveSeedWindow::new(budget).expect("positive window"),
+        )
+        .expect("complete newest turn must fit");
+
+        assert_eq!(projection.messages, full[2..].to_vec());
+        assert_eq!(
+            projection.status,
+            LiveSeedProjectionStatus::Windowed {
+                dropped_messages: 2,
+                included_compaction_summary: false,
+            }
+        );
+    }
+
+    #[test]
+    fn system_rows_follow_the_same_bounded_replay_policy_as_other_messages() {
         let huge = "x".repeat(100_000);
         let mut session = Session::new();
         session.push_batch(vec![
@@ -3302,33 +3326,25 @@ mod prompt_truth_tests {
             .map(serialized_message_chars)
             .collect::<Result<Vec<_>, _>>()
             .expect("serialized costs");
-        let budget = costs[2] + costs[3];
+        let budget = costs[4] + costs[5];
 
         let projection = realtime_projection_messages_with_window(
             &session,
             LiveSeedWindow::new(budget).expect("positive window"),
         )
-        .expect("large instructions must not consume the dialogue replay window");
-
-        assert_eq!(projection.messages, vec![full[2].clone(), full[3].clone()]);
-        let config = RealtimeSessionOpenConfig::for_open_from_messages(
-            meerkat_contracts::RealtimeTurningMode::ProviderManaged,
-            test_identity(),
-            Vec::new(),
-            projection.messages,
-            session.messages(),
-        )
-        .expect("ordered System messages must be representable");
-        assert_eq!(config.seed_messages(), &full[2..]);
-        let expected_instructions = format!("{huge}\n\n");
+        .expect("ordinary ordered rows outside the replay window may be omitted");
+        assert_eq!(projection.messages, full[4..]);
         assert_eq!(
-            config.ordered_system_instructions(),
-            Some(expected_instructions.as_str())
+            projection.status,
+            LiveSeedProjectionStatus::Windowed {
+                dropped_messages: 4,
+                included_compaction_summary: false,
+            }
         );
     }
 
     #[test]
-    fn runtime_snapshot_carries_constructor_derived_ordered_system_projection() {
+    fn runtime_snapshot_carries_exact_system_drift_witness() {
         let open_config = RealtimeSessionOpenConfig::new(
             meerkat_contracts::RealtimeTurningMode::ProviderManaged,
             test_identity(),
@@ -3341,14 +3357,11 @@ mod prompt_truth_tests {
         )
         .expect("ordered System messages must be representable");
         let snapshot = build_live_projection_snapshot_for_runtime(&SessionId::new(), &open_config);
-        assert_eq!(
-            snapshot.ordered_system_instructions.as_deref(),
-            Some("first\n\nsecond")
-        );
+        assert_eq!(snapshot.canonical_system_messages, vec!["first", "second"]);
     }
 
     #[test]
-    fn runtime_snapshot_ordered_system_instructions_none_without_system_rows() {
+    fn runtime_snapshot_system_drift_witness_is_empty_without_system_rows() {
         let open_config = RealtimeSessionOpenConfig::new(
             meerkat_contracts::RealtimeTurningMode::ProviderManaged,
             test_identity(),
@@ -3357,6 +3370,6 @@ mod prompt_truth_tests {
         )
         .expect("ordinary dialogue must be representable");
         let snapshot = build_live_projection_snapshot_for_runtime(&SessionId::new(), &open_config);
-        assert_eq!(snapshot.ordered_system_instructions, None);
+        assert!(snapshot.canonical_system_messages.is_empty());
     }
 }

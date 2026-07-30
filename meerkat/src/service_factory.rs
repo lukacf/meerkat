@@ -140,13 +140,6 @@ impl FactoryAgent {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl SessionAgent for FactoryAgent {
-    fn take_run_checkpoint_receipt(
-        &mut self,
-        expected_run_id: &meerkat_core::RunId,
-    ) -> Result<Option<meerkat_core::RunCheckpointReceipt>, meerkat_core::error::AgentError> {
-        self.agent.take_run_checkpoint_receipt(expected_run_id)
-    }
-
     async fn run_with_events(
         &mut self,
         prompt: meerkat_core::types::ContentInput,
@@ -528,41 +521,6 @@ impl SessionAgent for FactoryAgent {
 
     fn session_clone(&self) -> Result<Session, meerkat_core::error::AgentError> {
         Ok(self.agent.session().clone())
-    }
-
-    fn install_immutable_session_labels(
-        &mut self,
-        labels: &std::collections::BTreeMap<String, String>,
-    ) -> Result<(), meerkat_core::error::AgentError> {
-        if labels.is_empty() {
-            return Ok(());
-        }
-        let labels = serde_json::to_value(labels).map_err(|error| {
-            meerkat_core::error::AgentError::InternalError(format!(
-                "failed to encode immutable session labels: {error}"
-            ))
-        })?;
-        if self
-            .agent
-            .session()
-            .metadata()
-            .get(meerkat_session::SESSION_LABELS_KEY)
-            != Some(&labels)
-        {
-            self.agent
-                .session_mut()
-                .set_metadata(meerkat_session::SESSION_LABELS_KEY, labels);
-        }
-        Ok(())
-    }
-
-    fn classify_callback_result_ingress(
-        &self,
-        results: &[meerkat_core::ToolResult],
-    ) -> Result<meerkat_core::session::CallbackResultIngress, meerkat_core::error::AgentError> {
-        self.agent
-            .session()
-            .classify_callback_result_ingress(results)
     }
 
     async fn prepare_head_canonical_runtime_boundary(

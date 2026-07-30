@@ -1115,7 +1115,7 @@ fn sweep_dangling_blobs(
                         collect_message_blob_refs(&message, &mut refs);
                         collector.record(&blobs_root, &session_id, refs);
                     }
-                    Err(()) => undecodable += 1,
+                    Err(_) => undecodable += 1,
                 }
             }
         }
@@ -1137,7 +1137,7 @@ fn sweep_dangling_blobs(
                 let session_json: JsonColumnBytes = row.get(1)?;
                 match collect_inline_session_blob_refs(&session_json.into_bytes()) {
                     Ok(refs) => collector.record(&blobs_root, &session_id, refs),
-                    Err(_) => undecodable += 1,
+                    Err(()) => undecodable += 1,
                 }
             }
         }

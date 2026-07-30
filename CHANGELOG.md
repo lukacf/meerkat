@@ -56,23 +56,18 @@ via cargo-semver-checks against the published baselines).
 - `WireProviderTag::OpenAi` adds the `prompt_cache_enabled` field.
 - `SessionError` adds the `DurableTailRecoveryRefused` variant (code
   `SESSION_DURABLE_TAIL_RECOVERY_REFUSED`), `DurableResumeHold` adds
-  `RecoveryRefused` (wire token `recovery_refused`), and
-  `meerkat_runtime::recovery::DurableTailRecoveryError` adds
-  `UnboundReceiptFacts`. A machine-REFUSED durable-tail recovery
+  `RecoveryRefused` (wire token `recovery_refused`). A machine-REFUSED
+  durable-tail recovery
   (conflicting persisted runtime facts: another live runtime, or boundary
   receipts that already cover or contradict the tail) no longer surfaces as
-  `DurableTailHeldForRecovery` — operators now get the refusal's own cause
+  `DurableTailHeldForRecovery`; operators now get the refusal's own cause
   and remediation (retry after the conflicting runtime quiesces) instead of
   the hold's "await reconciliation".
-- `DurableTailRecoveryRequest::from_classification` now DERIVES the receipt
-  facts from the recovered snapshot bytes: a supplied session identity,
-  conversation digest, or message count the bytes do not prove — or bytes
-  that do not decode as a session document — is a typed
-  `UnboundReceiptFacts` rejection. Previously the classifier verdict did not
-  bind the bytes, so a `RuntimeStore` holder could pair a valid descendant
-  snapshot with fabricated classification receipt facts and mint false
-  durable receipt evidence. In-tree construction was honest; this closes the
-  public authority-boundary footgun.
+- `meerkat_runtime::recovery::recover_durable_tail` now accepts only a
+  `RuntimeStore` and stable `SessionId`. The former public
+  `DurableTailRecoveryRequest` construction seam is removed: recovery loads
+  and seals the exact store-owned source, classification, receipt facts,
+  candidate identity, and CAS tokens internally.
 - `meerkat_core::BlobStoreError` adds the exhaustive
   `WriteLimitExceeded { max_blob_bytes, actual_encoded_bytes }` variant —
   the typed store-side refusal of an oversized write. Downstream exhaustive
@@ -90,6 +85,30 @@ via cargo-semver-checks against the published baselines).
   `renew_occurrence_lease_if_current`. External stores must provide
   store-clock next-action projection and atomically screen the exact
   `{ occurrence, attempt, claim_token, owner }` renewal witness.
+- `ModelCapabilities` adds
+  `supports_mid_conversation_system_messages`. External model catalogs must
+  declare whether each model admits ordered System messages after the leading
+  prefix; unknown and older models should set it to `false`.
+- `StickyModelFallbackCommitOperation::wait` now returns
+  `Option<SessionControlCommitReceipt>` instead of `()`, exposing the exact
+  durable control receipt when one was committed.
+- `CoreExecutor` adds
+  `acknowledge_committed_session_boundary(&CommittedSessionBoundaryAuthority)`.
+  Store-backed executors must override the rejecting default and consume the
+  exact typed authority after the runtime boundary commits.
+- `MobSessionService` adds the required
+  `acknowledge_committed_runtime_session_boundary_under_turn_finalization_boundary`
+  method. Implementations and wrappers must forward the exhaustive
+  `CommittedSessionBoundaryAuthority` carrier.
+- `OccurrenceLifecycleInput` and `OccurrenceLifecycleEffect` add
+  `DispatchAccepted`; exhaustive matches must add arms. The input carries
+  `DeliveryAdmissionOutcome` plus `at_utc`.
+- `PlanningTurnRequest` adds the public `planning_turn: u64` field.
+- Every `AdaptiveDriverRuntime` operation after `now_ms` now receives an
+  `&AdaptiveOperationDeadline`. The trait also adds the required
+  `cancel_planning_turn` and `cancel_layer_flow` operations. External
+  runtimes must retain exact planning/child-flow custody until terminality or
+  cancellation is acknowledged.
 
 ### Billing-affecting default change
 
@@ -223,14 +242,18 @@ via cargo-semver-checks against the published baselines).
   an exact provider can execute that Session unchanged.
 - Provider lowering never changes that durable meaning. Standard OpenAI
   Responses, OpenAI-compatible Chat Completions, and OpenAI Realtime preserve
-  System interleaving. Anthropic and Gemini accept a leading System prefix;
-  the private ChatGPT Responses backend accepts one leading System row.
-  Other shapes receive a typed non-retryable provider projection error. Empty,
-  whitespace-only, and duplicate entries are never trimmed,
-  deduplicated, delimiter-joined, replaced, or dropped. Realtime's separate
-  `runtime_system_context` carrier is retired; reconnect applies the same
-  ordered replay-window policy to every role and replays retained System rows
-  in place, while `SystemNotice` remains an explicit history event.
+  System interleaving. Cataloged Anthropic Fable 5, Opus 4.8, and Opus 5
+  support mid-conversation System messages; Meerkat lowers a canonical
+  turn-scoped `System -> User` boundary to Anthropic's legal
+  `User -> System -> Assistant` placement. Other Anthropic models and Gemini
+  accept only a leading System prefix; the private ChatGPT Responses backend
+  accepts one leading System row. Other shapes receive a typed non-retryable
+  provider projection error. Empty, whitespace-only, and duplicate entries
+  are never trimmed, deduplicated, delimiter-joined, replaced, or dropped.
+  Realtime's separate `runtime_system_context` carrier is retired; reconnect
+  applies the same ordered replay-window policy to every role and replays
+  retained System rows in place, while `SystemNotice` remains an explicit
+  history event.
 - Typed peer terminal-response facts now persist as deduplicated
   `SystemNotice` messages at the conversation tail without mutating any
   ordered `System` message. Active-turn delivery commits the notice to the

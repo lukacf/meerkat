@@ -698,6 +698,18 @@ impl meerkat_core::service::SessionServiceHistoryExt for FailingOnceSessionServi
 
 #[async_trait::async_trait]
 impl meerkat_mob::MobSessionService for FailingOnceSessionService {
+    async fn acknowledge_committed_runtime_session_boundary_under_turn_finalization_boundary(
+        &self,
+        session_id: &meerkat_core::SessionId,
+        authority: &meerkat_core::CommittedSessionBoundaryAuthority,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        self.inner
+            .acknowledge_committed_runtime_session_boundary_under_turn_finalization_boundary(
+                session_id, authority,
+            )
+            .await
+    }
+
     /// Test double: the two-read composition is the exact truth here.
     async fn load_session_for_resume(
         &self,

@@ -8,13 +8,13 @@ use crate::machines::occurrence_lifecycle as occ_dsl;
 use crate::machines::schedule_lifecycle as sched_dsl;
 use crate::store::PendingSupersession;
 use crate::types::{
-    CreateScheduleRequest, DeliveryCompletionFailureReason, DeliveryFailureReason, DeliveryReceipt,
-    DeliveryReceiptStage, Occurrence, OccurrenceFailureClass, OccurrenceId, OccurrenceOrdinal,
-    OccurrencePhase, OccurrenceTargetProbeOutcome, RuntimeCompletionOutcome,
-    RuntimeDeliveryOutcome, Schedule, ScheduleId, SchedulePhase, ScheduleRevision, TargetBinding,
-    TriggerSpec, UpdateScheduleRequest, delivery_receipt_id_from_authority,
-    target_materialized_session_id, validate_occurrence_machine_projection,
-    validate_schedule_machine_projection,
+    CreateScheduleRequest, DeliveryAdmissionOutcome, DeliveryCompletionFailureReason,
+    DeliveryFailureReason, DeliveryReceipt, DeliveryReceiptStage, Occurrence,
+    OccurrenceFailureClass, OccurrenceId, OccurrenceOrdinal, OccurrencePhase,
+    OccurrenceTargetProbeOutcome, RuntimeCompletionOutcome, RuntimeDeliveryOutcome, Schedule,
+    ScheduleId, SchedulePhase, ScheduleRevision, TargetBinding, TriggerSpec, UpdateScheduleRequest,
+    delivery_receipt_id_from_authority, target_materialized_session_id,
+    validate_occurrence_machine_projection, validate_schedule_machine_projection,
 };
 use chrono::{DateTime, Utc};
 use meerkat_core::SessionId;
@@ -390,6 +390,7 @@ pub enum OccurrenceLifecycleInput {
     /// occurrence authority retains the pre-effect identity and refuses any
     /// shell-side rewrite.
     DispatchAccepted {
+        admission_outcome: DeliveryAdmissionOutcome,
         at_utc: DateTime<Utc>,
     },
     AwaitCompletion {
@@ -1261,11 +1262,13 @@ fn convert_occurrence_input(
             correlation_id: correlation_id.clone().map(Into::into),
             at_utc_ms: occurrence_datetime_to_millis(*at_utc, "at_utc")?,
         },
-        OccurrenceLifecycleInput::DispatchAccepted { at_utc } => {
-            occ_dsl::OccurrenceLifecycleInput::DispatchAccepted {
-                at_utc_ms: occurrence_datetime_to_millis(*at_utc, "at_utc")?,
-            }
-        }
+        OccurrenceLifecycleInput::DispatchAccepted {
+            admission_outcome,
+            at_utc,
+        } => occ_dsl::OccurrenceLifecycleInput::DispatchAccepted {
+            admission_outcome: to_dsl_delivery_admission_outcome(*admission_outcome),
+            at_utc_ms: occurrence_datetime_to_millis(*at_utc, "at_utc")?,
+        },
         OccurrenceLifecycleInput::AwaitCompletion { at_utc } => {
             occ_dsl::OccurrenceLifecycleInput::AwaitCompletion {
                 at_utc_ms: occurrence_datetime_to_millis(*at_utc, "at_utc")?,
@@ -2881,6 +2884,15 @@ fn to_dsl_runtime_completion_outcome(
     }
 }
 
+fn to_dsl_delivery_admission_outcome(
+    outcome: DeliveryAdmissionOutcome,
+) -> occ_dsl::DeliveryAdmissionOutcome {
+    match outcome {
+        DeliveryAdmissionOutcome::Accepted => occ_dsl::DeliveryAdmissionOutcome::Accepted,
+        DeliveryAdmissionOutcome::Deduplicated => occ_dsl::DeliveryAdmissionOutcome::Deduplicated,
+    }
+}
+
 fn from_dsl_failure_class(fc: occ_dsl::FailureClass) -> OccurrenceFailureClass {
     match fc {
         occ_dsl::FailureClass::TargetMaterializationFailed => {
@@ -3284,7 +3296,10 @@ mod tests {
             ),
             (
                 &pending,
-                OccurrenceLifecycleInput::DispatchAccepted { at_utc: now },
+                OccurrenceLifecycleInput::DispatchAccepted {
+                    admission_outcome: DeliveryAdmissionOutcome::Accepted,
+                    at_utc: now,
+                },
                 occ_dsl::OccurrenceTransitionFailureClassKind::NotDispatching,
             ),
             (
@@ -3630,11 +3645,12 @@ mod tests {
             .into_occurrence();
         let accepted = dispatching
             .apply(OccurrenceLifecycleInput::DispatchAccepted {
+                admission_outcome: DeliveryAdmissionOutcome::Accepted,
                 at_utc: now + Duration::milliseconds(1),
             })
             .expect("dispatch acceptance should pass generated authority")
             .into_occurrence();
-        let admission = RuntimeDeliveryOutcome::AdmissionDeduplicated;
+        let admission = RuntimeDeliveryOutcome::AdmissionAccepted;
         let accepted_receipt = accepted
             .delivery_receipt_from_authority(Some(admission.clone()))
             .expect("accepted receipt authority");
@@ -3658,6 +3674,42 @@ mod tests {
         assert_eq!(
             recorded.last_receipt.as_ref().map(|receipt| receipt.stage),
             Some(DeliveryReceiptStage::DispatchAccepted)
+        );
+    }
+
+    #[test]
+    fn deduplicated_admission_terminalizes_completed_from_machine_authority() {
+        let now = Utc::now();
+        let dispatching = sample_claimed_occurrence()
+            .apply(OccurrenceLifecycleInput::DispatchStarted {
+                correlation_id: Some("stable-occurrence-correlation".into()),
+                at_utc: now,
+            })
+            .expect("dispatch start should pass generated authority")
+            .into_occurrence();
+
+        let mutator = dispatching
+            .apply(OccurrenceLifecycleInput::DispatchAccepted {
+                admission_outcome: DeliveryAdmissionOutcome::Deduplicated,
+                at_utc: now + Duration::milliseconds(1),
+            })
+            .expect("deduplicated admission should pass generated authority");
+        assert!(
+            mutator
+                .effects
+                .contains(&OccurrenceLifecycleEffect::Completed)
+        );
+        let completed = mutator.into_occurrence();
+        assert_eq!(completed.phase, OccurrencePhase::Completed);
+        assert_eq!(completed.failure_class, None);
+
+        let receipt = completed
+            .delivery_receipt_from_authority(Some(RuntimeDeliveryOutcome::AdmissionDeduplicated))
+            .expect("deduplicated admission should project a completed receipt");
+        assert_eq!(receipt.stage, DeliveryReceiptStage::Completed);
+        assert_eq!(
+            receipt.correlation_id.as_deref(),
+            Some("stable-occurrence-correlation")
         );
     }
 

@@ -383,6 +383,12 @@ pub enum AcceptOutcome {
         input_id: InputId,
         /// The existing input ID that was matched.
         existing_id: InputId,
+        /// Exact machine/store-owned lifecycle seed for the matched input.
+        ///
+        /// Persistent runtimes may already have archived the terminal input
+        /// from live machine state, so consumers must classify this retained
+        /// receipt instead of re-reading a live row after admission.
+        existing_seed: InputStateSeed,
     },
     /// Input was rejected (validation failed, durability violation, etc.).
     Rejected {
@@ -461,6 +467,7 @@ mod tests {
         let outcome = AcceptOutcome::Deduplicated {
             input_id: InputId::new(),
             existing_id: InputId::new(),
+            existing_seed: InputStateSeed::new_accepted(),
         };
         assert!(!outcome.is_accepted());
         assert!(outcome.is_deduplicated());

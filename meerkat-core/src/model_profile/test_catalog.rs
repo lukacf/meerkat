@@ -47,6 +47,7 @@ const BASE_CAPS: ModelCapabilities = ModelCapabilities {
     effort_levels: &[],
     openai_responses_params: None,
     supports_web_search: false,
+    supports_mid_conversation_system_messages: false,
     supports_inference_geo: false,
     supports_compaction: false,
     supports_structured_output: false,

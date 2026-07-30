@@ -3055,10 +3055,12 @@ mod tests {
             ],
         );
 
-        let err = match HnswMemoryStore::open(&memory_dir) {
-            Ok(_) => panic!("unledgered owned memory schema must be refused"),
-            Err(error) => error,
-        };
+        let result = HnswMemoryStore::open(&memory_dir);
+        assert!(
+            result.is_err(),
+            "unledgered owned memory schema must be refused"
+        );
+        let err = result.err().unwrap();
         assert!(
             err.to_string().contains("no ledger row"),
             "unexpected refusal: {err}"

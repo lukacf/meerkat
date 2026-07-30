@@ -3455,49 +3455,51 @@ impl MobSessionService for MockSessionService {
         )
     }
 
-    async fn acknowledge_whole_blob_runtime_session_boundary_under_turn_finalization_boundary(
+    async fn acknowledge_committed_runtime_session_boundary_under_turn_finalization_boundary(
         &self,
         session_id: &SessionId,
-        committed_store_revision: u64,
-        committed_blob_sha256: &str,
+        authority: &meerkat_core::CommittedSessionBoundaryAuthority,
     ) -> Result<(), SessionError> {
-        self.runtime_boundary_acknowledgements.write().await.push(
-            RuntimeBoundaryAcknowledgement::WholeBlob {
+        let acknowledgement = match authority {
+            meerkat_core::CommittedSessionBoundaryAuthority::WholeBlob {
+                session_id: authority_session_id,
+                committed_store_revision,
+                committed_blob_sha256,
+            } if authority_session_id == session_id => RuntimeBoundaryAcknowledgement::WholeBlob {
                 session_id: session_id.clone(),
-                store_revision: committed_store_revision,
-                blob_sha256: committed_blob_sha256.to_string(),
+                store_revision: *committed_store_revision,
+                blob_sha256: committed_blob_sha256.clone(),
             },
-        );
-        Ok(())
-    }
-
-    async fn acknowledge_head_canonical_runtime_session_boundary_under_turn_finalization_boundary(
-        &self,
-        session_id: &SessionId,
-        committed_head_token: &str,
-    ) -> Result<(), SessionError> {
-        self.runtime_boundary_acknowledgements.write().await.push(
-            RuntimeBoundaryAcknowledgement::HeadCanonical {
-                session_id: session_id.clone(),
-                head_token: committed_head_token.to_string(),
-            },
-        );
-        Ok(())
-    }
-
-    async fn acknowledge_provisional_runtime_session_boundary_under_turn_finalization_boundary(
-        &self,
-        session_id: &SessionId,
-        committed_store_revision: u64,
-        committed_authority_token: &str,
-    ) -> Result<(), SessionError> {
-        self.runtime_boundary_acknowledgements.write().await.push(
-            RuntimeBoundaryAcknowledgement::Provisional {
-                session_id: session_id.clone(),
-                store_revision: committed_store_revision,
-                authority_token: committed_authority_token.to_string(),
-            },
-        );
+            meerkat_core::CommittedSessionBoundaryAuthority::HeadCanonical {
+                session_id: authority_session_id,
+                committed_head_token,
+            } if authority_session_id == session_id => {
+                RuntimeBoundaryAcknowledgement::HeadCanonical {
+                    session_id: session_id.clone(),
+                    head_token: committed_head_token.clone(),
+                }
+            }
+            meerkat_core::CommittedSessionBoundaryAuthority::Provisional {
+                session_id: authority_session_id,
+                committed_store_revision,
+                committed_authority_token,
+            } if authority_session_id == session_id => {
+                RuntimeBoundaryAcknowledgement::Provisional {
+                    session_id: session_id.clone(),
+                    store_revision: *committed_store_revision,
+                    authority_token: committed_authority_token.clone(),
+                }
+            }
+            _ => {
+                return Err(SessionError::Unsupported(
+                    "boundary acknowledgement session identity mismatch".to_string(),
+                ));
+            }
+        };
+        self.runtime_boundary_acknowledgements
+            .write()
+            .await
+            .push(acknowledgement);
         Ok(())
     }
 
@@ -7858,6 +7860,29 @@ fn adaptive_test_limits() -> AdaptiveRunLimits {
     }
 }
 
+fn adaptive_test_operation_deadline() -> crate::adaptive::AdaptiveOperationDeadline {
+    crate::adaptive::AdaptiveOperationDeadline::from_policy(
+        &crate::adaptive::AdaptivePolicy {
+            limits: crate::adaptive::AdaptiveLimitRecord {
+                max_depth: 3,
+                max_total_decisions: 5,
+                max_repair_attempts: 2,
+                max_layer_failures: 2,
+                max_attempts_per_layer: 2,
+                max_members_per_layer: 4,
+                max_total_spawned_members: 8,
+                max_active_members: 4,
+                max_retained_layer_mobs: 1,
+                max_wall_clock_ms: 60_000,
+                max_aggregate_tokens: 10_000,
+                max_aggregate_tool_calls: 100,
+            },
+            ..crate::adaptive::AdaptivePolicy::default()
+        },
+        1_000,
+    )
+}
+
 fn adaptive_admission_request(layer_id: &str, member_count: u64) -> AdaptiveLayerAdmissionRequest {
     AdaptiveLayerAdmissionRequest {
         layer_id: layer_id.to_string(),
@@ -8181,6 +8206,7 @@ async fn adaptive_loop_real_planning_error_cancels_run_and_allows_next_initializ
     let mut runtime = crate::runtime::mobpack_execution::PackAdaptiveRuntime {
         control_mob: handle.clone(),
         session_service: service,
+        active_planning_run: None,
         layer_created_probe: None,
     };
     let limits = crate::adaptive::AdaptiveLimitRecord {
@@ -8724,6 +8750,16 @@ impl SessionAgent for PersistentMockAgent {
         Ok(Session::with_id(self.session_id.clone()))
     }
 
+    fn session_transcript_authority(
+        &self,
+    ) -> Result<
+        meerkat_session::ephemeral::SessionTranscriptAuthoritySnapshot,
+        meerkat_core::error::AgentError,
+    > {
+        let session = self.session_clone()?;
+        meerkat_session::ephemeral::SessionTranscriptAuthoritySnapshot::from_session(&session)
+    }
+
     fn durable_llm_identity(&self) -> Option<SessionLlmIdentity> {
         Some(self.llm_identity.clone())
     }
@@ -8882,6 +8918,18 @@ impl SessionServiceControlExt for PersistedListingSessionService {
 
 #[async_trait]
 impl MobSessionService for PersistedListingSessionService {
+    async fn acknowledge_committed_runtime_session_boundary_under_turn_finalization_boundary(
+        &self,
+        session_id: &SessionId,
+        authority: &meerkat_core::CommittedSessionBoundaryAuthority,
+    ) -> Result<(), SessionError> {
+        self.inner
+            .acknowledge_committed_runtime_session_boundary_under_turn_finalization_boundary(
+                session_id, authority,
+            )
+            .await
+    }
+
     /// Test double: nothing durable survives archive here, so the two-read
     /// composition is the exact truth — `ArchivedNotRevivable` cannot exist.
     async fn load_session_for_resume(
@@ -9179,6 +9227,18 @@ impl SessionServiceControlExt for InactiveReadSessionService {
 
 #[async_trait]
 impl MobSessionService for InactiveReadSessionService {
+    async fn acknowledge_committed_runtime_session_boundary_under_turn_finalization_boundary(
+        &self,
+        session_id: &SessionId,
+        authority: &meerkat_core::CommittedSessionBoundaryAuthority,
+    ) -> Result<(), SessionError> {
+        self.inner
+            .acknowledge_committed_runtime_session_boundary_under_turn_finalization_boundary(
+                session_id, authority,
+            )
+            .await
+    }
+
     /// Test double: nothing durable survives archive here, so the two-read
     /// composition is the exact truth — `ArchivedNotRevivable` cannot exist.
     async fn load_session_for_resume(
@@ -9370,6 +9430,54 @@ async fn create_test_mob_with_persistent_service(definition: MobDefinition) -> M
         .expect("create mob with persistent session service")
 }
 
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn test_persistent_resume_classifies_lifecycle_only_session_as_absent() {
+    let session_store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+    let runtime_store = Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+    let runtime_store_dyn: Arc<dyn meerkat_runtime::RuntimeStore> = runtime_store.clone();
+    let blob_store: Arc<dyn meerkat_core::BlobStore> =
+        Arc::new(meerkat_store::MemoryBlobStore::new());
+    let service = Arc::new(meerkat_session::PersistentSessionService::new(
+        PersistentMockBuilder,
+        16,
+        session_store,
+        runtime_store_dyn.clone(),
+        blob_store.clone(),
+    ));
+    let session_id = SessionId::new();
+    let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
+    let machine = meerkat_runtime::MeerkatMachine::persistent(runtime_store_dyn, blob_store);
+
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("seed lifecycle authority without a committed session body");
+    assert!(
+        meerkat_runtime::store::load_runtime_state(runtime_store.as_ref(), &runtime_id)
+            .await
+            .expect("read lifecycle-only runtime state")
+            .is_some(),
+        "fixture must retain lifecycle authority while the session body is absent"
+    );
+    assert!(
+        meerkat_runtime::RuntimeStore::load_session_snapshot(runtime_store.as_ref(), &runtime_id)
+            .await
+            .expect("read lifecycle-only session body")
+            .is_none(),
+        "fixture must not accidentally persist a session body"
+    );
+
+    let loaded = service
+        .load_session_for_resume(&session_id)
+        .await
+        .expect("lifecycle-only resume classification");
+    assert!(
+        matches!(loaded, ResumeSessionLoad::Absent),
+        "a never-persisted session body must remain fresh-eligible even when lifecycle authority exists"
+    );
+}
+
 fn overlay_probe_visible_tools(overlay: Option<&TurnToolOverlay>) -> Vec<meerkat_core::ToolName> {
     let blocked = overlay
         .and_then(|overlay| overlay.blocked_tools.as_ref())
@@ -9490,6 +9598,15 @@ impl SessionAgent for OverlayProbeSessionAgent {
 
     fn session_clone(&self) -> Result<Session, meerkat_core::error::AgentError> {
         Ok(self.session.clone())
+    }
+
+    fn session_transcript_authority(
+        &self,
+    ) -> Result<
+        meerkat_session::ephemeral::SessionTranscriptAuthoritySnapshot,
+        meerkat_core::error::AgentError,
+    > {
+        meerkat_session::ephemeral::SessionTranscriptAuthoritySnapshot::from_session(&self.session)
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -10661,7 +10778,7 @@ async fn test_destroy_final_member_event_append_failure_survives_cold_restart() 
 
 #[tokio::test]
 async fn test_destroy_remote_orphan_retains_events_and_metadata_for_retry() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "destroy-remote-orphan-retains-authority",
@@ -10738,7 +10855,7 @@ async fn test_destroy_remote_orphan_retains_events_and_metadata_for_retry() {
 
 #[tokio::test]
 async fn test_destroy_remote_retire_failure_uses_force_destroy_before_publication() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "destroy-remote-force-fallback",
@@ -10812,7 +10929,7 @@ async fn test_destroy_remote_retire_failure_uses_force_destroy_before_publicatio
 
 #[tokio::test]
 async fn test_destroy_remote_revoke_failure_retains_retry_anchor() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "destroy-remote-revoke-retry",
@@ -10911,7 +11028,7 @@ async fn test_destroy_remote_revoke_failure_retains_retry_anchor() {
 
 #[tokio::test]
 async fn test_destroy_remote_archive_before_revoke_survives_cold_restart() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "destroy-remote-archive-cold-retry",
@@ -11022,7 +11139,7 @@ async fn test_destroy_remote_archive_before_revoke_survives_cold_restart() {
 #[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
 async fn test_sqlite_destroy_remote_archive_before_revoke_skips_tokenless_rebind() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let directory = tempfile::tempdir().expect("temporary sqlite directory");
     let database_path = directory.path().join("remote-retirement-cold.sqlite");
     let definition = with_unique_mob_id(
@@ -11111,7 +11228,7 @@ async fn test_sqlite_destroy_remote_archive_before_revoke_skips_tokenless_rebind
 
 #[tokio::test]
 async fn test_destroy_remote_final_append_after_revoke_survives_cold_restart() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "destroy-remote-final-append-cold-retry",
@@ -12466,6 +12583,7 @@ async fn test_destroy_retire_admission_failure_after_marker_retains_retry_anchor
     assert!(
         report.errors.iter().any(|error| {
             error.contains("destroy retire admission failed")
+                && error.contains("routed_session_not_durability_ready")
                 && error.contains(
                     "cannot accept routed input until its persistent runtime is cold reloaded",
                 )
@@ -12525,12 +12643,19 @@ async fn test_destroy_retire_admission_failure_after_marker_retains_retry_anchor
         crate::runtime::handle::MobDestroyError::Incomplete { report } => report,
         other => panic!("expected incomplete destroy retry, got {other:?}"),
     };
+    // The admitted destroy owns cleanup retry, but it does not own
+    // registration-authorized cold materialization of the consumer runtime.
+    // Redispatch must therefore preserve the same typed refusal and roster
+    // anchor until a cold host rebuilds the runtime from durable truth.
     assert!(
         retry_report.errors.iter().any(|error| {
             error.contains("destroy retire admission failed")
-                && error.contains("is not registered with this MeerkatMachine")
+                && error.contains("routed_session_not_durability_ready")
+                && error.contains(
+                    "cannot accept routed input until its persistent runtime is cold reloaded",
+                )
         }),
-        "retry should preserve the remaining partial destroy state: {retry_report:?}"
+        "same-process retry must preserve the cold-reload requirement and partial destroy state: {retry_report:?}"
     );
 }
 
@@ -13233,7 +13358,7 @@ async fn test_rotate_supervisor_unreadable_final_completion_loss_fail_stops_and_
 
 #[tokio::test]
 async fn test_rotate_supervisor_timeout_keeps_durable_operation_and_retry_reuses_id() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "rotate-supervisor-operation-retry",
@@ -13390,7 +13515,7 @@ async fn test_rotate_supervisor_timeout_keeps_durable_operation_and_retry_reuses
 #[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
 async fn test_rotate_supervisor_observes_rejection_through_retained_authority() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let mut definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "rotate-supervisor-cross-authority-rejection",
@@ -13486,7 +13611,7 @@ async fn test_rotate_supervisor_observes_rejection_through_retained_authority() 
 #[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
 async fn test_legacy_pending_rotation_prunes_inactive_acceptance_and_survives_restart() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let mut definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "rotate-supervisor-legacy-operation-migration",
@@ -13688,7 +13813,7 @@ async fn test_legacy_pending_rotation_prunes_inactive_acceptance_and_survives_re
 
 #[tokio::test]
 async fn test_rotate_supervisor_reauthorizes_live_remote_members_and_rejects_stale_epoch() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "rotate-supervisor-live-remote",
@@ -13861,7 +13986,7 @@ fn pending_recipient_trust_snapshot(handle: &MobHandle) -> Vec<String> {
 /// the machine-owned `pending_recipient_trust` obligation must be closed.
 #[tokio::test]
 async fn test_authorize_rejection_rolls_back_newly_installed_recipient_trust() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "authorize-reject-rollback",
@@ -13938,7 +14063,7 @@ async fn test_authorize_rejection_rolls_back_newly_installed_recipient_trust() {
 /// failing attempt only.
 #[tokio::test]
 async fn test_authorize_rejection_preserves_preexisting_recipient_trust() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "authorize-reject-preserve",
@@ -14000,7 +14125,7 @@ async fn test_authorize_rejection_preserves_preexisting_recipient_trust() {
 /// installed and must close the machine-owned obligation window.
 #[tokio::test]
 async fn test_bind_rejection_rolls_back_provisioner_recipient_trust() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "bind-reject-rollback",
@@ -14046,7 +14171,7 @@ async fn test_bind_rejection_rolls_back_provisioner_recipient_trust() {
 /// machine-owned obligation window.
 #[tokio::test]
 async fn test_bind_send_failure_rolls_back_provisioner_recipient_trust() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "bind-send-failure-rollback",
@@ -14105,7 +14230,7 @@ async fn test_bind_send_failure_rolls_back_provisioner_recipient_trust() {
 /// fail-stops before a second BindMember can escape.
 #[tokio::test]
 async fn test_post_commit_bind_decode_failure_quarantines_and_fail_stops() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "bind-decode-failure-rollback",
@@ -14177,7 +14302,7 @@ async fn test_post_commit_bind_decode_failure_quarantines_and_fail_stops() {
 /// and resolved, never leaked.
 #[tokio::test]
 async fn test_pending_recipient_trust_obligation_resolves_on_success() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "pending-trust-success",
@@ -14231,7 +14356,7 @@ async fn test_pending_recipient_trust_obligation_resolves_on_success() {
 
 #[tokio::test]
 async fn test_rotate_supervisor_bind_fallback_binds_next_authority() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "rotate-supervisor-bind-fallback",
@@ -14275,7 +14400,7 @@ async fn test_rotate_supervisor_bind_fallback_binds_next_authority() {
 
 #[tokio::test]
 async fn test_rotate_supervisor_does_not_attempt_old_bind_fallback() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "rotate-supervisor-bind-fallback-failure",
@@ -14342,7 +14467,7 @@ async fn test_rotate_supervisor_does_not_attempt_old_bind_fallback() {
 
 #[tokio::test]
 async fn test_rotate_supervisor_does_not_persist_old_rebind_metadata() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "rotate-supervisor-bind-fallback-persist-failure",
@@ -14408,7 +14533,7 @@ async fn test_rotate_supervisor_does_not_persist_old_rebind_metadata() {
 
 #[tokio::test]
 async fn test_rotate_supervisor_blocks_old_rebind_and_reuses_hidden_completion() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "rotate-supervisor-hidden-completion-retry",
@@ -14583,7 +14708,7 @@ async fn test_rotate_supervisor_blocks_old_rebind_and_reuses_hidden_completion()
 
 #[tokio::test]
 async fn test_rotate_supervisor_refused_old_rebind_preserves_operation_across_restart() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "rotate-supervisor-refused-old-rebind-restart",
@@ -14825,7 +14950,7 @@ async fn test_rotate_supervisor_final_commit_conflict_reports_lost_retry_anchor(
 
 #[tokio::test]
 async fn test_rotate_supervisor_pending_commit_conflict_fails_closed_without_local_authority() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "rotate-supervisor-pending-cas-conflict-reconcile",
@@ -14900,7 +15025,7 @@ async fn test_rotate_supervisor_pending_commit_conflict_fails_closed_without_loc
 
 #[tokio::test]
 async fn test_rotate_supervisor_receipt_checkpoint_conflict_does_not_reauthorize_old_authority() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "rotate-supervisor-pending-cas-conflict-reconcile-fails",
@@ -14984,7 +15109,7 @@ async fn test_rotate_supervisor_receipt_checkpoint_conflict_does_not_reauthorize
 #[tokio::test]
 async fn test_rotate_supervisor_pending_verification_conflict_fails_closed_without_local_authority()
 {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "rotate-supervisor-pending-verify-cas-conflict",
@@ -15111,7 +15236,7 @@ async fn test_rotate_supervisor_pending_verification_conflict_fails_closed_witho
 
 #[tokio::test]
 async fn test_rotate_supervisor_final_commit_conflict_fails_closed_without_local_authority() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "rotate-supervisor-final-cas-conflict-reconcile",
@@ -15203,7 +15328,7 @@ async fn test_rotate_supervisor_final_commit_conflict_fails_closed_without_local
 
 #[tokio::test]
 async fn test_rotate_supervisor_final_commit_failure_preserves_attempted_authority_for_retry() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "rotate-supervisor-final-commit-failure",
@@ -15472,7 +15597,7 @@ async fn test_rotate_supervisor_private_trust_failure_keeps_durable_operation_fo
 
 #[tokio::test]
 async fn test_rotate_supervisor_partial_publish_leaves_pending_without_old_reauthorization() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "rotate-supervisor-private-trust-partial-publish",
@@ -15689,7 +15814,7 @@ async fn test_rotate_supervisor_ack_rejection_leaves_pending_without_old_reautho
 
 #[tokio::test]
 async fn test_rotate_supervisor_retains_exact_operation_when_checkpoint_write_fails() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "rotate-supervisor-stale-durable-pending",
@@ -15827,7 +15952,7 @@ async fn test_rotate_supervisor_retains_exact_operation_when_checkpoint_write_fa
 
 #[tokio::test]
 async fn test_rotate_supervisor_does_not_submit_before_operation_anchor_is_durable() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "rotate-supervisor-pending-write-failure",
@@ -15952,7 +16077,7 @@ async fn test_rotate_supervisor_does_not_submit_before_operation_anchor_is_durab
 
 #[tokio::test]
 async fn test_restarted_peer_only_member_rebinds_when_supervisor_state_is_lost() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "peer-only-rebind-after-restart",
@@ -16006,7 +16131,7 @@ async fn test_restarted_peer_only_member_rebinds_when_supervisor_state_is_lost()
 
 #[tokio::test]
 async fn test_resume_rebind_ambiguity_retains_outer_trust_for_exact_retry() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "peer-only-rebind-ambiguous-bind",
@@ -16102,7 +16227,7 @@ async fn test_resume_rebind_ambiguity_retains_outer_trust_for_exact_retry() {
 
 #[tokio::test]
 async fn test_external_member_spawn_rejects_bind_peer_id_pubkey_mismatch() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "external-bind-peer-id-mismatch",
@@ -16148,7 +16273,7 @@ async fn test_external_member_spawn_rejects_bind_peer_id_pubkey_mismatch() {
 /// fail-stops the actor, and prevents any second BindMember side effect.
 #[tokio::test]
 async fn test_external_post_bind_retire_failure_quarantines_peer_and_fail_stops() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "external-post-bind-retire-failure",
@@ -16218,7 +16343,7 @@ async fn test_query_string_bootstrap_token_fallback_is_rejected() {
     // Dogma regression: bind with only a query-string `?mob_supervisor_bootstrap_token=...`
     // (no typed `bootstrap_token` field) must be rejected. The typed field is the
     // sole authoritative carrier; the query-string fallback was deleted in Wave 3 E.
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "peer-only-query-bootstrap-rejected",
@@ -22532,7 +22657,7 @@ async fn test_attach_existing_session_restores_persisted_inactive_session() {
 
 #[tokio::test]
 async fn test_resume_recreates_missing_external_bridge_preserving_backend_identity() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let service = Arc::new(MockSessionService::new());
     let _ = service.enable_runtime_adapter();
     let definition = with_unique_mob_id(
@@ -23254,7 +23379,7 @@ async fn test_peer_only_members_reject_agent_event_subscriptions_explicitly() {
 
 #[tokio::test]
 async fn test_peer_only_members_accept_direct_turn_delivery_without_bridge_session() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let service = Arc::new(MockSessionService::new());
     let _ = service.enable_runtime_adapter();
     let mut definition = with_unique_mob_id(
@@ -23576,7 +23701,7 @@ async fn test_peer_only_members_accept_direct_turn_delivery_without_bridge_sessi
 
 #[tokio::test]
 async fn test_resume_reconciles_mixed_topology_without_losing_external_member_refs() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "resume-mixed-topology",
@@ -23737,7 +23862,7 @@ async fn test_resume_reconciles_mixed_topology_without_losing_external_member_re
 
 #[tokio::test]
 async fn test_resume_replaces_foreign_live_owner_before_trust_repair() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "resume-live-owner-trust-repair-fails",
@@ -23846,7 +23971,7 @@ async fn test_resume_replaces_foreign_live_owner_before_trust_repair() {
 
 #[tokio::test]
 async fn test_resume_rebuilds_all_foreign_attachments_before_trust_repair() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "resume-trust-repair-preflights",
@@ -23983,7 +24108,7 @@ async fn test_resume_rebuilds_all_foreign_attachments_before_trust_repair() {
 
 #[tokio::test]
 async fn test_resume_reconciles_peer_only_trust_edges() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "resume-peer-only-trust-edges",
@@ -24655,7 +24780,7 @@ async fn test_spawn_duplicate_member_identity_fails() {
 
 #[tokio::test]
 async fn test_spawn_supports_session_and_external_backends() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "spawn-session-and-external",
@@ -24771,7 +24896,7 @@ async fn test_external_backend_rejects_invalid_peer_name_components() {
 
 #[tokio::test]
 async fn test_external_backend_wiring_uses_sendable_transport_addresses() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "external-wiring-addresses",
@@ -24854,7 +24979,7 @@ async fn test_external_backend_wiring_uses_sendable_transport_addresses() {
 
 #[tokio::test]
 async fn test_external_backend_unwiring_revokes_remote_trust() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "external-unwiring-trust",
@@ -24924,7 +25049,7 @@ async fn test_external_backend_unwiring_revokes_remote_trust() {
 
 #[tokio::test]
 async fn test_peer_only_retire_unwire_failure_retains_retry_anchor() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "peer-only-retire-unwire-retry",
@@ -25035,7 +25160,7 @@ async fn test_peer_only_retire_unwire_failure_retains_retry_anchor() {
 
 #[tokio::test]
 async fn test_peer_only_retire_unwire_failure_survives_cold_restart() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "peer-only-retire-unwire-cold-retry",
@@ -25157,7 +25282,7 @@ async fn test_peer_only_retire_unwire_failure_survives_cold_restart() {
 
 #[tokio::test]
 async fn test_peer_only_retire_revoke_failure_retains_overlay_and_retry_anchor() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "peer-only-retire-revoke-retry",
@@ -25276,7 +25401,7 @@ async fn test_peer_only_retire_revoke_failure_retains_overlay_and_retry_anchor()
 
 #[tokio::test]
 async fn test_peer_only_retire_supervisor_checkpoint_cold_retry_never_recontacts_remote() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "peer-only-supervisor-checkpoint-cold-retry",
@@ -25367,7 +25492,7 @@ async fn test_peer_only_retire_supervisor_checkpoint_cold_retry_never_recontacts
 
 #[tokio::test]
 async fn test_peer_only_retire_local_trust_remove_repair_is_offline_retryable() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "peer-only-local-trust-remove-repair",
@@ -25449,7 +25574,7 @@ async fn test_peer_only_retire_local_trust_remove_repair_is_offline_retryable() 
 
 #[tokio::test]
 async fn test_peer_only_retire_final_append_after_revoke_survives_cold_restart() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "peer-only-retire-final-append-cold-retry",
@@ -25563,7 +25688,7 @@ async fn test_peer_only_retire_final_append_after_revoke_survives_cold_restart()
 
 #[tokio::test]
 async fn test_peer_only_respawn_records_retirement_per_generation() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "peer-only-retirement-generation-key",
@@ -29688,7 +29813,7 @@ async fn test_auto_wire_orchestrator() {
 
 #[tokio::test]
 async fn test_auto_wire_orchestrator_updates_real_comms_peers() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let (handle, service) =
         create_test_mob_with_real_comms(sample_definition_with_auto_wire()).await;
 
@@ -29753,7 +29878,7 @@ async fn test_auto_wire_orchestrator_not_wired_to_self() {
 
 #[tokio::test]
 async fn test_auto_wire_orchestrator_real_comms_does_not_surface_self_peer() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let (handle, service) =
         create_test_mob_with_real_comms(sample_definition_with_auto_wire()).await;
 
@@ -29777,7 +29902,7 @@ async fn test_auto_wire_orchestrator_real_comms_does_not_surface_self_peer() {
 
 #[tokio::test]
 async fn test_auto_wire_parent_uses_spawning_member_not_orchestrator() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let (handle, service) = create_test_mob_with_real_comms(sample_definition()).await;
 
     let sid_l = handle
@@ -31842,23 +31967,27 @@ async fn mob_runtime_executor_forwards_exact_profile_boundary_acknowledgements()
         Arc::new(tokio::sync::RwLock::new(HashMap::new())),
     );
 
-    CoreExecutor::acknowledge_whole_blob_session_boundary(
-        &mut executor,
-        41,
-        "sha256:whole-blob-exact",
-    )
-    .await
-    .expect("forward WholeBlob acknowledgement");
-    CoreExecutor::acknowledge_head_canonical_session_boundary(&mut executor, "head-cas-exact")
-        .await
-        .expect("forward HeadCanonical acknowledgement");
-    CoreExecutor::acknowledge_provisional_session_boundary(
-        &mut executor,
-        42,
-        "provisional-authority-exact",
-    )
-    .await
-    .expect("forward provisional acknowledgement");
+    let authorities = [
+        meerkat_core::CommittedSessionBoundaryAuthority::WholeBlob {
+            session_id: session_id.clone(),
+            committed_store_revision: 41,
+            committed_blob_sha256: "sha256:whole-blob-exact".to_string(),
+        },
+        meerkat_core::CommittedSessionBoundaryAuthority::HeadCanonical {
+            session_id: session_id.clone(),
+            committed_head_token: "head-cas-exact".to_string(),
+        },
+        meerkat_core::CommittedSessionBoundaryAuthority::Provisional {
+            session_id: session_id.clone(),
+            committed_store_revision: 42,
+            committed_authority_token: "provisional-authority-exact".to_string(),
+        },
+    ];
+    for authority in &authorities {
+        CoreExecutor::acknowledge_committed_session_boundary(&mut executor, authority)
+            .await
+            .expect("forward exact committed-session boundary authority");
+    }
 
     assert_eq!(
         *service.runtime_boundary_acknowledgements.read().await,
@@ -32979,8 +33108,8 @@ struct FencedRetirementSessionStore {
     inner: Arc<MemoryStore>,
     presented_fence: AtomicU64,
     current_fence: AtomicU64,
-    projection_attempts: AtomicU64,
-    stale_projection_attempts: AtomicU64,
+    content_projection_attempts: AtomicU64,
+    stale_content_projection_attempts: AtomicU64,
 }
 
 #[cfg(feature = "runtime-adapter")]
@@ -32990,8 +33119,8 @@ impl FencedRetirementSessionStore {
             inner: Arc::new(MemoryStore::new()),
             presented_fence: AtomicU64::new(fence),
             current_fence: AtomicU64::new(fence),
-            projection_attempts: AtomicU64::new(0),
-            stale_projection_attempts: AtomicU64::new(0),
+            content_projection_attempts: AtomicU64::new(0),
+            stale_content_projection_attempts: AtomicU64::new(0),
         }
     }
 
@@ -32999,22 +33128,24 @@ impl FencedRetirementSessionStore {
         self.current_fence.store(fence, Ordering::SeqCst);
     }
 
-    fn projection_attempts(&self) -> u64 {
-        self.projection_attempts.load(Ordering::SeqCst)
+    fn content_projection_attempts(&self) -> u64 {
+        self.content_projection_attempts.load(Ordering::SeqCst)
     }
 
-    fn stale_projection_attempts(&self) -> u64 {
-        self.stale_projection_attempts.load(Ordering::SeqCst)
+    fn stale_content_projection_attempts(&self) -> u64 {
+        self.stale_content_projection_attempts
+            .load(Ordering::SeqCst)
     }
 
-    fn authorize_projection(&self) -> Result<(), meerkat_store::SessionStoreError> {
-        self.projection_attempts.fetch_add(1, Ordering::SeqCst);
+    fn authorize_content_projection(&self) -> Result<(), meerkat_store::SessionStoreError> {
+        self.content_projection_attempts
+            .fetch_add(1, Ordering::SeqCst);
         let presented = self.presented_fence.load(Ordering::SeqCst);
         let current = self.current_fence.load(Ordering::SeqCst);
         if presented == current {
             return Ok(());
         }
-        self.stale_projection_attempts
+        self.stale_content_projection_attempts
             .fetch_add(1, Ordering::SeqCst);
         Err(meerkat_store::SessionStoreError::Internal(format!(
             "stale fencing token: presented {presented}, current {current}"
@@ -33026,7 +33157,7 @@ impl FencedRetirementSessionStore {
 #[async_trait]
 impl SessionStore for FencedRetirementSessionStore {
     async fn save(&self, session: &Session) -> Result<(), meerkat_store::SessionStoreError> {
-        self.authorize_projection()?;
+        self.authorize_content_projection()?;
         SessionStore::save(self.inner.as_ref(), session).await
     }
 
@@ -33035,7 +33166,7 @@ impl SessionStore for FencedRetirementSessionStore {
         session: &Session,
         commit: &meerkat_core::TranscriptRewriteCommit,
     ) -> Result<(), meerkat_store::SessionStoreError> {
-        self.authorize_projection()?;
+        self.authorize_content_projection()?;
         SessionStore::save_transcript_rewrite(self.inner.as_ref(), session, commit).await
     }
 
@@ -33043,7 +33174,7 @@ impl SessionStore for FencedRetirementSessionStore {
         &self,
         session: &Session,
     ) -> Result<(), meerkat_store::SessionStoreError> {
-        self.authorize_projection()?;
+        self.authorize_content_projection()?;
         SessionStore::save_authoritative_projection(self.inner.as_ref(), session).await
     }
 
@@ -33052,7 +33183,7 @@ impl SessionStore for FencedRetirementSessionStore {
         session: &Session,
         expected_current_revision: Option<String>,
     ) -> Result<(), meerkat_store::SessionStoreError> {
-        self.authorize_projection()?;
+        self.authorize_content_projection()?;
         SessionStore::save_authoritative_projection_if_current_revision(
             self.inner.as_ref(),
             session,
@@ -33091,7 +33222,7 @@ impl SessionStore for FencedRetirementSessionStore {
 
 #[cfg(feature = "runtime-adapter")]
 #[tokio::test]
-async fn test_successful_retire_is_fenced_session_store_terminal_barrier() {
+async fn test_successful_retire_commits_runtime_terminal_before_content_projection_quiescence() {
     let fenced_store = Arc::new(FencedRetirementSessionStore::new(1));
     let session_store: Arc<dyn SessionStore> = fenced_store.clone();
     let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
@@ -33102,7 +33233,7 @@ async fn test_successful_retire_is_fenced_session_store_terminal_barrier() {
         PersistentMockBuilder,
         16,
         session_store,
-        runtime_store,
+        runtime_store.clone(),
         blob_store,
     ));
     let adapter = service
@@ -33124,6 +33255,7 @@ async fn test_successful_retire_is_fenced_session_store_terminal_barrier() {
         .resolve_bridge_session_id(&identity)
         .await
         .expect("session-backed fenced member");
+    let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
 
     handle
         .retire(identity.clone())
@@ -33148,12 +33280,18 @@ async fn test_successful_retire_is_fenced_session_store_terminal_barrier() {
             .expect("read live session after fenced retirement"),
         "successful retirement must remove the live session actor"
     );
-
-    let attempts_at_retirement = fenced_store.projection_attempts();
-    assert!(
-        attempts_at_retirement > 0,
-        "the fenced fixture must observe session creation/archive projections"
+    assert_eq!(
+        meerkat_runtime::store::load_runtime_state(runtime_store.as_ref(), &runtime_id)
+            .await
+            .expect("read runtime lifecycle after fenced retirement"),
+        Some(meerkat_runtime::RuntimeState::Retired),
+        "successful retirement must commit the RuntimeStore-owned lifecycle terminal before returning"
     );
+
+    // SessionStore is a content projection, not archive authority. Rotate its
+    // fixture fence only after the RuntimeStore terminal is observed; any late
+    // content writer must then be visible as a stale projection attempt.
+    let attempts_at_retirement = fenced_store.content_projection_attempts();
     fenced_store.rotate_fence(2);
     handle
         .shutdown()
@@ -33162,14 +33300,14 @@ async fn test_successful_retire_is_fenced_session_store_terminal_barrier() {
     tokio::task::yield_now().await;
 
     assert_eq!(
-        fenced_store.projection_attempts(),
+        fenced_store.content_projection_attempts(),
         attempts_at_retirement,
         "no SessionStore projection may begin after successful retirement"
     );
     assert_eq!(
-        fenced_store.stale_projection_attempts(),
+        fenced_store.stale_content_projection_attempts(),
         0,
-        "rotating authority after successful retirement must observe no old-fence writer"
+        "rotating the content-projection fence after successful retirement must observe no old-fence writer"
     );
 }
 
@@ -33237,11 +33375,11 @@ async fn test_fresh_provision_failure_preserves_resumable_document_and_quiesces_
         "unexpected fresh rollback failure: {error:?}"
     );
 
-    let durable = memory_store
-        .load(&session_id)
+    let durable = service
+        .load_authoritative_session(&session_id)
         .await
-        .expect("load failed fresh provision document")
-        .expect("durably-created session remains discoverable after response loss");
+        .expect("load authoritative fresh provision document")
+        .expect("runtime-authoritative session remains discoverable after response loss");
     assert_ne!(
         durable.lifecycle_terminal(),
         Some(meerkat_core::session::SessionLifecycleTerminal::Archived),
@@ -33382,11 +33520,11 @@ async fn test_retired_session_revival_failure_preserves_resumable_document() {
         .await
         .expect("retire seed session");
 
-    let archived = memory_store
-        .load(&session_id)
+    let archived = service
+        .load_authoritative_session(&session_id)
         .await
-        .expect("load archived seed projection")
-        .expect("archived seed projection remains durable");
+        .expect("load authoritative archived seed")
+        .expect("archived seed remains durable under runtime authority");
     assert!(
         service
             .load_persisted_session(&session_id)
@@ -33455,16 +33593,14 @@ async fn test_retired_session_revival_failure_preserves_resumable_document() {
         "unexpected post-attachment failure: {error:?}"
     );
 
-    let preserved = memory_store
-        .load(&session_id)
+    let preserved = service
+        .load_authoritative_session(&session_id)
         .await
-        .expect("load preserved session projection")
-        .expect("promoted session projection remains durable");
-    assert_eq!(
-        preserved.lifecycle_terminal(),
-        Some(meerkat_core::session::SessionLifecycleTerminal::Active),
-        "a response lost after durable archived-session promotion must leave a discoverable resumable document"
-    );
+        .expect("load authoritative preserved session")
+        .expect("promoted session remains durable under runtime authority");
+    // RuntimeStore owns lifecycle truth. The portable Session body need not
+    // mirror an Active marker; ordinary visibility and explicit resume below
+    // prove that the durable promotion survived the lost response.
     assert!(
         service
             .load_persisted_session(&session_id)
@@ -33702,7 +33838,7 @@ async fn test_explicit_hard_cancel_member_without_adapter_is_rejected() {
 
 #[tokio::test]
 async fn test_external_backend_turn_driven_mode_uses_start_turn_dispatch() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "external-turn-driven",
@@ -33756,7 +33892,7 @@ async fn test_external_backend_turn_driven_mode_uses_start_turn_dispatch() {
 /// non-goal.
 #[tokio::test]
 async fn test_unplaced_external_flow_step_fails_typed_per_step_at_dispatch() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let mut definition = with_unique_mob_id(
         sample_definition_with_dispatch_mode(DispatchMode::OneToOne),
         "external-autonomous-flow",
@@ -33846,7 +33982,7 @@ async fn test_unplaced_external_flow_step_fails_typed_per_step_at_dispatch() {
 
 #[tokio::test]
 async fn test_subscribe_all_agent_events_keeps_session_backed_members_in_mixed_roster() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "mixed-subscribe-all",
@@ -33926,7 +34062,7 @@ async fn test_subscribe_all_agent_events_surfaces_session_subscription_failure()
 
 #[tokio::test]
 async fn test_external_backend_lifecycle_and_turn_policy() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "external-lifecycle-policy",
@@ -34004,7 +34140,7 @@ async fn test_external_backend_lifecycle_and_turn_policy() {
 
 #[tokio::test]
 async fn test_rewire_repairs_remote_trust_for_existing_peer_only_edge() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "rewire-peer-only-trust",
@@ -39215,7 +39351,7 @@ async fn test_stop_notifies_every_active_orchestrator_profile_member() {
 }
 
 #[tokio::test]
-async fn test_destroy_interrupts_autonomous_host_loops_before_archive() {
+async fn test_destroy_does_not_open_orchestrator_turn_before_archive() {
     let (handle, service) = create_test_mob(sample_definition()).await;
 
     handle
@@ -39247,8 +39383,8 @@ async fn test_destroy_interrupts_autonomous_host_loops_before_archive() {
     handle.destroy().await.expect("destroy");
     assert_eq!(
         service.inject_call_count(),
-        1,
-        "destroy must schedule its lifecycle notification while the machine still classifies the orchestrator as Active"
+        0,
+        "destroy must not create a member turn immediately before retiring that same member"
     );
     // With the runtime adapter path, interrupt goes through the runtime-owned
     // hard-cancel path, not direct session_service.interrupt().
@@ -39258,6 +39394,34 @@ async fn test_destroy_interrupts_autonomous_host_loops_before_archive() {
         handle.status().await.unwrap(),
         MobState::Destroyed,
         "destroy must transition mob to Destroyed"
+    );
+}
+
+#[tokio::test]
+async fn test_complete_does_not_open_orchestrator_turn_before_archive() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+
+    handle
+        .spawn(ProfileName::from("lead"), AgentIdentity::from("l-1"), None)
+        .await
+        .expect("spawn lead");
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert_eq!(
+        service.inject_call_count(),
+        0,
+        "no lifecycle injection should precede completion"
+    );
+
+    handle.complete().await.expect("complete");
+    assert_eq!(
+        service.inject_call_count(),
+        0,
+        "complete must not create a member turn immediately before retiring that same member"
+    );
+    assert_eq!(
+        handle.status().await.unwrap(),
+        MobState::Completed,
+        "complete must retain its terminal machine transition"
     );
 }
 
@@ -39944,6 +40108,16 @@ impl SessionServiceControlExt for RealCommsSessionService {
 
 #[async_trait]
 impl MobSessionService for RealCommsSessionService {
+    async fn acknowledge_committed_runtime_session_boundary_under_turn_finalization_boundary(
+        &self,
+        _session_id: &SessionId,
+        _authority: &meerkat_core::CommittedSessionBoundaryAuthority,
+    ) -> Result<(), SessionError> {
+        Err(SessionError::Unsupported(
+            "real-comms test service has no store-owned boundary authority".to_string(),
+        ))
+    }
+
     /// Test double: nothing durable survives archive here, so the two-read
     /// composition is the exact truth — `ArchivedNotRevivable` cannot exist.
     async fn load_session_for_resume(
@@ -40393,8 +40567,8 @@ impl meerkat_runtime::SessionLlmReconfigureHost for RecordingSessionLlmReconfigu
 }
 
 #[derive(Clone)]
-struct RuntimeTurnPromptBarrier {
-    prompt_substring: String,
+struct RuntimeTurnContentBarrier {
+    content_substring: String,
     entered: Arc<tokio::sync::Notify>,
 }
 
@@ -40409,10 +40583,10 @@ struct RuntimeBackedRealCommsSessionService {
     append_system_context_delay_ms: AtomicU64,
     block_runtime_turns: AtomicBool,
     fail_runtime_turns: AtomicBool,
-    fail_runtime_checkpoint: AtomicBool,
+    fail_runtime_boundary_acknowledgement: AtomicBool,
     return_extraction_failure: AtomicBool,
     runtime_turn_started: tokio::sync::Notify,
-    runtime_turn_prompt_barriers: RwLock<HashMap<SessionId, RuntimeTurnPromptBarrier>>,
+    runtime_turn_content_barriers: RwLock<HashMap<SessionId, RuntimeTurnContentBarrier>>,
     release_runtime_turns: tokio::sync::Notify,
     block_session_reads: AtomicBool,
     session_read_entered: tokio::sync::Notify,
@@ -40441,21 +40615,25 @@ struct RuntimeBackedRealCommsSessionService {
 
 impl RuntimeBackedRealCommsSessionService {
     fn new() -> Self {
+        Self::with_runtime_adapter(Arc::new(meerkat_runtime::MeerkatMachine::ephemeral()))
+    }
+
+    fn with_runtime_adapter(runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>) -> Self {
         Self {
             sessions: RwLock::new(HashMap::new()),
             actor_registry: meerkat_session::LiveSessionActorRegistry::default(),
             keep_alive_notifiers: RwLock::new(HashMap::new()),
             session_comms_names: RwLock::new(HashMap::new()),
             session_counter: AtomicU64::new(0),
-            runtime_adapter: Arc::new(meerkat_runtime::MeerkatMachine::ephemeral()),
+            runtime_adapter,
             keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool::new(false),
             append_system_context_delay_ms: AtomicU64::new(0),
             block_runtime_turns: AtomicBool::new(false),
             fail_runtime_turns: AtomicBool::new(false),
-            fail_runtime_checkpoint: AtomicBool::new(false),
+            fail_runtime_boundary_acknowledgement: AtomicBool::new(false),
             return_extraction_failure: AtomicBool::new(false),
             runtime_turn_started: tokio::sync::Notify::new(),
-            runtime_turn_prompt_barriers: RwLock::new(HashMap::new()),
+            runtime_turn_content_barriers: RwLock::new(HashMap::new()),
             release_runtime_turns: tokio::sync::Notify::new(),
             block_session_reads: AtomicBool::new(false),
             session_read_entered: tokio::sync::Notify::new(),
@@ -40593,7 +40771,7 @@ impl RuntimeBackedRealCommsSessionService {
             .await
             .remove(session_id);
         self.active_runtime_runs.write().await.remove(session_id);
-        self.runtime_turn_prompt_barriers
+        self.runtime_turn_content_barriers
             .write()
             .await
             .remove(session_id);
@@ -40619,8 +40797,8 @@ impl RuntimeBackedRealCommsSessionService {
         self.fail_runtime_turns.store(enabled, Ordering::Relaxed);
     }
 
-    fn set_fail_runtime_checkpoint(&self, enabled: bool) {
-        self.fail_runtime_checkpoint
+    fn set_fail_runtime_boundary_acknowledgement(&self, enabled: bool) {
+        self.fail_runtime_boundary_acknowledgement
             .store(enabled, Ordering::Relaxed);
     }
 
@@ -40645,24 +40823,24 @@ impl RuntimeBackedRealCommsSessionService {
         self.release_runtime_turns.notify_one();
     }
 
-    async fn arm_runtime_turn_prompt_barrier(
+    async fn arm_runtime_turn_content_barrier(
         &self,
         session_id: &SessionId,
-        prompt_substring: impl Into<String>,
+        content_substring: impl Into<String>,
     ) -> Arc<tokio::sync::Notify> {
         let entered = Arc::new(tokio::sync::Notify::new());
-        self.runtime_turn_prompt_barriers.write().await.insert(
+        self.runtime_turn_content_barriers.write().await.insert(
             session_id.clone(),
-            RuntimeTurnPromptBarrier {
-                prompt_substring: prompt_substring.into(),
+            RuntimeTurnContentBarrier {
+                content_substring: content_substring.into(),
                 entered: Arc::clone(&entered),
             },
         );
         entered
     }
 
-    async fn clear_runtime_turn_prompt_barrier(&self, session_id: &SessionId) {
-        self.runtime_turn_prompt_barriers
+    async fn clear_runtime_turn_content_barrier(&self, session_id: &SessionId) {
+        self.runtime_turn_content_barriers
             .write()
             .await
             .remove(session_id);
@@ -40854,7 +41032,8 @@ fn is_incoming_terminal_peer_response(
             } if peer.id.to_string() == expected_peer_id
                 && peer.display_name.as_deref() == Some(expected_display_name)
                 && request_id == expected_request_id
-                && status == "Completed"
+                && status
+                    == meerkat_core::PeerResponseTerminalProjectionStatus::Completed.label()
                 && payload == expected_payload
         )
     })
@@ -41058,6 +41237,25 @@ impl SessionServiceControlExt for RuntimeBackedRealCommsSessionService {
 
 #[async_trait]
 impl MobSessionService for RuntimeBackedRealCommsSessionService {
+    async fn acknowledge_committed_runtime_session_boundary_under_turn_finalization_boundary(
+        &self,
+        _session_id: &SessionId,
+        _authority: &meerkat_core::CommittedSessionBoundaryAuthority,
+    ) -> Result<(), SessionError> {
+        if self
+            .fail_runtime_boundary_acknowledgement
+            .load(Ordering::Relaxed)
+        {
+            Err(SessionError::Agent(
+                meerkat_core::error::AgentError::InternalError(
+                    "injected runtime boundary acknowledgement failure".to_string(),
+                ),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
     /// Test double: nothing durable survives archive here, so the two-read
     /// composition is the exact truth — `ArchivedNotRevivable` cannot exist.
     async fn load_session_for_resume(
@@ -41190,15 +41388,21 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
         let event_tx = req.event_tx.clone();
         let applied_turn_metadata = req.runtime.turn_metadata.clone();
         let provider_visible_prompt = provider_visible_prompt_from_start_turn_request(&req);
-        let prompt_barrier = self
-            .runtime_turn_prompt_barriers
+        let content_barrier = self
+            .runtime_turn_content_barriers
             .read()
             .await
             .get(session_id)
             .filter(|barrier| {
                 provider_visible_prompt
                     .text_content()
-                    .contains(&barrier.prompt_substring)
+                    .contains(&barrier.content_substring)
+                    || req.runtime.typed_turn_appends.iter().any(|append| {
+                        append
+                            .content
+                            .render_text()
+                            .contains(&barrier.content_substring)
+                    })
             })
             .cloned();
         self.applied_runtime_system_appends
@@ -41206,21 +41410,29 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
             .await
             .entry(session_id.clone())
             .or_default()
-            .extend(req.runtime.typed_turn_appends.iter().filter_map(|append| {
-                matches!(
-                    append.role,
-                    meerkat_core::lifecycle::run_primitive::ConversationAppendRole::System
-                        | meerkat_core::lifecycle::run_primitive::ConversationAppendRole::SystemNotice
-                )
-                .then(|| AppendSystemContextRequest {
-                    content: append.content.clone(),
-                    source: append.identity.as_ref().and_then(|identity| identity.source.clone()),
-                    idempotency_key: append
-                        .identity
-                        .as_ref()
-                        .and_then(|identity| identity.idempotency_key.clone()),
-                })
-            }));
+            .extend(
+                req.runtime
+                    .typed_turn_appends
+                    .iter()
+                    .filter(|append| {
+                        matches!(
+                            append.role,
+                            meerkat_core::lifecycle::run_primitive::ConversationAppendRole::System
+                                | meerkat_core::lifecycle::run_primitive::ConversationAppendRole::SystemNotice
+                        )
+                    })
+                    .map(|append| AppendSystemContextRequest {
+                        content: append.content.clone(),
+                        source: append
+                            .identity
+                            .as_ref()
+                            .and_then(|identity| identity.source.clone()),
+                        idempotency_key: append
+                            .identity
+                            .as_ref()
+                            .and_then(|identity| identity.idempotency_key.clone()),
+                    }),
+            );
 
         let identity_probe = {
             self.runtime_llm_identity_probe
@@ -41338,10 +41550,10 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
         if block_all_runtime_turns {
             self.runtime_turn_started.notify_waiters();
         }
-        if let Some(barrier) = &prompt_barrier {
-            barrier.entered.notify_waiters();
+        if let Some(barrier) = &content_barrier {
+            barrier.entered.notify_one();
         }
-        if block_all_runtime_turns || prompt_barrier.is_some() {
+        if block_all_runtime_turns || content_barrier.is_some() {
             self.release_runtime_turns.notified().await;
         }
 
@@ -41369,33 +41581,24 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
 
         self.active_runtime_runs.write().await.remove(session_id);
 
-        let inject_checkpoint_failure = self.fail_runtime_checkpoint.load(Ordering::Relaxed);
+        let inject_boundary_acknowledgement_failure = self
+            .fail_runtime_boundary_acknowledgement
+            .load(Ordering::Relaxed);
         let receipt = meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft {
             run_id,
             boundary,
             contributing_input_ids,
-            conversation_digest: inject_checkpoint_failure.then(|| {
+            conversation_digest: inject_boundary_acknowledgement_failure.then(|| {
                 // Canonical accumulator digest (`sha256:<hex>`) of the
-                // serialized empty message list (`[]`) in the valid synthetic
-                // Session witness below — the committed-boundary witness
+                // empty message list in the valid synthetic Session below.
+                // The committed-boundary witness
                 // validation recomputes this exact format.
                 "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
                     .to_string()
             }),
             message_count: 0,
         };
-        let session_snapshot = if inject_checkpoint_failure {
-            Some(
-                serde_json::to_vec(&Session::with_id(session_id.clone())).map_err(|error| {
-                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                        "failed to build valid injected committed session snapshot: {error}"
-                    )))
-                })?,
-            )
-        } else {
-            None
-        };
-        if self.return_extraction_failure.load(Ordering::Relaxed) {
+        let output = if self.return_extraction_failure.load(Ordering::Relaxed) {
             let mut result = mock_run_result(
                 session_id.clone(),
                 "runtime main turn completed".to_string(),
@@ -41405,21 +41608,24 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
                 attempts: 1,
                 reason: "injected extraction failure".to_string(),
             });
-            Ok(
-                meerkat_core::lifecycle::core_executor::CoreApplyOutput::with_run_result(
-                    receipt,
-                    session_snapshot,
-                    result,
-                ),
+            meerkat_core::lifecycle::core_executor::CoreApplyOutput::with_run_result(
+                receipt, None, result,
             )
         } else {
-            Ok(
-                meerkat_core::lifecycle::core_executor::CoreApplyOutput::with_untyped_snapshot(
-                    receipt,
-                    session_snapshot,
-                    None,
-                ),
+            meerkat_core::lifecycle::core_executor::CoreApplyOutput::with_untyped_snapshot(
+                receipt, None, None,
             )
+        };
+        if inject_boundary_acknowledgement_failure {
+            output
+                .with_session(Arc::new(Session::with_id(session_id.clone())))
+                .map_err(|error| {
+                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                        "failed to seal injected committed session boundary: {error}"
+                    )))
+                })
+        } else {
+            Ok(output)
         }
     }
 
@@ -41428,15 +41634,7 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
         _session_id: &SessionId,
         _session_snapshot: Arc<Vec<u8>>,
     ) -> Result<(), SessionError> {
-        if self.fail_runtime_checkpoint.load(Ordering::Relaxed) {
-            Err(SessionError::Agent(
-                meerkat_core::error::AgentError::InternalError(
-                    "injected runtime checkpoint failure".to_string(),
-                ),
-            ))
-        } else {
-            Ok(())
-        }
+        Ok(())
     }
 
     async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), SessionError> {
@@ -41467,7 +41665,7 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
             .await
             .remove(session_id);
         self.active_runtime_runs.write().await.remove(session_id);
-        self.runtime_turn_prompt_barriers
+        self.runtime_turn_content_barriers
             .write()
             .await
             .remove(session_id);
@@ -41487,6 +41685,30 @@ async fn create_test_mob_with_runtime_backed_real_comms(
     definition: MobDefinition,
 ) -> (MobHandle, Arc<RuntimeBackedRealCommsSessionService>) {
     let service = Arc::new(RuntimeBackedRealCommsSessionService::new());
+    let storage = MobStorage::in_memory();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+
+    (handle, service)
+}
+
+async fn create_test_mob_with_persistent_runtime_backed_real_comms(
+    definition: MobDefinition,
+) -> (MobHandle, Arc<RuntimeBackedRealCommsSessionService>) {
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+    let blob_store: Arc<dyn meerkat_core::BlobStore> =
+        Arc::new(meerkat_store::MemoryBlobStore::new());
+    let runtime_adapter = Arc::new(meerkat_runtime::MeerkatMachine::persistent(
+        runtime_store,
+        blob_store,
+    ));
+    let service = Arc::new(RuntimeBackedRealCommsSessionService::with_runtime_adapter(
+        runtime_adapter,
+    ));
     let storage = MobStorage::in_memory();
     let handle = MobBuilder::new(definition, storage)
         .with_session_service(service.clone())
@@ -41983,7 +42205,7 @@ async fn test_peer_message_delivery_lane_is_bounded() {
 
 #[tokio::test]
 async fn test_peer_message_reaches_idle_autonomous_member_after_kickoff_completion() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let (handle, service) =
         create_test_mob_with_runtime_backed_real_comms(sample_definition()).await;
     service.set_keep_alive_turns_complete_immediately(true);
@@ -42090,7 +42312,7 @@ async fn test_peer_message_reaches_idle_autonomous_member_after_kickoff_completi
 #[tokio::test]
 #[ignore = "exploratory runtime-backed kickoff contract; follow-up hardening pending"]
 async fn test_wait_for_ready_blocks_until_autonomous_kickoff_resolves() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let (handle, _service) =
         create_test_mob_with_runtime_backed_real_comms(sample_definition()).await;
 
@@ -42142,7 +42364,7 @@ async fn test_wait_for_ready_blocks_until_autonomous_kickoff_resolves() {
 #[tokio::test]
 #[ignore = "exploratory runtime-backed active-member delivery probe; smoke lane covers the end-to-end contract"]
 async fn test_peer_message_reaches_ready_autonomous_member_before_kickoff_settles() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let (handle, service) =
         create_test_mob_with_runtime_backed_real_comms(sample_definition()).await;
 
@@ -42258,7 +42480,7 @@ async fn test_peer_message_reaches_ready_autonomous_member_before_kickoff_settle
 #[tokio::test]
 #[ignore = "exploratory runtime-backed multi-recipient delivery probe; smoke lane covers the end-to-end contract"]
 async fn test_peer_messages_reach_all_ready_autonomous_members_before_kickoff_settles() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let (handle, service) =
         create_test_mob_with_runtime_backed_real_comms(sample_definition()).await;
 
@@ -42393,7 +42615,7 @@ async fn test_peer_messages_reach_all_ready_autonomous_members_before_kickoff_se
 #[tokio::test]
 async fn test_running_peer_message_to_autonomous_member_queues_when_exact_boundary_is_unavailable()
 {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let (handle, service) =
         create_test_mob_with_runtime_backed_real_comms(sample_definition()).await;
     service.set_keep_alive_turns_complete_immediately(true);
@@ -42572,7 +42794,7 @@ async fn test_running_peer_message_to_autonomous_member_queues_when_exact_bounda
 
 #[tokio::test]
 async fn test_active_autonomous_direct_steer_falls_back_when_exact_boundary_is_unavailable() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let (handle, service) =
         create_test_mob_with_runtime_backed_real_comms(sample_definition()).await;
     service.set_keep_alive_turns_complete_immediately(true);
@@ -42601,13 +42823,11 @@ async fn test_active_autonomous_direct_steer_falls_back_when_exact_boundary_is_u
         .await
         .expect("kickoff should resolve before blocked direct turn");
 
-    let prompt_baseline = service.applied_runtime_prompts(&sid_worker).await.len();
-    let context_baseline = service
-        .applied_runtime_system_appends(&sid_worker)
-        .await
-        .len();
-
-    service.set_keep_alive_turns_complete_immediately(false);
+    // Scope the block to this input. A global keep-alive flag can be observed
+    // late by an already-started ambient empty turn and block the wrong run.
+    let first_apply_entered = service
+        .arm_runtime_turn_content_barrier(&sid_worker, "first direct prompt holds active apply")
+        .await;
     let worker = handle
         .member(&AgentIdentity::from("w-direct-steer"))
         .await
@@ -42615,35 +42835,19 @@ async fn test_active_autonomous_direct_steer_falls_back_when_exact_boundary_is_u
     worker
         .send(
             "first direct prompt holds active apply",
-            HandlingMode::Steer,
+            HandlingMode::Queue,
         )
         .await
-        .expect("first direct steer should be admitted");
+        .expect("first queued direct turn should be admitted");
 
-    let first_apply_observed = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let prompts = service.applied_runtime_prompts(&sid_worker).await;
-            if prompts
-                .iter()
-                .skip(prompt_baseline)
-                .any(|prompt| prompt.text_content().contains("first direct prompt"))
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await;
-    if first_apply_observed.is_err() {
-        let prompts = service.applied_runtime_prompts(&sid_worker).await;
-        let snapshot = service
-            .runtime_adapter
-            .meerkat_machine_spine_snapshot(&sid_worker)
-            .await;
-        panic!(
-            "first direct steer should enter active apply; prompts={prompts:?} snapshot={snapshot:?}"
-        );
-    }
+    tokio::time::timeout(Duration::from_secs(5), first_apply_entered.notified())
+        .await
+        .expect("first queued direct turn should enter active apply");
+    let active_apply_count = service.applied_runtime_prompts(&sid_worker).await.len();
+    let active_append_count = service
+        .applied_runtime_system_appends(&sid_worker)
+        .await
+        .len();
 
     service.set_append_system_context_delay_ms(250);
     let steer_worker = handle
@@ -42667,26 +42871,25 @@ async fn test_active_autonomous_direct_steer_falls_back_when_exact_boundary_is_u
 
     let appends = service.applied_runtime_system_appends(&sid_worker).await;
     assert!(
-        !appends.iter().skip(context_baseline).any(|append| append
+        !appends.iter().skip(active_append_count).any(|append| append
             .text()
             .contains("second direct steer uses the queued fallback")),
         "a service without exact boundary preparation must not claim a live append; appends={appends:?}"
     );
     assert_eq!(
         service.applied_runtime_prompts(&sid_worker).await.len(),
-        prompt_baseline + 1,
+        active_apply_count,
         "queued fallback must wait for the blocked apply to release"
     );
 
-    service.set_keep_alive_turns_complete_immediately(true);
     service
-        .interrupt(&sid_worker)
-        .await
-        .expect("interrupt should release blocked worker apply");
+        .clear_runtime_turn_content_barrier(&sid_worker)
+        .await;
+    service.release_one_runtime_turn();
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             let prompts = service.applied_runtime_prompts(&sid_worker).await;
-            if prompts.iter().skip(prompt_baseline + 1).any(|prompt| {
+            if prompts.iter().skip(active_apply_count).any(|prompt| {
                 prompt
                     .text_content()
                     .contains("second direct steer uses the queued fallback")
@@ -42706,7 +42909,7 @@ async fn test_active_autonomous_direct_steer_falls_back_when_exact_boundary_is_u
 
 #[tokio::test]
 async fn test_active_internal_submit_work_steer_falls_back_when_exact_boundary_is_unavailable() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let (handle, service) =
         create_test_mob_with_runtime_backed_real_comms(sample_definition()).await;
     service.set_keep_alive_turns_complete_immediately(true);
@@ -42735,13 +42938,11 @@ async fn test_active_internal_submit_work_steer_falls_back_when_exact_boundary_i
         .await
         .expect("kickoff should resolve before blocked direct turn");
 
-    let prompt_baseline = service.applied_runtime_prompts(&sid_worker).await.len();
-    let context_baseline = service
-        .applied_runtime_system_appends(&sid_worker)
-        .await
-        .len();
-
-    service.set_keep_alive_turns_complete_immediately(false);
+    // Scope the block to this input. A global keep-alive flag can be observed
+    // late by an already-started ambient empty turn and block the wrong run.
+    let first_apply_entered = service
+        .arm_runtime_turn_content_barrier(&sid_worker, "first direct prompt holds active apply")
+        .await;
     let worker = handle
         .member(&AgentIdentity::from("w-internal-steer"))
         .await
@@ -42749,35 +42950,19 @@ async fn test_active_internal_submit_work_steer_falls_back_when_exact_boundary_i
     worker
         .send(
             "first direct prompt holds active apply",
-            HandlingMode::Steer,
+            HandlingMode::Queue,
         )
         .await
-        .expect("first direct steer should be admitted");
+        .expect("first queued direct turn should be admitted");
 
-    let first_apply_observed = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let prompts = service.applied_runtime_prompts(&sid_worker).await;
-            if prompts
-                .iter()
-                .skip(prompt_baseline)
-                .any(|prompt| prompt.text_content().contains("first direct prompt"))
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await;
-    if first_apply_observed.is_err() {
-        let prompts = service.applied_runtime_prompts(&sid_worker).await;
-        let snapshot = service
-            .runtime_adapter
-            .meerkat_machine_spine_snapshot(&sid_worker)
-            .await;
-        panic!(
-            "first direct steer should enter active apply; prompts={prompts:?} snapshot={snapshot:?}"
-        );
-    }
+    tokio::time::timeout(Duration::from_secs(5), first_apply_entered.notified())
+        .await
+        .expect("first queued direct turn should enter active apply");
+    let active_apply_count = service.applied_runtime_prompts(&sid_worker).await.len();
+    let active_append_count = service
+        .applied_runtime_system_appends(&sid_worker)
+        .await
+        .len();
 
     let entry = handle
         .get_member(&AgentIdentity::from("w-internal-steer"))
@@ -42800,26 +42985,25 @@ async fn test_active_internal_submit_work_steer_falls_back_when_exact_boundary_i
 
     let appends = service.applied_runtime_system_appends(&sid_worker).await;
     assert!(
-        !appends.iter().skip(context_baseline).any(|append| append
+        !appends.iter().skip(active_append_count).any(|append| append
             .text()
             .contains("internal identity bridge steer uses queued fallback")),
         "a service without exact boundary preparation must not claim a live append; appends={appends:?}"
     );
     assert_eq!(
         service.applied_runtime_prompts(&sid_worker).await.len(),
-        prompt_baseline + 1,
+        active_apply_count,
         "queued fallback must wait for the blocked apply to release"
     );
 
-    service.set_keep_alive_turns_complete_immediately(true);
     service
-        .interrupt(&sid_worker)
-        .await
-        .expect("interrupt should release blocked worker apply");
+        .clear_runtime_turn_content_barrier(&sid_worker)
+        .await;
+    service.release_one_runtime_turn();
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             let prompts = service.applied_runtime_prompts(&sid_worker).await;
-            if prompts.iter().skip(prompt_baseline + 1).any(|prompt| {
+            if prompts.iter().skip(active_apply_count).any(|prompt| {
                 prompt
                     .text_content()
                     .contains("internal identity bridge steer uses queued fallback")
@@ -42839,7 +43023,7 @@ async fn test_active_internal_submit_work_steer_falls_back_when_exact_boundary_i
 
 #[tokio::test]
 async fn test_turn_driven_submit_work_steer_queues_when_exact_boundary_is_unavailable() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let (handle, service) =
         create_test_mob_with_runtime_backed_real_comms(sample_definition()).await;
 
@@ -42967,7 +43151,7 @@ async fn test_turn_driven_submit_work_steer_queues_when_exact_boundary_is_unavai
 
 #[tokio::test]
 async fn test_member_send_steer_queues_when_exact_boundary_is_unavailable() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let (handle, service) =
         create_test_mob_with_runtime_backed_real_comms(sample_definition()).await;
 
@@ -43080,7 +43264,7 @@ async fn test_member_send_steer_queues_when_exact_boundary_is_unavailable() {
 
 #[tokio::test]
 async fn test_peer_response_reaches_requester_in_runtime_backed_real_comms() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let (handle, service) =
         create_test_mob_with_runtime_backed_real_comms(sample_definition()).await;
     service.set_keep_alive_turns_complete_immediately(true);
@@ -43279,26 +43463,37 @@ async fn test_peer_response_reaches_requester_in_runtime_backed_real_comms() {
         Some(meerkat_runtime::InputLifecycleState::Consumed),
         "terminal peer response should be applied and consumed: {requester_snapshot:?}"
     );
+    // The fixture records typed appends before it records the provider-visible
+    // prompt for the same apply. Observing the append above therefore proves
+    // delivery, but is not yet a completion barrier for the reaction-turn
+    // probe. Wait for that second record rather than racing the two fixture
+    // locks.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if service.applied_runtime_prompts(&sid_requester).await.len()
+                > requester_prompt_baseline
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("terminal peer response should start the requester reaction turn");
     let requester_prompts_after_response = service.applied_runtime_prompts(&sid_requester).await;
-    let requester_response_prompts = requester_prompts_after_response
-        .iter()
-        .skip(requester_prompt_baseline)
-        .filter(|prompt| {
-            let text = prompt.text_content();
-            text.contains("Peer response from")
-                && text.contains(&format!("(to request: {request_id})"))
-        })
-        .collect::<Vec<_>>();
     assert_eq!(
-        requester_response_prompts.len(),
-        1,
+        requester_prompts_after_response.len(),
+        requester_prompt_baseline + 1,
         "terminal peer response should append runtime system context and kick exactly one requester reaction turn: {requester_prompts_after_response:?}"
     );
     // The mandatory requester reaction turn carries the typed comms-notice
     // projection as its model-visible content — never a fabricated empty
     // prompt (providers reject empty user messages) and never raw user
     // prose authored by the responder outside the typed notice rendering.
-    let reaction_prompt = requester_response_prompts[0].text_content();
+    let reaction_prompt = requester_prompts_after_response
+        .last()
+        .expect("reaction turn prompt should exist")
+        .text_content();
     assert!(
         !reaction_prompt.trim().is_empty(),
         "terminal peer response reaction turn must have model-visible content, \
@@ -43323,41 +43518,16 @@ async fn test_peer_response_reaches_requester_in_runtime_backed_real_comms() {
         meerkat_contracts::PeerResponseTerminalStatusWire::Completed,
         serde_json::json!({"interpretation":"lighthouse"}),
     );
-    service
+    let (duplicate_outcome, _) = service
         .runtime_adapter
         .accept_input_with_completion(&sid_requester, duplicate)
         .await
         .expect("duplicate terminal response should be accepted for idempotent apply");
-
-    tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            let snapshot = service
-                .runtime_adapter
-                .meerkat_machine_spine_snapshot(&sid_requester)
-                .await
-                .expect("requester snapshot should still exist after duplicate");
-            if snapshot.inputs.queue.is_empty()
-                && snapshot
-                    .inputs
-                    .admission_order
-                    .iter()
-                    .filter(|input| {
-                        input.content_shape.as_ref().is_some_and(|shape| {
-                            shape.kind()
-                                == meerkat_runtime::identifiers::InputKind::PeerResponseTerminal
-                        }) && input.lifecycle
-                            == Some(meerkat_runtime::InputLifecycleState::Consumed)
-                    })
-                    .count()
-                    >= 2
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .expect("duplicate terminal response should be consumed without re-applying context");
+    assert!(
+        duplicate_outcome.is_deduplicated(),
+        "the typed peer-route/request-correlation terminal key must reject replay before apply: \
+         {duplicate_outcome:?}"
+    );
     let requester_contexts = service.applied_runtime_system_appends(&sid_requester).await;
     let response_context_count = requester_contexts
         .iter()
@@ -43384,7 +43554,7 @@ async fn test_peer_response_reaches_requester_in_runtime_backed_real_comms() {
 
 #[tokio::test]
 async fn test_default_peer_response_inherits_request_steer_while_requester_running() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let (handle, service) =
         create_test_mob_with_runtime_backed_real_comms(sample_definition()).await;
     service.set_keep_alive_turns_complete_immediately(true);
@@ -43454,7 +43624,7 @@ async fn test_default_peer_response_inherits_request_steer_while_requester_runni
     let responder_display_identity = test_comms_name("worker", "w-running-responder");
 
     let requester_runtime_started_notify = service
-        .arm_runtime_turn_prompt_barrier(&sid_requester, "body: keep requester busy")
+        .arm_runtime_turn_content_barrier(&sid_requester, "body: keep requester busy")
         .await;
     let requester_runtime_started = requester_runtime_started_notify.notified();
     tokio::pin!(requester_runtime_started);
@@ -43501,7 +43671,7 @@ async fn test_default_peer_response_inherits_request_steer_while_requester_runni
     );
     service.set_keep_alive_turns_complete_immediately(false);
     service
-        .clear_runtime_turn_prompt_barrier(&sid_requester)
+        .clear_runtime_turn_content_barrier(&sid_requester)
         .await;
     service.release_one_runtime_turn();
 
@@ -43622,7 +43792,7 @@ async fn test_default_peer_response_inherits_request_steer_while_requester_runni
 
 #[tokio::test]
 async fn test_mcp_send_request_response_terminal_steer_is_visible_to_requester() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let (handle, service) =
         create_test_mob_with_runtime_backed_real_comms(sample_definition()).await;
     service.set_keep_alive_turns_complete_immediately(true);
@@ -44655,9 +44825,18 @@ async fn test_steer_submit_work_with_injected_context_rejected() {
 
 static REAL_COMMS_TEST_LOCK: Mutex<()> = Mutex::new(());
 
+fn lock_real_comms_tests() -> std::sync::MutexGuard<'static, ()> {
+    // This mutex only serializes access to the process-global inproc registry.
+    // A prior test panic does not corrupt registry state owned by this guard,
+    // so retain serialization without masking every later assertion.
+    REAL_COMMS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 #[tokio::test]
 async fn test_wire_enables_peer_request_delivery() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let (handle, service) = create_test_mob_with_real_comms(sample_definition()).await;
 
     let sid_a = handle
@@ -44766,7 +44945,7 @@ async fn test_wire_enables_peer_request_delivery() {
 
 #[tokio::test]
 async fn test_unwire_updates_peers_and_sends_retired_notifications() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let (handle, service) = create_test_mob_with_real_comms(sample_definition()).await;
 
     let sid_a = handle
@@ -44820,7 +44999,7 @@ async fn test_unwire_updates_peers_and_sends_retired_notifications() {
 
 #[tokio::test]
 async fn test_stale_member_trust_obligation_cannot_readd_local_trust_when_machine_edge_absent() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let (handle, service) = create_test_mob_with_real_comms(sample_definition()).await;
 
     let sid_a = handle
@@ -44938,7 +45117,7 @@ async fn test_stale_member_trust_obligation_cannot_readd_local_trust_when_machin
 
 #[tokio::test]
 async fn test_member_trust_mutation_rejects_foreign_mob_owner() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let (handle, service) = create_test_mob_with_real_comms(sample_definition()).await;
 
     let sid_a = handle
@@ -45028,7 +45207,7 @@ async fn test_member_trust_mutation_rejects_foreign_mob_owner() {
 
 #[tokio::test]
 async fn test_stale_external_peer_trust_obligation_cannot_readd_trust_when_machine_edge_absent() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let (handle, service) = create_test_mob_with_real_comms(sample_definition()).await;
 
     let sid = handle
@@ -45242,7 +45421,7 @@ async fn test_stale_external_peer_trust_obligation_cannot_readd_trust_when_machi
 
 #[tokio::test]
 async fn test_retire_updates_peers_and_sends_retired_notifications() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let (handle, service) = create_test_mob_with_real_comms(sample_definition()).await;
 
     let sid_a = handle
@@ -48456,7 +48635,7 @@ async fn mcp_provenance_filter_preserves_exact_catalog_and_gates_hybrid_resoluti
 
 #[tokio::test]
 async fn test_external_spawn_with_binding_uses_real_identity() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "external-spawn-real-identity",
@@ -48518,7 +48697,7 @@ async fn test_external_spawn_with_binding_uses_real_identity() {
 #[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
 async fn test_external_tcp_bind_and_peer_turn_use_routable_supervisor_bridge() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "external-tcp-bind-route",
@@ -48636,7 +48815,7 @@ fn unused_loopback_port() -> u16 {
 #[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
 async fn test_external_tcp_bind_uses_configured_supervisor_advertised_address() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let mut definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "external-tcp-advertised-supervisor",
@@ -48732,7 +48911,7 @@ async fn test_external_tcp_bind_uses_configured_supervisor_advertised_address() 
 #[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
 async fn test_external_tcp_fixed_supervisor_bridge_pending_rotation_retry_reuses_active_listener() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let mut definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "external-tcp-fixed-supervisor-pending-retry",
@@ -48897,7 +49076,7 @@ async fn test_external_tcp_fixed_supervisor_bridge_pending_rotation_retry_reuses
 #[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
 async fn test_fixed_port_activation_rebuild_failure_retries_same_durable_operation() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let mut definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "fixed-port-activation-rebuild-retry-anchor",
@@ -49007,7 +49186,7 @@ async fn test_fixed_port_activation_rebuild_failure_retries_same_durable_operati
 #[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
 async fn test_private_ephemeral_tcp_supervisor_rotation_rejected_before_mutation() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "external-tcp-ephemeral-rotate-rejected",
@@ -49094,7 +49273,7 @@ async fn test_private_ephemeral_tcp_supervisor_rotation_rejected_before_mutation
 
 #[tokio::test]
 async fn test_force_cancel_peer_only_external_member_uses_cooperative_bridge_interrupt() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "external-force-cancel",
@@ -49169,7 +49348,7 @@ async fn test_session_spawn_default_binding() {
 async fn test_trusted_peer_spec_uses_real_external_identity_for_peer_only_members() {
     // Peer-only external members should wire using the real external transport
     // identity rather than a hidden local bridge session.
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "trusted-peer-spec",
@@ -49256,7 +49435,7 @@ async fn test_supervisor_trust_does_not_leak_into_member_peer_directory() {
     // The *positive* complement — "the supervisor is still trusted enough
     // for the member to send back to it" — is enforced by
     // `test_supervisor_private_trust_preserves_send_resolution` below.
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(sample_definition(), "no-supervisor-leak");
     let (handle, service) = create_test_mob_with_real_comms(definition).await;
     let receipt = handle
@@ -49348,7 +49527,7 @@ async fn test_supervisor_private_trust_preserves_send_resolution() {
     // (so `send_peer_command` can resolve), is marked private (so the
     // directory hides it), and the member's classified inbox knows the
     // supervisor pubkey (so admission accepts lifecycle notifications).
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(sample_definition(), "supervisor-send-resolution");
     let (handle, service) = create_test_mob_with_real_comms(definition).await;
     let receipt = handle
@@ -49411,7 +49590,7 @@ async fn test_rotate_supervisor_reinstalls_private_trust_on_session_backed_membe
     // peer id sticks in the member's private-trust set and new-supervisor
     // lifecycle notifications (`mob.peer_added`, `mob.peer_retired`, …) are
     // dropped at the classified inbox's admission gate.
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(sample_definition(), "rotate-private-trust");
     let mob_id = definition.id.clone();
     let (handle, service) = create_test_mob_with_real_comms(definition).await;
@@ -58211,16 +58390,19 @@ async fn pack_cleanup_physically_destroys_real_mob_handle() {
     let mut runtime = crate::runtime::mobpack_execution::PackAdaptiveRuntime {
         control_mob: layer.clone(),
         session_service: service,
+        active_planning_run: None,
         layer_created_probe: None,
     };
 
     let layer_lease =
         crate::adaptive::AdaptiveLayerLease::new(layer.clone(), Arc::new(TestCancellationOwner));
+    let deadline = adaptive_test_operation_deadline();
     let cleanup = <crate::runtime::mobpack_execution::PackAdaptiveRuntime as crate::adaptive::AdaptiveDriverRuntime>::cleanup_layer(
         &mut runtime,
         &layer_lease,
         &crate::adaptive::LayerId::new("real-layer").expect("layer id"),
         1,
+        &deadline,
     )
     .await
     .expect("physical cleanup");
@@ -58280,10 +58462,12 @@ async fn aborting_pack_provision_destroys_child_and_cancels_machine_run() {
     let mut runtime = crate::runtime::mobpack_execution::PackAdaptiveRuntime {
         control_mob: control_mob.clone(),
         session_service: service.clone(),
+        active_planning_run: None,
         layer_created_probe: Some(layer_created_tx),
     };
     let task_capability = capability.clone();
     let task_layer_id = layer_id.clone();
+    let deadline = adaptive_test_operation_deadline();
     let provision = tokio::spawn(async move {
         <crate::runtime::mobpack_execution::PackAdaptiveRuntime as crate::adaptive::AdaptiveDriverRuntime>::provision_layer(
             &mut runtime,
@@ -58291,6 +58475,7 @@ async fn aborting_pack_provision_destroys_child_and_cancels_machine_run() {
             &task_layer_id,
             1,
             &compiled,
+            &deadline,
         )
         .await
     });
@@ -59325,7 +59510,7 @@ async fn create_host_ceremony_mob(
 /// descriptor bootstrap token.
 #[tokio::test]
 async fn test_bind_host_commits_machine_facts_and_persists_record() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let (handle, mob_id, runtime_metadata) = create_host_ceremony_mob("bind-host-commit").await;
     let stub =
         spawn_host_daemon_stub("bind-commit", Some("wss://host-stub/live".to_string())).await;
@@ -59431,7 +59616,7 @@ async fn test_bind_host_commits_machine_facts_and_persists_record() {
 /// fail-stop before any later command can falsely treat Requested as no-effect.
 #[tokio::test]
 async fn test_bind_host_reply_identity_mismatch_quarantines_and_fail_stops() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let (handle, mob_id, runtime_metadata) =
         create_host_ceremony_mob("bind-host-identity-mismatch").await;
     let stub = spawn_host_daemon_stub("identity-mismatch", None).await;
@@ -59486,7 +59671,7 @@ async fn test_bind_host_reply_identity_mismatch_quarantines_and_fail_stops() {
 
 #[tokio::test]
 async fn test_bind_host_post_ack_persistence_failure_cold_recovers_from_confirmed_anchor() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "bind-host-post-ack-persist-failure",
@@ -59568,7 +59753,7 @@ async fn test_bind_host_post_ack_persistence_failure_cold_recovers_from_confirme
 /// permits an exact live retry.
 #[tokio::test]
 async fn test_bind_host_surfaces_typed_rejection_and_retries() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let (handle, mob_id, runtime_metadata) =
         create_host_ceremony_mob("bind-host-typed-rejection").await;
     let stub = spawn_host_daemon_stub("typed-rejection", None).await;
@@ -59619,7 +59804,7 @@ async fn test_bind_host_surfaces_typed_rejection_and_retries() {
 /// retain its trust/pending obligation and fail-stop for cold exact replay.
 #[tokio::test]
 async fn test_bind_host_ambiguous_rejections_quarantine_instead_of_rolling_back() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
 
     for (label, cause) in [
         (
@@ -59695,7 +59880,7 @@ async fn test_bind_host_ambiguous_rejections_quarantine_instead_of_rolling_back(
 /// host's recipient trust; a fresh bind after revoke succeeds.
 #[tokio::test]
 async fn test_revoke_host_clears_machine_facts_and_deletes_record() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let (handle, mob_id, runtime_metadata) = create_host_ceremony_mob("revoke-host").await;
     let stub = spawn_host_daemon_stub("revoke", None).await;
     let report = handle
@@ -59757,7 +59942,7 @@ async fn test_revoke_host_clears_machine_facts_and_deletes_record() {
 /// binding from the destroyed incarnation.
 #[tokio::test]
 async fn test_destroy_revokes_bound_host_and_deletes_authority_record() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let (handle, mob_id, runtime_metadata) =
         create_host_ceremony_mob("destroy-revokes-host-authority").await;
     let stub = spawn_host_daemon_stub("destroy-revoke", None).await;
@@ -59826,7 +60011,7 @@ fn test_destroy_drain_retries_certified_failed_replacement_bind_window() {
 /// rotation commit.
 #[tokio::test]
 async fn test_rotate_supervisor_rebinds_bound_hosts_and_commits() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let (handle, mob_id, runtime_metadata) = create_host_ceremony_mob("rotate-host-commit").await;
     let stub = spawn_host_daemon_stub("rotate-commit", None).await;
     let bind_report = handle
@@ -59895,7 +60080,7 @@ async fn test_rotate_supervisor_rebinds_bound_hosts_and_commits() {
 /// back), and a retry converges through the idempotent rebind path.
 #[tokio::test]
 async fn test_rotate_supervisor_fails_closed_when_host_rejects_rebind() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let (handle, mob_id, runtime_metadata) =
         create_host_ceremony_mob("rotate-host-fail-closed").await;
     let stub = spawn_host_daemon_stub("rotate-fail-closed", None).await;
@@ -59984,7 +60169,7 @@ async fn test_rotate_supervisor_fails_closed_when_host_rejects_rebind() {
 /// without it, §9's controlling-restart contract is violated.
 #[tokio::test]
 async fn test_resume_recovers_host_bindings_from_durable_records() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let _serial = lock_real_comms_tests();
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
         "resume-host-recovery",
@@ -60901,6 +61086,356 @@ async fn test_queued_member_turns_apply_their_own_llm_identity_at_execution() {
     turn_b.wait().await.expect("turn B completion");
 }
 
+#[derive(Clone)]
+struct HeadCanonicalQueueGateClient {
+    state: Arc<HeadCanonicalQueueGateState>,
+}
+
+struct HeadCanonicalQueueGateState {
+    request_count: AtomicUsize,
+    release: tokio::sync::watch::Sender<bool>,
+}
+
+impl HeadCanonicalQueueGateClient {
+    fn new() -> Self {
+        let (release, _release_rx) = tokio::sync::watch::channel(false);
+        Self {
+            state: Arc::new(HeadCanonicalQueueGateState {
+                request_count: AtomicUsize::new(0),
+                release,
+            }),
+        }
+    }
+
+    fn request_count(&self) -> usize {
+        self.state.request_count.load(Ordering::SeqCst)
+    }
+
+    fn release(&self) {
+        self.state.release.send_replace(true);
+    }
+
+    async fn wait_for_request_count(&self, expected: usize, context: &'static str) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while self.request_count() < expected {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "{context}: observed {} of {expected} LLM requests",
+                self.request_count()
+            )
+        });
+    }
+}
+
+#[async_trait]
+impl meerkat_client::LlmClient for HeadCanonicalQueueGateClient {
+    fn project_replay_messages(
+        &self,
+        messages: &[Message],
+    ) -> Result<Vec<Message>, meerkat_client::LlmError> {
+        Ok(messages.to_vec())
+    }
+
+    fn stream<'a>(
+        &'a self,
+        _request: &'a meerkat_client::LlmRequest,
+    ) -> meerkat_client::types::LlmStream<'a> {
+        self.state.request_count.fetch_add(1, Ordering::SeqCst);
+        let mut release = self.state.release.subscribe();
+        Box::pin(async_stream::try_stream! {
+            loop {
+                if *release.borrow_and_update() {
+                    break;
+                }
+                if release.changed().await.is_err() {
+                    break;
+                }
+            }
+            yield meerkat_client::LlmEvent::TextDelta {
+                delta: "ok".to_string(),
+                meta: None,
+            };
+            yield meerkat_client::LlmEvent::Done {
+                outcome: meerkat_client::LlmDoneOutcome::Success {
+                    stop_reason: meerkat_core::StopReason::EndTurn,
+                },
+            };
+        })
+    }
+
+    fn provider(&self) -> Provider {
+        Provider::Other
+    }
+
+    async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {
+        Ok(())
+    }
+}
+
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_head_canonical_same_member_queue_admissions_serialize_committed_boundaries() {
+    const PIPELINED_TURNS: usize = 5;
+
+    let temp = tempfile::TempDir::new().expect("head-canonical queue tempdir");
+    let user_config_root = temp.path().join("user-config");
+    let runtime_root = temp.path().join("runtime");
+    let project_root = temp.path().join("project");
+    let context_root = temp.path().join("context");
+    let realm_db_path = temp.path().join("realm.db");
+    for path in [
+        &user_config_root,
+        &runtime_root,
+        &project_root,
+        &context_root,
+    ] {
+        std::fs::create_dir_all(path).expect("create head-canonical queue test root");
+    }
+
+    let factory = meerkat::AgentFactory::new(runtime_root.join("factory-store"))
+        .user_config_root(user_config_root)
+        .runtime_root(runtime_root)
+        .project_root(project_root)
+        .context_root(context_root)
+        .builtins(false)
+        .comms(true);
+    let mut config = meerkat::Config::default();
+    config.compaction.auto_compact_threshold = 1_000_000;
+    let mut builder = meerkat::FactoryAgentBuilder::new(factory, config);
+    let session_store = Arc::new(
+        meerkat_store::SqliteSessionStore::open(&realm_db_path)
+            .expect("open co-tenant HeadCanonical SessionStore"),
+    );
+    builder.default_session_store = Some(Arc::new(meerkat_store::StoreAdapter::new(
+        session_store.clone(),
+    )));
+    let session_store_dyn: Arc<dyn meerkat::SessionStore> = session_store;
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> = Arc::new(
+        meerkat_runtime::SqliteRuntimeStore::new_head_canonical(&realm_db_path)
+            .expect("open co-tenant HeadCanonical RuntimeStore"),
+    );
+    let blob_store: Arc<dyn meerkat_core::BlobStore> =
+        Arc::new(meerkat_store::MemoryBlobStore::new());
+    let service = Arc::new(meerkat_session::PersistentSessionService::new(
+        builder,
+        16,
+        session_store_dyn,
+        runtime_store,
+        blob_store,
+    ));
+
+    let mut definition = with_unique_mob_id(sample_definition(), "head-canonical-queue");
+    let lead = definition
+        .profiles
+        .get_mut(&ProfileName::from("lead"))
+        .and_then(ProfileBinding::as_inline_mut)
+        .expect("inline lead profile");
+    lead.model = "gpt-5.5".to_string();
+    lead.runtime_mode = crate::MobRuntimeMode::TurnDriven;
+    lead.tools = ToolConfig {
+        comms: true,
+        ..ToolConfig::default()
+    };
+
+    let client = HeadCanonicalQueueGateClient::new();
+    let handle = MobBuilder::new(definition, MobStorage::in_memory())
+        .with_session_service(service.clone())
+        .with_default_llm_client(Arc::new(client.clone()))
+        .create()
+        .await
+        .expect("create HeadCanonical queue mob");
+    let identity = AgentIdentity::from("head-canonical-queued-lead");
+    let session_id = handle
+        .spawn(ProfileName::from("lead"), identity.clone(), None)
+        .await
+        .expect("spawn HeadCanonical queue member")
+        .bridge_session_id()
+        .expect("turn-driven member has a bridge session")
+        .clone();
+    let member = handle
+        .member(&identity)
+        .await
+        .expect("queued member handle");
+
+    let first = tokio::time::timeout(
+        Duration::from_secs(30),
+        member.start_turn(
+            ContentInput::Text("queued-boundary-0".to_string()),
+            HandlingMode::Queue,
+            crate::MemberTurnOptions::default(),
+            None,
+        ),
+    )
+    .await
+    .expect("first queued turn admission timed out")
+    .expect("admit first queued turn");
+    client
+        .wait_for_request_count(1, "first queued turn must own the executor")
+        .await;
+
+    let mut turns = vec![first];
+    for index in 1..PIPELINED_TURNS {
+        turns.push(
+            tokio::time::timeout(
+                Duration::from_secs(30),
+                member.start_turn(
+                    ContentInput::Text(format!("queued-boundary-{index}")),
+                    HandlingMode::Queue,
+                    crate::MemberTurnOptions::default(),
+                    None,
+                ),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("queued turn {index} admission timed out"))
+            .unwrap_or_else(|error| panic!("admit queued turn {index}: {error}")),
+        );
+    }
+    tokio::task::yield_now().await;
+    assert_eq!(
+        client.request_count(),
+        1,
+        "back-to-back Queue admission must not start a second same-session turn \
+         while the first owns the executor"
+    );
+
+    client.release();
+    for (index, turn) in turns.into_iter().enumerate() {
+        tokio::time::timeout(Duration::from_secs(30), turn.wait())
+            .await
+            .unwrap_or_else(|_| panic!("queued turn {index} completion timed out"))
+            .unwrap_or_else(|error| {
+                panic!("queued turn {index} failed its committed boundary: {error}")
+            });
+    }
+    client
+        .wait_for_request_count(
+            PIPELINED_TURNS,
+            "every pipelined Queue admission must execute",
+        )
+        .await;
+
+    let follow_up = tokio::time::timeout(
+        Duration::from_secs(30),
+        member.start_turn(
+            ContentInput::Text("queued-boundary-follow-up".to_string()),
+            HandlingMode::Queue,
+            crate::MemberTurnOptions::default(),
+            None,
+        ),
+    )
+    .await
+    .expect("post-pipeline health turn admission timed out")
+    .expect("admit post-pipeline health turn");
+    tokio::time::timeout(Duration::from_secs(30), follow_up.wait())
+        .await
+        .expect("post-pipeline health turn completion timed out")
+        .expect("post-pipeline health turn commits");
+    client
+        .wait_for_request_count(
+            PIPELINED_TURNS + 1,
+            "post-pipeline HeadCanonical store remains writable",
+        )
+        .await;
+
+    let durable = tokio::time::timeout(
+        Duration::from_secs(30),
+        service.load_persisted_session(&session_id),
+    )
+    .await
+    .expect("durable HeadCanonical session load timed out")
+    .expect("load durable HeadCanonical session after queued turns")
+    .expect("queued member session remains durable");
+    let user_text = durable
+        .messages()
+        .iter()
+        .filter_map(|message| match message {
+            Message::User(user) => Some(user.text_content()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    for index in 0..PIPELINED_TURNS {
+        assert!(
+            user_text.contains(&format!("queued-boundary-{index}")),
+            "durable transcript lost queued turn {index}: {user_text}"
+        );
+    }
+    assert!(
+        user_text.contains("queued-boundary-follow-up"),
+        "durable transcript lost the post-pipeline health turn: {user_text}"
+    );
+
+    let connection =
+        rusqlite::Connection::open(&realm_db_path).expect("inspect co-tenant HeadCanonical DB");
+    let (runtime_token, runtime_revision): (String, i64) = connection
+        .query_row(
+            "SELECT committed_head_token, store_revision \
+             FROM runtime_session_authority WHERE session_id = ?1",
+            [session_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read runtime HeadCanonical authority");
+    let (session_token, session_revision, message_count): (String, i64, i64) = connection
+        .query_row(
+            "SELECT cas_token, version, message_count \
+             FROM session_heads WHERE session_id = ?1",
+            [session_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("read canonical session head");
+    assert_eq!(
+        runtime_token, session_token,
+        "runtime and SessionStore must converge on one exact HeadCanonical token"
+    );
+    assert!(
+        runtime_revision >= i64::try_from(PIPELINED_TURNS + 1).expect("turn count fits i64"),
+        "the HeadCanonical store revision must advance across every queued boundary: \
+         observed {runtime_revision}"
+    );
+    assert_eq!(
+        u32::try_from(session_revision).expect("canonical session version fits u32"),
+        durable.version(),
+        "materialized durable session must retain the canonical head schema version"
+    );
+    assert_eq!(
+        usize::try_from(message_count).expect("non-negative canonical message count"),
+        durable.messages().len(),
+        "materialized durable transcript must match the canonical head"
+    );
+    let whole_blob_rows: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM runtime_session_snapshots WHERE runtime_id = ?1",
+            [meerkat_runtime::LogicalRuntimeId::for_session(&session_id).to_string()],
+            |row| row.get(0),
+        )
+        .expect("count WholeBlob runtime snapshots");
+    assert_eq!(
+        whole_blob_rows, 0,
+        "HeadCanonical queue processing must not fall back to WholeBlob authority"
+    );
+    let provisional_tail_rows: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM runtime_head_canonical_provisional_tails \
+             WHERE session_id = ?1",
+            [session_id.to_string()],
+            |row| row.get(0),
+        )
+        .expect("count provisional HeadCanonical tails");
+    assert_eq!(
+        provisional_tail_rows, 0,
+        "all queued turn candidates must be finalized after committed completion"
+    );
+
+    tokio::time::timeout(Duration::from_secs(30), handle.shutdown())
+        .await
+        .expect("HeadCanonical queue mob shutdown timed out")
+        .expect("shutdown HeadCanonical queue mob");
+}
+
 #[tokio::test]
 async fn test_finalization_failure_suppresses_buffered_success_terminal() {
     let mut definition = sample_definition();
@@ -60911,14 +61446,15 @@ async fn test_finalization_failure_suppresses_buffered_success_terminal() {
         .as_inline_mut()
         .unwrap()
         .runtime_mode = crate::MobRuntimeMode::TurnDriven;
-    let (handle, service) = create_test_mob_with_runtime_backed_real_comms(definition).await;
+    let (handle, service) =
+        create_test_mob_with_persistent_runtime_backed_real_comms(definition).await;
     let identity = AgentIdentity::from("lead-finalization-failure");
     handle
         .spawn(ProfileName::from("lead"), identity.clone(), None)
         .await
         .expect("spawn lead");
     service.set_emit_runtime_event_before_completion(true);
-    service.set_fail_runtime_checkpoint(true);
+    service.set_fail_runtime_boundary_acknowledgement(true);
     let llm_host = Arc::new(RecordingSessionLlmReconfigureHost::new());
     service
         .runtime_adapter

@@ -244,7 +244,7 @@ async fn assert_fenced_registration_target_and_authority_contract(
     let stale_recovery_fence = Arc::new(SequencedRuntimeWriteFence::new([
         crate::store::RuntimeStoreWriteFenceOutcome::Applied,
         crate::store::RuntimeStoreWriteFenceOutcome::Conflict {
-            reason: "lease expired before recovered inputs committed".to_string(),
+            reason: "lease expired before live publication".to_string(),
         },
     ]));
     let outcome = machine
@@ -268,8 +268,9 @@ async fn assert_fenced_registration_target_and_authority_contract(
             .expect("stale recovery input retained")
             .seed
             .phase,
-        crate::input_state::InputLifecycleState::Accepted,
-        "superseded recovery must not overwrite the observed input row"
+        crate::input_state::InputLifecycleState::Queued,
+        "the exact multi-writer recovery CAS may commit deterministic Accepted-to-Queued \
+         normalization before a later live-publication fence conflict"
     );
 
     let retry_recovery_observation = machine
@@ -277,7 +278,6 @@ async fn assert_fenced_registration_target_and_authority_contract(
         .await
         .expect("re-observe normalized stale-recovery lifecycle");
     let retry_recovery_fence = Arc::new(SequencedRuntimeWriteFence::new([
-        crate::store::RuntimeStoreWriteFenceOutcome::Applied,
         crate::store::RuntimeStoreWriteFenceOutcome::Applied,
         crate::store::RuntimeStoreWriteFenceOutcome::Applied,
     ]));
@@ -291,8 +291,8 @@ async fn assert_fenced_registration_target_and_authority_contract(
         outcome,
         RuntimeSessionRegistrationOutcome::AlreadyExact { .. }
     ));
-    assert_eq!(retry_recovery_fence.checks(), 3);
-    assert_eq!(retry_recovery_fence.operations(), 3);
+    assert_eq!(retry_recovery_fence.checks(), 2);
+    assert_eq!(retry_recovery_fence.operations(), 2);
     assert!(machine.contains_session(&stale_recovery_session).await);
     assert_eq!(
         store
@@ -1928,15 +1928,15 @@ async fn runtime_loop_commits_failed_but_applied_terminal_snapshot() {
             ));
             let contributing_input_ids = primitive.contributing_input_ids().to_vec();
             let conversation_digest = session_messages_sha256(&session);
-            Ok(CoreApplyOutput::with_untyped_snapshot(RunBoundaryReceiptDraft {
+            CoreApplyOutput::new(
+                RunBoundaryReceiptDraft {
                     run_id,
                     boundary: primitive.apply_boundary(),
                     contributing_input_ids,
                     conversation_digest: Some(conversation_digest),
                     message_count: session.messages().len(),
-                }, Some(
-                    serde_json::to_vec(&session).expect("serialize applied terminal session"),
-                ), Some(
+                },
+                Some(
                     meerkat_core::lifecycle::core_executor::CoreApplyTerminal::MachineTerminalFailure {
                         error: meerkat_core::TurnErrorMetadata::terminal(
                             meerkat_core::TurnTerminalCauseKind::ToolFailure,
@@ -1944,7 +1944,23 @@ async fn runtime_loop_commits_failed_but_applied_terminal_snapshot() {
                             "runtime-loop applied terminal",
                         ),
                     },
-                )))
+                ),
+            )
+            .with_session(Arc::new(session))
+            .map_err(|error| CoreExecutorError::Internal(error.to_string()))
+        }
+
+        async fn acknowledge_committed_session_boundary(
+            &mut self,
+            authority: &meerkat_core::CommittedSessionBoundaryAuthority,
+        ) -> Result<(), CoreExecutorError> {
+            if authority.session_id() != &self.session_id {
+                return Err(CoreExecutorError::Internal(
+                    "applied-terminal executor received another session's committed authority"
+                        .to_string(),
+                ));
+            }
+            Ok(())
         }
 
         async fn cancel_after_boundary(
@@ -2002,12 +2018,15 @@ async fn runtime_loop_commits_failed_but_applied_terminal_snapshot() {
     .await
     .expect("machine-terminal completion should resolve")
     .expect("completion authority should remain available");
-    assert!(matches!(
-        completion,
-        CompletionOutcome::AbandonedWithError { error, .. }
-            if error.kind == meerkat_core::TurnTerminalCauseKind::ToolFailure
-                && error.outcome == Some(meerkat_core::TurnTerminalOutcome::Failed)
-    ));
+    assert!(
+        matches!(
+            completion,
+            CompletionOutcome::AbandonedWithError { ref error, .. }
+                if error.kind == meerkat_core::TurnTerminalCauseKind::ToolFailure
+                    && error.outcome == Some(meerkat_core::TurnTerminalOutcome::Failed)
+        ),
+        "unexpected machine-terminal completion: {completion:?}"
+    );
     let state = adapter
         .input_state(&session_id, &input_id)
         .await
@@ -2220,13 +2239,15 @@ async fn teardown_required_runtime_loop_exit_unregisters_after_exact_cleanup() {
 }
 
 #[tokio::test]
-async fn no_pending_runtime_loop_exit_persists_unregister_before_exact_cleanup() {
+async fn no_pending_runtime_loop_exit_persists_unregister_and_ensure_joins_settlement() {
     struct NoPendingExecutor {
         stop_calls: Arc<AtomicUsize>,
         cleanup_calls: Arc<AtomicUsize>,
         cleanup_started: Arc<Notify>,
         release_cleanup: Arc<Notify>,
     }
+
+    struct ReplacementExecutor;
 
     #[async_trait::async_trait]
     impl CoreExecutor for NoPendingExecutor {
@@ -2269,6 +2290,33 @@ async fn no_pending_runtime_loop_exit_persists_unregister_before_exact_cleanup()
             self.cleanup_calls.fetch_add(1, Ordering::SeqCst);
             self.cleanup_started.notify_one();
             self.release_cleanup.notified().await;
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for ReplacementExecutor {
+        async fn apply(
+            &mut self,
+            _run_id: RunId,
+            _primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            Err(CoreExecutorError::Internal(
+                "replacement executor was not expected to run".to_string(),
+            ))
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -2323,15 +2371,36 @@ async fn no_pending_runtime_loop_exit_persists_unregister_before_exact_cleanup()
         durable.unregister_progress().is_some(),
         "NoPendingBoundary must persist its unregister prefix before cleanup"
     );
+
+    let mut replacement = tokio::spawn({
+        let machine = Arc::clone(&machine);
+        let session_id = session_id.clone();
+        async move {
+            machine
+                .ensure_session_with_executor(session_id, Box::new(ReplacementExecutor))
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_millis(2_250), &mut replacement)
+        .await
+        .expect_err(
+            "ensure must join exact unregister settlement beyond the old two-second caller grace",
+        );
+
     release_cleanup.notify_one();
 
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while machine.contains_session(&session_id).await {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("no-pending handoff must drive canonical unregister");
+    tokio::time::timeout(Duration::from_secs(3), &mut replacement)
+        .await
+        .expect("replacement ensure should finish after exact unregister settlement")
+        .expect("replacement ensure task should not panic")
+        .expect("replacement executor should attach after exact unregister settlement");
+    assert!(
+        machine
+            .session_has_executor(&session_id)
+            .await
+            .expect("observe replacement executor attachment"),
+        "replacement ensure must restart its claim transaction after settlement"
+    );
     assert_eq!(stop_calls.load(Ordering::SeqCst), 1);
     assert_eq!(cleanup_calls.load(Ordering::SeqCst), 1);
 }
@@ -2423,7 +2492,7 @@ async fn machine_terminal_cancellation_drives_completion_result_through_runtime_
 }
 
 #[tokio::test]
-async fn completion_preserves_structured_output_when_runtime_finalization_fails() {
+async fn completion_waiter_fails_closed_when_runtime_finalization_fails() {
     struct StructuredOutputExecutor {
         session_id: SessionId,
     }
@@ -2504,42 +2573,29 @@ async fn completion_preserves_structured_output_when_runtime_finalization_fails(
         .expect("input should be accepted");
     assert!(matches!(accept_outcome, AcceptOutcome::Accepted { .. }));
 
-    let completion = tokio::time::timeout(
+    let completion_error = tokio::time::timeout(
         Duration::from_secs(1),
         completion_handle
             .expect("accepted input should register a completion waiter")
-            .wait_authorized(),
+            .try_wait(),
     )
     .await
-    .expect("completion waiter should resolve after finalization failure");
+    .expect("completion waiter must not hang after finalization failure")
+    .expect_err("a rejected durable boundary must not publish a terminal outcome");
 
-    match completion {
-        CompletionOutcome::CompletedWithFinalizationFailure { error } => {
-            // #85: the non-durable result is intentionally NOT carried on this
-            // outcome; only the typed finalization error reaches the waiter.
-            assert_eq!(
-                error.kind,
-                meerkat_core::TurnTerminalCauseKind::RuntimeApplyFailure
-            );
-            assert!(error.terminal);
-            assert_eq!(
-                error.outcome,
-                Some(meerkat_core::TurnTerminalOutcome::Failed)
-            );
+    match completion_error {
+        crate::completion::CompletionWaitError::AuthorityUnavailable(detail) => {
             assert!(
-                error
-                    .detail
-                    .as_deref()
-                    .is_some_and(|detail| detail.contains("synthetic atomic_apply failure")),
-                "finalization failure detail should remain available: {error:?}"
+                detail.contains("synthetic atomic_apply failure"),
+                "mechanical waiter failure must retain the durable commit cause: {detail}"
             );
         }
-        other => panic!("expected completed output with finalization failure, got {other:?}"),
+        other => panic!("expected authority-unavailable waiter failure, got {other:?}"),
     }
 }
 
 #[tokio::test]
-async fn directed_machine_terminal_commit_failure_publishes_the_same_terminal_as_its_waiter() {
+async fn directed_machine_terminal_commit_failure_fails_waiter_without_publication() {
     #[derive(Default)]
     struct RecordingTerminalPublisher {
         events: std::sync::Mutex<Vec<meerkat_core::event::AgentEvent>>,
@@ -2667,67 +2723,42 @@ async fn directed_machine_terminal_commit_failure_publishes_the_same_terminal_as
         &interaction_uuid.to_string(),
     )
     .expect("tracked directed input");
-    let interaction_id = directed_input.id().clone();
     let (accept_outcome, completion_handle) = adapter
         .accept_input_with_completion(&session_id, directed_input)
         .await
         .expect("directed input should be accepted");
     assert!(matches!(accept_outcome, AcceptOutcome::Accepted { .. }));
 
-    let completion_wait = tokio::time::timeout(
+    let completion_error = tokio::time::timeout(
         Duration::from_secs(2),
         completion_handle
             .expect("accepted directed input should register a completion waiter")
-            .wait_authorized(),
+            .try_wait(),
     )
-    .await;
-    let completion = match completion_wait {
-        Ok(completion) => completion,
-        Err(error) => {
-            let runtime_state = adapter.runtime_state(&session_id).await;
-            let input_state = adapter.input_state(&session_id, &interaction_id).await;
-            let published = publisher
-                .events
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
-            panic!(
-                "directed completion waiter should resolve from durable stop authority: {error}; runtime={runtime_state:?}; input={input_state:?}; events={published:?}"
-            );
-        }
-    };
-    assert!(matches!(
-        &completion,
-        CompletionOutcome::RuntimeTerminated { reason, .. } if reason == "runtime stopped"
-    ));
+    .await
+    .expect("directed completion waiter must not hang after rejected persistence")
+    .expect_err("a rejected machine-terminal boundary must not mint a terminal outcome");
+    assert!(
+        matches!(
+            completion_error,
+            crate::completion::CompletionWaitError::AuthorityUnavailable(ref detail)
+                if detail.contains("atomic_apply_with_machine_lifecycle")
+        ),
+        "mechanical waiter failure must retain the rejected atomic seam: {completion_error:?}"
+    );
 
     let events = publisher
         .events
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    assert_eq!(events.len(), 1, "one exact directed terminal is published");
-    match &events[0] {
-        meerkat_core::event::AgentEvent::InteractionFailed {
-            interaction_id: published_id,
-            reason: meerkat_core::event::InteractionFailureReason::Abandoned { detail },
-        } => {
-            assert_eq!(published_id.0, interaction_id.0);
-            assert_eq!(detail, "runtime stopped");
-            assert_eq!(
-                completion
-                    .error_metadata()
-                    .expect("runtime termination carries typed error metadata")
-                    .detail
-                    .as_deref(),
-                Some(detail.as_str())
-            );
-        }
-        other => panic!("unexpected directed terminal event: {other:?}"),
-    }
+    assert!(
+        events.is_empty(),
+        "a rejected durable boundary must not publish a directed terminal"
+    );
 }
 
 #[tokio::test]
-async fn nondirected_machine_terminal_commit_failure_has_authorized_finalization_error() {
+async fn nondirected_machine_terminal_commit_failure_fails_waiter_without_terminal() {
     struct NonDirectedTerminalExecutor {
         session_id: SessionId,
         turn_state: Arc<dyn meerkat_core::TurnStateHandle>,
@@ -2813,35 +2844,23 @@ async fn nondirected_machine_terminal_commit_failure_has_authorized_finalization
         )
         .await
         .expect("non-directed input should be accepted");
-    let completion = tokio::time::timeout(
+    let completion_error = tokio::time::timeout(
         Duration::from_secs(2),
         completion_handle
             .expect("accepted input should register a completion waiter")
-            .wait_authorized(),
+            .try_wait(),
     )
     .await
-    .expect("finalization authority should resolve the non-directed waiter");
-
-    match completion {
-        CompletionOutcome::AbandonedWithError { error, .. } => {
-            assert_eq!(
-                error.kind,
-                meerkat_core::TurnTerminalCauseKind::RuntimeApplyFailure
-            );
-            assert_eq!(
-                error.outcome,
-                Some(meerkat_core::TurnTerminalOutcome::Failed)
-            );
-            assert!(error.terminal);
-            assert!(
-                error.detail.as_deref().is_some_and(|detail| {
-                    detail.contains("atomic_apply_with_machine_lifecycle")
-                }),
-                "the typed finalization error must name the unsupported atomic seam: {error:?}"
-            );
-        }
-        other => panic!("expected authorized failed finalization, got {other:?}"),
-    }
+    .expect("non-directed completion waiter must not hang after rejected persistence")
+    .expect_err("a rejected machine-terminal boundary must not mint a terminal outcome");
+    assert!(
+        matches!(
+            completion_error,
+            crate::completion::CompletionWaitError::AuthorityUnavailable(ref detail)
+                if detail.contains("atomic_apply_with_machine_lifecycle")
+        ),
+        "mechanical waiter failure must retain the rejected atomic seam: {completion_error:?}"
+    );
 }
 
 #[tokio::test]
@@ -2868,11 +2887,9 @@ async fn runtime_loop_checkpoints_session_snapshot_after_machine_commit() {
                 conversation_digest: Some(session_messages_sha256(&session)),
                 message_count: 0,
             };
-            let session_snapshot = serde_json::to_vec(&session)
-                .map_err(|err| CoreExecutorError::Internal(err.to_string()))?;
-            Ok(CoreApplyOutput::with_run_result(
+            CoreApplyOutput::with_run_result(
                 receipt,
-                Some(session_snapshot),
+                None,
                 meerkat_core::RunResult {
                     text: "done".to_string(),
                     session_id: self.session_id.clone(),
@@ -2885,7 +2902,9 @@ async fn runtime_loop_checkpoints_session_snapshot_after_machine_commit() {
                     schema_warnings: None,
                     skill_diagnostics: None,
                 },
-            ))
+            )
+            .with_session(Arc::new(session))
+            .map_err(|error| CoreExecutorError::Internal(error.to_string()))
         }
 
         async fn checkpoint_committed_session_snapshot(
@@ -2907,11 +2926,25 @@ async fn runtime_loop_checkpoints_session_snapshot_after_machine_commit() {
             Ok(())
         }
 
-        async fn acknowledge_whole_blob_session_boundary(
+        async fn acknowledge_committed_session_boundary(
             &mut self,
-            committed_store_revision: u64,
-            committed_blob_sha256: &str,
+            authority: &meerkat_core::CommittedSessionBoundaryAuthority,
         ) -> Result<(), CoreExecutorError> {
+            let meerkat_core::CommittedSessionBoundaryAuthority::WholeBlob {
+                session_id,
+                committed_store_revision,
+                committed_blob_sha256,
+            } = authority
+            else {
+                return Err(CoreExecutorError::Internal(format!(
+                    "WholeBlob checkpoint probe received {authority:?}"
+                )));
+            };
+            if session_id != &self.session_id {
+                return Err(CoreExecutorError::Internal(
+                    "WholeBlob checkpoint probe received another session's authority".to_string(),
+                ));
+            }
             self.checkpoint_calls.fetch_add(1, Ordering::SeqCst);
             let runtime_id = crate::identifiers::LogicalRuntimeId::for_session(&self.session_id);
             let committed = crate::store::RuntimeStore::load_whole_blob_store_authority(
@@ -2921,7 +2954,7 @@ async fn runtime_loop_checkpoints_session_snapshot_after_machine_commit() {
             .await
             .map_err(|err| CoreExecutorError::Internal(err.to_string()))?;
             if committed.as_ref().is_some_and(|authority| {
-                authority.store_revision() == committed_store_revision
+                authority.store_revision() == *committed_store_revision
                     && authority.blob_sha256() == committed_blob_sha256
             }) {
                 self.observed_committed_snapshot
@@ -2993,7 +3026,7 @@ async fn aborted_nondirected_owned_commit_recovers_completed_after_compaction_ch
     let commit_entered = Arc::new(Notify::new());
     let release_commit = Arc::new(Notify::new());
     let store: Arc<dyn RuntimeStore> = Arc::new(
-        RuntimeCommitAtomicityStore::block_atomic_apply_after_commit(
+        RuntimeCommitAtomicityStore::block_success_boundary_after_commit(
             Arc::clone(&inner),
             Arc::clone(&commit_entered),
             Arc::clone(&release_commit),
@@ -3288,7 +3321,7 @@ async fn aborted_directed_candidate_checkpoint_recovers_exact_completed_terminal
         .expect("accept directed Candidate recovery input");
     tokio::time::timeout(Duration::from_secs(1), checkpoint_entered.notified())
         .await
-        .expect("directed commit must reach its first compatibility checkpoint");
+        .expect("directed commit must reach its store-authority acknowledgement");
 
     abort_attached_runtime_loop(&machine, &session_id).await;
     release_checkpoint.notify_one();
@@ -3325,7 +3358,7 @@ async fn aborted_directed_candidate_checkpoint_recovers_exact_completed_terminal
     assert_eq!(
         checkpoint_calls.load(Ordering::SeqCst),
         3,
-        "the cancelled checkpoint plus compaction and Candidate recovery checkpoints are all observed"
+        "the cancelled authority acknowledgement plus compaction and Candidate recovery checkpoints are all observed"
     );
     await_runtime_recovery_stop(&machine, &session_id).await;
     drop(runtime_bindings);
@@ -3910,11 +3943,9 @@ async fn runtime_loop_checkpoint_failure_is_completion_finalization_failure() {
                 conversation_digest: Some(session_messages_sha256(&session)),
                 message_count: 0,
             };
-            let session_snapshot = serde_json::to_vec(&session)
-                .map_err(|err| CoreExecutorError::Internal(err.to_string()))?;
-            Ok(CoreApplyOutput::with_run_result(
+            CoreApplyOutput::with_run_result(
                 receipt,
-                Some(session_snapshot),
+                None,
                 meerkat_core::RunResult {
                     text: "checkpoint-fails-after-output".to_string(),
                     session_id: self.session_id.clone(),
@@ -3927,7 +3958,9 @@ async fn runtime_loop_checkpoint_failure_is_completion_finalization_failure() {
                     schema_warnings: None,
                     skill_diagnostics: None,
                 },
-            ))
+            )
+            .with_session(Arc::new(session))
+            .map_err(|error| CoreExecutorError::Internal(error.to_string()))
         }
 
         async fn checkpoint_committed_session_snapshot(
@@ -3939,10 +3972,9 @@ async fn runtime_loop_checkpoint_failure_is_completion_finalization_failure() {
             ))
         }
 
-        async fn acknowledge_whole_blob_session_boundary(
+        async fn acknowledge_committed_session_boundary(
             &mut self,
-            _committed_store_revision: u64,
-            _committed_blob_sha256: &str,
+            _authority: &meerkat_core::CommittedSessionBoundaryAuthority,
         ) -> Result<(), CoreExecutorError> {
             Err(CoreExecutorError::apply_failed_unknown(
                 "synthetic checkpoint projection failure",
@@ -5096,7 +5128,7 @@ async fn unregister_session_unsupported_atomic_finalization_fails_closed() {
 }
 
 #[tokio::test]
-async fn unregister_session_unknown_commit_outcome_retries_without_durable_rollback() {
+async fn unregister_session_unknown_commit_outcome_is_settled_before_executor_replacement() {
     let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());
     let store = Arc::new(RuntimeCommitAtomicityStore::commit_then_report_unknown(
         Arc::clone(&inner),
@@ -5174,12 +5206,7 @@ async fn unregister_session_unknown_commit_outcome_retries_without_durable_rollb
             .is_none(),
         "the synthetic committed side of the ambiguous outcome retired the old ops epoch"
     );
-    let lifecycle_after_unknown = crate::store::load_machine_lifecycle(inner.as_ref(), &runtime_id)
-        .await
-        .unwrap();
-    let progress_writes_after_unknown = store.successful_unregister_progress().len();
     let finalizations_after_unknown = store.unregister_finalization_calls();
-    let all_commit_calls_after_unknown = store.commit_machine_lifecycle_calls();
 
     let register_error = adapter
         .register_session(session_id.clone())
@@ -5191,104 +5218,27 @@ async fn unregister_session_unknown_commit_outcome_retries_without_durable_rollb
         .await
         .expect_err("binding preparation must not revive an ambiguous terminal retry anchor");
     assert!(bindings_error.to_string().contains("outcome is unknown"));
-    let attach_error = adapter
+    adapter
         .ensure_session_with_executor(session_id.clone(), Box::new(RuntimeParityNoopExecutor))
         .await
-        .expect_err("executor attachment must not revive an ambiguous terminal retry anchor");
-    assert!(matches!(
-        attach_error,
-        RuntimeDriverError::UnregisterFinalizationOutcomeUnknown { .. }
-    ));
-    let retire_error =
-        <MeerkatMachine as SessionServiceRuntimeExt>::retire_runtime(adapter.as_ref(), &session_id)
-            .await
-            .expect_err("lifecycle controls must freeze behind an ambiguous finalization");
-    assert!(retire_error.to_string().contains("outcome is unknown"));
-    assert_eq!(
-        adapter
-            .session_dsl_state(&session_id)
-            .await
-            .expect("fenced operations must retain generated terminal authority"),
-        terminal_retry_anchor,
-        "fenced operations must not mutate the exact terminal retry anchor"
-    );
-    assert_eq!(
-        crate::store::load_machine_lifecycle(inner.as_ref(), &runtime_id)
-            .await
-            .unwrap(),
-        lifecycle_after_unknown,
-        "fenced operations must not overwrite the possibly committed lifecycle snapshot"
-    );
-    assert_eq!(
-        store.commit_machine_lifecycle_calls(),
-        all_commit_calls_after_unknown,
-        "fenced operations must issue no ordinary or atomic lifecycle writes"
-    );
-    assert_eq!(
-        store.successful_unregister_progress().len(),
-        progress_writes_after_unknown,
-        "fenced operations must not append unregister progress"
-    );
-
-    store
-        .fail_unregister_finalization
-        .store(true, Ordering::SeqCst);
-    adapter
-        .unregister_session(&session_id)
-        .await
-        .expect_err("a failed idempotent finalization retry must retain its witness");
-    assert!(adapter.contains_session(&session_id).await);
+        .expect("executor ensure must settle the exact unregister witness before replacement");
     assert!(
         adapter
-            .sessions
-            .read()
+            .session_has_executor(&session_id)
             .await
-            .get(&session_id)
-            .is_some_and(|entry| entry.pending_unregister_finalization.is_some()),
-        "every failed exact retry must retain the pending finalization witness"
+            .expect("observe replacement executor"),
+        "replacement executor must attach only after unregister settlement"
     );
-    let anchor_after_failed_retry = adapter
-        .session_dsl_state(&session_id)
-        .await
-        .expect("failed retry must retain terminal generated authority");
-    assert_eq!(
-        anchor_after_failed_retry.registration_phase,
-        mm_dsl::RegistrationPhase::Draining
-    );
-    assert!(anchor_after_failed_retry.session_id.is_none());
-    assert_eq!(
-        store.unregister_finalization_calls(),
-        finalizations_after_unknown + 1,
-        "retry must issue only the exact atomic unregister finalization"
-    );
-    assert_eq!(
-        store.successful_unregister_progress().len(),
-        progress_writes_after_unknown,
-        "retry must never emit an ordinary lifecycle progress write"
+    assert!(
+        store.unregister_finalization_calls() > finalizations_after_unknown,
+        "settlement must retry the exact atomic finalization before replacing the executor"
     );
 
     adapter
         .unregister_session(&session_id)
         .await
-        .expect("idempotent retry must converge after the lost acknowledgement");
+        .expect("replacement runtime should unregister cleanly");
     assert!(!adapter.contains_session(&session_id).await);
-    assert_eq!(
-        crate::store::load_machine_lifecycle(inner.as_ref(), &runtime_id)
-            .await
-            .unwrap(),
-        lifecycle_after_unknown,
-        "retry must preserve the exact committed final lifecycle"
-    );
-    assert_eq!(
-        store.unregister_finalization_calls(),
-        finalizations_after_unknown + 2,
-        "converging retry must issue only one more atomic finalization"
-    );
-    assert_eq!(
-        store.successful_unregister_progress().len(),
-        progress_writes_after_unknown,
-        "converging retry must not overwrite terminal truth through the ordinary lifecycle path"
-    );
     assert!(
         crate::store::RuntimeStore::load_ops_lifecycle(inner.as_ref(), &runtime_id)
             .await
@@ -5705,7 +5655,7 @@ async fn unregister_session_finalization_persist_failure_restores_retry_anchor()
 }
 
 #[tokio::test]
-async fn unregister_retry_repersist_live_feedback_before_advancing_teardown() {
+async fn unregister_progress_persist_failure_requires_cold_reload_from_durable_prefix() {
     let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());
     let store = Arc::new(RuntimeCommitAtomicityStore::pass_through(Arc::clone(
         &inner,
@@ -5732,10 +5682,26 @@ async fn unregister_retry_repersist_live_feedback_before_advancing_teardown() {
         .await
         .expect_err("the first live-feedback progress write should fail once");
     assert!(
-        error
-            .to_string()
-            .contains("synthetic commit_machine_lifecycle failure"),
+        matches!(&error, RuntimeDriverError::RecoveryRepairBlocked { .. }),
         "unexpected progress-persist failure: {error}"
+    );
+    let reload_required = adapter
+        .session_durability_health(&session_id)
+        .await
+        .expect("failed unregister retains its durability gate")
+        .expect("persistent session has a durability gate")
+        .require_ready()
+        .expect_err("failed unregister progress must require a cold reload");
+    assert_eq!(
+        reload_required.operation(),
+        "ordinary_lifecycle_commit",
+        "failed unregister must poison the exact lifecycle-persist boundary"
+    );
+    assert!(
+        reload_required
+            .reason()
+            .contains("synthetic commit_machine_lifecycle failure"),
+        "failed unregister must retain the store failure evidence: {reload_required}"
     );
 
     let live = adapter
@@ -5762,17 +5728,46 @@ async fn unregister_retry_repersist_live_feedback_before_advancing_teardown() {
         "the failed feedback write must not masquerade as durable progress"
     );
 
-    adapter
+    let retry_error = adapter
         .unregister_session(&session_id)
         .await
-        .expect("the next owned saga should re-persist live progress then finish");
+        .expect_err("the poisoned shell must not retry from undurable live progress");
+    assert!(
+        matches!(
+            &retry_error,
+            RuntimeDriverError::RecoveryRepairBlocked { .. }
+        ),
+        "same-process retry must remain fail-closed: {retry_error}"
+    );
+
+    drop(adapter);
+    let recovered = Arc::new(MeerkatMachine::persistent(
+        store.clone() as Arc<dyn crate::store::RuntimeStore>,
+        memory_blob_store(),
+    ));
+    recovered
+        .register_session(session_id.clone())
+        .await
+        .expect("fresh registration should recover the exact durable unregister prefix");
+    let recovered_authority = recovered
+        .session_dsl_state(&session_id)
+        .await
+        .expect("cold-recovered unregister authority");
+    assert!(recovered_authority.unregister_runtime_loop_drain_pending);
+    assert!(recovered_authority.unregister_comms_drain_exit_pending);
+    assert!(recovered_authority.unregister_completion_waiter_drain_pending);
+
+    recovered
+        .unregister_session(&session_id)
+        .await
+        .expect("cold-recovered saga should execute its remaining durable obligations");
     let progress = store.successful_unregister_progress();
     assert_eq!(
         progress.get(progress_before + 1),
-        Some(&Some((false, true, true))),
-        "retry must first durably publish the already-live feedback prefix"
+        Some(&Some((true, true, true))),
+        "cold registration must republish the exact durable all-pending prefix before realizing further drain feedback"
     );
-    assert!(!adapter.contains_session(&session_id).await);
+    assert!(!recovered.contains_session(&session_id).await);
 }
 
 #[tokio::test]
@@ -5902,7 +5897,7 @@ async fn unregister_session_preserves_primary_when_rollback_persist_also_fails()
         "combined error must report rollback persistence separately: {rendered}"
     );
     assert!(
-        rendered.contains("unregister rollback lifecycle persist failed"),
+        rendered.contains("unregister rollback recovery lifecycle persist failed"),
         "combined error must retain the rollback-persist cause: {rendered}"
     );
     assert!(
@@ -9719,6 +9714,12 @@ async fn persistent_destroy_durable_commit_observes_canonical_destroy_truth() {
             RuntimeStore::session_persistence_profile(self.inner.as_ref())
         }
 
+        fn input_state_batch_cas_implementation_profile(
+            &self,
+        ) -> crate::store::InputStateBatchCasImplementationProfile {
+            self.inner.input_state_batch_cas_implementation_profile()
+        }
+
         fn supports_compaction_projection_outbox(&self) -> bool {
             self.inner.supports_compaction_projection_outbox()
         }
@@ -9788,6 +9789,30 @@ async fn persistent_destroy_durable_commit_observes_canonical_destroy_truth() {
             runtime_id: &LogicalRuntimeId,
         ) -> Result<Vec<crate::store::InputStateRow>, crate::store::RuntimeStoreError> {
             self.inner.load_input_states(runtime_id).await
+        }
+
+        async fn load_input_states_with_versions(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<crate::store::PreparedRecoveryInputSnapshot, crate::store::RuntimeStoreError>
+        {
+            self.inner.load_input_states_with_versions(runtime_id).await
+        }
+
+        async fn compare_and_swap_recovery_input_states_atomically(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            expected_revision: crate::store::RecoveryInputSetRevision,
+            mutations: &[crate::store::RecoveryInputStateMutation],
+        ) -> Result<crate::store::InputStateBatchCasOutcome, crate::store::RuntimeStoreError>
+        {
+            self.inner
+                .compare_and_swap_recovery_input_states_atomically(
+                    runtime_id,
+                    expected_revision,
+                    mutations,
+                )
+                .await
         }
 
         async fn load_boundary_receipt(
@@ -9871,6 +9896,30 @@ async fn persistent_destroy_durable_commit_observes_canonical_destroy_truth() {
         ) -> Result<Option<crate::input_state::StoredInputState>, crate::store::RuntimeStoreError>
         {
             self.inner.load_input_state(runtime_id, input_id).await
+        }
+
+        async fn load_input_states_by_ids(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            input_ids: &[InputId],
+        ) -> Result<
+            Vec<Option<crate::input_state::StoredInputState>>,
+            crate::store::RuntimeStoreError,
+        > {
+            self.inner
+                .load_input_states_by_ids(runtime_id, input_ids)
+                .await
+        }
+
+        async fn load_pending_terminal_owner_ids_page(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            after: Option<&InputId>,
+            limit: usize,
+        ) -> Result<Vec<InputId>, crate::store::RuntimeStoreError> {
+            self.inner
+                .load_pending_terminal_owner_ids_page(runtime_id, after, limit)
+                .await
         }
 
         async fn load_machine_lifecycle_record(
@@ -12562,7 +12611,7 @@ mod stop_teardown_coordinator_class {
     }
 
     #[tokio::test]
-    async fn revival_persist_failure_restores_stopped_stop_receipt_before_retry() {
+    async fn revival_persist_failure_requires_registration_authorized_cold_reload() {
         let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());
         let store = Arc::new(RuntimeCommitAtomicityStore::pass_through(Arc::clone(
             &inner,
@@ -12602,19 +12651,32 @@ mod stop_teardown_coordinator_class {
             .await
             .expect_err("synthetic revival lifecycle persistence failure must surface");
         assert!(
-            error
-                .to_string()
-                .contains("synthetic commit_machine_lifecycle failure"),
+            matches!(
+                &error,
+                crate::meerkat_machine::RuntimeBindingsError::PrepareFailed(
+                    failed_session,
+                    _
+                ) if failed_session == &session_id
+            ),
             "unexpected revival persistence error: {error}"
         );
+        let reload_required = machine
+            .session_durability_health(&session_id)
+            .await
+            .expect("failed revival retains its durability gate")
+            .expect("persistent session has a durability gate")
+            .require_ready()
+            .expect_err("failed revival must require a cold reload");
         assert_eq!(
-            machine
-                .session_dsl_state(&session_id)
-                .await
-                .expect("failed revival must retain session authority")
-                .lifecycle_phase,
-            mm_dsl::MeerkatPhase::Stopped,
-            "failed revival persistence must restore live generated Stopped truth"
+            reload_required.operation(),
+            "ordinary_lifecycle_commit",
+            "failed revival must poison the exact lifecycle-persist boundary"
+        );
+        assert!(
+            reload_required
+                .reason()
+                .contains("synthetic commit_machine_lifecycle failure"),
+            "failed revival must retain the store failure evidence: {reload_required}"
         );
         assert_eq!(
             crate::store::load_runtime_state(inner.as_ref(), &runtime_id)
@@ -12623,34 +12685,42 @@ mod stop_teardown_coordinator_class {
             Some(RuntimeState::Stopped),
             "failed revival persistence must leave durable Stopped truth unchanged"
         );
-        {
-            let sessions = machine.sessions.read().await;
-            let coordinator = sessions
-                .get(&session_id)
-                .and_then(|entry| entry.runtime_stop_cleanup_coordinator.as_ref())
-                .expect("failed revival must retain the completed stop receipt");
-            assert_eq!(coordinator.coordinator_id, original_coordinator_id);
-            assert!(matches!(
-                coordinator.result_rx.borrow().clone(),
-                Some(Ok(()))
-            ));
-        }
 
-        machine
+        let retry_error = machine
             .prepare_bindings(session_id.clone())
             .await
-            .expect("retry must revive and persist the stopped session");
+            .expect_err("same-process retry must not reuse ambiguous revival state");
+        assert!(
+            matches!(
+                &retry_error,
+                crate::meerkat_machine::RuntimeBindingsError::PrepareFailed(
+                    failed_session,
+                    _
+                ) if failed_session == &session_id
+            ),
+            "same-process revival retry must remain fail-closed: {retry_error}"
+        );
+
+        drop(machine);
+        let recovered = Arc::new(MeerkatMachine::persistent(
+            store.clone() as Arc<dyn crate::store::RuntimeStore>,
+            memory_blob_store(),
+        ));
+        recovered
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("fresh registration must revive from durable Stopped truth");
         assert_eq!(
-            machine
+            recovered
                 .session_dsl_state(&session_id)
                 .await
-                .expect("retried revival must retain session authority")
+                .expect("cold-reloaded revival must retain session authority")
                 .lifecycle_phase,
             mm_dsl::MeerkatPhase::Attached,
-            "successful retry must advance through PrepareBindings into a live attached phase"
+            "cold reload must advance through PrepareBindings into a live attached phase"
         );
         {
-            let sessions = machine.sessions.read().await;
+            let sessions = recovered.sessions.read().await;
             let entry = sessions
                 .get(&session_id)
                 .expect("revived session must remain registered");
@@ -12660,12 +12730,12 @@ mod stop_teardown_coordinator_class {
             );
         }
 
-        machine
+        recovered
             .stop_runtime_executor(&session_id, "new stop after retried revival")
             .await
             .expect("post-revival stop must execute instead of reusing old success");
         let new_coordinator_id = {
-            let sessions = machine.sessions.read().await;
+            let sessions = recovered.sessions.read().await;
             let coordinator = sessions
                 .get(&session_id)
                 .and_then(|entry| entry.runtime_stop_cleanup_coordinator.as_ref())
@@ -12681,7 +12751,7 @@ mod stop_teardown_coordinator_class {
             "post-revival stop must not reuse the retired coordinator result"
         );
         assert_eq!(
-            machine
+            recovered
                 .session_dsl_state(&session_id)
                 .await
                 .expect("post-revival stop authority")
@@ -12689,7 +12759,7 @@ mod stop_teardown_coordinator_class {
             mm_dsl::MeerkatPhase::Stopped
         );
 
-        machine
+        recovered
             .unregister_session(&session_id)
             .await
             .expect("test cleanup should remove the stopped session");
@@ -16289,7 +16359,11 @@ async fn unavailable_exact_boundary_is_the_only_queued_fallback() {
         .meerkat_machine_spine_snapshot(&rig.session_id)
         .await
         .expect("snapshot should exist while busy");
-    assert!(during_busy.inputs.steer_queue.contains(&peer_id));
+    assert_eq!(during_busy.inputs.queue, vec![peer_id.clone()]);
+    assert!(
+        !during_busy.inputs.steer_queue.contains(&peer_id),
+        "typed unavailable normalization must leave no stale Steer projection"
+    );
     assert_eq!(
         during_busy
             .inputs
@@ -24799,9 +24873,7 @@ impl CoreExecutor for RuntimeRecoveryExecutor {
         run_id: RunId,
         primitive: RunPrimitive,
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
-        let session_snapshot = serde_json::to_vec(&self.session)
-            .map_err(|error| CoreExecutorError::Internal(error.to_string()))?;
-        Ok(CoreApplyOutput::with_run_result(
+        CoreApplyOutput::with_run_result(
             RunBoundaryReceiptDraft {
                 run_id,
                 boundary: primitive.apply_boundary(),
@@ -24809,7 +24881,7 @@ impl CoreExecutor for RuntimeRecoveryExecutor {
                 conversation_digest: Some(session_messages_sha256(&self.session)),
                 message_count: self.session.messages().len(),
             },
-            Some(session_snapshot),
+            None,
             meerkat_core::RunResult {
                 text: self.result_text.clone(),
                 session_id: self.session.id().clone(),
@@ -24822,7 +24894,9 @@ impl CoreExecutor for RuntimeRecoveryExecutor {
                 schema_warnings: None,
                 skill_diagnostics: None,
             },
-        ))
+        )
+        .with_session(Arc::new(self.session.clone()))
+        .map_err(|error| CoreExecutorError::Internal(error.to_string()))
     }
 
     async fn checkpoint_committed_session_snapshot(
@@ -24834,6 +24908,29 @@ impl CoreExecutor for RuntimeRecoveryExecutor {
                 .map_err(|error| CoreExecutorError::Internal(error.to_string()))?;
         if checkpoint.id() != self.session.id() || checkpoint.messages().is_empty() {
             return Ok(());
+        }
+        let call = self.target_checkpoint_calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if call == 1
+            && let Some((entered, release)) = &self.first_checkpoint_gate
+        {
+            entered.notify_one();
+            release.notified().await;
+        }
+        self.projection_order
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push("checkpoint");
+        Ok(())
+    }
+
+    async fn acknowledge_committed_session_boundary(
+        &mut self,
+        authority: &meerkat_core::CommittedSessionBoundaryAuthority,
+    ) -> Result<(), CoreExecutorError> {
+        if authority.session_id() != self.session.id() {
+            return Err(CoreExecutorError::Internal(
+                "runtime recovery boundary authority belongs to another session".to_string(),
+            ));
         }
         let call = self.target_checkpoint_calls.fetch_add(1, Ordering::SeqCst) + 1;
         if call == 1
@@ -24961,7 +25058,12 @@ fn runtime_recovery_compaction_session(
             "digest_format": history.digest_format(),
         });
         let mut encoded = serde_json::to_value(session).expect("encode fixture session");
+        encoded["version"] = serde_json::json!(2);
         encoded["metadata"][meerkat_core::SESSION_TRANSCRIPT_HISTORY_STATE_KEY] = released_graph;
+        encoded["metadata"]
+            .as_object_mut()
+            .expect("session metadata serializes as an object")
+            .remove(meerkat_core::SESSION_TRANSCRIPT_REWRITE_PREFIX_AUTHORITY_KEY);
         encoded
     }
 
@@ -24989,8 +25091,10 @@ fn runtime_recovery_compaction_session(
         )
         .expect("commit compaction fixture rewrite");
     let encoded = encode_as_released_0810_compaction_fixture(&session);
-    let mut session: meerkat_core::Session =
-        serde_json::from_value(encoded).expect("decode typed compaction fixture");
+    let encoded = serde_json::to_vec(&encoded).expect("encode released 0.8.10 compaction fixture");
+    let imported = meerkat_core::import_released_0810_session(&encoded)
+        .expect("released 0.8.10 compaction fixture imports");
+    let (mut session, _import_receipt) = imported.into_parts();
     let commit = session
         .validated_transcript_history_state()
         .expect("seal compaction fixture history")
@@ -25098,7 +25202,7 @@ struct RuntimeCommitAtomicityStore {
     unsupported_unregister_finalization: AtomicBool,
     commit_then_report_unknown: AtomicBool,
     terminal_commit_machine_lifecycle_then_report_error: AtomicBool,
-    block_atomic_apply_after_commit: Option<(Arc<Notify>, Arc<Notify>)>,
+    block_success_boundary_after_commit: Option<(Arc<Notify>, Arc<Notify>)>,
     block_commit_machine_lifecycle_after_commit:
         std::sync::Mutex<Option<(Arc<Notify>, Arc<Notify>)>>,
     block_delete_ops_lifecycle: Option<(Arc<Notify>, Arc<Notify>)>,
@@ -25106,7 +25210,7 @@ struct RuntimeCommitAtomicityStore {
     block_initialize_ops_after_selection: std::sync::Mutex<Option<(Arc<Notify>, Arc<Notify>)>>,
     machine_lifecycle_observation_calls: AtomicUsize,
     machine_lifecycle_cas_calls: AtomicUsize,
-    persist_input_states_atomically_calls: AtomicUsize,
+    input_recovery_cas_calls: AtomicUsize,
     commit_machine_lifecycle_calls: AtomicUsize,
     unregister_finalization_calls: AtomicUsize,
     delete_ops_lifecycle_calls: AtomicUsize,
@@ -25130,14 +25234,14 @@ impl RuntimeCommitAtomicityStore {
             unsupported_unregister_finalization: AtomicBool::new(false),
             commit_then_report_unknown: AtomicBool::new(false),
             terminal_commit_machine_lifecycle_then_report_error: AtomicBool::new(false),
-            block_atomic_apply_after_commit: None,
+            block_success_boundary_after_commit: None,
             block_commit_machine_lifecycle_after_commit: std::sync::Mutex::new(None),
             block_delete_ops_lifecycle: None,
             block_unregister_finalization_after_commit: None,
             block_initialize_ops_after_selection: std::sync::Mutex::new(None),
             machine_lifecycle_observation_calls: AtomicUsize::new(0),
             machine_lifecycle_cas_calls: AtomicUsize::new(0),
-            persist_input_states_atomically_calls: AtomicUsize::new(0),
+            input_recovery_cas_calls: AtomicUsize::new(0),
             commit_machine_lifecycle_calls: AtomicUsize::new(0),
             unregister_finalization_calls: AtomicUsize::new(0),
             delete_ops_lifecycle_calls: AtomicUsize::new(0),
@@ -25191,13 +25295,13 @@ impl RuntimeCommitAtomicityStore {
         }
     }
 
-    fn block_atomic_apply_after_commit(
+    fn block_success_boundary_after_commit(
         inner: Arc<crate::store::InMemoryRuntimeStore>,
         entered: Arc<Notify>,
         release: Arc<Notify>,
     ) -> Self {
         let mut store = Self::pass_through(inner);
-        store.block_atomic_apply_after_commit = Some((entered, release));
+        store.block_success_boundary_after_commit = Some((entered, release));
         store
     }
 
@@ -25262,9 +25366,8 @@ impl RuntimeCommitAtomicityStore {
         self.machine_lifecycle_cas_calls.load(Ordering::SeqCst)
     }
 
-    fn persist_input_states_atomically_calls(&self) -> usize {
-        self.persist_input_states_atomically_calls
-            .load(Ordering::SeqCst)
+    fn input_recovery_cas_calls(&self) -> usize {
+        self.input_recovery_cas_calls.load(Ordering::SeqCst)
     }
 
     fn unregister_finalization_calls(&self) -> usize {
@@ -25307,8 +25410,108 @@ impl RuntimeStore for RuntimeCommitAtomicityStore {
         RuntimeStore::session_persistence_profile(self.inner.as_ref())
     }
 
+    fn session_boundary_authority_read_cost(
+        &self,
+    ) -> crate::store::RuntimeSessionAuthorityReadCost {
+        RuntimeStore::session_boundary_authority_read_cost(self.inner.as_ref())
+    }
+
+    async fn commit_prepared_session_boundary(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        request: crate::store::PreparedRuntimeSessionCommit,
+    ) -> Result<crate::store::PreparedRuntimeSessionCommitResult, crate::store::RuntimeStoreError>
+    {
+        use crate::store::PreparedRuntimeSessionCommitKind;
+
+        let kind = request.kind();
+        if request.session().is_some() {
+            self.session_snapshot_commits.fetch_add(1, Ordering::SeqCst);
+        }
+        if self.fail_atomic_apply.swap(false, Ordering::SeqCst) {
+            let operation = match kind {
+                PreparedRuntimeSessionCommitKind::Success => "atomic_apply",
+                PreparedRuntimeSessionCommitKind::SnapshotOnly => "commit_session_snapshot",
+                PreparedRuntimeSessionCommitKind::ServiceTurnTerminal
+                | PreparedRuntimeSessionCommitKind::MachineTerminal
+                | PreparedRuntimeSessionCommitKind::Recovery => {
+                    "atomic_apply_with_machine_lifecycle"
+                }
+            };
+            return Err(crate::store::RuntimeStoreError::WriteFailed(format!(
+                "synthetic {operation} failure"
+            )));
+        }
+        if matches!(
+            kind,
+            PreparedRuntimeSessionCommitKind::ServiceTurnTerminal
+                | PreparedRuntimeSessionCommitKind::MachineTerminal
+                | PreparedRuntimeSessionCommitKind::Recovery
+        ) && self
+            .unsupported_atomic_machine_lifecycle
+            .swap(false, Ordering::SeqCst)
+        {
+            return Err(crate::store::RuntimeStoreError::Unsupported(
+                "atomic_apply_with_machine_lifecycle".to_string(),
+            ));
+        }
+        let result = self
+            .inner
+            .commit_prepared_session_boundary(runtime_id, request)
+            .await?;
+        if matches!(kind, PreparedRuntimeSessionCommitKind::Success)
+            && let Some((entered, release)) = &self.block_success_boundary_after_commit
+        {
+            entered.notify_one();
+            release.notified().await;
+        }
+        Ok(result)
+    }
+
+    async fn load_session_boundary_authority(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<crate::store::RuntimeSessionAuthority>, crate::store::RuntimeStoreError>
+    {
+        self.inner.load_session_boundary_authority(runtime_id).await
+    }
+
+    async fn load_whole_blob_store_authority(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<crate::store::WholeBlobStoreAuthority>, crate::store::RuntimeStoreError>
+    {
+        self.inner.load_whole_blob_store_authority(runtime_id).await
+    }
+
+    async fn load_committed_whole_blob_snapshot(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<crate::store::CommittedWholeBlobSnapshot>, crate::store::RuntimeStoreError>
+    {
+        self.inner
+            .load_committed_whole_blob_snapshot(runtime_id)
+            .await
+    }
+
+    async fn commit_prepared_whole_blob_snapshot_cas(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        prepared: crate::store::PreparedWholeBlobSnapshotCas,
+    ) -> Result<crate::store::WholeBlobSnapshotCasOutcome, crate::store::RuntimeStoreError> {
+        self.inner
+            .commit_prepared_whole_blob_snapshot_cas(runtime_id, prepared)
+            .await
+    }
+
     fn supports_compaction_projection_outbox(&self) -> bool {
         self.inner.supports_compaction_projection_outbox()
+    }
+
+    fn input_state_batch_cas_implementation_profile(
+        &self,
+    ) -> crate::store::InputStateBatchCasImplementationProfile {
+        self.inner.input_state_batch_cas_implementation_profile()
     }
 
     async fn commit_session_snapshot(
@@ -25355,10 +25558,6 @@ impl RuntimeStore for RuntimeCommitAtomicityStore {
                 session_store_key,
             )
             .await?;
-        if let Some((entered, release)) = &self.block_atomic_apply_after_commit {
-            entered.notify_one();
-            release.notified().await;
-        }
         Ok(())
     }
 
@@ -25483,8 +25682,6 @@ impl RuntimeStore for RuntimeCommitAtomicityStore {
         runtime_id: &LogicalRuntimeId,
         states: &[crate::input_state::InputStatePersistenceRecord],
     ) -> Result<(), crate::store::RuntimeStoreError> {
-        self.persist_input_states_atomically_calls
-            .fetch_add(1, Ordering::SeqCst);
         self.inner
             .persist_input_states_atomically(runtime_id, states)
             .await
@@ -25501,12 +25698,68 @@ impl RuntimeStore for RuntimeCommitAtomicityStore {
             .await
     }
 
+    async fn load_input_states_with_versions(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<crate::store::PreparedRecoveryInputSnapshot, crate::store::RuntimeStoreError> {
+        self.inner.load_input_states_with_versions(runtime_id).await
+    }
+
+    async fn compare_and_swap_recovery_input_states_atomically(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        expected_revision: crate::store::RecoveryInputSetRevision,
+        mutations: &[crate::store::RecoveryInputStateMutation],
+    ) -> Result<crate::store::InputStateBatchCasOutcome, crate::store::RuntimeStoreError> {
+        self.input_recovery_cas_calls.fetch_add(1, Ordering::SeqCst);
+        self.inner
+            .compare_and_swap_recovery_input_states_atomically(
+                runtime_id,
+                expected_revision,
+                mutations,
+            )
+            .await
+    }
+
     async fn load_input_state(
         &self,
         runtime_id: &LogicalRuntimeId,
         input_id: &InputId,
     ) -> Result<Option<crate::input_state::StoredInputState>, crate::store::RuntimeStoreError> {
         self.inner.load_input_state(runtime_id, input_id).await
+    }
+
+    async fn load_input_state_by_idempotency_key(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        key: &crate::IdempotencyKey,
+    ) -> Result<Option<crate::store::ExactInputStateObservation>, crate::store::RuntimeStoreError>
+    {
+        self.inner
+            .load_input_state_by_idempotency_key(runtime_id, key)
+            .await
+    }
+
+    async fn load_input_states_by_ids(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        input_ids: &[InputId],
+    ) -> Result<Vec<Option<crate::input_state::StoredInputState>>, crate::store::RuntimeStoreError>
+    {
+        self.inner
+            .load_input_states_by_ids(runtime_id, input_ids)
+            .await
+    }
+
+    async fn load_pending_terminal_owner_ids_page(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        after: Option<&InputId>,
+        limit: usize,
+    ) -> Result<Vec<InputId>, crate::store::RuntimeStoreError> {
+        self.inner
+            .load_pending_terminal_owner_ids_page(runtime_id, after, limit)
+            .await
     }
 
     async fn observe_machine_lifecycle(
@@ -25818,7 +26071,7 @@ async fn cold_ensure_reconciles_runtime_authority_once_then_recovers_inputs_only
         "cold ensure must perform exactly one target-local lifecycle normalization CAS",
     );
     assert_eq!(
-        counted_store.persist_input_states_atomically_calls(),
+        counted_store.input_recovery_cas_calls(),
         1,
         "the one input-recovery pass must publish its normalized ledger once",
     );
@@ -25946,31 +26199,58 @@ async fn supervisor_rotation_persistence_failures_leave_cold_resumable_checkpoin
     fault_store
         .fail_commit_machine_lifecycle
         .store(true, Ordering::SeqCst);
-    assert!(matches!(
-        machine
-            .submit_supervisor_rotation(
-                &session_id,
-                GeneratedSupervisorRotationSubmit {
-                    operation_id: operation_id.clone(),
-                    next: GeneratedSupervisorBinding {
-                        name: "next-supervisor".to_string(),
-                        peer_id: next_peer_id.clone(),
-                        address: "inproc://next-supervisor".to_string(),
-                        signing_public_key: next_signing_key.clone(),
-                        epoch: 2,
-                    },
-                    preflight_rejection: None,
-                    sender_peer_id: Some(previous_peer_id.clone()),
-                    sender_signing_public_key: Some(previous_signing_key.clone()),
+    let first_error = machine
+        .submit_supervisor_rotation(
+            &session_id,
+            GeneratedSupervisorRotationSubmit {
+                operation_id: operation_id.clone(),
+                next: GeneratedSupervisorBinding {
+                    name: "next-supervisor".to_string(),
+                    peer_id: next_peer_id.clone(),
+                    address: "inproc://next-supervisor".to_string(),
+                    signing_public_key: next_signing_key.clone(),
+                    epoch: 2,
                 },
-            )
-            .await,
-        Err(SupervisorBindingStageError::Persistence(_))
+                preflight_rejection: None,
+                sender_peer_id: Some(previous_peer_id.clone()),
+                sender_signing_public_key: Some(previous_signing_key.clone()),
+            },
+        )
+        .await
+        .expect_err("failed supervisor submit persistence must surface");
+    assert!(matches!(
+        &first_error,
+        SupervisorBindingStageError::Persistence(_)
     ));
+    assert!(
+        first_error
+            .to_string()
+            .contains("registration-authorized cold reload is required"),
+        "ambiguous supervisor persistence must poison the current shell: {first_error}"
+    );
     assert!(matches!(
         machine.supervisor_binding(&session_id).await,
         SupervisorBinding::Bound { ref peer_id, epoch: 1, .. } if peer_id == &previous_peer_id
     ));
+
+    drop(machine);
+    machine = MeerkatMachine::persistent_without_blobs(Arc::clone(&store));
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("fresh process should recover the pre-rotation durable checkpoint");
+    assert!(matches!(
+        machine.supervisor_binding(&session_id).await,
+        SupervisorBinding::Bound { ref peer_id, epoch: 1, .. } if peer_id == &previous_peer_id
+    ));
+    assert!(
+        machine
+            .active_supervisor_rotation(&session_id)
+            .await
+            .expect("read cold-recovered supervisor state")
+            .is_none(),
+        "failed initial persistence must not create a durable rotation"
+    );
 
     machine
         .submit_supervisor_rotation(
@@ -26138,7 +26418,7 @@ async fn mark_staged_runtime_turn_machine_failed(driver: &SharedDriver, run_id: 
 }
 
 #[tokio::test]
-async fn persistent_driver_recover_replaces_dead_process_phase_with_fresh_idle_shell() {
+async fn persistent_driver_direct_recover_is_repair_blocked_without_registration_authority() {
     let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
     let session_id = SessionId::new();
     let runtime_id = LogicalRuntimeId::for_session(&session_id);
@@ -26160,27 +26440,24 @@ async fn persistent_driver_recover_replaces_dead_process_phase_with_fresh_idle_s
         store.clone() as Arc<dyn RuntimeStore>,
         memory_blob_store(),
     );
-    driver
+    let error = driver
         .recover()
         .await
-        .expect("public persistent recover should use generated runtime authority");
-
-    assert_eq!(driver.runtime_state(), RuntimeState::Idle);
+        .expect_err("direct recovery must not bypass registration-owned convergence");
+    assert!(
+        matches!(
+            &error,
+            RuntimeDriverError::RecoveryRepairBlocked { reason, .. }
+                if reason.contains("registration-authorized lifecycle convergence")
+        ),
+        "unexpected direct-recovery rejection: {error}"
+    );
     assert_eq!(
         crate::store::load_runtime_state(store.as_ref(), &runtime_id)
             .await
-            .expect("load runtime state after recovery"),
-        Some(RuntimeState::Idle),
-        "cold recovery must normalize the dead process phase before rebuilding authority"
-    );
-
-    let authority = driver.inner_ref().shared_dsl_authority();
-    let authority = authority
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    assert_eq!(
-        authority.state().lifecycle_phase,
-        mm_dsl::MeerkatPhase::Idle
+            .expect("load runtime state after rejected direct recovery"),
+        Some(RuntimeState::Retired),
+        "repair-blocked direct recovery must not mutate durable lifecycle state"
     );
 }
 
@@ -26364,7 +26641,7 @@ async fn completed_run_rejects_foreign_session_witness_before_mutation() {
 }
 
 #[tokio::test]
-async fn persistent_commit_atomic_apply_failure_preserves_pre_terminal_state() {
+async fn persistent_commit_atomic_apply_failure_publishes_no_durable_terminal_state() {
     let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());
     let store: Arc<dyn RuntimeStore> = Arc::new(
         RuntimeCommitAtomicityStore::fail_atomic_apply_once(Arc::clone(&inner)),
@@ -26372,14 +26649,16 @@ async fn persistent_commit_atomic_apply_failure_preserves_pre_terminal_state() {
     let (driver, runtime_id, run_id, input_id) = persistent_staged_run_driver(store).await;
     let owner_session_id = SessionId::parse(&runtime_id.to_string()).unwrap();
     let session = meerkat_core::Session::with_id(owner_session_id);
-    let session_snapshot = serde_json::to_vec(&session).unwrap();
 
     let err = commit_runtime_loop_run(
         &driver,
         run_id.clone(),
         vec![input_id.clone()],
         machine_terminal_receipt(run_id.clone(), vec![input_id.clone()], &session),
-        Some(BoundSessionCommit::untyped(session_snapshot)),
+        Some(
+            BoundSessionCommit::sealed(Arc::new(session))
+                .expect("seal typed failed-commit session"),
+        ),
         Vec::new(),
         None,
     )
@@ -26389,10 +26668,6 @@ async fn persistent_commit_atomic_apply_failure_preserves_pre_terminal_state() {
         err.to_string().contains("synthetic atomic_apply failure"),
         "unexpected commit error: {err}"
     );
-
-    let entry = driver.lock().await;
-    assert_live_run_remains_staged(&entry, &run_id, &input_id, "failed boundary commit");
-    drop(entry);
 
     assert!(
         inner
@@ -26423,7 +26698,10 @@ async fn persistent_commit_success_persists_receipt_and_terminalizes_once() {
         run_id.clone(),
         vec![input_id.clone()],
         machine_terminal_receipt(run_id.clone(), vec![input_id.clone()], &session),
-        Some(BoundSessionCommit::untyped(session_snapshot.clone())),
+        Some(
+            BoundSessionCommit::sealed(Arc::new(session.clone()))
+                .expect("seal typed completed session"),
+        ),
         Vec::new(),
         None,
     )
@@ -26519,9 +26797,7 @@ async fn persistent_commit_success_uses_one_durable_receipt_terminal_write() {
         run_id.clone(),
         vec![input_id.clone()],
         machine_terminal_receipt(run_id.clone(), vec![input_id.clone()], &session),
-        Some(BoundSessionCommit::untyped(
-            serde_json::to_vec(&session).expect("serialize session snapshot"),
-        )),
+        Some(BoundSessionCommit::sealed(Arc::new(session)).expect("seal typed completed session")),
         Vec::new(),
         None,
     )
@@ -26706,7 +26982,7 @@ async fn machine_terminal_carrier_validation_rejects_adversarial_witnesses_befor
 }
 
 #[tokio::test]
-async fn persistent_machine_terminal_atomic_failure_preserves_pre_commit_truth() {
+async fn persistent_machine_terminal_atomic_failure_publishes_no_durable_terminal_state() {
     let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());
     let store: Arc<dyn RuntimeStore> = Arc::new(
         RuntimeCommitAtomicityStore::fail_atomic_apply_once(Arc::clone(&inner)),
@@ -26735,28 +27011,6 @@ async fn persistent_machine_terminal_atomic_failure_preserves_pre_commit_truth()
             .contains("synthetic atomic_apply_with_machine_lifecycle failure"),
         "unexpected terminal transaction error: {error}"
     );
-    {
-        let entry = driver.lock().await;
-        assert_eq!(entry.runtime_state(), RuntimeState::Running);
-        assert_eq!(entry.current_run_id().as_ref(), Some(&run_id));
-        assert_eq!(
-            entry.input_phase(&input_id),
-            Some(crate::input_state::InputLifecycleState::Staged),
-            "failed terminal transaction must restore the pre-commit input phase"
-        );
-        let authority = entry.shared_dsl_authority();
-        let turn_phase = {
-            let authority = authority
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            authority.state().turn_phase
-        };
-        assert_eq!(
-            turn_phase,
-            mm_dsl::TurnPhase::Failed,
-            "the core turn terminal existed before the failed outer commit and must remain"
-        );
-    }
     assert!(
         inner
             .load_boundary_receipt(&runtime_id, &run_id, 0)
@@ -26784,6 +27038,7 @@ async fn persistent_machine_terminal_commit_recovers_consumed_input_and_failed_t
     mark_staged_runtime_turn_machine_failed(&driver, &run_id).await;
     let owner_session_id = SessionId::parse(&runtime_id.to_string())
         .expect("direct driver runtime id should be its session UUID alias");
+    let session_id = owner_session_id.clone();
     let (session, session_snapshot) = failed_turn_session_snapshot(owner_session_id);
 
     commit_machine_terminal_run(
@@ -26826,17 +27081,26 @@ async fn persistent_machine_terminal_commit_recovers_consumed_input_and_failed_t
     );
 
     drop(driver);
-    let mut recovered =
-        PersistentRuntimeDriver::new(runtime_id.clone(), Arc::clone(&store), memory_blob_store());
+    let recovered = MeerkatMachine::persistent_without_blobs(Arc::clone(&store));
     recovered
-        .recover()
+        .register_session(session_id.clone())
         .await
-        .expect("crash recovery should consume atomic machine-terminal truth");
-    assert_eq!(recovered.runtime_state(), RuntimeState::Idle);
+        .expect("registration-authorized recovery should consume atomic machine-terminal truth");
     assert_eq!(
-        recovered.input_phase(&input_id),
-        Some(crate::input_state::InputLifecycleState::Consumed),
-        "recovery must not replay a machine-terminal input"
+        recovered
+            .session_dsl_state(&session_id)
+            .await
+            .expect("read recovered machine-terminal authority")
+            .lifecycle_phase,
+        mm_dsl::MeerkatPhase::Idle,
+    );
+    assert!(
+        recovered
+            .input_state(&session_id, &input_id)
+            .await
+            .expect("read recovered machine-terminal input")
+            .is_none(),
+        "registration recovery must archive the consumed machine-terminal input instead of replaying it"
     );
     let recovered_session: meerkat_core::Session = serde_json::from_slice(
         &inner
@@ -26876,15 +27140,34 @@ async fn persistent_failed_run_lifecycle_commit_failure_preserves_pre_terminal_s
     );
 
     let entry = driver.lock().await;
-    assert_live_run_remains_staged(&entry, &run_id, &input_id, "failed run persist");
+    assert_eq!(
+        entry.runtime_state(),
+        RuntimeState::Idle,
+        "the live shell crossed the fail-stop terminal checkpoint before persistence failed"
+    );
+    assert_eq!(
+        entry.current_run_id(),
+        None,
+        "the failed live terminal transition must not retain a runnable run identity"
+    );
+    assert_eq!(
+        entry.input_phase(&input_id),
+        Some(crate::input_state::InputLifecycleState::Queued),
+        "the recoverable contributor is replay-queued only in the now-invalid live shell"
+    );
+    assert_eq!(
+        entry.input_terminal_outcome(&input_id),
+        None,
+        "the failed terminal commit must not mint a terminal input outcome"
+    );
     drop(entry);
 
-    assert_ne!(
+    assert_eq!(
         crate::store::load_runtime_state(inner.as_ref(), &runtime_id)
             .await
             .unwrap(),
-        Some(RuntimeState::Idle),
-        "failed run persist must not durably commit the returned runtime state"
+        None,
+        "the direct-driver fixture begins without a durable lifecycle row, and a rejected terminal write must not invent one"
     );
 }
 
@@ -40352,11 +40635,12 @@ async fn empty_compaction_outbox_skips_the_identity_checkpoint_cycle_after_commi
     let store = Arc::new(RuntimeCommitAtomicityStore::pass_through(Arc::clone(
         &inner,
     )));
-    let runtime_id = LogicalRuntimeId::for_session(&SessionId::new());
+    let session_id = SessionId::new();
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
     // Seed a committed snapshot straight into the inner store (bypassing the
     // counters) so the recovery form below has a document to reload.
-    let seeded =
-        serde_json::to_vec(&meerkat_core::Session::new()).expect("empty session serializes");
+    let seeded = serde_json::to_vec(&meerkat_core::Session::with_id(session_id))
+        .expect("empty session serializes");
     crate::store::RuntimeStore::commit_session_snapshot(
         inner.as_ref(),
         &runtime_id,

@@ -2,7 +2,7 @@
 
 _Generated from the Rust machine catalog. Do not edit by hand._
 
-- Version: `8`
+- Version: `9`
 - Rust owner: `self` / `catalog::dsl::occurrence_lifecycle`
 
 ## State
@@ -60,7 +60,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ClassifyCompletionSupersession`(schedule_phase: ClaimedDispatchSchedulePhase, current_schedule_revision: u64)
 - `Claim`(owner_id: ClaimOwner, at_utc_ms: u64, lease_expires_at_utc_ms: u64, claim_token: ClaimToken)
 - `DispatchStarted`(correlation_id: Option<CorrelationId>, at_utc_ms: u64)
-- `DispatchAccepted`(at_utc_ms: u64)
+- `DispatchAccepted`(admission_outcome: DeliveryAdmissionOutcome, at_utc_ms: u64)
 - `AwaitCompletion`(at_utc_ms: u64)
 - `Complete`(at_utc_ms: u64)
 - `ResolveRuntimeCompletion`(outcome: RuntimeCompletionOutcome, detail: Option<String>, at_utc_ms: u64)
@@ -1373,11 +1373,21 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `DispatchAcceptedFromDispatching`
 - From: `Dispatching`
-- On: `DispatchAccepted`(at_utc_ms)
+- On: `DispatchAccepted`(admission_outcome, at_utc_ms)
 - Guards:
   - ``
+  - `admission_accepted`
 - Emits: `DispatchAccepted`
 - To: `Dispatching`
+
+### `DispatchDeduplicatedFromDispatching`
+- From: `Dispatching`
+- On: `DispatchAccepted`(admission_outcome, at_utc_ms)
+- Guards:
+  - ``
+  - `admission_deduplicated`
+- Emits: `DispatchAccepted`, `Completed`
+- To: `Completed`
 
 ### `AwaitCompletionFromDispatching`
 - From: `Dispatching`

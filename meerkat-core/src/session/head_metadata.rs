@@ -290,8 +290,7 @@ impl SessionHeadMetadataCell {
         let mut canonical_json = Vec::new();
         crate::digest_observability::write_canonical_json(value, &mut canonical_json)?;
         #[cfg(test)]
-        super::SESSION_HEAD_METADATA_CANONICALIZATION_COUNT
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        super::record_session_head_metadata_canonicalization();
         let exact_hash = MerkleHash::digest(&[VALUE_EXACT_DOMAIN, &canonical_json]);
         crate::digest_observability::record_content_digest_computation();
         crate::digest_observability::record_content_digest_bytes(canonical_json.len() as u64);
@@ -1175,6 +1174,7 @@ fn fold_proof(route: &[u8; 32], siblings: &[MerkleHash], mut hash: MerkleHash) -
 }
 
 #[cfg(test)]
+#[allow(clippy::panic)]
 mod tests {
     use super::*;
 

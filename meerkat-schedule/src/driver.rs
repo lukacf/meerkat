@@ -8,9 +8,9 @@ use crate::store::{
     ClaimDueRequest, RenewOccurrenceLeaseOutcome, RenewOccurrenceLeaseRequest, ScheduleStore,
 };
 use crate::types::{
-    DeliveryCompletionFailureReason, DeliveryFailureReason, DeliveryReceipt, Occurrence,
-    OccurrenceId, OccurrencePhase, OccurrenceTargetProbeOutcome, RuntimeCompletionOutcome,
-    RuntimeDeliveryOutcome,
+    DeliveryAdmissionOutcome, DeliveryCompletionFailureReason, DeliveryFailureReason,
+    DeliveryReceipt, Occurrence, OccurrenceId, OccurrencePhase, OccurrenceTargetProbeOutcome,
+    RuntimeCompletionOutcome, RuntimeDeliveryOutcome,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
@@ -212,12 +212,23 @@ impl ScheduleTickReport {
         let mut samples = self
             .schedule_row_faults
             .iter()
-            .map(|fault| format!("schedule-row: {fault}"))
-            .chain(
-                self.occurrence_row_faults
-                    .iter()
-                    .map(|fault| format!("occurrence-row: {fault}")),
-            )
+            .map(|fault| {
+                format!(
+                    "schedule-row {}: {:?} fault: {}",
+                    fault.schedule_id.as_deref().unwrap_or("?"),
+                    fault.kind,
+                    fault.detail
+                )
+            })
+            .chain(self.occurrence_row_faults.iter().map(|fault| {
+                format!(
+                    "occurrence-row {} (schedule={}): {:?} fault: {}",
+                    fault.occurrence_id.as_deref().unwrap_or("?"),
+                    fault.schedule_id.as_deref().unwrap_or("?"),
+                    fault.kind,
+                    fault.detail
+                )
+            }))
             .chain(
                 self.refill_faults
                     .iter()
@@ -487,8 +498,14 @@ impl ScheduleDriver {
                 .await?;
         }
 
-        validate_dispatch_receipt(&dispatching, &delivery_identity, &dispatch)?;
+        let admission_outcome =
+            validate_dispatch_receipt(&dispatching, &delivery_identity, &dispatch)?;
         if dispatch.receipt.stage == crate::DeliveryReceiptStage::DispatchAccepted {
+            let admission_outcome = admission_outcome.ok_or_else(|| {
+                ScheduleDomainError::Internal(
+                    "dispatch-accepted receipt omitted a successful admission outcome".to_string(),
+                )
+            })?;
             let Some(accepted) = self
                 .store
                 .transition_occurrence_with_receipt_if_current(
@@ -496,6 +513,7 @@ impl ScheduleDriver {
                     dispatching.attempt_count,
                     dispatching.claim_token(),
                     OccurrenceLifecycleInput::DispatchAccepted {
+                        admission_outcome,
                         at_utc: store_now_utc,
                     },
                     dispatch.receipt.runtime_outcome.clone(),
@@ -505,6 +523,9 @@ impl ScheduleDriver {
                 return Ok(false);
             };
             dispatching = accepted;
+            if dispatching.phase == OccurrencePhase::Completed {
+                return Ok(true);
+            }
         }
 
         let refetched_id = dispatching.occurrence_id.clone();
@@ -750,7 +771,7 @@ fn validate_dispatch_receipt(
     occurrence: &Occurrence,
     identity: &ScheduleDeliveryIdentity,
     dispatch: &DeliveryDispatch,
-) -> Result<(), ScheduleDomainError> {
+) -> Result<Option<DeliveryAdmissionOutcome>, ScheduleDomainError> {
     let receipt = &dispatch.receipt;
     if receipt.occurrence_id != occurrence.occurrence_id
         || receipt.attempt != occurrence.attempt_count
@@ -784,12 +805,13 @@ fn validate_dispatch_receipt(
     match (&receipt.stage, &receipt.runtime_outcome) {
         (
             crate::DeliveryReceiptStage::DispatchAccepted,
-            Some(
-                RuntimeDeliveryOutcome::AdmissionAccepted
-                | RuntimeDeliveryOutcome::AdmissionDeduplicated,
-            ),
-        )
-        | (crate::DeliveryReceiptStage::DispatchStarted, None) => Ok(()),
+            Some(RuntimeDeliveryOutcome::AdmissionAccepted),
+        ) => Ok(Some(DeliveryAdmissionOutcome::Accepted)),
+        (
+            crate::DeliveryReceiptStage::DispatchAccepted,
+            Some(RuntimeDeliveryOutcome::AdmissionDeduplicated),
+        ) => Ok(Some(DeliveryAdmissionOutcome::Deduplicated)),
+        (crate::DeliveryReceiptStage::DispatchStarted, None) => Ok(None),
         (stage, outcome) => Err(ScheduleDomainError::Internal(format!(
             "delivery adapter returned invalid admission receipt stage {stage:?} with outcome {outcome:?}"
         ))),
@@ -1484,7 +1506,12 @@ mod tests {
                 DeliveryReceiptStage::DispatchAccepted,
             );
             receipt.correlation_id = Some(identity.correlation_id.clone());
-            receipt.runtime_outcome = Some(RuntimeDeliveryOutcome::AdmissionDeduplicated);
+            // This fixture exercises the case where a newly accepted
+            // delivery loses its completion authority and must remain
+            // reclaimable. `AdmissionDeduplicated` is instead durable
+            // exactly-once success evidence and the occurrence machine
+            // terminalizes it immediately.
+            receipt.runtime_outcome = Some(RuntimeDeliveryOutcome::AdmissionAccepted);
             Ok(DeliveryDispatch {
                 receipt,
                 correlation_id: Some(identity.correlation_id.clone()),
@@ -1607,6 +1634,8 @@ mod tests {
             } else {
                 RuntimeDeliveryOutcome::AdmissionDeduplicated
             };
+            let admission_was_deduplicated =
+                admission == RuntimeDeliveryOutcome::AdmissionDeduplicated;
             self.admissions.lock().await.push(admission.clone());
             let mut receipt = DeliveryReceipt::new(
                 occurrence.occurrence_id.clone(),
@@ -1619,7 +1648,17 @@ mod tests {
                 receipt,
                 correlation_id: Some(identity.correlation_id.clone()),
                 materialized_session_id: None,
-                completion: Box::pin(async { Ok(DeliveryTerminal::completed(None)) }),
+                completion: Box::pin(async move {
+                    if admission_was_deduplicated {
+                        Err(ScheduleDomainError::DeliveryCompletionFailed {
+                            reason: DeliveryCompletionFailureReason::RuntimeCompletionAuthorityUnavailable,
+                            detail: "original completion channel did not survive the crash"
+                                .to_string(),
+                        })
+                    } else {
+                        Ok(DeliveryTerminal::completed(None))
+                    }
+                }),
             })
         }
     }
@@ -3479,13 +3518,16 @@ mod tests {
                 RuntimeDeliveryOutcome::AdmissionDeduplicated
             ]
         );
+        let recovered =
+            wait_for_occurrence_phase(&service, &schedule.schedule_id, OccurrencePhase::Completed)
+                .await?;
+        assert_eq!(recovered.occurrence_id, intent.occurrence_id);
+        assert_eq!(recovered.failure_class, None);
         let receipts = store.list_receipts(&intent.occurrence_id).await?;
         assert!(receipts.iter().any(|receipt| {
-            receipt.stage == DeliveryReceiptStage::DispatchAccepted
+            receipt.stage == DeliveryReceiptStage::Completed
                 && receipt.runtime_outcome == Some(RuntimeDeliveryOutcome::AdmissionDeduplicated)
         }));
-        let recovered = wait_for_occurrence_attempt(&service, &schedule.schedule_id, 2).await?;
-        assert_eq!(recovered.occurrence_id, intent.occurrence_id);
         Ok(())
     }
 

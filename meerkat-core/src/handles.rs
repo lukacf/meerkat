@@ -280,7 +280,9 @@ pub trait StickyModelFallbackCommitCoordinator: Send + Sync {
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 pub trait StickyModelFallbackCommitOperation: Send + Sync {
-    async fn wait(&self) -> Result<(), StickyModelFallbackCommitError>;
+    async fn wait(
+        &self,
+    ) -> Result<Option<crate::SessionControlCommitReceipt>, StickyModelFallbackCommitError>;
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -767,6 +769,10 @@ impl std::fmt::Display for PeerResponseTerminalTransportIdentity {
 pub struct PeerResponseTerminalRouteIdentity(crate::comms::PeerId);
 
 impl PeerResponseTerminalRouteIdentity {
+    pub const fn from_peer_id(peer_id: crate::comms::PeerId) -> Self {
+        Self(peer_id)
+    }
+
     pub fn parse(raw: impl Into<String>) -> Result<Self, PeerResponseTerminalFactError> {
         let raw = raw.into();
         if raw.trim().is_empty() {

@@ -16,6 +16,6 @@ pub use graph::{
     TranscriptRevisionEdge, TranscriptRewriteCommit, TranscriptRewriteParentTransition,
     TranscriptRewritePatch, TranscriptRewritePrefixAccumulator, TranscriptRewriteRecord,
     extend_transcript_rewrite_prefix_accumulator, transcript_history_full_body_materializations,
-    transcript_rewrite_prefix_commit_serializations, transcript_rewrite_prefix_digest,
+    transcript_rewrite_prefix_digest,
 };
 pub use sealed::{ValidatedTranscriptHistory, ValidatedTranscriptRewriteSuffix};

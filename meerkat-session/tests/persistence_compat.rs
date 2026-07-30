@@ -272,6 +272,15 @@ mod runtime_backed_llm_reconfigure_tests {
             Ok(self.session.clone())
         }
 
+        fn session_transcript_authority(
+            &self,
+        ) -> Result<meerkat_session::ephemeral::SessionTranscriptAuthoritySnapshot, AgentError>
+        {
+            meerkat_session::ephemeral::SessionTranscriptAuthoritySnapshot::from_session(
+                &self.session,
+            )
+        }
+
         fn durable_llm_identity(&self) -> Option<SessionLlmIdentity> {
             Some(test_llm_identity("noop"))
         }

@@ -635,44 +635,18 @@ pub trait MobSessionService:
             .await
     }
 
-    /// Confirm an ordinary WholeBlob boundary from the exact fixed-size
-    /// authority returned by RuntimeStore while the outer turn-finalization
-    /// boundary is held.
-    async fn acknowledge_whole_blob_runtime_session_boundary_under_turn_finalization_boundary(
+    /// Confirm one exact store-issued session boundary while the outer
+    /// turn-finalization boundary is held.
+    ///
+    /// REQUIRED, deliberately without a default: wrappers must forward the
+    /// exhaustive authority carrier as one contract. They cannot compile while
+    /// accidentally inheriting an `Unsupported` or no-op implementation for
+    /// one persistence profile.
+    async fn acknowledge_committed_runtime_session_boundary_under_turn_finalization_boundary(
         &self,
-        _session_id: &SessionId,
-        _committed_store_revision: u64,
-        _committed_blob_sha256: &str,
-    ) -> Result<(), SessionError> {
-        Err(SessionError::Unsupported(
-            "session service cannot acknowledge a WholeBlob runtime boundary".to_string(),
-        ))
-    }
-
-    /// Confirm a HeadCanonical boundary from the exact store-issued head CAS
-    /// token while the outer turn-finalization boundary is held.
-    async fn acknowledge_head_canonical_runtime_session_boundary_under_turn_finalization_boundary(
-        &self,
-        _session_id: &SessionId,
-        _committed_head_token: &str,
-    ) -> Result<(), SessionError> {
-        Err(SessionError::Unsupported(
-            "session service cannot acknowledge a HeadCanonical runtime boundary".to_string(),
-        ))
-    }
-
-    /// Confirm metadata-only promotion of an exact provisional boundary while
-    /// the outer turn-finalization boundary is held.
-    async fn acknowledge_provisional_runtime_session_boundary_under_turn_finalization_boundary(
-        &self,
-        _session_id: &SessionId,
-        _committed_store_revision: u64,
-        _committed_authority_token: &str,
-    ) -> Result<(), SessionError> {
-        Err(SessionError::Unsupported(
-            "session service cannot acknowledge a provisional runtime boundary".to_string(),
-        ))
-    }
+        session_id: &SessionId,
+        authority: &meerkat_core::CommittedSessionBoundaryAuthority,
+    ) -> Result<(), SessionError>;
 
     /// Remove the service-side live actor while the owning runtime entry is in
     /// its generated post-stop unregister window.
@@ -1079,38 +1053,13 @@ where
         Ok(prepared.into_stage_output(None))
     }
 
-    async fn acknowledge_whole_blob_runtime_session_boundary_under_turn_finalization_boundary(
+    async fn acknowledge_committed_runtime_session_boundary_under_turn_finalization_boundary(
         &self,
         _session_id: &SessionId,
-        _committed_store_revision: u64,
-        _committed_blob_sha256: &str,
-    ) -> Result<(), SessionError> {
-        // RuntimeStore already matched the exact committed WholeBlob
-        // revision/digest before invoking this hook. EphemeralSessionService
-        // owns no durable compatibility projection or post-commit receipt to
-        // reconcile; its actor mutation is already the live authority.
-        Ok(())
-    }
-
-    async fn acknowledge_head_canonical_runtime_session_boundary_under_turn_finalization_boundary(
-        &self,
-        _session_id: &SessionId,
-        _committed_head_token: &str,
+        _authority: &meerkat_core::CommittedSessionBoundaryAuthority,
     ) -> Result<(), SessionError> {
         Err(SessionError::Unsupported(
-            "ephemeral session service cannot acknowledge a HeadCanonical runtime boundary"
-                .to_string(),
-        ))
-    }
-
-    async fn acknowledge_provisional_runtime_session_boundary_under_turn_finalization_boundary(
-        &self,
-        _session_id: &SessionId,
-        _committed_store_revision: u64,
-        _committed_authority_token: &str,
-    ) -> Result<(), SessionError> {
-        Err(SessionError::Unsupported(
-            "ephemeral session service cannot acknowledge a provisional runtime boundary"
+            "ephemeral session service cannot acknowledge store-owned runtime boundaries"
                 .to_string(),
         ))
     }
@@ -1592,45 +1541,15 @@ where
         .await
     }
 
-    async fn acknowledge_whole_blob_runtime_session_boundary_under_turn_finalization_boundary(
+    async fn acknowledge_committed_runtime_session_boundary_under_turn_finalization_boundary(
         &self,
         session_id: &SessionId,
-        committed_store_revision: u64,
-        committed_blob_sha256: &str,
+        authority: &meerkat_core::CommittedSessionBoundaryAuthority,
     ) -> Result<(), SessionError> {
-        meerkat_session::PersistentSessionService::<B>::acknowledge_whole_blob_runtime_session_boundary_under_runtime_turn_boundary(
+        meerkat_session::PersistentSessionService::<B>::acknowledge_committed_runtime_session_boundary_under_runtime_turn_boundary(
             self,
             session_id,
-            committed_store_revision,
-            committed_blob_sha256,
-        )
-        .await
-    }
-
-    async fn acknowledge_head_canonical_runtime_session_boundary_under_turn_finalization_boundary(
-        &self,
-        session_id: &SessionId,
-        committed_head_token: &str,
-    ) -> Result<(), SessionError> {
-        meerkat_session::PersistentSessionService::<B>::acknowledge_head_canonical_runtime_session_boundary_under_runtime_turn_boundary(
-            self,
-            session_id,
-            committed_head_token,
-        )
-        .await
-    }
-
-    async fn acknowledge_provisional_runtime_session_boundary_under_turn_finalization_boundary(
-        &self,
-        session_id: &SessionId,
-        committed_store_revision: u64,
-        committed_authority_token: &str,
-    ) -> Result<(), SessionError> {
-        meerkat_session::PersistentSessionService::<B>::acknowledge_provisional_runtime_session_boundary_under_runtime_turn_boundary(
-            self,
-            session_id,
-            committed_store_revision,
-            committed_authority_token,
+            authority,
         )
         .await
     }

@@ -37,6 +37,7 @@ rust_library(
         "__meerkat-generated-authority-bridge",
         "jsonschema",
         "schema",
+        "test-support",
     ],
     edition = "2024",
     rustc_flags = [
@@ -72,6 +73,7 @@ rust_library(
         "__meerkat-generated-authority-bridge",
         "jsonschema",
         "schema",
+        "test-support",
     ],
     edition = "2024",
     rustc_flags = [
@@ -118,6 +120,7 @@ rust_test(
         "__meerkat-generated-authority-bridge",
         "jsonschema",
         "schema",
+        "test-support",
     ],
     edition = "2024",
     rustc_flags = [
@@ -176,6 +179,7 @@ rust_test(
         "__meerkat-generated-authority-bridge",
         "jsonschema",
         "schema",
+        "test-support",
     ],
     edition = "2024",
     rustc_flags = [
@@ -184,6 +188,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
+        "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
     ],
     srcs = [
         "tests/auth_binding_no_string_form.rs",
@@ -192,65 +198,6 @@ rust_test(
     rustc_env = {
         "CARGO_PKG_VERSION": "0.8.11",
         "CARGO_BIN_NAME": "auth_binding_no_string_form",
-        "CARGO_MANIFEST_DIR": "./meerkat-core",
-        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
-    },
-    tags = [
-        "fast",
-    ],
-    size = "small",
-    data = [],
-    env = {
-        "RUST_MIN_STACK": "16777216",
-    },
-    proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-core",
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
-    deps = [
-        "//meerkat-core:meerkat_core",
-        "//meerkat-machine-kernels:meerkat_machine_kernels",
-        "//meerkat-machine-schema:meerkat_machine_schema",
-    ] + all_crate_deps(
-        package_name = "meerkat-core",
-        normal = True,
-        normal_dev = True,
-    ),
-)
-
-rust_test(
-    name = "transcript_graph_ingress_validation_test",
-    aliases = aliases(
-        package_name = "meerkat-core",
-        normal = True,
-        normal_dev = True,
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
-    crate_name = "transcript_graph_ingress_validation",
-    crate_root = "tests/transcript_graph_ingress_validation.rs",
-    crate_features = [
-        "__meerkat-facade-agent-factory-build",
-        "__meerkat-generated-authority-bridge",
-        "jsonschema",
-        "schema",
-    ],
-    edition = "2024",
-    rustc_flags = [
-        "--cfg=meerkat_internal_generated_authority_bridge",
-    ],
-    compile_data = [
-        "Cargo.toml",
-        "src/config_template.toml",
-    ],
-    srcs = [
-        "tests/transcript_graph_ingress_validation.rs",
-    ],
-    visibility = ["//visibility:public"],
-    rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.11",
-        "CARGO_BIN_NAME": "transcript_graph_ingress_validation",
         "CARGO_MANIFEST_DIR": "./meerkat-core",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
@@ -294,6 +241,7 @@ rust_test(
         "__meerkat-generated-authority-bridge",
         "jsonschema",
         "schema",
+        "test-support",
     ],
     edition = "2024",
     rustc_flags = [
@@ -302,6 +250,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
+        "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
     ],
     srcs = [
         "tests/document_cost_probe.rs",
@@ -355,6 +305,7 @@ rust_test(
         "__meerkat-generated-authority-bridge",
         "jsonschema",
         "schema",
+        "test-support",
     ],
     edition = "2024",
     rustc_flags = [
@@ -363,6 +314,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
+        "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
     ],
     srcs = [
         "tests/durable_tail_classification.rs",
@@ -414,67 +367,7 @@ rust_test(
         "__meerkat-generated-authority-bridge",
         "jsonschema",
         "schema",
-    ],
-    edition = "2024",
-    rustc_flags = [
-        "--cfg=meerkat_internal_generated_authority_bridge",
-    ],
-    compile_data = [
-        "Cargo.toml",
-        "src/config_template.toml",
-    ],
-    srcs = [
-        "tests/fork_at_rotates_session_id.rs",
-    ],
-    visibility = ["//visibility:public"],
-    rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.11",
-        "CARGO_BIN_NAME": "fork_at_rotates_session_id",
-        "CARGO_MANIFEST_DIR": "./meerkat-core",
-        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
-    },
-    tags = [
-        "fast",
-    ],
-    size = "small",
-    data = [
-        ":package_runfiles",
-    ],
-    env = {
-        "RUST_MIN_STACK": "16777216",
-    },
-    proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-core",
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
-    deps = [
-        "//meerkat-core:meerkat_core",
-        "//meerkat-machine-kernels:meerkat_machine_kernels",
-        "//meerkat-machine-schema:meerkat_machine_schema",
-    ] + all_crate_deps(
-        package_name = "meerkat-core",
-        normal = True,
-        normal_dev = True,
-    ),
-)
-
-rust_test(
-    name = "v0_8_10_ob3_recovery_migration_test",
-    aliases = aliases(
-        package_name = "meerkat-core",
-        normal = True,
-        normal_dev = True,
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
-    crate_name = "v0_8_10_ob3_recovery_migration",
-    crate_root = "tests/v0_8_10_ob3_recovery_migration.rs",
-    crate_features = [
-        "__meerkat-facade-agent-factory-build",
-        "__meerkat-generated-authority-bridge",
-        "jsonschema",
-        "schema",
+        "test-support",
     ],
     edition = "2024",
     rustc_flags = [
@@ -487,12 +380,12 @@ rust_test(
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
     ],
     srcs = [
-        "tests/v0_8_10_ob3_recovery_migration.rs",
+        "tests/fork_at_rotates_session_id.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
         "CARGO_PKG_VERSION": "0.8.11",
-        "CARGO_BIN_NAME": "v0_8_10_ob3_recovery_migration",
+        "CARGO_BIN_NAME": "fork_at_rotates_session_id",
         "CARGO_MANIFEST_DIR": "./meerkat-core",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
@@ -538,6 +431,7 @@ rust_test(
         "__meerkat-generated-authority-bridge",
         "jsonschema",
         "schema",
+        "test-support",
     ],
     edition = "2024",
     rustc_flags = [
@@ -546,6 +440,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
+        "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
     ],
     srcs = [
         "tests/hooks_contracts.rs",
@@ -603,6 +499,7 @@ rust_test(
         "__meerkat-generated-authority-bridge",
         "jsonschema",
         "schema",
+        "test-support",
     ],
     edition = "2024",
     rustc_flags = [
@@ -611,6 +508,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
+        "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
     ],
     srcs = [
         "tests/image_generation_contracts.rs",
@@ -662,6 +561,7 @@ rust_test(
         "__meerkat-generated-authority-bridge",
         "jsonschema",
         "schema",
+        "test-support",
     ],
     edition = "2024",
     rustc_flags = [
@@ -670,6 +570,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
+        "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
     ],
     srcs = [
         "tests/mcp_config_crossproc.rs",
@@ -721,6 +623,7 @@ rust_test(
         "__meerkat-generated-authority-bridge",
         "jsonschema",
         "schema",
+        "test-support",
     ],
     edition = "2024",
     rustc_flags = [
@@ -729,6 +632,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
+        "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
     ],
     srcs = [
         "tests/ops_lifecycle_integration.rs",
@@ -779,6 +684,7 @@ rust_test(
         "__meerkat-generated-authority-bridge",
         "jsonschema",
         "schema",
+        "test-support",
     ],
     edition = "2024",
     rustc_flags = [
@@ -787,6 +693,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
+        "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
     ],
     srcs = [
         "tests/rct_contracts.rs",
@@ -840,6 +748,7 @@ rust_test(
         "__meerkat-generated-authority-bridge",
         "jsonschema",
         "schema",
+        "test-support",
     ],
     edition = "2024",
     rustc_flags = [
@@ -848,6 +757,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
+        "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
     ],
     srcs = [
         "tests/realm_connection_config.rs",
@@ -899,6 +810,7 @@ rust_test(
         "__meerkat-generated-authority-bridge",
         "jsonschema",
         "schema",
+        "test-support",
     ],
     edition = "2024",
     rustc_flags = [
@@ -907,6 +819,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
+        "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
     ],
     srcs = [
         "tests/runtime_turn_metadata_typed_round_trip.rs",
@@ -958,6 +872,7 @@ rust_test(
         "__meerkat-generated-authority-bridge",
         "jsonschema",
         "schema",
+        "test-support",
     ],
     edition = "2024",
     rustc_flags = [
@@ -966,6 +881,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
+        "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
     ],
     srcs = [
         "tests/source_identity_resolve_enforces_lifecycle.rs",
@@ -1017,6 +934,7 @@ rust_test(
         "__meerkat-generated-authority-bridge",
         "jsonschema",
         "schema",
+        "test-support",
     ],
     edition = "2024",
     rustc_flags = [
@@ -1025,6 +943,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
+        "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
     ],
     srcs = [
         "tests/tool_notice_projection.rs",
@@ -1076,6 +996,7 @@ rust_test(
         "__meerkat-generated-authority-bridge",
         "jsonschema",
         "schema",
+        "test-support",
     ],
     edition = "2024",
     rustc_flags = [
@@ -1084,6 +1005,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
+        "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
     ],
     srcs = [
         "tests/transcript_delta_retention.rs",
@@ -1135,6 +1058,7 @@ rust_test(
         "__meerkat-generated-authority-bridge",
         "jsonschema",
         "schema",
+        "test-support",
     ],
     edition = "2024",
     rustc_flags = [
@@ -1143,6 +1067,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
+        "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
     ],
     srcs = [
         "tests/transcript_digest_budget.rs",
@@ -1178,11 +1104,134 @@ rust_test(
     ),
 )
 
+rust_test(
+    name = "transcript_graph_ingress_validation_test",
+    aliases = aliases(
+        package_name = "meerkat-core",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "transcript_graph_ingress_validation",
+    crate_root = "tests/transcript_graph_ingress_validation.rs",
+    crate_features = [
+        "__meerkat-facade-agent-factory-build",
+        "__meerkat-generated-authority-bridge",
+        "jsonschema",
+        "schema",
+        "test-support",
+    ],
+    edition = "2024",
+    rustc_flags = [
+        "--cfg=meerkat_internal_generated_authority_bridge",
+    ],
+    compile_data = [
+        "Cargo.toml",
+        "src/config_template.toml",
+        "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
+        "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
+    ],
+    srcs = [
+        "tests/transcript_graph_ingress_validation.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.11",
+        "CARGO_BIN_NAME": "transcript_graph_ingress_validation",
+        "CARGO_MANIFEST_DIR": "./meerkat-core",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "small",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "16777216",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-core",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-core:meerkat_core",
+        "//meerkat-machine-kernels:meerkat_machine_kernels",
+        "//meerkat-machine-schema:meerkat_machine_schema",
+    ] + all_crate_deps(
+        package_name = "meerkat-core",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "v0_8_10_ob3_recovery_migration_test",
+    aliases = aliases(
+        package_name = "meerkat-core",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "v0_8_10_ob3_recovery_migration",
+    crate_root = "tests/v0_8_10_ob3_recovery_migration.rs",
+    crate_features = [
+        "__meerkat-facade-agent-factory-build",
+        "__meerkat-generated-authority-bridge",
+        "jsonschema",
+        "schema",
+        "test-support",
+    ],
+    edition = "2024",
+    rustc_flags = [
+        "--cfg=meerkat_internal_generated_authority_bridge",
+    ],
+    compile_data = [
+        "Cargo.toml",
+        "src/config_template.toml",
+        "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
+        "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
+    ],
+    srcs = [
+        "tests/v0_8_10_ob3_recovery_migration.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.11",
+        "CARGO_BIN_NAME": "v0_8_10_ob3_recovery_migration",
+        "CARGO_MANIFEST_DIR": "./meerkat-core",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "small",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "16777216",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-core",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-core:meerkat_core",
+        "//meerkat-machine-kernels:meerkat_machine_kernels",
+        "//meerkat-machine-schema:meerkat_machine_schema",
+    ] + all_crate_deps(
+        package_name = "meerkat-core",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
 test_suite(
     name = "fast_tests",
     tests = [
         ":auth_binding_no_string_form_test",
-        ":transcript_graph_ingress_validation_test",
         ":document_cost_probe_test",
         ":durable_tail_classification_test",
         ":fork_at_rotates_session_id_test",
@@ -1197,6 +1246,7 @@ test_suite(
         ":tool_notice_projection_test",
         ":transcript_delta_retention_test",
         ":transcript_digest_budget_test",
+        ":transcript_graph_ingress_validation_test",
         ":v0_8_10_ob3_recovery_migration_test",
     ],
 )

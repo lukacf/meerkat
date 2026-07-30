@@ -7009,12 +7009,16 @@ mod tests {
     }
 
     #[test]
-    fn call_target_rejects_blank_call_id() {
+    fn call_target_rejects_blank_call_id_as_invalid_request() {
         let error = match OpenAiLiveCallTarget::new("   ") {
             Ok(_) => panic!("blank target must fail"),
             Err(error) => error,
         };
-        assert!(matches!(error, LlmError::InvalidInputShape { .. }));
+        assert!(matches!(
+            error,
+            LlmError::InvalidRequest { message }
+                if message == "openai live call_id must not be empty"
+        ));
     }
 
     #[test]
@@ -11183,14 +11187,13 @@ mod tests {
                     if matches!(
                         item.as_ref(),
                         Item::Message {
-                            role: Role::System,
+                            role: Role::User,
                             content,
                             ..
                         } if matches!(
                             content.as_slice(),
                             [ContentPart::InputText { text }]
-                                if text.contains("peer_response_terminal")
-                                    && text.contains("birch seventeen")
+                                if text == "Authoritative peer token is birch seventeen."
                         )
                     )
             )

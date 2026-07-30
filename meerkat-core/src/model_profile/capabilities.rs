@@ -222,6 +222,9 @@ pub struct ModelCapabilities {
     // ── Features ──────────────────────────────────────────────────────
     /// Provider-native web search tool support.
     pub supports_web_search: bool,
+    /// Whether the model accepts ordered System messages inside conversation
+    /// history after the leading system-prompt prefix.
+    pub supports_mid_conversation_system_messages: bool,
     /// Anthropic data-residency hint via `inference_geo`.
     pub supports_inference_geo: bool,
     /// Anthropic `compaction` / `context_management` (with the compaction beta header).

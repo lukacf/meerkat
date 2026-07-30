@@ -40,7 +40,12 @@ struct RuntimeStickyModelFallbackCommitCoordinator {
 
 struct RuntimeStickyModelFallbackCommitOperation {
     result_rx: crate::tokio::sync::watch::Receiver<
-        Option<Result<(), meerkat_core::handles::StickyModelFallbackCommitError>>,
+        Option<
+            Result<
+                Option<meerkat_core::SessionControlCommitReceipt>,
+                meerkat_core::handles::StickyModelFallbackCommitError,
+            >,
+        >,
     >,
 }
 
@@ -49,7 +54,12 @@ struct RuntimeStickyModelFallbackCommitOperation {
 impl meerkat_core::handles::StickyModelFallbackCommitOperation
     for RuntimeStickyModelFallbackCommitOperation
 {
-    async fn wait(&self) -> Result<(), meerkat_core::handles::StickyModelFallbackCommitError> {
+    async fn wait(
+        &self,
+    ) -> Result<
+        Option<meerkat_core::SessionControlCommitReceipt>,
+        meerkat_core::handles::StickyModelFallbackCommitError,
+    > {
         let mut result_rx = self.result_rx.clone();
         loop {
             if let Some(result) = result_rx.borrow().clone() {
@@ -80,7 +90,8 @@ impl meerkat_core::handles::StickyModelFallbackCommitCoordinator
             let result = machine_commit
                 .commit()
                 .map_err(meerkat_core::handles::StickyModelFallbackCommitError::MachineRejected);
-            let (_result_tx, result_rx) = crate::tokio::sync::watch::channel(Some(result));
+            let (_result_tx, result_rx) =
+                crate::tokio::sync::watch::channel(Some(result.map(|()| None)));
             return Ok(Arc::new(RuntimeStickyModelFallbackCommitOperation {
                 result_rx,
             }));
@@ -115,7 +126,10 @@ async fn run_sticky_model_fallback_commit(
     store: Arc<dyn crate::store::RuntimeStore>,
     machine_commit: Box<dyn meerkat_core::handles::StickyModelFallbackMachineCommit>,
     control_delta: meerkat_core::handles::StickyModelFallbackControlDelta,
-) -> Result<(), meerkat_core::handles::StickyModelFallbackCommitError> {
+) -> Result<
+    Option<meerkat_core::SessionControlCommitReceipt>,
+    meerkat_core::handles::StickyModelFallbackCommitError,
+> {
     use meerkat_core::handles::StickyModelFallbackCommitError as CommitError;
 
     let runtime_id = crate::identifiers::LogicalRuntimeId::for_session(&session_id);
@@ -258,7 +272,13 @@ async fn run_sticky_model_fallback_commit(
             }
         }
     } else {
-        Ok(())
+        meerkat_core::SessionControlCommitReceipt::new(
+            target_authority.session_id().clone(),
+            target_authority.store_revision(),
+            target_authority.blob_sha256(),
+        )
+        .map(Some)
+        .map_err(CommitError::SnapshotOutcomeUnknown)
     }
 }
 

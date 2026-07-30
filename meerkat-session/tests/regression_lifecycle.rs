@@ -181,6 +181,16 @@ impl SessionAgent for MockAgent {
         Ok(meerkat_core::Session::with_id(self.session_id.clone()))
     }
 
+    fn session_transcript_authority(
+        &self,
+    ) -> Result<
+        meerkat_session::ephemeral::SessionTranscriptAuthoritySnapshot,
+        meerkat_core::AgentError,
+    > {
+        let session = self.session_clone()?;
+        meerkat_session::ephemeral::SessionTranscriptAuthoritySnapshot::from_session(&session)
+    }
+
     fn durable_llm_identity(&self) -> Option<meerkat_core::SessionLlmIdentity> {
         Some(test_llm_identity("mock"))
     }
@@ -270,6 +280,16 @@ impl SessionAgent for SnapshotAgent {
 
     fn session_clone(&self) -> Result<meerkat_core::Session, meerkat_core::AgentError> {
         Ok(meerkat_core::Session::with_id(self.session_id.clone()))
+    }
+
+    fn session_transcript_authority(
+        &self,
+    ) -> Result<
+        meerkat_session::ephemeral::SessionTranscriptAuthoritySnapshot,
+        meerkat_core::AgentError,
+    > {
+        let session = self.session_clone()?;
+        meerkat_session::ephemeral::SessionTranscriptAuthoritySnapshot::from_session(&session)
     }
 
     fn durable_llm_identity(&self) -> Option<meerkat_core::SessionLlmIdentity> {
@@ -496,6 +516,16 @@ impl SessionAgent for RecordingTurnAgent {
 
     fn session_clone(&self) -> Result<meerkat_core::Session, meerkat_core::AgentError> {
         Ok(meerkat_core::Session::with_id(self.session_id.clone()))
+    }
+
+    fn session_transcript_authority(
+        &self,
+    ) -> Result<
+        meerkat_session::ephemeral::SessionTranscriptAuthoritySnapshot,
+        meerkat_core::AgentError,
+    > {
+        let session = self.session_clone()?;
+        meerkat_session::ephemeral::SessionTranscriptAuthoritySnapshot::from_session(&session)
     }
 
     fn durable_llm_identity(&self) -> Option<meerkat_core::SessionLlmIdentity> {

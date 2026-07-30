@@ -9455,19 +9455,22 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
     }
 
     #[cfg(feature = "session-store")]
-    async fn acknowledge_whole_blob_session_boundary(
+    async fn acknowledge_committed_session_boundary(
         &mut self,
-        committed_store_revision: u64,
-        committed_blob_sha256: &str,
+        authority: &meerkat_core::CommittedSessionBoundaryAuthority,
     ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
         let Some(persistent) = self.persistent_service.as_ref() else {
-            return Ok(());
+            return Err(
+                meerkat_core::lifecycle::core_executor::CoreExecutorError::Internal(
+                    "CLI executor received store-owned session authority without a persistent service"
+                        .to_string(),
+                ),
+            );
         };
         persistent
-            .acknowledge_whole_blob_runtime_session_boundary_under_runtime_turn_boundary(
+            .acknowledge_committed_runtime_session_boundary_under_runtime_turn_boundary(
                 &self.session_id,
-                committed_store_revision,
-                committed_blob_sha256,
+                authority,
             )
             .await
             .map_err(
@@ -9983,6 +9986,19 @@ impl meerkat_mob::MobSessionService for RunMobSessionService {
             &self.inner,
             session_id,
             session_snapshot,
+        )
+        .await
+    }
+
+    async fn acknowledge_committed_runtime_session_boundary_under_turn_finalization_boundary(
+        &self,
+        session_id: &SessionId,
+        authority: &meerkat_core::CommittedSessionBoundaryAuthority,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::acknowledge_committed_runtime_session_boundary_under_turn_finalization_boundary(
+            &self.inner,
+            session_id,
+            authority,
         )
         .await
     }
@@ -12940,6 +12956,19 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
             &self.inner,
             session_id,
             session_snapshot,
+        )
+        .await
+    }
+
+    async fn acknowledge_committed_runtime_session_boundary_under_turn_finalization_boundary(
+        &self,
+        session_id: &SessionId,
+        authority: &meerkat_core::CommittedSessionBoundaryAuthority,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::acknowledge_committed_runtime_session_boundary_under_turn_finalization_boundary(
+            &self.inner,
+            session_id,
+            authority,
         )
         .await
     }
@@ -19457,6 +19486,16 @@ default_model = "gemma"
     #[cfg(feature = "mob")]
     #[async_trait]
     impl meerkat_mob::MobSessionService for TestMobSessionService {
+        async fn acknowledge_committed_runtime_session_boundary_under_turn_finalization_boundary(
+            &self,
+            _session_id: &SessionId,
+            _authority: &meerkat_core::CommittedSessionBoundaryAuthority,
+        ) -> Result<(), SessionError> {
+            Err(SessionError::Unsupported(
+                "CLI test service has no store-owned boundary authority".to_string(),
+            ))
+        }
+
         /// Test double: the two-read composition is the exact truth here.
         async fn load_session_for_resume(
             &self,
@@ -24010,6 +24049,38 @@ default_model = "gpt-5.4"
         );
         let service = Arc::new(service);
         let wrapper = MobCliSessionService::new(Arc::clone(&service));
+        let unknown_session = SessionId::new();
+        let authorities = [
+            meerkat_core::CommittedSessionBoundaryAuthority::WholeBlob {
+                session_id: unknown_session.clone(),
+                committed_store_revision: 1,
+                committed_blob_sha256: "missing-whole-blob-authority".to_string(),
+            },
+            meerkat_core::CommittedSessionBoundaryAuthority::HeadCanonical {
+                session_id: unknown_session.clone(),
+                committed_head_token: "missing-head-canonical-authority".to_string(),
+            },
+            meerkat_core::CommittedSessionBoundaryAuthority::Provisional {
+                session_id: unknown_session.clone(),
+                committed_store_revision: 1,
+                committed_authority_token: "missing-provisional-authority".to_string(),
+            },
+        ];
+        for authority in &authorities {
+            let result = <MobCliSessionService as meerkat_mob::MobSessionService>::acknowledge_committed_runtime_session_boundary_under_turn_finalization_boundary(
+                &wrapper,
+                &unknown_session,
+                authority,
+            )
+            .await;
+            assert!(
+                !matches!(
+                    result,
+                    Err(meerkat_core::service::SessionError::Unsupported(_))
+                ),
+                "MobCliSessionService must forward every store-authority boundary acknowledgement to its persistent inner service"
+            );
+        }
         let llm_override: Arc<dyn LlmClient> = Arc::new(CapturingLlmClient::new(
             Arc::new(Mutex::new(Vec::new())),
             Arc::new(Mutex::new(None)),

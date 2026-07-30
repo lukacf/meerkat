@@ -3732,6 +3732,16 @@ impl MobSessionService for LocalSessionService {
         <Self as SessionService>::create_session(self, req).await
     }
 
+    async fn acknowledge_committed_runtime_session_boundary_under_turn_finalization_boundary(
+        &self,
+        _session_id: &SessionId,
+        _authority: &meerkat_core::CommittedSessionBoundaryAuthority,
+    ) -> Result<(), SessionError> {
+        Err(SessionError::Unsupported(
+            "in-memory local session service has no store-owned boundary authority".to_string(),
+        ))
+    }
+
     /// In-memory service: nothing durable survives archive, so the two-read
     /// composition is the exact truth — `ArchivedNotRevivable` cannot exist.
     async fn load_session_for_resume(
@@ -6615,6 +6625,16 @@ mod tests {
 
     #[async_trait]
     impl MobSessionService for MockSessionSvc {
+        async fn acknowledge_committed_runtime_session_boundary_under_turn_finalization_boundary(
+            &self,
+            _session_id: &SessionId,
+            _authority: &meerkat_core::CommittedSessionBoundaryAuthority,
+        ) -> Result<(), SessionError> {
+            Err(SessionError::Unsupported(
+                "mock session service has no store-owned boundary authority".to_string(),
+            ))
+        }
+
         /// Test double: the two-read composition is the exact truth here.
         async fn load_session_for_resume(
             &self,

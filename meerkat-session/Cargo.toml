@@ -41,7 +41,7 @@ tokio_with_wasm = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
-meerkat-core = { workspace = true }
+meerkat-core = { workspace = true, features = ["test-support"] }
 meerkat-store = { workspace = true, features = ["memory"] }
 meerkat-runtime = { workspace = true }
 

@@ -1986,6 +1986,16 @@ pub enum RuntimeDeliveryOutcome {
     },
 }
 
+/// Machine-facing classification of a successful target admission.
+///
+/// This is deliberately narrower than [`RuntimeDeliveryOutcome`]: only these
+/// two variants are legal on the `DispatchAccepted` lifecycle input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliveryAdmissionOutcome {
+    Accepted,
+    Deduplicated,
+}
+
 impl RuntimeDeliveryOutcome {
     pub fn detail(&self) -> String {
         match self {

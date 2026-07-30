@@ -518,15 +518,27 @@ async fn publish_committed_session_boundary(
     let Some(prepared_boundary) = prepared_boundary else {
         return Ok(());
     };
+    let Some(committed_authority) = committed_authority else {
+        // `DriverEntry::Ephemeral` deliberately returns no store-issued
+        // authority; its live Session is already the committed boundary.
+        // Persistent drivers wrap every successful store result in `Some`, so
+        // absence remains impossible for the authority-bearing profiles below.
+        if prepared_boundary.provisional_promotion_receipt().is_some()
+            || prepared_boundary.head_canonical().is_some()
+        {
+            return Err(meerkat_core::lifecycle::CoreExecutorError::Internal(
+                "authority-bearing session boundary committed without store-owned authority"
+                    .to_string(),
+            ));
+        }
+        return Ok(());
+    };
     if let Some(checkpoint) = prepared_boundary.provisional_promotion_receipt() {
-        let committed_authority = committed_authority
-            .and_then(|result| result.authority())
-            .ok_or_else(|| {
-                meerkat_core::lifecycle::CoreExecutorError::Internal(
-                    "provisional session promotion committed without store-owned authority"
-                        .to_string(),
-                )
-            })?;
+        let committed_authority = committed_authority.authority().ok_or_else(|| {
+            meerkat_core::lifecycle::CoreExecutorError::Internal(
+                "provisional session promotion committed without store-owned authority".to_string(),
+            )
+        })?;
         if committed_authority.session_id() != checkpoint.session_id() {
             return Err(meerkat_core::lifecycle::CoreExecutorError::Internal(
                 "provisional session promotion returned authority for another session".to_string(),
@@ -564,19 +576,16 @@ async fn publish_committed_session_boundary(
                 }
             };
         return executor
-            .acknowledge_provisional_session_boundary(
-                committed_store_revision,
-                committed_authority_token,
+            .acknowledge_committed_session_boundary(
+                &meerkat_core::CommittedSessionBoundaryAuthority::Provisional {
+                    session_id: committed_authority.session_id().clone(),
+                    committed_store_revision,
+                    committed_authority_token: committed_authority_token.to_string(),
+                },
             )
             .await;
     }
     if prepared_boundary.head_canonical().is_some() {
-        let committed_authority = committed_authority.ok_or_else(|| {
-            meerkat_core::lifecycle::CoreExecutorError::Internal(
-                "head-canonical session boundary committed without a store-owned authority result"
-                    .to_string(),
-            )
-        })?;
         if committed_authority.profile()
             != crate::store::RuntimeSessionPersistenceProfile::HeadCanonicalV1
         {
@@ -603,7 +612,12 @@ async fn publish_committed_session_boundary(
                 ))
             })?;
         return executor
-            .acknowledge_head_canonical_session_boundary(token)
+            .acknowledge_committed_session_boundary(
+                &meerkat_core::CommittedSessionBoundaryAuthority::HeadCanonical {
+                    session_id: head_authority.session_id().clone(),
+                    committed_head_token: token.to_string(),
+                },
+            )
             .await;
     }
     let prepared_artifact = prepared_boundary.whole_blob_artifact().map_err(|error| {
@@ -612,7 +626,7 @@ async fn publish_committed_session_boundary(
         ))
     })?;
     let committed_authority = committed_authority
-        .and_then(|result| result.authority())
+        .authority()
         .and_then(crate::store::RuntimeSessionAuthority::whole_blob)
         .ok_or_else(|| {
             meerkat_core::lifecycle::CoreExecutorError::Internal(
@@ -633,9 +647,12 @@ async fn publish_committed_session_boundary(
         ));
     }
     executor
-        .acknowledge_whole_blob_session_boundary(
-            committed_authority.store_revision(),
-            committed_authority.blob_sha256(),
+        .acknowledge_committed_session_boundary(
+            &meerkat_core::CommittedSessionBoundaryAuthority::WholeBlob {
+                session_id: committed_authority.session_id().clone(),
+                committed_store_revision: committed_authority.store_revision(),
+                committed_blob_sha256: committed_authority.blob_sha256().to_string(),
+            },
         )
         .await
 }
@@ -1500,8 +1517,16 @@ async fn drain_recovered_interaction_terminal_outboxes_under_authority(
                             )
                         })?
                 };
+                let requires_external_session_checkpoint = if requires_session_checkpoint {
+                    !matches!(
+                        driver.lock().await.session_persistence_profile(),
+                        Some(crate::store::RuntimeSessionPersistenceProfile::HeadCanonicalV1)
+                    )
+                } else {
+                    false
+                };
                 let committed_snapshot = if finalized_receipt.is_none()
-                    && requires_session_checkpoint
+                    && requires_external_session_checkpoint
                 {
                     Some(
                         driver
@@ -1653,7 +1678,15 @@ async fn drain_recovered_input_terminal_completions(
                 )
             })?;
         }
-        let (finalization, finalization_error) = if batch.requires_session_checkpoint {
+        let requires_external_session_checkpoint = if batch.requires_session_checkpoint {
+            !matches!(
+                driver.lock().await.session_persistence_profile(),
+                Some(crate::store::RuntimeSessionPersistenceProfile::HeadCanonicalV1)
+            )
+        } else {
+            false
+        };
+        let (finalization, finalization_error) = if requires_external_session_checkpoint {
             let snapshot = driver
                 .lock()
                 .await
@@ -5696,10 +5729,24 @@ async fn process_queue(
                                 };
                                 // The rejected boundary transaction rolled back
                                 // both terminal input state and its exact receipt.
-                                // Do not publish an ephemeral richer waiter result:
-                                // the canonical stop path below persists one
-                                // runless RuntimeTerminated outcome and resolves
-                                // every waiter from that same durable authority.
+                                // The live persistent shell has nevertheless
+                                // crossed its fail-stop terminal checkpoint, so
+                                // its contributors are no longer in the active
+                                // set used by runless stop terminalization. Fail
+                                // the exact process-local waiters while their
+                                // input identities are still owned here; waiting
+                                // for the stop path would strand them forever.
+                                // This is mechanical delivery failure only: do
+                                // not mint an ephemeral terminal outcome while a
+                                // registration-authorized reload is required.
+                                if let Some(completions) = completions.as_ref() {
+                                    let mut completions = completions.lock().await;
+                                    fail_completion_waiters(
+                                        &mut completions,
+                                        &input_ids,
+                                        failure_detail.clone(),
+                                    );
+                                }
                                 drop(terminal_authority_guard);
                                 let should_stop = stop_runtime_loop_executor_from_dsl_effect(
                                 driver,
@@ -5716,90 +5763,15 @@ async fn process_queue(
                             }
                         };
 
-                        let authoritative_checkpoint = match reconcile_compaction_projection_outbox(
-                            driver,
-                            executor,
-                            EmptyOutboxCheckpoint::SkipIdentityRefresh,
-                        )
-                        .await
-                        {
-                            Ok(checkpoint) => checkpoint,
-                            Err(err) => {
-                                tracing::error!(
-                                    %run_id,
-                                    error = %err,
-                                    "failed to finalize committed compaction projection outbox"
-                                );
-                                let completion_error =
-                                    meerkat_core::TurnErrorMetadata::runtime_apply_failure(
-                                        format!(
-                                            "runtime compaction projection finalization failed after commit: {err}"
-                                        ),
-                                    );
-                                let publication_error =
-                                    finalize_publish_and_resolve_runtime_terminals(
-                                        driver,
-                                        completions,
-                                        terminal_authority_guard,
-                                        teardown_slot,
-                                        executor,
-                                        &input_ids,
-                                        &directed_interaction_ids,
-                                        &run_id,
-                                        completion_terminal_observation(terminal.as_ref()),
-                                        terminal.as_ref(),
-                                        crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Failed,
-                                        Some(completion_error.clone()),
-                                    )
-                                    .await
-                                    .err();
-                                if let Some(publication_error) = publication_error.as_ref() {
-                                    tracing::error!(
-                                        %run_id,
-                                        error = %publication_error,
-                                        "failed to durably publish directed terminal after compaction finalization failure"
-                                    );
-                                }
-                                if publication_error.is_some()
-                                    && directed_interaction_ids.is_empty()
-                                {
-                                    // No durable interaction outbox can retry
-                                    // this batch. Exit through the abnormal
-                                    // handoff so teardown consumes the retained
-                                    // non-directed carrier before any runless
-                                    // stop terminal is minted.
-                                    return true;
-                                }
-                                if publication_error.is_some()
-                                    && drain_recovered_interaction_terminal_outboxes_until_clear(
-                                        driver,
-                                        completions,
-                                        executor,
-                                        authority_binding,
-                                        true,
-                                        RuntimeProjectionRecoveryAuthority::RuntimeLoop,
-                                    )
-                                    .await
-                                {
-                                    return true;
-                                }
-                                return stop_runtime_loop_executor_from_dsl_effect(
-                                        driver,
-                                        completions,
-                                        executor,
-                                        format!(
-                                            "runtime compaction projection finalization failed after commit for run {run_id}: {err}"
-                                        ),
-                                        handoff,
-                                        turn_finalization_guard,
-                                    )
-                                    .await;
-                            }
-                        };
-
+                        // Acknowledge the exact store commit before any
+                        // derived compaction projection advances that same
+                        // store-owned authority (HeadCanonical intent cleanup
+                        // is a metadata-only head mutation). Otherwise the
+                        // executor re-reads a newer cleaned head and rejects
+                        // the just-committed token as stale.
                         let checkpoint_result = publish_committed_session_boundary(
                             executor,
-                            authoritative_checkpoint,
+                            None,
                             committed_authority.as_ref(),
                             committed_session_boundary.as_ref(),
                         )
@@ -5867,6 +5839,88 @@ async fn process_queue(
                             .await;
                             return should_stop;
                         }
+
+                        let _authoritative_checkpoint =
+                            match reconcile_compaction_projection_outbox(
+                                driver,
+                                executor,
+                                EmptyOutboxCheckpoint::SkipIdentityRefresh,
+                            )
+                            .await
+                            {
+                                Ok(checkpoint) => checkpoint,
+                                Err(err) => {
+                                    tracing::error!(
+                                        %run_id,
+                                        error = %err,
+                                        "failed to finalize committed compaction projection outbox"
+                                    );
+                                    let completion_error =
+                                        meerkat_core::TurnErrorMetadata::runtime_apply_failure(
+                                            format!(
+                                                "runtime compaction projection finalization failed after commit: {err}"
+                                            ),
+                                        );
+                                    let publication_error =
+                                    finalize_publish_and_resolve_runtime_terminals(
+                                        driver,
+                                        completions,
+                                        terminal_authority_guard,
+                                        teardown_slot,
+                                        executor,
+                                        &input_ids,
+                                        &directed_interaction_ids,
+                                        &run_id,
+                                        completion_terminal_observation(terminal.as_ref()),
+                                        terminal.as_ref(),
+                                        crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Failed,
+                                        Some(completion_error.clone()),
+                                    )
+                                    .await
+                                    .err();
+                                    if let Some(publication_error) = publication_error.as_ref() {
+                                        tracing::error!(
+                                            %run_id,
+                                            error = %publication_error,
+                                            "failed to durably publish directed terminal after compaction finalization failure"
+                                        );
+                                    }
+                                    if publication_error.is_some()
+                                        && directed_interaction_ids.is_empty()
+                                    {
+                                        // No durable interaction outbox can retry
+                                        // this batch. Exit through the abnormal
+                                        // handoff so teardown consumes the retained
+                                        // non-directed carrier before any runless
+                                        // stop terminal is minted.
+                                        return true;
+                                    }
+                                    if publication_error.is_some()
+                                    && drain_recovered_interaction_terminal_outboxes_until_clear(
+                                        driver,
+                                        completions,
+                                        executor,
+                                        authority_binding,
+                                        true,
+                                        RuntimeProjectionRecoveryAuthority::RuntimeLoop,
+                                    )
+                                    .await
+                                {
+                                    return true;
+                                }
+                                    return stop_runtime_loop_executor_from_dsl_effect(
+                                        driver,
+                                        completions,
+                                        executor,
+                                        format!(
+                                            "runtime compaction projection finalization failed after commit for run {run_id}: {err}"
+                                        ),
+                                        handoff,
+                                        turn_finalization_guard,
+                                    )
+                                    .await;
+                                }
+                            };
 
                         if let Err(err) = finalize_publish_and_resolve_runtime_terminals(
                             driver,
@@ -6305,7 +6359,12 @@ mod tests {
             "digest_format": history.digest_format(),
         });
         let mut encoded = serde_json::to_value(session).unwrap();
+        encoded["version"] = serde_json::json!(2);
         encoded["metadata"][meerkat_core::SESSION_TRANSCRIPT_HISTORY_STATE_KEY] = released_graph;
+        encoded["metadata"]
+            .as_object_mut()
+            .unwrap()
+            .remove(meerkat_core::SESSION_TRANSCRIPT_REWRITE_PREFIX_AUTHORITY_KEY);
         encoded
     }
 
@@ -6331,7 +6390,9 @@ mod tests {
             )
             .unwrap();
         let encoded = encode_as_released_0810_compaction_fixture(&session);
-        let mut session: meerkat_core::Session = serde_json::from_value(encoded).unwrap();
+        let encoded = serde_json::to_vec(&encoded).unwrap();
+        let imported = meerkat_core::import_released_0810_session(&encoded).unwrap();
+        let (mut session, _import_receipt) = imported.into_parts();
         let commit = session
             .validated_transcript_history_state()
             .unwrap()
@@ -6474,14 +6535,24 @@ mod tests {
             Ok(())
         }
 
-        async fn acknowledge_whole_blob_session_boundary(
+        async fn acknowledge_committed_session_boundary(
             &mut self,
-            committed_store_revision: u64,
-            committed_blob_sha256: &str,
+            authority: &meerkat_core::CommittedSessionBoundaryAuthority,
         ) -> Result<(), meerkat_core::lifecycle::CoreExecutorError> {
-            self.authority_ack =
-                Some((committed_store_revision, committed_blob_sha256.to_string()));
-            Ok(())
+            match authority {
+                meerkat_core::CommittedSessionBoundaryAuthority::WholeBlob {
+                    committed_store_revision,
+                    committed_blob_sha256,
+                    ..
+                } => {
+                    self.authority_ack =
+                        Some((*committed_store_revision, committed_blob_sha256.clone()));
+                    Ok(())
+                }
+                other => Err(meerkat_core::lifecycle::CoreExecutorError::Internal(
+                    format!("WholeBlob finalization probe received {other:?}"),
+                )),
+            }
         }
 
         async fn cancel_after_boundary(
@@ -6565,6 +6636,25 @@ mod tests {
                 .to_string()
                 .contains("differed from the exact prepared artifact")
         );
+        assert_eq!(executor.authority_ack, None);
+        assert_eq!(snapshot_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn ephemeral_whole_blob_finalization_requires_no_store_authority() {
+        let session = Arc::new(meerkat_core::Session::new());
+        let boundary = meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(session)
+            .expect("seal ephemeral session boundary");
+        let snapshot_calls = Arc::new(AtomicUsize::new(0));
+        let mut executor = WholeBlobFinalizationProbe {
+            snapshot_calls: Arc::clone(&snapshot_calls),
+            authority_ack: None,
+        };
+
+        publish_committed_session_boundary(&mut executor, None, None, Some(&boundary))
+            .await
+            .expect("ephemeral driver has no store-issued session authority");
+
         assert_eq!(executor.authority_ack, None);
         assert_eq!(snapshot_calls.load(Ordering::SeqCst), 0);
     }

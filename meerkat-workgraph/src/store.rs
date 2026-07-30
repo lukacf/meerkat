@@ -2913,9 +2913,7 @@ mod legacy_schema_tests {
                     namespace: WorkNamespace::default(),
                     item_id: WorkItemId::generated(),
                 },
-                target: crate::WorkAttentionTarget::Session {
-                    session_id: session_id.clone(),
-                },
+                target: crate::WorkAttentionTarget::Session { session_id },
                 mode: WorkAttentionMode::Pursue,
                 status: WorkAttentionStatus::Active,
                 machine_state: Default::default(),
@@ -2940,10 +2938,9 @@ mod legacy_schema_tests {
             .expect("insert legacy row");
         }
 
-        let error = match crate::SqliteWorkGraphStore::open(&path) {
-            Ok(_) => panic!("unledgered owned workgraph schema must be refused"),
-            Err(error) => error,
-        };
+        let error = crate::SqliteWorkGraphStore::open(&path)
+            .err()
+            .expect("unledgered owned workgraph schema must be refused");
         assert!(
             error.to_string().contains("no ledger row"),
             "unexpected refusal: {error}"

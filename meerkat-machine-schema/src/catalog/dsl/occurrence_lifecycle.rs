@@ -3,7 +3,7 @@ use meerkat_machine_dsl::machine;
 
 machine! {
     machine OccurrenceLifecycleMachine {
-        version: 8,
+        version: 9,
         rust: "self" / "catalog::dsl::occurrence_lifecycle",
 
         state {
@@ -194,7 +194,10 @@ machine! {
             // intent was committed. The correlation id is deliberately not an
             // input here: this transition can only retain the machine-owned
             // identity committed before the external effect.
-            DispatchAccepted { at_utc_ms: u64 },
+            DispatchAccepted {
+                admission_outcome: Enum<DeliveryAdmissionOutcome>,
+                at_utc_ms: u64
+            },
             AwaitCompletion { at_utc_ms: u64 },
             Complete { at_utc_ms: u64 },
             ResolveRuntimeCompletion {
@@ -1396,10 +1399,13 @@ machine! {
         }
 
         transition DispatchAcceptedFromDispatching {
-            on input DispatchAccepted { at_utc_ms }
+            on input DispatchAccepted { admission_outcome, at_utc_ms }
             guard {
                 self.lifecycle_phase == Phase::Dispatching
                 && self.delivery_correlation_id != None
+            }
+            guard "admission_accepted" {
+                admission_outcome == DeliveryAdmissionOutcome::Accepted
             }
             update {
                 self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
@@ -1409,6 +1415,32 @@ machine! {
             }
             to Dispatching
             emit DispatchAccepted
+        }
+
+        // A deduplicated admission is the target's durable proof that this
+        // occurrence's stable exactly-once identity already took effect. A
+        // reclaim after the original deliverer crashed must therefore
+        // terminalize successfully even when no live completion channel
+        // survived that crash.
+        transition DispatchDeduplicatedFromDispatching {
+            on input DispatchAccepted { admission_outcome, at_utc_ms }
+            guard {
+                self.lifecycle_phase == Phase::Dispatching
+                && self.delivery_correlation_id != None
+            }
+            guard "admission_deduplicated" {
+                admission_outcome == DeliveryAdmissionOutcome::Deduplicated
+            }
+            update {
+                self.completed_at_utc_ms = Some(at_utc_ms);
+                self.receipt_recorded_at_utc_ms = Some(at_utc_ms);
+                self.receipt_stage = Some(DeliveryReceiptStage::Completed);
+                self.receipt_failure_class = None;
+                self.receipt_detail = None;
+            }
+            to Completed
+            emit DispatchAccepted
+            emit Completed
         }
 
         // --- Await completion ---
@@ -2242,6 +2274,12 @@ pub enum RuntimeCompletionOutcome {
     Abandoned,
     FinalizationFailed,
     RuntimeTerminated,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliveryAdmissionOutcome {
+    Accepted,
+    Deduplicated,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -3139,6 +3139,7 @@ impl SessionDocumentMachineAuthority {
                             write_document: durable_document_present,
                             retire_runtime: archive_should_retire_runtime(
                                 runtime_backed,
+                                durable_document_present,
                                 runtime_observation,
                             ),
                         }])
@@ -3792,10 +3793,13 @@ fn store_projection_can_recover_authority(
 
 fn archive_should_retire_runtime(
     runtime_backed: bool,
+    durable_document_present: bool,
     runtime_observation: SessionArchiveRuntimeObservation,
 ) -> bool {
     (runtime_backed)
-        && (runtime_observation == SessionArchiveRuntimeObservation::RetirementRequired)
+        && (runtime_observation != SessionArchiveRuntimeObservation::QuiescentTerminal)
+        && ((durable_document_present)
+            || (runtime_observation == SessionArchiveRuntimeObservation::RetirementRequired))
 }
 
 impl Default for SessionDocumentMachineAuthority {

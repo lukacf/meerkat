@@ -1043,15 +1043,20 @@ mod tests {
         use crate::builtin::shell::process_lifecycle::{ProcessGroupControl, ProcessGroupSignal};
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-        struct HeldLiveControl {
+        struct RefusingKillControl {
             live: AtomicBool,
             signal_count: AtomicUsize,
         }
 
-        impl ProcessGroupControl for HeldLiveControl {
-            fn signal(&self, _pgid: i32, _signal: ProcessGroupSignal) -> std::io::Result<bool> {
+        impl ProcessGroupControl for RefusingKillControl {
+            fn signal(&self, _pgid: i32, signal: ProcessGroupSignal) -> std::io::Result<bool> {
                 self.signal_count.fetch_add(1, Ordering::SeqCst);
-                Ok(self.live.load(Ordering::SeqCst))
+                match signal {
+                    ProcessGroupSignal::Term => Ok(self.live.load(Ordering::SeqCst)),
+                    ProcessGroupSignal::Kill => Err(std::io::Error::other(
+                        "injected process-group KILL dispatch failure",
+                    )),
+                }
             }
 
             fn exists(&self, _pgid: i32) -> std::io::Result<bool> {
@@ -1060,7 +1065,7 @@ mod tests {
         }
 
         let temp_dir = TempDir::new().unwrap();
-        let control = Arc::new(HeldLiveControl {
+        let control = Arc::new(RefusingKillControl {
             live: AtomicBool::new(true),
             signal_count: AtomicUsize::new(0),
         });

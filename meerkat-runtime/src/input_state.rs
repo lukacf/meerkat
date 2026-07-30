@@ -1728,7 +1728,8 @@ mod tests {
         }
 
         let mut forged_verdict = serde_json::to_value(&rows[0]).unwrap();
-        forged_verdict["terminal_completion"]["finalization"] = serde_json::json!("succeeded");
+        forged_verdict["terminal_completion"]["phase"]["finalization"] =
+            serde_json::json!("succeeded");
         let error = serde_json::from_value::<StoredInputState>(forged_verdict)
             .expect_err("the receipt digest must bind the typed finalization verdict");
         assert!(error.to_string().contains("receipt digest mismatch"));

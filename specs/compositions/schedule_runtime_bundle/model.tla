@@ -3,7 +3,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated composition model for schedule_runtime_bundle.
 
-CONSTANTS BooleanValues, ClaimOwnerValues, ClaimTokenValues, ClaimedDispatchDispositionValues, ClaimedDispatchSchedulePhaseValues, CompletionSupersessionDispositionValues, CorrelationIdValues, DeliveryCompletionFailureReasonValues, DeliveryFailureReasonValues, DeliveryReceiptStageValues, LateCompletionResolutionClassValues, MisfirePolicyValues, MissingTargetPolicyValues, NatValues, OccurrenceFailureClassValues, OccurrenceIdValues, OccurrenceLifecycleInputVariantValues, OccurrenceLifecycleStateValues, OccurrenceTargetProbeOutcomeValues, OccurrenceTransitionFailureClassKindValues, OccurrenceTransitionFailureRefusalKindValues, OverlapPolicyValues, RuntimeCompletionOutcomeValues, RuntimeOutcomeKeyValues, ScheduleIdValues, ScheduleLifecycleStateValues, SessionIdValues, SetOfOccurrenceIdValues, StringValues, TargetBindingIdValues, TriggerKeyValues
+CONSTANTS BooleanValues, ClaimOwnerValues, ClaimTokenValues, ClaimedDispatchDispositionValues, ClaimedDispatchSchedulePhaseValues, CompletionSupersessionDispositionValues, CorrelationIdValues, DeliveryAdmissionOutcomeValues, DeliveryCompletionFailureReasonValues, DeliveryFailureReasonValues, DeliveryReceiptStageValues, LateCompletionResolutionClassValues, MisfirePolicyValues, MissingTargetPolicyValues, NatValues, OccurrenceFailureClassValues, OccurrenceIdValues, OccurrenceLifecycleInputVariantValues, OccurrenceLifecycleStateValues, OccurrenceTargetProbeOutcomeValues, OccurrenceTransitionFailureClassKindValues, OccurrenceTransitionFailureRefusalKindValues, OverlapPolicyValues, RuntimeCompletionOutcomeValues, RuntimeOutcomeKeyValues, ScheduleIdValues, ScheduleLifecycleStateValues, SessionIdValues, SetOfOccurrenceIdValues, StringValues, TargetBindingIdValues, TriggerKeyValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -3581,14 +3581,16 @@ occurrence_DispatchStartedFromClaimed(arg_correlation_id, arg_at_utc_ms) ==
        /\ model_step_count' = model_step_count + 1
 
 
-occurrence_DispatchAcceptedFromDispatching(arg_at_utc_ms) ==
+occurrence_DispatchAcceptedFromDispatching(arg_admission_outcome, arg_at_utc_ms) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "occurrence"
        /\ packet.variant = "DispatchAccepted"
+       /\ packet.payload.admission_outcome = arg_admission_outcome
        /\ packet.payload.at_utc_ms = arg_at_utc_ms
        /\ ~HigherPriorityReady("occurrence_authority")
        /\ occurrence_phase = "Dispatching"
        /\ (occurrence_delivery_correlation_id # None)
+       /\ (packet.payload.admission_outcome = "Accepted")
        /\ occurrence_phase' = "Dispatching"
        /\ occurrence_receipt_recorded_at_utc_ms' = Some(packet.payload.at_utc_ms)
        /\ occurrence_receipt_stage' = Some("DispatchAccepted")
@@ -3601,6 +3603,32 @@ occurrence_DispatchAcceptedFromDispatching(arg_at_utc_ms) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "DispatchAccepted", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "DispatchAcceptedFromDispatching"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "DispatchAcceptedFromDispatching", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Dispatching"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+occurrence_DispatchDeduplicatedFromDispatching(arg_admission_outcome, arg_at_utc_ms) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "occurrence"
+       /\ packet.variant = "DispatchAccepted"
+       /\ packet.payload.admission_outcome = arg_admission_outcome
+       /\ packet.payload.at_utc_ms = arg_at_utc_ms
+       /\ ~HigherPriorityReady("occurrence_authority")
+       /\ occurrence_phase = "Dispatching"
+       /\ (occurrence_delivery_correlation_id # None)
+       /\ (packet.payload.admission_outcome = "Deduplicated")
+       /\ occurrence_phase' = "Completed"
+       /\ occurrence_receipt_recorded_at_utc_ms' = Some(packet.payload.at_utc_ms)
+       /\ occurrence_receipt_stage' = Some("Completed")
+       /\ occurrence_receipt_failure_class' = None
+       /\ occurrence_receipt_detail' = None
+       /\ occurrence_completed_at_utc_ms' = Some(packet.payload.at_utc_ms)
+       /\ UNCHANGED << occurrence_occurrence_id, occurrence_schedule_id, occurrence_schedule_revision, occurrence_occurrence_ordinal, occurrence_trigger_key, occurrence_target_binding_key, occurrence_misfire_policy, occurrence_misfire_policy_key, occurrence_overlap_policy, occurrence_overlap_policy_key, occurrence_missing_target_policy, occurrence_missing_target_policy_key, occurrence_due_at_utc_ms, occurrence_misfire_deadline_utc_ms, occurrence_claimed_by, occurrence_lease_expires_at_utc_ms, occurrence_claimed_at_utc_ms, occurrence_claim_token, occurrence_delivery_correlation_id, occurrence_target_materialized_session_id, occurrence_last_receipt_recorded_at_utc_ms, occurrence_last_receipt_attempt, occurrence_last_receipt_stage, occurrence_last_receipt_failure_class, occurrence_last_receipt_detail, occurrence_last_receipt_correlation_id, occurrence_last_receipt_materialized_session_id, occurrence_runtime_outcome_key, occurrence_failure_class, occurrence_failure_detail, occurrence_dispatched_at_utc_ms, occurrence_attempt_count, occurrence_superseded_by_revision, occurrence_late_completion_recorded_at_utc_ms, occurrence_late_completion_resolution, occurrence_late_completion_detail, occurrence_stale_completion_arrivals, schedule_phase, schedule_schedule_id, schedule_revision, schedule_trigger_key, schedule_target_binding_key, schedule_misfire_policy, schedule_overlap_policy, schedule_missing_target_policy, schedule_planning_horizon_days, schedule_planning_horizon_occurrences, schedule_planning_cursor_utc_ms, schedule_next_occurrence_ordinal, schedule_superseded_ack_ids, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "occurrence", variant |-> "DispatchAccepted", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "DispatchDeduplicatedFromDispatching"], [machine |-> "occurrence", variant |-> "Completed", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "DispatchDeduplicatedFromDispatching"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "occurrence", transition |-> "DispatchDeduplicatedFromDispatching", actor |-> "occurrence_authority", step |-> (model_step_count + 1), from_phase |-> occurrence_phase, to_phase |-> "Completed"]}
        /\ model_step_count' = model_step_count + 1
 
 
@@ -5175,7 +5203,8 @@ EntryPacketAdmissible_occurrence(packet) ==
     \/ /\ (packet.variant = "RecordReceipt") /\ (occurrence_phase = "DeliveryFailed") /\ (((occurrence_receipt_stage # None) /\ (occurrence_receipt_recorded_at_utc_ms # None) /\ (occurrence_receipt_detail = packet.payload.detail) /\ (occurrence_delivery_correlation_id = packet.payload.correlation_id) /\ (occurrence_target_materialized_session_id = packet.payload.materialized_session_id)))
     \/ /\ (packet.variant = "Claim") /\ (occurrence_phase = "Pending") /\ (((occurrence_due_at_utc_ms <= packet.payload.at_utc_ms) /\ (packet.payload.at_utc_ms <= occurrence_misfire_deadline_utc_ms)))
     \/ /\ (packet.variant = "DispatchStarted") /\ (occurrence_phase = "Claimed")
-    \/ /\ (packet.variant = "DispatchAccepted") /\ (occurrence_phase = "Dispatching") /\ ((occurrence_delivery_correlation_id # None))
+    \/ /\ (packet.variant = "DispatchAccepted") /\ (occurrence_phase = "Dispatching") /\ ((occurrence_delivery_correlation_id # None)) /\ ((packet.payload.admission_outcome = "Accepted"))
+    \/ /\ (packet.variant = "DispatchAccepted") /\ (occurrence_phase = "Dispatching") /\ ((occurrence_delivery_correlation_id # None)) /\ ((packet.payload.admission_outcome = "Deduplicated"))
     \/ /\ (packet.variant = "AwaitCompletion") /\ (occurrence_phase = "Dispatching")
     \/ /\ (packet.variant = "AwaitCompletion") /\ (occurrence_phase = "Superseded")
     \/ /\ (packet.variant = "Complete") /\ (occurrence_phase = "Dispatching" \/ occurrence_phase = "AwaitingCompletion")
@@ -5473,7 +5502,8 @@ CoreNext ==
     \/ \E arg_correlation_id \in OptionCorrelationIdValues : \E arg_detail \in OptionStringValues : \E arg_materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionRuntimeOutcomeKeyValues : occurrence_RecordReceiptDeliveryFailed(arg_correlation_id, arg_detail, arg_materialized_session_id, arg_runtime_outcome_key)
     \/ \E arg_owner_id \in ClaimOwnerValues : \E arg_at_utc_ms \in 0..2 : \E arg_lease_expires_at_utc_ms \in 0..2 : \E arg_claim_token \in ClaimTokenValues : occurrence_ClaimPending(arg_owner_id, arg_at_utc_ms, arg_lease_expires_at_utc_ms, arg_claim_token)
     \/ \E arg_correlation_id \in OptionCorrelationIdValues : \E arg_at_utc_ms \in 0..2 : occurrence_DispatchStartedFromClaimed(arg_correlation_id, arg_at_utc_ms)
-    \/ \E arg_at_utc_ms \in 0..2 : occurrence_DispatchAcceptedFromDispatching(arg_at_utc_ms)
+    \/ \E arg_admission_outcome \in DeliveryAdmissionOutcomeValues : \E arg_at_utc_ms \in 0..2 : occurrence_DispatchAcceptedFromDispatching(arg_admission_outcome, arg_at_utc_ms)
+    \/ \E arg_admission_outcome \in DeliveryAdmissionOutcomeValues : \E arg_at_utc_ms \in 0..2 : occurrence_DispatchDeduplicatedFromDispatching(arg_admission_outcome, arg_at_utc_ms)
     \/ \E arg_at_utc_ms \in 0..2 : occurrence_AwaitCompletionFromDispatching(arg_at_utc_ms)
     \/ \E arg_at_utc_ms \in 0..2 : occurrence_AwaitCompletionAfterSupersession(arg_at_utc_ms)
     \/ \E arg_at_utc_ms \in 0..2 : occurrence_CompleteFromDispatchingOrAwaiting(arg_at_utc_ms)
@@ -5755,12 +5785,13 @@ WitnessFairness_runtime_delivery_feedback_7 ==
     /\ WF_vars(\E arg_correlation_id \in OptionCorrelationIdValues : \E arg_detail \in OptionStringValues : \E arg_materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionRuntimeOutcomeKeyValues : occurrence_RecordReceiptDeliveryFailed(arg_correlation_id, arg_detail, arg_materialized_session_id, arg_runtime_outcome_key))
     /\ WF_vars(\E arg_owner_id \in ClaimOwnerValues : \E arg_at_utc_ms \in 0..2 : \E arg_lease_expires_at_utc_ms \in 0..2 : \E arg_claim_token \in ClaimTokenValues : occurrence_ClaimPending(arg_owner_id, arg_at_utc_ms, arg_lease_expires_at_utc_ms, arg_claim_token))
     /\ WF_vars(\E arg_correlation_id \in OptionCorrelationIdValues : \E arg_at_utc_ms \in 0..2 : occurrence_DispatchStartedFromClaimed(arg_correlation_id, arg_at_utc_ms))
-    /\ WF_vars(\E arg_at_utc_ms \in 0..2 : occurrence_DispatchAcceptedFromDispatching(arg_at_utc_ms))
+    /\ WF_vars(\E arg_admission_outcome \in DeliveryAdmissionOutcomeValues : \E arg_at_utc_ms \in 0..2 : occurrence_DispatchAcceptedFromDispatching(arg_admission_outcome, arg_at_utc_ms))
+    /\ WF_vars(\E arg_admission_outcome \in DeliveryAdmissionOutcomeValues : \E arg_at_utc_ms \in 0..2 : occurrence_DispatchDeduplicatedFromDispatching(arg_admission_outcome, arg_at_utc_ms))
     /\ WF_vars(\E arg_at_utc_ms \in 0..2 : occurrence_AwaitCompletionFromDispatching(arg_at_utc_ms))
     /\ WF_vars(\E arg_at_utc_ms \in 0..2 : occurrence_AwaitCompletionAfterSupersession(arg_at_utc_ms))
-    /\ WF_vars(\E arg_at_utc_ms \in 0..2 : occurrence_CompleteFromDispatchingOrAwaiting(arg_at_utc_ms))
 
 WitnessFairness_runtime_delivery_feedback_8 ==
+    /\ WF_vars(\E arg_at_utc_ms \in 0..2 : occurrence_CompleteFromDispatchingOrAwaiting(arg_at_utc_ms))
     /\ WF_vars(\E arg_outcome \in RuntimeCompletionOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_RuntimeCompletionCompleted(arg_outcome, arg_detail, arg_at_utc_ms))
     /\ WF_vars(\E arg_outcome \in RuntimeCompletionOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_RuntimeCompletionRuntimeRejected(arg_outcome, arg_detail, arg_at_utc_ms))
     /\ WF_vars(\E arg_outcome \in RuntimeCompletionOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_RuntimeCompletionTransportError(arg_outcome, arg_detail, arg_at_utc_ms))
@@ -5784,9 +5815,9 @@ WitnessFairness_runtime_delivery_feedback_8 ==
     /\ WF_vars(\E arg_superseded_by_revision \in 0..2 : \E arg_at_utc_ms \in 0..2 : occurrence_SupersedeAlreadySuperseded(arg_superseded_by_revision, arg_at_utc_ms))
     /\ WF_vars(\E arg_at_utc_ms \in 0..2 : occurrence_LateCompleteAfterSupersession(arg_at_utc_ms))
     /\ WF_vars(\E arg_outcome \in RuntimeCompletionOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_LateRuntimeCompletionCompletedAfterSupersession(arg_outcome, arg_detail, arg_at_utc_ms))
-    /\ WF_vars(\E arg_outcome \in RuntimeCompletionOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_LateRuntimeCompletionRejectedAfterSupersession(arg_outcome, arg_detail, arg_at_utc_ms))
 
 WitnessFairness_runtime_delivery_feedback_9 ==
+    /\ WF_vars(\E arg_outcome \in RuntimeCompletionOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_LateRuntimeCompletionRejectedAfterSupersession(arg_outcome, arg_detail, arg_at_utc_ms))
     /\ WF_vars(\E arg_outcome \in RuntimeCompletionOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_LateRuntimeCompletionTransportErrorAfterSupersession(arg_outcome, arg_detail, arg_at_utc_ms))
     /\ WF_vars(\E arg_outcome \in RuntimeCompletionOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_LateRuntimeCompletionInternalErrorAfterSupersession(arg_outcome, arg_detail, arg_at_utc_ms))
     /\ WF_vars(\E arg_reason \in DeliveryCompletionFailureReasonValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_LateDeliveryCompletionFailureAfterSupersession(arg_reason, arg_detail, arg_at_utc_ms))
@@ -5810,9 +5841,9 @@ WitnessFairness_runtime_delivery_feedback_9 ==
     /\ WF_vars(\E arg_target_binding_key \in TargetBindingIdValues : schedule_SyncTargetSnapshotPaused(arg_target_binding_key))
     /\ WF_vars(\E arg_at_utc_ms \in 0..2 : schedule_PauseActiveOrPaused(arg_at_utc_ms))
     /\ WF_vars(\E arg_at_utc_ms \in 0..2 : schedule_ResumeActiveOrPaused(arg_at_utc_ms))
-    /\ WF_vars(\E arg_at_utc_ms \in 0..2 : schedule_DeleteActive(arg_at_utc_ms))
 
 WitnessFairness_runtime_delivery_feedback_10 ==
+    /\ WF_vars(\E arg_at_utc_ms \in 0..2 : schedule_DeleteActive(arg_at_utc_ms))
     /\ WF_vars(\E arg_at_utc_ms \in 0..2 : schedule_DeletePaused(arg_at_utc_ms))
     /\ WF_vars(\E arg_at_utc_ms \in 0..2 : schedule_DeleteDeleted(arg_at_utc_ms))
     /\ WF_vars(\E arg_occurrence_id \in OccurrenceIdValues : \E arg_superseding_revision \in 0..2 : schedule_ConfirmOccurrencesSupersededActive(arg_occurrence_id, arg_superseding_revision))
@@ -6010,12 +6041,13 @@ WitnessFairness_runtime_lease_expiry_7 ==
     /\ WF_vars(\E arg_correlation_id \in OptionCorrelationIdValues : \E arg_detail \in OptionStringValues : \E arg_materialized_session_id \in OptionSessionIdValues : \E arg_runtime_outcome_key \in OptionRuntimeOutcomeKeyValues : occurrence_RecordReceiptDeliveryFailed(arg_correlation_id, arg_detail, arg_materialized_session_id, arg_runtime_outcome_key))
     /\ WF_vars(\E arg_owner_id \in ClaimOwnerValues : \E arg_at_utc_ms \in 0..2 : \E arg_lease_expires_at_utc_ms \in 0..2 : \E arg_claim_token \in ClaimTokenValues : occurrence_ClaimPending(arg_owner_id, arg_at_utc_ms, arg_lease_expires_at_utc_ms, arg_claim_token))
     /\ WF_vars(\E arg_correlation_id \in OptionCorrelationIdValues : \E arg_at_utc_ms \in 0..2 : occurrence_DispatchStartedFromClaimed(arg_correlation_id, arg_at_utc_ms))
-    /\ WF_vars(\E arg_at_utc_ms \in 0..2 : occurrence_DispatchAcceptedFromDispatching(arg_at_utc_ms))
+    /\ WF_vars(\E arg_admission_outcome \in DeliveryAdmissionOutcomeValues : \E arg_at_utc_ms \in 0..2 : occurrence_DispatchAcceptedFromDispatching(arg_admission_outcome, arg_at_utc_ms))
+    /\ WF_vars(\E arg_admission_outcome \in DeliveryAdmissionOutcomeValues : \E arg_at_utc_ms \in 0..2 : occurrence_DispatchDeduplicatedFromDispatching(arg_admission_outcome, arg_at_utc_ms))
     /\ WF_vars(\E arg_at_utc_ms \in 0..2 : occurrence_AwaitCompletionFromDispatching(arg_at_utc_ms))
     /\ WF_vars(\E arg_at_utc_ms \in 0..2 : occurrence_AwaitCompletionAfterSupersession(arg_at_utc_ms))
-    /\ WF_vars(\E arg_at_utc_ms \in 0..2 : occurrence_CompleteFromDispatchingOrAwaiting(arg_at_utc_ms))
 
 WitnessFairness_runtime_lease_expiry_8 ==
+    /\ WF_vars(\E arg_at_utc_ms \in 0..2 : occurrence_CompleteFromDispatchingOrAwaiting(arg_at_utc_ms))
     /\ WF_vars(\E arg_outcome \in RuntimeCompletionOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_RuntimeCompletionCompleted(arg_outcome, arg_detail, arg_at_utc_ms))
     /\ WF_vars(\E arg_outcome \in RuntimeCompletionOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_RuntimeCompletionRuntimeRejected(arg_outcome, arg_detail, arg_at_utc_ms))
     /\ WF_vars(\E arg_outcome \in RuntimeCompletionOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_RuntimeCompletionTransportError(arg_outcome, arg_detail, arg_at_utc_ms))
@@ -6039,9 +6071,9 @@ WitnessFairness_runtime_lease_expiry_8 ==
     /\ WF_vars(\E arg_superseded_by_revision \in 0..2 : \E arg_at_utc_ms \in 0..2 : occurrence_SupersedeAlreadySuperseded(arg_superseded_by_revision, arg_at_utc_ms))
     /\ WF_vars(\E arg_at_utc_ms \in 0..2 : occurrence_LateCompleteAfterSupersession(arg_at_utc_ms))
     /\ WF_vars(\E arg_outcome \in RuntimeCompletionOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_LateRuntimeCompletionCompletedAfterSupersession(arg_outcome, arg_detail, arg_at_utc_ms))
-    /\ WF_vars(\E arg_outcome \in RuntimeCompletionOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_LateRuntimeCompletionRejectedAfterSupersession(arg_outcome, arg_detail, arg_at_utc_ms))
 
 WitnessFairness_runtime_lease_expiry_9 ==
+    /\ WF_vars(\E arg_outcome \in RuntimeCompletionOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_LateRuntimeCompletionRejectedAfterSupersession(arg_outcome, arg_detail, arg_at_utc_ms))
     /\ WF_vars(\E arg_outcome \in RuntimeCompletionOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_LateRuntimeCompletionTransportErrorAfterSupersession(arg_outcome, arg_detail, arg_at_utc_ms))
     /\ WF_vars(\E arg_outcome \in RuntimeCompletionOutcomeValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_LateRuntimeCompletionInternalErrorAfterSupersession(arg_outcome, arg_detail, arg_at_utc_ms))
     /\ WF_vars(\E arg_reason \in DeliveryCompletionFailureReasonValues : \E arg_detail \in OptionStringValues : \E arg_at_utc_ms \in 0..2 : occurrence_LateDeliveryCompletionFailureAfterSupersession(arg_reason, arg_detail, arg_at_utc_ms))
@@ -6065,9 +6097,9 @@ WitnessFairness_runtime_lease_expiry_9 ==
     /\ WF_vars(\E arg_target_binding_key \in TargetBindingIdValues : schedule_SyncTargetSnapshotPaused(arg_target_binding_key))
     /\ WF_vars(\E arg_at_utc_ms \in 0..2 : schedule_PauseActiveOrPaused(arg_at_utc_ms))
     /\ WF_vars(\E arg_at_utc_ms \in 0..2 : schedule_ResumeActiveOrPaused(arg_at_utc_ms))
-    /\ WF_vars(\E arg_at_utc_ms \in 0..2 : schedule_DeleteActive(arg_at_utc_ms))
 
 WitnessFairness_runtime_lease_expiry_10 ==
+    /\ WF_vars(\E arg_at_utc_ms \in 0..2 : schedule_DeleteActive(arg_at_utc_ms))
     /\ WF_vars(\E arg_at_utc_ms \in 0..2 : schedule_DeletePaused(arg_at_utc_ms))
     /\ WF_vars(\E arg_at_utc_ms \in 0..2 : schedule_DeleteDeleted(arg_at_utc_ms))
     /\ WF_vars(\E arg_occurrence_id \in OccurrenceIdValues : \E arg_superseding_revision \in 0..2 : schedule_ConfirmOccurrencesSupersededActive(arg_occurrence_id, arg_superseding_revision))

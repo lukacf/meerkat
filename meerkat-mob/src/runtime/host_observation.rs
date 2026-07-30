@@ -3502,6 +3502,17 @@ mod tests {
 
     #[async_trait::async_trait]
     impl MobSessionService for BoundarySessionService {
+        async fn acknowledge_committed_runtime_session_boundary_under_turn_finalization_boundary(
+            &self,
+            _session_id: &SessionId,
+            _authority: &meerkat_core::CommittedSessionBoundaryAuthority,
+        ) -> Result<(), meerkat_core::service::SessionError> {
+            Err(meerkat_core::service::SessionError::Unsupported(
+                "boundary-observation test service has no store-owned boundary authority"
+                    .to_string(),
+            ))
+        }
+
         /// Test double: nothing durable survives archive here, so the two-read
         /// composition is the exact truth — `ArchivedNotRevivable` cannot exist.
         async fn load_session_for_resume(
@@ -3813,18 +3824,21 @@ mod tests {
         }
     }
 
-    fn terminal_attribution(boundary_sequence: u64) -> DirectedTurnRuntimeAttribution {
-        let expected_content_digest = meerkat_runtime::input::run_started_content_digest(
+    fn current_content_digest() -> String {
+        meerkat_runtime::input::run_started_content_digest(
             &meerkat_core::types::ContentInput::Text("current".to_string()),
         )
-        .expect("fixture RunStarted content should digest");
+        .expect("fixture RunStarted content should digest")
+    }
+
+    fn terminal_attribution(boundary_sequence: u64) -> DirectedTurnRuntimeAttribution {
         DirectedTurnRuntimeAttribution {
             runtime_input_id: meerkat_core::lifecycle::InputId::new(),
             admission_sequence: 12,
             last_boundary_sequence: Some(boundary_sequence),
             terminal_outcome: Some(meerkat_runtime::input_state::InputTerminalOutcome::Consumed),
             phase: meerkat_runtime::input_state::InputLifecycleState::Consumed,
-            expected_content_digest,
+            expected_content_digest: current_content_digest(),
             tracking_kind: DirectedTurnTrackingKind::FlowStep,
         }
     }
@@ -4192,7 +4206,12 @@ mod tests {
         tokio::task::yield_now().await;
         assert_eq!(reads.load(Ordering::SeqCst), 1);
 
-        tokio::time::advance(POLL_SAFETY_TICK - Duration::from_millis(1)).await;
+        tokio::time::advance(
+            POLL_SAFETY_TICK
+                .checked_sub(Duration::from_millis(1))
+                .expect("safety tick exceeds one millisecond"),
+        )
+        .await;
         tokio::task::yield_now().await;
         assert_eq!(
             reads.load(Ordering::SeqCst),
@@ -5003,14 +5022,10 @@ mod tests {
                 run_started(&session, "current"),
             ),
         ]));
-        let scan = scan_durable_terminals(
-            &session,
-            41,
-            &meerkat_core::types::ContentInput::Text("current".to_string()),
-            &log,
-        )
-        .await
-        .expect("scan");
+        let expected_content_digest = current_content_digest();
+        let scan = scan_durable_terminals(&session, 41, &expected_content_digest, &log)
+            .await
+            .expect("scan");
         assert_eq!(scan.matching_run_starts, 2);
 
         let expectation = CompletionTerminalExpectation::Completed {
@@ -5071,14 +5086,10 @@ mod tests {
                 interaction_completed(interaction_b, "same-result"),
             ),
         ]));
-        let scan = scan_durable_terminals(
-            &session,
-            41,
-            &meerkat_core::types::ContentInput::Text("current".to_string()),
-            &log,
-        )
-        .await
-        .expect("scan");
+        let expected_content_digest = current_content_digest();
+        let scan = scan_durable_terminals(&session, 41, &expected_content_digest, &log)
+            .await
+            .expect("scan");
         assert_eq!(scan.matching_run_starts, 2);
         assert!(
             scan.terminals

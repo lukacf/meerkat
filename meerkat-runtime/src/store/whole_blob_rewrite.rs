@@ -19,33 +19,6 @@ use super::{
     RuntimeStoreError, WholeBlobStoreAuthority,
 };
 
-static PREPARED_WHOLE_BLOB_SUCCESSOR_DOCUMENT_HASHES: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-static PREPARED_WHOLE_BLOB_SUCCESSOR_SEMANTIC_MINTS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-
-/// Global count of semantic suffix proofs performed for prepared WholeBlob
-/// rewrite successors.
-///
-/// This counts the one graph-suffix proof invocation, separately from
-/// serialization, exact serialized-byte hashing, and the backend CAS.
-#[doc(hidden)]
-#[must_use]
-pub fn prepared_whole_blob_successor_semantic_mints() -> u64 {
-    PREPARED_WHOLE_BLOB_SUCCESSOR_SEMANTIC_MINTS.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-/// Global acceptance counter for full successor-document hashes performed by
-/// prepared WholeBlob rewrites.
-///
-/// This is intentionally process-wide like the core serialization counters:
-/// acceptance tests compare deltas around one isolated operation.
-#[doc(hidden)]
-#[must_use]
-pub fn prepared_whole_blob_successor_document_hashes() -> u64 {
-    PREPARED_WHOLE_BLOB_SUCCESSOR_DOCUMENT_HASHES.load(std::sync::atomic::Ordering::Relaxed)
-}
-
 /// One self-consistent current-domain WholeBlob document bound to exact bytes.
 ///
 /// [`CommittedWholeBlobSnapshot`] already proves the store-owned byte/digest
@@ -133,6 +106,7 @@ pub struct PreparedWholeBlobRewriteBoundary {
     expected_authority: WholeBlobStoreAuthority,
     successor: Arc<Session>,
     successor_bytes: Arc<Vec<u8>>,
+    successor_encode_bytes: u64,
     successor_blob_sha256: String,
     successor_catalog_entry: RuntimeSessionCatalogEntry,
     compaction_projection_intents: Arc<[CompactionProjectionIntent]>,
@@ -161,6 +135,36 @@ impl PreparedWholeBlobRewriteBoundary {
                     .to_string(),
             });
         }
+        if let Some(audit_receipt) = exact_committed_rewrite_receipt(&expected_runtime, commits)? {
+            // The physical successor already landed and the only missing
+            // effect is its audit receipt. Reuse the RuntimeStore-authenticated
+            // typed document, bytes, and digest so the backend still performs
+            // one exact-authority CAS check without re-encoding, re-hashing, or
+            // re-minting successor semantics from a caller-carried Session.
+            let VerifiedCommittedWholeBlobPayload {
+                session,
+                bytes,
+                store_authority,
+            } = expected_runtime;
+            let successor_catalog_entry = RuntimeSessionCatalogEntry::from_session(
+                session.as_ref(),
+                RuntimeSessionPersistenceProfile::WholeBlobV1,
+                None,
+            )?;
+            let compaction_projection_intents: Arc<[CompactionProjectionIntent]> =
+                super::validated_compaction_projection_intents(session.as_ref())?.into();
+            let successor_blob_sha256 = store_authority.blob_sha256().to_string();
+            return Ok(Self {
+                expected_authority: store_authority,
+                successor: session,
+                successor_bytes: bytes,
+                successor_encode_bytes: 0,
+                successor_blob_sha256,
+                successor_catalog_entry,
+                compaction_projection_intents,
+                audit_receipt: Arc::new(audit_receipt),
+            });
+        }
         let committed_prefix = expected_runtime
             .session()
             .validated_transcript_history_state()
@@ -186,8 +190,6 @@ impl PreparedWholeBlobRewriteBoundary {
                 detail: "prepared WholeBlob successor has no rewrite graph".to_string(),
             })?;
         let successor_prefix = successor_history.state().rewrite_prefix().clone();
-        PREPARED_WHOLE_BLOB_SUCCESSOR_SEMANTIC_MINTS
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let suffix = successor_history
             .prove_commit_suffix_after(&committed_prefix)
             .map_err(
@@ -245,15 +247,15 @@ impl PreparedWholeBlobRewriteBoundary {
                 "failed to materialize prepared WholeBlob rewrite successor: {error}"
             ))
         })?;
-        PREPARED_WHOLE_BLOB_SUCCESSOR_DOCUMENT_HASHES
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let successor_bytes = artifact.bytes_arc();
+        let successor_encode_bytes = successor_bytes.len() as u64;
         let successor_blob_sha256 = artifact.row_sha256_token().to_string();
         let expected_authority = expected_runtime.store_authority;
         Ok(Self {
             expected_authority,
             successor,
             successor_bytes,
+            successor_encode_bytes,
             successor_blob_sha256,
             successor_catalog_entry,
             compaction_projection_intents,
@@ -270,6 +272,7 @@ impl PreparedWholeBlobRewriteBoundary {
             successor_session_id: self.successor.id().clone(),
             successor_blob_sha256: self.successor_blob_sha256.clone(),
             successor_bytes: Arc::clone(&self.successor_bytes),
+            successor_encode_bytes: self.successor_encode_bytes,
             successor_catalog_entry: self.successor_catalog_entry.clone(),
             compaction_projection_intents: Arc::clone(&self.compaction_projection_intents),
         }
@@ -326,6 +329,71 @@ impl PreparedWholeBlobRewriteBoundary {
     }
 }
 
+fn exact_committed_rewrite_receipt(
+    expected_runtime: &VerifiedCommittedWholeBlobPayload,
+    commits: &[TranscriptRewriteCommit],
+) -> Result<Option<TranscriptRewriteAuditReceiptBatch>, RuntimeStoreError> {
+    let Some(first) = commits.first() else {
+        return Ok(None);
+    };
+    let Some(history) = expected_runtime
+        .session()
+        .validated_transcript_history_state()
+        .map_err(
+            |error| RuntimeStoreError::SessionPersistenceAuthorityConflict {
+                runtime_id: expected_runtime.store_authority().session_id().to_string(),
+                detail: format!("committed WholeBlob rewrite-repair graph is invalid: {error}"),
+            },
+        )?
+    else {
+        return Ok(None);
+    };
+    let Some(start_index) = first
+        .rewrite_generation
+        .checked_sub(1)
+        .and_then(|index| usize::try_from(index).ok())
+    else {
+        return Ok(None);
+    };
+    if start_index.checked_add(commits.len()) != Some(history.state().commit_count())
+        || history.state().commit(start_index) != Some(first)
+    {
+        return Ok(None);
+    }
+    let suffix = history
+        .prove_commit_suffix_starting_with(first)
+        .map_err(
+            |error| RuntimeStoreError::SessionPersistenceAuthorityConflict {
+                runtime_id: expected_runtime.store_authority().session_id().to_string(),
+                detail: format!("committed WholeBlob rewrite-repair suffix is invalid: {error}"),
+            },
+        )?;
+    let selected = suffix.commits();
+    if selected.len() != commits.len()
+        || !selected
+            .zip(commits)
+            .all(|(selected, supplied)| selected == supplied)
+    {
+        return Err(RuntimeStoreError::SessionPersistenceAuthorityConflict {
+            runtime_id: expected_runtime.store_authority().session_id().to_string(),
+            detail: "committed WholeBlob rewrite-repair commits differ from the exact sealed tail"
+                .to_string(),
+        });
+    }
+    TranscriptRewriteAuditReceiptBatch::new(
+        suffix.start_prefix().clone(),
+        commits.to_vec(),
+        suffix.end_prefix().clone(),
+    )
+    .map(Some)
+    .map_err(
+        |error| RuntimeStoreError::SessionPersistenceAuthorityConflict {
+            runtime_id: expected_runtime.store_authority().session_id().to_string(),
+            detail: format!("failed to prepare committed WholeBlob rewrite repair: {error}"),
+        },
+    )
+}
+
 /// Store-facing exact CAS inputs for a prepared WholeBlob rewrite.
 #[derive(Debug, Clone)]
 pub struct PreparedWholeBlobRewriteStoreParts {
@@ -333,6 +401,7 @@ pub struct PreparedWholeBlobRewriteStoreParts {
     successor_session_id: SessionId,
     successor_blob_sha256: String,
     successor_bytes: Arc<Vec<u8>>,
+    successor_encode_bytes: u64,
     successor_catalog_entry: RuntimeSessionCatalogEntry,
     compaction_projection_intents: Arc<[CompactionProjectionIntent]>,
 }
@@ -356,6 +425,16 @@ impl PreparedWholeBlobRewriteStoreParts {
     #[must_use]
     pub fn successor_bytes(&self) -> &[u8] {
         self.successor_bytes.as_ref()
+    }
+
+    /// Exact bytes encoded while preparing this physical successor.
+    ///
+    /// Receipt-only repair carries the already-committed bytes and reports
+    /// zero. This value otherwise binds the same artifact handed to the CAS.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn successor_encode_bytes(&self) -> u64 {
+        self.successor_encode_bytes
     }
 
     /// Exact successor compaction intents proved once by rich preparation.

@@ -183,10 +183,12 @@ impl MeerkatMachine {
                 AcceptOutcome::Deduplicated {
                     input_id: preview_input,
                     existing_id: preview_existing,
+                    ..
                 },
                 AcceptOutcome::Deduplicated {
                     input_id: committed_input,
                     existing_id: committed_existing,
+                    ..
                 },
             ) => preview_input == committed_input && preview_existing == committed_existing,
             (

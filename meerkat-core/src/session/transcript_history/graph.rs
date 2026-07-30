@@ -18,16 +18,6 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-static TRANSCRIPT_REWRITE_PREFIX_COMMIT_SERIALIZATIONS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-
-/// Number of exact commit serializations performed by rolling-prefix
-/// construction. A receipt-only replay authorization must not advance it.
-#[must_use]
-pub fn transcript_rewrite_prefix_commit_serializations() -> u64 {
-    TRANSCRIPT_REWRITE_PREFIX_COMMIT_SERIALIZATIONS.load(std::sync::atomic::Ordering::Relaxed)
-}
-
 /// Immutable rewrite commit that advances a session transcript head.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -232,8 +222,6 @@ impl TranscriptRewritePrefixAccumulator {
             )));
         }
         let bytes = serde_json::to_vec(commit)?;
-        TRANSCRIPT_REWRITE_PREFIX_COMMIT_SERIALIZATIONS
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let previous = self.raw_digest().ok_or_else(|| {
             serde_json::Error::io(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -1469,6 +1457,83 @@ pub(crate) fn import_released_0810_history(
 }
 
 impl TranscriptHistoryState {
+    /// Rebuild the exact compact graph already proved by a HeadCanonical
+    /// store's physical row/edge replay.
+    ///
+    /// The store supplies only the original anchor document and the ordered
+    /// compact edge vector. This constructor rebinds those facts to the
+    /// store-owned rewrite/graph prefixes and performs one semantic graph
+    /// validation. It never materializes one full document per rewrite.
+    pub(in crate::session) fn from_store_replayed_compact_graph(
+        anchor_revision: String,
+        anchor_messages: Vec<Message>,
+        anchor_row_prefix: SessionMessageRowPrefixAccumulator,
+        edges: Vec<TranscriptRevisionEdge>,
+        expected_rewrite_prefix: &TranscriptRewritePrefixAccumulator,
+        expected_graph_prefix: &TranscriptGraphPrefixAccumulator,
+    ) -> Result<Self, TranscriptEditError> {
+        let first = edges.first().ok_or_else(|| {
+            TranscriptEditError::HistoryStateMalformed(
+                "store-replayed compact graph carries no rewrite edge".to_string(),
+            )
+        })?;
+        if first.base_revision() != anchor_revision
+            || first.messages_before_base() != anchor_messages.len()
+            || anchor_row_prefix.row_count() != anchor_messages.len() as u64
+        {
+            return Err(TranscriptEditError::HistoryStateMalformed(
+                "store-replayed compact graph anchor does not match its first edge".to_string(),
+            ));
+        }
+        let actual_anchor_revision = transcript_messages_digest(&anchor_messages)
+            .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
+        if actual_anchor_revision != anchor_revision {
+            return Err(TranscriptEditError::HistoryStateMalformed(format!(
+                "store-replayed compact graph anchor revision {anchor_revision} has digest {actual_anchor_revision}"
+            )));
+        }
+        let anchor = TranscriptRevisionAnchor {
+            revision: anchor_revision,
+            messages: anchor_messages,
+            row_prefix: anchor_row_prefix,
+            created_at: first.parent_created_at(),
+        };
+        let rewrite_prefix = edges
+            .last()
+            .map(TranscriptRevisionEdge::rewrite_prefix)
+            .cloned()
+            .ok_or_else(|| {
+                TranscriptEditError::HistoryStateMalformed(
+                    "store-replayed compact graph lost its final rewrite prefix".to_string(),
+                )
+            })?;
+        if &rewrite_prefix != expected_rewrite_prefix {
+            return Err(TranscriptEditError::HistoryStateMalformed(
+                "store-replayed compact graph rewrite prefix differs from the physical head"
+                    .to_string(),
+            ));
+        }
+        let graph_prefix = TranscriptGraphPrefixAccumulator::from_graph(&anchor, &edges)
+            .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
+        if &graph_prefix != expected_graph_prefix {
+            return Err(TranscriptEditError::HistoryStateMalformed(
+                "store-replayed compact graph prefix differs from the physical head".to_string(),
+            ));
+        }
+        let persistent_edges = PersistentTranscriptEdges::from_vec(&anchor, edges)
+            .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
+        let state = Self {
+            format: TRANSCRIPT_HISTORY_FORMAT_CURRENT,
+            anchor: Arc::new(anchor),
+            edges: persistent_edges,
+            rewrite_prefix,
+            graph_prefix,
+            digest_format: TRANSCRIPT_DIGEST_FORMAT_CURRENT,
+        };
+        validate_transcript_history_state(&state)?;
+        Ok(state)
+    }
+
     fn from_legacy_full_bodies(
         legacy_head: String,
         commits: Vec<TranscriptRewriteCommit>,
@@ -2534,10 +2599,18 @@ impl TranscriptHistoryState {
                         .map_err(|error| {
                             TranscriptEditError::HistoryStateMalformed(error.to_string())
                         })?;
-                let result_prefix = SessionMessageRowPrefixAccumulator::from_messages(
-                    &record.revision_body.messages,
-                )
-                .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
+                let replacement_rows = replacement
+                    .iter()
+                    .map(serde_json::to_vec)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| {
+                        TranscriptEditError::HistoryStateMalformed(error.to_string())
+                    })?;
+                let result_prefix = parent_prefix
+                    .replace_serialized_range(start as u64, end as u64, &replacement_rows)
+                    .map_err(|error| {
+                        TranscriptEditError::HistoryStateMalformed(error.to_string())
+                    })?;
                 state = Some(Self::from_authorized_first_rewrite(
                     record.parent_body.clone(),
                     parent_prefix,
@@ -2733,20 +2806,24 @@ mod tests {
 
     #[test]
     fn released_importer_preserves_arbitrary_exact_parent_splice() {
+        let retained_prefix = message("retained prefix");
+        let retained_turn = message("retained turn");
+        let released_replacement = message("released replacement");
+        let released_appended_turn = message("released appended turn");
         let base = body(
             vec![
-                message("retained prefix"),
+                retained_prefix.clone(),
                 message("released base"),
-                message("retained turn"),
+                retained_turn.clone(),
             ],
             None,
         );
         let parent = body(
             vec![
-                message("retained prefix"),
-                message("released replacement"),
-                message("retained turn"),
-                message("released appended turn"),
+                retained_prefix,
+                released_replacement.clone(),
+                retained_turn,
+                released_appended_turn.clone(),
             ],
             Some(&base.revision),
         );
@@ -2764,8 +2841,8 @@ mod tests {
                 at: 1,
                 replacement,
                 appended,
-            } if replacement == &[message("released replacement")]
-                && appended == &[message("released appended turn")]
+            } if replacement == &[released_replacement]
+                && appended == &[released_appended_turn]
         ));
         let mut materialized = base.messages.clone();
         apply_parent_advance(&mut materialized, &advance)
@@ -2803,11 +2880,9 @@ mod tests {
             vec![message("divergent prefix"), message("first edit")],
             None,
         );
+        let divergent_prefix = second_parent.messages[0].clone();
         let second_revision = body(
-            vec![
-                Message::System(crate::types::SystemMessage::new("replacement system")),
-                message("second edit"),
-            ],
+            vec![divergent_prefix, message("second edit")],
             Some(&second_parent.revision),
         );
         let second_commit = TranscriptRewriteCommit {
@@ -3062,23 +3137,22 @@ mod tests {
     }
 
     #[test]
-    fn replay_of_a_fully_proved_log_hashes_nothing() {
+    fn full_body_reconciliation_revalidates_bytes_even_when_commits_are_proved() {
         let records = rewrite_chain(6);
         let proved = sealed(&records);
         let (replayed, hashed) = hashed_bytes(|| {
             TranscriptHistoryState::from_rewrite_records_with_proved(records.clone(), Some(&proved))
         });
         let replayed = replayed.expect("replay succeeds").expect("non-empty");
-        assert_eq!(
-            hashed, 0,
-            "every commit in the log is carried byte-equal by the proved graph, \
-             so the replay must not hash a transcript a second time"
+        assert!(
+            hashed > 0,
+            "a compact edge cannot authorize arbitrary bytes in a legacy full-body record"
         );
         assert_same_graph(&replayed, &proved);
     }
 
     #[test]
-    fn replay_cost_of_one_new_record_does_not_grow_with_the_proved_prefix() {
+    fn full_body_reconciliation_cost_tracks_all_legacy_evidence() {
         let hash_one_new_record = |chain_len: usize| {
             let records = rewrite_chain(chain_len);
             let proved = sealed(&records[..chain_len - 1]);
@@ -3097,11 +3171,9 @@ mod tests {
             );
             hashed
         };
-        assert_eq!(
-            hash_one_new_record(2),
-            hash_one_new_record(8),
-            "resume must hash the records the session cannot already prove, and \
-             only those: a longer proved prefix is not more work"
+        assert!(
+            hash_one_new_record(8) > hash_one_new_record(2),
+            "the one-time 0.8.10 reconciliation must validate every legacy full-body row"
         );
     }
 

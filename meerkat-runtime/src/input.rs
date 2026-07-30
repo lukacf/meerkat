@@ -22,6 +22,7 @@ use meerkat_core::{
     PeerResponseTerminalProjectionStatus, PeerResponseTerminalRenderPayload,
     PeerResponseTerminalRouteIdentity, PeerResponseTerminalSource,
     PeerResponseTerminalTransportIdentity, externalize_content_blocks, hydrate_content_blocks,
+    peer_response_terminal_context_key,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -470,6 +471,7 @@ pub fn peer_response_terminal_input(
     status: meerkat_contracts::PeerResponseTerminalStatusWire,
     result: serde_json::Value,
 ) -> Input {
+    let idempotency_key = peer_response_terminal_idempotency_key(peer_id, request_id);
     let correlation_id = CorrelationId::from_uuid(request_id.as_uuid());
     let request_id = request_id.to_string();
     let peer_id = peer_id.to_string();
@@ -489,7 +491,7 @@ pub fn peer_response_terminal_input(
             },
             durability: InputDurability::Durable,
             visibility: InputVisibility::default(),
-            idempotency_key: None,
+            idempotency_key: Some(idempotency_key),
             supersession_key: None,
             correlation_id: Some(correlation_id),
         },
@@ -504,6 +506,18 @@ pub fn peer_response_terminal_input(
         // sender declaration exists.
         sender_taint: None,
     })
+}
+
+pub(crate) fn peer_response_terminal_idempotency_key(
+    peer_id: meerkat_core::comms::PeerId,
+    request_id: meerkat_core::PeerCorrelationId,
+) -> IdempotencyKey {
+    let route_identity = PeerResponseTerminalRouteIdentity::from_peer_id(peer_id);
+    let correlation_id = PeerResponseTerminalCorrelationId::from_peer_correlation_id(request_id);
+    IdempotencyKey::new(peer_response_terminal_context_key(
+        &route_identity,
+        correlation_id,
+    ))
 }
 
 /// Flow step input from mob orchestration.
@@ -993,7 +1007,7 @@ fn peer_notice_renderable(peer: &PeerInput) -> Option<CoreRenderable> {
             CommsNoticeKind::ResponseTerminal,
             Some(request_id.clone()),
             None,
-            Some(format!("{status:?}")),
+            Some(status.label().to_owned()),
         ),
     };
     let summary = match kind {
@@ -1206,7 +1220,7 @@ pub fn run_started_content_digest(content: &ContentInput) -> Result<String, Stri
     let mut digest = Sha256::new();
     digest.update(b"meerkat:run-started-content:v1\0");
     digest.update(encoded);
-    Ok(format!("{digest:x}"))
+    Ok(format!("{:x}", digest.finalize()))
 }
 
 pub fn directed_input_run_started_content_digest(input: &Input) -> Result<String, String> {
@@ -2659,6 +2673,7 @@ mod tests {
                                 runtime_id,
                             },
                         durability: InputDurability::Durable,
+                        idempotency_key,
                         correlation_id,
                         ..
                     },
@@ -2675,6 +2690,13 @@ mod tests {
                     correlation_id,
                     Some(CorrelationId::from_uuid(
                         uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000162").unwrap()
+                    ))
+                );
+                assert_eq!(
+                    idempotency_key,
+                    Some(IdempotencyKey::new(
+                        "peer_response_terminal:00000000-0000-4000-8000-000000000161:\
+                         00000000-0000-4000-8000-000000000162"
                     ))
                 );
                 assert_eq!(status, ResponseTerminalStatus::Completed);

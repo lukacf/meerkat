@@ -1330,7 +1330,9 @@ mod tests {
                 .is_empty(),
             "recorded-but-unadopted commits must not be served"
         );
-        inc.save_head(&next, SessionHeadCas::IfToken(token))
+        let adopted =
+            SessionHead::from_session(&session, next.strand.clone(), next.rewrite_count).unwrap();
+        inc.save_head(&adopted, SessionHeadCas::IfToken(token))
             .await
             .unwrap();
         let commits = inc.load_rewrite_commits(session.id()).await.unwrap();
@@ -1528,7 +1530,10 @@ mod tests {
             )
             .await?;
         assert!(inc.load_rewrites(session.id()).await?.is_empty());
-        inc.save_head(&next, SessionHeadCas::IfToken(token)).await?;
+        let adopted =
+            SessionHead::from_session(&compacted, next.strand.clone(), next.rewrite_count)?;
+        inc.save_head(&adopted, SessionHeadCas::IfToken(token))
+            .await?;
         assert_eq!(inc.load_rewrites(session.id()).await?.len(), 1);
 
         let slim = store.load(session.id()).await?.expect("slim load");

@@ -738,17 +738,26 @@ Return exactly:
     .to_string()
 }
 
+fn adaptive_planning_step(role: &str, message: impl Into<String>) -> FlowStepSpec {
+    let mut step = json_step(role, message);
+    // Two required planner turns plus the compiled Solo child's 30-second
+    // default must fit inside the adaptive policy's single 180-second budget,
+    // leaving 30 seconds for admission, authority, and cleanup mechanics.
+    step.timeout_ms = Some(60_000);
+    step
+}
+
 fn build_adaptive_marquee_control_flow() -> FlowSpec {
     let mut steps = IndexMap::new();
 
-    let mut run_layer = json_step("flowmaster", adaptive_layer_run_decision_message());
+    let mut run_layer = adaptive_planning_step("flowmaster", adaptive_layer_run_decision_message());
     run_layer.condition = Some(condition_eq(
         "params.previous_layer_result",
         serde_json::Value::Null,
     ));
     steps.insert(StepId::from("run_layer"), run_layer);
 
-    let mut finish = json_step("flowmaster", adaptive_finish_decision_message());
+    let mut finish = adaptive_planning_step("flowmaster", adaptive_finish_decision_message());
     finish.condition = Some(condition_not_eq(
         "params.previous_layer_result",
         serde_json::Value::Null,
@@ -3564,6 +3573,10 @@ async fn run_smoke_flow_or_skip(test_name: &str, flow_id: &str, params: Value) -
 #[ignore = "lane:e2e-smoke"]
 async fn e2e_flow_runtime_adaptive_layer_marquee_smoke() {
     let test_name = "e2e_flow_runtime_adaptive_layer_marquee_smoke";
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("meerkat_mob::runtime::mobpack_execution=debug")
+        .with_test_writer()
+        .try_init();
     let Some(models) = flow_smoke_models() else {
         eprintln!(
             "Skipping {test_name}: no matching API key for FLOW_SMOKE_MODEL/SMOKE_MODEL or fast default models"

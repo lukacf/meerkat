@@ -93,12 +93,20 @@ struct AccumulatorState {
     stream_a: Option<Midstate>,
     /// Retained prefix midstates at previously witnessed boundaries.
     boundaries: VecDeque<Midstate>,
-    /// Exact durable-row authority last installed by a verified
-    /// head-canonical materialization or acknowledged commit.
+    /// Exact audited-graph endpoint retained across ordinary appends and
+    /// store-boundary acknowledgements.
     exact_row_anchor: Option<SessionMessageRowPrefixAccumulator>,
-    /// The anchor extended through every append performed on this buffer.
-    /// Non-append mutations invalidate both exact-row fields.
+    /// Latest exact store-owned boundary installed by a verified
+    /// head-canonical materialization or acknowledged commit.
+    exact_row_committed: Option<SessionMessageRowPrefixAccumulator>,
+    /// The installed lineage extended through every append performed on this
+    /// buffer. Non-append mutations invalidate this live-current witness.
     exact_row_current: Option<SessionMessageRowPrefixAccumulator>,
+    /// Store-verified WholeBlob bytes establish exact serialized-row lineage,
+    /// but deriving its prefix eagerly would add another O(document) pass to
+    /// every resume. The count advances across appends and materializes the
+    /// prefix only if a rewrite or HeadCanonical conversion actually asks.
+    lazy_exact_row_current_count: Option<u64>,
     /// Monotonic count of non-append transcript mutations. Observability for
     /// tests and diagnostics; correctness does not depend on it.
     epoch: u64,
@@ -132,9 +140,10 @@ impl Clone for TranscriptDigestAccumulator {
 }
 
 thread_local! {
-    /// Debug/test builds cross-check every witness-served digest against a
-    /// full recompute, so a missed invalidation seam fails loudly in CI
-    /// instead of silently persisting a wrong `head_revision`.
+    /// Focused meerkat-core unit tests cross-check every witness-served digest
+    /// against a full recompute, so a missed invalidation seam fails loudly
+    /// without turning every downstream debug/integration build back into an
+    /// O(document) runtime.
     ///
     /// The cross-check deliberately uses the UNCOUNTED digest helper: it is
     /// verification scaffolding, so it must not appear in the
@@ -144,7 +153,7 @@ thread_local! {
 }
 
 pub(crate) fn take_verification_sample() -> bool {
-    if cfg!(any(test, debug_assertions)) {
+    if cfg!(test) {
         CROSS_CHECK_ENABLED.with(std::cell::Cell::get)
     } else {
         // Production hot paths must remain O(delta) from the first turn after
@@ -172,7 +181,9 @@ impl TranscriptDigestAccumulator {
         state.stream_a = None;
         state.boundaries.clear();
         state.exact_row_anchor = None;
+        state.exact_row_committed = None;
         state.exact_row_current = None;
+        state.lazy_exact_row_current_count = None;
         state.parked = None;
         state.epoch = state.epoch.saturating_add(1);
     }
@@ -184,6 +195,14 @@ impl TranscriptDigestAccumulator {
     /// boundaries survive an append by construction.
     fn extend(&mut self, appended: &[Message]) {
         let state = self.state.get_mut().unwrap_or_else(PoisonError::into_inner);
+        state.lazy_exact_row_current_count =
+            state
+                .lazy_exact_row_current_count
+                .and_then(|current_count| {
+                    u64::try_from(appended.len())
+                        .ok()
+                        .and_then(|appended_count| current_count.checked_add(appended_count))
+                });
         if let Some(current) = state.exact_row_current.take() {
             let serialized = appended
                 .iter()
@@ -214,7 +233,9 @@ impl TranscriptDigestAccumulator {
         if state.stream_a.is_none()
             && state.boundaries.is_empty()
             && state.exact_row_anchor.is_none()
+            && state.exact_row_committed.is_none()
             && state.exact_row_current.is_none()
+            && state.lazy_exact_row_current_count.is_none()
         {
             return;
         }
@@ -222,7 +243,9 @@ impl TranscriptDigestAccumulator {
             stream_a: state.stream_a.take(),
             boundaries: std::mem::take(&mut state.boundaries),
             exact_row_anchor: state.exact_row_anchor.take(),
+            exact_row_committed: state.exact_row_committed.take(),
             exact_row_current: state.exact_row_current.take(),
+            lazy_exact_row_current_count: state.lazy_exact_row_current_count.take(),
             epoch: state.epoch,
             parked: None,
         };
@@ -245,7 +268,9 @@ impl TranscriptDigestAccumulator {
                 state.stream_a = None;
                 state.boundaries.clear();
                 state.exact_row_anchor = None;
+                state.exact_row_committed = None;
                 state.exact_row_current = None;
+                state.lazy_exact_row_current_count = None;
                 state.epoch = state.epoch.saturating_add(1);
             }
             return;
@@ -254,27 +279,55 @@ impl TranscriptDigestAccumulator {
             state.exact_row_anchor = parked.exact_row_anchor.filter(|anchor| {
                 u64::try_from(lowest_mutated_index).is_ok_and(|index| index >= anchor.row_count())
             });
+            state.exact_row_committed = parked.exact_row_committed.filter(|committed| {
+                u64::try_from(lowest_mutated_index)
+                    .is_ok_and(|index| index >= committed.row_count())
+            });
             state.epoch = state.epoch.saturating_add(1);
             return;
         }
         state.stream_a = parked.stream_a;
         state.boundaries = parked.boundaries;
         state.exact_row_anchor = parked.exact_row_anchor;
+        state.exact_row_committed = parked.exact_row_committed;
         state.exact_row_current = parked.exact_row_current;
+        state.lazy_exact_row_current_count = parked.lazy_exact_row_current_count;
+    }
+
+    /// Re-derive the live-current lineage after a known-index mutation kept an
+    /// exact prefix. Only rows after the nearest retained prefix are encoded.
+    fn rebuild_exact_row_current_from_retained_prefix(&mut self, messages: &[Message]) {
+        let state = self.state.get_mut().unwrap_or_else(PoisonError::into_inner);
+        let Some(base) = [
+            state.exact_row_anchor.as_ref(),
+            state.exact_row_committed.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|prefix| prefix.row_count() <= messages.len() as u64)
+        .max_by_key(|prefix| prefix.row_count())
+        .cloned() else {
+            return;
+        };
+        let Ok(start) = usize::try_from(base.row_count()) else {
+            return;
+        };
+        let serialized = messages[start..]
+            .iter()
+            .map(serde_json::to_vec)
+            .collect::<Result<Vec<_>, _>>();
+        state.exact_row_current = serialized
+            .ok()
+            .and_then(|rows| base.extend_serialized_rows(&rows).ok());
     }
 
     fn install_exact_row_prefix(&self, prefix: SessionMessageRowPrefixAccumulator) {
         let mut state = self.locked();
-        // An acknowledgement of the already-tracked current prefix does not
-        // change its semantic ancestry. Preserve the audited graph-endpoint
-        // anchor so the next coherence check stays O(1) after arbitrarily many
-        // ordinary appends/saves. A new or changed authority starts a new
-        // lineage at that exact prefix.
-        if state.exact_row_current.as_ref() == Some(&prefix) && state.exact_row_anchor.is_some() {
-            state.exact_row_current = Some(prefix);
-            return;
+        state.lazy_exact_row_current_count = None;
+        if state.exact_row_anchor.is_none() {
+            state.exact_row_anchor = Some(prefix.clone());
         }
-        state.exact_row_anchor = Some(prefix.clone());
+        state.exact_row_committed = Some(prefix.clone());
         state.exact_row_current = Some(prefix);
     }
 
@@ -284,7 +337,15 @@ impl TranscriptDigestAccumulator {
         current: SessionMessageRowPrefixAccumulator,
     ) {
         let mut state = self.locked();
+        state.lazy_exact_row_current_count = None;
         state.exact_row_anchor = Some(anchor);
+        // Graph replay can install a new semantic endpoint before its rewrite
+        // is physically committed. Preserve an already witnessed store
+        // boundary across that preflight; cold materialization has no prior
+        // boundary and therefore adopts the verified current prefix.
+        if state.exact_row_committed.is_none() {
+            state.exact_row_committed = Some(current.clone());
+        }
         state.exact_row_current = Some(current);
     }
 
@@ -296,11 +357,28 @@ impl TranscriptDigestAccumulator {
             .filter(|prefix| prefix.row_count() == row_count)
             .or_else(|| {
                 state
+                    .exact_row_committed
+                    .as_ref()
+                    .filter(|prefix| prefix.row_count() == row_count)
+            })
+            .or_else(|| {
+                state
                     .exact_row_anchor
                     .as_ref()
                     .filter(|prefix| prefix.row_count() == row_count)
             })
             .cloned()
+    }
+
+    fn mark_lazy_exact_row_current(&self, row_count: u64) {
+        let mut state = self.locked();
+        if state.exact_row_current.is_none() {
+            state.lazy_exact_row_current_count = Some(row_count);
+        }
+    }
+
+    fn lazy_exact_row_current_matches(&self, row_count: u64) -> bool {
+        self.locked().lazy_exact_row_current_count == Some(row_count)
     }
 
     fn exact_row_lineage_extends(
@@ -309,7 +387,8 @@ impl TranscriptDigestAccumulator {
         current_count: u64,
     ) -> bool {
         let state = self.locked();
-        state.exact_row_anchor.as_ref() == Some(anchor)
+        (state.exact_row_anchor.as_ref() == Some(anchor)
+            || state.exact_row_committed.as_ref() == Some(anchor))
             && state
                 .exact_row_current
                 .as_ref()
@@ -472,6 +551,19 @@ impl TranscriptMessages {
         }
     }
 
+    /// Adopt a fresh branch transcript whose current rows establish a new
+    /// lineage origin rather than continuing a durable store strand.
+    pub(crate) fn from_fresh_branch(messages: Vec<Message>) -> Self {
+        let transcript = Self::from_vec(messages);
+        if let Ok(prefix) = SessionMessageRowPrefixAccumulator::from_messages(&transcript.messages)
+        {
+            transcript
+                .accumulator
+                .install_exact_row_lineage(prefix.clone(), prefix);
+        }
+        transcript
+    }
+
     /// Install exact durable-row lineage proven by a head materialization or
     /// acknowledged prepared commit.
     pub(crate) fn install_exact_row_prefix(
@@ -505,7 +597,26 @@ impl TranscriptMessages {
         &self,
         row_count: u64,
     ) -> Option<SessionMessageRowPrefixAccumulator> {
-        self.accumulator.exact_row_prefix_at(row_count)
+        if let Some(prefix) = self.accumulator.exact_row_prefix_at(row_count) {
+            return Some(prefix);
+        }
+        if u64::try_from(self.messages.len()).ok() != Some(row_count)
+            || !self.accumulator.lazy_exact_row_current_matches(row_count)
+        {
+            return None;
+        }
+        let prefix = SessionMessageRowPrefixAccumulator::from_messages(&self.messages).ok()?;
+        self.accumulator
+            .install_exact_row_lineage(prefix.clone(), prefix.clone());
+        Some(prefix)
+    }
+
+    /// Mark exact row lineage proven by store-owned WholeBlob bytes without
+    /// reserializing the transcript during every load.
+    pub(crate) fn mark_lazy_whole_blob_row_lineage(&self) {
+        if let Ok(row_count) = u64::try_from(self.messages.len()) {
+            self.accumulator.mark_lazy_exact_row_current(row_count);
+        }
     }
 
     pub(crate) fn exact_row_lineage_extends(
@@ -570,6 +681,10 @@ impl TranscriptMessages {
     /// (`None` = the scan changed nothing, so the witness stays valid).
     pub(crate) fn finish_in_place_scan(&mut self, lowest_mutated_index: Option<usize>) {
         self.accumulator.finish_in_place_scan(lowest_mutated_index);
+        if lowest_mutated_index.is_some() {
+            self.accumulator
+                .rebuild_exact_row_current_from_retained_prefix(&self.messages);
+        }
     }
 
     /// Format-2 transcript digest of the current buffer.
@@ -761,11 +876,54 @@ mod tests {
     }
 
     #[test]
+    fn committed_boundary_survives_appends_beside_graph_anchor_and_live_current() {
+        let mut messages = TranscriptMessages::default();
+        let graph_anchor = crate::session_store::SessionMessageRowPrefixAccumulator::empty();
+        messages.push(user("committed"));
+        let committed = exact_row_prefix(&messages);
+        assert!(messages.install_exact_row_prefix(committed.clone()));
+
+        messages.push(user("live tail"));
+        let current = exact_row_prefix(&messages);
+
+        assert_eq!(messages.exact_row_prefix_at(0), Some(graph_anchor));
+        assert_eq!(messages.exact_row_prefix_at(1), Some(committed));
+        assert_eq!(messages.exact_row_prefix_at(2), Some(current));
+        assert!(
+            messages.exact_row_lineage_extends(
+                &messages.exact_row_prefix_at(1).expect("committed boundary"),
+                2,
+            ),
+            "ordinary successor preparation must accept the durable boundary beside the graph anchor"
+        );
+    }
+
+    #[test]
+    fn graph_replay_preflight_preserves_existing_committed_boundary() {
+        let mut messages = TranscriptMessages::default();
+        messages.push(user("committed predecessor"));
+        let committed = exact_row_prefix(&messages);
+        assert!(messages.install_exact_row_prefix(committed.clone()));
+
+        let rewritten = TranscriptMessages::from_vec(vec![user("rewritten endpoint")]);
+        let graph_anchor = exact_row_prefix(&rewritten);
+        let mut rewritten_with_tail = rewritten;
+        rewritten_with_tail.push(user("live tail"));
+        let live_current = exact_row_prefix(&rewritten_with_tail);
+
+        messages.push(user("live tail"));
+        assert!(messages.install_exact_row_lineage(graph_anchor.clone(), live_current.clone()));
+        assert_ne!(graph_anchor, committed);
+        assert_eq!(messages.exact_row_prefix_at(1), Some(committed));
+        assert_eq!(messages.exact_row_prefix_at(2), Some(live_current));
+    }
+
+    #[test]
     fn suffix_only_in_place_scan_preserves_exact_durable_row_anchor() {
         let mut messages = TranscriptMessages::from_vec(transcript(4));
         let anchor = exact_row_prefix(&messages[..2]);
         let current = exact_row_prefix(&messages);
-        assert!(messages.install_exact_row_lineage(anchor.clone(), current));
+        assert!(messages.install_exact_row_lineage(anchor.clone(), current.clone()));
 
         {
             let buffer = messages.begin_in_place_scan();
@@ -773,10 +931,16 @@ mod tests {
         }
         messages.finish_in_place_scan(Some(2));
 
+        let rebuilt_current = exact_row_prefix(&messages);
         assert_eq!(messages.exact_row_prefix_at(2), Some(anchor));
-        assert!(
-            messages.exact_row_prefix_at(4).is_none(),
-            "a suffix rewrite must invalidate the exact current-row prefix"
+        assert_ne!(
+            rebuilt_current, current,
+            "the rebuilt current-row prefix must bind the changed suffix"
+        );
+        assert_eq!(
+            messages.exact_row_prefix_at(4),
+            Some(rebuilt_current),
+            "a suffix rewrite must rebuild the exact current-row prefix from the retained anchor"
         );
         assert!(
             messages.digest_witness().is_none(),

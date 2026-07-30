@@ -5606,6 +5606,18 @@ mod tests {
         })
     }
 
+    fn exact_system_message_count(messages: &[Message], expected: &str) -> usize {
+        messages
+            .iter()
+            .filter(|message| {
+                matches!(
+                    message,
+                    Message::System(system) if system.content == expected
+                )
+            })
+            .count()
+    }
+
     // -----------------------------------------------------------------------
     // Tests
     // -----------------------------------------------------------------------
@@ -6081,6 +6093,7 @@ mod tests {
     #[cfg(feature = "mob")]
     #[tokio::test]
     async fn router_created_deferred_sessions_project_mob_tools_to_live_open_config() {
+        let _projection_guard = crate::session_runtime::realtime_open_projection_test_guard().await;
         let (router, _notif_rx) = test_router().await;
 
         let create_resp = router
@@ -6127,6 +6140,7 @@ mod tests {
     #[cfg(feature = "comms")]
     #[tokio::test]
     async fn router_created_deferred_live_session_exposes_comms_tools_before_peers_exist() {
+        let _projection_guard = crate::session_runtime::realtime_open_projection_test_guard().await;
         let (router, _notif_rx) = test_router().await;
 
         let create_resp = router
@@ -6349,6 +6363,7 @@ mod tests {
     #[cfg(feature = "comms")]
     #[tokio::test]
     async fn live_open_starts_peer_ingress_for_deferred_keep_alive_controller() {
+        let _projection_guard = crate::session_runtime::realtime_open_projection_test_guard().await;
         let (router, session_id, _command_log) =
             open_deferred_keep_alive_live_controller("live-smoke-controller-drain-test").await;
 
@@ -6373,6 +6388,7 @@ mod tests {
     #[cfg(feature = "comms")]
     #[tokio::test]
     async fn live_peer_ingress_forwards_peer_message_to_active_live_adapter() {
+        let _projection_guard = crate::session_runtime::realtime_open_projection_test_guard().await;
         let (router, session_id, command_log) =
             open_deferred_keep_alive_live_controller("live-smoke-controller-forward-test").await;
 
@@ -6425,6 +6441,7 @@ mod tests {
     #[cfg(feature = "comms")]
     #[tokio::test]
     async fn live_peer_ingress_steer_interrupts_before_forwarding_to_active_live_adapter() {
+        let _projection_guard = crate::session_runtime::realtime_open_projection_test_guard().await;
         let (router, session_id, command_log) =
             open_deferred_keep_alive_live_controller("live-smoke-controller-steer-test").await;
 
@@ -6481,6 +6498,7 @@ mod tests {
     #[cfg(feature = "mob")]
     #[tokio::test]
     async fn router_created_deferred_sessions_apply_tool_filter_to_live_open_config() {
+        let _projection_guard = crate::session_runtime::realtime_open_projection_test_guard().await;
         let (router, _notif_rx) = test_router().await;
 
         let create_resp = router
@@ -6530,6 +6548,7 @@ mod tests {
     #[cfg(feature = "mob")]
     #[tokio::test]
     async fn live_tool_dispatcher_routes_through_session_composed_tools() {
+        let _projection_guard = crate::session_runtime::realtime_open_projection_test_guard().await;
         let (router, _notif_rx) = test_router().await;
 
         let create_resp = router
@@ -8132,7 +8151,7 @@ mod tests {
         );
     }
 
-    async fn archived_session_read_remains_available_and_mutations_reject_inner() {
+    async fn archived_session_is_not_found_and_mutations_reject_inner() {
         let (router, _notif_rx) = test_router().await;
 
         let create_resp = router
@@ -8166,13 +8185,11 @@ mod tests {
             ))
             .await
             .unwrap();
-        assert!(
-            read_resp.error.is_none(),
-            "archived session should remain readable: {:?}",
-            read_resp.error
+        assert_eq!(
+            error_code(&read_resp),
+            error::SESSION_NOT_FOUND,
+            "archive is an absorbing lifecycle terminal projected as NotFound"
         );
-        let read = result_value(&read_resp);
-        assert_eq!(read["session_id"], session_id);
 
         let stream_resp = router
             .dispatch(make_request(
@@ -9372,13 +9389,11 @@ mod tests {
             .last()
             .cloned()
             .expect("first follow-up request");
-        let first_system_prompt =
-            system_prompt_from_request(&first_request).expect("system prompt on first turn");
-        assert!(
-            first_system_prompt.contains(injected_text),
-            "next eligible turn must include the durable System message: {first_system_prompt}"
+        assert_eq!(
+            exact_system_message_count(&first_request, injected_text),
+            1,
+            "next eligible turn must include the durable ordered System message: {first_request:?}"
         );
-        assert_eq!(first_system_prompt.matches(injected_text).count(), 1);
         recorded_requests
             .lock()
             .expect("recorded requests lock poisoned")
@@ -9409,13 +9424,11 @@ mod tests {
             .last()
             .cloned()
             .expect("second follow-up request");
-        let second_system_prompt =
-            system_prompt_from_request(&second_request).expect("system prompt on second turn");
-        assert!(
-            second_system_prompt.contains(injected_text),
-            "durable System messages must remain in transcript order on later turns: {second_system_prompt}"
+        assert_eq!(
+            exact_system_message_count(&second_request, injected_text),
+            1,
+            "durable System messages must remain in transcript order on later turns: {second_request:?}"
         );
-        assert_eq!(second_system_prompt.matches(injected_text).count(), 1);
     }
 
     #[tokio::test]
@@ -9500,11 +9513,10 @@ mod tests {
             .first()
             .cloned()
             .expect("first request");
-        let first_system_prompt =
-            system_prompt_from_request(&first_request).expect("system prompt on first turn");
-        assert!(
-            !first_system_prompt.contains(injected_text),
-            "context appended during an active RPC turn must not affect the in-flight request"
+        assert_eq!(
+            exact_system_message_count(&first_request, injected_text),
+            0,
+            "context appended during an active RPC turn must not affect the in-flight request: {first_request:?}"
         );
 
         let second_turn_resp = router
@@ -9527,11 +9539,10 @@ mod tests {
             .last()
             .cloned()
             .expect("second request");
-        let second_system_prompt =
-            system_prompt_from_request(&second_request).expect("system prompt on second turn");
-        assert!(
-            second_system_prompt.contains(injected_text),
-            "context appended during an active RPC turn must apply on the next eligible turn"
+        assert_eq!(
+            exact_system_message_count(&second_request, injected_text),
+            1,
+            "context appended during an active RPC turn must apply on the next eligible turn: {second_request:?}"
         );
     }
 
@@ -9608,12 +9619,10 @@ mod tests {
             .last()
             .cloned()
             .expect("follow-up request");
-        let system_prompt =
-            system_prompt_from_request(&request).expect("system prompt on follow-up turn");
         assert_eq!(
-            system_prompt.matches(injected_text).count(),
+            exact_system_message_count(&request, injected_text),
             1,
-            "duplicate idempotency keys must not enqueue multiple staged copies: {system_prompt}"
+            "duplicate idempotency keys must not enqueue multiple ordered System rows: {request:?}"
         );
     }
 
@@ -10188,8 +10197,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn archived_session_read_remains_available_and_mutations_reject() {
-        Box::pin(archived_session_read_remains_available_and_mutations_reject_inner()).await;
+    async fn archived_session_is_not_found_and_mutations_reject() {
+        Box::pin(archived_session_is_not_found_and_mutations_reject_inner()).await;
     }
 
     /// 7. `turn/start` returns a result for an existing session.

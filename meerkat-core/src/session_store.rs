@@ -2202,6 +2202,50 @@ pub struct VerifiedSessionHeadMaterialization {
     session: Arc<Session>,
 }
 
+/// Store-proved binding between a compact graph endpoint and the current
+/// HeadCanonical row prefix.
+///
+/// Construction extends the graph's exact final endpoint with serialized
+/// physical tail rows and requires the result to equal the current head
+/// authority. This keeps graph installation mechanical and avoids
+/// rematerializing every historical revision merely to prove an append tail.
+#[derive(Debug)]
+pub struct VerifiedHeadCanonicalTranscriptHistory {
+    history: ValidatedTranscriptHistory,
+    endpoint: SessionMessageRowPrefixAccumulator,
+    current: SessionMessageRowPrefixAccumulator,
+}
+
+impl VerifiedHeadCanonicalTranscriptHistory {
+    #[doc(hidden)]
+    pub fn bind_serialized_live_tail(
+        history: ValidatedTranscriptHistory,
+        serialized_tail: &[Vec<u8>],
+        expected_current: &SessionMessageRowPrefixAccumulator,
+    ) -> Result<Self, SessionStoreError> {
+        let endpoint = history
+            .final_endpoint_row_prefix()
+            .cloned()
+            .ok_or_else(|| {
+                SessionStoreError::Serialization(
+                    "compact transcript graph has no final endpoint witness".to_string(),
+                )
+            })?;
+        let current = endpoint.extend_serialized_rows(serialized_tail)?;
+        if &current != expected_current {
+            return Err(SessionStoreError::Serialization(
+                "compact transcript graph endpoint plus physical tail differs from the current head"
+                    .to_string(),
+            ));
+        }
+        Ok(Self {
+            history,
+            endpoint,
+            current,
+        })
+    }
+}
+
 impl VerifiedSessionHeadMaterialization {
     #[must_use]
     pub fn head(&self) -> &SessionHead {
@@ -2211,6 +2255,54 @@ impl VerifiedSessionHeadMaterialization {
     #[must_use]
     pub fn session(&self) -> &Arc<Session> {
         &self.session
+    }
+
+    /// Install the exact compact rewrite graph reconstructed by the same
+    /// physical store read that produced this materialization.
+    ///
+    /// Head rows deliberately keep graph bodies out of metadata, but a loaded
+    /// domain Session must still carry its rewrite history. Rebinding the
+    /// store-proved graph here keeps EventStore audit projection out of the
+    /// recovery-authority path.
+    #[doc(hidden)]
+    pub fn with_validated_transcript_history(
+        mut self,
+        history: Option<VerifiedHeadCanonicalTranscriptHistory>,
+    ) -> Result<Self, SessionStoreError> {
+        match (self.head.rewrite_count, history) {
+            (0, None) => {}
+            (0, Some(_)) => return Err(SessionStoreError::Corrupted(self.head.id)),
+            (_, None) => {
+                return Err(SessionStoreError::InvalidTranscriptRewrite {
+                    id: self.head.id,
+                    reason: "rewritten HeadCanonical materialization has no compact graph"
+                        .to_string(),
+                });
+            }
+            (_, Some(verified)) => {
+                if verified.history.rewrite_prefix() != &self.head.rewrite_prefix
+                    || self.head.graph_prefix.as_ref() != Some(verified.history.graph_prefix())
+                    || self.head.message_row_prefix.as_ref() != Some(&verified.current)
+                {
+                    return Err(SessionStoreError::Corrupted(self.head.id));
+                }
+                let session = Arc::make_mut(&mut self.session);
+                if !session.install_exact_message_row_lineage(verified.endpoint, verified.current) {
+                    return Err(SessionStoreError::Corrupted(self.head.id));
+                }
+                session
+                    .install_validated_audited_transcript_history_preserving_live(
+                        verified.history,
+                    )
+                    .map_err(|error| SessionStoreError::InvalidTranscriptRewrite {
+                        id: self.head.id.clone(),
+                        reason: format!(
+                            "store-replayed compact transcript graph does not extend the live head: {error}"
+                        ),
+                    })?;
+            }
+        }
+        Ok(self)
     }
 
     /// Install a store-verified ancestor prefix from the same physical row
@@ -3917,7 +4009,7 @@ impl PreparedHeadCanonicalRewriteMutation {
         runtime_boundary_head: &SessionHead,
         observed_head: SessionHead,
     ) -> Result<Self, SessionStoreError> {
-        validate_store_issued_head_pair(session, runtime_boundary_head, &observed_head)?;
+        validate_store_issued_head_identity_pair(session, runtime_boundary_head, &observed_head)?;
         Self::require_pending(
             Self::try_prepare_current(session, observed_head, None)?,
             session.id(),
@@ -4010,17 +4102,33 @@ impl PreparedHeadCanonicalRewriteMutation {
                 )
             }
             None => {
-                let history = session
-                    .validated_transcript_history_state()
-                    .map_err(|error| SessionStoreError::InvalidTranscriptRewrite {
-                        id: session.id().clone(),
-                        reason: format!("failed to validate transcript rewrite graph: {error}"),
-                    })?
-                    .ok_or_else(|| SessionStoreError::InvalidTranscriptRewrite {
-                        id: session.id().clone(),
-                        reason: "same-session rewrite has no validated transcript graph"
-                            .to_string(),
-                    })?;
+                let history =
+                    match session
+                        .validated_transcript_history_state()
+                        .map_err(|error| SessionStoreError::InvalidTranscriptRewrite {
+                            id: session.id().clone(),
+                            reason: format!("failed to validate transcript rewrite graph: {error}"),
+                        })? {
+                        Some(history) => history,
+                        None if observed_head.rewrite_count == 0
+                            && observed_head.rewrite_prefix
+                                == TranscriptRewritePrefixAccumulator::default()
+                            && observed_head.graph_prefix.is_none() =>
+                        {
+                            // No graph on either side means there is no rewrite
+                            // suffix to prepare. Let the singular route fall
+                            // through to the ordinary append/head mutation.
+                            return Ok(None);
+                        }
+                        None => {
+                            return Err(SessionStoreError::InvalidTranscriptRewrite {
+                                id: session.id().clone(),
+                                reason:
+                                    "physical rewrite authority has no validated transcript graph"
+                                        .to_string(),
+                            });
+                        }
+                    };
                 if observed_count > history.commit_count() {
                     return Err(SessionStoreError::InvalidTranscriptRewrite {
                         id: session.id().clone(),
@@ -4089,10 +4197,7 @@ impl PreparedHeadCanonicalRewriteMutation {
                 Some(witness) => witness.row_prefix(),
                 None => history.anchor().row_prefix(),
             };
-            if base_count != edge.messages_before_base()
-                || current_len < base_count
-                || current_len > edge.messages_before()
-            {
+            if base_count != edge.messages_before_base() || current_len > edge.messages_before() {
                 return Err(SessionStoreError::InvalidTranscriptRewrite {
                     id: session.id().clone(),
                     reason: format!(
@@ -4103,7 +4208,49 @@ impl PreparedHeadCanonicalRewriteMutation {
             }
 
             let appended = edge.parent_advance().appended();
-            let already_appended = current_len - base_count;
+            let mut serialized_base_bridge = Vec::new();
+            let already_appended = if current_len < base_count {
+                // The first rewrite in a run may adopt a parent that includes
+                // an uncheckpointed ordinary suffix. Bridge only those
+                // missing anchor rows from the exact observed physical tip;
+                // hashing or copying the preceding document is unnecessary.
+                if pending_index != 0 || observed_count != 0 {
+                    return Err(SessionStoreError::InvalidTranscriptRewrite {
+                        id: session.id().clone(),
+                        reason: "only the first compact occurrence may bridge an uncheckpointed anchor suffix"
+                            .to_string(),
+                    });
+                }
+                let anchor_messages = history.anchor().messages();
+                if anchor_messages.len() != base_count {
+                    return Err(SessionStoreError::Corrupted(session.id().clone()));
+                }
+                let missing_anchor_suffix = &anchor_messages[current_len..base_count];
+                if crate::image_content::messages_have_inline_media(missing_anchor_suffix) {
+                    return Err(SessionStoreError::InvalidTranscriptRewrite {
+                        id: session.id().clone(),
+                        reason: "compact rewrite anchor bridge carries inline media".to_string(),
+                    });
+                }
+                serialized_base_bridge = missing_anchor_suffix
+                    .iter()
+                    .map(|message| serde_json::to_vec(message).map_err(SessionStoreError::from))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let bridged_prefix =
+                    current_prefix.extend_serialized_rows(&serialized_base_bridge)?;
+                if &bridged_prefix != base_prefix {
+                    return Err(SessionStoreError::TranscriptContinuityViolation {
+                        id: session.id().clone(),
+                        previous_revision: current_prefix.digest().to_string(),
+                        incoming_revision: base_prefix.digest().to_string(),
+                        reason: "observed rows do not prefix the compact rewrite anchor"
+                            .to_string(),
+                    });
+                }
+                0
+            } else {
+                current_len - base_count
+            };
             if already_appended > appended.len() {
                 return Err(SessionStoreError::InvalidTranscriptRewrite {
                     id: session.id().clone(),
@@ -4111,20 +4258,22 @@ impl PreparedHeadCanonicalRewriteMutation {
                         .to_string(),
                 });
             }
-            let serialized_already_appended = appended[..already_appended]
-                .iter()
-                .map(|message| serde_json::to_vec(message).map_err(SessionStoreError::from))
-                .collect::<Result<Vec<_>, _>>()?;
-            let expected_current_prefix =
-                base_prefix.extend_serialized_rows(&serialized_already_appended)?;
-            if expected_current_prefix != current_prefix {
-                return Err(SessionStoreError::TranscriptContinuityViolation {
-                    id: session.id().clone(),
-                    previous_revision: current_prefix.digest().to_string(),
-                    incoming_revision: expected_current_prefix.digest().to_string(),
-                    reason: "observed rows do not match the compact parent-advance lineage"
-                        .to_string(),
-                });
+            if current_len >= base_count {
+                let serialized_already_appended = appended[..already_appended]
+                    .iter()
+                    .map(|message| serde_json::to_vec(message).map_err(SessionStoreError::from))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let expected_current_prefix =
+                    base_prefix.extend_serialized_rows(&serialized_already_appended)?;
+                if expected_current_prefix != current_prefix {
+                    return Err(SessionStoreError::TranscriptContinuityViolation {
+                        id: session.id().clone(),
+                        previous_revision: current_prefix.digest().to_string(),
+                        incoming_revision: expected_current_prefix.digest().to_string(),
+                        reason: "observed rows do not match the compact parent-advance lineage"
+                            .to_string(),
+                    });
+                }
             }
             let mut advanced_base_prefix = base_prefix.clone();
             let parent_transition =
@@ -4163,10 +4312,12 @@ impl PreparedHeadCanonicalRewriteMutation {
                 } else {
                     PreparedHeadCanonicalParentTransition::ExactAppend
                 };
-            let serialized_parent_suffix = appended[already_appended..]
+            let serialized_appended_suffix = appended[already_appended..]
                 .iter()
                 .map(|message| serde_json::to_vec(message).map_err(SessionStoreError::from))
                 .collect::<Result<Vec<_>, _>>()?;
+            let mut serialized_parent_suffix = serialized_base_bridge;
+            serialized_parent_suffix.extend(serialized_appended_suffix);
             let serialized_all_appended = appended
                 .iter()
                 .map(|message| serde_json::to_vec(message).map_err(SessionStoreError::from))
@@ -4491,8 +4642,19 @@ impl PreparedHeadCanonicalMutationRoute {
         runtime_boundary_head: &SessionHead,
         observed_head: SessionHead,
     ) -> Result<Self, SessionStoreError> {
-        validate_store_issued_head_pair(session, runtime_boundary_head, &observed_head)?;
-        Self::prepare_observed(session, observed_head)
+        validate_store_issued_head_identity_pair(session, runtime_boundary_head, &observed_head)?;
+        match PreparedHeadCanonicalRewriteMutation::try_prepare_current(
+            session,
+            observed_head.clone(),
+            None,
+        )? {
+            Some(rewrite) => Ok(Self::Rewrite(rewrite)),
+            None => {
+                validate_store_issued_head_pair(session, runtime_boundary_head, &observed_head)?;
+                PreparedHeadCanonicalMutation::prepare(session, Some(observed_head))
+                    .map(Self::Ordinary)
+            }
+        }
     }
 
     pub fn prepare_intra_turn(
@@ -4511,11 +4673,19 @@ impl PreparedHeadCanonicalMutationRoute {
         observed_head: SessionHead,
         preflight: Option<PreparedHeadCanonicalRewritePreflight>,
     ) -> Result<Self, SessionStoreError> {
-        validate_store_issued_head_pair(session, runtime_boundary_head, &observed_head)?;
         let Some(preflight) = preflight else {
+            validate_store_issued_head_pair(session, runtime_boundary_head, &observed_head)?;
             return PreparedHeadCanonicalMutation::prepare(session, Some(observed_head))
                 .map(Self::Ordinary);
         };
+        // A pending rewrite is intentionally not an append of the observed
+        // row prefix. Its sealed graph edge proves the exact predecessor and
+        // replacement lineage inside `try_prepare_current`; demanding that
+        // the rewritten live rows still share the predecessor's flat prefix
+        // would reject every prefix-changing compaction. Keep the store-head
+        // identity/representation checks here, then let the specialized
+        // rewrite carrier own that continuity proof.
+        validate_store_issued_head_identity_pair(session, runtime_boundary_head, &observed_head)?;
         let prepared = PreparedHeadCanonicalRewriteMutation::try_prepare_current(
             session,
             observed_head,
@@ -4562,23 +4732,14 @@ fn validate_store_issued_head_pair(
     runtime_boundary_head: &SessionHead,
     observed_head: &SessionHead,
 ) -> Result<(), SessionStoreError> {
-    validate_session_head_storage_representation(runtime_boundary_head)?;
-    validate_session_head_storage_representation(observed_head)?;
-    if &runtime_boundary_head.id != session.id() || &observed_head.id != session.id() {
-        return Err(SessionStoreError::InvalidTranscriptRewrite {
-            id: session.id().clone(),
-            reason: "store-issued committed or observed head belongs to another session"
-                .to_string(),
-        });
-    }
-    if runtime_boundary_head.row_lineage_anchor != observed_head.row_lineage_anchor {
-        return Err(SessionStoreError::TranscriptContinuityViolation {
-            id: session.id().clone(),
-            previous_revision: session_head_cas_token(runtime_boundary_head)?,
-            incoming_revision: session_head_cas_token(observed_head)?,
-            reason: "observed physical head does not share the committed row-lineage origin"
-                .to_string(),
-        });
+    validate_store_issued_head_identity_pair(session, runtime_boundary_head, observed_head)?;
+    if observed_head.rewrite_count > runtime_boundary_head.rewrite_count {
+        // Specialized rewrite persistence already moved the physical head
+        // across the non-append transition. The exact observed-head CAS,
+        // compact graph prefix, and shared row-lineage origin own continuity;
+        // the rewritten live document cannot also retain the old boundary as
+        // a flat message prefix.
+        return Ok(());
     }
     let boundary_prefix = runtime_boundary_head
         .message_row_prefix
@@ -4591,7 +4752,11 @@ fn validate_store_issued_head_pair(
         .exact_message_row_prefix_at(runtime_boundary_head.message_count)
         .ok_or_else(|| SessionStoreError::InvalidTranscriptRewrite {
             id: session.id().clone(),
-            reason: "live session does not retain the committed boundary row prefix".to_string(),
+            reason: format!(
+                "live session does not retain the committed boundary row prefix at {} rows (live row count {})",
+                runtime_boundary_head.message_count,
+                session.messages().len()
+            ),
         })?;
     if boundary_prefix != &live_boundary_prefix {
         return Err(SessionStoreError::TranscriptContinuityViolation {
@@ -4599,6 +4764,40 @@ fn validate_store_issued_head_pair(
             previous_revision: boundary_prefix.digest().to_string(),
             incoming_revision: live_boundary_prefix.digest().to_string(),
             reason: "live session does not continue the exact committed store boundary".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_store_issued_head_identity_pair(
+    session: &Session,
+    runtime_boundary_head: &SessionHead,
+    observed_head: &SessionHead,
+) -> Result<(), SessionStoreError> {
+    validate_session_head_storage_representation(runtime_boundary_head)?;
+    validate_session_head_storage_representation(observed_head)?;
+    if &runtime_boundary_head.id != session.id() || &observed_head.id != session.id() {
+        return Err(SessionStoreError::InvalidTranscriptRewrite {
+            id: session.id().clone(),
+            reason: "store-issued committed or observed head belongs to another session"
+                .to_string(),
+        });
+    }
+    if observed_head.rewrite_count < runtime_boundary_head.rewrite_count {
+        return Err(SessionStoreError::TranscriptContinuityViolation {
+            id: session.id().clone(),
+            previous_revision: session_head_cas_token(runtime_boundary_head)?,
+            incoming_revision: session_head_cas_token(observed_head)?,
+            reason: "observed physical head rewinds the committed rewrite count".to_string(),
+        });
+    }
+    if runtime_boundary_head.row_lineage_anchor != observed_head.row_lineage_anchor {
+        return Err(SessionStoreError::TranscriptContinuityViolation {
+            id: session.id().clone(),
+            previous_revision: session_head_cas_token(runtime_boundary_head)?,
+            incoming_revision: session_head_cas_token(observed_head)?,
+            reason: "observed physical head does not share the committed row-lineage origin"
+                .to_string(),
         });
     }
     Ok(())
@@ -5673,6 +5872,7 @@ impl StrandSplice {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::types::{
@@ -5891,11 +6091,13 @@ mod tests {
         envelope["messages"] = serde_json::to_value(vec![Message::User(UserMessage::text(
             "forged live transcript".to_string(),
         ))])?;
-        let forged: Session = serde_json::from_value(envelope)?;
-        assert!(matches!(
-            run_boundary_snapshot_head_coherence_guard(&forged),
-            Err(SessionStoreError::InvalidTranscriptRewrite { .. })
-        ));
+        let error = serde_json::from_value::<Session>(envelope)
+            .expect_err("session decode must reject a forged live transcript");
+        assert!(
+            error
+                .to_string()
+                .contains("live transcript does not preserve the graph-proved audited endpoint")
+        );
         Ok(())
     }
 
@@ -6330,31 +6532,37 @@ mod tests {
             Some("unit-test".to_string()),
             Some(parent_revision),
         )?;
-        let mut incoming = first.clone();
-
         let mut later = first;
         let second_commit = later.commit_transcript_rewrite(
             TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
-            vec![Message::User(UserMessage::text(
-                "later audited projection".to_string(),
-            ))],
+            vec![Message::User(UserMessage::text("persisted".to_string()))],
             crate::TranscriptRewriteReason::new("second"),
             Some("unit-test".to_string()),
             Some(first_commit.revision.clone()),
         )?;
+        let third_commit = later.commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+            vec![Message::User(UserMessage::text(
+                "first audited projection".to_string(),
+            ))],
+            crate::TranscriptRewriteReason::new("third"),
+            Some("unit-test".to_string()),
+            Some(second_commit.revision),
+        )?;
         let later_state = later
             .transcript_history_state()?
-            .ok_or_else(|| "second rewrite should retain history state".to_string())?;
-        assert_eq!(later_state.head(), second_commit.revision);
-
-        // Keep the live transcript at the first rewrite but substitute the
-        // independently valid graph through the second rewrite. The supplied
-        // first commit is a member of this graph and its revision still equals
-        // the live digest; only the graph's ordered tail exposes the mismatch.
-        incoming.set_metadata_unchecked_for_test(
-            crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
-            serde_json::to_value(later_state)?,
+            .ok_or_else(|| "third rewrite should retain history state".to_string())?;
+        assert_eq!(later_state.head(), third_commit.revision);
+        assert_eq!(
+            later_state.head(),
+            first_commit.revision,
+            "the graph must end at content-equal but occurrence-distinct ABA history"
         );
+
+        // The incoming document and graph are independently valid through the
+        // third rewrite. Supplying the first occurrence must still fail: the
+        // guard authorizes exactly the named occurrence, never a later tail.
+        let incoming = later;
         incoming
             .validate_transcript_history_state()
             .expect("trailing-commit graph is independently valid");
@@ -6621,9 +6829,7 @@ mod tests {
             ))],
         )?;
         let audited_graph = previous
-            .metadata()
-            .get(crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY)
-            .cloned()
+            .validated_transcript_history_state()?
             .expect("audited graph");
 
         let mut incoming = previous.clone();
@@ -6632,12 +6838,12 @@ mod tests {
 
         append_only_save_guard(&incoming, Some(&previous))?;
         assert_eq!(incoming.transcript_rewrite_generation()?, 1);
-        assert_eq!(
-            incoming
-                .metadata()
-                .get(crate::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY),
-            Some(&audited_graph),
-            "tail-only notice refresh must not rewrite audited graph metadata"
+        let incoming_graph = incoming
+            .validated_transcript_history_state()?
+            .expect("audited graph");
+        assert!(
+            audited_graph.shares_exact_state_with(&incoming_graph),
+            "tail-only notice refresh must preserve the exact audited graph authority"
         );
         Ok(())
     }
@@ -6794,9 +7000,7 @@ mod tests {
         }));
 
         let mut incoming = Session::with_id(previous.id().clone());
-        incoming.push(Message::System(SystemMessage::new(
-            "runtime system before context refresh",
-        )));
+        incoming.push(previous.messages()[0].clone());
         incoming.push(Message::User(UserMessage::text(
             "Verbose context that will be compacted".to_string(),
         )));
@@ -7133,7 +7337,7 @@ mod tests {
             vec![original_message],
             crate::TranscriptRewriteReason::new("recurrence-test"),
             Some("unit-test".to_string()),
-            Some(first.revision.clone()),
+            Some(first.revision),
         )?;
         assert_eq!(second.revision, a, "the graph must be A -> B -> A");
 
@@ -7373,11 +7577,13 @@ mod tests {
     #[allow(clippy::expect_used)]
     fn session_head_projection_strips_inline_history_and_round_trips_token() {
         let (_, compacted, _) = compacted_session_fixture();
+        let compacted_wire = serde_json::to_value(&compacted).expect("fixture serializes");
         assert!(
-            compacted
-                .metadata()
+            compacted_wire["metadata"]
+                .as_object()
+                .expect("metadata is an object")
                 .contains_key(SESSION_TRANSCRIPT_HISTORY_STATE_KEY),
-            "fixture must carry inline history state"
+            "WholeBlob fixture wire must carry inline history state"
         );
         let head = SessionHead::from_session(&compacted, TranscriptStrandId::root(), 1)
             .expect("head projection");
@@ -7721,6 +7927,66 @@ mod tests {
             crate::session::session_head_metadata_canonicalization_count(),
             0,
             "message-only successor must not rebuild metadata"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn no_history_successor_routes_to_ordinary_head_mutation() {
+        let (mut session, observed) = acknowledged_head_canonical_root_with_metadata();
+        session.push(Message::System(SystemMessage::new(
+            "detached control append after reconstruction",
+        )));
+
+        let route = PreparedHeadCanonicalMutationRoute::prepare_successor(
+            &session,
+            &observed,
+            observed.clone(),
+        )
+        .expect("a graph-free committed root must admit an ordinary successor");
+        assert!(
+            matches!(route, PreparedHeadCanonicalMutationRoute::Ordinary(_)),
+            "absence of rewrite history must not force the specialized rewrite route"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn rewritten_head_without_live_graph_remains_rejected() {
+        let (mut rewritten, runtime_head) = acknowledged_head_canonical_root_with_metadata();
+        rewritten.push(Message::User(UserMessage::text("alpha")));
+        rewritten
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+                vec![Message::User(UserMessage::text("beta"))],
+                crate::TranscriptRewriteReason::new("negative route pin"),
+                Some("unit-test".to_string()),
+                None,
+            )
+            .expect("rewrite fixture");
+        let physical_rewrite = PreparedHeadCanonicalRewriteMutation::prepare_intra_turn(
+            &rewritten,
+            &runtime_head,
+            runtime_head.clone(),
+        )
+        .expect("prepare physical rewrite");
+        let observed_rewritten_head = physical_rewrite.successor_head().clone();
+
+        let mut graphless = Session::with_id(rewritten.id().clone());
+        graphless.push(Message::User(UserMessage::text("beta")));
+        let error = PreparedHeadCanonicalMutationRoute::prepare_successor(
+            &graphless,
+            &runtime_head,
+            observed_rewritten_head,
+        )
+        .expect_err("physical rewrite authority must require the live validated graph");
+        assert!(
+            matches!(
+                error,
+                SessionStoreError::InvalidTranscriptRewrite { ref reason, .. }
+                    if reason.contains("physical rewrite authority has no validated transcript graph")
+            ),
+            "unexpected missing-graph error: {error}"
         );
     }
 

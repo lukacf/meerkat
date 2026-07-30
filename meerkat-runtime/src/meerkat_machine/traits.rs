@@ -1,5 +1,6 @@
 use super::*;
 use crate::input_state::StoredInputState;
+use crate::store::{RuntimeSessionAuthority, RuntimeSessionPersistenceProfile};
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
@@ -953,11 +954,13 @@ impl MeerkatMachine {
             Ok(parts) => parts,
             Err(RuntimeControlPlaneError::NotFound(_)) => {
                 // A process restart can leave unfinished runtime realization
-                // without a live session entry. Recover only that lifecycle
-                // residue before deciding archive has no runtime half. A
-                // checkpoint snapshot is session content authority and is
-                // intentionally not consulted here; a clean unbound Idle row
-                // likewise belongs to the dead process and is already absent.
+                // without a live session entry. Runtime lifecycle residue
+                // requires recovery so archive can finish process cleanup. A
+                // store-issued session-boundary authority independently
+                // requires recovery so archive can establish the singular
+                // Retired lifecycle terminal even when the old process left a
+                // clean Idle row. This is a bounded authority-row read, never
+                // a Session body parse.
                 let Some(store) = self.store.as_ref() else {
                     return Ok(None);
                 };
@@ -965,19 +968,53 @@ impl MeerkatMachine {
                     crate::store::load_machine_lifecycle(store.as_ref(), &runtime_id)
                         .await
                         .map_err(|error| RuntimeControlPlaneError::Internal(error.to_string()))?;
-                if !durable_lifecycle.as_ref().is_some_and(
+                let lifecycle_requires_archive = durable_lifecycle.as_ref().is_some_and(
                     super::session_management::machine_lifecycle_has_runtime_archive_residue,
-                ) {
+                );
+                let lifecycle_is_quiescent = durable_lifecycle.as_ref().is_some_and(|lifecycle| {
+                    matches!(
+                        lifecycle.runtime_state(),
+                        RuntimeState::Retired | RuntimeState::Destroyed
+                    )
+                });
+                let durable_session_authority = if lifecycle_is_quiescent {
+                    None
+                } else {
+                    match store.session_persistence_profile() {
+                        RuntimeSessionPersistenceProfile::WholeBlobV1 => store
+                            .load_whole_blob_store_authority(&runtime_id)
+                            .await
+                            .map(|authority| authority.map(RuntimeSessionAuthority::WholeBlob))
+                            .map_err(|error| {
+                                RuntimeControlPlaneError::Internal(error.to_string())
+                            })?,
+                        RuntimeSessionPersistenceProfile::HeadCanonicalV1 => store
+                            .load_session_boundary_authority(&runtime_id)
+                            .await
+                            .map_err(|error| {
+                                RuntimeControlPlaneError::Internal(error.to_string())
+                            })?,
+                    }
+                };
+                if let Some(authority) = durable_session_authority.as_ref()
+                    && (authority.session_id() != session_id
+                        || authority.profile() != store.session_persistence_profile())
+                {
+                    return Err(RuntimeControlPlaneError::Internal(format!(
+                        "runtime {runtime_id} returned mismatched session-boundary authority while archiving {session_id}"
+                    )));
+                }
+                if !lifecycle_requires_archive && durable_session_authority.is_none() {
                     return Ok(None);
                 }
                 // Archive recovery must preserve the durable lifecycle
-                // authority exactly long enough to drain any terminal
-                // outboxes owned by its last placement. The public
-                // RegisterSession command intentionally revives Stopped
-                // to Idle and clears that epoch tuple; doing so here would
-                // destroy the witness required for exact outbox adoption.
-                // Recover the entry mechanically, without applying the
-                // user-facing revival transition.
+                // authority exactly long enough to drain terminal outboxes
+                // and/or install the Retired terminal for the committed
+                // session body. The public RegisterSession command
+                // intentionally revives Stopped to Idle and clears that epoch
+                // tuple; doing so here would destroy the witness required for
+                // exact outbox adoption. Recover the entry mechanically,
+                // without applying the user-facing revival transition.
                 recovered_registration_for_archive = self
                     .register_session_inner_under_registration_transaction(session_id.clone(), None)
                     .await

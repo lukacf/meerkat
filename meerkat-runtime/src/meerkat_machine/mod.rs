@@ -1379,14 +1379,15 @@ pub(crate) struct MemberEffectAuthorityGuard {
     _session_guard: crate::tokio::sync::OwnedMutexGuard<()>,
 }
 
-/// Exact residency plus registration-stability interval for member live/open.
+/// Exact residency plus registration-stability interval for member-live work.
 ///
-/// Unlike an ordinary member effect, live/open must acquire the dedicated
-/// live-lifecycle gate and then call back into machine mutations. Holding the
-/// session mutation gate here would deadlock that canonical pipeline. The
-/// stable residency slot prevents generation cutover, while the registration
-/// transaction prevents unregister or same-id replacement until open returns.
-pub(crate) struct MemberLiveOpenAuthorityGuard {
+/// Unlike an ordinary member effect, member-live operations call back into
+/// machine mutations through the shared live pipeline. Holding the session
+/// mutation gate here would deadlock that canonical pipeline. The stable
+/// residency slot prevents generation cutover, while the registration
+/// transaction prevents unregister or same-id replacement until the live
+/// operation returns.
+pub(crate) struct MemberLiveAuthorityGuard {
     _slot_guard: crate::tokio::sync::OwnedMutexGuard<()>,
     _registration_guard: crate::tokio::sync::OwnedMutexGuard<()>,
 }
@@ -6377,14 +6378,14 @@ impl MeerkatMachine {
             .await
     }
 
-    /// Acquire the non-reentrant authority interval required by member
-    /// live/open. This deliberately does not take `mutation_gate`: the shared
-    /// live pipeline owns lifecycle -> mutation ordering internally.
-    pub(crate) async fn lock_member_live_open_authority(
+    /// Acquire the non-reentrant authority interval required by member-live
+    /// operations. This deliberately does not take `mutation_gate`: the
+    /// shared live pipeline owns lifecycle -> mutation ordering internally.
+    pub(crate) async fn lock_member_live_authority(
         &self,
         session_id: &SessionId,
         expected: &meerkat_contracts::wire::supervisor_bridge::BridgeMemberIncarnation,
-    ) -> Result<MemberLiveOpenAuthorityGuard, RuntimeDriverError> {
+    ) -> Result<MemberLiveAuthorityGuard, RuntimeDriverError> {
         let lease = self
             .acquire_member_effect_authority_lease(session_id, Some(expected))
             .await?;
@@ -6423,7 +6424,7 @@ impl MeerkatMachine {
             .unwrap_or(RuntimeState::Destroyed);
         self.reject_unregistration_drain_ingress(session_id, state)
             .await?;
-        Ok(MemberLiveOpenAuthorityGuard {
+        Ok(MemberLiveAuthorityGuard {
             _slot_guard: slot_guard,
             _registration_guard: registration_guard,
         })

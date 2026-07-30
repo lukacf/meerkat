@@ -442,6 +442,108 @@ pub struct SessionSnapshot {
     pub last_assistant_text: Option<String>,
 }
 
+/// Bounded actor-owned transcript authority used to compare a live SessionTask
+/// with the exact committed store boundary.
+///
+/// This carrier deliberately excludes the transcript body. Implementations
+/// must derive it from their canonical live `Session`; runtime-backed wrappers
+/// cannot silently omit the capability and force ordinary authority checks
+/// back through an O(document) export.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionTranscriptAuthoritySnapshot {
+    session_id: SessionId,
+    transcript_revision: String,
+    message_count: usize,
+    mutation_generation: u64,
+}
+
+impl SessionTranscriptAuthoritySnapshot {
+    pub fn from_session(session: &meerkat_core::Session) -> Result<Self, AgentError> {
+        Ok(Self {
+            session_id: session.id().clone(),
+            transcript_revision: session.transcript_content_digest().map_err(|error| {
+                AgentError::InternalError(format!(
+                    "failed to derive live transcript authority for session {}: {error}",
+                    session.id()
+                ))
+            })?,
+            message_count: session.messages().len(),
+            // SessionTask replaces this placeholder with its actor-owned
+            // monotonic generation before the snapshot crosses the service
+            // boundary.
+            mutation_generation: 0,
+        })
+    }
+
+    #[must_use]
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    #[must_use]
+    pub fn transcript_revision(&self) -> &str {
+        &self.transcript_revision
+    }
+
+    #[must_use]
+    pub const fn message_count(&self) -> usize {
+        self.message_count
+    }
+
+    #[must_use]
+    pub const fn mutation_generation(&self) -> u64 {
+        self.mutation_generation
+    }
+
+    fn bind_actor_generation(mut self, generation: u64) -> Self {
+        self.mutation_generation = generation;
+        self
+    }
+}
+
+/// Transcript authority bound to one exact live actor incarnation.
+///
+/// The inner snapshot fences transcript ABA within the actor. The witness
+/// fences remove-and-recreate ABA for the same logical `SessionId`.
+#[derive(Clone)]
+pub struct LiveSessionTranscriptAuthoritySnapshot {
+    actor_witness: LiveSessionActorWitness,
+    authority: SessionTranscriptAuthoritySnapshot,
+}
+
+impl LiveSessionTranscriptAuthoritySnapshot {
+    #[must_use]
+    pub fn session_id(&self) -> &SessionId {
+        self.authority.session_id()
+    }
+
+    #[must_use]
+    pub fn transcript_revision(&self) -> &str {
+        self.authority.transcript_revision()
+    }
+
+    #[must_use]
+    pub const fn message_count(&self) -> usize {
+        self.authority.message_count()
+    }
+
+    #[must_use]
+    pub const fn mutation_generation(&self) -> u64 {
+        self.authority.mutation_generation()
+    }
+}
+
+impl PartialEq for LiveSessionTranscriptAuthoritySnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(
+            &self.actor_witness.incarnation,
+            &other.actor_witness.incarnation,
+        ) && self.authority == other.authority
+    }
+}
+
+impl Eq for LiveSessionTranscriptAuthoritySnapshot {}
+
 /// Opaque identity for one exact in-process session actor.
 ///
 /// A [`SessionId`] names the logical session and is intentionally reusable
@@ -823,6 +925,16 @@ enum SessionCommand {
     ExportSession {
         reply_tx: oneshot::Sender<Result<meerkat_core::Session, AgentError>>,
     },
+    /// Observe only exact transcript authority; never export the full body.
+    ObserveSessionTranscriptAuthority {
+        reply_tx: oneshot::Sender<Result<SessionTranscriptAuthoritySnapshot, AgentError>>,
+    },
+    /// Export only if the actor still has the exact observed transcript
+    /// generation and authority.
+    ExportSessionIfTranscriptAuthority {
+        expected: SessionTranscriptAuthoritySnapshot,
+        reply_tx: oneshot::Sender<Result<Option<meerkat_core::Session>, AgentError>>,
+    },
     /// Classify a callback-result batch against actor-owned canonical
     /// transcript state without exporting that state across the command seam.
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
@@ -929,6 +1041,24 @@ enum SessionCommand {
             oneshot::Sender<Result<HeadCanonicalRuntimeBoundaryAcknowledgeOutcome, AgentError>>,
     },
     Shutdown,
+}
+
+impl SessionCommand {
+    /// Conservatively advance actor-owned transcript generation for every
+    /// command except the three body/authority observations themselves.
+    ///
+    /// Over-advancing on a read-only diagnostic is safe (a later conditional
+    /// export retries). The default-mutating shape is intentional: a newly
+    /// added command cannot silently create an ABA hole by forgetting to opt
+    /// into generation advancement.
+    fn advances_transcript_authority_generation(&self) -> bool {
+        !matches!(
+            self,
+            Self::ExportSession { .. }
+                | Self::ObserveSessionTranscriptAuthority { .. }
+                | Self::ExportSessionIfTranscriptAuthority { .. }
+        )
+    }
 }
 
 /// Lightweight summary updated after each turn, readable without querying the task.
@@ -1582,6 +1712,12 @@ pub trait SessionAgent: Send {
     /// after each turn.
     fn session_clone(&self) -> Result<meerkat_core::Session, AgentError>;
 
+    /// Observe the live transcript's exact bounded authority without exporting
+    /// or cloning its accumulated document.
+    fn session_transcript_authority(
+        &self,
+    ) -> Result<SessionTranscriptAuthoritySnapshot, AgentError>;
+
     /// Classify callback-result ingress against the actor-owned canonical
     /// Session. Implementations with direct session access should override
     /// this; the default remains exact for lightweight/test agents.
@@ -2225,6 +2361,111 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         })?;
 
         Ok(session)
+    }
+
+    /// Observe exact actor-owned transcript authority without cloning the
+    /// accumulated Session document.
+    pub async fn observe_session_transcript_authority(
+        &self,
+        id: &SessionId,
+    ) -> Result<LiveSessionTranscriptAuthoritySnapshot, SessionError> {
+        let (actor_witness, command_tx) = {
+            let sessions = self.sessions.read().await;
+            let handle = sessions
+                .get(id)
+                .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+            (handle.actor_witness.clone(), handle.command_tx.clone())
+        };
+        let (reply_tx, reply_rx) = oneshot::channel();
+        command_tx
+            .send(SessionCommand::ObserveSessionTranscriptAuthority { reply_tx })
+            .await
+            .map_err(|_| {
+                SessionError::Agent(AgentError::InternalError(
+                    "Session task has exited".to_string(),
+                ))
+            })?;
+        let authority = reply_rx
+            .await
+            .map_err(|_| {
+                SessionError::Agent(AgentError::InternalError(
+                    "Session task dropped the transcript-authority reply".to_string(),
+                ))
+            })?
+            .map_err(SessionError::Agent)?;
+        if !actor_witness.is_live() {
+            return Err(SessionError::NotFound { id: id.clone() });
+        }
+        Ok(LiveSessionTranscriptAuthoritySnapshot {
+            actor_witness,
+            authority,
+        })
+    }
+
+    /// Export the live actor only when its transcript authority and mutation
+    /// generation still equal a prior bounded observation. The comparison and
+    /// clone execute in one SessionTask command, closing the observation/export
+    /// race without parking or hashing another full document.
+    pub async fn export_session_if_transcript_authority(
+        &self,
+        id: &SessionId,
+        expected: LiveSessionTranscriptAuthoritySnapshot,
+    ) -> Result<Option<meerkat_core::Session>, SessionError> {
+        if expected.session_id() != id {
+            return Err(SessionError::Agent(AgentError::InternalError(format!(
+                "transcript-authority export for {id} received snapshot for {}",
+                expected.session_id()
+            ))));
+        }
+        let (command_tx, deferred_turn_state) = {
+            let sessions = self.sessions.read().await;
+            let handle = sessions
+                .get(id)
+                .filter(|handle| expected.actor_witness.is_handle(handle));
+            let Some(handle) = handle else {
+                return Ok(None);
+            };
+            (
+                handle.command_tx.clone(),
+                Arc::clone(&handle.deferred_turn_state),
+            )
+        };
+        let (reply_tx, reply_rx) = oneshot::channel();
+        command_tx
+            .send(SessionCommand::ExportSessionIfTranscriptAuthority {
+                expected: expected.authority.clone(),
+                reply_tx,
+            })
+            .await
+            .map_err(|_| {
+                SessionError::Agent(AgentError::InternalError(
+                    "Session task has exited".to_string(),
+                ))
+            })?;
+        let Some(mut session) = reply_rx
+            .await
+            .map_err(|_| {
+                SessionError::Agent(AgentError::InternalError(
+                    "Session task dropped the generation-bound export reply".to_string(),
+                ))
+            })?
+            .map_err(SessionError::Agent)?
+        else {
+            return Ok(None);
+        };
+        let still_current = self.sessions.read().await.get(id).is_some_and(|handle| {
+            expected.actor_witness.is_handle(handle) && expected.actor_witness.is_live()
+        });
+        if !still_current {
+            return Ok(None);
+        }
+        let state = lock_deferred_turn_state(&deferred_turn_state).clone();
+        session.set_deferred_turn_state(state).map_err(|error| {
+            SessionError::Agent(AgentError::InternalError(format!(
+                "failed to serialize generation-bound deferred-turn state: {error}"
+            )))
+        })?;
+        Ok(Some(session))
     }
 
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
@@ -4900,12 +5141,16 @@ async fn drain_session_task_commands<A: SessionAgent>(
     control: &SessionTaskControl,
     next_seq: &mut u64,
     source: &EventSourceIdentity,
+    transcript_authority_generation: &mut u64,
 ) {
     // Prevent any new commands from entering the buffer.
     commands.close();
 
     // Drain buffered commands and resolve their waiters.
     while let Ok(cmd) = commands.try_recv() {
+        if cmd.advances_transcript_authority_generation() {
+            *transcript_authority_generation = (*transcript_authority_generation).saturating_add(1);
+        }
         match cmd {
             SessionCommand::StartTurn { result_tx, .. } => {
                 // Machine is in ShuttingDown; dispatch authorization resolves
@@ -4929,6 +5174,27 @@ async fn drain_session_task_commands<A: SessionAgent>(
             }
             SessionCommand::ExportSession { reply_tx } => {
                 let _ = reply_tx.send(agent.session_clone());
+            }
+            SessionCommand::ObserveSessionTranscriptAuthority { reply_tx } => {
+                let result = agent.session_transcript_authority().map(|snapshot| {
+                    snapshot.bind_actor_generation(*transcript_authority_generation)
+                });
+                let _ = reply_tx.send(result);
+            }
+            SessionCommand::ExportSessionIfTranscriptAuthority { expected, reply_tx } => {
+                let result = agent
+                    .session_transcript_authority()
+                    .map(|snapshot| {
+                        snapshot.bind_actor_generation(*transcript_authority_generation)
+                    })
+                    .and_then(|current| {
+                        if current == expected {
+                            agent.session_clone().map(Some)
+                        } else {
+                            Ok(None)
+                        }
+                    });
+                let _ = reply_tx.send(result);
             }
             #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
             SessionCommand::ClassifyCallbackResultIngress { results, reply_tx } => {
@@ -5066,6 +5332,10 @@ async fn session_task<A: SessionAgent>(
     control: SessionTaskControl,
 ) {
     let mut next_seq: u64 = 0;
+    // Lives on the SessionTask incarnation, not inside replaceable Session
+    // state. Durable sync and compaction rollback therefore cannot recreate a
+    // previously observed generation under the same actor witness.
+    let mut transcript_authority_generation: u64 = 0;
     // The service captures this canonical identity immediately after agent
     // construction and uses it as the registry key. Never re-read a custom
     // SessionAgent's potentially mutable identity inside the task.
@@ -5075,6 +5345,9 @@ async fn session_task<A: SessionAgent>(
         let Some(cmd) = commands.recv().await else {
             break;
         };
+        if cmd.advances_transcript_authority_generation() {
+            transcript_authority_generation = transcript_authority_generation.saturating_add(1);
+        }
 
         match cmd {
             SessionCommand::ReplaceClient { client, reply_tx } => {
@@ -5493,6 +5766,7 @@ async fn session_task<A: SessionAgent>(
                                     &control,
                                     &mut next_seq,
                                     &source,
+                                    &mut transcript_authority_generation,
                                 )
                                 .await;
                                 break;
@@ -5771,6 +6045,7 @@ async fn session_task<A: SessionAgent>(
                         &control,
                         &mut next_seq,
                         &source,
+                        &mut transcript_authority_generation,
                     )
                     .await;
                     break;
@@ -5778,6 +6053,25 @@ async fn session_task<A: SessionAgent>(
             }
             SessionCommand::ExportSession { reply_tx } => {
                 let _ = reply_tx.send(agent.session_clone());
+            }
+            SessionCommand::ObserveSessionTranscriptAuthority { reply_tx } => {
+                let result = agent.session_transcript_authority().map(|snapshot| {
+                    snapshot.bind_actor_generation(transcript_authority_generation)
+                });
+                let _ = reply_tx.send(result);
+            }
+            SessionCommand::ExportSessionIfTranscriptAuthority { expected, reply_tx } => {
+                let result = agent
+                    .session_transcript_authority()
+                    .map(|snapshot| snapshot.bind_actor_generation(transcript_authority_generation))
+                    .and_then(|current| {
+                        if current == expected {
+                            agent.session_clone().map(Some)
+                        } else {
+                            Ok(None)
+                        }
+                    });
+                let _ = reply_tx.send(result);
             }
             #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
             SessionCommand::ClassifyCallbackResultIngress { results, reply_tx } => {
@@ -6094,6 +6388,7 @@ async fn session_task<A: SessionAgent>(
                     &control,
                     &mut next_seq,
                     &source,
+                    &mut transcript_authority_generation,
                 )
                 .await;
                 break;
@@ -6339,6 +6634,12 @@ mod runtime_turn_metadata_tests {
             Ok(self.session.clone())
         }
 
+        fn session_transcript_authority(
+            &self,
+        ) -> Result<SessionTranscriptAuthoritySnapshot, meerkat_core::error::AgentError> {
+            SessionTranscriptAuthoritySnapshot::from_session(&self.session)
+        }
+
         fn observed_session_tail(&self) -> ObservedSessionTailKind {
             ObservedSessionTailKind::Empty
         }
@@ -6512,6 +6813,13 @@ mod runtime_turn_metadata_tests {
 
         fn session_clone(&self) -> Result<meerkat_core::Session, meerkat_core::error::AgentError> {
             Ok(meerkat_core::Session::with_id(self.session_id.clone()))
+        }
+
+        fn session_transcript_authority(
+            &self,
+        ) -> Result<SessionTranscriptAuthoritySnapshot, meerkat_core::error::AgentError> {
+            let session = self.session_clone()?;
+            SessionTranscriptAuthoritySnapshot::from_session(&session)
         }
 
         fn observed_session_tail(&self) -> ObservedSessionTailKind {
@@ -6691,11 +6999,47 @@ mod runtime_turn_metadata_tests {
             DeferredFirstTurnPhase::Pending
         );
 
+        let before_sync = service
+            .observe_session_transcript_authority(&created.session_id)
+            .await
+            .expect("pre-sync transcript authority");
         let durable = meerkat_core::Session::with_id(created.session_id.clone());
         service
             .sync_session_from_durable_snapshot(&created.session_id, durable)
             .await
             .expect("durable sync should succeed");
+        let after_sync = service
+            .observe_session_transcript_authority(&created.session_id)
+            .await
+            .expect("post-sync transcript authority");
+
+        assert_eq!(
+            before_sync.transcript_revision(),
+            after_sync.transcript_revision(),
+            "fixture must exercise equal-revision whole-Session replacement"
+        );
+        assert_eq!(before_sync.message_count(), after_sync.message_count());
+        assert_ne!(
+            before_sync.mutation_generation(),
+            after_sync.mutation_generation(),
+            "SessionTask generation must survive equal-body Session replacement"
+        );
+        assert!(
+            service
+                .export_session_if_transcript_authority(&created.session_id, before_sync)
+                .await
+                .expect("stale conditional export")
+                .is_none(),
+            "pre-replacement authority must not export the replacement Session"
+        );
+        assert!(
+            service
+                .export_session_if_transcript_authority(&created.session_id, after_sync)
+                .await
+                .expect("current conditional export")
+                .is_some(),
+            "current actor generation should export atomically"
+        );
 
         let guard = lock_deferred_turn_state(&deferred_state);
         assert_eq!(guard.first_turn_phase(), DeferredFirstTurnPhase::Pending);
@@ -6826,7 +7170,7 @@ mod runtime_turn_metadata_tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[allow(clippy::expect_used, clippy::panic)]
 mod injected_context_turn_tests {
     use super::*;
     use async_trait::async_trait;
@@ -6984,6 +7328,12 @@ mod injected_context_turn_tests {
             Ok(self.session.clone())
         }
 
+        fn session_transcript_authority(
+            &self,
+        ) -> Result<SessionTranscriptAuthoritySnapshot, meerkat_core::error::AgentError> {
+            SessionTranscriptAuthoritySnapshot::from_session(&self.session)
+        }
+
         fn append_system_messages(&mut self, contents: Vec<String>) -> Result<(), AgentError> {
             for content in contents {
                 self.session.append_system_message(content);
@@ -7132,12 +7482,14 @@ mod injected_context_turn_tests {
             .await
             .expect("first turn should run");
 
-        let mut metadata = meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata::default();
-        metadata.system_prompts = vec![
-            String::new(),
-            " repeated ".to_string(),
-            " repeated ".to_string(),
-        ];
+        let metadata = meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+            system_prompts: vec![
+                String::new(),
+                " repeated ".to_string(),
+                " repeated ".to_string(),
+            ],
+            ..Default::default()
+        };
         service
             .start_turn(
                 &created.session_id,
@@ -7283,6 +7635,12 @@ mod injected_context_turn_tests {
 
         fn session_clone(&self) -> Result<meerkat_core::Session, meerkat_core::error::AgentError> {
             self.0.session_clone()
+        }
+
+        fn session_transcript_authority(
+            &self,
+        ) -> Result<SessionTranscriptAuthoritySnapshot, meerkat_core::error::AgentError> {
+            self.0.session_transcript_authority()
         }
 
         fn observed_session_tail(&self) -> ObservedSessionTailKind {
@@ -7574,6 +7932,13 @@ mod admission_window_tests {
 
         fn session_clone(&self) -> Result<meerkat_core::Session, meerkat_core::error::AgentError> {
             Ok(meerkat_core::Session::new())
+        }
+
+        fn session_transcript_authority(
+            &self,
+        ) -> Result<SessionTranscriptAuthoritySnapshot, meerkat_core::error::AgentError> {
+            let session = self.session_clone()?;
+            SessionTranscriptAuthoritySnapshot::from_session(&session)
         }
 
         fn observed_session_tail(&self) -> ObservedSessionTailKind {
@@ -7892,11 +8257,12 @@ mod archive_shutdown_drain_tests {
     struct DrainProbeHooks {
         entered_run: Arc<tokio::sync::Notify>,
         release_run: Arc<tokio::sync::Semaphore>,
-        /// When set, the next `discard_unapplied_active_turn_system_context`
-        /// call fires `request_shutdown` on the installed turn-admission slot
-        /// — deterministically simulating archive committing its teardown
-        /// transition between the admitted preflight and the begin step.
-        yank_shutdown_in_discard: Arc<AtomicBool>,
+        /// When set, the next pending-tool-results effect handler fires
+        /// `request_shutdown` on the installed turn-admission slot. That
+        /// handler is the last synchronous agent seam before `begin`, so this
+        /// deterministically simulates archive committing its teardown
+        /// transition between admitted preflight and begin.
+        yank_shutdown_before_begin: Arc<AtomicBool>,
         turn_admission: Arc<std::sync::Mutex<Option<Arc<std::sync::Mutex<TurnAdmissionSlot>>>>>,
     }
 
@@ -7905,7 +8271,7 @@ mod archive_shutdown_drain_tests {
             Self {
                 entered_run: Arc::new(tokio::sync::Notify::new()),
                 release_run: Arc::new(tokio::sync::Semaphore::new(0)),
-                yank_shutdown_in_discard: Arc::new(AtomicBool::new(false)),
+                yank_shutdown_before_begin: Arc::new(AtomicBool::new(false)),
                 turn_admission: Arc::new(std::sync::Mutex::new(None)),
             }
         }
@@ -7994,6 +8360,42 @@ mod archive_shutdown_drain_tests {
             Ok(())
         }
 
+        fn apply_pending_tool_results(
+            &mut self,
+            results: Vec<meerkat_core::ToolResult>,
+        ) -> Result<(), AgentError> {
+            if !results.is_empty() {
+                return Err(AgentError::ConfigError(
+                    "drain probe does not support pending tool results".to_string(),
+                ));
+            }
+            if self
+                .hooks
+                .yank_shutdown_before_begin
+                .swap(false, Ordering::SeqCst)
+            {
+                let turn_admission = self
+                    .hooks
+                    .turn_admission
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()
+                    .ok_or_else(|| {
+                        AgentError::InternalError(
+                            "drain probe has no installed turn-admission slot".to_string(),
+                        )
+                    })?;
+                lock_turn_admission(&turn_admission)
+                    .request_shutdown()
+                    .map_err(|error| {
+                        AgentError::InternalError(format!(
+                            "drain probe failed to yank shutdown before begin: {error}"
+                        ))
+                    })?;
+            }
+            Ok(())
+        }
+
         fn hot_swap_llm_identity(
             &mut self,
             _client: Arc<dyn meerkat_core::AgentLlmClient>,
@@ -8022,6 +8424,13 @@ mod archive_shutdown_drain_tests {
 
         fn session_clone(&self) -> Result<meerkat_core::Session, meerkat_core::error::AgentError> {
             Ok(meerkat_core::Session::new())
+        }
+
+        fn session_transcript_authority(
+            &self,
+        ) -> Result<SessionTranscriptAuthoritySnapshot, meerkat_core::error::AgentError> {
+            let session = self.session_clone()?;
+            SessionTranscriptAuthoritySnapshot::from_session(&session)
         }
 
         fn observed_session_tail(&self) -> ObservedSessionTailKind {
@@ -8237,9 +8646,16 @@ mod archive_shutdown_drain_tests {
             .expect("create deferred session");
         let session_id = created.session_id.clone();
         hooks.install_turn_admission(&service, &session_id).await;
-        hooks.yank_shutdown_in_discard.store(true, Ordering::SeqCst);
+        hooks
+            .yank_shutdown_before_begin
+            .store(true, Ordering::SeqCst);
 
-        let result = service.start_turn(&session_id, start_turn_request()).await;
+        let result = tokio::time::timeout(
+            WAITER_TIMEOUT,
+            service.start_turn(&session_id, start_turn_request()),
+        )
+        .await
+        .expect("begin-window shutdown yank must settle the start-turn waiter");
 
         assert!(
             matches!(result, Err(SessionError::Agent(AgentError::Cancelled))),
@@ -8635,6 +9051,13 @@ mod inline_video_admission_tests {
 
         fn session_clone(&self) -> Result<meerkat_core::Session, meerkat_core::error::AgentError> {
             Ok(meerkat_core::Session::new())
+        }
+
+        fn session_transcript_authority(
+            &self,
+        ) -> Result<SessionTranscriptAuthoritySnapshot, meerkat_core::error::AgentError> {
+            let session = self.session_clone()?;
+            SessionTranscriptAuthoritySnapshot::from_session(&session)
         }
 
         fn observed_session_tail(&self) -> ObservedSessionTailKind {

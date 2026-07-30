@@ -175,11 +175,14 @@ async fn sqlite_lease_renewal_is_multi_host_and_exact_claim_authoritative() {
         .await
         .expect("host B renews exact host A claim");
     let renewed = match renewed.outcome {
-        RenewOccurrenceLeaseOutcome::Renewed(renewed) => renewed,
-        RenewOccurrenceLeaseOutcome::StaleClaim => {
-            panic!("the exact durable claim witness must renew across hosts")
-        }
+        RenewOccurrenceLeaseOutcome::Renewed(renewed) => Some(renewed),
+        RenewOccurrenceLeaseOutcome::StaleClaim => None,
     };
+    assert!(
+        renewed.is_some(),
+        "the exact durable claim witness must renew across hosts"
+    );
+    let renewed = renewed.unwrap();
     let renewed_expiry = renewed
         .lease_expires_at_utc
         .expect("renewed occurrence has a lease");

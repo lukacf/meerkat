@@ -872,6 +872,7 @@ fn encode_lower_hex(bytes: &[u8]) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
     use serde::{Deserialize, Serialize};

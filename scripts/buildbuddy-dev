@@ -205,12 +205,10 @@ case "${lane}" in
     run_bazel_with_extra e2e-smoke-rbe
     ;;
   e2e-smoke-turbo-s|smoke-turbo-s)
-    # The Bazel command owns this cohort's effective --jobs=1 and
-    # --flaky_test_attempts=2 policy; this is intentionally not a Nextest
-    # test-group override. Mirror both values at the facade so --dry-run
-    # prints the effective contract as well.
-    jobs=1
-    run_bazel_with_extra e2e-smoke-turbo-s-rbe --flaky_test_attempts=2
+    # The Bazel command owns and prints this cohort's retry policy. Keep
+    # caller arguments first so an explicit shard label can replace the full
+    # cohort target instead of accidentally running all Turbo-S shards.
+    run_bazel_with_extra e2e-smoke-turbo-s-rbe
     ;;
   e2e-auth)
     run_bazel_with_extra e2e-auth-rbe

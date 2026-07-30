@@ -279,15 +279,15 @@ else
 fi
 
 if [[ -x scripts/run-surface-feature-matrix ]] &&
-  grep -Fq 'scripts/cargo-agent-gate' .github/workflows/cargo.yml &&
+  job_has_line .github/workflows/nightly.yml feature-matrix 'make test-feature-matrix' &&
   grep -Fq -- '-p meerkat-rpc \' scripts/run-surface-feature-matrix &&
   grep -Fq -- '-p meerkat-rest \' scripts/run-surface-feature-matrix &&
   grep -Fq -- '-p meerkat-mcp-server' scripts/run-surface-feature-matrix &&
   grep -Fq 'default_target="//:surface_feature_matrix_builds"' scripts/buildbuddy-bazel-poc &&
   ! grep -Fq 'test-feature-matrix-surface-checks)' tools/buildbuddy/cargo_lane_test.sh; then
-  pass "Surface feature matrix keeps Cargo checks for Cargo CI and uses Bazel-native targets for BuildBuddy CI"
+  pass "Surface feature matrix keeps Cargo checks in nightly CI and uses Bazel-native targets for BuildBuddy"
 else
-  bad "Surface feature matrix is not split cleanly between Cargo and BuildBuddy CI"
+  bad "Surface feature matrix is not split cleanly between nightly Cargo CI and BuildBuddy"
 fi
 
 if [[ -x scripts/run-build-backend-lane ]] &&
@@ -352,32 +352,27 @@ rm -rf "${dispatch_log_root}"
 
 if grep -Fq 'name: CI' .github/workflows/ci.yml &&
   grep -Fq 'name: GHA Cargo' .github/workflows/ci.yml &&
-  grep -Fq 'name: GCP BuildBuddy' .github/workflows/ci.yml &&
   job_has_line .github/workflows/ci.yml gate 'name: CI gate' &&
-  job_has_line .github/workflows/ci.yml gate 'name: Check selected CI backend' &&
+  job_has_line .github/workflows/ci.yml gate 'name: Check CI result' &&
   job_has_line .github/workflows/ci.yml gate 'CARGO_RESULT:' &&
-  job_has_line .github/workflows/ci.yml gate 'GCP_BUILDBUDDY_RESULT:' &&
-  job_has_line .github/workflows/ci.yml gate 'No CI backend completed successfully.' &&
-  grep -Fq "github.actor == 'lukacf'" .github/workflows/ci.yml &&
-  grep -Fq 'Only lukacf can run the secret-backed GCP BuildBuddy lane.' .github/workflows/ci.yml &&
+  job_has_line .github/workflows/ci.yml gate 'CI did not complete successfully.' &&
   grep -Fq 'uses: ./.github/workflows/cargo.yml' .github/workflows/ci.yml &&
-  grep -Fq 'uses: ./.github/workflows/buildbuddy.yml' .github/workflows/ci.yml &&
+  ! grep -Fq 'uses: ./.github/workflows/buildbuddy.yml' .github/workflows/ci.yml &&
+  ! job_has_line .github/workflows/ci.yml gcp-buildbuddy 'name: GCP BuildBuddy' &&
   grep -Fq 'name: Cargo CI' .github/workflows/cargo.yml &&
   grep -Fq 'workflow_call:' .github/workflows/cargo.yml &&
-  grep -Fq 'scripts/cargo-agent-gate' .github/workflows/cargo.yml &&
   grep -Fq 'name: GCP BuildBuddy CI' .github/workflows/buildbuddy.yml &&
   grep -Fq 'workflow_call:' .github/workflows/buildbuddy.yml &&
-  ! grep -Fq 'pull_request:' .github/workflows/cargo.yml &&
-  ! grep -Fq 'push:' .github/workflows/cargo.yml &&
-  ! grep -Fq 'pull_request:' .github/workflows/buildbuddy.yml &&
-  ! grep -Fq 'push:' .github/workflows/buildbuddy.yml &&
+  ! grep -q '^  workflow_dispatch:' .github/workflows/buildbuddy.yml &&
+  ! grep -q '^  pull_request:' .github/workflows/buildbuddy.yml &&
+  ! grep -q '^  push:' .github/workflows/buildbuddy.yml &&
   grep -Fq 'gcp-buildbuddy' .github/workflows/buildbuddy.yml &&
   ! grep -Fq 'buildbuddy-hosted' .github/workflows/ci.yml &&
   ! grep -Fq 'buildbuddy-hosted' .github/workflows/buildbuddy.yml &&
   grep -Fq 'GCP BuildBuddy gate' .github/workflows/buildbuddy.yml; then
-  pass "Top-level CI exposes default Cargo and owner-gated GCP BuildBuddy lanes"
+  pass "Top-level CI uses GHA Cargo while GCP BuildBuddy remains an inert reusable fallback"
 else
-  bad "Top-level CI two-lane routing is not wired correctly"
+  bad "Top-level GHA-only CI or inert GCP BuildBuddy fallback is not wired correctly"
 fi
 
 if grep -Fq 'MEERKAT_GCP_BUILDBUDDY_CI_MAX_SECONDS' .github/workflows/buildbuddy.yml &&
@@ -410,7 +405,7 @@ else
 fi
 
 if job_has_line .github/workflows/ci.yml cargo 'name: GHA Cargo' &&
-  job_has_line .github/workflows/ci.yml gcp-buildbuddy 'name: GCP BuildBuddy' &&
+  ! job_has_line .github/workflows/ci.yml gcp-buildbuddy 'name: GCP BuildBuddy' &&
   job_has_line .github/workflows/ci.yml gate 'name: CI gate' &&
   job_has_line .github/workflows/buildbuddy.yml prebuild-submit 'name: Prebuild submitter' &&
   job_has_line .github/workflows/buildbuddy.yml prebuild-submit 'group: gcp-prebuild' &&
@@ -504,9 +499,9 @@ if job_has_line .github/workflows/ci.yml cargo 'name: GHA Cargo' &&
   grep -Fq 'default_target="//..."' scripts/buildbuddy-bazel-poc &&
   grep -Fq -- '--build_tag_filters=-local,-manual,-e2e,-system,-live,-slow,-required-feature,-trybuild,-snapshot,-fixture,-cargo-equivalent,-requires-network' scripts/buildbuddy-bazel-poc &&
   job_has_line .github/workflows/buildbuddy.yml gate 'runs-on: ubuntu-latest'; then
-  pass "GCP BuildBuddy CI uses a broad Bazel-native prebuild plus path-aware edge lanes"
+  pass "Reusable GCP BuildBuddy workflow uses a broad Bazel-native prebuild plus path-aware edge lanes"
 else
-  bad "GCP BuildBuddy CI is not using the broad-prebuild/path-aware edge-lane shape"
+  bad "Reusable GCP BuildBuddy workflow is not using the broad-prebuild/path-aware edge-lane shape"
 fi
 
 sdk_only="$(printf 'sdks/typescript/src/runtime.ts\n' | scripts/buildbuddy-edge-changes --paths-from-stdin)"
@@ -676,14 +671,15 @@ fi
 
 if ! grep -Fq 'rust-release-packaging:' .github/workflows/cargo.yml &&
   grep -Fq 'Verify Rust release config' .github/workflows/release.yml &&
-  grep -Fq 'scripts/cargo-agent-gate' .github/workflows/cargo.yml &&
+  job_has_line .github/workflows/nightly.yml feature-matrix 'make test-feature-matrix' &&
   grep -Fq 'name: GHA Cargo' .github/workflows/ci.yml &&
-  grep -Fq 'name: GCP BuildBuddy' .github/workflows/ci.yml &&
+  ! grep -Fq 'name: GCP BuildBuddy' .github/workflows/ci.yml &&
+  ! grep -Fq 'uses: ./.github/workflows/buildbuddy.yml' .github/workflows/ci.yml &&
   ! grep -Fq 'BuildBuddy hosted' .github/workflows/ci.yml &&
   ! grep -Fq 'buildbuddy-hosted' .github/workflows/ci.yml; then
-  pass "CI exposes one default Cargo lane plus one owner-gated GCP BuildBuddy lane"
+  pass "CI uses one GHA Cargo lane and defers low-churn feature checks to nightly"
 else
-  bad "CI does not match the simplified two-lane shape"
+  bad "CI does not match the GHA-only per-push plus nightly shape"
 fi
 
 if grep -Fq 'name = "e2e_system_tests"' BUILD.bazel &&

@@ -3328,8 +3328,12 @@ capabilities = [{capability_values}]
             .await
             .expect("export member bridge session");
         let appended = exported.messages().last().expect("appended System message");
+        assert!(
+            matches!(appended, meerkat_core::Message::System(_)),
+            "last transcript entry should be System, got {appended:?}"
+        );
         let meerkat_core::Message::System(system) = appended else {
-            panic!("last transcript entry should be System, got {appended:?}");
+            return;
         };
         assert_eq!(system.content, "Prioritize coordinating with the lead.");
         let identity = system.identity.as_ref().expect("message identity metadata");

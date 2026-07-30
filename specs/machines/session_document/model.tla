@@ -30,7 +30,7 @@ VARIABLES phase, model_step_count, session_first_turn_phase, session_pending_ini
 
 vars == << phase, model_step_count, session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal >>
 
-archive_should_retire_runtime(runtime_backed, runtime_observation) == (runtime_backed /\ (runtime_observation = "RetirementRequired"))
+archive_should_retire_runtime(runtime_backed, durable_document_present, runtime_observation) == (runtime_backed /\ (runtime_observation # "QuiescentTerminal") /\ (IF durable_document_present THEN TRUE ELSE (runtime_observation = "RetirementRequired")))
 store_projection_can_recover_authority(has_metadata, has_build_state, runtime_projection_quarantined) == (IF has_metadata THEN TRUE ELSE (IF has_build_state THEN TRUE ELSE runtime_projection_quarantined))
 resume_provider_recompute_from_model(model_override_present, provider_override_present) == (model_override_present /\ (provider_override_present = FALSE))
 resume_reject_provider_requires_model(provider_override_present, model_override_present) == (provider_override_present /\ (model_override_present = FALSE))

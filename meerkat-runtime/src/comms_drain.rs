@@ -2081,14 +2081,14 @@ fn require_optional_registered_member_incarnation(
     }
 }
 
-async fn acquire_registered_member_effect_authority(
+async fn acquire_registered_member_live_authority(
     adapter: &MeerkatMachine,
     session_id: &SessionId,
     expected: &BridgeMemberIncarnation,
     context: &str,
-) -> Result<crate::meerkat_machine::MemberEffectAuthorityGuard, (BridgeRejectionCause, String)> {
+) -> Result<crate::meerkat_machine::MemberLiveAuthorityGuard, (BridgeRejectionCause, String)> {
     adapter
-        .lock_member_effect_authority(session_id, expected)
+        .lock_member_live_authority(session_id, expected)
         .await
         .map_err(|error| match error {
             crate::traits::RuntimeDriverError::StaleAuthority { reason } => (
@@ -2097,28 +2097,7 @@ async fn acquire_registered_member_effect_authority(
             ),
             other => (
                 BridgeRejectionCause::Unavailable,
-                format!("{context}: failed to acquire member effect authority: {other}"),
-            ),
-        })
-}
-
-async fn acquire_registered_member_live_open_authority(
-    adapter: &MeerkatMachine,
-    session_id: &SessionId,
-    expected: &BridgeMemberIncarnation,
-    context: &str,
-) -> Result<crate::meerkat_machine::MemberLiveOpenAuthorityGuard, (BridgeRejectionCause, String)> {
-    adapter
-        .lock_member_live_open_authority(session_id, expected)
-        .await
-        .map_err(|error| match error {
-            crate::traits::RuntimeDriverError::StaleAuthority { reason } => (
-                BridgeRejectionCause::StaleFence,
-                format!("{context}: {reason}"),
-            ),
-            other => (
-                BridgeRejectionCause::Unavailable,
-                format!("{context}: failed to acquire member live/open authority: {other}"),
+                format!("{context}: failed to acquire member-live authority: {other}"),
             ),
         })
 }
@@ -5369,7 +5348,7 @@ async fn try_handle_supervisor_bridge_command(
             let turning_mode = payload.turning_mode;
             let transport = payload.transport;
             crate::tokio::spawn(async move {
-                let effect_authority = match acquire_registered_member_live_open_authority(
+                let effect_authority = match acquire_registered_member_live_authority(
                     adapter.as_ref(),
                     &session_id,
                     &expected_member,
@@ -5434,7 +5413,7 @@ async fn try_handle_supervisor_bridge_command(
                     return true;
                 }
             };
-            let effect_authority = match acquire_registered_member_effect_authority(
+            let effect_authority = match acquire_registered_member_live_authority(
                 adapter,
                 session_id,
                 &payload.expected_member,
@@ -5498,7 +5477,7 @@ async fn try_handle_supervisor_bridge_command(
                     return true;
                 }
             };
-            let effect_authority = match acquire_registered_member_effect_authority(
+            let effect_authority = match acquire_registered_member_live_authority(
                 adapter,
                 session_id,
                 &payload.expected_member,
@@ -5567,7 +5546,7 @@ async fn try_handle_supervisor_bridge_command(
                     return true;
                 }
             };
-            let effect_authority = match acquire_registered_member_effect_authority(
+            let effect_authority = match acquire_registered_member_live_authority(
                 adapter,
                 session_id,
                 &payload.expected_member,

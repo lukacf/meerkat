@@ -2018,7 +2018,7 @@ fn released_realm_fixture_sha256(path: &std::path::Path) -> String {
     let mut file = std::fs::File::open(path)
         .unwrap_or_else(|error| panic!("cannot hash fixture file {}: {error}", path.display()));
     let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
+    let mut buffer = vec![0_u8; 64 * 1024];
     loop {
         let read = file
             .read(&mut buffer)
@@ -2095,12 +2095,11 @@ fn released_realm_fixture_ledger(database: &std::path::Path) -> Vec<(String, i64
                 database.display()
             )
         });
-    let rows = statement
+    statement
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
         .expect("query pre-upgrade schema ledger")
         .collect::<Result<Vec<_>, _>>()
-        .expect("decode pre-upgrade schema ledger");
-    rows
+        .expect("decode pre-upgrade schema ledger")
 }
 
 #[cfg(feature = "sqlite-store")]
@@ -2233,12 +2232,11 @@ fn released_realm_fixture_runtime_snapshots(database: &std::path::Path) -> Vec<(
              WHERE typeof(session_snapshot) = 'blob' ORDER BY runtime_id",
         )
         .unwrap();
-    let rows = statement
+    statement
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-    rows
+        .unwrap()
 }
 
 #[cfg(feature = "sqlite-store")]

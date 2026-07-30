@@ -363,13 +363,10 @@ case "${command}" in
       --color=no
       --curses=no
     )
-    # Turbo-S is a Bazel sh_test cohort, not a Nextest run. Serialize the
-    # actual remote test actions and retry a failed shard once at the Bazel
-    # boundary where the aggregate-load flakes occur. Keep these arguments
-    # enforced after caller arguments so a generic --jobs=64 from CI/dev
-    # cannot silently undo the lane's stabilization contract.
+    # Turbo-S is a Bazel sh_test cohort, not a Nextest run. Retry a failed
+    # shard once at the Bazel boundary where aggregate-load flakes occur,
+    # while preserving Bazel/BuildBuddy parallelism across independent shards.
     enforced_args+=(
-      --jobs=1
       --flaky_test_attempts=2
     )
     ;;

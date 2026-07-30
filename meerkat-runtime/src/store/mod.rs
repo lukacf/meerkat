@@ -12,8 +12,7 @@ mod whole_blob_rewrite;
 pub use meerkat_core::{HeadCanonicalProvisionalTailAuthority, WholeBlobProvisionalTailAuthority};
 pub use whole_blob_rewrite::{
     PreparedWholeBlobRewriteBoundary, PreparedWholeBlobRewriteStoreParts,
-    VerifiedCommittedWholeBlobPayload, prepared_whole_blob_successor_document_hashes,
-    prepared_whole_blob_successor_semantic_mints,
+    VerifiedCommittedWholeBlobPayload,
 };
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -1263,20 +1262,19 @@ impl CommittedWholeBlobSnapshot {
         bytes: Arc<Vec<u8>>,
         authority: WholeBlobStoreAuthority,
     ) -> Result<Self, RuntimeStoreError> {
-        let observed_blob_sha256 = format!("row-sha256:{:x}", Sha256::digest(bytes.as_ref()));
-        if observed_blob_sha256 != authority.blob_sha256() {
+        let decoded =
+            meerkat_core::Session::decode_whole_blob_document(bytes.as_ref()).map_err(|error| {
+                RuntimeStoreError::ReadFailed(format!(
+                    "WholeBlob body is not a valid current Session: {error}"
+                ))
+            })?;
+        if decoded.row_sha256_token() != authority.blob_sha256() {
             return Err(RuntimeStoreError::SessionPersistenceAuthorityConflict {
                 runtime_id: authority.session_id().to_string(),
                 detail: "WholeBlob body digest differs from store authority".to_string(),
             });
         }
-        let session = Arc::new(
-            meerkat_core::Session::from_persisted_bytes(bytes.as_ref()).map_err(|error| {
-                RuntimeStoreError::ReadFailed(format!(
-                    "WholeBlob body is not a valid current Session: {error}"
-                ))
-            })?,
-        );
+        let session = Arc::new(decoded.into_session());
         if session.id() != authority.session_id() {
             return Err(RuntimeStoreError::SessionPersistenceAuthorityConflict {
                 runtime_id: authority.session_id().to_string(),
@@ -6692,7 +6690,7 @@ pub(crate) fn pending_terminal_owner_fixture(
 pub(crate) async fn assert_pending_terminal_owner_index_contract(store: &dyn RuntimeStore) {
     let runtime_id =
         LogicalRuntimeId::new(format!("pending-terminal-index-{}", uuid::Uuid::now_v7()));
-    let mut ids = vec![InputId::new(), InputId::new(), InputId::new()];
+    let mut ids = [InputId::new(), InputId::new(), InputId::new()];
     ids.sort_by_key(|input_id| input_id.0);
     let fixtures = ids
         .iter()
@@ -6874,6 +6872,15 @@ impl MachineLifecycleStoreRecord {
         Self {
             snapshot: snapshot.clone(),
         }
+    }
+
+    /// Runtime state carried by this exact machine-authorized store record.
+    ///
+    /// Custom stores use this bounded fact to advance an existing session
+    /// catalog projection in the same transaction as the lifecycle row.
+    #[must_use]
+    pub fn runtime_state(&self) -> RuntimeState {
+        self.snapshot.runtime_state()
     }
 
     pub fn encode(&self) -> Result<Vec<u8>, RuntimeStoreError> {
@@ -7979,6 +7986,9 @@ pub trait RuntimeStore: Send + Sync {
     /// output-only diagnostics. Conflicts are ordinary level-triggered
     /// re-observation; unsupported or malformed bytes return
     /// [`RuntimeStoreError::MachineLifecycleRepairBlocked`].
+    ///
+    /// When a runtime session catalog entry already exists, an applied CAS
+    /// must advance its runtime-state projection in the same atomic operation.
     async fn compare_and_swap_machine_lifecycle(
         &self,
         runtime_id: &LogicalRuntimeId,
@@ -7998,7 +8008,11 @@ pub trait RuntimeStore: Send + Sync {
     /// `write_fence` inside the row lock/transaction after the exact raw-row
     /// comparison and immediately before publication. Custom stores must opt
     /// in explicitly; the default is capability-unavailable rather than an
-    /// unfenced fallback to compare_and_swap_machine_lifecycle.
+    /// unfenced fallback to compare_and_swap_machine_lifecycle. An applied
+    /// fence must also advance an existing runtime session catalog entry to
+    /// the replacement state in that same operation. This includes an
+    /// already-exact lifecycle row: the applied fence heals a stale catalog
+    /// projection before returning [`FencedMachineLifecycleCasOutcome::AlreadyExact`].
     async fn compare_and_swap_machine_lifecycle_with_fence(
         &self,
         runtime_id: &LogicalRuntimeId,
@@ -8029,7 +8043,9 @@ pub trait RuntimeStore: Send + Sync {
     /// Writes runtime state, generated runtime binding facts, and all input
     /// state updates in a single atomic operation. `MachineLifecycleCommit` has
     /// no public constructor, so this cannot be used by compatibility callers
-    /// to pick runtime truth.
+    /// to pick runtime truth. If a runtime session catalog entry exists, its
+    /// runtime-state projection must advance to [`MachineLifecycleCommit::runtime_state`]
+    /// in the same operation.
     async fn commit_machine_lifecycle(
         &self,
         runtime_id: &LogicalRuntimeId,
@@ -8068,6 +8084,9 @@ pub trait RuntimeStore: Send + Sync {
     /// An implementation may leave the prior pair untouched or finish the
     /// entire atomic commit before cancellation is observable, but it must not
     /// detach a background write that can cross a same-runtime-ID replacement.
+    /// If a runtime session catalog entry exists, its runtime-state projection
+    /// is part of this same atomic finalization and is selected from
+    /// [`UnregisterFinalizationCommit::lifecycle_store_record`].
     async fn commit_unregister_finalization(
         &self,
         runtime_id: &LogicalRuntimeId,
@@ -8327,6 +8346,35 @@ mod store_authority_record_tests {
             .expect("carrier bytes remain independently usable after the Session is dropped");
         assert_eq!(decoded.id(), &session_id);
         assert_eq!(decoded.messages().len(), 1);
+    }
+
+    #[test]
+    fn committed_whole_blob_decode_installs_store_owned_rewrite_lineage() {
+        let mut session = meerkat_core::Session::new();
+        session.push(Message::User(UserMessage::text("original")));
+        let artifact = session
+            .to_persisted_artifact()
+            .expect("serialize WholeBlob document");
+        let authority = WholeBlobStoreAuthority::issued(
+            session.id().clone(),
+            1,
+            artifact.row_sha256_token().to_string(),
+        )
+        .expect("issue exact WholeBlob authority");
+        let committed = CommittedWholeBlobSnapshot::new(artifact.bytes_arc(), authority)
+            .expect("decode store-owned WholeBlob document");
+
+        let mut decoded = committed.session().clone();
+        let parent_revision = decoded.transcript_revision().expect("read parent revision");
+        decoded
+            .commit_transcript_rewrite(
+                meerkat_core::TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+                vec![Message::User(UserMessage::text("edited"))],
+                meerkat_core::TranscriptRewriteReason::new("test"),
+                Some("runtime-store-test".to_string()),
+                Some(parent_revision),
+            )
+            .expect("store-owned WholeBlob decode must carry exact rewrite lineage");
     }
 
     #[test]

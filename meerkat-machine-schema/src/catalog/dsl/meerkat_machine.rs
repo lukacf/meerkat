@@ -17533,6 +17533,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.input_phases.insert(input_id, InputPhase::Queued);
                 self.input_lane.insert(input_id, InputLane::Queue);
                 self.input_recovery_lanes.insert(input_id, InputLane::Queue);
+                self.input_attempt_counts.insert(input_id, 0);
                 self.input_admission_seq.insert(input_id, self.next_admission_seq);
                 self.next_admission_seq += 1;
             }
@@ -17556,6 +17557,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.input_phases.insert(input_id, InputPhase::Queued);
                 self.input_lane.insert(input_id, InputLane::Steer);
                 self.input_recovery_lanes.insert(input_id, InputLane::Steer);
+                self.input_attempt_counts.insert(input_id, 0);
                 self.input_admission_seq.insert(input_id, self.next_admission_seq);
                 self.next_admission_seq += 1;
             }
@@ -17822,7 +17824,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.input_phases.get_cloned(input_id) == Some(InputPhase::Queued)
                 && self.input_lane.get_cloned(input_id) == Some(InputLane::Steer)
             }
-            update {}
+            update {
+                self.input_lane.insert(input_id, InputLane::Queue);
+                self.input_recovery_lanes.insert(input_id, InputLane::Queue);
+            }
             to Running
             emit LiveBoundaryUnavailableNormalized {
                 input_id: input_id,
@@ -19192,6 +19197,17 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Terminated)
             }
             update {
+                if self.completion_feed_sequences.contains_key(operation_id) {
+                    self.completion_sequence_claims.remove(
+                        self.completion_feed_sequences
+                            .get_copied(operation_id)
+                            .get("value")
+                    );
+                }
+                self.completion_feed_sequences.remove(operation_id);
+                self.completion_feed_kinds.remove(operation_id);
+                self.completion_feed_terminal_outcomes.remove(operation_id);
+                self.completion_feed_terminal_payload.remove(operation_id);
                 self.op_statuses.remove(operation_id);
                 self.op_kinds.remove(operation_id);
                 self.op_peer_ready.remove(operation_id);

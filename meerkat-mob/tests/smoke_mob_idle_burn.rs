@@ -182,24 +182,26 @@ fn idle_mob_definition() -> MobDefinition {
     definition
 }
 
-/// Recursive on-disk size of the persisted session root. The historical
-/// regressions were store-read/digest loops, so the gate verifies the large
-/// document is actually durable (not just live in memory) before idling.
-fn dir_size_bytes(root: &Path) -> u64 {
-    let Ok(entries) = fs::read_dir(root) else {
-        return 0;
-    };
-    entries
-        .flatten()
-        .map(|entry| {
-            let path = entry.path();
-            match entry.metadata() {
-                Ok(meta) if meta.is_dir() => dir_size_bytes(&path),
-                Ok(meta) => meta.len(),
-                Err(_) => 0,
-            }
-        })
-        .sum()
+fn file_size_bytes(path: &Path) -> u64 {
+    fs::metadata(path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0)
+}
+
+fn sqlite_sidecar_path(path: &Path, suffix: &str) -> std::path::PathBuf {
+    let mut sidecar = path.as_os_str().to_os_string();
+    sidecar.push(suffix);
+    sidecar.into()
+}
+
+/// On-disk size of the store-owned WholeBlob runtime authority. The built-in
+/// JSONL realm pairs its JSONL SessionStore projection with this durable
+/// SQLite runtime companion; the projection directory is intentionally not
+/// session authority after the store-owned-authority reset.
+fn runtime_store_size_bytes(path: &Path) -> u64 {
+    file_size_bytes(path)
+        .saturating_add(file_size_bytes(&sqlite_sidecar_path(path, "-wal")))
+        .saturating_add(file_size_bytes(&sqlite_sidecar_path(path, "-shm")))
 }
 
 async fn wait_for_requests(capture: &CaptureClient, at_least: usize, what: &str) {
@@ -233,6 +235,7 @@ async fn e2e_smoke_mob_idle_burn_gate() {
     let project_root = root.join("project-root");
     let context_root = root.join("context-root");
     let sessions_root = root.join("sessions-jsonl");
+    let runtime_db_path = root.join("runtime.sqlite3");
     let mob_db_path = root.join("mob.db");
     for dir in [&project_root, &context_root] {
         fs::create_dir_all(dir).expect("create idle-burn project/context root");
@@ -252,8 +255,10 @@ async fn e2e_smoke_mob_idle_burn_gate() {
     builder.default_session_store = Some(Arc::new(StoreAdapter::new(store.clone())));
 
     let store_dyn: Arc<dyn meerkat::SessionStore> = store;
-    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
-        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> = Arc::new(
+        meerkat_runtime::SqliteRuntimeStore::new_whole_blob(runtime_db_path.clone())
+            .expect("create durable WholeBlob runtime companion"),
+    );
     let blob_store: Arc<dyn meerkat_core::BlobStore> = Arc::new(MemoryBlobStore::default());
     let service = Arc::new(PersistentSessionService::new(
         builder,
@@ -342,23 +347,23 @@ async fn e2e_smoke_mob_idle_burn_gate() {
     .await;
 
     // The regression class under test is store-read/digest loops, so the
-    // large document must actually be durable in the session store before
-    // the measured window opens.
+    // large document must actually be durable in the store-owned runtime
+    // authority before the measured window opens.
     let deadline = Instant::now() + Duration::from_secs(120);
     let persisted_bytes = loop {
-        let bytes = dir_size_bytes(&sessions_root);
+        let bytes = runtime_store_size_bytes(&runtime_db_path);
         if bytes >= MIN_PERSISTED_BYTES {
             break bytes;
         }
         assert!(
             Instant::now() < deadline,
-            "timed out waiting for the large session document to persist: \
+            "timed out waiting for the large store-owned session document to persist: \
              {bytes} bytes on disk (need >= {MIN_PERSISTED_BYTES})"
         );
         sleep(Duration::from_millis(250)).await;
     };
     eprintln!(
-        "[idle-burn gate] persisted session store size: {:.1} MB",
+        "[idle-burn gate] persisted runtime authority size: {:.1} MB",
         persisted_bytes as f64 / (1024.0 * 1024.0)
     );
 

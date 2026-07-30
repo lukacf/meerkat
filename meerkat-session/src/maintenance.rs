@@ -69,6 +69,13 @@ impl SessionAgent for RefusingSessionAgent {
         match *self {}
     }
 
+    fn session_transcript_authority(
+        &self,
+    ) -> Result<crate::ephemeral::SessionTranscriptAuthoritySnapshot, meerkat_core::error::AgentError>
+    {
+        match *self {}
+    }
+
     fn observed_session_tail(&self) -> crate::ephemeral::ObservedSessionTailKind {
         match *self {}
     }

@@ -9,9 +9,9 @@ use meerkat_core::session_store::{
     PreparedHeadCanonicalParentTransition, PreparedHeadCanonicalRewriteMutation,
     SESSION_ROW_LINEAGE_REBASE_INTERVAL, SaveGuardWitness, SessionHead, SessionHeadCas,
     SessionMessageRowPrefixAccumulator, StrandLayout, StrandRewriteLayout, StrandSegment,
-    StrandSplice, TranscriptStrandId, head_canonical_plain_save_guard_with_prefix_witness,
-    reconstruct_rewrite_record, session_head_cas_token, strand_layout_for_history,
-    validate_save_head_transition,
+    StrandSplice, TranscriptStrandId, VerifiedHeadCanonicalTranscriptHistory,
+    head_canonical_plain_save_guard_with_prefix_witness, reconstruct_rewrite_record,
+    session_head_cas_token, strand_layout_for_history, validate_save_head_transition,
 };
 use meerkat_core::time_compat::SystemTime;
 use meerkat_core::transcript_messages_digest;
@@ -21,7 +21,8 @@ use meerkat_core::{
     SessionHeadMetadataCell, SessionHeadMetadataCellIdentity, SessionHeadMetadataIdentity,
     SessionHeadMetadataProjection, SessionHeadMetadataValueDigest, SessionId, SessionMeta,
     StoredComponentEventRow, TranscriptRevisionEdge, TranscriptRewriteCommit,
-    TranscriptRewritePrefixAccumulator, TranscriptRewriteRecord, VerifiedComponentEventSequence,
+    TranscriptRewritePrefixAccumulator, TranscriptRewriteRecord, ValidatedTranscriptHistory,
+    VerifiedComponentEventSequence,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use std::collections::{BTreeMap, BTreeSet};
@@ -493,6 +494,7 @@ pub const SESSION_STORE_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::S
 };
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod schema_floor_tests {
     use super::*;
 
@@ -3848,6 +3850,31 @@ pub fn load_head_canonical_for_runtime_in_txn(
     Ok(current)
 }
 
+/// Attach the authenticated metadata projection to one exact current physical
+/// head without materializing transcript rows.
+///
+/// RuntimeStore uses this bounded co-tenant seam when an idempotent retry must
+/// re-prove its body-free catalog projection. The point check keeps a stale or
+/// synthetic head from borrowing the physical metadata owner.
+#[doc(hidden)]
+pub fn materialize_physical_head_metadata_for_runtime_in_txn(
+    tx: &Transaction<'_>,
+    head: &SessionHead,
+) -> Result<SessionHead, SessionStoreError> {
+    let (current, stored_token) = head_row_in_txn(tx, &head.id)?
+        .ok_or_else(|| SessionStoreError::Corrupted(head.id.clone()))?;
+    if &current != head || session_head_cas_token(head)? != stored_token {
+        return Err(SessionStoreError::Corrupted(head.id.clone()));
+    }
+    let mut materialized = head.clone();
+    attach_head_metadata_projection(
+        tx,
+        &mut materialized,
+        HeadMetadataProjectionOwner::PhysicalHead,
+    )?;
+    Ok(materialized)
+}
+
 /// Materialize one exact retained head inside a co-tenant recovery
 /// transaction.
 ///
@@ -4005,11 +4032,150 @@ fn verify_direct_current_anchor_rows_in_txn(
 struct ReplayedHeadCanonicalRows {
     serialized_rows: Vec<Vec<u8>>,
     lineage: meerkat_core::session_store::VerifiedSessionRowLineageReplay,
+    history: Option<VerifiedHeadCanonicalTranscriptHistory>,
     anchor_is_current: bool,
     #[cfg(test)]
     decoded_rewrite_count: u64,
     #[cfg(test)]
     loaded_link_row_count: usize,
+}
+
+/// Reconstruct the compact domain graph from the out-of-line edge rows owned
+/// by HeadCanonical storage.
+///
+/// Current-head row replay remains bounded by its lineage anchor. History
+/// restoration separately decodes each compact edge once and resolves only the
+/// original graph anchor document, avoiding both EventStore authority and the
+/// former `rewrites × document` body materialization.
+fn replay_head_canonical_history_in_txn(
+    tx: &Transaction<'_>,
+    head: &SessionHead,
+) -> Result<Option<VerifiedHeadCanonicalTranscriptHistory>, SessionStoreError> {
+    let id = &head.id;
+    if head.rewrite_count == 0 {
+        if head.rewrite_prefix != TranscriptRewritePrefixAccumulator::empty()
+            || head.graph_prefix.is_some()
+        {
+            return Err(SessionStoreError::Corrupted(id.clone()));
+        }
+        return Ok(None);
+    }
+    let graph_prefix = head
+        .graph_prefix
+        .as_ref()
+        .ok_or_else(|| SessionStoreError::Corrupted(id.clone()))?;
+    let indexed = indexed_rewrite_rows_range_in_txn(tx, id, 0, head.rewrite_count)?;
+    if u64::try_from(indexed.len()).ok() != Some(head.rewrite_count) {
+        return Err(SessionStoreError::Corrupted(id.clone()));
+    }
+    let mut rewrite_prefix = TranscriptRewritePrefixAccumulator::empty();
+    let mut edges = Vec::with_capacity(indexed.len());
+    for (offset, (rewrite_idx, row)) in indexed.iter().enumerate() {
+        let expected_idx =
+            u64::try_from(offset).map_err(|_| SessionStoreError::Corrupted(id.clone()))?;
+        if *rewrite_idx != expected_idx {
+            return Err(SessionStoreError::Corrupted(id.clone()));
+        }
+        rewrite_prefix = rewrite_prefix
+            .extend(&row.commit)
+            .map_err(SessionStoreError::from)?;
+        let edge_bytes = row
+            .graph_edge_json
+            .as_deref()
+            .ok_or_else(|| SessionStoreError::Corrupted(id.clone()))?;
+        let edge = TranscriptRevisionEdge::from_replay_bytes(edge_bytes)
+            .map_err(|_| SessionStoreError::Corrupted(id.clone()))?;
+        let canonical = edge.to_replay_bytes().map_err(SessionStoreError::from)?;
+        if canonical.as_slice() != edge_bytes
+            || edge.commit() != &row.commit
+            || edge.rewrite_generation()
+                != expected_idx
+                    .checked_add(1)
+                    .ok_or_else(|| SessionStoreError::Corrupted(id.clone()))?
+            || edge.rewrite_prefix() != &rewrite_prefix
+        {
+            return Err(SessionStoreError::Corrupted(id.clone()));
+        }
+        edges.push(edge);
+    }
+    if rewrite_prefix != head.rewrite_prefix {
+        return Err(SessionStoreError::Corrupted(id.clone()));
+    }
+
+    let first_row = &indexed
+        .first()
+        .ok_or_else(|| SessionStoreError::Corrupted(id.clone()))?
+        .1;
+    let first_edge = edges
+        .first()
+        .ok_or_else(|| SessionStoreError::Corrupted(id.clone()))?;
+    let mut topology_roots = Vec::with_capacity(
+        indexed
+            .len()
+            .checked_mul(2)
+            .ok_or_else(|| SessionStoreError::Corrupted(id.clone()))?,
+    );
+    for (_, row) in &indexed {
+        topology_roots.push(row.parent_strand.clone());
+        topology_roots.push(row.strand.clone());
+    }
+    let links = bounded_strand_links_for_roots_in_txn(
+        tx,
+        id,
+        &topology_roots,
+        ordinary_topology_hop_budget(head, 0)?,
+    )?;
+    let anchor_strand = if first_edge.parent_advance().exact_splice().is_some() {
+        links
+            .get(first_row.parent_strand.as_str())
+            .map(|link| link.successor.clone())
+            .ok_or_else(|| SessionStoreError::Corrupted(id.clone()))?
+    } else {
+        first_row.parent_strand.clone()
+    };
+    let anchor_count = u64::try_from(first_edge.messages_before_base())
+        .map_err(|_| SessionStoreError::Corrupted(id.clone()))?;
+    let anchor_rows = resolve_strand_bytes_in_txn(tx, id, &anchor_strand, 0..anchor_count, &links)?;
+    let anchor_prefix = SessionMessageRowPrefixAccumulator::from_serialized_rows(&anchor_rows)?;
+    let anchor_messages = anchor_rows
+        .iter()
+        .map(|bytes| {
+            serde_json::from_slice::<Message>(bytes)
+                .map_err(|_| SessionStoreError::Corrupted(id.clone()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let history = ValidatedTranscriptHistory::from_store_replayed_compact_graph(
+        first_edge.base_revision().to_string(),
+        anchor_messages,
+        anchor_prefix,
+        edges,
+        &head.rewrite_prefix,
+        graph_prefix,
+    )
+    .map_err(|error| SessionStoreError::InvalidTranscriptRewrite {
+        id: id.clone(),
+        reason: format!("failed to restore store-owned compact transcript graph: {error}"),
+    })?;
+    let endpoint_count = history
+        .final_endpoint_row_prefix()
+        .map(SessionMessageRowPrefixAccumulator::row_count)
+        .ok_or_else(|| SessionStoreError::Corrupted(id.clone()))?;
+    let last_strand = &indexed
+        .last()
+        .ok_or_else(|| SessionStoreError::Corrupted(id.clone()))?
+        .1
+        .strand;
+    if last_strand != &head.strand || endpoint_count > head.message_count {
+        return Err(SessionStoreError::Corrupted(id.clone()));
+    }
+    let live_tail =
+        strand_row_bytes_in_txn(tx, id, &head.strand, endpoint_count..head.message_count)?;
+    let current = head
+        .message_row_prefix
+        .as_ref()
+        .ok_or_else(|| SessionStoreError::Corrupted(id.clone()))?;
+    VerifiedHeadCanonicalTranscriptHistory::bind_serialized_live_tail(history, &live_tail, current)
+        .map(Some)
 }
 
 /// Cold-replay one head's exact operation lineage after its bounded anchor.
@@ -4022,8 +4188,10 @@ struct ReplayedHeadCanonicalRows {
 fn replay_head_canonical_rows_in_txn(
     tx: &Transaction<'_>,
     head: &SessionHead,
+    owner: HeadMetadataProjectionOwner,
 ) -> Result<ReplayedHeadCanonicalRows, SessionStoreError> {
     let id = &head.id;
+    let history = replay_head_canonical_history_in_txn(tx, head)?;
     let anchor = head.row_lineage_anchor.as_ref().ok_or_else(|| {
         SessionStoreError::InvalidTranscriptRewrite {
             id: id.clone(),
@@ -4111,7 +4279,8 @@ fn replay_head_canonical_rows_in_txn(
             .map_err(|_| SessionStoreError::Corrupted(id.clone()))?;
         let messages_after = u64::try_from(edge.messages_after())
             .map_err(|_| SessionStoreError::Corrupted(id.clone()))?;
-        if messages_before_base != current_count
+        if messages_before_base < current_count
+            || (offset > 0 && messages_before_base != current_count)
             || row.parent_len != messages_before
             || row.strand_len != messages_after
         {
@@ -4120,9 +4289,17 @@ fn replay_head_canonical_rows_in_txn(
 
         let appended =
             serialized_messages_for_lineage_replay(id, edge.parent_advance().appended())?;
+        let base_bridge = strand_row_bytes_in_txn(
+            tx,
+            id,
+            &row.parent_strand,
+            current_count..messages_before_base,
+        )?;
+        let mut parent_suffix = base_bridge;
+        parent_suffix.extend(appended);
         let parent_count = current_count
             .checked_add(
-                u64::try_from(appended.len())
+                u64::try_from(parent_suffix.len())
                     .map_err(|_| SessionStoreError::Corrupted(id.clone()))?,
             )
             .ok_or_else(|| SessionStoreError::Corrupted(id.clone()))?;
@@ -4175,8 +4352,14 @@ fn replay_head_canonical_rows_in_txn(
         } else if row.parent_strand != current_strand {
             return Err(SessionStoreError::Corrupted(id.clone()));
         }
-        verify_serialized_strand_rows_in_txn(tx, id, &row.parent_strand, current_count, &appended)?;
-        replay.append_serialized_rows(&row.parent_strand, &appended)?;
+        verify_serialized_strand_rows_in_txn(
+            tx,
+            id,
+            &row.parent_strand,
+            current_count,
+            &parent_suffix,
+        )?;
+        replay.append_serialized_rows(&row.parent_strand, &parent_suffix)?;
         if let Some(parent_link) = links.get(row.parent_strand.as_str()) {
             verify_linked_strand_physical_shape_in_txn(
                 tx,
@@ -4240,18 +4423,21 @@ fn replay_head_canonical_rows_in_txn(
             if final_replayed_endpoint.is_some_and(|endpoint| link.splice.strand_len != endpoint) {
                 return Err(SessionStoreError::Corrupted(id.clone()));
             }
-            verify_linked_strand_physical_shape_in_txn(
-                tx,
-                id,
-                &head.strand,
-                link,
-                head.message_count,
-            )?;
+            if matches!(owner, HeadMetadataProjectionOwner::PhysicalHead) {
+                verify_linked_strand_physical_shape_in_txn(
+                    tx,
+                    id,
+                    &head.strand,
+                    link,
+                    head.message_count,
+                )?;
+            }
         }
         None => {
             if final_replayed_endpoint.is_some()
-                || materialized_row_count_in_txn(tx, id, &head.strand)? != head.message_count
-                || physical_row_extent_in_txn(tx, id, &head.strand)? != head.message_count
+                || (matches!(owner, HeadMetadataProjectionOwner::PhysicalHead)
+                    && (materialized_row_count_in_txn(tx, id, &head.strand)? != head.message_count
+                        || physical_row_extent_in_txn(tx, id, &head.strand)? != head.message_count))
             {
                 return Err(SessionStoreError::Corrupted(id.clone()));
             }
@@ -4274,6 +4460,7 @@ fn replay_head_canonical_rows_in_txn(
     Ok(ReplayedHeadCanonicalRows {
         serialized_rows,
         lineage,
+        history,
         anchor_is_current,
         #[cfg(test)]
         decoded_rewrite_count,
@@ -4289,19 +4476,26 @@ fn verify_head_canonical_with_metadata_owner_in_txn(
 ) -> Result<meerkat_core::VerifiedSessionHeadMaterialization, SessionStoreError> {
     let mut head = head.clone();
     attach_head_metadata_projection(tx, &mut head, owner)?;
-    let replayed = replay_head_canonical_rows_in_txn(tx, &head)?;
-    match head.realtime_event_prefix.as_ref() {
+    let ReplayedHeadCanonicalRows {
+        serialized_rows,
+        lineage,
+        history,
+        anchor_is_current,
+        ..
+    } = replay_head_canonical_rows_in_txn(tx, &head, owner)?;
+    let verified = match head.realtime_event_prefix.as_ref() {
         Some(realtime) => {
             let realtime = load_verified_component_sequence_in_txn(tx, realtime)?;
             head.verify_serialized_rows_with_component_sequences_and_lineage(
-                replayed.serialized_rows,
+                serialized_rows,
                 realtime,
-                replayed.lineage,
+                lineage,
             )
         }
-        None if replayed.anchor_is_current => head.verify_serialized_rows(replayed.serialized_rows),
+        None if anchor_is_current => head.verify_serialized_rows(serialized_rows),
         _ => Err(SessionStoreError::Corrupted(head.id.clone())),
-    }
+    }?;
+    verified.with_validated_transcript_history(history)
 }
 
 /// Independently replay the retained runtime boundary and physical head.
@@ -7415,8 +7609,12 @@ mod tests {
         )));
         first.save(&session).await.unwrap();
 
-        let mut stale = first.load(session.id()).await.unwrap().unwrap();
-        let mut newer = second.load(session.id()).await.unwrap().unwrap();
+        // A raw WholeBlob reload intentionally has no current exact
+        // row-lineage authority. Keep two writers from the exact constructed
+        // state so the rewrite itself is valid and this probe reaches the
+        // store's stale-parent guard.
+        let mut stale = session.clone();
+        let mut newer = session.clone();
         newer.push(Message::User(UserMessage::text("intervening".to_string())));
         second.save(&newer).await.unwrap();
 
@@ -8148,6 +8346,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retained_runtime_boundary_verifies_exact_prefix_after_same_strand_append() {
+        let (_dir, store) = temp_store();
+        let (mut session, root) =
+            prepared_root_with_metadata("application", serde_json::json!({"value": 1}));
+        let persisted_root = root.clone();
+        let _ = store
+            .in_write_txn(move |tx| {
+                apply_prepared_head_canonical_mutation_in_txn(tx, &persisted_root)
+            })
+            .await
+            .expect("persist root");
+        let runtime_boundary = root.successor_head().clone();
+        let retained_boundary = runtime_boundary.clone();
+        store
+            .in_write_txn(move |tx| {
+                retain_runtime_boundary_head_metadata_in_txn(tx, &retained_boundary)
+            })
+            .await
+            .expect("retain runtime boundary metadata");
+        root.acknowledge_session(&mut session, root.successor_head_token())
+            .expect("acknowledge root");
+
+        session.push(user("later physical append"));
+        let observed = incremental(&store)
+            .load_head(session.id())
+            .await
+            .expect("load root head")
+            .expect("root head exists");
+        let append = PreparedHeadCanonicalMutation::prepare(&session, Some(observed))
+            .expect("prepare append");
+        incremental(&store)
+            .apply_prepared_head_canonical_mutation(&append)
+            .await
+            .expect("persist append");
+
+        let boundary_for_read = runtime_boundary.clone();
+        let verified = store
+            .in_read_txn(move |tx| {
+                verify_runtime_boundary_head_canonical_in_txn(tx, &boundary_for_read)
+            })
+            .await
+            .expect("retained boundary prefix must remain independently verifiable");
+        assert_eq!(verified.session().messages(), &session.messages()[..1]);
+
+        let connection = open_connection(store.path()).expect("open store");
+        let corrupted_row =
+            serde_json::to_vec(&user("corrupted retained prefix")).expect("serialize corruption");
+        connection
+            .execute(
+                r"
+                UPDATE session_strand_messages
+                SET message_json = ?3
+                WHERE session_id = ?1 AND strand = ?2 AND seq = 0
+                ",
+                params![
+                    session.id().to_string(),
+                    runtime_boundary.strand.as_str(),
+                    corrupted_row,
+                ],
+            )
+            .expect("corrupt retained prefix row");
+        drop(connection);
+        let boundary_for_corruption_check = runtime_boundary.clone();
+        let error = store
+            .in_read_txn(move |tx| {
+                verify_runtime_boundary_head_canonical_in_txn(tx, &boundary_for_corruption_check)
+            })
+            .await
+            .expect_err("corrupt retained prefix must fail closed");
+        assert!(
+            matches!(
+                error,
+                SessionStoreError::Corrupted(ref id)
+                    | SessionStoreError::TranscriptContinuityViolation { ref id, .. }
+                    if id == session.id()
+            ),
+            "unexpected retained-prefix corruption error: {error:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn corrupted_metadata_cell_fails_cold_reads_as_corruption() {
         let (_dir, store) = temp_store();
         let (session, root) =
@@ -8398,25 +8677,6 @@ mod tests {
         .unwrap()
     }
 
-    fn compact_layout_physical_row_count(layout: &StrandLayout) -> usize {
-        let rewrite_rows = layout
-            .rewrites
-            .iter()
-            .map(|rewrite| {
-                let parent_splice_rows = match &rewrite.parent_transition {
-                    PreparedHeadCanonicalParentTransition::ExactAppend => 0,
-                    PreparedHeadCanonicalParentTransition::ExactSplice(parent_splice) => {
-                        parent_splice.serialized_replacement().len()
-                    }
-                };
-                parent_splice_rows
-                    + rewrite.serialized_parent_suffix.len()
-                    + rewrite.serialized_replacement.len()
-            })
-            .sum::<usize>();
-        layout.serialized_anchor.len() + rewrite_rows + layout.serialized_tail.len()
-    }
-
     fn strand_link_count(path: &Path, id: &SessionId) -> i64 {
         let conn = open_connection(path).unwrap();
         conn.query_row(
@@ -8540,7 +8800,11 @@ mod tests {
         let replay_head = tail.successor_head().clone();
         let (decoded, loaded_links) = store
             .in_read_txn(move |tx| {
-                let replayed = replay_head_canonical_rows_in_txn(tx, &replay_head)?;
+                let replayed = replay_head_canonical_rows_in_txn(
+                    tx,
+                    &replay_head,
+                    HeadMetadataProjectionOwner::PhysicalHead,
+                )?;
                 Ok((
                     replayed.decoded_rewrite_count,
                     replayed.loaded_link_row_count,
@@ -8623,7 +8887,11 @@ mod tests {
         let head_for_cost = head.clone();
         let (decoded, loaded_links) = store
             .in_read_txn(move |tx| {
-                let replayed = replay_head_canonical_rows_in_txn(tx, &head_for_cost)?;
+                let replayed = replay_head_canonical_rows_in_txn(
+                    tx,
+                    &head_for_cost,
+                    HeadMetadataProjectionOwner::PhysicalHead,
+                )?;
                 assert_eq!(replayed.serialized_rows.len(), expected_messages.len());
                 Ok((
                     replayed.decoded_rewrite_count,
@@ -8645,74 +8913,13 @@ mod tests {
             "the cost probe must retain historical links so zero loaded links cannot be an empty-history artifact"
         );
 
+        // The current lineage anchor is the store-issued authority for an
+        // ordinary load. Pre-anchor rewrite edges and links are intentionally
+        // outside this bounded read; explicit history/audit operations own
+        // their validation. Legal representation-only changes such as trailing
+        // JSON whitespace are likewise not a second semantic authority.
+        // Structural row continuity remains mandatory.
         let conn = open_connection(store.path()).unwrap();
-        conn.execute(
-            "UPDATE session_rewrites SET graph_edge_json = X'7B7D'
-             WHERE session_id = ?1 AND rewrite_idx = 0",
-            params![session.id().to_string()],
-        )
-        .unwrap();
-        drop(conn);
-        let loaded = store
-            .load(session.id())
-            .await
-            .expect("ordinary load must not deep-audit pre-anchor history")
-            .expect("session present");
-        assert_eq!(loaded.messages(), session.messages());
-
-        let conn = open_connection(store.path()).unwrap();
-        conn.execute(
-            "UPDATE session_strand_links SET successor = strand
-             WHERE rowid = (
-                 SELECT rowid FROM session_strand_links
-                 WHERE session_id = ?1
-                 LIMIT 1
-             )",
-            params![session.id().to_string()],
-        )
-        .unwrap();
-        drop(conn);
-        let loaded = store
-            .load(session.id())
-            .await
-            .expect("ordinary load must not traverse disconnected historical links")
-            .expect("session present");
-        assert_eq!(loaded.messages(), session.messages());
-
-        let conn = open_connection(store.path()).unwrap();
-        let original_row: Vec<u8> = conn
-            .query_row(
-                "SELECT message_json FROM session_strand_messages
-                 WHERE session_id = ?1 AND strand = ?2 AND seq = 0",
-                params![session.id().to_string(), head.strand.as_str()],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let mut representation_only_corruption = original_row.clone();
-        representation_only_corruption.push(b' ');
-        conn.execute(
-            "UPDATE session_strand_messages SET message_json = ?3
-             WHERE session_id = ?1 AND strand = ?2 AND seq = 0",
-            params![
-                session.id().to_string(),
-                head.strand.as_str(),
-                representation_only_corruption
-            ],
-        )
-        .unwrap();
-        drop(conn);
-        assert!(matches!(
-            store.load(session.id()).await,
-            Err(SessionStoreError::Corrupted(corrupted)) if corrupted == *session.id()
-        ));
-
-        let conn = open_connection(store.path()).unwrap();
-        conn.execute(
-            "UPDATE session_strand_messages SET message_json = ?3
-             WHERE session_id = ?1 AND strand = ?2 AND seq = 0",
-            params![session.id().to_string(), head.strand.as_str(), original_row],
-        )
-        .unwrap();
         conn.execute(
             "DELETE FROM session_strand_messages
              WHERE session_id = ?1 AND strand = ?2 AND seq = 0",
@@ -8790,7 +8997,11 @@ mod tests {
         let replay_head = observed_head.clone();
         let (decoded, loaded_links) = store
             .in_read_txn(move |tx| {
-                let replayed = replay_head_canonical_rows_in_txn(tx, &replay_head)?;
+                let replayed = replay_head_canonical_rows_in_txn(
+                    tx,
+                    &replay_head,
+                    HeadMetadataProjectionOwner::PhysicalHead,
+                )?;
                 Ok((
                     replayed.decoded_rewrite_count,
                     replayed.loaded_link_row_count,
@@ -9166,7 +9377,14 @@ mod tests {
         let mut session = Session::new();
         session.push(user("one"));
         session.push(user("two"));
-        let head = seed_incremental(&inc, &session).await;
+        let root = PreparedHeadCanonicalMutation::prepare_root(&session)
+            .expect("prepare exact component-rooted session");
+        inc.apply_prepared_head_canonical_mutation(&root)
+            .await
+            .expect("persist exact component-rooted session");
+        root.acknowledge_session(&mut session, root.successor_head_token())
+            .expect("acknowledge exact component roots");
+        let head = root.successor_head().clone();
         assert!(
             inc.load_rewrite_commits(session.id())
                 .await
@@ -9183,39 +9401,23 @@ mod tests {
                 None,
             )
             .unwrap();
-        let parent_body = session
-            .transcript_revision_body(&commit.parent_revision)
-            .unwrap()
-            .unwrap();
-        let revision_body = session
-            .transcript_revision_body(&commit.revision)
-            .unwrap()
-            .unwrap();
-        let record = TranscriptRewriteRecord::new(commit.clone(), parent_body, revision_body)
-            .expect("valid rewrite record");
-        let token = session_head_cas_token(&head).unwrap();
-        let next = inc
-            .commit_rewrite(
-                session.id(),
-                &record,
-                SessionHeadCas::IfToken(token.clone()),
-            )
-            .await
-            .unwrap();
+        let rewrite =
+            PreparedHeadCanonicalRewriteMutation::prepare_intra_turn(&session, &head, head.clone())
+                .expect("prepare exact compact rewrite");
 
-        // Recorded but not adopted: the commit view stays empty, exactly
-        // like load_rewrites.
+        // Preparing a carrier is side-effect free. The commit view changes
+        // only when the singular prepared mutation atomically installs the
+        // exact replay edge and successor head.
         assert!(
             inc.load_rewrite_commits(session.id())
                 .await
                 .unwrap()
                 .is_empty(),
-            "recorded-but-unadopted commits must not be served"
+            "an uncommitted prepared rewrite must not be served"
         );
-
-        inc.save_head(&next, SessionHeadCas::IfToken(token))
+        inc.apply_prepared_head_canonical_rewrite_mutation(&rewrite)
             .await
-            .unwrap();
+            .expect("atomically persist exact rewrite carrier");
         let commits = inc.load_rewrite_commits(session.id()).await.unwrap();
         assert_eq!(commits, vec![commit]);
         assert_eq!(
@@ -9422,23 +9624,13 @@ mod tests {
             user("base row"),
             user("retained suffix"),
         ];
-        let first = vec![
-            user("retained prefix"),
-            user("first rewrite"),
-            user("retained suffix"),
-        ];
-        let second_parent = vec![
-            user("retained prefix"),
-            user("imported arbitrary-role splice"),
-            user("retained suffix"),
-            user("appended parent row"),
-        ];
-        let second = vec![
-            user("retained prefix"),
-            user("imported arbitrary-role splice"),
-            user("second rewrite"),
-            user("appended parent row"),
-        ];
+        let mut first = anchor.clone();
+        first[1] = user("first rewrite");
+        let mut second_parent = first.clone();
+        second_parent[1] = user("imported arbitrary-role splice");
+        second_parent.push(user("appended parent row"));
+        let mut second = second_parent.clone();
+        second[2] = user("second rewrite");
         let created_at = serde_json::to_value(SystemTime::UNIX_EPOCH).expect("serialize time");
         let revisions = [&anchor, &first, &second_parent, &second]
             .into_iter()
@@ -9552,7 +9744,7 @@ mod tests {
                     .transcript_rewrite_prefix_authority()
                     .ok_or_else(|| SessionStoreError::Corrupted(id.clone()))?;
                 if expected_prefix.occurrence_count() != expected_count {
-                    return Err(SessionStoreError::Corrupted(id.clone()));
+                    return Err(SessionStoreError::Corrupted(id));
                 }
                 backfill_rewrite_graph_edges_from_validated_session_in_txn(
                     tx,
@@ -9664,7 +9856,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn head_canonical_activation_from_whole_blob_snapshot() {
+    async fn whole_blob_snapshot_read_view_is_side_effect_free_without_runtime_receipt() {
         let (_dir, store) = temp_store();
 
         // Supported whole-blob snapshot with two audited rewrites and a live
@@ -9675,7 +9867,7 @@ mod tests {
         session.push(user("turn one"));
         session.push(user("turn two"));
         store.save(&session).await.unwrap();
-        let second_commit = session
+        let _first_commit = session
             .commit_transcript_rewrite(
                 TranscriptRewriteSelection::MessageRange { start: 0, end: 2 },
                 vec![user("[compacted] summary one")],
@@ -9684,9 +9876,8 @@ mod tests {
                 None,
             )
             .unwrap();
-        let first_commit_revision = session.transcript_revision().unwrap();
         session.push(user("turn three"));
-        session
+        let second_commit = session
             .commit_transcript_rewrite(
                 TranscriptRewriteSelection::MessageRange { start: 0, end: 2 },
                 vec![user("[compacted] summary two")],
@@ -9696,22 +9887,29 @@ mod tests {
             )
             .unwrap();
         let audited_graph = session
-            .metadata()
-            .get(meerkat_core::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY)
-            .cloned()
+            .validated_transcript_history_state()
+            .unwrap()
             .expect("second rewrite installs audited graph");
+        let audited_rewrite_prefix = audited_graph.rewrite_prefix().clone();
+        let audited_graph_prefix = audited_graph.graph_prefix().clone();
         session.push(user("turn four"));
         for turn in 0..16 {
             session.push(user(&format!("ordinary turn {turn}")));
         }
+        let state = session
+            .validated_transcript_history_state()
+            .unwrap()
+            .expect("ordinary appends retain typed compact history");
         assert_eq!(
-            session
-                .metadata()
-                .get(meerkat_core::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY),
-            Some(&audited_graph),
-            "ordinary whole-blob appends must leave audited graph bytes untouched"
+            state.rewrite_prefix(),
+            &audited_rewrite_prefix,
+            "ordinary whole-blob appends must leave rewrite-prefix authority untouched"
         );
-        let state = session.transcript_history_state().unwrap().unwrap();
+        assert_eq!(
+            state.graph_prefix(),
+            &audited_graph_prefix,
+            "ordinary whole-blob appends must leave compact graph authority untouched"
+        );
         assert_eq!(state.head(), second_commit.revision);
         assert_eq!(
             state.commits().last(),
@@ -9729,14 +9927,6 @@ mod tests {
         assert!(blob_row_bytes(store.path(), session.id()).is_some());
 
         let inc = incremental(&store);
-        let proved_history = session
-            .validated_transcript_history_state()
-            .unwrap()
-            .expect("fixture carries validated compact history");
-        let compact_layout =
-            strand_layout_for_history(&session, Some(&proved_history)).expect("compact layout");
-        let expected_physical_rows = compact_layout_physical_row_count(&compact_layout);
-
         // Blob-only exceptional reads may explicitly materialize occurrence
         // bodies, but they must not force migration or revive a k-fold strand
         // vector in the layout carrier.
@@ -9758,116 +9948,22 @@ mod tests {
         assert_eq!(synthesized.rewrite_count, 2);
         assert_eq!(synthesized.message_count, session.messages().len() as u64);
         let synthesized_token = session_head_cas_token(&synthesized).unwrap();
+        let synthesized_again = inc.load_head(session.id()).await.unwrap().unwrap();
+        assert_eq!(
+            synthesized_again, synthesized,
+            "the same stored WholeBlob must synthesize the same typed read view"
+        );
+        assert_eq!(
+            session_head_cas_token(&synthesized_again).unwrap(),
+            synthesized_token,
+            "the synthesized view must deterministically bind its own CAS authority"
+        );
         {
             let conn = open_connection(store.path()).unwrap();
             let heads: i64 = conn
                 .query_row("SELECT COUNT(*) FROM session_heads", [], |row| row.get(0))
                 .unwrap();
             assert_eq!(heads, 0, "load_head must not write");
-        }
-
-        // First incremental write migrates in-txn against the synthesized token.
-        let migrated_head = SessionHead::from_session(
-            &session,
-            synthesized.strand.clone(),
-            synthesized.rewrite_count,
-        )
-        .unwrap();
-        inc.save_head(&migrated_head, SessionHeadCas::IfToken(synthesized_token))
-            .await
-            .expect("synthesized token must match the migrated head token");
-        assert_eq!(
-            strand_row_count(store.path(), session.id(), &migrated_head.strand),
-            i64::try_from(session.messages().len()).unwrap(),
-            "one-time activation must settle the current anchor into direct rows"
-        );
-        assert!(
-            total_strand_rows(store.path(), session.id())
-                <= i64::try_from(expected_physical_rows + session.messages().len()).unwrap(),
-            "activation may add one settled live document but must never restore one full body per rewrite"
-        );
-        {
-            let conn = open_connection(store.path()).unwrap();
-            let missing_edges: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM session_rewrites
-                     WHERE session_id = ?1 AND graph_edge_json IS NULL",
-                    params![session.id().to_string()],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            assert_eq!(
-                missing_edges, 0,
-                "every adopted rewrite must carry its exact cold-replay edge"
-            );
-        }
-
-        // Slim load returns a byte-identical live transcript, no history metadata.
-        let slim = store.load(session.id()).await.unwrap().unwrap();
-        assert_eq!(
-            transcript_messages_digest(slim.messages()).unwrap(),
-            transcript_messages_digest(session.messages()).unwrap()
-        );
-        assert!(slim.transcript_history_state().unwrap().is_none());
-
-        // list() yields exactly one entry for the migrated session.
-        let listed = store.list(SessionFilter::default()).await.unwrap();
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].id, *session.id());
-
-        // Adopted rewrites reconstruct from strand ranges.
-        let records = inc.load_rewrites(session.id()).await.unwrap();
-        assert_eq!(records.len(), 2);
-        assert_eq!(records[0].commit.revision, first_commit_revision);
-        let reopened = SqliteSessionStore::open(store.path()).expect("reopen migrated store");
-        let cold = reopened
-            .load(session.id())
-            .await
-            .expect("cold replay migrated head")
-            .expect("session present after reopen");
-        assert_eq!(cold.messages(), session.messages());
-
-        // Corrupt the archived blob: loads must be unaffected (pins "blob
-        // never read post-migration").
-        {
-            let conn = open_connection(store.path()).unwrap();
-            conn.execute(
-                "UPDATE sessions SET session_json = X'DEADBEEF' WHERE session_id = ?1",
-                params![session.id().to_string()],
-            )
-            .unwrap();
-        }
-        let slim_after_corruption = store.load(session.id()).await.unwrap().unwrap();
-        assert_eq!(
-            slim_after_corruption.messages().len(),
-            session.messages().len()
-        );
-
-        // delete removes rows from every session-domain table.
-        store.delete(session.id()).await.unwrap();
-        let conn = open_connection(store.path()).unwrap();
-        for table in [
-            "sessions",
-            "session_strand_messages",
-            "session_strand_links",
-            "session_rewrites",
-            "session_component_events",
-            "session_head_metadata_refs",
-            "session_head_metadata_head_lineage",
-            "session_head_metadata_state_deltas",
-            "session_head_metadata_states",
-            "session_head_metadata_current",
-            "session_head_metadata_cells",
-            "session_heads",
-        ] {
-            let count: i64 = conn
-                .query_row(
-                    &format!("SELECT COUNT(*) FROM {table} WHERE session_id = ?1"),
-                    params![session.id().to_string()],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            assert_eq!(count, 0, "table {table} must be cleared by delete");
         }
     }
 

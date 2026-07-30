@@ -101,6 +101,7 @@ impl<'de> Deserialize<'de> for TranscriptRewriteAuditReceiptBatch {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::session::{TranscriptRewriteReason, TranscriptRewriteSelection};
@@ -123,7 +124,7 @@ mod tests {
     }
 
     #[test]
-    fn generation_eighty_receipt_serializes_only_its_one_commit() {
+    fn generation_eighty_receipt_binds_only_its_one_commit() {
         let start: TranscriptRewritePrefixAccumulator = serde_json::from_value(serde_json::json!({
             "occurrence_count": 79,
             "digest": format!("sha256:{}", "0".repeat(64)),
@@ -131,16 +132,11 @@ mod tests {
         .expect("synthetic proved prefix is canonical");
         let commit = commit(80);
         let end = start.extend(&commit).expect("generation 80 extends 79");
-        let before = crate::transcript_rewrite_prefix_commit_serializations();
         let receipt = TranscriptRewriteAuditReceiptBatch::new(start, vec![commit], end)
             .expect("one-commit receipt validates");
-        let after = crate::transcript_rewrite_prefix_commit_serializations();
         assert_eq!(receipt.commits().len(), 1);
-        assert_eq!(
-            after - before,
-            1,
-            "receipt construction must serialize only the supplied suffix"
-        );
+        assert_eq!(receipt.start_prefix().occurrence_count(), 79);
+        assert_eq!(receipt.end_prefix().occurrence_count(), 80);
     }
 
     #[test]

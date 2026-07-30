@@ -509,6 +509,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `DispatchAcceptedFromDispatching`
   - anchors: (unclaimed)
   - scenarios: `occurrence_claim_dispatch_completion`
+- `DispatchDeduplicatedFromDispatching`
+  - anchors: (unclaimed)
+  - scenarios: `occurrence_claim_dispatch_completion`
 - `AwaitCompletionFromDispatching`
   - anchors: `occurrence_lifecycle`
   - scenarios: `occurrence_claim_dispatch_completion`, `occurrence_lease_recovery`

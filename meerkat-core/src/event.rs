@@ -2590,11 +2590,16 @@ mod tests {
     fn transcript_rewrite_commit_reads_the_commit_without_building_the_bodies() {
         let session_id = SessionId::new();
         let record = rewrite_record_fixture();
-        let payload = serde_json::to_string(&AgentEvent::TranscriptRewriteCommitted {
+        let mut payload = serde_json::to_value(&AgentEvent::TranscriptRewriteCommitted {
             session_id: session_id.clone(),
             record: record.clone(),
         })
         .expect("payload serializes");
+        payload["record"]["commit"]
+            .as_object_mut()
+            .expect("commit is an object")
+            .remove("rewrite_generation");
+        let payload = serde_json::to_string(&payload).expect("released payload serializes");
         let payload = serde_json::value::RawValue::from_string(payload).expect("payload is json");
 
         let before = crate::rewrite_record_body_decodes();
@@ -2607,7 +2612,9 @@ mod tests {
             "reading a commit must not materialize either transcript body"
         );
         assert_eq!(decoded.0, session_id);
-        assert_eq!(decoded.1, vec![record.commit]);
+        let mut released_commit = record.commit;
+        released_commit.rewrite_generation = 0;
+        assert_eq!(decoded.1, vec![released_commit]);
     }
 
     #[test]

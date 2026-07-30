@@ -523,8 +523,12 @@ pub(super) fn validate_transcript_revision_edge(
         .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
     if &expected_result_prefix != edge.result_witness().row_prefix() {
         return Err(TranscriptEditError::HistoryStateMalformed(format!(
-            "rewrite occurrence {} result row lineage is not derived from its exact parent and replacement",
-            edge.rewrite_generation()
+            "rewrite occurrence {} result row lineage is not derived from its exact parent and replacement: expected {} at {} rows, found {} at {} rows",
+            edge.rewrite_generation(),
+            expected_result_prefix.digest(),
+            expected_result_prefix.row_count(),
+            edge.result_witness().row_prefix().digest(),
+            edge.result_witness().row_prefix().row_count(),
         )));
     }
     if commit.selection.semantic() == TranscriptRewriteSemantic::Compaction {

@@ -21687,14 +21687,19 @@ impl MobActor {
         let mut identity_reconcile_safety_scan =
             tokio::time::interval(IDENTITY_RECONCILE_SAFETY_PAGE_INTERVAL);
         #[cfg(not(target_arch = "wasm32"))]
-        host_status_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        #[cfg(not(target_arch = "wasm32"))]
-        identity_reconcile_safety_scan
-            .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        // Consume interval's immediate first tick. Bind/rebind already perform
-        // an eager observation; the periodic driver starts one cadence later.
-        host_status_poll.tick().await;
-        identity_reconcile_safety_scan.tick().await;
+        {
+            host_status_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            identity_reconcile_safety_scan
+                .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            // Tokio intervals tick immediately. Bind/rebind already perform an
+            // eager observation, so consume that first tick and start the
+            // periodic driver one cadence later.
+            host_status_poll.tick().await;
+            identity_reconcile_safety_scan.tick().await;
+        }
+        // `tokio_with_wasm` intervals already wait one full period before
+        // their first tick. Awaiting a startup tick on wasm would therefore
+        // park the actor for the five-minute identity safety cadence.
         enum RegularActorWake {
             Routed(Option<RoutedMobCommand>),
             HostStatusPoll,
@@ -38963,21 +38968,11 @@ impl MobActor {
             .await?;
         self.cancel_all_flow_tasks().await?;
 
-        // Completion is the dominant, terminal operation: it must proceed even
-        // if the orchestrator cannot be told the mob is completing. This seam
-        // owns that policy and decides to continue, but the delivery fault is
-        // explicitly surfaced (logged) rather than swallowed inside the
-        // delivery routine.
-        if let Err(error) = self
-            .notify_orchestrator_lifecycle(format!("Mob '{}' is completing.", self.definition.id))
-            .await
-        {
-            tracing::warn!(
-                mob_id = %self.definition.id,
-                error = %error,
-                "completion proceeding despite orchestrator lifecycle delivery failure"
-            );
-        }
+        // Completion is terminal lifecycle authority, not member work. Never
+        // lower it into a turn on a member that this same command immediately
+        // retires: that detached turn can race the idle pre-check and make
+        // completion wait on work it created. MobCompleted below is the
+        // durable notification.
         self.retire_all_members("complete").await?;
 
         // MobMachine owns both completion admission and the durable journal
@@ -40194,26 +40189,13 @@ impl MobActor {
                 )
             })?;
 
-            // Capture and schedule the destroy notification while the
-            // machine still classifies the orchestrator-profile members as
-            // Active. The generated retire transitions below move every
-            // member to Retiring; querying the active-profile projection
-            // afterward would deterministically erase the recipients.
-            // Destroy remains dominant, so an unreachable recipient is logged
-            // rather than allowed to block teardown.
-            if let Err(error) = self
-                .notify_orchestrator_lifecycle(format!(
-                    "Mob '{}' is destroying.",
-                    self.definition.id
-                ))
-                .await
-            {
-                tracing::warn!(
-                    mob_id = %self.definition.id,
-                    error = %error,
-                    "destroy proceeding despite orchestrator lifecycle delivery failure"
-                );
-            }
+            // `MobDestroying` above is the durable lifecycle notification.
+            // Never also lower destroy into a member turn: that detached turn
+            // can win admission after the disposal pre-check observes Idle,
+            // acquire the session's turn-finalization boundary, and make this
+            // same destroy wait for work it just created. Retaining the
+            // boundary wait is required for exact teardown authority; the
+            // liveness fix is to stop teardown from opening new member work.
         }
         if destroy_input_needed {
             for entry in &entries {
@@ -46318,18 +46300,18 @@ impl MobActor {
             tracing::debug!(
                 agent_identity = %entry.agent_identity,
                 session_id = %bridge_session_id,
-                "dispatch_member_turn_after_machine_admission checking live session"
+                "dispatch_member_turn_after_machine_admission checking live session actor"
             );
             match self
                 .session_service
-                .has_live_session(bridge_session_id)
+                .live_session_actor_registered(bridge_session_id)
                 .await
             {
                 Ok(true) => {
                     tracing::debug!(
                         agent_identity = %entry.agent_identity,
                         session_id = %bridge_session_id,
-                        "dispatch_member_turn_after_machine_admission live session exists"
+                        "dispatch_member_turn_after_machine_admission live session actor exists"
                     );
                 }
                 Ok(false) | Err(meerkat_core::service::SessionError::NotFound { .. }) => {

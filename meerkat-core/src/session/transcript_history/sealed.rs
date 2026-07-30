@@ -38,6 +38,17 @@ impl ValidatedTranscriptHistory {
         Self { state }
     }
 
+    /// Exact durable-row witness for the final audited rewrite endpoint.
+    ///
+    /// HeadCanonical stores use this to bind the compact graph to an exact
+    /// physical append tail before installing it on a materialized Session.
+    #[doc(hidden)]
+    pub fn final_endpoint_row_prefix(&self) -> Option<&crate::SessionMessageRowPrefixAccumulator> {
+        self.state
+            .final_endpoint_witness()
+            .map(|witness| witness.row_prefix())
+    }
+
     /// Test-only structural seal. Production seals require checkpoint or
     /// authorized-construction evidence and enter through
     /// [`Self::adopt_session_validated`].

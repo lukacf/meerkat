@@ -19,7 +19,7 @@ use meerkat_session::ephemeral::{
     HeadCanonicalRuntimeBoundaryAcknowledgeOutcome, HeadCanonicalRuntimeBoundaryAuthority,
     HeadCanonicalRuntimeBoundaryPrepareRequest, ObservedSessionTailKind,
     PreparedHeadCanonicalRuntimeBoundary, SessionAgent, SessionAgentBuilder, SessionAgentTurnInput,
-    SessionSnapshot,
+    SessionSnapshot, SessionTranscriptAuthoritySnapshot,
 };
 use std::sync::Arc;
 
@@ -512,6 +512,12 @@ impl SessionAgent for FactoryAgent {
         Ok(self.agent.session().clone())
     }
 
+    fn session_transcript_authority(
+        &self,
+    ) -> Result<SessionTranscriptAuthoritySnapshot, meerkat_core::error::AgentError> {
+        SessionTranscriptAuthoritySnapshot::from_session(self.agent.session())
+    }
+
     async fn prepare_head_canonical_runtime_boundary(
         &mut self,
         request: HeadCanonicalRuntimeBoundaryPrepareRequest,
@@ -588,8 +594,8 @@ impl SessionAgent for FactoryAgent {
                     meerkat_core::error::AgentError::InternalError(
                         "head-canonical successor preparation is missing its physical predecessor head"
                             .to_string(),
-                    )
-                })?;
+                        )
+                    })?;
                 let rewrite_required =
                     meerkat_core::session_store::PreparedHeadCanonicalRewriteMutation::is_required(
                         self.agent.session(),

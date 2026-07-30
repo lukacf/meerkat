@@ -52,6 +52,7 @@ schema = []
 jsonschema = ["dep:jsonschema"]
 __meerkat-facade-agent-factory-build = []
 __meerkat-generated-authority-bridge = []
+test-support = []
 
 [dev-dependencies]
 # Path-only (no version): dev-deps that cycle back to meerkat-core are

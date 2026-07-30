@@ -101,7 +101,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `resume_overrides_admissible`(provider_override_present: Bool, model_override_present: Bool, has_build_only_overrides: Bool, first_turn_phase: SessionFirstTurnPhase) -> `Bool`
 - `resume_provider_recompute_from_model`(model_override_present: Bool, provider_override_present: Bool) -> `Bool`
 - `store_projection_can_recover_authority`(has_metadata: Bool, has_build_state: Bool, runtime_projection_quarantined: Bool) -> `Bool`
-- `archive_should_retire_runtime`(runtime_backed: Bool, runtime_observation: SessionArchiveRuntimeObservation) -> `Bool`
+- `archive_should_retire_runtime`(runtime_backed: Bool, durable_document_present: Bool, runtime_observation: SessionArchiveRuntimeObservation) -> `Bool`
 
 ## Invariants
 

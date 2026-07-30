@@ -254,53 +254,36 @@ mod tests {
     }
 
     async fn run_committed_runtime_turn(
-        service: &PersistentSessionService<FactoryAgentBuilder>,
-        runtime_store: &Arc<dyn meerkat_runtime::RuntimeStore>,
+        service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
+        runtime_adapter: &Arc<meerkat_runtime::MeerkatMachine>,
         session_id: &meerkat::SessionId,
         prompt: &str,
     ) {
-        let output = service
-            .apply_runtime_turn(
-                session_id,
-                meerkat_core::RunId::new(),
-                catalog_route_turn_request(prompt),
-                meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
-                vec![meerkat_core::InputId::new()],
-            )
+        let admission = service
+            .reserve_runtime_turn_admission(session_id)
             .await
-            .expect("runtime turn should complete");
-        let snapshot = output
-            .committed()
-            .expect("runtime turn should produce a committed boundary")
-            .whole_blob_artifact()
-            .expect("runtime turn snapshot should encode")
-            .bytes_arc();
-        runtime_store
-            .atomic_apply(
-                &meerkat_runtime::LogicalRuntimeId::for_session(session_id),
-                Some(meerkat_runtime::store::SerializedSessionSnapshot {
-                    session_snapshot: Arc::clone(&snapshot),
-                }),
-                output.receipt.clone().into_sequenced(0),
-                Vec::new(),
-                Some(session_id.clone()),
-            )
-            .await
-            .expect("machine-owned runtime output commit should succeed");
+            .expect("runtime turn admission should be reserved");
         service
-            .checkpoint_committed_runtime_session_snapshot(session_id, snapshot)
+            .run_machine_committed_live_turn(
+                meerkat::MachineServiceTurnCommitProtocol::from_machine(runtime_adapter),
+                session_id,
+                catalog_route_turn_request(prompt),
+                admission,
+            )
             .await
-            .expect("committed runtime snapshot should project to the session store");
+            .map_err(|(error, _admission)| error)
+            .expect("machine-owned runtime turn should commit");
     }
 
     fn catalog_route_service(
         store_path: impl Into<std::path::PathBuf>,
         store: Arc<dyn meerkat::SessionStore>,
+        runtime_store: Arc<dyn meerkat_runtime::RuntimeStore>,
         dispatcher: Arc<DeferredCatalogDispatcher>,
         client: Arc<CatalogLoadClient>,
     ) -> (
-        PersistentSessionService<FactoryAgentBuilder>,
-        Arc<dyn meerkat_runtime::RuntimeStore>,
+        Arc<PersistentSessionService<FactoryAgentBuilder>>,
+        Arc<meerkat_runtime::MeerkatMachine>,
     ) {
         let factory = AgentFactory::new(store_path)
             .builtins(false)
@@ -312,16 +295,11 @@ mod tests {
         let tool_dispatcher: Arc<dyn AgentToolDispatcher> = dispatcher;
         builder.default_llm_client = Some(llm_client);
         builder.default_tool_dispatcher = Some(tool_dispatcher);
-        let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
-            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
-        let service = PersistentSessionService::new(
-            builder,
-            4,
-            store,
-            Arc::clone(&runtime_store),
-            Arc::new(MemoryBlobStore::new()),
-        );
-        (service, runtime_store)
+        let persistence =
+            PersistenceBundle::new(store, runtime_store, Arc::new(MemoryBlobStore::new()));
+        let (service, runtime_adapter) =
+            meerkat::surface::build_runtime_backed_service(builder, 4, persistence);
+        (Arc::new(service), runtime_adapter)
     }
 
     #[tokio::test]
@@ -348,11 +326,11 @@ mod tests {
             .await
             .expect("create_session should succeed through the facade persistence bundle");
 
-        let persisted = session_store
-            .load(&created.session_id)
+        let persisted = service
+            .load_authoritative_session(&created.session_id)
             .await
-            .expect("load should succeed")
-            .expect("memory-backed bundle should persist the created session");
+            .expect("authoritative load should succeed")
+            .expect("memory-backed bundle should retain the created session");
         assert_eq!(persisted.id(), &created.session_id);
 
         let summaries = service
@@ -418,23 +396,38 @@ mod tests {
     async fn deferred_catalog_load_authority_survives_persistent_restart() {
         let temp = tempfile::tempdir().expect("tempdir should succeed");
         let session_store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
         let dispatcher = Arc::new(DeferredCatalogDispatcher::new());
         let client = Arc::new(CatalogLoadClient::default());
-        let (service, runtime_store) = catalog_route_service(
+        let (service, runtime_adapter) = catalog_route_service(
             temp.path().join("sessions"),
             Arc::clone(&session_store),
+            Arc::clone(&runtime_store),
             Arc::clone(&dispatcher),
             Arc::clone(&client),
         );
 
-        let created = service
-            .create_session(catalog_route_request("", InitialTurnPolicy::Defer))
+        let fresh = meerkat::Session::new();
+        let id = fresh.id().clone();
+        let admission = service
+            .reserve_create_session_admission()
             .await
-            .expect("deferred create should stage the session");
-        let id = created.session_id;
+            .expect("fresh session admission should be reserved");
+        let created =
+            meerkat::surface::materialize_session_actor_unattached_with_reserved_admission(
+                &service,
+                &runtime_adapter,
+                fresh,
+                catalog_route_request("", InitialTurnPolicy::Defer),
+                admission,
+            )
+            .await
+            .expect("deferred create should materialize the runtime-owned actor");
+        assert_eq!(created.session_id, id);
         run_committed_runtime_turn(
             &service,
-            &runtime_store,
+            &runtime_adapter,
             &id,
             "load the deferred catalog tool",
         )
@@ -458,11 +451,11 @@ mod tests {
             "real catalog-load authority should reveal the requested deferred tool at the next boundary"
         );
 
-        let persisted = session_store
-            .load(&id)
+        let persisted = service
+            .load_authoritative_session(&id)
             .await
-            .expect("load persisted session")
-            .expect("persisted session should exist");
+            .expect("load authoritative session")
+            .expect("authoritative session should exist");
         let persisted_state = persisted
             .tool_visibility_state()
             .expect("persisted visibility state should decode")
@@ -483,10 +476,14 @@ mod tests {
             "authority must come from the catalog entry provenance"
         );
 
+        drop(service);
+        drop(runtime_adapter);
+
         let restarted_client = Arc::new(CatalogLoadClient::default());
-        let (restarted, _restarted_runtime_store) = catalog_route_service(
+        let (restarted, restarted_runtime_adapter) = catalog_route_service(
             temp.path().join("sessions-restarted"),
             Arc::clone(&session_store),
+            Arc::clone(&runtime_store),
             Arc::clone(&dispatcher),
             restarted_client,
         );
@@ -495,8 +492,18 @@ mod tests {
             .await
             .expect("authoritative load should succeed")
             .expect("authoritative session should exist after restart");
-        let resumed = restarted
-            .create_session(catalog_route_resume_request(resume_source))
+        let admission = restarted
+            .reserve_create_session_admission()
+            .await
+            .expect("resume admission should be reserved");
+        let resumed =
+            meerkat::surface::materialize_session_actor_unattached_with_reserved_admission(
+                &restarted,
+                &restarted_runtime_adapter,
+                resume_source.clone(),
+                catalog_route_resume_request(resume_source),
+                admission,
+            )
             .await
             .expect("resume should materialize persisted visibility state");
         assert_eq!(resumed.session_id, id);

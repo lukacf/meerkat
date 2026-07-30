@@ -3313,7 +3313,7 @@ mod prompt_truth_tests {
         let huge = "x".repeat(100_000);
         let mut session = Session::new();
         session.push_batch(vec![
-            Message::System(SystemMessage::new(huge.clone())),
+            Message::System(SystemMessage::new(huge)),
             Message::System(SystemMessage::new("")),
             Message::User(UserMessage::text("old user")),
             assistant_text("old assistant"),

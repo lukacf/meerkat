@@ -649,16 +649,15 @@ fn generated_meerkat_immediate_starts_derive_content_shape() -> Result<(), Strin
     use meerkat_core::turn_execution_authority::ContentShape;
 
     let schema = meerkat_machine();
-    for input_name in ["StartImmediateAppend"] {
-        let input = schema
-            .inputs
-            .variant_named(input_name)
-            .expect("immediate start input");
-        assert!(
-            input.field_named("admitted_content_shape").is_err(),
-            "{input_name} must derive its content shape instead of accepting caller-supplied shape"
-        );
-    }
+    let input_name = "StartImmediateAppend";
+    let input = schema
+        .inputs
+        .variant_named(input_name)
+        .expect("immediate start input");
+    assert!(
+        input.field_named("admitted_content_shape").is_err(),
+        "{input_name} must derive its content shape instead of accepting caller-supplied shape"
+    );
 
     for (input_name, expected_shape) in [("StartImmediateAppend", ContentShape::ImmediateAppend)] {
         for phase in ["Initializing", "Attached", "Running"] {

@@ -590,6 +590,29 @@ where
         Ok(())
     }
 
+    async fn publish_store_confirmed_sticky_model_fallback(
+        &mut self,
+        receipt: Option<crate::SessionControlCommitReceipt>,
+    ) -> Result<(), AgentError> {
+        if let Some(receipt) = receipt.as_ref() {
+            let checkpointer = self.checkpointer.as_ref().ok_or_else(|| {
+                AgentError::StickyModelFallbackAuthorityUnknown {
+                    message: "durable sticky fallback committed without a session checkpointer"
+                        .to_string(),
+                }
+            })?;
+            checkpointer
+                .acknowledge_control_commit(receipt)
+                .await
+                .map_err(|error| AgentError::StickyModelFallbackAuthorityUnknown {
+                    message: format!(
+                        "durable sticky fallback committed but actor base acknowledgement failed: {error}"
+                    ),
+                })?;
+        }
+        self.publish_pending_sticky_model_fallback()
+    }
+
     fn reject_pending_sticky_model_fallback(
         &mut self,
         commit_error: crate::handles::StickyModelFallbackCommitError,
@@ -644,7 +667,10 @@ where
             return Ok(());
         };
         match operation.wait().await {
-            Ok(()) => self.publish_pending_sticky_model_fallback(),
+            Ok(receipt) => {
+                self.publish_store_confirmed_sticky_model_fallback(receipt)
+                    .await
+            }
             Err(error) => Err(self.reject_pending_sticky_model_fallback(error)),
         }
     }
@@ -948,7 +974,10 @@ where
                     next_session,
                 });
             match operation.wait().await {
-                Ok(()) => self.publish_pending_sticky_model_fallback()?,
+                Ok(receipt) => {
+                    self.publish_store_confirmed_sticky_model_fallback(receipt)
+                        .await?;
+                }
                 Err(error) => return Err(self.reject_pending_sticky_model_fallback(error)),
             }
         } else {
@@ -11278,7 +11307,7 @@ mod tests {
             .await
             .expect("the replacement client should run");
         assert!(primary.seen_max_tokens().is_empty());
-        assert_eq!(backup.seen_max_tokens(), vec![8192]);
+        assert_eq!(backup.seen_max_tokens(), vec![2048]);
     }
 
     #[tokio::test]
@@ -15507,8 +15536,13 @@ mod tests {
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
     #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     impl crate::handles::StickyModelFallbackCommitOperation for ImmediateStickyFallbackOperation {
-        async fn wait(&self) -> Result<(), crate::handles::StickyModelFallbackCommitError> {
-            Ok(())
+        async fn wait(
+            &self,
+        ) -> Result<
+            Option<crate::SessionControlCommitReceipt>,
+            crate::handles::StickyModelFallbackCommitError,
+        > {
+            Ok(None)
         }
     }
 

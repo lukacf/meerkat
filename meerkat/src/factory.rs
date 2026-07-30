@@ -3162,13 +3162,25 @@ impl AgentFactory {
             return Ok(None);
         };
         let Some(metadata) = session.session_metadata() else {
-            if session.messages().is_empty()
-                && matches!(
-                    &build_config.runtime_build_mode,
-                    meerkat_core::RuntimeBuildMode::SessionOwned(bindings)
-                        if bindings.session_id() == session.id()
-                            && meerkat_runtime::session_runtime_bindings_have_machine_authority(bindings)
-                )
+            let machine_precreated = matches!(
+                &build_config.runtime_build_mode,
+                meerkat_core::RuntimeBuildMode::SessionOwned(bindings)
+                    if bindings.session_id() == session.id()
+                        && meerkat_runtime::session_runtime_bindings_have_machine_authority(bindings)
+            );
+            let generated_deferred_precreation = session
+                .try_deferred_turn_state()
+                .map_err(|error| {
+                    BuildAgentError::Config(format!(
+                        "resumed session {} has invalid durable deferred-turn state: {error}",
+                        session.id()
+                    ))
+                })?
+                .is_some_and(|state| {
+                    state.first_turn_phase() == meerkat_core::DeferredFirstTurnPhase::Pending
+                });
+            if machine_precreated
+                && (session.messages().is_empty() || generated_deferred_precreation)
             {
                 return Ok(None);
             }

@@ -22,10 +22,13 @@
 //!   head-canonical runtime authority;
 //! - append a fixed, tiny number and byte volume of canonical message rows;
 //! - grow the co-tenant database plus WAL by a fixed delta-sized envelope.
+//! - keep process CPU and wall time within a load-tolerant constant envelope
+//!   relative to the identical small-document turn, catching uninstrumented
+//!   scans, clones, and debug verification passes.
 //!
-//! These are absolute assertions with no ratio, denominator floor, or
-//! document-sized allowance. Process CPU and wall time are printed only as
-//! diagnostics.
+//! Byte/row assertions are absolute and document-size independent. Timing is
+//! a secondary bounded envelope with fixed slack, not the primary proof: it
+//! covers work that has not yet reached one of the structural counters.
 //!
 //! This test must stay ALONE in its test binary so no sibling test's CPU
 //! pollutes the measurement. No live provider is involved: members run
@@ -39,8 +42,8 @@ use meerkat::{AgentFactory, Config, FactoryAgentBuilder};
 use meerkat_core::types::HandlingMode;
 use meerkat_mob::definition::{OrchestratorConfig, WiringRules};
 use meerkat_mob::{
-    AgentIdentity, MobBuilder, MobDefinition, MobHandle, MobId, MobMemberStatus, MobRuntimeMode,
-    MobStorage, Profile, ProfileBinding, ProfileName, SpawnMemberSpec, ToolConfig,
+    AgentIdentity, MemberTurnOptions, MobBuilder, MobDefinition, MobHandle, MobId, MobMemberStatus,
+    MobRuntimeMode, MobStorage, Profile, ProfileBinding, ProfileName, SpawnMemberSpec, ToolConfig,
 };
 use meerkat_session::PersistentSessionService;
 use meerkat_store::{MemoryBlobStore, SqliteSessionStore, StoreAdapter};
@@ -88,6 +91,13 @@ const MAX_DIGEST_BYTES_PER_TURN: u64 = 128 * 1024;
 /// one copy of the ~10 MB fixture while leaving ample room for fixed-size
 /// runtime receipt/lifecycle rows and SQLite page framing.
 const MAX_DB_WAL_GROWTH_BYTES_PER_TURN: u64 = 2 * 1024 * 1024;
+
+/// Secondary instrumentation-honesty envelope. Fixed slack absorbs scheduler
+/// and SQLite variance while a 4x slope still rejects the measured hidden
+/// O(document) witness verification (19.3x CPU / 6.1x wall).
+const MAX_LARGE_SMALL_TIME_MULTIPLIER: f64 = 4.0;
+const CPU_TIME_SLACK_PER_TURN: Duration = Duration::from_millis(500);
+const WALL_TIME_SLACK_PER_TURN: Duration = Duration::from_secs(1);
 
 const MEMBER_IDS: [&str; 3] = ["lead-1", "w-small", "w-large"];
 const SMALL_MEMBER_ID: &str = "w-small";
@@ -316,8 +326,7 @@ fn durable_storage_facts(path: &Path) -> DurableStorageFacts {
         ),
         head_canonical_authority_rows: query_u64(
             &connection,
-            "SELECT COUNT(*) FROM runtime_session_authority \
-             WHERE persistence_profile = 'head_canonical_v1'",
+            "SELECT COUNT(*) FROM runtime_session_authority",
         ),
         session_head_rows: query_u64(&connection, "SELECT COUNT(*) FROM session_heads"),
     }
@@ -418,9 +427,17 @@ async fn measure_member_turns(
     for turn in 0..MEASURED_TURNS {
         let expected = capture.count() + 1;
         member
-            .send(MEASURED_TURN_PROMPT.to_string(), HandlingMode::Queue)
+            .start_turn(
+                MEASURED_TURN_PROMPT.to_string(),
+                HandlingMode::Queue,
+                MemberTurnOptions::default(),
+                None,
+            )
             .await
-            .expect("measured turn send");
+            .expect("measured turn admission")
+            .wait()
+            .await
+            .expect("measured turn committed completion");
         wait_for_requests(
             capture,
             expected,
@@ -451,9 +468,8 @@ async fn measure_member_turns(
     let db_wal_growth_bytes =
         checked_fact_delta(db_wal_end, db_wal_start, "main database + WAL bytes");
     eprintln!(
-        "[turn-storage gate] {member_id}: {} whole-document digest bytes, \
-         {} whole-session encode bytes over {MEASURED_TURNS} turns",
-        digest_bytes, encode_bytes,
+        "[turn-storage gate] {member_id}: {digest_bytes} whole-document digest bytes, \
+         {encode_bytes} whole-session encode bytes over {MEASURED_TURNS} turns",
     );
     let digest_sites_end = meerkat_core::digest_site_bytes();
     for (index, label) in meerkat_core::DIGEST_SITE_LABELS.iter().enumerate() {
@@ -590,12 +606,17 @@ async fn run_turn_latency_harness() -> (TurnCost, TurnCost) {
         .member(&AgentIdentity::from("lead-1"))
         .await
         .expect("lead handle")
-        .send(
+        .start_turn(
             "fixture transcript for lead-1".to_string(),
             HandlingMode::Queue,
+            MemberTurnOptions::default(),
+            None,
         )
         .await
-        .expect("lead seed turn");
+        .expect("lead seed turn admission")
+        .wait()
+        .await
+        .expect("lead seed turn committed completion");
     let small_seed = "small baseline transcript "
         .repeat(SMALL_SEED_INPUT_BYTES / 24)
         .chars()
@@ -605,9 +626,17 @@ async fn run_turn_latency_harness() -> (TurnCost, TurnCost) {
         .member(&AgentIdentity::from(SMALL_MEMBER_ID))
         .await
         .expect("small member handle")
-        .send(small_seed, HandlingMode::Queue)
+        .start_turn(
+            small_seed,
+            HandlingMode::Queue,
+            MemberTurnOptions::default(),
+            None,
+        )
         .await
-        .expect("small seed turn");
+        .expect("small seed turn admission")
+        .wait()
+        .await
+        .expect("small seed turn committed completion");
     wait_for_requests(&capture, 2, "lead + small seed turns").await;
     quiesce("after small seeding").await;
     let baseline_store_bytes = dir_size_bytes(&stores_root);
@@ -625,9 +654,17 @@ async fn run_turn_latency_harness() -> (TurnCost, TurnCost) {
             .take(LARGE_TURN_INPUT_BYTES)
             .collect::<String>();
         large_member
-            .send(filler, HandlingMode::Queue)
+            .start_turn(
+                filler,
+                HandlingMode::Queue,
+                MemberTurnOptions::default(),
+                None,
+            )
             .await
-            .expect("large seed turn");
+            .expect("large seed turn admission")
+            .wait()
+            .await
+            .expect("large seed turn committed completion");
     }
     wait_for_requests(&capture, 2 + LARGE_SESSION_TURNS, "large seed turns").await;
 
@@ -676,7 +713,31 @@ async fn run_turn_latency_harness() -> (TurnCost, TurnCost) {
         large.wall_per_turn.as_secs_f64() / small.wall_per_turn.as_secs_f64().max(1e-9);
     eprintln!(
         "[turn-storage gate] per-turn large/small: {cpu_ratio:.1}x CPU / \
-         {wall_ratio:.1}x wall (diagnostic only)",
+         {wall_ratio:.1}x wall",
+    );
+    let maximum_large_cpu = small
+        .cpu_per_turn
+        .mul_f64(MAX_LARGE_SMALL_TIME_MULTIPLIER)
+        .saturating_add(CPU_TIME_SLACK_PER_TURN);
+    let maximum_large_wall = small
+        .wall_per_turn
+        .mul_f64(MAX_LARGE_SMALL_TIME_MULTIPLIER)
+        .saturating_add(WALL_TIME_SLACK_PER_TURN);
+    assert!(
+        large.cpu_per_turn <= maximum_large_cpu,
+        "ordinary HeadCanonical large-document turns consumed {:?} CPU per turn, above the \
+         load-tolerant {:?} envelope derived from identical small-document turns; an \
+         uninstrumented O(document) scan/clone/verification pass remains",
+        large.cpu_per_turn,
+        maximum_large_cpu,
+    );
+    assert!(
+        large.wall_per_turn <= maximum_large_wall,
+        "ordinary HeadCanonical large-document turns consumed {:?} wall time per turn, above the \
+         load-tolerant {:?} envelope derived from identical small-document turns; an \
+         uninstrumented O(document) wait or blocking pass remains",
+        large.wall_per_turn,
+        maximum_large_wall,
     );
 
     for (label, cost) in [("small", &small), ("large", &large)] {

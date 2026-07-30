@@ -1272,10 +1272,29 @@ impl McpRuntimeIngressContext {
             .unwrap_or((None, None));
         let Some(attachment) = attachment else {
             if self.runtime_adapter.contains_session(session_id).await {
-                return Err(explicit_resume_required(
-                    session_id,
-                    "runtime registration exists without an exact MCP sidecar cleanup witness",
-                ));
+                // Archive may need to synthesize a machine registration solely
+                // to establish RuntimeStore's absorbing Retired authority for
+                // a durable body that had no prior lifecycle row. That
+                // registration deliberately has no MCP attachment sidecar.
+                // It is safe to remove only after the shared store proves the
+                // session is already terminal; active or unreadable authority
+                // still requires an explicit resume and an exact witness.
+                if self.authoritative_session_archived(session_id).await? {
+                    self.runtime_adapter
+                        .try_unregister_session(session_id)
+                        .await
+                        .map_err(runtime_driver_error_to_session_error)?;
+                    if self.runtime_adapter.contains_session(session_id).await {
+                        return Err(SessionError::Unsupported(format!(
+                            "terminal MCP runtime cleanup for {session_id} completed without removing the witness-less registration"
+                        )));
+                    }
+                } else {
+                    return Err(explicit_resume_required(
+                        session_id,
+                        "runtime registration exists without an exact MCP sidecar cleanup witness",
+                    ));
+                }
             }
             if let Some((incarnation, revision)) = logical_identity {
                 self.remove_unattached_logical_exact(session_id, incarnation, revision)
@@ -2634,17 +2653,15 @@ impl CoreExecutor for McpSessionRuntimeExecutor {
             .map_err(CoreExecutorError::apply_failed_from_session_error)
     }
 
-    async fn acknowledge_whole_blob_session_boundary(
+    async fn acknowledge_committed_session_boundary(
         &mut self,
-        committed_store_revision: u64,
-        committed_blob_sha256: &str,
+        authority: &meerkat_core::CommittedSessionBoundaryAuthority,
     ) -> Result<(), CoreExecutorError> {
         self.context
             .service
-            .acknowledge_whole_blob_runtime_session_boundary_under_runtime_turn_boundary(
+            .acknowledge_committed_runtime_session_boundary_under_runtime_turn_boundary(
                 &self.session_id,
-                committed_store_revision,
-                committed_blob_sha256,
+                authority,
             )
             .await
             .map_err(CoreExecutorError::apply_failed_from_session_error)

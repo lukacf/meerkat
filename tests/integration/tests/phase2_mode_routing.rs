@@ -183,6 +183,15 @@ impl SessionAgent for MockSessionAgent {
         Ok(self.session.clone())
     }
 
+    fn session_transcript_authority(
+        &self,
+    ) -> Result<
+        meerkat_session::ephemeral::SessionTranscriptAuthoritySnapshot,
+        meerkat_core::error::AgentError,
+    > {
+        meerkat_session::ephemeral::SessionTranscriptAuthoritySnapshot::from_session(&self.session)
+    }
+
     fn durable_llm_identity(&self) -> Option<SessionLlmIdentity> {
         Some(self.llm_identity.clone())
     }

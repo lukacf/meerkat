@@ -939,6 +939,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                             "ClaimPending",
                             "DispatchStartedFromClaimed",
                             "DispatchAcceptedFromDispatching",
+                            "DispatchDeduplicatedFromDispatching",
                             "AwaitCompletionFromDispatching",
                             "RuntimeCompletionCompleted",
                         ])

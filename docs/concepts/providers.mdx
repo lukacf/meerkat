@@ -21,12 +21,16 @@ Session transcript and derives each provider request from it:
 - OpenAI Realtime preserves the same ordering with in-conversation System
   items; its separate session `instructions` field is reserved for
   provider-owned configuration.
-- Anthropic and Gemini can represent only a leading System prefix. The private
-  ChatGPT Responses wire can represent at most one leading System message.
-  Their request projection returns a typed error for an unrepresentable
-  transcript instead of hoisting or merging messages. The ordinary System row
-  remains authored in the durable Session; selecting one of the exact wires
-  above makes that Session executable without rewriting it.
+- Cataloged Anthropic Fable 5, Opus 4.8, and Opus 5 support
+  mid-conversation System messages. Meerkat lowers a turn-scoped canonical
+  `System -> User` boundary to Anthropic's legal
+  `User -> System -> Assistant` placement without changing the durable
+  transcript. Other Anthropic models and Gemini can represent only a leading
+  System prefix. The private ChatGPT Responses wire can represent at most one
+  leading System message. A limited provider projection returns a typed error
+  for an unrepresentable transcript instead of hoisting or merging messages.
+  The ordinary System row remains authored in the durable Session; selecting
+  a capable wire can execute that Session without rewriting it.
 
 Empty, whitespace-only, and duplicate instructions are significant: adapters
 do not trim, deduplicate, replace, hoist, or silently drop them. System

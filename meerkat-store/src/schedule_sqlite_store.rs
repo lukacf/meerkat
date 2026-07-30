@@ -181,6 +181,7 @@ pub const SCHEDULE_STORE_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::
 };
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod schema_floor_tests {
     use super::*;
 

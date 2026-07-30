@@ -45,9 +45,7 @@ mod tests {
     use meerkat_client::types::LlmStream;
     use meerkat_client::{LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest};
     use meerkat_core::SessionBuildOptions;
-    use meerkat_core::session_store::{
-        IncrementalSessionStore as _, SessionFilter, SessionStore, SessionStoreError,
-    };
+    use meerkat_core::session_store::{IncrementalSessionStore as _, SessionStore};
     #[cfg(all(feature = "memory-store-session", feature = "session-compaction"))]
     use meerkat_core::{
         MemoryEnumerationRequest, MemoryIndexBatch, MemoryIndexRequest, MemoryIndexScope,
@@ -613,7 +611,7 @@ mod tests {
             meerkat::SqliteSessionStore::open(sqlite_path.clone()).expect("open session sqlite"),
         );
         let runtime_store = Arc::new(
-            meerkat_runtime::store::SqliteRuntimeStore::new(sqlite_path)
+            meerkat_runtime::store::SqliteRuntimeStore::new_head_canonical(sqlite_path)
                 .expect("open runtime sqlite"),
         );
         let runtime_store_for_bundle: Arc<dyn RuntimeStore> = runtime_store.clone();
@@ -673,6 +671,57 @@ mod tests {
             &self,
         ) -> meerkat_runtime::store::RuntimeSessionPersistenceProfile {
             meerkat_runtime::store::RuntimeSessionPersistenceProfile::WholeBlobV1
+        }
+
+        fn session_boundary_authority_read_cost(
+            &self,
+        ) -> meerkat_runtime::store::RuntimeSessionAuthorityReadCost {
+            self.inner.session_boundary_authority_read_cost()
+        }
+
+        async fn load_session_boundary_authority(
+            &self,
+            runtime_id: &meerkat_runtime::LogicalRuntimeId,
+        ) -> Result<
+            Option<meerkat_runtime::store::RuntimeSessionAuthority>,
+            meerkat_runtime::RuntimeStoreError,
+        > {
+            self.inner.load_session_boundary_authority(runtime_id).await
+        }
+
+        async fn load_whole_blob_store_authority(
+            &self,
+            runtime_id: &meerkat_runtime::LogicalRuntimeId,
+        ) -> Result<
+            Option<meerkat_runtime::store::WholeBlobStoreAuthority>,
+            meerkat_runtime::RuntimeStoreError,
+        > {
+            self.inner.load_whole_blob_store_authority(runtime_id).await
+        }
+
+        async fn load_committed_whole_blob_snapshot(
+            &self,
+            runtime_id: &meerkat_runtime::LogicalRuntimeId,
+        ) -> Result<
+            Option<meerkat_runtime::store::CommittedWholeBlobSnapshot>,
+            meerkat_runtime::RuntimeStoreError,
+        > {
+            self.inner
+                .load_committed_whole_blob_snapshot(runtime_id)
+                .await
+        }
+
+        async fn commit_prepared_whole_blob_snapshot_cas(
+            &self,
+            runtime_id: &meerkat_runtime::LogicalRuntimeId,
+            prepared: meerkat_runtime::store::PreparedWholeBlobSnapshotCas,
+        ) -> Result<
+            meerkat_runtime::store::WholeBlobSnapshotCasOutcome,
+            meerkat_runtime::RuntimeStoreError,
+        > {
+            self.inner
+                .commit_prepared_whole_blob_snapshot_cas(runtime_id, prepared)
+                .await
         }
 
         async fn commit_prepared_session_boundary(
@@ -805,6 +854,40 @@ mod tests {
             self.inner.load_input_states(runtime_id).await
         }
 
+        async fn load_input_states_by_ids(
+            &self,
+            runtime_id: &meerkat_runtime::LogicalRuntimeId,
+            input_ids: &[meerkat_core::InputId],
+        ) -> Result<
+            Vec<Option<meerkat_runtime::input_state::StoredInputState>>,
+            meerkat_runtime::RuntimeStoreError,
+        > {
+            self.inner
+                .load_input_states_by_ids(runtime_id, input_ids)
+                .await
+        }
+
+        async fn load_pending_terminal_owner_ids_page(
+            &self,
+            runtime_id: &meerkat_runtime::LogicalRuntimeId,
+            after: Option<&meerkat_core::InputId>,
+            limit: usize,
+        ) -> Result<Vec<meerkat_core::InputId>, meerkat_runtime::RuntimeStoreError> {
+            self.inner
+                .load_pending_terminal_owner_ids_page(runtime_id, after, limit)
+                .await
+        }
+
+        async fn load_input_states_with_versions(
+            &self,
+            runtime_id: &meerkat_runtime::LogicalRuntimeId,
+        ) -> Result<
+            meerkat_runtime::store::PreparedRecoveryInputSnapshot,
+            meerkat_runtime::RuntimeStoreError,
+        > {
+            self.inner.load_input_states_with_versions(runtime_id).await
+        }
+
         async fn load_boundary_receipt(
             &self,
             runtime_id: &meerkat_runtime::LogicalRuntimeId,
@@ -871,6 +954,129 @@ mod tests {
             self.inner.persist_input_state(runtime_id, state).await
         }
 
+        async fn persist_input_states_atomically(
+            &self,
+            runtime_id: &meerkat_runtime::LogicalRuntimeId,
+            states: &[meerkat_runtime::input_state::InputStatePersistenceRecord],
+        ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
+            self.inner
+                .persist_input_states_atomically(runtime_id, states)
+                .await
+        }
+
+        async fn write_prepared_whole_blob_provisional_tail(
+            &self,
+            runtime_id: &meerkat_runtime::LogicalRuntimeId,
+            prepared: meerkat_runtime::store::PreparedWholeBlobProvisionalTail,
+        ) -> Result<
+            meerkat_runtime::store::WholeBlobProvisionalTailAuthority,
+            meerkat_runtime::RuntimeStoreError,
+        > {
+            self.inner
+                .write_prepared_whole_blob_provisional_tail(runtime_id, prepared)
+                .await
+        }
+
+        async fn load_whole_blob_provisional_tail(
+            &self,
+            runtime_id: &meerkat_runtime::LogicalRuntimeId,
+        ) -> Result<
+            Option<meerkat_runtime::store::CommittedWholeBlobProvisionalTail>,
+            meerkat_runtime::RuntimeStoreError,
+        > {
+            self.inner
+                .load_whole_blob_provisional_tail(runtime_id)
+                .await
+        }
+
+        async fn discard_whole_blob_provisional_tail(
+            &self,
+            runtime_id: &meerkat_runtime::LogicalRuntimeId,
+            expected: &meerkat_runtime::store::WholeBlobProvisionalTailAuthority,
+        ) -> Result<bool, meerkat_runtime::RuntimeStoreError> {
+            self.inner
+                .discard_whole_blob_provisional_tail(runtime_id, expected)
+                .await
+        }
+
+        fn input_state_batch_cas_implementation_profile(
+            &self,
+        ) -> meerkat_runtime::store::InputStateBatchCasImplementationProfile {
+            self.inner.input_state_batch_cas_implementation_profile()
+        }
+
+        async fn compare_and_swap_input_states_atomically(
+            &self,
+            runtime_id: &meerkat_runtime::LogicalRuntimeId,
+            expected: &[meerkat_runtime::input_state::StoredInputState],
+            replacements: &[meerkat_runtime::input_state::InputStatePersistenceRecord],
+        ) -> Result<
+            meerkat_runtime::store::InputStateBatchCasOutcome,
+            meerkat_runtime::RuntimeStoreError,
+        > {
+            self.inner
+                .compare_and_swap_input_states_atomically(runtime_id, expected, replacements)
+                .await
+        }
+
+        async fn compare_and_swap_input_states_atomically_with_fence(
+            &self,
+            runtime_id: &meerkat_runtime::LogicalRuntimeId,
+            expected: &[meerkat_runtime::input_state::StoredInputState],
+            replacements: &[meerkat_runtime::input_state::InputStatePersistenceRecord],
+            write_fence: Arc<dyn meerkat_runtime::store::RuntimeStoreWriteFence>,
+        ) -> Result<
+            meerkat_runtime::store::FencedInputStateBatchCasOutcome,
+            meerkat_runtime::RuntimeStoreError,
+        > {
+            self.inner
+                .compare_and_swap_input_states_atomically_with_fence(
+                    runtime_id,
+                    expected,
+                    replacements,
+                    write_fence,
+                )
+                .await
+        }
+
+        async fn compare_and_swap_recovery_input_states_atomically(
+            &self,
+            runtime_id: &meerkat_runtime::LogicalRuntimeId,
+            expected_revision: meerkat_runtime::store::RecoveryInputSetRevision,
+            mutations: &[meerkat_runtime::store::RecoveryInputStateMutation],
+        ) -> Result<
+            meerkat_runtime::store::InputStateBatchCasOutcome,
+            meerkat_runtime::RuntimeStoreError,
+        > {
+            self.inner
+                .compare_and_swap_recovery_input_states_atomically(
+                    runtime_id,
+                    expected_revision,
+                    mutations,
+                )
+                .await
+        }
+
+        async fn compare_and_swap_recovery_input_states_atomically_with_fence(
+            &self,
+            runtime_id: &meerkat_runtime::LogicalRuntimeId,
+            expected_revision: meerkat_runtime::store::RecoveryInputSetRevision,
+            mutations: &[meerkat_runtime::store::RecoveryInputStateMutation],
+            write_fence: Arc<dyn meerkat_runtime::store::RuntimeStoreWriteFence>,
+        ) -> Result<
+            meerkat_runtime::store::FencedInputStateBatchCasOutcome,
+            meerkat_runtime::RuntimeStoreError,
+        > {
+            self.inner
+                .compare_and_swap_recovery_input_states_atomically_with_fence(
+                    runtime_id,
+                    expected_revision,
+                    mutations,
+                    write_fence,
+                )
+                .await
+        }
+
         async fn load_input_state(
             &self,
             runtime_id: &meerkat_runtime::LogicalRuntimeId,
@@ -880,6 +1086,19 @@ mod tests {
             meerkat_runtime::RuntimeStoreError,
         > {
             self.inner.load_input_state(runtime_id, input_id).await
+        }
+
+        async fn load_input_state_by_idempotency_key(
+            &self,
+            runtime_id: &meerkat_runtime::LogicalRuntimeId,
+            key: &meerkat_runtime::IdempotencyKey,
+        ) -> Result<
+            Option<meerkat_runtime::store::ExactInputStateObservation>,
+            meerkat_runtime::RuntimeStoreError,
+        > {
+            self.inner
+                .load_input_state_by_idempotency_key(runtime_id, key)
+                .await
         }
 
         async fn load_machine_lifecycle_record(
@@ -1122,40 +1341,6 @@ mod tests {
                 .transcript_content_digest()
                 .expect("materialized projection transcript digest"),
             "{context}: store head must bind the materialized transcript digest"
-        );
-    }
-
-    async fn assert_runtime_snapshot_matches_authority(
-        store: &meerkat_runtime::store::SqliteRuntimeStore,
-        runtime_id: &meerkat_runtime::LogicalRuntimeId,
-        snapshot: &[u8],
-        session: &Session,
-        context: &str,
-    ) {
-        let committed = store
-            .load_committed_whole_blob_snapshot(runtime_id)
-            .await
-            .expect("load exact committed runtime snapshot")
-            .expect("committed runtime snapshot must exist");
-        assert_eq!(
-            committed.bytes(),
-            snapshot,
-            "{context}: store authority must bind the exact runtime bytes"
-        );
-        assert_eq!(
-            committed.session().messages().len(),
-            session.messages().len(),
-            "{context}: store authority must bind the decoded message count"
-        );
-        assert_eq!(
-            committed
-                .session()
-                .transcript_content_digest()
-                .expect("committed authority transcript digest"),
-            session
-                .transcript_content_digest()
-                .expect("decoded runtime snapshot transcript digest"),
-            "{context}: store authority must bind the decoded transcript digest"
         );
     }
 
@@ -1465,7 +1650,7 @@ mod tests {
             assert_eq!(
                 event_store.failed_rewrite_appends(),
                 1,
-                "test setup must fail exactly the post-commit rewrite audit append"
+                "test setup must fail exactly the post-commit rewrite audit append; outcome={outcome:?}"
             );
             assert!(
                 !matches!(outcome, Ok(CompletionOutcome::CallbackPending { .. })),
@@ -1500,28 +1685,13 @@ mod tests {
                     .expect("load runtime projection quarantine marker"),
                 "audit infrastructure failure must not quarantine valid runtime authority"
             );
-            let snapshot = runtime_store
-                .load_session_snapshot(&runtime_id)
-                .await
-                .expect("load runtime snapshot after audit append failure")
-                .expect("valid committed runtime snapshot must survive audit append failure");
-            let runtime_session: Session =
-                serde_json::from_slice(&snapshot).expect("runtime snapshot is a session");
-            assert_runtime_snapshot_matches_authority(
-                runtime_store.as_ref(),
-                &runtime_id,
-                snapshot.as_slice(),
-                &runtime_session,
-                "prepared compaction checkpoint",
-            )
-            .await;
-            assert!(has_compaction_summary(&runtime_session));
+            assert!(has_compaction_summary(&projection_after_failure));
             assert!(
-                runtime_session
+                !projection_after_failure
                     .compaction_projection_intents()
-                    .expect("read runtime snapshot outbox")
+                    .expect("read head-canonical session projection")
                     .is_empty(),
-                "the authoritative snapshot must be the exact cleaned checkpoint while the independent durable outbox retains retry custody"
+                "the store-owned head must retain the projection intent until every derived compaction effect is durable"
             );
 
             let memory_store =
@@ -1584,38 +1754,23 @@ mod tests {
         };
 
         // New service/runtime/agent/HNSW handles model a process restart. Feed
-        // it the surviving runtime snapshot directly; runtime recovery owns
-        // outbox reconciliation and must converge every derived projection.
+        // it the materialized store-owned head; runtime recovery owns outbox
+        // reconciliation and must converge every derived projection.
         let client: Arc<dyn LlmClient> = Arc::new(CallbackPendingAfterCompactionClient::new());
         let (service, adapter, runtime_store, event_store) =
             build_rewrite_audit_failure_memory_service(temp.path(), client);
         let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
-        let snapshot = runtime_store
-            .load_session_snapshot(&runtime_id)
-            .await
-            .expect("load surviving runtime snapshot for recovery")
-            .expect("runtime snapshot must survive into the new process");
-        let resume_source: Session =
-            serde_json::from_slice(&snapshot).expect("recovery snapshot is a session");
-        assert_runtime_snapshot_matches_authority(
-            runtime_store.as_ref(),
-            &runtime_id,
-            snapshot.as_slice(),
-            &resume_source,
-            "cold recovery source",
-        )
-        .await;
         let projection_store =
             meerkat::SqliteSessionStore::open(temp.path().join("sessions.sqlite3"))
                 .expect("open session projection store for checkpoint audit");
-        let projection = projection_store
+        let resume_source = projection_store
             .load(&session_id)
             .await
             .expect("load session projection for checkpoint audit")
             .expect("session projection must survive into the new process");
         assert_projection_matches_store_head(
             &projection_store,
-            &projection,
+            &resume_source,
             "cold recovery session projection",
         )
         .await;
@@ -1637,13 +1792,17 @@ mod tests {
         .await
         .expect("recovery must finalize the pending compaction outbox");
 
-        let recovered_snapshot = runtime_store
-            .load_session_snapshot(&runtime_id)
+        let recovered_session = projection_store
+            .load(&session_id)
             .await
-            .expect("load recovered runtime snapshot")
-            .expect("recovered runtime snapshot must remain authoritative");
-        let recovered_session: Session =
-            serde_json::from_slice(&recovered_snapshot).expect("recovered snapshot is a session");
+            .expect("load recovered store-owned session head")
+            .expect("recovered store-owned session head must remain authoritative");
+        assert_projection_matches_store_head(
+            &projection_store,
+            &recovered_session,
+            "recovered session projection",
+        )
+        .await;
         assert!(has_compaction_summary(&recovered_session));
         assert!(
             recovered_session
@@ -1885,139 +2044,6 @@ mod tests {
         assert_eq!(cadence.last_compaction_attempt_boundary_index, Some(1));
     }
 
-    /// Session-store wrapper modeling a host that loses the ability to write
-    /// the durable session row just before dying (the kill window between the
-    /// runtime-store commits and the row projection write inside
-    /// `save_normalized_session` / `persist_normalized_transcript_rewrite_chain`).
-    /// All reads and all other stores stay healthy; only durable row writes
-    /// fail while armed. Nothing is ever written that real code did not write.
-    struct KillWindowSessionStore {
-        inner: Arc<dyn SessionStore>,
-        fail_row_writes: Arc<AtomicBool>,
-    }
-
-    impl KillWindowSessionStore {
-        fn fail_if_armed(&self) -> Result<(), SessionStoreError> {
-            if self.fail_row_writes.load(Ordering::Acquire) {
-                return Err(SessionStoreError::Internal(
-                    "kill window: durable session row write lost before host death".to_string(),
-                ));
-            }
-            Ok(())
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl SessionStore for KillWindowSessionStore {
-        async fn save(&self, session: &Session) -> Result<(), SessionStoreError> {
-            self.fail_if_armed()?;
-            self.inner.save(session).await
-        }
-
-        async fn save_transcript_rewrite(
-            &self,
-            session: &Session,
-            commit: &meerkat_core::TranscriptRewriteCommit,
-        ) -> Result<(), SessionStoreError> {
-            self.fail_if_armed()?;
-            self.inner.save_transcript_rewrite(session, commit).await
-        }
-
-        async fn save_authoritative_projection(
-            &self,
-            session: &Session,
-        ) -> Result<(), SessionStoreError> {
-            self.fail_if_armed()?;
-            self.inner.save_authoritative_projection(session).await
-        }
-
-        async fn save_authoritative_projection_if_current_revision(
-            &self,
-            session: &Session,
-            expected_current_revision: Option<String>,
-        ) -> Result<(), SessionStoreError> {
-            self.fail_if_armed()?;
-            self.inner
-                .save_authoritative_projection_if_current_revision(
-                    session,
-                    expected_current_revision,
-                )
-                .await
-        }
-
-        async fn load(
-            &self,
-            id: &meerkat::SessionId,
-        ) -> Result<Option<Session>, SessionStoreError> {
-            self.inner.load(id).await
-        }
-
-        async fn list(
-            &self,
-            filter: SessionFilter,
-        ) -> Result<Vec<meerkat_core::SessionMeta>, SessionStoreError> {
-            self.inner.list(filter).await
-        }
-
-        async fn delete(&self, id: &meerkat::SessionId) -> Result<(), SessionStoreError> {
-            self.fail_if_armed()?;
-            self.inner.delete(id).await
-        }
-
-        async fn delete_if_current_revision(
-            &self,
-            id: &meerkat::SessionId,
-            expected_current_revision: &str,
-        ) -> Result<bool, SessionStoreError> {
-            self.fail_if_armed()?;
-            self.inner
-                .delete_if_current_revision(id, expected_current_revision)
-                .await
-        }
-    }
-
-    /// Build a runtime-backed service over explicit sqlite stores (same layout
-    /// as the sqlite realm backend: session row + runtime snapshots share one
-    /// sqlite file, file event store + projector under `.rkat/`), with the
-    /// durable session row behind the kill-window wrapper.
-    fn build_kill_window_service(
-        root: &std::path::Path,
-        fail_row_writes: Arc<AtomicBool>,
-    ) -> (
-        Arc<PersistentSessionService<FactoryAgentBuilder>>,
-        Arc<MeerkatMachine>,
-        Arc<dyn SessionStore>,
-    ) {
-        let sqlite_path = root.join("sessions.sqlite3");
-        let raw_row_store: Arc<dyn SessionStore> =
-            Arc::new(meerkat::SqliteSessionStore::open(sqlite_path.clone()).expect("open sqlite"));
-        let session_store: Arc<dyn SessionStore> = Arc::new(KillWindowSessionStore {
-            inner: Arc::clone(&raw_row_store),
-            fail_row_writes,
-        });
-        let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> = Arc::new(
-            meerkat_runtime::store::SqliteRuntimeStore::new(sqlite_path)
-                .expect("open runtime sqlite"),
-        );
-        let blob_store: Arc<dyn meerkat_core::BlobStore> =
-            Arc::new(meerkat_store::FsBlobStore::new(root.join("blobs")));
-        let bundle = PersistenceBundle::new(session_store, runtime_store, blob_store);
-
-        let factory = AgentFactory::new(root.join("sessions"));
-        let mut builder = FactoryAgentBuilder::new(factory, Config::default());
-        builder.default_llm_client = Some(Arc::new(HistorySummarizingTestClient));
-        let (service, adapter) = build_runtime_backed_service(builder, 4, bundle);
-        let service = service.with_event_projection(
-            Arc::new(meerkat_session::event_store::FileEventStore::new(
-                root.join(".rkat").join("events"),
-            )),
-            Arc::new(meerkat_session::projector::SessionProjector::new(
-                root.join(".rkat"),
-            )),
-        );
-        (Arc::new(service), adapter, raw_row_store)
-    }
-
     /// Like `run_prompt`, but returns the outcome (or the error text) instead
     /// of asserting completion — used for the turn that dies mid-persist.
     async fn run_prompt_capture(
@@ -2076,182 +2102,6 @@ mod tests {
         );
     }
 
-    /// Kill between commit points: the host dies (loses durable row writes)
-    /// during the compaction turn's boundary persist, AFTER the runtime-store
-    /// snapshots and the event-store rewrite audit committed but BEFORE the
-    /// durable session row was written. On restart the runtime snapshot is the
-    /// preferred authority (post-compaction) while the durable row is still the
-    /// pre-compaction transcript. Resume must accept the rewrite chain against
-    /// the lagged row and converge it — not fail closed with
-    /// `TranscriptContinuityViolation`.
-    ///
-    /// Same-process caveats sharpen here (see the module header): the "kill"
-    /// is a fault-injected row-write failure plus a JOINED unregister saga
-    /// (`wait_for_canonical_unregister_completion`), not a process death, and
-    /// host 2's authoritative load can be served by process-global memos
-    /// seeded when host 1 committed the compacted snapshot — the lagged-row
-    /// convergence is proven, but the full cold re-validation of the rewrite
-    /// chain may be memo-absorbed in this harness.
-    #[tokio::test]
-    async fn cold_restart_resume_after_compaction_with_lagged_durable_row() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let fail_row_writes = Arc::new(AtomicBool::new(false));
-
-        // First host lifetime.
-        let session_id = {
-            let (service, adapter, raw_row_store) =
-                build_kill_window_service(temp.path(), Arc::clone(&fail_row_writes));
-            let session = Session::new();
-            let session_id = session.id().clone();
-            materialize(&service, &adapter, session).await;
-            run_prompt(&adapter, &session_id, "first turn before crash").await;
-
-            // Arm the kill window: from here on the host can no longer write
-            // the durable session row (it is about to die mid-persist).
-            fail_row_writes.store(true, Ordering::Release);
-
-            // The compaction turn: runtime snapshots + rewrite audit events
-            // commit; the durable row write is best-effort on this path
-            // (checkpointer failures are warn-only), so the turn itself may
-            // still complete — which is exactly how production reaches this
-            // state: runtime authority advanced, row projection stale, host
-            // dies before any later write converges it.
-            let outcome =
-                run_prompt_capture(&adapter, &session_id, "second turn crashes mid-persist").await;
-            assert!(
-                outcome.is_ok(),
-                "test setup failed: the compaction turn could not run at all: {outcome:?}"
-            );
-
-            // The durable row must still be the pre-compaction transcript.
-            let row = raw_row_store
-                .load(&session_id)
-                .await
-                .expect("load durable row")
-                .expect("durable row exists");
-            assert!(
-                !has_compaction_summary(&row),
-                "test setup failed: durable row unexpectedly carries the compacted transcript"
-            );
-
-            // The failed compatibility checkpoint stops the runtime after its
-            // committed snapshot is durable. Its completion waiter resolves
-            // before the independently owned unregister saga necessarily
-            // finishes, and the executor itself retains the service/adapter
-            // Arcs, so merely leaving this lexical scope is not a process
-            // boundary. Join the canonical saga before constructing host 2;
-            // otherwise host 2 can race a durable Draining prefix and this
-            // transcript-projection test accidentally becomes an unregister
-            // recovery test.
-            wait_for_canonical_unregister_completion(&adapter, &session_id).await;
-            session_id
-        };
-        let runtime_store =
-            meerkat_runtime::store::SqliteRuntimeStore::new(temp.path().join("sessions.sqlite3"))
-                .expect("reopen runtime store after kill window");
-        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
-        assert_eq!(
-            meerkat_runtime::store::load_runtime_state(&runtime_store, &runtime_id)
-                .await
-                .expect("load completed runtime lifecycle after process boundary"),
-            Some(meerkat_runtime::RuntimeState::Idle),
-            "host 1 must durably commit the completed unregister lifecycle before host 2 starts"
-        );
-        let lifecycle_record = runtime_store
-            .load_machine_lifecycle_record(&runtime_id)
-            .await
-            .expect("load completed machine lifecycle record")
-            .expect("completed machine lifecycle record must remain queryable");
-        let lifecycle_record: serde_json::Value = serde_json::from_slice(&lifecycle_record)
-            .expect("completed machine lifecycle record must remain valid JSON");
-        assert_eq!(
-            lifecycle_record.get("unregister_progress"),
-            Some(&serde_json::Value::Null),
-            "host 2 must not inherit an unfinished unregister prefix from host 1"
-        );
-        let runtime_snapshot = runtime_store
-            .load_session_snapshot(&runtime_id)
-            .await
-            .expect("load runtime snapshot after kill window");
-        let quarantined = runtime_store
-            .is_runtime_projection_quarantined(&runtime_id)
-            .await
-            .expect("load runtime projection quarantine marker");
-        let pending_projections = runtime_store
-            .load_pending_compaction_projections(&runtime_id)
-            .await
-            .expect("load compaction outbox after kill window");
-        assert!(
-            runtime_snapshot.is_some(),
-            "committed runtime snapshot must survive projection failure; quarantined={quarantined}, pending_projections={pending_projections:?}"
-        );
-        let runtime_snapshot = runtime_snapshot
-            .expect("asserted committed runtime snapshot must survive projection failure");
-        let runtime_session: Session = serde_json::from_slice(&runtime_snapshot)
-            .expect("committed runtime snapshot must remain a Session");
-        assert!(
-            has_compaction_summary(&runtime_session),
-            "projection failure must not discard the committed compacted transcript"
-        );
-        assert!(
-            !quarantined,
-            "a failed compatibility projection must not quarantine committed runtime authority"
-        );
-        assert_eq!(
-            pending_projections.len(),
-            0,
-            "this no-memory-store fixture must not invent a compaction projection outbox"
-        );
-        // Host restart clears the transient write fault.
-        fail_row_writes.store(false, Ordering::Release);
-
-        // Second host lifetime over the same durable stores.
-        let (service, adapter, raw_row_store) =
-            build_kill_window_service(temp.path(), Arc::clone(&fail_row_writes));
-        let resume_source = service
-            .load_authoritative_session(&session_id)
-            .await
-            .expect("authoritative load after restart")
-            .expect("session should survive restart");
-        assert!(
-            has_compaction_summary(&resume_source),
-            "runtime snapshot authority must carry the compacted transcript on restart"
-        );
-        assert!(
-            rewrite_commit_count(&resume_source) >= 1,
-            "resume source must retain the compaction rewrite commit"
-        );
-
-        materialize(&service, &adapter, resume_source).await;
-        run_prompt(&adapter, &session_id, "third turn after restart").await;
-
-        let final_session = service
-            .load_authoritative_session(&session_id)
-            .await
-            .expect("authoritative load after resumed turn")
-            .expect("session should still exist");
-        let texts = user_texts(&final_session);
-        assert!(
-            texts.iter().any(|t| t.contains("first turn before crash")),
-            "history from before the crash must survive: {texts:?}"
-        );
-        assert!(
-            texts.iter().any(|t| t.contains("third turn after restart")),
-            "the post-restart turn must be recorded: {texts:?}"
-        );
-        // The resume persist must have converged the lagged durable row onto
-        // the compacted transcript.
-        let row = raw_row_store
-            .load(&session_id)
-            .await
-            .expect("load durable row after resume")
-            .expect("durable row exists after resume");
-        assert!(
-            has_compaction_summary(&row),
-            "resume must converge the lagged durable row onto the compacted transcript"
-        );
-    }
-
     /// Build a runtime-backed service over explicit sqlite stores (no
     /// wrapper), returning the raw sqlite session store so the test can
     /// inspect the incremental head/strand representation directly.
@@ -2267,7 +2117,7 @@ mod tests {
             Arc::new(meerkat::SqliteSessionStore::open(sqlite_path.clone()).expect("open sqlite"));
         let session_store: Arc<dyn SessionStore> = raw_row_store.clone();
         let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> = Arc::new(
-            meerkat_runtime::store::SqliteRuntimeStore::new(sqlite_path)
+            meerkat_runtime::store::SqliteRuntimeStore::new_head_canonical(sqlite_path)
                 .expect("open runtime sqlite"),
         );
         let blob_store: Arc<dyn meerkat_core::BlobStore> =
@@ -2344,12 +2194,12 @@ mod tests {
                     .any(|record| record.commit.messages_after < record.commit.messages_before),
                 "at least one adopted rewrite must shrink the transcript"
             );
-            // Slim contract: the durable row carries no inline history state.
-            assert!(
-                slim.transcript_history_state()
-                    .expect("state read")
-                    .is_none(),
-                "slim load must carry no inline history state"
+            // The head row carries no inline graph bytes, but the store-owned
+            // edge rows must be rebound onto the loaded domain Session.
+            assert_eq!(
+                rewrite_commit_count(&slim) as u64,
+                head.rewrite_count,
+                "load must restore the exact out-of-line compact graph"
             );
 
             let digest =

@@ -3934,11 +3934,13 @@ mod tests {
         assert_eq!(measured.graph_anchor_bytes, 0);
         assert!(measured.graph_bytes > 0);
 
-        let mut footprint = SessionFootprint::default();
-        footprint.inline_graph_kind = measured.graph_kind;
-        footprint.inline_graph_bytes = measured.graph_bytes;
-        footprint.inline_released_commits = measured.released_commits;
-        footprint.inline_released_revision_bodies = measured.released_revision_bodies;
+        let footprint = SessionFootprint {
+            inline_graph_kind: measured.graph_kind,
+            inline_graph_bytes: measured.graph_bytes,
+            inline_released_commits: measured.released_commits,
+            inline_released_revision_bodies: measured.released_revision_bodies,
+            ..SessionFootprint::default()
+        };
         let sessions = BTreeMap::from([("released".to_string(), footprint)]);
         let mut diagnosis = StorageDiagnosis::default();
         report_inline_graph_pool(

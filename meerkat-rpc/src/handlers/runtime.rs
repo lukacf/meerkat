@@ -152,6 +152,7 @@ pub(crate) fn to_wire_accept_result(
         meerkat_runtime::AcceptOutcome::Deduplicated {
             input_id,
             existing_id,
+            ..
         } => RuntimeAcceptResult {
             outcome_type: RuntimeAcceptOutcomeType::Deduplicated,
             input_id: Some(input_id.to_string()),

@@ -2838,15 +2838,37 @@ impl DriverEntry {
             .iter()
             .map(ToString::to_string)
             .collect();
+        // Completion receipts cover the whole runtime batch, while public
+        // interaction terminals cover only inputs admitted with directed
+        // interaction custody. Bind the outbox set to that stamped subset;
+        // comparing it to every completion recipient rejects valid mixed
+        // directed/nondirected batches before publication.
+        let mut expected_directed_input_ids = std::collections::BTreeSet::new();
+        for input_id in &completion_input_ids {
+            let stored = self
+                .as_driver()
+                .stored_input_state(input_id)
+                .ok_or_else(|| RuntimeDriverError::RecoveryCorruption {
+                    reason: format!(
+                        "interaction terminal completion lost recipient input {input_id}"
+                    ),
+                })?;
+            if stored.state.directed_run_started_attribution.is_some() {
+                expected_directed_input_ids.insert(input_id.to_string());
+            }
+        }
         let outbox_input_ids: std::collections::BTreeSet<_> = outboxes
             .iter()
             .map(|outbox| outbox.input_id.to_string())
             .collect();
-        if persisted_input_ids != outbox_input_ids {
+        if !outbox_input_ids.is_subset(&persisted_input_ids)
+            || expected_directed_input_ids != outbox_input_ids
+        {
             return Err(RuntimeDriverError::ValidationFailed {
                 reason: format!(
-                    "directed terminal completion recipients did not exactly match outbox rows: \
-                     expected={persisted_input_ids:?}, actual={outbox_input_ids:?}"
+                    "directed terminal completion subset did not exactly match outbox rows: \
+                     recipients={persisted_input_ids:?}, expected_directed={expected_directed_input_ids:?}, \
+                     actual={outbox_input_ids:?}"
                 ),
             });
         }
@@ -3478,16 +3500,6 @@ impl DriverEntry {
                 }
             }
         })
-    }
-
-    pub(crate) fn input_is_terminal_by_authority(
-        &self,
-        input_id: &InputId,
-    ) -> Result<bool, RuntimeDriverError> {
-        match self {
-            DriverEntry::Ephemeral(d) => d.input_is_terminal_by_authority(input_id),
-            DriverEntry::Persistent(d) => d.inner_ref().input_is_terminal_by_authority(input_id),
-        }
     }
 
     pub(crate) fn silent_comms_intents(&self) -> Vec<String> {
@@ -8865,11 +8877,17 @@ mod recovery_tests {
     ) {
         use crate::input_state::{InteractionTerminalOutbox, InteractionTerminalOutboxPhase};
 
-        let input = Input::Prompt(crate::input::PromptInput::new(
-            format!("terminal recovery batch {batch_key:?}"),
+        let input_id = InputId::new();
+        let input = crate::mob_adapter::create_tracked_flow_step_input(
+            "terminal-recovery-step",
+            meerkat_core::types::ContentInput::Text(format!(
+                "terminal recovery batch {batch_key:?}"
+            )),
+            "terminal-recovery-flow",
             None,
-        ));
-        let input_id = input.id().clone();
+            &input_id.to_string(),
+        )
+        .expect("build tracked directed terminal recovery input");
         assert!(
             persistent
                 .accept_input(input)
@@ -9009,7 +9027,9 @@ mod recovery_tests {
                     .await
             }
         });
-        entered.notified().await;
+        crate::tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+            .await
+            .expect("pre-CAS test block must be reached");
         task.abort();
         let join_error = match task.await {
             Ok(_) => panic!("blocked recovery completed instead of being cancelled"),
@@ -9071,7 +9091,9 @@ mod recovery_tests {
                     .await
             }
         });
-        entered.notified().await;
+        crate::tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+            .await
+            .expect("post-commit recovery CAS test block must be reached");
         task.abort();
         let join_error = match task.await {
             Ok(_) => panic!("blocked recovery completed instead of being cancelled"),
@@ -9175,7 +9197,9 @@ mod recovery_tests {
                     .await
             }
         });
-        entered.notified().await;
+        crate::tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+            .await
+            .expect("post-commit finalization CAS test block must be reached");
         task.abort();
         let join_error = match task.await {
             Ok(_) => panic!("blocked terminal finalization completed instead of being cancelled"),
@@ -9264,12 +9288,11 @@ mod recovery_tests {
     }
 
     #[tokio::test]
-    async fn terminal_publication_cancelled_after_commit_reconciles_published_image() {
-        use crate::input_state::InteractionTerminalOutboxPhase;
+    async fn terminal_publication_requires_exact_finalized_completion_receipt() {
         use crate::store::RuntimeStore;
 
         let (runtime_id, store, driver, _) = candidate_terminal_recovery_driver(
-            "terminal-publication-cancel-after-commit",
+            "terminal-publication-requires-finalized-completion",
             RunId::new(),
         )
         .await;
@@ -9320,86 +9343,60 @@ mod recovery_tests {
             })
             .collect::<Vec<_>>();
 
-        let entered = Arc::new(crate::tokio::sync::Notify::new());
-        let release = Arc::new(crate::tokio::sync::Notify::new());
-        store.block_next_input_state_batch_cas_after_commit(
-            Arc::clone(&entered),
-            Arc::clone(&release),
-        );
-        let task = crate::tokio::spawn({
-            let driver = Arc::clone(&driver);
-            let candidate_owner_input_id = candidate_owner_input_id.clone();
-            let receipts = receipts.clone();
-            async move {
-                driver
-                    .lock()
-                    .await
-                    .mark_interaction_terminal_outboxes_published(
-                        &candidate_owner_input_id,
-                        &receipts,
-                    )
-                    .await
-            }
-        });
-        entered.notified().await;
-        task.abort();
-        let join_error = match task.await {
-            Ok(_) => panic!("blocked terminal publication completed instead of being cancelled"),
-            Err(error) => error,
-        };
-        assert!(join_error.is_cancelled());
-        release.notify_waiters();
-
-        let shell = driver
-            .lock()
-            .await
-            .as_driver()
-            .stored_input_states_snapshot()
-            .expect("snapshot shell after lost publication acknowledgement");
-        assert!(matches!(
-            &shell[0]
-                .state
-                .interaction_terminal_outbox
-                .as_ref()
-                .expect("shell terminal outbox")
-                .phase,
-            InteractionTerminalOutboxPhase::Finalized { .. }
-        ));
-        let durable_after_cancel = store
-            .load_input_states_strict(&runtime_id)
-            .await
-            .expect("load durable published outbox");
-        assert!(matches!(
-            &durable_after_cancel[0]
-                .state
-                .interaction_terminal_outbox
-                .as_ref()
-                .expect("durable terminal outbox")
-                .phase,
-            InteractionTerminalOutboxPhase::Published { .. }
-        ));
-
-        let recovered = driver
-            .lock()
-            .await
-            .interaction_terminal_recovery_batches()
-            .await
-            .expect("lost publication acknowledgement must reconcile");
-        assert!(
-            recovered.is_empty(),
-            "published batches are already drained"
-        );
-        let shell_after_retry = serialized_input_states(
+        let shell_before = serialized_input_states(
             driver
                 .lock()
                 .await
                 .as_driver()
                 .stored_input_states_snapshot()
-                .expect("snapshot shell after publication reconciliation"),
+                .expect("snapshot shell before rejected publication"),
+        );
+        let durable_before = serialized_input_states(
+            store
+                .load_input_states_strict(&runtime_id)
+                .await
+                .expect("load durable image before rejected publication"),
+        );
+        let error = driver
+            .lock()
+            .await
+            .mark_interaction_terminal_outboxes_published(&candidate_owner_input_id, &receipts)
+            .await
+            .expect_err("publication must require the exact finalized completion receipt");
+        assert!(matches!(
+            error,
+            RuntimeDriverError::RecoveryCorruption { ref reason }
+                if reason.contains("lost its terminal-completion identity")
+        ));
+        assert_eq!(
+            serialized_input_states(
+                driver
+                    .lock()
+                    .await
+                    .as_driver()
+                    .stored_input_states_snapshot()
+                    .expect("snapshot shell after rejected publication"),
+            ),
+            shell_before,
+            "completion authority rejection must precede shell mutation"
         );
         assert_eq!(
-            shell_after_retry,
-            serialized_input_states(durable_after_cancel)
+            serialized_input_states(
+                store
+                    .load_input_states_strict(&runtime_id)
+                    .await
+                    .expect("load durable image after rejected publication"),
+            ),
+            durable_before,
+            "completion authority rejection must precede durable mutation"
+        );
+        assert_eq!(
+            store
+                .load_pending_terminal_owner_ids_page(&runtime_id, None, 2)
+                .await
+                .expect("load pending terminal owner after rejected publication"),
+            vec![candidate_owner_input_id],
+            "rejected publication must leave the finalized outbox recoverable"
         );
     }
 

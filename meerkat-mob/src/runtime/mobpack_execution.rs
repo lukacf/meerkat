@@ -17,6 +17,10 @@ use tokio::time as tokio_time;
 const CALLABLE_POLICY_PATH: &str = "adaptive/policies.toml";
 const LAYER_DESTROY_RETRY_INITIAL: Duration = Duration::from_millis(25);
 const LAYER_DESTROY_RETRY_MAX: Duration = Duration::from_secs(1);
+// Leave enough scheduler margin for the exact planning subphase error and its
+// run ledger to reach the outer adaptive owner before the absolute policy
+// deadline wins the timeout race.
+const PLANNING_DIAGNOSTIC_HANDOFF: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MobpackRunOutcome {
@@ -95,8 +99,15 @@ pub async fn run_mobpack_callable(
 pub(super) struct PackAdaptiveRuntime {
     pub(super) control_mob: MobHandle,
     pub(super) session_service: Arc<dyn MobSessionService>,
+    pub(super) active_planning_run: Option<ActivePlanningRun>,
     #[cfg(test)]
     pub(super) layer_created_probe: Option<tokio::sync::mpsc::UnboundedSender<MobHandle>>,
+}
+
+#[derive(Clone)]
+pub(super) struct ActivePlanningRun {
+    run_id: RunId,
+    planning_turn: u64,
 }
 
 struct PackLayerCancellationOwner {
@@ -133,58 +144,209 @@ async fn run_pack_layer_cancellation_cleanup(
     layer_id: crate::adaptive::LayerId,
     attempt: u64,
     layer: MobHandle,
+    deadline: tokio_time::Instant,
 ) {
     // Make one best-effort pass before physical cleanup. Neither response is
     // allowed to gate destruction; both inputs are replay-safe and are retried
     // below after the child reaches a proven terminal state.
-    let _ = driver.cancel(&capability).await;
-    let _ = driver
-        .record_layer_interrupted(&capability, &layer_id, attempt)
-        .await;
+    let _ = tokio_time::timeout_at(deadline, driver.cancel(&capability)).await;
+    let _ = tokio_time::timeout_at(
+        deadline,
+        driver.record_layer_interrupted(&capability, &layer_id, attempt),
+    )
+    .await;
 
     loop {
-        let destroyed = layer.destroy().await.is_ok()
-            || matches!(layer.status().await, Ok(MobState::Destroyed));
+        if tokio_time::Instant::now() >= deadline {
+            tracing::error!(
+                layer_id = layer_id.as_str(),
+                attempt,
+                "adaptive layer cleanup guardian exhausted its bounded terminalization window"
+            );
+            return;
+        }
+        let destroyed = matches!(
+            tokio_time::timeout_at(deadline, layer.destroy()).await,
+            Ok(Ok(_))
+        ) || matches!(
+            tokio_time::timeout_at(deadline, layer.status()).await,
+            Ok(Ok(MobState::Destroyed))
+        );
         if destroyed {
             break;
         }
 
         // Destroy is idempotent and retryable. Retaining this owned worker is
         // preferable to reverting to an orphaned self-retaining mob actor.
-        tokio_time::sleep(Duration::from_millis(25)).await;
+        tokio_time::sleep(
+            Duration::from_millis(25)
+                .min(deadline.saturating_duration_since(tokio_time::Instant::now())),
+        )
+        .await;
     }
 
     // Lost responses are indistinguishable from committed transitions. Retry
     // the now-idempotent machine inputs until their acknowledgements arrive;
     // the owned worker continues holding the physically destroyed child while
     // control-plane truth converges.
-    while driver.cancel(&capability).await.is_err() {
-        tokio_time::sleep(Duration::from_millis(25)).await;
+    while !matches!(
+        tokio_time::timeout_at(deadline, driver.cancel(&capability)).await,
+        Ok(Ok(()))
+    ) {
+        if tokio_time::Instant::now() >= deadline {
+            return;
+        }
+        tokio_time::sleep(
+            Duration::from_millis(25)
+                .min(deadline.saturating_duration_since(tokio_time::Instant::now())),
+        )
+        .await;
     }
-    while driver
-        .record_layer_interrupted(&capability, &layer_id, attempt)
-        .await
-        .is_err()
-    {
-        tokio_time::sleep(Duration::from_millis(25)).await;
+    while !matches!(
+        tokio_time::timeout_at(
+            deadline,
+            driver.record_layer_interrupted(&capability, &layer_id, attempt)
+        )
+        .await,
+        Ok(Ok(()))
+    ) {
+        if tokio_time::Instant::now() >= deadline {
+            return;
+        }
+        tokio_time::sleep(
+            Duration::from_millis(25)
+                .min(deadline.saturating_duration_since(tokio_time::Instant::now())),
+        )
+        .await;
     }
-    while driver
-        .record_layer_mob_destroyed(&capability, &layer_id, attempt)
-        .await
-        .is_err()
-    {
-        tokio_time::sleep(Duration::from_millis(25)).await;
+    while !matches!(
+        tokio_time::timeout_at(
+            deadline,
+            driver.record_layer_mob_destroyed(&capability, &layer_id, attempt)
+        )
+        .await,
+        Ok(Ok(()))
+    ) {
+        if tokio_time::Instant::now() >= deadline {
+            return;
+        }
+        tokio_time::sleep(
+            Duration::from_millis(25)
+                .min(deadline.saturating_duration_since(tokio_time::Instant::now())),
+        )
+        .await;
     }
 }
 
 impl PackAdaptiveRuntime {
+    async fn cancel_active_planning_run(
+        &mut self,
+        deadline: &crate::adaptive::AdaptiveOperationDeadline,
+    ) -> Result<(), crate::adaptive::AdaptiveError> {
+        let Some(custody) = self.active_planning_run.clone() else {
+            return Ok(());
+        };
+        let mut last_status = "flow row absent".to_string();
+        loop {
+            let subphase_remaining = deadline.terminalization_subphase_remaining();
+            if subphase_remaining.is_zero() {
+                tracing::error!(
+                    run_id = %custody.run_id,
+                    planning_turn = custody.planning_turn,
+                    status = %last_status,
+                    deadline_ms = deadline.deadline_ms(),
+                    "adaptive planning-flow cancellation exhausted its terminalization window"
+                );
+                return Err(
+                    crate::adaptive::AdaptiveError::TerminalizationDeadlineExceeded {
+                        stage: crate::adaptive::AdaptiveRuntimeStage::PlanningCancellation,
+                        deadline_ms: deadline.deadline_ms(),
+                    },
+                );
+            }
+            match tokio_time::timeout(
+                subphase_remaining,
+                self.control_mob.flow_status(custody.run_id.clone()),
+            )
+            .await
+            {
+                Ok(Ok(Some(run))) => {
+                    last_status = format!(
+                        "status={:?}; failures={:?}; steps={:?}",
+                        run.status, run.failure_ledger, run.step_ledger
+                    );
+                    if mob_machine_run_status_is_terminal(&run.run_id, &run.status)? {
+                        self.active_planning_run = None;
+                        return Ok(());
+                    }
+                    match tokio_time::timeout(
+                        deadline.terminalization_subphase_remaining(),
+                        self.control_mob.cancel_flow(custody.run_id.clone()),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => {
+                            self.active_planning_run = None;
+                            return Ok(());
+                        }
+                        Ok(Err(error)) => {
+                            tracing::warn!(
+                                run_id = %custody.run_id,
+                                planning_turn = custody.planning_turn,
+                                status = %last_status,
+                                error = %error,
+                                "adaptive planning-flow cancellation will retry"
+                            );
+                        }
+                        Err(_) => {
+                            tracing::warn!(
+                                run_id = %custody.run_id,
+                                planning_turn = custody.planning_turn,
+                                status = %last_status,
+                                "adaptive planning-flow cancellation subphase timed out"
+                            );
+                        }
+                    }
+                }
+                Ok(Ok(None)) => {
+                    // The stable run identity is acquired before admission.
+                    // An outer timeout can therefore race a still-queued
+                    // admission command; retain custody and keep checking
+                    // until absence or terminality is authoritative.
+                }
+                Ok(Err(error)) => {
+                    tracing::warn!(
+                        run_id = %custody.run_id,
+                        planning_turn = custody.planning_turn,
+                        status = %last_status,
+                        error = %error,
+                        "adaptive planning-flow status check during cancellation will retry"
+                    );
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        run_id = %custody.run_id,
+                        planning_turn = custody.planning_turn,
+                        status = %last_status,
+                        "adaptive planning-flow status subphase timed out during cancellation"
+                    );
+                }
+            }
+            tokio_time::sleep(Duration::from_millis(25).min(deadline.terminalization_remaining()))
+                .await;
+        }
+    }
+
     fn cancellation_safe_layer(
         &self,
         layer: MobHandle,
         capability: crate::AdaptiveDriverCapability,
         layer_id: crate::adaptive::LayerId,
         attempt: u64,
+        deadline: &crate::adaptive::AdaptiveOperationDeadline,
     ) -> crate::adaptive::AdaptiveLayerLease<MobHandle> {
+        let cancellation_deadline =
+            tokio_time::Instant::now() + deadline.terminalization_remaining();
         let guardian_layer = layer.clone();
         let driver = crate::adaptive::AdaptiveDriver::new(self.control_mob.clone());
         let (guardian_trigger, cancellation) = tokio::sync::oneshot::channel();
@@ -202,6 +364,7 @@ impl PackAdaptiveRuntime {
                 worker_layer_id,
                 attempt,
                 guardian_layer,
+                cancellation_deadline,
             )
             .await;
         });
@@ -219,6 +382,7 @@ impl PackAdaptiveRuntime {
                     layer_id,
                     attempt,
                     reaper_layer,
+                    cancellation_deadline,
                 )
                 .await;
             }
@@ -247,19 +411,115 @@ impl crate::adaptive::AdaptiveDriverRuntime for PackAdaptiveRuntime {
     async fn run_planning_turn(
         &mut self,
         request: crate::adaptive::PlanningTurnRequest,
+        deadline: &crate::adaptive::AdaptiveOperationDeadline,
     ) -> Result<crate::adaptive::LayerDecision, crate::adaptive::AdaptiveError> {
-        let run_id = self
-            .control_mob
-            .run_flow(
-                FlowId::from("plan"),
-                serde_json::json!({
-                    "adaptive_run_id": request.adaptive_run_id.as_str(),
-                    "objective": request.objective,
-                    "previous_layer_result": request.previous_layer_result,
-                }),
+        let flow_id = FlowId::from("plan");
+        let idempotency_key = format!(
+            "adaptive:{}:planning:{}",
+            request.adaptive_run_id.as_str(),
+            request.planning_turn
+        );
+        let identity = crate::store::MobExternalDeliveryIdentity::new(
+            &idempotency_key,
+            RunId::new().to_string(),
+        )
+        .map_err(|error| {
+            crate::adaptive::AdaptiveError::DriverRuntime(format!(
+                "adaptive planning identity is invalid: {error}"
+            ))
+        })?;
+        let run_id =
+            RunId::for_external_delivery(self.control_mob.mob_id(), &flow_id, &idempotency_key);
+        self.active_planning_run = Some(ActivePlanningRun {
+            run_id: run_id.clone(),
+            planning_turn: request.planning_turn,
+        });
+        tracing::debug!(
+            %run_id,
+            planning_turn = request.planning_turn,
+            "adaptive planning flow entering admission"
+        );
+        let admission_diagnostics = || {
+            format!(
+                "run_id={run_id}; planning_turn={}; phase=admission-and-target-provisioning",
+                request.planning_turn
             )
-            .await?;
-        let run = await_flow_terminal(&self.control_mob, run_id.clone()).await?;
+        };
+        let admission_budget = deadline
+            .execution_subphase_remaining()
+            .saturating_sub(PLANNING_DIAGNOSTIC_HANDOFF);
+        let admission: Result<RunId, crate::adaptive::AdaptiveError> = if admission_budget.is_zero()
+        {
+            Err(deadline.execution_error(
+                crate::adaptive::AdaptiveRuntimeStage::PlanningAdmission,
+                admission_diagnostics(),
+            ))
+        } else {
+            match tokio_time::timeout(admission_budget, async {
+                    self.control_mob
+                        .run_flow_with_external_identity(
+                            flow_id,
+                            serde_json::json!({
+                                "adaptive_run_id": request.adaptive_run_id.as_str(),
+                                "objective": request.objective,
+                                "previous_layer_result": request.previous_layer_result,
+                            }),
+                            &identity,
+                        )
+                        .await
+                        .map_err(|error| {
+                            crate::adaptive::AdaptiveError::DriverRuntime(format!(
+                                "adaptive planning admission failed; run_id={run_id}; planning_turn={}; phase=admission-and-target-provisioning; error={error}",
+                                request.planning_turn
+                            ))
+                        })
+                })
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => Err(deadline.execution_error(
+                        crate::adaptive::AdaptiveRuntimeStage::PlanningAdmission,
+                        admission_diagnostics(),
+                    )),
+                }
+        };
+        let admitted_run_id = match admission {
+            Ok(run_id) => run_id,
+            Err(error @ crate::adaptive::AdaptiveError::DeadlineExceeded { .. }) => {
+                // The admission future was dropped at the outer deadline.
+                // Retain the preselected run identity so the caller can
+                // resolve that ambiguous command through exact cancellation.
+                return Err(error);
+            }
+            Err(error) => {
+                // A received non-timeout failure is an authoritative negative
+                // admission result; there is no planning flow to retain.
+                self.active_planning_run = None;
+                return Err(error);
+            }
+        };
+        if admitted_run_id != run_id {
+            self.active_planning_run = Some(ActivePlanningRun {
+                run_id: admitted_run_id.clone(),
+                planning_turn: request.planning_turn,
+            });
+            return Err(crate::adaptive::AdaptiveError::DriverRuntime(format!(
+                "adaptive planning admission returned run '{admitted_run_id}' instead of stable run '{run_id}'"
+            )));
+        }
+        tracing::debug!(
+            %run_id,
+            planning_turn = request.planning_turn,
+            "adaptive planning flow admitted; entering terminal wait"
+        );
+        let run = await_flow_terminal(
+            &self.control_mob,
+            run_id.clone(),
+            deadline,
+            crate::adaptive::AdaptiveRuntimeStage::PlanningTerminalWait,
+        )
+        .await?;
+        self.active_planning_run = None;
         let decision = run
             .root_step_outputs
             .get(&crate::StepId::from("plan"))
@@ -279,12 +539,20 @@ impl crate::adaptive::AdaptiveDriverRuntime for PackAdaptiveRuntime {
         serde_json::from_value(decision.clone()).map_err(Into::into)
     }
 
+    async fn cancel_planning_turn(
+        &mut self,
+        deadline: &crate::adaptive::AdaptiveOperationDeadline,
+    ) -> Result<(), crate::adaptive::AdaptiveError> {
+        self.cancel_active_planning_run(deadline).await
+    }
+
     async fn provision_layer(
         &mut self,
         capability: &Self::Capability,
         layer_id: &crate::adaptive::LayerId,
         attempt: u64,
         compiled: &crate::adaptive::CompiledLayer,
+        deadline: &crate::adaptive::AdaptiveOperationDeadline,
     ) -> crate::adaptive::AdaptiveLayerProvision<Self::Layer> {
         let requested_members = compiled.spawn_specs.len() as u64;
         let mut builder = match MobBuilder::from_mobpack(
@@ -322,8 +590,13 @@ impl crate::adaptive::AdaptiveDriverRuntime for PackAdaptiveRuntime {
         if let Some(probe) = &self.layer_created_probe {
             let _ = probe.send(handle.clone());
         }
-        let layer =
-            self.cancellation_safe_layer(handle, capability.clone(), layer_id.clone(), attempt);
+        let layer = self.cancellation_safe_layer(
+            handle,
+            capability.clone(),
+            layer_id.clone(),
+            attempt,
+            deadline,
+        );
         let spawn_results = match layer.layer().spawn_many(compiled.spawn_specs.clone()).await {
             Ok(results) => results,
             Err(error) => {
@@ -363,6 +636,7 @@ impl crate::adaptive::AdaptiveDriverRuntime for PackAdaptiveRuntime {
         &mut self,
         layer: &Self::Layer,
         activation_params: BTreeMap<String, serde_json::Value>,
+        _deadline: &crate::adaptive::AdaptiveOperationDeadline,
     ) -> Result<RunId, crate::adaptive::AdaptiveError> {
         Ok(layer
             .run_flow(
@@ -376,8 +650,24 @@ impl crate::adaptive::AdaptiveDriverRuntime for PackAdaptiveRuntime {
         &mut self,
         layer: &Self::Layer,
         run_id: RunId,
+        deadline: &crate::adaptive::AdaptiveOperationDeadline,
     ) -> Result<MobRun, crate::adaptive::AdaptiveError> {
-        await_flow_terminal(layer, run_id).await
+        await_flow_terminal(
+            layer,
+            run_id,
+            deadline,
+            crate::adaptive::AdaptiveRuntimeStage::LayerTerminal,
+        )
+        .await
+    }
+
+    async fn cancel_layer_flow(
+        &mut self,
+        layer: &Self::Layer,
+        run_id: RunId,
+        _deadline: &crate::adaptive::AdaptiveOperationDeadline,
+    ) -> Result<(), crate::adaptive::AdaptiveError> {
+        Ok(layer.cancel_flow(run_id).await?)
     }
 
     async fn cleanup_layer(
@@ -385,10 +675,25 @@ impl crate::adaptive::AdaptiveDriverRuntime for PackAdaptiveRuntime {
         layer: &crate::adaptive::AdaptiveLayerLease<Self::Layer>,
         layer_id: &crate::adaptive::LayerId,
         attempt: u64,
+        deadline: &crate::adaptive::AdaptiveOperationDeadline,
     ) -> Result<crate::adaptive::AdaptiveLayerCleanup, crate::adaptive::AdaptiveError> {
         let mut retry_delay = LAYER_DESTROY_RETRY_INITIAL;
         loop {
-            match layer.layer().destroy().await {
+            let remaining = deadline.cleanup_remaining();
+            if remaining.is_zero() {
+                return Ok(crate::adaptive::AdaptiveLayerCleanup::Retained(
+                    crate::AdaptiveLayerDisposition::Retained,
+                ));
+            }
+            let destroy = match tokio_time::timeout(remaining, layer.layer().destroy()).await {
+                Ok(result) => result,
+                Err(_) => {
+                    return Ok(crate::adaptive::AdaptiveLayerCleanup::Retained(
+                        crate::AdaptiveLayerDisposition::Retained,
+                    ));
+                }
+            };
+            match destroy {
                 Ok(_) => return Ok(crate::adaptive::AdaptiveLayerCleanup::Destroyed),
                 Err(error) => {
                     let actor_channel_closed = matches!(
@@ -415,7 +720,13 @@ impl crate::adaptive::AdaptiveDriverRuntime for PackAdaptiveRuntime {
                         retry_delay_ms = retry_delay.as_millis(),
                         "adaptive mobpack child destroy incomplete; retaining lease and retrying",
                     );
-                    tokio_time::sleep(retry_delay).await;
+                    let remaining = deadline.cleanup_remaining();
+                    if remaining.is_zero() {
+                        return Ok(crate::adaptive::AdaptiveLayerCleanup::Retained(
+                            crate::AdaptiveLayerDisposition::Retained,
+                        ));
+                    }
+                    tokio_time::sleep(retry_delay.min(remaining)).await;
                     retry_delay = retry_delay.saturating_mul(2).min(LAYER_DESTROY_RETRY_MAX);
                 }
             }
@@ -478,6 +789,7 @@ async fn run_adaptive_callable(
     let mut runtime = PackAdaptiveRuntime {
         control_mob,
         session_service,
+        active_planning_run: None,
         #[cfg(test)]
         layer_created_probe: None,
     };
@@ -563,14 +875,55 @@ fn load_profile_templates(
 async fn await_flow_terminal(
     mob: &MobHandle,
     run_id: RunId,
+    deadline: &crate::adaptive::AdaptiveOperationDeadline,
+    stage: crate::adaptive::AdaptiveRuntimeStage,
 ) -> Result<MobRun, crate::adaptive::AdaptiveError> {
+    let mut last_status = "flow row absent".to_string();
     loop {
-        if let Some(run) = mob.flow_status(run_id.clone()).await?
-            && mob_machine_run_status_is_terminal(&run_id, &run.status)?
-        {
-            return Ok(run);
+        let status_budget = deadline
+            .execution_subphase_remaining()
+            .saturating_sub(PLANNING_DIAGNOSTIC_HANDOFF);
+        if status_budget.is_zero() {
+            tracing::error!(
+                %run_id,
+                stage = %stage,
+                status = %last_status,
+                deadline_ms = deadline.deadline_ms(),
+                "adaptive flow terminal wait exhausted its execution window"
+            );
+            return Err(deadline
+                .execution_error(stage, format!("run_id={run_id}; last_status={last_status}")));
         }
-        tokio_time::sleep(Duration::from_millis(250)).await;
+        let status = match tokio_time::timeout(status_budget, mob.flow_status(run_id.clone())).await
+        {
+            Ok(result) => result.map_err(crate::adaptive::AdaptiveError::from)?,
+            Err(_) => {
+                return Err(deadline.execution_error(
+                    stage,
+                    format!("run_id={run_id}; last_status={last_status}"),
+                ));
+            }
+        };
+        if let Some(run) = status {
+            let observed_status = format!(
+                "status={:?}; failures={:?}; steps={:?}",
+                run.status, run.failure_ledger, run.step_ledger
+            );
+            if observed_status != last_status {
+                tracing::debug!(
+                    %run_id,
+                    stage = %stage,
+                    status = %observed_status,
+                    "adaptive flow terminal wait observed a status transition"
+                );
+                last_status = observed_status;
+            }
+            if mob_machine_run_status_is_terminal(&run_id, &run.status)? {
+                return Ok(run);
+            }
+        }
+        tokio_time::sleep(Duration::from_millis(250).min(deadline.execution_subphase_remaining()))
+            .await;
     }
 }
 

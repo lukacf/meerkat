@@ -1147,18 +1147,22 @@ machine! {
             has_metadata || has_build_state || runtime_projection_quarantined
         }
 
-        // Lifecycle-terminal realization helper: the runtime is retired iff
-        // the archive is runtime-backed AND the typed runtime observation says
-        // retirement work remains. The durable session-document snapshot is
-        // intentionally not consulted here: it authorizes the document write,
-        // but cannot prove runtime presence or override a quiescent terminal.
+        // Lifecycle-terminal realization helper. RuntimeStore is the singular
+        // lifecycle authority for runtime-backed sessions, so archiving a
+        // durable body must establish an absorbing runtime terminal even when
+        // no prior lifecycle row or live registration exists. A pre-existing
+        // quiescent terminal is already converged and must not be rewritten.
         helper archive_should_retire_runtime(
             runtime_backed: bool,
+            durable_document_present: bool,
             runtime_observation: Enum<SessionArchiveRuntimeObservation>
         ) -> bool {
             runtime_backed
                 && runtime_observation
-                    == SessionArchiveRuntimeObservation::RetirementRequired
+                    != SessionArchiveRuntimeObservation::QuiescentTerminal
+                && (durable_document_present
+                    || runtime_observation
+                        == SessionArchiveRuntimeObservation::RetirementRequired)
         }
 
         disposition SessionFirstTurnPhaseResolved => local seam NoOwnerRealization,
@@ -3600,6 +3604,7 @@ machine! {
                 write_document: durable_document_present,
                 retire_runtime: archive_should_retire_runtime(
                     runtime_backed,
+                    durable_document_present,
                     runtime_observation)
             }
         }

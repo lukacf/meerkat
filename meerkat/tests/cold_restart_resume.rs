@@ -153,15 +153,15 @@ mod tests {
             .collect()
     }
 
-    /// Ask B regression: the persisted row and the runtime-store snapshot can
-    /// carry the same conversation with different construction bookkeeping
-    /// (run identity, timestamps) — e.g. a row written by a pre-#808 binary,
-    /// or a re-created authority that re-stamped its projection. Resume must
-    /// treat the transcript revision as a content address: bookkeeping-only
-    /// divergence must not fail the append-only save guard and strand the
-    /// session.
+    /// Exact physical authority regression: changing persisted message bytes
+    /// without advancing the store-issued head token must fail closed.
+    ///
+    /// Older releases normalized selected bookkeeping fields before comparing
+    /// authority. With the 0.8.10 compatibility floor removed, a row carrying
+    /// different bytes under the old token is corruption, even when the
+    /// visible conversation text happens to be unchanged.
     #[tokio::test]
-    async fn cold_restart_resume_survives_rebookkept_persisted_row() {
+    async fn cold_restart_resume_refuses_rebookkept_persisted_row() {
         let temp = tempfile::tempdir().expect("tempdir");
 
         let session_id = {
@@ -227,35 +227,14 @@ mod tests {
             session_id
         };
 
-        // Cold restart: resume prefers the runtime snapshot (original stamps)
-        // and the first post-resume persist proves continuity against the
-        // re-stamped row. Content is identical, so this must succeed.
-        let (service, adapter) = build_service(temp.path()).await;
-        let resume_source = service
+        let (service, _adapter) = build_service(temp.path()).await;
+        let error = service
             .load_authoritative_session(&session_id)
             .await
-            .expect("authoritative load after restart")
-            .expect("session should survive restart");
-        materialize(&service, &adapter, resume_source).await;
-        run_prompt(&adapter, &session_id, "second turn after restart").await;
-
-        let final_session = service
-            .load_authoritative_session(&session_id)
-            .await
-            .expect("authoritative load after resumed turn")
-            .expect("session should still exist");
-        let texts = user_texts(&final_session);
+            .expect_err("changed physical bytes under the old token must fail closed");
         assert!(
-            texts
-                .iter()
-                .any(|t| t.contains("first turn before restart")),
-            "history from before the restart must survive: {texts:?}"
-        );
-        assert!(
-            texts
-                .iter()
-                .any(|t| t.contains("second turn after restart")),
-            "the post-restart turn must be recorded: {texts:?}"
+            format!("{error:?}").contains("TranscriptRevisionConflict"),
+            "unexpected exact-authority error: {error}"
         );
     }
 

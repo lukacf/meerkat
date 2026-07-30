@@ -138,12 +138,11 @@ Ownership splits three ways:
   promotion advances the committed authority to the exact physical head.
   Both are fenced on the observed store, lifecycle-row, and input-row
   identities, so a concurrent writer fails the whole boundary typed instead
-  of being overwritten. No shell promotes or discards the tail. The
-  classification verdict crosses the crate seam sealed:
-  `DurableTailRecoveryRequest` has private fields and one constructor,
-  `from_classification`, which requires the classifier's own
-  `DurableTailClassified` effect — the request cannot exist without the
-  verdict that justifies it.
+  of being overwritten. No shell promotes or discards the tail.
+  `recover_durable_tail` is the only public preparation seam and accepts only
+  the `RuntimeStore` plus stable `SessionId`; it loads and seals the exact
+  store source, classification, receipt facts, candidate identity, and CAS
+  tokens internally before driving generated authority.
 
 The recovery rule is never-discard: every store-proven durable descendant is
 preserved. Recovery commits a completed tail as a recovered run boundary,

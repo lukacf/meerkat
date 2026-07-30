@@ -68,7 +68,11 @@ else
   bad "RUST_LANE_ID target directories collide"
 fi
 
-codex_agent_env="$(CODEX_AGENT_ID=doctor-codex-agent ./scripts/repo-cargo --print-env)"
+codex_agent_env="$(
+  env -u RUST_LANE_ID -u MEERKAT_AGENT_LANE -u GITHUB_JOB -u GITHUB_RUN_ID \
+    -u GITHUB_RUN_ATTEMPT CODEX_AGENT_ID=doctor-codex-agent \
+    ./scripts/repo-cargo --print-env
+)"
 codex_agent_lane="$(value_from_env lane_key "${codex_agent_env}")"
 if [[ "${codex_agent_lane}" == "doctor-codex-agent" ]]; then
   pass "CODEX_AGENT_ID creates a distinct same-worktree Cargo lane"
@@ -76,7 +80,11 @@ else
   bad "CODEX_AGENT_ID was not used as the default Cargo lane"
 fi
 
-github_lane_env="$(GITHUB_JOB=fmt-lint GITHUB_RUN_ID=12345 GITHUB_RUN_ATTEMPT=2 ./scripts/repo-cargo --print-env)"
+github_lane_env="$(
+  env -u RUST_LANE_ID -u MEERKAT_AGENT_LANE -u CODEX_AGENT_ID \
+    GITHUB_JOB=fmt-lint GITHUB_RUN_ID=12345 GITHUB_RUN_ATTEMPT=2 \
+    ./scripts/repo-cargo --print-env
+)"
 github_lane="$(value_from_env lane_key "${github_lane_env}")"
 if [[ "${github_lane}" == "gha-12345-2-fmt-lint" ]]; then
   pass "GitHub Actions target lanes are isolated per run attempt"

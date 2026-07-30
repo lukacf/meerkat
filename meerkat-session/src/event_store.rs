@@ -2139,6 +2139,7 @@ impl FileEventStore {
                 }
             }
             if let [commit] = commits.as_slice()
+                && commit.rewrite_generation != 0
                 && commit.rewrite_generation == head.last_rewrite_generation
                 && head.last_rewrite_commit.as_ref() != Some(commit)
             {
@@ -3863,6 +3864,62 @@ impl FileEventStore {
                 batch.insert(commit.rewrite_generation, (commit, event.seq));
             }
         }
+        for event in events {
+            let Some((event_session_id, receipt, _)) =
+                transcript_rewrite_receipt_event_parts(&event.event)
+            else {
+                continue;
+            };
+            if event_session_id != session_id {
+                continue;
+            }
+
+            // A receipt is authority for one exact missing suffix, not merely
+            // a conflict-free bag of occurrence facts. Run this after exact
+            // generation conflict detection so corruption retains its typed,
+            // more-specific verdict instead of being masked by a broad prefix
+            // mismatch.
+            let proved_start = if index.legacy_transcript_rewrite_commits.is_empty() {
+                let mut accumulator = TranscriptRewritePrefixAccumulator::empty();
+                let mut expected_generation = 1_u64;
+                for (&generation, row) in &index.transcript_rewrite_commits {
+                    if generation != expected_generation {
+                        break;
+                    }
+                    accumulator = accumulator
+                        .extend(&row.commit)
+                        .map_err(|error| EventStoreError::Serialization(error.to_string()))?;
+                    expected_generation = expected_generation.checked_add(1).ok_or_else(|| {
+                        EventStoreError::Store(
+                            "transcript rewrite generation overflow while proving receipt start"
+                                .to_string(),
+                        )
+                    })?;
+                }
+                accumulator
+            } else {
+                // Released generation-zero rows acquire order only from the
+                // one-time body-authorized importer. Without its finalized
+                // durable head, no nonempty current prefix is proved here.
+                TranscriptRewritePrefixAccumulator::empty()
+            };
+            if receipt.start_prefix() != &proved_start {
+                return Err(EventStoreError::Store(format!(
+                    "transcript rewrite receipt starts at occurrence {}, but the canonical event log proves occurrence {}",
+                    receipt.start_prefix().occurrence_count(),
+                    proved_start.occurrence_count()
+                )));
+            }
+
+            let receipt_end = receipt.end_prefix().occurrence_count();
+            if let Some((&greatest_existing, _)) = index.transcript_rewrite_commits.last_key_value()
+                && greatest_existing > receipt_end
+            {
+                return Err(EventStoreError::Store(format!(
+                    "transcript rewrite receipt ends at occurrence {receipt_end}, omitting already-observed occurrence {greatest_existing}"
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -4703,6 +4760,17 @@ mod tests {
             .expect("test rewrite receipt must validate")
     }
 
+    fn transcript_rewrite_receipt_event(
+        session_id: &SessionId,
+        receipt: TranscriptRewriteAuditReceiptBatch,
+    ) -> AgentEvent {
+        AgentEvent::TranscriptRewriteAuditReceiptCommitted {
+            session_id: session_id.clone(),
+            receipt,
+            final_assistant_text: None,
+        }
+    }
+
     fn assert_invalid_exact_terminal(error: EventStoreError, interaction_id: InteractionId) {
         assert!(
             matches!(
@@ -4772,7 +4840,7 @@ mod tests {
             session_id.clone(),
             2,
             second_prefix,
-            Some(second.commit.clone()),
+            Some(second.commit),
         )?;
 
         let omission = TranscriptRewriteAuditRead::authorized_tail(
@@ -4792,9 +4860,16 @@ mod tests {
         );
 
         let conflicting = transcript_rewrite_record(1, "A", "X", None, "conflicting-first");
+        let conflicting_receipt = transcript_rewrite_receipt(
+            TranscriptRewritePrefixAccumulator::empty(),
+            std::slice::from_ref(&conflicting.commit),
+        );
         let conflicting_row = RawTranscriptRewriteEvent::new(
             2,
-            serde_json::value::to_raw_value(&transcript_rewrite_event(&session_id, conflicting))?,
+            serde_json::value::to_raw_value(&transcript_rewrite_receipt_event(
+                &session_id,
+                conflicting_receipt,
+            ))?,
         )?;
         let first_receipt = TranscriptRewritePrefixReceipt::new(
             session_id,
@@ -4958,6 +5033,8 @@ mod tests {
                 meerkat_core::types::UserMessage::text("corrupt-on-disk-body"),
             ));
         let commit = corrupt.commit.clone();
+        corrupt.commit.rewrite_generation = 0;
+        corrupt.digest_format = 0;
         append_raw_test_rows(
             &store,
             &session_id,
@@ -5014,6 +5091,8 @@ mod tests {
             .push(meerkat_core::Message::User(
                 meerkat_core::types::UserMessage::text("corrupt-anchored-suffix"),
             ));
+        anchored_corrupt.commit.rewrite_generation = 0;
+        anchored_corrupt.digest_format = 0;
         append_raw_test_rows(
             &store,
             &anchored_session,
@@ -5163,6 +5242,8 @@ mod tests {
 
         let a_to_c =
             transcript_rewrite_record(3, "A", "C", Some(a_to_b.commit.revision.clone()), "a-to-c");
+        let third_receipt =
+            transcript_rewrite_receipt(expected.clone(), std::slice::from_ref(&a_to_c.commit));
         append_raw_test_rows(
             &restarted,
             &session_id,
@@ -5183,7 +5264,7 @@ mod tests {
                     source: EventSourceIdentity::session(session_id.clone()),
                     mob_id: None,
                     stream_seq: 5,
-                    event: transcript_rewrite_event(&session_id, a_to_c.clone()),
+                    event: transcript_rewrite_receipt_event(&session_id, third_receipt),
                 },
             ],
         )
@@ -5269,10 +5350,19 @@ mod tests {
             TranscriptRewritePrefixAccumulator::from_commits(std::slice::from_ref(&a_to_b.commit))?;
         let descendant_only =
             transcript_rewrite_receipt(first_prefix, std::slice::from_ref(&b_to_c.commit));
-        store
+        let descendant_error = store
             .append_transcript_rewrite_receipt_exact(&session_id, &descendant_only, None)
             .await
             .expect_err("a descendant-only receipt cannot skip its missing ancestor");
+        assert!(
+            matches!(
+                &descendant_error,
+                EventStoreError::Store(message)
+                    if message.contains("starts at occurrence 1")
+                        && message.contains("proves occurrence 0")
+            ),
+            "descendant-only receipt must fail at the exact proved-prefix boundary, got {descendant_error:?}"
+        );
         assert!(
             !store.log_path(&session_id).exists(),
             "rejected descendant-only evidence must not create canonical JSONL"
@@ -5395,6 +5485,7 @@ mod tests {
         let mut legacy_record =
             meerkat_core::TranscriptRewriteRecord::new(commit, parent_body, revision_body)?;
         legacy_record.commit.rewrite_generation = 0;
+        legacy_record.digest_format = 0;
         let legacy_event = transcript_rewrite_event(&session_id, legacy_record);
 
         // Full payload decode owns compatibility healing because the retained
@@ -5521,9 +5612,10 @@ mod tests {
             )
             .into());
         };
-        assert!(
-            repaired.rewrite_rows().is_empty(),
-            "current receipt-only reconciliation must not expose rewrite bodies"
+        assert_eq!(
+            repaired.rewrite_rows().len(),
+            1,
+            "full reconciliation must retain the exact compact receipt row so the consumer can verify logged occurrence coverage"
         );
         assert_eq!(
             repaired
@@ -6426,15 +6518,26 @@ mod tests {
         assert_eq!(restarted.last_seq(&session_id).await?, 512);
         assert_eq!(
             restarted.decoded_rows(),
-            512,
-            "a restarted in-memory index performs one validating rebuild"
+            0,
+            "the durable event-log head serves a restarted last_seq without rebuilding JSONL"
         );
 
         restarted.reset_decoded_rows();
         let page = restarted.read_from_bounded(&session_id, 477, 11).await?;
         assert_eq!(page.first().map(|row| row.seq), Some(477));
         assert_eq!(page.last().map(|row| row.seq), Some(487));
-        assert!(restarted.decoded_rows() <= usize::try_from(EVENT_LOG_INDEX_STRIDE)? + 11);
+        assert!(
+            restarted.decoded_rows() <= 512 + usize::try_from(EVENT_LOG_INDEX_STRIDE)? + 11,
+            "the first page after restart performs one validating index rebuild plus one bounded seek"
+        );
+        restarted.reset_decoded_rows();
+        let indexed_page = restarted.read_from_bounded(&session_id, 477, 11).await?;
+        assert_eq!(indexed_page.first().map(|row| row.seq), Some(477));
+        assert_eq!(indexed_page.last().map(|row| row.seq), Some(487));
+        assert!(
+            restarted.decoded_rows() <= usize::try_from(EVENT_LOG_INDEX_STRIDE)? + 11,
+            "later pages reuse the validated sparse index"
+        );
         restarted.reset_decoded_rows();
         assert_eq!(restarted.last_seq(&session_id).await?, 512);
         assert_eq!(restarted.decoded_rows(), 0);
@@ -6571,11 +6674,13 @@ mod tests {
         );
 
         store.reset_decoded_rows();
-        assert_eq!(store.last_seq(&retained_session).await?, 1);
+        let rebuilt = store.read_from_bounded(&retained_session, 1, 1).await?;
+        assert_eq!(rebuilt.len(), 1);
+        assert_eq!(rebuilt[0].seq, 1);
         assert_eq!(
             store.decoded_rows(),
-            1,
-            "an evicted entry reconstructs from the canonical JSONL"
+            2,
+            "an evicted entry reconstructs one index row from canonical JSONL and serves one requested row"
         );
         assert_eq!(
             store.index_registry_len().await,
@@ -6641,12 +6746,25 @@ mod tests {
             })
             .await;
 
+        let shared = store.event_log_index(&session_id).await;
+        {
+            let index = shared.lock().await;
+            assert_eq!(index.last_seq, 129);
+            assert_eq!(index.row_count, 129);
+            assert_eq!(
+                index.fingerprint,
+                Some(after),
+                "a delayed append note must preserve the newer validated index"
+            );
+        }
         store.reset_decoded_rows();
-        assert_eq!(store.last_seq(&session_id).await?, 129);
+        let tail = store.read_from_bounded(&session_id, 129, 1).await?;
+        assert_eq!(tail.len(), 1);
+        assert_eq!(tail[0].seq, 129);
         assert_eq!(
             store.decoded_rows(),
-            0,
-            "a delayed append note must preserve the newer validated index"
+            1,
+            "the preserved index serves only the requested tail row"
         );
         Ok(())
     }

@@ -126,22 +126,14 @@ impl OwnedProcessGroup {
             return Ok(());
         }
         self.kill_already_requested = true;
+        // A successfully dispatched SIGKILL is the containment fence. Waiting
+        // for the numeric process-group identity itself to disappear is not:
+        // an already-killed orphan/zombie descendant can keep killpg(pgid, 0)
+        // observable until an external reaper runs, even though it can no
+        // longer execute or emit output. Keep child reaping bounded, then
+        // retire the owned identity. Signal-dispatch failure above remains a
+        // hard error and leaves the guard armed.
         let _ = tokio::time::timeout(self.kill_settle_timeout, child.wait()).await;
-
-        let settle_deadline = Instant::now() + self.kill_settle_timeout;
-        while Instant::now() < settle_deadline {
-            if !self.control.exists(pgid)? {
-                self.disarm();
-                return Ok(());
-            }
-            tokio::time::sleep(self.poll_interval).await;
-        }
-        if self.control.exists(pgid)? {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                format!("process group {pgid} survived TERM/KILL containment"),
-            ));
-        }
         self.disarm();
         Ok(())
     }
@@ -260,6 +252,22 @@ pub(super) async fn join_output_bounded(
             let _ = handle.await;
             warn!("{} reader task exceeded bounded drain timeout", label);
             Vec::new()
+        }
+    }
+}
+
+/// Join a reader that projects directly onto a channel without allowing an
+/// escaped writer to retain that reader task forever.
+pub(super) async fn join_reader_bounded(mut handle: JoinHandle<()>, label: &str) {
+    match tokio::time::timeout(OUTPUT_DRAIN_TIMEOUT, &mut handle).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            warn!("{} reader task failed: {}", label, error);
+        }
+        Err(_) => {
+            handle.abort();
+            let _ = handle.await;
+            warn!("{} reader task exceeded bounded drain timeout", label);
         }
     }
 }
@@ -389,7 +397,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn terminate_fails_and_stays_armed_while_group_survives_kill() {
+    async fn accepted_kill_fence_retires_observable_zombie_group_identity() {
         let mut child = short_lived_child().await;
         let control = Arc::new(FailingControl {
             fail_probe: false,
@@ -404,14 +412,13 @@ mod tests {
             Duration::ZERO,
         );
 
-        let error = group
+        group
             .terminate(&mut child)
             .await
-            .expect_err("a surviving group is not contained");
-        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+            .expect("accepted SIGKILL is the bounded containment fence");
         assert!(
-            group.pgid.is_some(),
-            "surviving group must leave the guard armed"
+            group.pgid.is_none(),
+            "an observable zombie identity must not wedge containment"
         );
         assert!(
             control.signals.load(Ordering::SeqCst) >= 2,

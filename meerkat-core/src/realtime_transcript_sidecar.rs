@@ -446,6 +446,7 @@ fn user_content_event_rejected(commit: &RealtimeTranscriptApplyCommit) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::realtime_transcript::RealtimeTranscriptRole;

@@ -316,6 +316,21 @@ impl RunCheckpointReceipt {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait SessionCheckpointer: Send + Sync {
+    /// Rebind the actor's fixed-size committed base after a runtime-owned
+    /// control-only store mutation.
+    ///
+    /// The receipt is minted from the store outcome that committed the
+    /// control mutation. Implementations must confirm that exact authority;
+    /// they must not reload or compare the accumulated Session document.
+    async fn acknowledge_control_commit(
+        &self,
+        _receipt: &SessionControlCommitReceipt,
+    ) -> Result<(), AgentError> {
+        Err(AgentError::InternalError(
+            "session checkpointer cannot acknowledge runtime control commits".to_string(),
+        ))
+    }
+
     /// Persist one in-run physical successor.
     ///
     /// `previous` is the exact last successful receipt for this session/run.
@@ -330,7 +345,52 @@ pub trait SessionCheckpointer: Send + Sync {
     ) -> Result<Option<RunCheckpointReceipt>, AgentError>;
 }
 
+/// Fixed-size store authority returned by a runtime-owned control mutation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionControlCommitReceipt {
+    session_id: SessionId,
+    store_revision: u64,
+    authority_token: String,
+}
+
+impl SessionControlCommitReceipt {
+    pub fn new(
+        session_id: SessionId,
+        store_revision: u64,
+        authority_token: impl Into<String>,
+    ) -> Result<Self, String> {
+        let authority_token = authority_token.into();
+        if store_revision == 0 {
+            return Err("session control commit revision must be non-zero".to_string());
+        }
+        if authority_token.is_empty() {
+            return Err("session control commit authority token must be non-empty".to_string());
+        }
+        Ok(Self {
+            session_id,
+            store_revision,
+            authority_token,
+        })
+    }
+
+    #[must_use]
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    #[must_use]
+    pub const fn store_revision(&self) -> u64 {
+        self.store_revision
+    }
+
+    #[must_use]
+    pub fn authority_token(&self) -> &str {
+        &self.authority_token
+    }
+}
+
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -429,5 +489,20 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn session_control_commit_receipt_requires_bounded_store_authority() {
+        let session_id = SessionId::new();
+        let receipt = SessionControlCommitReceipt::new(session_id.clone(), 7, "row-sha256:exact")
+            .expect("non-zero revision and non-empty token should be accepted");
+        assert_eq!(receipt.session_id(), &session_id);
+        assert_eq!(receipt.store_revision(), 7);
+        assert_eq!(receipt.authority_token(), "row-sha256:exact");
+
+        assert!(
+            SessionControlCommitReceipt::new(session_id.clone(), 0, "row-sha256:exact").is_err()
+        );
+        assert!(SessionControlCommitReceipt::new(session_id, 7, "").is_err());
     }
 }

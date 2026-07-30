@@ -146,7 +146,7 @@ pub use transcript_history::{
     TranscriptRewriteParentTransition, TranscriptRewritePatch, TranscriptRewritePrefixAccumulator,
     TranscriptRewriteRecord, ValidatedTranscriptHistory, ValidatedTranscriptRewriteSuffix,
     extend_transcript_rewrite_prefix_accumulator, transcript_history_full_body_materializations,
-    transcript_rewrite_prefix_commit_serializations, transcript_rewrite_prefix_digest,
+    transcript_rewrite_prefix_digest,
 };
 
 /// Current session format version.
@@ -574,10 +574,9 @@ pub fn transcript_messages_digest(messages: &[Message]) -> Result<String, serde_
 /// Full transcript digest that does NOT bump the content-digest budget
 /// counter.
 ///
-/// Reserved for the debug-build witness cross-check: that recompute is
-/// verification scaffolding, not production work, so counting it would make
-/// the digest-budget regression tests measure the cross-check instead of the
-/// path being budgeted.
+/// Reserved for focused meerkat-core unit-test witness cross-checks. Downstream
+/// debug/integration builds deliberately do not execute it: verification
+/// scaffolding must not turn ordinary runtime work back into O(document).
 pub(crate) fn transcript_messages_digest_uncounted(
     messages: &[Message],
 ) -> Result<String, serde_json::Error> {
@@ -640,17 +639,34 @@ fn head_canonical_metadata_cell_carries_key(key: &str) -> bool {
 }
 
 #[cfg(test)]
-static SESSION_HEAD_METADATA_CANONICALIZATION_COUNT: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+std::thread_local! {
+    /// Per-test-thread observability for exact metadata-value canonicalization.
+    ///
+    /// The Rust test harness runs independent tests concurrently in one
+    /// process. A process-global counter lets unrelated HeadCanonical fixture
+    /// construction inflate another test's O(delta) budget, so it cannot
+    /// certify how much work the measured caller performed.
+    static SESSION_HEAD_METADATA_CANONICALIZATION_COUNT: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+}
 
 #[cfg(test)]
 pub(crate) fn reset_session_head_metadata_canonicalization_count() {
-    SESSION_HEAD_METADATA_CANONICALIZATION_COUNT.store(0, std::sync::atomic::Ordering::Relaxed);
+    SESSION_HEAD_METADATA_CANONICALIZATION_COUNT.set(0);
 }
 
 #[cfg(test)]
 pub(crate) fn session_head_metadata_canonicalization_count() -> u64 {
-    SESSION_HEAD_METADATA_CANONICALIZATION_COUNT.load(std::sync::atomic::Ordering::Relaxed)
+    SESSION_HEAD_METADATA_CANONICALIZATION_COUNT.get()
+}
+
+#[cfg(test)]
+pub(crate) fn record_session_head_metadata_canonicalization() {
+    SESSION_HEAD_METADATA_CANONICALIZATION_COUNT.set(
+        SESSION_HEAD_METADATA_CANONICALIZATION_COUNT
+            .get()
+            .saturating_add(1),
+    );
 }
 
 #[derive(Debug, Clone)]
@@ -900,16 +916,44 @@ fn compact_transcript_history_metadata_for_snapshot(
     let Some(value) = metadata.remove(SESSION_TRANSCRIPT_HISTORY_STATE_KEY) else {
         return Ok(None);
     };
-    let mut state: TranscriptHistoryState =
+    let state: TranscriptHistoryState =
         serde_json::from_value(value).map_err(|error| error.to_string())?;
-    state
-        .compact_mechanical_revision_bodies()
-        .map_err(|error| error.to_string())?;
+    // `TranscriptHistoryState::deserialize` has already performed the full
+    // current-graph validation. Current graphs carry no mechanical revision
+    // bodies to prune, so validating again here only repeats every retained
+    // rewrite-prefix serialization before installing the exact state that was
+    // just proved.
     metadata.remove(SESSION_TRANSCRIPT_REWRITE_PREFIX_AUTHORITY_KEY);
     Ok(Some(std::sync::Arc::new(state)))
 }
 
 impl ValidatedTranscriptHistory {
+    /// Seal one compact transcript graph reconstructed from exact
+    /// HeadCanonical rows and persisted graph edges.
+    ///
+    /// This is a store-ingress capability, not a general graph constructor.
+    /// The graph implementation revalidates the anchor, ordered edges, and both
+    /// physical-head prefix authorities before this proof can be minted.
+    #[doc(hidden)]
+    pub fn from_store_replayed_compact_graph(
+        anchor_revision: String,
+        anchor_messages: Vec<Message>,
+        anchor_row_prefix: crate::session_store::SessionMessageRowPrefixAccumulator,
+        edges: Vec<TranscriptRevisionEdge>,
+        expected_rewrite_prefix: &TranscriptRewritePrefixAccumulator,
+        expected_graph_prefix: &TranscriptGraphPrefixAccumulator,
+    ) -> Result<Self, TranscriptEditError> {
+        let state = TranscriptHistoryState::from_store_replayed_compact_graph(
+            anchor_revision,
+            anchor_messages,
+            anchor_row_prefix,
+            edges,
+            expected_rewrite_prefix,
+            expected_graph_prefix,
+        )?;
+        Ok(Self::adopt_session_validated(std::sync::Arc::new(state)))
+    }
+
     /// Rebuild and seal a graph from generation-bearing rewrite records while
     /// reusing an optional already-proved prefix.
     ///
@@ -1139,6 +1183,37 @@ pub struct SerializedSessionArtifact {
     row_sha256_token: Arc<str>,
 }
 
+/// One decoded WholeBlob document paired with its observed physical identity.
+///
+/// This is an observation, not persistence authority: the owning store must
+/// compare [`Self::row_sha256_token`] with its transaction-issued row token
+/// before exposing [`Self::session`].  Decoding through this seam also installs
+/// the exact serialized-message lineage proven by those same bytes, so a
+/// subsequent transcript rewrite does not depend on a self-authenticating
+/// `Session` field.
+#[derive(Debug)]
+pub struct DecodedWholeBlobSessionDocument {
+    session: Session,
+    row_sha256_token: String,
+}
+
+impl DecodedWholeBlobSessionDocument {
+    #[must_use]
+    pub fn session(&self) -> &Session {
+        &self.session
+    }
+
+    #[must_use]
+    pub fn row_sha256_token(&self) -> &str {
+        &self.row_sha256_token
+    }
+
+    #[must_use]
+    pub fn into_session(self) -> Session {
+        self.session
+    }
+}
+
 impl SerializedSessionArtifact {
     fn from_parts(bytes: Vec<u8>, raw_sha256: [u8; 32]) -> Self {
         Self {
@@ -1193,6 +1268,7 @@ impl SessionArtifactWriter {
     }
 
     fn finish(self) -> SerializedSessionArtifact {
+        crate::digest_observability::record_session_encode_bytes(self.bytes.len() as u64);
         let digest = self.hasher.finalize();
         let mut raw_sha256 = [0u8; 32];
         raw_sha256.copy_from_slice(&digest);
@@ -1389,6 +1465,32 @@ impl Session {
     /// process-global memo lookup.
     pub fn from_persisted_bytes(serialized: &[u8]) -> Result<Self, serde_json::Error> {
         serde_json::from_slice(serialized)
+    }
+
+    /// Decode an observed WholeBlob row and derive its exact physical identity.
+    ///
+    /// The returned token is deliberately not trusted here. `RuntimeStore`
+    /// owns the transaction-issued authority and must compare it before the
+    /// decoded session is usable. Once that comparison succeeds, the exact
+    /// serialized message vector establishes the row-lineage origin required
+    /// by later rewrite commits.
+    #[doc(hidden)]
+    pub fn decode_whole_blob_document(
+        serialized: &[u8],
+    ) -> Result<DecodedWholeBlobSessionDocument, serde_json::Error> {
+        let session = Self::from_persisted_bytes(serialized)?;
+        let message_count = u64::try_from(session.messages().len()).map_err(|_| {
+            <serde_json::Error as serde::de::Error>::custom(
+                "WholeBlob transcript row count exceeds u64",
+            )
+        })?;
+        if session.exact_message_row_prefix_at(message_count).is_none() {
+            session.messages.mark_lazy_whole_blob_row_lineage();
+        }
+        Ok(DecodedWholeBlobSessionDocument {
+            session,
+            row_sha256_token: row_sha256_token(sha256_key(serialized)),
+        })
     }
 
     /// Exact durable-row lineage at one prefix count, when this Session was
@@ -3297,6 +3399,54 @@ impl Session {
         Ok(Some(commit))
     }
 
+    /// Construct one legitimate typed compaction and its paired projection
+    /// intent for downstream persistence-contract tests.
+    ///
+    /// This seam deliberately remains behind `test-support`: tests may ask the
+    /// core compaction owner to mint the opaque witness, but may not reproduce
+    /// its selection tag or projection fingerprint outside this crate.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn stage_validated_compaction_for_test(
+        &mut self,
+        replacement: Vec<Message>,
+        summary_tokens: u64,
+    ) -> Result<
+        (
+            TranscriptRewriteCommit,
+            crate::memory::CompactionProjectionIntent,
+        ),
+        String,
+    > {
+        let messages_before = self.messages.len();
+        let authority = crate::agent::compact::ValidatedCompactionRewrite::for_test(
+            self.messages(),
+            &replacement,
+        )
+        .map_err(|error| error.to_string())?;
+        let commit = self
+            .replace_messages_for_compaction_internal(replacement, &authority)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "test compaction rewrite was a no-op".to_string())?;
+        let projection = crate::memory::CompactionProjectionId::from_validated_transcript_rewrite(
+            self.id().clone(),
+            &commit,
+            &authority,
+        )
+        .ok_or_else(|| {
+            "core-owned test compaction did not mint a projection identity".to_string()
+        })?;
+        let intent = crate::memory::CompactionProjectionIntent {
+            projection,
+            summary_tokens,
+            messages_before,
+            messages_after: self.messages.len(),
+        };
+        self.add_compaction_projection_intent(intent.clone())
+            .map_err(|error| error.to_string())?;
+        Ok((commit, intent))
+    }
+
     /// Atomically refresh the synthetic runtime notices of one kind.
     ///
     /// This is the ONE transcript authority operation for synthetic-notice
@@ -3370,6 +3520,11 @@ impl Session {
             return Ok(());
         }
 
+        let lowest_mutated_index = self
+            .messages
+            .iter()
+            .position(&is_refresh_notice)
+            .unwrap_or(self.messages.len());
         let mut refreshed = self
             .messages
             .iter()
@@ -3405,12 +3560,23 @@ impl Session {
             }
         }
         let updated_at = SystemTime::now();
-        // SEAM 1 (non-append): synthetic notices are stripped from anywhere in
-        // the vector, so the retained midstate and prefix ring are discarded.
-        // Audited history remains byte-for-byte untouched. A mutation that
-        // changes an audited prefix must cross the typed rewrite boundary
-        // before persistence; cosmetic graph reinstall cannot authorize it.
-        self.messages.replace(refreshed);
+        if lowest_mutated_index == self.messages.len() {
+            // No prior notice existed: this is an exact append, so preserve
+            // the live digest and row-lineage accumulators as an append.
+            let appended = refreshed.split_off(lowest_mutated_index);
+            self.messages.extend_batch(appended);
+        } else {
+            // SEAM 1 (known-index replacement): synthetic notices are stripped
+            // from `lowest_mutated_index` onward and replacements are appended.
+            // Park the accumulator so it can retain an exact durable-row anchor
+            // only when the first changed row is at or beyond that anchor. A
+            // refresh that reaches into committed history therefore still drops
+            // the witness and must cross the typed rewrite boundary before the
+            // next HeadCanonical persist.
+            *self.messages.begin_in_place_scan() = refreshed;
+            self.messages
+                .finish_in_place_scan(Some(lowest_mutated_index));
+        }
         self.mark_content_mutated(updated_at);
         self.realtime_transcript
             .apply_prepared_rebase(realtime_rebase);
@@ -4992,10 +5158,18 @@ impl Session {
         &self,
         revision: &str,
     ) -> Result<Option<TranscriptRevisionBody>, serde_json::Error> {
-        self.validated_transcript_history_state()
+        let Some(history) = self
+            .validated_transcript_history_state()
             .map_err(|error| <serde_json::Error as serde::ser::Error>::custom(error.to_string()))?
-            .map(|history| history.materialize_revision(revision))
-            .transpose()
+        else {
+            return Ok(None);
+        };
+        if !history.state().contains_revision(revision) {
+            return Ok(None);
+        }
+        history
+            .materialize_revision(revision)
+            .map(Some)
             .map_err(|error| <serde_json::Error as serde::ser::Error>::custom(error.to_string()))
     }
 
@@ -5482,7 +5656,7 @@ impl Session {
             version: session_version(),
             realtime_transcript: Box::new(SessionRealtimeTranscriptProjection::empty(&id)),
             id,
-            messages: TranscriptMessages::from_vec(truncated),
+            messages: TranscriptMessages::from_fresh_branch(truncated),
             created_at: now,
             updated_at: now,
             metadata: self.fork_metadata_projection(),
@@ -6226,7 +6400,7 @@ mod tests {
                     .materialize_revision_bodies()
                     .expect("audited bodies should materialize")
                     .into_iter()
-                    .map(|body| (body.revision.clone(), body.messages.clone()))
+                    .map(|body| (body.revision, body.messages))
                     .collect::<Vec<_>>();
                 bodies.sort_by(|left, right| left.0.cmp(&right.0));
                 bodies
@@ -6901,14 +7075,19 @@ mod tests {
             SESSION_TRANSCRIPT_HISTORY_STATE_KEY.to_string(),
             document["metadata"][SESSION_TRANSCRIPT_HISTORY_STATE_KEY].clone(),
         );
+        let graph_wire = metadata[SESSION_TRANSCRIPT_HISTORY_STATE_KEY].clone();
 
         let sealed = compact_transcript_history_metadata_for_snapshot(&mut metadata)
             .expect("valid graph compacts")
             .expect("graph value present");
         assert_eq!(
             serde_json::to_value(sealed.as_ref()).unwrap(),
-            metadata[SESSION_TRANSCRIPT_HISTORY_STATE_KEY],
-            "the returned proof must cover exactly the installed graph value"
+            graph_wire,
+            "the returned proof must cover exactly the consumed graph value"
+        );
+        assert!(
+            !metadata.contains_key(SESSION_TRANSCRIPT_HISTORY_STATE_KEY),
+            "the transient wire graph must not remain beside the typed authority"
         );
 
         // No graph, no proof: the seam must not manufacture evidence.
@@ -6920,9 +7099,10 @@ mod tests {
         );
     }
 
-    /// Decode threads the proven parse into the per-instance shared cache:
-    /// the first consumer after a decode must not re-parse the metadata value
-    /// that was serialized from that exact state one statement earlier.
+    /// Decode threads the proven parse into the per-instance shared cache and
+    /// removes the transient wire projection from ordinary metadata. The first
+    /// consumer after a decode must not re-parse the graph value serialized
+    /// from that exact state one statement earlier.
     #[test]
     fn decode_seeds_shared_transcript_graph_with_the_proven_parse() {
         let mut session = Session::new();
@@ -6937,6 +7117,7 @@ mod tests {
             )
             .unwrap();
         let document = serde_json::to_value(&session).unwrap();
+        let serialized_graph = document["metadata"][SESSION_TRANSCRIPT_HISTORY_STATE_KEY].clone();
 
         let decoded: Session = serde_json::from_value(document).unwrap();
         let seeded = decoded
@@ -6946,8 +7127,14 @@ mod tests {
             .expect("decode must seed the shared graph parse");
         assert_eq!(
             serde_json::to_value(&*seeded).unwrap(),
-            decoded.metadata[SESSION_TRANSCRIPT_HISTORY_STATE_KEY],
-            "the seeded graph must be the value the decode installed"
+            serialized_graph,
+            "the seeded graph must be the value the wire carried"
+        );
+        assert!(
+            !decoded
+                .metadata
+                .contains_key(SESSION_TRANSCRIPT_HISTORY_STATE_KEY),
+            "the typed graph cache is the singular in-memory authority"
         );
         // The sealed accessor serves the seeded allocation, not a re-parse.
         let sealed = decoded
@@ -6983,23 +7170,13 @@ mod tests {
                 None,
             )
             .expect("consistent rewrite should commit");
-        let mut state = source
-            .metadata()
-            .get(SESSION_TRANSCRIPT_HISTORY_STATE_KEY)
-            .cloned()
-            .expect("consistent graph metadata");
-        state["anchor"]["messages"][0] =
-            serde_json::to_value(Message::User(UserMessage::text("tampered".to_string())))
-                .expect("tampered message");
-        let mut session = Session::new();
-        for message in source.messages() {
-            session.push(message.clone());
-        }
-        session.set_metadata_unchecked_for_test(SESSION_TRANSCRIPT_HISTORY_STATE_KEY, state);
+        let mut source_document = serde_json::to_value(&source).expect("source serializes");
+        source_document["metadata"][SESSION_TRANSCRIPT_HISTORY_STATE_KEY]["anchor"]["messages"]
+            [0] = serde_json::to_value(Message::User(UserMessage::text("tampered".to_string())))
+            .expect("tampered message");
         assert!(
-            session.validated_transcript_history_state().is_err(),
-            "an unverified session must not be able to mint a proof for a \
-             digest-inconsistent transcript graph"
+            serde_json::from_value::<Session>(source_document).is_err(),
+            "decode must not mint a proof for a digest-inconsistent transcript graph"
         );
     }
 
@@ -7020,16 +7197,9 @@ mod tests {
                 None,
             )
             .expect("consistent rewrite should commit");
-        let state = source
-            .metadata()
-            .get(SESSION_TRANSCRIPT_HISTORY_STATE_KEY)
-            .cloned()
-            .expect("consistent graph metadata");
-        let mut session = Session::new();
-        for message in source.messages() {
-            session.push(message.clone());
-        }
-        session.set_metadata_unchecked_for_test(SESSION_TRANSCRIPT_HISTORY_STATE_KEY, state);
+        let source_document = serde_json::to_value(&source).expect("source serializes");
+        let session: Session =
+            serde_json::from_value(source_document).expect("consistent graph decodes");
         let sealed = session
             .validated_transcript_history_state()
             .expect("a consistent graph must seal")
@@ -7125,19 +7295,21 @@ mod tests {
             )
             .expect("rewrite should commit");
         let graph_before = session
-            .metadata()
-            .get(SESSION_TRANSCRIPT_HISTORY_STATE_KEY)
-            .cloned()
+            .validated_transcript_history_state()
+            .expect("history validation")
             .expect("rewrite graph");
 
         for turn in 0..762 {
             session.push(Message::User(UserMessage::text(format!("turn {turn}"))));
         }
 
-        assert_eq!(
-            session.metadata().get(SESSION_TRANSCRIPT_HISTORY_STATE_KEY),
-            Some(&graph_before),
-            "ordinary appends must not parse, mutate, or reserialize audited graph metadata"
+        let graph_after = session
+            .validated_transcript_history_state()
+            .expect("history validation")
+            .expect("rewrite graph");
+        assert!(
+            graph_before.shares_exact_state_with(&graph_after),
+            "ordinary appends must preserve the exact audited graph authority"
         );
         let state = session
             .transcript_history_state()
@@ -7193,9 +7365,8 @@ mod tests {
             )
             .expect("seed rewrite");
         let graph_before = session
-            .metadata()
-            .get(SESSION_TRANSCRIPT_HISTORY_STATE_KEY)
-            .cloned()
+            .validated_transcript_history_state()
+            .expect("history validation")
             .expect("audited graph");
 
         for refresh in 0..64 {
@@ -7209,10 +7380,13 @@ mod tests {
                 )
                 .expect("mechanical refresh");
         }
-        assert_eq!(
-            session.metadata().get(SESSION_TRANSCRIPT_HISTORY_STATE_KEY),
-            Some(&graph_before),
-            "tail-only synthetic refreshes must not materialize or rewrite audited graph metadata"
+        let graph_after = session
+            .validated_transcript_history_state()
+            .expect("history validation")
+            .expect("audited graph");
+        assert!(
+            graph_before.shares_exact_state_with(&graph_after),
+            "tail-only synthetic refreshes must preserve the exact audited graph authority"
         );
 
         let state = session
@@ -8209,7 +8383,8 @@ mod tests {
         ])
         .expect_err("branched rewrite records must not replay as a linear source history");
         assert!(
-            err.to_string().contains("does not extend transcript head"),
+            err.to_string()
+                .contains("not expected contiguous generation"),
             "unexpected error: {err}"
         );
     }
@@ -8342,9 +8517,8 @@ mod tests {
             )
             .expect("rewrite should commit");
         let graph_before = session
-            .metadata()
-            .get(SESSION_TRANSCRIPT_HISTORY_STATE_KEY)
-            .cloned()
+            .validated_transcript_history_state()
+            .expect("history validation")
             .expect("audited graph");
         let messages_before = session.messages().to_vec();
 
@@ -8367,10 +8541,13 @@ mod tests {
             head,
             transcript_messages_digest(session.messages()).expect("current digest")
         );
-        assert_eq!(
-            session.metadata().get(SESSION_TRANSCRIPT_HISTORY_STATE_KEY),
-            Some(&graph_before),
-            "mechanical prompt mutation must not rewrite audited graph metadata"
+        let graph_after = session
+            .validated_transcript_history_state()
+            .expect("history validation")
+            .expect("audited graph");
+        assert!(
+            graph_before.shares_exact_state_with(&graph_after),
+            "mechanical prompt mutation must preserve the exact audited graph authority"
         );
         assert!(
             session
@@ -8459,7 +8636,7 @@ mod tests {
     }
 
     #[test]
-    fn validated_bridge_projection_preserves_its_selected_head() {
+    fn validated_bridge_parent_materialization_preserves_its_selected_head() {
         let mut session = Session::new();
         session.push(Message::User(UserMessage::text("question".to_string())));
         session.push(Message::BlockAssistant(BlockAssistantMessage {
@@ -8473,7 +8650,7 @@ mod tests {
         }));
 
         let first_parent = session.transcript_revision().expect("first parent");
-        let first = session
+        let _first = session
             .commit_transcript_rewrite(
                 TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
                 vec![Message::BlockAssistant(BlockAssistantMessage {
@@ -8528,36 +8705,17 @@ mod tests {
             .expect("history state should decode")
             .expect("history state should exist");
         assert_eq!(full.head(), second.revision);
-        let projection = ValidatedTranscriptHistory::seal_owned(full)
+        let bridge_body = ValidatedTranscriptHistory::seal_owned(full)
             .expect("full graph should seal")
-            .project_at_revision(&bridge_revision)
-            .expect("bridge projection should preserve proof");
-
-        let mut replayed = Session::new();
-        replayed
-            .apply_validated_transcript_history_state(projection)
-            .expect("bridge projection should materialize");
+            .materialize_rewrite_parent(&second)
+            .expect("the exact rewrite occurrence must materialize its bridge parent");
         assert_eq!(
-            replayed.transcript_revision().expect("projected revision"),
-            bridge_revision
+            bridge_body.revision, bridge_revision,
+            "explicit parent materialization must preserve the selected bridge revision"
         );
         assert_eq!(
-            serde_json::to_value(replayed.messages()).expect("projection serializes"),
+            serde_json::to_value(&bridge_body.messages).expect("projection serializes"),
             serde_json::to_value(&bridge_messages).expect("bridge serializes")
-        );
-        let projected = replayed
-            .transcript_history_state()
-            .expect("projected history decodes")
-            .expect("projected history exists");
-        assert_eq!(
-            projected.head(),
-            bridge_revision,
-            "generic pruning must not rewind a selected bridge to the latest audited commit"
-        );
-        assert_eq!(projected.commit_count(), 1);
-        assert_eq!(
-            projected.last_commit().map(|commit| &commit.revision),
-            Some(&first.revision)
         );
     }
 

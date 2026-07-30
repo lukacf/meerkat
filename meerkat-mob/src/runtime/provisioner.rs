@@ -6364,44 +6364,14 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
             .map_err(CoreExecutorError::apply_failed_from_session_error)
     }
 
-    async fn acknowledge_whole_blob_session_boundary(
+    async fn acknowledge_committed_session_boundary(
         &mut self,
-        committed_store_revision: u64,
-        committed_blob_sha256: &str,
+        authority: &meerkat_core::CommittedSessionBoundaryAuthority,
     ) -> Result<(), CoreExecutorError> {
         self.session_service
-            .acknowledge_whole_blob_runtime_session_boundary_under_turn_finalization_boundary(
+            .acknowledge_committed_runtime_session_boundary_under_turn_finalization_boundary(
                 &self.bridge_session_id,
-                committed_store_revision,
-                committed_blob_sha256,
-            )
-            .await
-            .map_err(CoreExecutorError::apply_failed_from_session_error)
-    }
-
-    async fn acknowledge_head_canonical_session_boundary(
-        &mut self,
-        committed_head_token: &str,
-    ) -> Result<(), CoreExecutorError> {
-        self.session_service
-            .acknowledge_head_canonical_runtime_session_boundary_under_turn_finalization_boundary(
-                &self.bridge_session_id,
-                committed_head_token,
-            )
-            .await
-            .map_err(CoreExecutorError::apply_failed_from_session_error)
-    }
-
-    async fn acknowledge_provisional_session_boundary(
-        &mut self,
-        committed_store_revision: u64,
-        committed_authority_token: &str,
-    ) -> Result<(), CoreExecutorError> {
-        self.session_service
-            .acknowledge_provisional_runtime_session_boundary_under_turn_finalization_boundary(
-                &self.bridge_session_id,
-                committed_store_revision,
-                committed_authority_token,
+                authority,
             )
             .await
             .map_err(CoreExecutorError::apply_failed_from_session_error)

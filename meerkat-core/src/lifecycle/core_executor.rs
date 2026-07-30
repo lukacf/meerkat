@@ -11,11 +11,47 @@ use crate::error::AgentError;
 use crate::lifecycle::run_primitive::TurnRequestContext;
 use crate::service::SessionError;
 use crate::turn_execution_authority::{TurnTerminalCauseKind, TurnTerminalOutcome};
-use crate::types::RunResult;
+use crate::types::{RunResult, SessionId};
 use crate::{TurnErrorMetadata, event::AgentEvent, interaction::InteractionId};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
+
+/// Exact fixed-size authority returned by the store after committing one
+/// session boundary.
+///
+/// This is deliberately one exhaustive carrier rather than one optional hook
+/// per persistence profile. Store-backed wrappers must forward the carrier as
+/// a whole, so adding a new authority shape forces every exhaustive forwarding
+/// match to be reviewed at compile time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommittedSessionBoundaryAuthority {
+    WholeBlob {
+        session_id: SessionId,
+        committed_store_revision: u64,
+        committed_blob_sha256: String,
+    },
+    HeadCanonical {
+        session_id: SessionId,
+        committed_head_token: String,
+    },
+    Provisional {
+        session_id: SessionId,
+        committed_store_revision: u64,
+        committed_authority_token: String,
+    },
+}
+
+impl CommittedSessionBoundaryAuthority {
+    #[must_use]
+    pub fn session_id(&self) -> &SessionId {
+        match self {
+            Self::WholeBlob { session_id, .. }
+            | Self::HeadCanonical { session_id, .. }
+            | Self::Provisional { session_id, .. } => session_id,
+        }
+    }
+}
 
 /// Closed classifier for failures observed while applying a run primitive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -672,6 +708,26 @@ impl BoundSessionCommit {
                 whole_blob: std::sync::Arc::new(std::sync::OnceLock::from(Ok(
                     std::sync::Arc::new(crate::SerializedSessionArtifact::from_raw_bytes(snapshot)),
                 ))),
+            },
+            #[cfg(test)]
+            whole_blob_encode_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
+    }
+
+    /// Seal an already serialized WholeBlob artifact without copying its bytes
+    /// or recomputing its physical row digest.
+    ///
+    /// The carrier remains intentionally untyped: callers that need a
+    /// `Session` must retain or decode one separately. This constructor exists
+    /// for control-plane writers that already own the exact one-pass artifact
+    /// accepted by the store.
+    #[must_use]
+    pub fn from_serialized_artifact(
+        artifact: std::sync::Arc<crate::SerializedSessionArtifact>,
+    ) -> Self {
+        Self {
+            kind: BoundSessionCommitKind::WholeBlobUntyped {
+                whole_blob: std::sync::Arc::new(std::sync::OnceLock::from(Ok(artifact))),
             },
             #[cfg(test)]
             whole_blob_encode_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -1588,56 +1644,25 @@ pub trait CoreExecutor: Send + Sync {
         Ok(())
     }
 
-    /// Acknowledge an ordinary WholeBlob boundary from its store-issued
-    /// fixed-size authority.
+    /// Acknowledge the exact store-issued authority for a committed session
+    /// boundary.
     ///
-    /// The runtime compares this authority with the exact prepared artifact
-    /// before invoking the executor. Durable implementations then confirm the
-    /// revision/digest through the store's bounded authority seam and publish
-    /// executor-owned post-commit effects. Ordinary finalization must not
-    /// reload or compare the accumulated document.
-    async fn acknowledge_whole_blob_session_boundary(
-        &mut self,
-        _committed_store_revision: u64,
-        _committed_blob_sha256: &str,
-    ) -> Result<(), CoreExecutorError> {
-        Ok(())
-    }
-
-    /// Acknowledge a session boundary whose canonical head and transcript
-    /// suffix were already committed inside the RuntimeStore transaction.
+    /// The runtime validates this authority against the prepared boundary
+    /// before invoking the executor. Durable implementations publish
+    /// executor-owned post-commit effects and advance actor-local fencing from
+    /// this bounded carrier; ordinary finalization must not reload or compare
+    /// the accumulated document.
     ///
-    /// Unlike [`Self::checkpoint_committed_session_snapshot`], this hook
-    /// carries no whole document and performs no compatibility projection.
-    /// It lets the executor publish post-commit side effects (for example,
-    /// staged context lifecycle events) against the exact small authority
-    /// returned by the store. Implementations that can be paired with a
-    /// head-canonical runtime must override it; the default fails closed so a
-    /// successful durable commit is never silently reported as fully
-    /// finalized when executor-owned side effects remain staged.
-    async fn acknowledge_head_canonical_session_boundary(
+    /// Generic/ephemeral executors retain a rejecting default because they
+    /// never receive store authority. In particular, WholeBlob is not a silent
+    /// no-op: every store-backed executor must explicitly implement this one
+    /// hook.
+    async fn acknowledge_committed_session_boundary(
         &mut self,
-        _committed_head_token: &str,
+        _authority: &CommittedSessionBoundaryAuthority,
     ) -> Result<(), CoreExecutorError> {
         Err(CoreExecutorError::Internal(
-            "executor cannot acknowledge a head-canonical session boundary".to_string(),
-        ))
-    }
-
-    /// Acknowledge metadata-only promotion of an exact provisional tail.
-    ///
-    /// The runtime has already verified that the store-returned authority
-    /// matches the actor-carried receipt. This hook carries only the fixed-size
-    /// committed revision/token so executor-owned staged effects can publish
-    /// and actor-local committed-base fencing can advance without re-encoding
-    /// WholeBlob state or reapplying a HeadCanonical mutation.
-    async fn acknowledge_provisional_session_boundary(
-        &mut self,
-        _committed_store_revision: u64,
-        _committed_authority_token: &str,
-    ) -> Result<(), CoreExecutorError> {
-        Err(CoreExecutorError::Internal(
-            "executor cannot acknowledge a promoted provisional session boundary".to_string(),
+            "executor cannot acknowledge a store-owned session boundary".to_string(),
         ))
     }
 
@@ -1737,6 +1762,22 @@ mod tests {
         assert!(cloned.whole_blob_bytes().is_ok());
         assert_eq!(commit.whole_blob_encode_count(), 1);
         assert_eq!(cloned.whole_blob_encode_count(), 1);
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn prepared_serialized_artifact_is_retained_without_copy_or_rehash() {
+        let artifact = std::sync::Arc::new(crate::SerializedSessionArtifact::from_raw_bytes(
+            br#"{"exact":"artifact"}"#.to_vec(),
+        ));
+        let commit = BoundSessionCommit::from_serialized_artifact(std::sync::Arc::clone(&artifact));
+        let retained = commit
+            .whole_blob_artifact()
+            .expect("pre-serialized artifact remains immediately available");
+
+        assert!(std::ptr::eq(retained, artifact.as_ref()));
+        assert_eq!(commit.whole_blob_encode_count(), 0);
+        assert!(commit.session().is_none());
     }
 
     #[test]

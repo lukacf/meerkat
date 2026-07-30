@@ -806,7 +806,7 @@ impl ValidatedCompactionRewrite {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl ValidatedCompactionRewrite {
     pub(crate) fn for_test(
         messages: &[Message],

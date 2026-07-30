@@ -3950,6 +3950,10 @@ pub fn occurrence_lifecycle_schema_metadata() -> MachineSchemaMetadata {
                 ],
             ),
             NamedTypeBinding::string_enum(
+                "DeliveryAdmissionOutcome",
+                &["Accepted", "Deduplicated"],
+            ),
+            NamedTypeBinding::string_enum(
                 "DeliveryFailureReason",
                 &[
                     "TargetMaterializationFailed",

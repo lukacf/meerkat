@@ -283,6 +283,56 @@ impl std::fmt::Display for CorrelationId {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum DeliveryAdmissionOutcome {
+    #[default]
+    #[serde(rename = "Accepted")]
+    Accepted,
+    #[serde(rename = "Deduplicated")]
+    Deduplicated,
+}
+impl DeliveryAdmissionOutcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Accepted => "Accepted",
+            Self::Deduplicated => "Deduplicated",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for DeliveryAdmissionOutcome {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Accepted" => Ok(Self::Accepted),
+            "Deduplicated" => Ok(Self::Deduplicated),
+            other => Err(format!("invalid DeliveryAdmissionOutcome value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for DeliveryAdmissionOutcome {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for DeliveryAdmissionOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum DeliveryCompletionFailureReason {
     #[default]
     #[serde(rename = "CompletionFutureFailed")]
@@ -1579,6 +1629,7 @@ pub mod inputs {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct DispatchAccepted {
+        pub admission_outcome: DeliveryAdmissionOutcome,
         pub at_utc_ms: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -2022,6 +2073,7 @@ pub enum TransitionId {
     ClaimPending,
     DispatchStartedFromClaimed,
     DispatchAcceptedFromDispatching,
+    DispatchDeduplicatedFromDispatching,
     AwaitCompletionFromDispatching,
     AwaitCompletionAfterSupersession,
     CompleteFromDispatchingOrAwaiting,

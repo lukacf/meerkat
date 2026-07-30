@@ -16,7 +16,7 @@ use crate::identifiers::LogicalRuntimeId;
 use crate::input::{Input, externalize_input_images};
 use crate::input_state::{
     InputAbandonReason, InputLifecycleState, InputState, InputStatePersistenceRecord,
-    StoredInputState,
+    InputStateSeed, StoredInputState,
 };
 use crate::runtime_event::RuntimeEventEnvelope;
 use crate::runtime_state::RuntimeState;
@@ -604,7 +604,7 @@ impl PersistentRuntimeDriver {
     async fn durable_idempotency_duplicate(
         &self,
         input: &Input,
-    ) -> Result<Option<InputId>, RuntimeDriverError> {
+    ) -> Result<Option<(InputId, InputStateSeed)>, RuntimeDriverError> {
         let Some(key) = input.header().idempotency_key.as_ref() else {
             return Ok(None);
         };
@@ -647,7 +647,7 @@ impl PersistentRuntimeDriver {
                 ),
             });
         }
-        Ok(Some(stored.state.input_id))
+        Ok(Some((stored.state.input_id, stored.seed)))
     }
 
     /// Get immutable reference to the inner ephemeral driver.
@@ -1647,13 +1647,16 @@ impl PersistentRuntimeDriver {
     ) -> Result<AcceptOutcome, RuntimeDriverError> {
         self.require_durability_ready()?;
         self.inner.ensure_contract_session_authority()?;
-        if let Some(existing_id) = self.durable_idempotency_duplicate(&input).await? {
+        if let Some((existing_id, existing_seed)) =
+            self.durable_idempotency_duplicate(&input).await?
+        {
             let input_id = input.id().clone();
             self.inner
                 .record_durable_idempotency_deduplication(input_id.clone(), existing_id.clone());
             return Ok(AcceptOutcome::Deduplicated {
                 input_id,
                 existing_id,
+                existing_seed,
             });
         }
         let preview = self
@@ -1810,10 +1813,13 @@ impl PersistentRuntimeDriver {
         resolved: &crate::accept::ResolvedAdmission,
     ) -> Result<AcceptOutcome, RuntimeDriverError> {
         self.require_durability_ready()?;
-        if let Some(existing_id) = self.durable_idempotency_duplicate(&input).await? {
+        if let Some((existing_id, existing_seed)) =
+            self.durable_idempotency_duplicate(&input).await?
+        {
             return Ok(AcceptOutcome::Deduplicated {
                 input_id: input.id().clone(),
                 existing_id,
+                existing_seed,
             });
         }
         self.inner
@@ -2570,6 +2576,7 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use meerkat_core::lifecycle::InputId;
+    use meerkat_core::types::SessionId;
 
     fn make_prompt(text: &str) -> Input {
         Input::Prompt(crate::input::PromptInput {
@@ -2588,6 +2595,28 @@ mod tests {
             typed_turn_appends: Vec::new(),
             turn_metadata: None,
         })
+    }
+
+    async fn recover_after_registration_authority(
+        store: &crate::store::InMemoryRuntimeStore,
+        session_id: &SessionId,
+        driver: &mut PersistentRuntimeDriver,
+    ) -> RecoveryReport {
+        let recovery =
+            crate::meerkat_machine::driver::reconcile_runtime_authority_for_cold_recovery(
+                store,
+                &driver.runtime_id,
+                session_id,
+            )
+            .await
+            .expect("registration must converge durable runtime authority");
+        driver
+            .inner_mut()
+            .replace_runtime_authority(recovery.authority);
+        driver
+            .recover_inputs_after_runtime_authority(recovery.unregister_progress.as_ref())
+            .await
+            .expect("registration-authorized input recovery must commit by exact batch CAS")
     }
 
     #[test]
@@ -2861,7 +2890,8 @@ mod tests {
     #[tokio::test]
     async fn recover_atomically_rewrites_cold_running_lifecycle_to_idle() {
         let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
-        let runtime_id = LogicalRuntimeId::new("rewrite-cold-running-lifecycle");
+        let session_id = SessionId::new();
+        let runtime_id = LogicalRuntimeId::for_session(&session_id);
         store
             .commit_machine_lifecycle(
                 &runtime_id,
@@ -2878,17 +2908,14 @@ mod tests {
                 &[],
             )
             .await
-            .expect("seed legacy cold Running lifecycle");
+            .expect("seed torn cold Running lifecycle");
 
         let runtime_store: Arc<dyn RuntimeStore> = store.clone();
         let blob_store: Arc<dyn BlobStore> = Arc::new(meerkat_store::MemoryBlobStore::new());
         let mut driver =
             PersistentRuntimeDriver::new(runtime_id.clone(), runtime_store, blob_store);
 
-        driver
-            .recover()
-            .await
-            .expect("cold Running recovery should converge durably");
+        recover_after_registration_authority(store.as_ref(), &session_id, &mut driver).await;
 
         assert_eq!(driver.runtime_state(), RuntimeState::Idle);
         assert_eq!(
@@ -2905,9 +2932,11 @@ mod tests {
         let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
         let store_trait: Arc<dyn RuntimeStore> = store.clone();
         let blob_store: Arc<dyn BlobStore> = Arc::new(meerkat_store::MemoryBlobStore::new());
-        let rid = LogicalRuntimeId::new("interaction-outbox-two-handle-phase-fence");
+        let session_id = SessionId::new();
+        let rid = LogicalRuntimeId::for_session(&session_id);
         let mut owner =
             PersistentRuntimeDriver::new(rid.clone(), store_trait.clone(), blob_store.clone());
+        recover_after_registration_authority(store.as_ref(), &session_id, &mut owner).await;
         let mut input_ids = Vec::new();
         for text in ["first", "second"] {
             let input = make_prompt(text);
@@ -2937,7 +2966,7 @@ mod tests {
         // A second store handle takes over before Candidate -> Finalized.
         let mut takeover =
             PersistentRuntimeDriver::new(rid.clone(), store_trait.clone(), blob_store.clone());
-        RuntimeDriver::recover(&mut takeover).await.unwrap();
+        recover_after_registration_authority(store.as_ref(), &session_id, &mut takeover).await;
         let takeover_expected = store.load_input_states_strict(&rid).await.unwrap();
         for input_id in &input_ids {
             takeover
@@ -3003,7 +3032,7 @@ mod tests {
         );
         let finalized_witness = store.load_input_states_strict(&rid).await.unwrap();
         let mut publisher = PersistentRuntimeDriver::new(rid.clone(), store_trait, blob_store);
-        RuntimeDriver::recover(&mut publisher).await.unwrap();
+        recover_after_registration_authority(store.as_ref(), &session_id, &mut publisher).await;
         let publisher_expected = store.load_input_states_strict(&rid).await.unwrap();
         for input_id in &input_ids {
             publisher

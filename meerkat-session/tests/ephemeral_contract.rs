@@ -20,14 +20,13 @@ use meerkat_core::service::{
 use meerkat_core::types::{AssistantBlock, HandlingMode, RunResult, SessionId, StopReason, Usage};
 use meerkat_core::{
     CancelAfterBoundaryCommand, CancelAfterBoundarySender, ContentInput, HookDecision, HookEngine,
-    HookExecutionReport, HookId, HookInvocation, HookOutcome, HookPoint, HookReasonCode, RunId,
-    Session, SessionDeferredTurnState, TransientTurnContextStateHandle,
+    HookInvocation, HookPoint, RunId, Session, SessionDeferredTurnState,
+    TransientTurnContextStateHandle,
 };
 use meerkat_session::ephemeral::SessionSnapshot;
 use meerkat_session::{EphemeralSessionService, SessionAgent, SessionAgentBuilder};
 use serde_json::json;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::SystemTime;
 use tokio::sync::mpsc;
 
@@ -155,6 +154,16 @@ impl SessionAgent for MockAgent {
 
     fn session_clone(&self) -> Result<meerkat_core::Session, meerkat_core::AgentError> {
         Ok(meerkat_core::Session::with_id(self.session_id.clone()))
+    }
+
+    fn session_transcript_authority(
+        &self,
+    ) -> Result<
+        meerkat_session::ephemeral::SessionTranscriptAuthoritySnapshot,
+        meerkat_core::AgentError,
+    > {
+        let session = self.session_clone()?;
+        meerkat_session::ephemeral::SessionTranscriptAuthoritySnapshot::from_session(&session)
     }
 
     fn durable_llm_identity(&self) -> Option<meerkat_core::SessionLlmIdentity> {
@@ -307,54 +316,6 @@ impl SessionAgentBuilder for MockAgentBuilder {
 // ---------------------------------------------------------------------------
 // Real agent fixtures (runtime boundary assertions)
 // ---------------------------------------------------------------------------
-
-struct DenyNextPreLlmHookEngine {
-    deny_next: AtomicBool,
-}
-
-impl DenyNextPreLlmHookEngine {
-    fn new() -> Self {
-        Self {
-            deny_next: AtomicBool::new(true),
-        }
-    }
-}
-
-#[async_trait]
-impl HookEngine for DenyNextPreLlmHookEngine {
-    async fn execute(
-        &self,
-        invocation: HookInvocation,
-        _overrides: Option<&meerkat_core::config::HookRunOverrides>,
-    ) -> Result<HookExecutionReport, meerkat_core::HookEngineError> {
-        if invocation.point != HookPoint::PreLlmRequest
-            || !self.deny_next.swap(false, Ordering::AcqRel)
-        {
-            return Ok(HookExecutionReport::default());
-        }
-
-        let decision = HookDecision::deny(
-            HookId::new("deny-pre-llm"),
-            HookReasonCode::PolicyViolation,
-            "pre-llm turn denied",
-            None,
-        );
-
-        Ok(HookExecutionReport {
-            started: vec![HookId::new("deny-pre-llm")],
-            outcomes: vec![HookOutcome {
-                hook_id: HookId::new("deny-pre-llm"),
-                point: HookPoint::PreLlmRequest,
-                priority: 0,
-                registration_index: 0,
-                decision: Some(decision.clone()),
-                failure_reason: None,
-                duration_ms: None,
-            }],
-            decision: Some(decision),
-        })
-    }
-}
 
 fn session_for_request(req: &CreateSessionRequest) -> Session {
     let mut session = req
@@ -547,6 +508,15 @@ impl SessionAgent for RealSessionAgent {
         Ok(self.session.clone())
     }
 
+    fn session_transcript_authority(
+        &self,
+    ) -> Result<
+        meerkat_session::ephemeral::SessionTranscriptAuthoritySnapshot,
+        meerkat_core::AgentError,
+    > {
+        meerkat_session::ephemeral::SessionTranscriptAuthoritySnapshot::from_session(&self.session)
+    }
+
     fn durable_llm_identity(&self) -> Option<meerkat_core::SessionLlmIdentity> {
         Some(test_llm_identity("mock"))
     }
@@ -661,6 +631,15 @@ impl SessionAgent for CompactionSessionAgent {
 
     fn session_clone(&self) -> Result<meerkat_core::Session, meerkat_core::AgentError> {
         Ok(self.session.clone())
+    }
+
+    fn session_transcript_authority(
+        &self,
+    ) -> Result<
+        meerkat_session::ephemeral::SessionTranscriptAuthoritySnapshot,
+        meerkat_core::AgentError,
+    > {
+        meerkat_session::ephemeral::SessionTranscriptAuthoritySnapshot::from_session(&self.session)
     }
 
     fn durable_llm_identity(&self) -> Option<meerkat_core::SessionLlmIdentity> {

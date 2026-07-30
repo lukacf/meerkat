@@ -414,6 +414,7 @@ impl PanicPayloadLogGate {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -502,13 +503,7 @@ mod tests {
         let raw = r#"api_key="before\\\"double-suffix" password='before\'single-suffix'"#;
         let detail = panic_payload_detail(&raw);
 
-        for secret in [
-            "before",
-            "double-suffix",
-            "single-suffix",
-            r#"\\\""#,
-            r#"\'"#,
-        ] {
+        for secret in ["before", "double-suffix", "single-suffix", r#"\\\""#, r"\'"] {
             assert!(
                 !detail.contains(secret),
                 "escaped quoted credential material survived redaction: {secret}"

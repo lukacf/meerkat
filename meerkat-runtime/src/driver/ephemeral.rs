@@ -2703,6 +2703,8 @@ impl EphemeralRuntimeDriver {
             )));
         };
         state.runtime_semantics = Some(normalized_semantics);
+        self.rebuild_queue_projections();
+        self.debug_assert_queue_projection_alignment();
         Ok(())
     }
 
@@ -3627,9 +3629,18 @@ impl EphemeralRuntimeDriver {
                     existing_id: existing_id.clone(),
                 },
             ));
+            let existing_seed = self
+                .stored_input_state(&existing_id)
+                .ok_or_else(|| {
+                    RuntimeDriverError::Internal(format!(
+                        "generated idempotency authority references missing input {existing_id}"
+                    ))
+                })?
+                .seed;
             return Ok(AcceptOutcome::Deduplicated {
                 input_id,
                 existing_id,
+                existing_seed,
             });
         }
 
@@ -3848,9 +3859,18 @@ impl EphemeralRuntimeDriver {
                 .as_ref()
                 .map(std::string::ToString::to_string),
         )? {
+            let existing_seed = self
+                .stored_input_state(&existing_id)
+                .ok_or_else(|| {
+                    RuntimeDriverError::Internal(format!(
+                        "generated idempotency authority references missing input {existing_id}"
+                    ))
+                })?
+                .seed;
             return Ok(AcceptOutcome::Deduplicated {
                 input_id,
                 existing_id,
+                existing_seed,
             });
         }
 
@@ -4576,6 +4596,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn live_boundary_unavailable_atomically_relanes_steer_as_queued_fallback() {
+        let mut driver =
+            EphemeralRuntimeDriver::new(LogicalRuntimeId::new("live-boundary-unavailable"));
+        driver
+            .contract_begin_run_authority(RunId::new())
+            .expect("active run authority");
+        let input = Input::Prompt(PromptInput::new(
+            "active steer becomes queued fallback",
+            Some(
+                meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                    handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
+                    ..Default::default()
+                },
+            ),
+        ));
+        let input_id = input.id().clone();
+        let resolved = driver
+            .resolve_admission_with_active_turn_boundary(&input, true)
+            .expect("active steer admission");
+        driver
+            .accept_resolved_input(input, resolved)
+            .await
+            .expect("active steer accepted");
+
+        assert_eq!(driver.dsl_steer_lane(), vec![input_id.clone()]);
+        assert!(driver.dsl_queue_lane().is_empty());
+        assert_eq!(
+            driver.input_recovery_lane(&input_id),
+            Some(meerkat_core::types::HandlingMode::Steer)
+        );
+
+        driver
+            .machine_normalize_live_boundary_unavailable(&input_id)
+            .expect("typed unavailable normalization");
+
+        assert_eq!(
+            driver.input_phase(&input_id),
+            Some(InputLifecycleState::Queued)
+        );
+        assert!(driver.dsl_steer_lane().is_empty());
+        assert_eq!(driver.dsl_queue_lane(), vec![input_id.clone()]);
+        assert!(driver.steer_queue().is_empty());
+        assert_eq!(driver.queue().input_ids(), std::slice::from_ref(&input_id));
+        assert_eq!(
+            driver.input_recovery_lane(&input_id),
+            Some(meerkat_core::types::HandlingMode::Queue)
+        );
+        let semantics = driver
+            .admitted_runtime_semantics(&input_id)
+            .expect("normalized runtime semantics");
+        assert_eq!(
+            semantics.execution_handling_mode,
+            Some(meerkat_core::types::HandlingMode::Queue)
+        );
+        assert!(!semantics.live_interrupt_required);
+        assert_eq!(
+            driver
+                .stored_input_state(&input_id)
+                .expect("persistable normalized input")
+                .seed
+                .recovery_lane,
+            Some(meerkat_core::types::HandlingMode::Queue)
+        );
+        driver
+            .validate_queue_projection_alignment("post unavailable normalization")
+            .expect("generated and physical queue projections remain aligned");
+    }
+
+    #[tokio::test]
     async fn backlog_deferral_order_is_assigned_by_machine() {
         let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("backlog-deferral"));
 
@@ -4885,6 +4974,7 @@ mod tests {
             crate::accept::AcceptOutcome::Deduplicated {
                 input_id,
                 existing_id,
+                ..
             } => {
                 assert_eq!(input_id, duplicate_id);
                 assert_eq!(existing_id, first_id);

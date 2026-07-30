@@ -91,6 +91,17 @@ fn smoke_model() -> String {
     std::env::var("SMOKE_MODEL").unwrap_or_else(|_| "claude-sonnet-4-6".to_string())
 }
 
+fn workgraph_smoke_model() -> String {
+    let model =
+        std::env::var("WORKGRAPH_SMOKE_MODEL").unwrap_or_else(|_| "claude-fable-5".to_string());
+    assert!(
+        meerkat_models::capabilities_for(meerkat_core::Provider::Anthropic, &model)
+            .is_some_and(|caps| caps.supports_mid_conversation_system_messages),
+        "WORKGRAPH_SMOKE_MODEL={model} must support Anthropic mid-conversation System messages"
+    );
+    model
+}
+
 fn openai_smoke_model() -> String {
     first_env(&["SMOKE_MODEL_OPENAI", "OPENAI_SMOKE_MODEL"]).unwrap_or_else(|| "gpt-5.4".into())
 }
@@ -3446,7 +3457,12 @@ async fn create_live_workgraph_item(
             "session/create",
             json!({
                 "prompt": "Initialize a durable WorkGraph coordination session.",
-                "model": smoke_model(),
+                // Detached-job notifications become canonical mid-conversation
+                // System rows. This smoke therefore needs an Anthropic model
+                // whose wire contract supports that role placement; the broad
+                // smoke default is intentionally the cheaper Haiku model,
+                // which does not.
+                "model": workgraph_smoke_model(),
                 "provider": "anthropic",
                 "max_tokens": 1024,
                 "initial_turn": "deferred",
@@ -4075,13 +4091,41 @@ while true; do sleep 1; done"#,
         Some(original_checkpoint),
         "the explicit recovered claim must resume from the committed checkpoint"
     );
-    wait_for_session_context(
+    wait_for_job_snapshot(&reopened_jobs, &job_id, 30, |snapshot| {
+        snapshot.phase == meerkat::JobPhase::Running
+            && snapshot.outbox.len() >= 2
+            && snapshot.outbox.iter().all(|entry| entry.applied)
+    })
+    .await?;
+
+    reopened_pump
+        .call(
+            &mut reopened_rpc,
+            "jobs/cancel",
+            json!({"job_id": job_id.to_string()}),
+            30,
+        )
+        .await?;
+    wait_for_job_snapshot(&reopened_jobs, &job_id, 30, |snapshot| {
+        snapshot.phase == meerkat::JobPhase::Cancelled
+    })
+    .await?;
+
+    if let Err(error) = wait_for_session_context(
         &reopened_persistence,
         &session_id,
         &["checkpoint-alpha", "recovered-beta"],
         30,
     )
-    .await?;
+    .await
+    {
+        let rpc_stderr = read_available_stderr(&mut reopened_rpc, 500).await;
+        return Err(format!(
+            "{error}\nreopened rkat-rpc stderr at recovery-delivery timeout:\n{}",
+            rpc_stderr.trim()
+        )
+        .into());
+    }
 
     let (_code, stale_message) = reopened_pump
         .call_expect_error(
@@ -4120,23 +4164,6 @@ while true; do sleep 1; done"#,
         recovery_text.contains("checkpoint-alpha") && recovery_text.contains("recovered-beta"),
         "live provider did not receive pre-crash and post-recovery deliveries: {recovery_readout}"
     );
-    assert_eq!(
-        reopened_jobs.get(&job_id).await?.expect("job").phase,
-        meerkat::JobPhase::Running
-    );
-
-    reopened_pump
-        .call(
-            &mut reopened_rpc,
-            "jobs/cancel",
-            json!({"job_id": job_id.to_string()}),
-            30,
-        )
-        .await?;
-    wait_for_job_snapshot(&reopened_jobs, &job_id, 30, |snapshot| {
-        snapshot.phase == meerkat::JobPhase::Cancelled
-    })
-    .await?;
     assert_eq!(
         tokio::fs::read_to_string(&attempts_path).await?,
         "2",
@@ -5734,7 +5761,7 @@ async fn e2e_scenario_71_live_adapter_channel_lifecycle_rpc_ws()
                 &mut rpc,
                 "session/create",
                 json!({
-                    "prompt": "You are a test assistant for live audio. When the user gives you a codeword to remember, answer with exactly `Remembering <codeword>.` and nothing else. When asked to say only the codeword once, answer with exactly `<remembered codeword>.` and nothing else. When asked to repeat things in a loop, produce a long looping response. When told to stop, answer exactly `Stopped.`. When asked to say codeword and token once, answer with exactly `<remembered codeword>. <token>.` and nothing else.",
+                    "prompt": "You are a test assistant for live audio. When the user gives you a codeword to remember, answer with exactly `Remembering <codeword>.` and nothing else. When asked to say only the codeword once, answer with exactly `<remembered codeword>.` and nothing else. When asked for a detailed explanation, answer fully in several paragraphs. When told to stop, answer exactly `Stopped.`. When asked to say codeword and token once, answer with exactly `<remembered codeword>. <token>.` and nothing else.",
                     "model": "gpt-realtime-2",
                     "provider": "openai",
                     "initial_turn": "deferred",
@@ -5772,8 +5799,6 @@ async fn e2e_scenario_71_live_adapter_channel_lifecycle_rpc_ws()
             openai_tts_pcm("Remember the codeword amber lantern.").await?;
         let codeword_only_pcm =
             openai_tts_pcm("Say only the codeword once.").await?;
-        let token_explain_pcm =
-            openai_tts_pcm("Keep saying the codeword nonstop in a loop forever do not stop talking until I interrupt you.").await?;
         let stop_pcm = openai_tts_pcm("Stop.").await?;
 
         // ------ Turn 1: Remember codeword ------
@@ -5861,11 +5886,11 @@ async fn e2e_scenario_71_live_adapter_channel_lifecycle_rpc_ws()
         // ------ Turns 3-4: Long answer + barge-in ------
         let _turn2_quiesced =
             ensure_live_session_quiescent(&mut ws_write, &mut ws_read, &turn2_capture, 5).await?;
-        eprintln!("[scenario 71] send turn 3 explanation and barge into turn 4");
-        let turn3_commit = match send_live_audio_and_wait_for_turn(
+        eprintln!("[scenario 71] send turn 3 long response and barge into turn 4");
+        let turn3_commit = match send_live_text_and_wait_for_turn(
             &mut ws_write,
             &mut ws_read,
-            &token_explain_pcm,
+            "Explain the four seasons in detail, covering weather, daylight, plants, and typical activities for each season.",
             120,
         )
         .await
@@ -5894,10 +5919,14 @@ async fn e2e_scenario_71_live_adapter_channel_lifecycle_rpc_ws()
             &turn3_commit,
             &stop_pcm,
             120,
-            |_capture| {
-                // Start barge-in immediately. The realtime model delivers audio
-                // faster than realtime.
-                true
+            |capture| {
+                // The provider can generate audio faster than realtime and
+                // control observations are delivered ahead of queued audio.
+                // Start at the first assistant transcript delta so the turn is
+                // observably active but has not already completed by the time
+                // its first audio frame reaches this client. The combined
+                // capture below still requires real assistant audio.
+                !capture.output_text.trim().is_empty()
             },
         )
         .await

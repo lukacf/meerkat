@@ -525,6 +525,7 @@ fn strip_released_checkpoint_metadata(session: &mut Session) {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -603,7 +604,7 @@ mod tests {
             RELEASED_SYSTEM_CONTEXT_STATE_KEY,
             serde_json::json!({
                 "applied": [{
-                    "content": content.clone(),
+                    "content": content,
                     "source": "shared-key",
                     "idempotency_key": "shared-key",
                     "accepted_at": accepted_at,

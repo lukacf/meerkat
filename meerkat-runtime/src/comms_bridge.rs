@@ -18,6 +18,7 @@ use crate::identifiers::{CorrelationId, LogicalRuntimeId};
 use crate::input::{
     ExternalEventInput, Input, InputDurability, InputHeader, InputOrigin, InputVisibility,
     PeerConvention, PeerInput, ResponseProgressPhase, ResponseTerminalStatus,
+    peer_response_terminal_idempotency_key,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -112,11 +113,20 @@ fn peer_input_from_ingress_fact(
         PeerConvention::ResponseProgress { .. } => None,
         _ => Some(interaction.handling_mode),
     };
-    let peer_id = ingress.canonical_peer_id_string().ok_or(
-        PeerIngressProjectionError::MissingCanonicalPeerId {
-            interaction_id: interaction.id,
-        },
-    )?;
+    let canonical_peer_id =
+        ingress
+            .canonical_peer_id
+            .ok_or(PeerIngressProjectionError::MissingCanonicalPeerId {
+                interaction_id: interaction.id,
+            })?;
+    let peer_id = canonical_peer_id.to_string();
+    let idempotency_key =
+        matches!(&convention, PeerConvention::ResponseTerminal { .. }).then(|| {
+            peer_response_terminal_idempotency_key(
+                canonical_peer_id,
+                meerkat_core::PeerCorrelationId::from_uuid(transcript_correlation_id.0),
+            )
+        });
     let display_identity = ingress
         .route
         .as_ref()
@@ -139,7 +149,7 @@ fn peer_input_from_ingress_fact(
                 transcript_eligible: true,
                 operator_eligible: true,
             },
-            idempotency_key: None,
+            idempotency_key,
             supersession_key: None,
             correlation_id: Some(CorrelationId::from_uuid(transcript_correlation_id.0)),
         },
@@ -1057,6 +1067,14 @@ mod tests {
                 p.header.correlation_id,
                 Some(CorrelationId::from_uuid(in_reply_to.0)),
                 "terminal peer responses must use the request interaction id that InteractionComplete reports",
+            );
+            assert_eq!(
+                p.header.idempotency_key,
+                Some(peer_response_terminal_idempotency_key(
+                    route_id,
+                    meerkat_core::PeerCorrelationId::from_uuid(in_reply_to.0),
+                )),
+                "terminal peer responses must carry one stable route/correlation replay key",
             );
             assert_eq!(p.header.durability, InputDurability::Durable);
             assert_eq!(

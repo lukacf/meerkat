@@ -984,7 +984,7 @@ impl MeerkatMachine {
                     };
 
                     match &result {
-                        AcceptOutcome::Accepted { input_id, .. } => {
+                        AcceptOutcome::Accepted { input_id, seed, .. } => {
                             let accepted_input_id = input_id.clone();
                             let fallback_wake = AcceptedIngressFallbackWakeGuard::new(
                                 wake_tx.clone(),
@@ -993,7 +993,11 @@ impl MeerkatMachine {
                                     || flags.wake_if_idle,
                             );
                             let is_terminal =
-                                driver.input_is_terminal_by_authority(&accepted_input_id)?;
+                                crate::meerkat_machine::input_seed_behavioral_terminality_via_authority(
+                                    &accepted_input_id,
+                                    seed,
+                                )
+                                .map_err(RuntimeDriverError::Internal)?;
                             let handle = if is_terminal || !register_completion {
                                 None
                             } else {
@@ -1012,8 +1016,17 @@ impl MeerkatMachine {
                                 fallback_wake,
                             )
                         }
-                        AcceptOutcome::Deduplicated { existing_id, .. } => {
-                            let is_terminal = driver.input_is_terminal_by_authority(existing_id)?;
+                        AcceptOutcome::Deduplicated {
+                            existing_id,
+                            existing_seed,
+                            ..
+                        } => {
+                            let is_terminal =
+                                crate::meerkat_machine::input_seed_behavioral_terminality_via_authority(
+                                    existing_id,
+                                    existing_seed,
+                                )
+                                .map_err(RuntimeDriverError::Internal)?;
 
                             if is_terminal || !register_completion {
                                 (

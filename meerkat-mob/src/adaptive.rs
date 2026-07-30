@@ -25,6 +25,209 @@ use tokio::time as tokio_time;
 const ADAPTIVE_RETRY_INITIAL: Duration = Duration::from_millis(25);
 const ADAPTIVE_RETRY_MAX: Duration = Duration::from_secs(1);
 const ADAPTIVE_RETRY_DIAGNOSTIC_LIMIT: usize = 8;
+const ADAPTIVE_TERMINALIZATION_GRACE: Duration = Duration::from_secs(5);
+const ADAPTIVE_AUTHORITY_GRACE: Duration = Duration::from_secs(1);
+const ADAPTIVE_CUSTODY_HANDOFF_GRACE: Duration = Duration::from_millis(100);
+
+/// The runtime boundary that owned an adaptive operation when its wall-clock
+/// budget expired.
+///
+/// Keeping this typed prevents a timeout from degrading into an opaque outer
+/// test failure and gives production diagnostics a stable stage vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdaptiveRuntimeStage {
+    Initialization,
+    Planning,
+    PlanningAdmission,
+    PlanningTerminalWait,
+    PlanningDecision,
+    PlanRejection,
+    PlanningCancellation,
+    LayerProvision,
+    LayerAdmission,
+    LayerProvisionAuthority,
+    LayerStart,
+    LayerRunStartAuthority,
+    LayerTerminal,
+    LayerTerminalAuthority,
+    LayerCancellation,
+    LayerInterruption,
+    LayerResultAuthority,
+    LayerCleanup,
+    LayerDisposition,
+    FinishAuthority,
+    RunCancellation,
+    DeadlineObservation,
+}
+
+impl std::fmt::Display for AdaptiveRuntimeStage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Initialization => "initialization",
+            Self::Planning => "planning",
+            Self::PlanningAdmission => "planning flow admission and target provisioning",
+            Self::PlanningTerminalWait => "planning flow terminal wait",
+            Self::PlanningDecision => "planning-decision authority",
+            Self::PlanRejection => "plan-rejection authority",
+            Self::PlanningCancellation => "planning cancellation",
+            Self::LayerProvision => "layer provisioning",
+            Self::LayerAdmission => "layer-admission authority",
+            Self::LayerProvisionAuthority => "layer-provision authority",
+            Self::LayerStart => "layer start",
+            Self::LayerRunStartAuthority => "layer-run-start authority",
+            Self::LayerTerminal => "layer terminal wait",
+            Self::LayerTerminalAuthority => "layer-terminal authority",
+            Self::LayerCancellation => "layer cancellation",
+            Self::LayerInterruption => "layer interruption",
+            Self::LayerResultAuthority => "layer-result authority",
+            Self::LayerCleanup => "layer cleanup",
+            Self::LayerDisposition => "layer disposition",
+            Self::FinishAuthority => "finish authority",
+            Self::RunCancellation => "adaptive run cancellation",
+            Self::DeadlineObservation => "deadline observation",
+        })
+    }
+}
+
+/// One absolute adaptive wall-clock budget plus a small, bounded window in
+/// which the shell can drain physical custody before asking MobMachine to
+/// terminalize the run as `DeadlineExceeded`.
+#[derive(Debug, Clone)]
+pub struct AdaptiveOperationDeadline {
+    deadline_ms: u64,
+    execution_deadline: tokio_time::Instant,
+    terminalization_deadline: tokio_time::Instant,
+}
+
+impl AdaptiveOperationDeadline {
+    pub(crate) fn from_policy(policy: &AdaptivePolicy, started_at_ms: u64) -> Self {
+        let wall_clock = Duration::from_millis(policy.limits.max_wall_clock_ms);
+        let execution_deadline = tokio_time::Instant::now() + wall_clock;
+        Self {
+            deadline_ms: started_at_ms.saturating_add(policy.limits.max_wall_clock_ms),
+            execution_deadline,
+            terminalization_deadline: execution_deadline + ADAPTIVE_TERMINALIZATION_GRACE,
+        }
+    }
+
+    pub fn deadline_ms(&self) -> u64 {
+        self.deadline_ms
+    }
+
+    pub fn observed_expired_at_ms(&self) -> u64 {
+        self.deadline_ms.saturating_add(1)
+    }
+
+    pub fn execution_remaining(&self) -> Duration {
+        self.execution_deadline
+            .saturating_duration_since(tokio_time::Instant::now())
+    }
+
+    pub(crate) fn execution_subphase_remaining(&self) -> Duration {
+        self.execution_remaining()
+            .saturating_sub(ADAPTIVE_CUSTODY_HANDOFF_GRACE)
+    }
+
+    pub fn terminalization_remaining(&self) -> Duration {
+        self.terminalization_deadline
+            .saturating_duration_since(tokio_time::Instant::now())
+    }
+
+    pub(crate) fn terminalization_subphase_remaining(&self) -> Duration {
+        self.terminalization_remaining()
+            .saturating_sub(ADAPTIVE_CUSTODY_HANDOFF_GRACE)
+    }
+
+    /// Physical cleanup must leave time for the authoritative disposition and
+    /// deadline-observation inputs to commit.
+    pub fn cleanup_remaining(&self) -> Duration {
+        self.terminalization_remaining()
+            .saturating_sub(ADAPTIVE_AUTHORITY_GRACE)
+    }
+
+    pub fn execution_expired(&self) -> bool {
+        self.execution_remaining().is_zero()
+    }
+
+    pub fn terminalization_expired(&self) -> bool {
+        self.terminalization_remaining().is_zero()
+    }
+
+    pub fn execution_error(
+        &self,
+        stage: AdaptiveRuntimeStage,
+        diagnostics: impl Into<String>,
+    ) -> AdaptiveError {
+        AdaptiveError::DeadlineExceeded {
+            stage,
+            deadline_ms: self.deadline_ms,
+            observed_at_ms: self.observed_expired_at_ms(),
+            diagnostics: diagnostics.into(),
+        }
+    }
+
+    pub(crate) async fn run_execution<T, F>(
+        &self,
+        stage: AdaptiveRuntimeStage,
+        diagnostics: impl FnOnce() -> String,
+        future: F,
+    ) -> Result<T, AdaptiveError>
+    where
+        F: Future<Output = Result<T, AdaptiveError>>,
+    {
+        if self.execution_expired() {
+            return Err(self.execution_error(stage, diagnostics()));
+        }
+        match tokio_time::timeout_at(self.execution_deadline, future).await {
+            Ok(result) => result,
+            Err(_) => Err(self.execution_error(stage, diagnostics())),
+        }
+    }
+
+    /// Bound a nested runtime operation slightly inside the absolute
+    /// execution deadline so it can return exact custody diagnostics to the
+    /// outer owner before that owner performs terminal cancellation.
+    pub(crate) async fn run_execution_subphase<T, F>(
+        &self,
+        stage: AdaptiveRuntimeStage,
+        diagnostics: impl FnOnce() -> String,
+        future: F,
+    ) -> Result<T, AdaptiveError>
+    where
+        F: Future<Output = Result<T, AdaptiveError>>,
+    {
+        let remaining = self.execution_subphase_remaining();
+        if remaining.is_zero() {
+            return Err(self.execution_error(stage, diagnostics()));
+        }
+        match tokio_time::timeout(remaining, future).await {
+            Ok(result) => result,
+            Err(_) => Err(self.execution_error(stage, diagnostics())),
+        }
+    }
+
+    async fn run_terminalization<T, F>(
+        &self,
+        stage: AdaptiveRuntimeStage,
+        future: F,
+    ) -> Result<T, AdaptiveError>
+    where
+        F: Future<Output = Result<T, AdaptiveError>>,
+    {
+        if self.terminalization_expired() {
+            return Err(AdaptiveError::TerminalizationDeadlineExceeded {
+                stage,
+                deadline_ms: self.deadline_ms,
+            });
+        }
+        tokio_time::timeout_at(self.terminalization_deadline, future)
+            .await
+            .map_err(|_| AdaptiveError::TerminalizationDeadlineExceeded {
+                stage,
+                deadline_ms: self.deadline_ms,
+            })?
+    }
+}
 
 fn push_bounded_retry_error(errors: &mut Vec<AdaptiveError>, error: AdaptiveError) {
     if errors.len() == ADAPTIVE_RETRY_DIAGNOSTIC_LIMIT {
@@ -551,6 +754,12 @@ impl AdaptiveDriver {
             Ok(limits) => limits,
             Err(error) => return AdaptiveRunInitialization::failed(error),
         };
+        // Durable machine limits retain the caller's wall-clock timestamp,
+        // while process-local cancellation custody uses a monotonic deadline.
+        // Mixing those clock domains makes synthetic/skewed timestamps appear
+        // expired and can strand an already-accepted machine run.
+        let cancellation_execution_deadline =
+            tokio_time::Instant::now() + Duration::from_millis(policy.limits.max_wall_clock_ms);
         let initialization_mob = self.control_mob.clone();
         let cancellation_driver = self.clone();
         let adaptive_run_id = adaptive_run_id.as_str().to_string();
@@ -563,7 +772,10 @@ impl AdaptiveDriver {
                     })
                     .await?)
             },
-            move |capability| cancellation_driver.cancellation_safe_run(capability.clone()),
+            move |capability| {
+                cancellation_driver
+                    .cancellation_safe_run(capability.clone(), cancellation_execution_deadline)
+            },
         )
     }
 
@@ -876,6 +1088,7 @@ pub struct AdaptiveRunOutcome {
 #[derive(Debug, Clone)]
 pub struct PlanningTurnRequest {
     pub adaptive_run_id: AdaptiveRunId,
+    pub planning_turn: u64,
     pub objective: String,
     pub previous_layer_result: Option<serde_json::Value>,
 }
@@ -1031,13 +1244,25 @@ impl AdaptiveRunCancellationOwner for DriverRunCancellationOwner {
 async fn run_driver_run_cancellation_cleanup(
     driver: AdaptiveDriver,
     capability: crate::AdaptiveDriverCapability,
+    deadline: tokio_time::Instant,
 ) {
     loop {
-        if driver.cancel(&capability).await.is_ok() {
+        if tokio_time::Instant::now() >= deadline {
+            tracing::error!(
+                adaptive_run_id = capability.adaptive_run_id(),
+                "adaptive cancellation guardian exhausted its bounded terminalization window"
+            );
+            return;
+        }
+        if matches!(
+            tokio_time::timeout_at(deadline, driver.cancel(&capability)).await,
+            Ok(Ok(()))
+        ) {
             return;
         }
 
-        if let Ok(snapshot) = driver.snapshot(&capability).await
+        if let Ok(Ok(snapshot)) =
+            tokio_time::timeout_at(deadline, driver.snapshot(&capability)).await
             && matches!(
                 snapshot.phase,
                 None | Some(
@@ -1050,7 +1275,11 @@ async fn run_driver_run_cancellation_cleanup(
             return;
         }
 
-        tokio_time::sleep(Duration::from_millis(25)).await;
+        tokio_time::sleep(
+            Duration::from_millis(25)
+                .min(deadline.saturating_duration_since(tokio_time::Instant::now())),
+        )
+        .await;
     }
 }
 
@@ -1058,7 +1287,14 @@ impl AdaptiveDriver {
     fn cancellation_safe_run(
         &self,
         capability: crate::AdaptiveDriverCapability,
+        execution_deadline: tokio_time::Instant,
     ) -> AdaptiveRunLease {
+        // Initialization is independently owned and may accept after the
+        // original execution window. Once acceptance exists, its cancellation
+        // obligation still owns one full terminalization window; otherwise a
+        // failed capability publication could create an ownerless active run.
+        let cancellation_deadline =
+            execution_deadline.max(tokio_time::Instant::now()) + ADAPTIVE_TERMINALIZATION_GRACE;
         let driver = self.clone();
         let worker_driver = driver.clone();
         let worker_capability = capability.clone();
@@ -1067,14 +1303,20 @@ impl AdaptiveDriver {
             if cancellation.await.is_ok() {
                 return;
             }
-            run_driver_run_cancellation_cleanup(worker_driver, worker_capability).await;
+            run_driver_run_cancellation_cleanup(
+                worker_driver,
+                worker_capability,
+                cancellation_deadline,
+            )
+            .await;
         });
 
         // Retain an independent owner for the exact worker. A panic or external
         // abort cannot silently discard the typed cancellation obligation.
         tokio::spawn(async move {
             if guardian.await.is_err() {
-                run_driver_run_cancellation_cleanup(driver, capability).await;
+                run_driver_run_cancellation_cleanup(driver, capability, cancellation_deadline)
+                    .await;
             }
         });
 
@@ -1184,6 +1426,12 @@ pub trait AdaptiveKernel {
     ) -> AdaptiveRunInitialization<Self::Capability>;
 
     async fn cancel_run(&self, capability: &Self::Capability) -> Result<(), AdaptiveError>;
+
+    async fn observe_deadline(
+        &self,
+        capability: &Self::Capability,
+        observed_at_ms: u64,
+    ) -> Result<(), AdaptiveError>;
 
     async fn record_planning_decision(
         &self,
@@ -1307,6 +1555,14 @@ impl AdaptiveKernel for AdaptiveDriver {
 
     async fn cancel_run(&self, capability: &Self::Capability) -> Result<(), AdaptiveError> {
         AdaptiveDriver::cancel(self, capability).await
+    }
+
+    async fn observe_deadline(
+        &self,
+        capability: &Self::Capability,
+        observed_at_ms: u64,
+    ) -> Result<(), AdaptiveError> {
+        AdaptiveDriver::observe_deadline(self, capability, observed_at_ms).await
     }
 
     async fn record_planning_decision(
@@ -1485,7 +1741,20 @@ pub trait AdaptiveDriverRuntime {
     async fn run_planning_turn(
         &mut self,
         request: PlanningTurnRequest,
+        deadline: &AdaptiveOperationDeadline,
     ) -> Result<LayerDecision, AdaptiveError>;
+
+    /// Cancel the exact planning flow whose custody was acquired by the most
+    /// recent `run_planning_turn`.
+    ///
+    /// This is a separate required operation because the outer absolute
+    /// deadline may drop `run_planning_turn` at any await. The runtime must
+    /// retain the stable flow identity until either terminality or this
+    /// cancellation is acknowledged.
+    async fn cancel_planning_turn(
+        &mut self,
+        deadline: &AdaptiveOperationDeadline,
+    ) -> Result<(), AdaptiveError>;
 
     async fn provision_layer(
         &mut self,
@@ -1493,19 +1762,32 @@ pub trait AdaptiveDriverRuntime {
         layer_id: &LayerId,
         attempt: u64,
         compiled: &CompiledLayer,
+        deadline: &AdaptiveOperationDeadline,
     ) -> AdaptiveLayerProvision<Self::Layer>;
 
     async fn start_layer_flow(
         &mut self,
         layer: &Self::Layer,
         activation_params: BTreeMap<String, serde_json::Value>,
+        deadline: &AdaptiveOperationDeadline,
     ) -> Result<RunId, AdaptiveError>;
 
     async fn await_layer_terminal(
         &mut self,
         layer: &Self::Layer,
         run_id: RunId,
+        deadline: &AdaptiveOperationDeadline,
     ) -> Result<MobRun, AdaptiveError>;
+
+    /// Request cancellation of the concrete child flow before physical layer
+    /// teardown. The runtime owns this because flow handles are store/runtime
+    /// facts, not adaptive machine state.
+    async fn cancel_layer_flow(
+        &mut self,
+        layer: &Self::Layer,
+        run_id: RunId,
+        deadline: &AdaptiveOperationDeadline,
+    ) -> Result<(), AdaptiveError>;
 
     /// Resolve physical ownership of a child layer.
     ///
@@ -1519,6 +1801,7 @@ pub trait AdaptiveDriverRuntime {
         layer: &AdaptiveLayerLease<Self::Layer>,
         layer_id: &LayerId,
         attempt: u64,
+        deadline: &AdaptiveOperationDeadline,
     ) -> Result<AdaptiveLayerCleanup, AdaptiveError>;
 }
 
@@ -1528,9 +1811,20 @@ fn attach_layer_finalization_error(
 ) -> AdaptiveError {
     match finalization {
         Ok(()) => primary,
-        Err(finalization_error) => AdaptiveError::DriverRuntime(format!(
-            "{primary}; adaptive layer finalization also failed: {finalization_error}"
-        )),
+        Err(finalization_error) => AdaptiveError::OperationFailedWithCleanup {
+            primary: Box::new(primary),
+            cleanup: format!("adaptive layer finalization: {finalization_error}"),
+        },
+    }
+}
+
+fn deadline_observation_ms(error: &AdaptiveError) -> Option<u64> {
+    match error {
+        AdaptiveError::DeadlineExceeded { observed_at_ms, .. } => Some(*observed_at_ms),
+        AdaptiveError::OperationFailedWithCleanup { primary, .. } => {
+            deadline_observation_ms(primary)
+        }
+        _ => None,
     }
 }
 
@@ -1552,18 +1846,42 @@ fn operation_error_with_followup_failures(
     }
 }
 
-async fn cancel_run_until_confirmed<K>(kernel: &K, capability: &K::Capability) -> Vec<AdaptiveError>
+async fn retry_backoff_within_terminalization(
+    deadline: &AdaptiveOperationDeadline,
+    delay: Duration,
+) -> bool {
+    let remaining = deadline.terminalization_remaining();
+    if remaining.is_zero() {
+        return false;
+    }
+    tokio_time::sleep(delay.min(remaining)).await;
+    !deadline.terminalization_expired()
+}
+
+async fn cancel_run_until_confirmed<K>(
+    kernel: &K,
+    capability: &K::Capability,
+    deadline: &AdaptiveOperationDeadline,
+) -> (bool, Vec<AdaptiveError>)
 where
     K: AdaptiveKernel + Sync,
 {
     let mut delay = ADAPTIVE_RETRY_INITIAL;
     let mut failures = Vec::new();
     loop {
-        match kernel.cancel_run(capability).await {
-            Ok(()) => return failures,
+        match deadline
+            .run_terminalization(
+                AdaptiveRuntimeStage::RunCancellation,
+                kernel.cancel_run(capability),
+            )
+            .await
+        {
+            Ok(()) => return (true, failures),
             Err(error) => {
                 push_bounded_retry_error(&mut failures, error);
-                tokio_time::sleep(delay).await;
+                if !retry_backoff_within_terminalization(deadline, delay).await {
+                    return (false, failures);
+                }
                 delay = delay.saturating_mul(2).min(ADAPTIVE_RETRY_MAX);
             }
         }
@@ -1574,18 +1892,27 @@ async fn layer_exists_until_confirmed<K>(
     kernel: &K,
     capability: &K::Capability,
     layer_id: &LayerId,
-) -> (bool, Vec<AdaptiveError>)
+    deadline: &AdaptiveOperationDeadline,
+) -> (Option<bool>, Vec<AdaptiveError>)
 where
     K: AdaptiveKernel + Sync,
 {
     let mut delay = ADAPTIVE_RETRY_INITIAL;
     let mut failures = Vec::new();
     loop {
-        match kernel.layer_exists(capability, layer_id).await {
-            Ok(exists) => return (exists, failures),
+        match deadline
+            .run_terminalization(
+                AdaptiveRuntimeStage::LayerDisposition,
+                kernel.layer_exists(capability, layer_id),
+            )
+            .await
+        {
+            Ok(exists) => return (Some(exists), failures),
             Err(error) => {
                 push_bounded_retry_error(&mut failures, error);
-                tokio_time::sleep(delay).await;
+                if !retry_backoff_within_terminalization(deadline, delay).await {
+                    return (None, failures);
+                }
                 delay = delay.saturating_mul(2).min(ADAPTIVE_RETRY_MAX);
             }
         }
@@ -1597,21 +1924,27 @@ async fn record_absent_layer_until_confirmed<K>(
     capability: &K::Capability,
     layer_id: &LayerId,
     attempt: u64,
-) -> Vec<AdaptiveError>
+    deadline: &AdaptiveOperationDeadline,
+) -> (bool, Vec<AdaptiveError>)
 where
     K: AdaptiveKernel + Sync,
 {
     let mut delay = ADAPTIVE_RETRY_INITIAL;
     let mut failures = Vec::new();
     loop {
-        match kernel
-            .record_layer_mob_destroyed(capability, layer_id, attempt)
+        match deadline
+            .run_terminalization(
+                AdaptiveRuntimeStage::LayerDisposition,
+                kernel.record_layer_mob_destroyed(capability, layer_id, attempt),
+            )
             .await
         {
-            Ok(()) => return failures,
+            Ok(()) => return (true, failures),
             Err(error) => {
                 push_bounded_retry_error(&mut failures, error);
-                tokio_time::sleep(delay).await;
+                if !retry_backoff_within_terminalization(deadline, delay).await {
+                    return (false, failures);
+                }
                 delay = delay.saturating_mul(2).min(ADAPTIVE_RETRY_MAX);
             }
         }
@@ -1624,14 +1957,18 @@ async fn finalize_absent_layer<K>(
     layer_id: &LayerId,
     attempt: u64,
     terminalization: Result<(), AdaptiveError>,
+    deadline: &AdaptiveOperationDeadline,
 ) -> Result<(), AdaptiveError>
 where
     K: AdaptiveKernel + Sync,
 {
     let original_terminalization_error = terminalization.err();
     let terminal_ack = if original_terminalization_error.is_some() {
-        kernel
-            .record_layer_interrupted(capability, layer_id, attempt)
+        deadline
+            .run_terminalization(
+                AdaptiveRuntimeStage::LayerInterruption,
+                kernel.record_layer_interrupted(capability, layer_id, attempt),
+            )
             .await
     } else {
         Ok(())
@@ -1648,8 +1985,11 @@ where
     // Mob creation failed before a handle existed, so physical absence is
     // proven. Feed that terminal cleanup observation through MobMachine to
     // release the admission reservation instead of fabricating local cleanup.
-    let cleanup_observation = kernel
-        .record_layer_mob_destroyed(capability, layer_id, attempt)
+    let cleanup_observation = deadline
+        .run_terminalization(
+            AdaptiveRuntimeStage::LayerDisposition,
+            kernel.record_layer_mob_destroyed(capability, layer_id, attempt),
+        )
         .await;
     match (original_terminalization_error, cleanup_observation) {
         (None, result) => result,
@@ -1662,26 +2002,46 @@ where
     }
 }
 
-async fn finalize_acquired_layer<K, R>(
-    kernel: &K,
-    capability: &K::Capability,
-    runtime: &mut R,
-    layer: AdaptiveLayerLease<R::Layer>,
-    layer_id: &LayerId,
+struct AcquiredLayerFinalizationContext<'a, K, R>
+where
+    K: AdaptiveKernel + Sync,
+    R: AdaptiveDriverRuntime<Capability = K::Capability> + Send,
+{
+    kernel: &'a K,
+    capability: &'a K::Capability,
+    runtime: &'a mut R,
+    layer_id: &'a LayerId,
     attempt: u64,
+    deadline: &'a AdaptiveOperationDeadline,
+}
+
+async fn finalize_acquired_layer<K, R>(
+    context: AcquiredLayerFinalizationContext<'_, K, R>,
+    layer: AdaptiveLayerLease<R::Layer>,
     terminalization: Result<(), AdaptiveError>,
 ) -> Result<(), AdaptiveError>
 where
     K: AdaptiveKernel + Sync,
     R: AdaptiveDriverRuntime<Capability = K::Capability> + Send,
 {
+    let AcquiredLayerFinalizationContext {
+        kernel,
+        capability,
+        runtime,
+        layer_id,
+        attempt,
+        deadline,
+    } = context;
     // A transition may commit and then lose its response. The idempotent
     // interruption input acknowledges either that already-terminal state or
     // terminalizes a still-live phase before cleanup observation.
     let original_terminalization_error = terminalization.err();
     let terminal_ack = if original_terminalization_error.is_some() {
-        kernel
-            .record_layer_interrupted(capability, layer_id, attempt)
+        deadline
+            .run_terminalization(
+                AdaptiveRuntimeStage::LayerInterruption,
+                kernel.record_layer_interrupted(capability, layer_id, attempt),
+            )
             .await
     } else {
         Ok(())
@@ -1689,7 +2049,24 @@ where
 
     // Physical teardown is unconditional once ownership of a layer has been
     // acquired, even when machine acknowledgement itself fails.
-    let cleanup = runtime.cleanup_layer(&layer, layer_id, attempt).await;
+    let cleanup_remaining = deadline.cleanup_remaining();
+    let cleanup = if cleanup_remaining.is_zero() {
+        Ok(AdaptiveLayerCleanup::Retained(
+            crate::AdaptiveLayerDisposition::Retained,
+        ))
+    } else {
+        match tokio_time::timeout(
+            cleanup_remaining,
+            runtime.cleanup_layer(&layer, layer_id, attempt, deadline),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Ok(AdaptiveLayerCleanup::Retained(
+                crate::AdaptiveLayerDisposition::Retained,
+            )),
+        }
+    };
     if let Err(ack_error) = terminal_ack {
         return match (original_terminalization_error, cleanup) {
             (Some(original_error), Ok(_)) => Err(AdaptiveError::DriverRuntime(format!(
@@ -1707,20 +2084,50 @@ where
         };
     }
 
-    let cleanup_observation = match cleanup? {
+    let cleanup = cleanup?;
+    let cleanup_observation = match cleanup {
         AdaptiveLayerCleanup::Destroyed => {
-            kernel
-                .record_layer_mob_destroyed(capability, layer_id, attempt)
+            deadline
+                .run_terminalization(
+                    AdaptiveRuntimeStage::LayerDisposition,
+                    kernel.record_layer_mob_destroyed(capability, layer_id, attempt),
+                )
                 .await
         }
         AdaptiveLayerCleanup::Retained(disposition) => {
-            kernel
-                .record_layer_mob_retained(capability, layer_id, attempt, disposition)
+            deadline
+                .run_terminalization(
+                    AdaptiveRuntimeStage::LayerDisposition,
+                    kernel.record_layer_mob_retained(capability, layer_id, attempt, disposition),
+                )
                 .await
         }
     };
     if cleanup_observation.is_ok() {
-        let _cleaned_layer = layer.disarm();
+        match cleanup {
+            AdaptiveLayerCleanup::Destroyed => {
+                let _cleaned_layer = layer.disarm();
+            }
+            AdaptiveLayerCleanup::Retained(_) => {
+                // Dropping the armed lease transfers the retained child to its
+                // prestarted cleanup owner. The machine now records that
+                // independent custody instead of pretending physical destroy.
+                drop(layer);
+            }
+        }
+    }
+    if original_terminalization_error.is_none()
+        && cleanup_observation.is_ok()
+        && matches!(cleanup, AdaptiveLayerCleanup::Retained(_))
+        && deadline.execution_expired()
+    {
+        return Err(deadline.execution_error(
+            AdaptiveRuntimeStage::LayerCleanup,
+            format!(
+                "layer_id={}; attempt={attempt}; disposition=retained; custody=cleanup-owner",
+                layer_id.as_str()
+            ),
+        ));
     }
     match (original_terminalization_error, cleanup_observation) {
         (None, result) => result,
@@ -1742,6 +2149,7 @@ where
     K: AdaptiveKernel + Sync,
     R: AdaptiveDriverRuntime<Capability = K::Capability> + Send,
 {
+    let deadline = AdaptiveOperationDeadline::from_policy(&request.policy, request.started_at_ms);
     // Initialization custody is established synchronously before this first
     // cancellable await. The owner keeps the queued machine command and its
     // reply alive, then publishes capability and armed lease as one value.
@@ -1750,30 +2158,92 @@ where
         &request.policy,
         request.started_at_ms,
     );
-    let (capability, run_lease) = initialization.resolve().await?;
+    let (capability, run_lease) = deadline
+        .run_execution(
+            AdaptiveRuntimeStage::Initialization,
+            || format!("adaptive_run_id={}", request.adaptive_run_id.as_str()),
+            initialization.resolve(),
+        )
+        .await?;
     let mut cancel_confirmed = false;
     let outcome = async {
         let mut body_store = InMemoryBodyStore::default();
         let mut context = request.compile_context.clone();
         context.adaptive_run_id = request.adaptive_run_id.clone();
         let mut previous_layer_result = context.previous_layer_result.clone();
+        let mut planning_turn = 1_u64;
 
         loop {
-            let decision = runtime
-                .run_planning_turn(PlanningTurnRequest {
-                    adaptive_run_id: request.adaptive_run_id.clone(),
-                    objective: request.objective.clone(),
-                    previous_layer_result: previous_layer_result.clone(),
-                })
-                .await?;
-            kernel
-                .record_planning_decision(&capability, &decision)
+            let planning_request = PlanningTurnRequest {
+                adaptive_run_id: request.adaptive_run_id.clone(),
+                planning_turn,
+                objective: request.objective.clone(),
+                previous_layer_result: previous_layer_result.clone(),
+            };
+            let decision = match deadline
+                .run_execution(
+                    AdaptiveRuntimeStage::Planning,
+                    || {
+                        format!(
+                            "adaptive_run_id={}; planning_turn={}; next_layer_attempt={}",
+                            request.adaptive_run_id.as_str(),
+                            planning_turn,
+                            context.attempt
+                        )
+                    },
+                    runtime.run_planning_turn(planning_request, &deadline),
+                )
+                .await
+            {
+                Ok(decision) => decision,
+                Err(error) => {
+                    let cancellation = deadline
+                        .run_terminalization(
+                            AdaptiveRuntimeStage::PlanningCancellation,
+                            runtime.cancel_planning_turn(&deadline),
+                        )
+                        .await;
+                    return match cancellation {
+                        Ok(()) => Err(error),
+                        Err(cancel_error) => Err(AdaptiveError::OperationFailedWithCleanup {
+                            primary: Box::new(error),
+                            cleanup: format!("adaptive planning-flow cancellation: {cancel_error}"),
+                        }),
+                    };
+                }
+            };
+            planning_turn = planning_turn.saturating_add(1);
+            deadline
+                .run_execution(
+                    AdaptiveRuntimeStage::PlanningDecision,
+                    || {
+                        format!(
+                            "adaptive_run_id={}; planning_turn={}; next_layer_attempt={}",
+                            request.adaptive_run_id.as_str(),
+                            planning_turn.saturating_sub(1),
+                            context.attempt
+                        )
+                    },
+                    kernel.record_planning_decision(&capability, &decision),
+                )
                 .await?;
 
             match decision {
                 LayerDecision::Finish { result, .. } => {
                     let digest = body_store.put_json(&result.result)?;
-                    kernel.resolve_finish(&capability, &digest).await?;
+                    deadline
+                        .run_execution(
+                            AdaptiveRuntimeStage::FinishAuthority,
+                            || {
+                                format!(
+                                    "adaptive_run_id={}; result_digest={}",
+                                    request.adaptive_run_id.as_str(),
+                                    digest.as_str()
+                                )
+                            },
+                            kernel.resolve_finish(&capability, &digest),
+                        )
+                        .await?;
                     return Ok(AdaptiveRunOutcome {
                         adaptive_run_id: request.adaptive_run_id,
                         final_result_digest: Some(digest),
@@ -1787,8 +2257,18 @@ where
                     let compiled = match compile_layer(&plan, &context, &request.policy) {
                         Ok(compiled) if compiled.plan_digest == plan_digest => compiled,
                         Ok(compiled) => {
-                            kernel
-                                .record_plan_rejected(&capability, &scoped_layer_id)
+                            deadline
+                                .run_execution(
+                                    AdaptiveRuntimeStage::PlanRejection,
+                                    || {
+                                        format!(
+                                            "adaptive_run_id={}; layer_id={}",
+                                            request.adaptive_run_id.as_str(),
+                                            scoped_layer_id.as_str()
+                                        )
+                                    },
+                                    kernel.record_plan_rejected(&capability, &scoped_layer_id),
+                                )
                                 .await?;
                             return Err(AdaptiveError::BodyDigestMismatch {
                                 expected: plan_digest,
@@ -1796,53 +2276,128 @@ where
                             });
                         }
                         Err(error) => {
-                            kernel
-                                .record_plan_rejected(&capability, &scoped_layer_id)
+                            deadline
+                                .run_execution(
+                                    AdaptiveRuntimeStage::PlanRejection,
+                                    || {
+                                        format!(
+                                            "adaptive_run_id={}; layer_id={}",
+                                            request.adaptive_run_id.as_str(),
+                                            scoped_layer_id.as_str()
+                                        )
+                                    },
+                                    kernel.record_plan_rejected(&capability, &scoped_layer_id),
+                                )
                                 .await?;
                             return Err(error);
                         }
                     };
-                    let admission = match kernel
-                        .resolve_layer_admission(
-                            &capability,
-                            &scoped_layer_id,
-                            context.attempt,
-                            &compiled,
-                            runtime.now_ms(),
+                    let admission = match deadline
+                        .run_execution(
+                            AdaptiveRuntimeStage::LayerAdmission,
+                            || {
+                                format!(
+                                    "adaptive_run_id={}; layer_id={}; attempt={}",
+                                    request.adaptive_run_id.as_str(),
+                                    scoped_layer_id.as_str(),
+                                    context.attempt
+                                )
+                            },
+                            kernel.resolve_layer_admission(
+                                &capability,
+                                &scoped_layer_id,
+                                context.attempt,
+                                &compiled,
+                                runtime.now_ms(),
+                            ),
                         )
                         .await
                     {
                         Ok(admission) => admission,
                         Err(primary) => {
+                            if deadline_observation_ms(&primary).is_some() {
+                                // The admission command may have committed and
+                                // lost its reply. Preserve DeadlineExceeded as
+                                // the run terminal: classify machine custody,
+                                // terminalize a committed reservation, and
+                                // record proven physical absence before the
+                                // outer deadline observation.
+                                let (layer_exists, mut failures) = layer_exists_until_confirmed(
+                                    kernel,
+                                    &capability,
+                                    &scoped_layer_id,
+                                    &deadline,
+                                )
+                                .await;
+                                if layer_exists == Some(true) {
+                                    let interruption = deadline
+                                        .run_terminalization(
+                                            AdaptiveRuntimeStage::LayerInterruption,
+                                            kernel.record_layer_interrupted(
+                                                &capability,
+                                                &scoped_layer_id,
+                                                context.attempt,
+                                            ),
+                                        )
+                                        .await;
+                                    if let Err(error) = finalize_absent_layer(
+                                        kernel,
+                                        &capability,
+                                        &scoped_layer_id,
+                                        context.attempt,
+                                        interruption,
+                                        &deadline,
+                                    )
+                                    .await
+                                    {
+                                        failures.push(error);
+                                    }
+                                }
+                                let failures = failures
+                                    .into_iter()
+                                    .map(|error| ("deadline admission custody drain", error))
+                                    .collect();
+                                return Err(operation_error_with_followup_failures(
+                                    primary, failures,
+                                ));
+                            }
                             // A lost admission acknowledgement can hide a
                             // committed reservation even though provisioning
                             // has not begun. Cancel first, then use machine
                             // truth to release only a proven-absent layer.
-                            let mut failures = cancel_run_until_confirmed(kernel, &capability)
-                                .await
+                            let (confirmed, cancel_failures) =
+                                cancel_run_until_confirmed(kernel, &capability, &deadline).await;
+                            let mut failures = cancel_failures
                                 .into_iter()
                                 .map(|error| ("adaptive cancellation retry", error))
                                 .collect::<Vec<_>>();
-                            cancel_confirmed = true;
-                            let (layer_exists, snapshot_failures) =
-                                layer_exists_until_confirmed(kernel, &capability, &scoped_layer_id)
-                                    .await;
+                            cancel_confirmed = confirmed;
+                            let (layer_exists, snapshot_failures) = layer_exists_until_confirmed(
+                                kernel,
+                                &capability,
+                                &scoped_layer_id,
+                                &deadline,
+                            )
+                            .await;
                             failures.extend(
                                 snapshot_failures
                                     .into_iter()
                                     .map(|error| ("adaptive layer snapshot retry", error)),
                             );
-                            if layer_exists {
-                                failures.extend(
+                            if layer_exists == Some(true) {
+                                let (_, disposition_failures) =
                                     record_absent_layer_until_confirmed(
                                         kernel,
                                         &capability,
                                         &scoped_layer_id,
                                         context.attempt,
+                                        &deadline,
                                     )
-                                    .await
-                                    .into_iter()
-                                    .map(|error| ("absent layer disposition retry", error)),
+                                    .await;
+                                failures.extend(
+                                    disposition_failures
+                                        .into_iter()
+                                        .map(|error| ("absent layer disposition retry", error)),
                                 );
                             }
                             return Err(operation_error_with_followup_failures(primary, failures));
@@ -1852,10 +2407,29 @@ where
                         continue;
                     }
 
-                    let layer = match runtime
-                        .provision_layer(&capability, &scoped_layer_id, context.attempt, &compiled)
-                        .await
-                    {
+                    let provision = tokio_time::timeout_at(
+                        deadline.execution_deadline,
+                        runtime.provision_layer(
+                            &capability,
+                            &scoped_layer_id,
+                            context.attempt,
+                            &compiled,
+                            &deadline,
+                        ),
+                    )
+                    .await
+                    .map_err(|_| {
+                        deadline.execution_error(
+                            AdaptiveRuntimeStage::LayerProvision,
+                            format!(
+                                "adaptive_run_id={}; layer_id={}; attempt={}",
+                                request.adaptive_run_id.as_str(),
+                                scoped_layer_id.as_str(),
+                                context.attempt
+                            ),
+                        )
+                    })?;
+                    let layer = match provision {
                         AdaptiveLayerProvision::Ready(layer) => layer,
                         AdaptiveLayerProvision::Failed {
                             layer,
@@ -1864,25 +2438,31 @@ where
                             requested_members,
                             error,
                         } => {
-                            let terminalization = kernel
-                                .record_layer_setup_fault(
-                                    &capability,
-                                    &scoped_layer_id,
-                                    context.attempt,
-                                    fault,
-                                    spawned_members,
-                                    requested_members,
+                            let terminalization = deadline
+                                .run_terminalization(
+                                    AdaptiveRuntimeStage::LayerInterruption,
+                                    kernel.record_layer_setup_fault(
+                                        &capability,
+                                        &scoped_layer_id,
+                                        context.attempt,
+                                        fault,
+                                        spawned_members,
+                                        requested_members,
+                                    ),
                                 )
                                 .await;
                             let finalization = match layer {
                                 Some(layer) => {
                                     finalize_acquired_layer(
-                                        kernel,
-                                        &capability,
-                                        runtime,
+                                        AcquiredLayerFinalizationContext {
+                                            kernel,
+                                            capability: &capability,
+                                            runtime,
+                                            layer_id: &scoped_layer_id,
+                                            attempt: context.attempt,
+                                            deadline: &deadline,
+                                        },
                                         layer,
-                                        &scoped_layer_id,
-                                        context.attempt,
                                         terminalization,
                                     )
                                     .await
@@ -1894,6 +2474,7 @@ where
                                         &scoped_layer_id,
                                         context.attempt,
                                         terminalization,
+                                        &deadline,
                                     )
                                     .await
                                 }
@@ -1901,132 +2482,251 @@ where
                             return Err(attach_layer_finalization_error(error, finalization));
                         }
                     };
-                    if let Err(error) = kernel
-                        .record_layer_provisioned(&capability, &scoped_layer_id, context.attempt)
-                        .await
-                    {
-                        let terminalization = kernel
-                            .record_layer_interrupted(
+                    if let Err(error) = deadline
+                        .run_execution(
+                            AdaptiveRuntimeStage::LayerProvisionAuthority,
+                            || {
+                                format!(
+                                    "adaptive_run_id={}; layer_id={}; attempt={}",
+                                    request.adaptive_run_id.as_str(),
+                                    scoped_layer_id.as_str(),
+                                    context.attempt
+                                )
+                            },
+                            kernel.record_layer_provisioned(
                                 &capability,
                                 &scoped_layer_id,
                                 context.attempt,
+                            ),
+                        )
+                        .await
+                    {
+                        let terminalization = deadline
+                            .run_terminalization(
+                                AdaptiveRuntimeStage::LayerInterruption,
+                                kernel.record_layer_interrupted(
+                                    &capability,
+                                    &scoped_layer_id,
+                                    context.attempt,
+                                ),
                             )
                             .await;
                         let finalization = finalize_acquired_layer(
-                            kernel,
-                            &capability,
-                            runtime,
+                            AcquiredLayerFinalizationContext {
+                                kernel,
+                                capability: &capability,
+                                runtime,
+                                layer_id: &scoped_layer_id,
+                                attempt: context.attempt,
+                                deadline: &deadline,
+                            },
                             layer,
-                            &scoped_layer_id,
-                            context.attempt,
                             terminalization,
                         )
                         .await;
                         return Err(attach_layer_finalization_error(error, finalization));
                     }
-                    let child_run_id = match runtime
-                        .start_layer_flow(layer.layer(), compiled.activation_params.clone())
+                    let child_run_id = match deadline
+                        .run_execution(
+                            AdaptiveRuntimeStage::LayerStart,
+                            || {
+                                format!(
+                                    "adaptive_run_id={}; layer_id={}; attempt={}",
+                                    request.adaptive_run_id.as_str(),
+                                    scoped_layer_id.as_str(),
+                                    context.attempt
+                                )
+                            },
+                            runtime.start_layer_flow(
+                                layer.layer(),
+                                compiled.activation_params.clone(),
+                                &deadline,
+                            ),
+                        )
                         .await
                     {
                         Ok(run_id) => run_id,
                         Err(error) => {
-                            let terminalization = kernel
-                                .record_layer_interrupted(
-                                    &capability,
-                                    &scoped_layer_id,
-                                    context.attempt,
+                            let terminalization = deadline
+                                .run_terminalization(
+                                    AdaptiveRuntimeStage::LayerInterruption,
+                                    kernel.record_layer_interrupted(
+                                        &capability,
+                                        &scoped_layer_id,
+                                        context.attempt,
+                                    ),
                                 )
                                 .await;
                             let finalization = finalize_acquired_layer(
-                                kernel,
-                                &capability,
-                                runtime,
+                                AcquiredLayerFinalizationContext {
+                                    kernel,
+                                    capability: &capability,
+                                    runtime,
+                                    layer_id: &scoped_layer_id,
+                                    attempt: context.attempt,
+                                    deadline: &deadline,
+                                },
                                 layer,
-                                &scoped_layer_id,
-                                context.attempt,
                                 terminalization,
                             )
                             .await;
                             return Err(attach_layer_finalization_error(error, finalization));
                         }
                     };
-                    if let Err(error) = kernel
-                        .record_layer_run_started(
-                            &capability,
-                            &scoped_layer_id,
-                            context.attempt,
-                            child_run_id.clone(),
-                        )
-                        .await
-                    {
-                        let terminalization = kernel
-                            .record_layer_interrupted(
+                    if let Err(error) = deadline
+                        .run_execution(
+                            AdaptiveRuntimeStage::LayerRunStartAuthority,
+                            || {
+                                format!(
+                                    "adaptive_run_id={}; layer_id={}; attempt={}; child_run_id={}",
+                                    request.adaptive_run_id.as_str(),
+                                    scoped_layer_id.as_str(),
+                                    context.attempt,
+                                    child_run_id
+                                )
+                            },
+                            kernel.record_layer_run_started(
                                 &capability,
                                 &scoped_layer_id,
                                 context.attempt,
+                                child_run_id.clone(),
+                            ),
+                        )
+                        .await
+                    {
+                        let terminalization = deadline
+                            .run_terminalization(
+                                AdaptiveRuntimeStage::LayerInterruption,
+                                kernel.record_layer_interrupted(
+                                    &capability,
+                                    &scoped_layer_id,
+                                    context.attempt,
+                                ),
                             )
                             .await;
                         let finalization = finalize_acquired_layer(
-                            kernel,
-                            &capability,
-                            runtime,
+                            AcquiredLayerFinalizationContext {
+                                kernel,
+                                capability: &capability,
+                                runtime,
+                                layer_id: &scoped_layer_id,
+                                attempt: context.attempt,
+                                deadline: &deadline,
+                            },
                             layer,
-                            &scoped_layer_id,
-                            context.attempt,
                             terminalization,
                         )
                         .await;
                         return Err(attach_layer_finalization_error(error, finalization));
                     }
-                    let child_run = match runtime
-                        .await_layer_terminal(layer.layer(), child_run_id)
+                    let child_run = match deadline
+                        .run_execution(
+                            AdaptiveRuntimeStage::LayerTerminal,
+                            || {
+                                format!(
+                                    "adaptive_run_id={}; layer_id={}; attempt={}; child_run_id={}",
+                                    request.adaptive_run_id.as_str(),
+                                    scoped_layer_id.as_str(),
+                                    context.attempt,
+                                    child_run_id
+                                )
+                            },
+                            runtime.await_layer_terminal(
+                                layer.layer(),
+                                child_run_id.clone(),
+                                &deadline,
+                            ),
+                        )
                         .await
                     {
                         Ok(child_run) => child_run,
                         Err(error) => {
-                            let terminalization = kernel
-                                .record_layer_interrupted(
-                                    &capability,
-                                    &scoped_layer_id,
-                                    context.attempt,
+                            let cancellation = deadline
+                                .run_terminalization(
+                                    AdaptiveRuntimeStage::LayerCancellation,
+                                    runtime.cancel_layer_flow(
+                                        layer.layer(),
+                                        child_run_id,
+                                        &deadline,
+                                    ),
+                                )
+                                .await;
+                            let terminalization = deadline
+                                .run_terminalization(
+                                    AdaptiveRuntimeStage::LayerInterruption,
+                                    kernel.record_layer_interrupted(
+                                        &capability,
+                                        &scoped_layer_id,
+                                        context.attempt,
+                                    ),
                                 )
                                 .await;
                             let finalization = finalize_acquired_layer(
-                                kernel,
-                                &capability,
-                                runtime,
+                                AcquiredLayerFinalizationContext {
+                                    kernel,
+                                    capability: &capability,
+                                    runtime,
+                                    layer_id: &scoped_layer_id,
+                                    attempt: context.attempt,
+                                    deadline: &deadline,
+                                },
                                 layer,
-                                &scoped_layer_id,
-                                context.attempt,
                                 terminalization,
                             )
                             .await;
+                            let error = match cancellation {
+                                Ok(()) => error,
+                                Err(cancel_error) => AdaptiveError::OperationFailedWithCleanup {
+                                    primary: Box::new(error),
+                                    cleanup: format!(
+                                        "adaptive child-flow cancellation: {cancel_error}"
+                                    ),
+                                },
+                            };
                             return Err(attach_layer_finalization_error(error, finalization));
                         }
                     };
-                    if let Err(error) = kernel
-                        .ingest_layer_terminal(
-                            &capability,
-                            &scoped_layer_id,
-                            context.attempt,
-                            &child_run,
-                        )
-                        .await
-                    {
-                        let terminalization = kernel
-                            .record_layer_interrupted(
+                    if let Err(error) = deadline
+                        .run_execution(
+                            AdaptiveRuntimeStage::LayerTerminalAuthority,
+                            || {
+                                format!(
+                                    "adaptive_run_id={}; layer_id={}; attempt={}; child_run_id={}",
+                                    request.adaptive_run_id.as_str(),
+                                    scoped_layer_id.as_str(),
+                                    context.attempt,
+                                    child_run.run_id
+                                )
+                            },
+                            kernel.ingest_layer_terminal(
                                 &capability,
                                 &scoped_layer_id,
                                 context.attempt,
+                                &child_run,
+                            ),
+                        )
+                        .await
+                    {
+                        let terminalization = deadline
+                            .run_terminalization(
+                                AdaptiveRuntimeStage::LayerInterruption,
+                                kernel.record_layer_interrupted(
+                                    &capability,
+                                    &scoped_layer_id,
+                                    context.attempt,
+                                ),
                             )
                             .await;
                         let finalization = finalize_acquired_layer(
-                            kernel,
-                            &capability,
-                            runtime,
+                            AcquiredLayerFinalizationContext {
+                                kernel,
+                                capability: &capability,
+                                runtime,
+                                layer_id: &scoped_layer_id,
+                                attempt: context.attempt,
+                                deadline: &deadline,
+                            },
                             layer,
-                            &scoped_layer_id,
-                            context.attempt,
                             terminalization,
                         )
                         .await;
@@ -2039,20 +2739,26 @@ where
                         }) {
                             Ok(result) => result,
                             Err(error) => {
-                                let terminalization = kernel
-                                    .record_layer_result_invalid(
-                                        &capability,
-                                        &scoped_layer_id,
-                                        context.attempt,
+                                let terminalization = deadline
+                                    .run_terminalization(
+                                        AdaptiveRuntimeStage::LayerResultAuthority,
+                                        kernel.record_layer_result_invalid(
+                                            &capability,
+                                            &scoped_layer_id,
+                                            context.attempt,
+                                        ),
                                     )
                                     .await;
                                 let finalization = finalize_acquired_layer(
-                                    kernel,
-                                    &capability,
-                                    runtime,
+                                    AcquiredLayerFinalizationContext {
+                                        kernel,
+                                        capability: &capability,
+                                        runtime,
+                                        layer_id: &scoped_layer_id,
+                                        attempt: context.attempt,
+                                        deadline: &deadline,
+                                    },
                                     layer,
-                                    &scoped_layer_id,
-                                    context.attempt,
                                     terminalization,
                                 )
                                 .await;
@@ -2062,61 +2768,88 @@ where
                     let result_digest = match body_store.put_json(&layer_result) {
                         Ok(digest) => digest,
                         Err(error) => {
-                            let terminalization = kernel
-                                .record_layer_interrupted(
-                                    &capability,
-                                    &scoped_layer_id,
-                                    context.attempt,
+                            let terminalization = deadline
+                                .run_terminalization(
+                                    AdaptiveRuntimeStage::LayerInterruption,
+                                    kernel.record_layer_interrupted(
+                                        &capability,
+                                        &scoped_layer_id,
+                                        context.attempt,
+                                    ),
                                 )
                                 .await;
                             let finalization = finalize_acquired_layer(
-                                kernel,
-                                &capability,
-                                runtime,
+                                AcquiredLayerFinalizationContext {
+                                    kernel,
+                                    capability: &capability,
+                                    runtime,
+                                    layer_id: &scoped_layer_id,
+                                    attempt: context.attempt,
+                                    deadline: &deadline,
+                                },
                                 layer,
-                                &scoped_layer_id,
-                                context.attempt,
                                 terminalization,
                             )
                             .await;
                             return Err(attach_layer_finalization_error(error, finalization));
                         }
                     };
-                    if let Err(error) = kernel
-                        .record_layer_result_validated(
-                            &capability,
-                            &scoped_layer_id,
-                            context.attempt,
-                            &result_digest,
-                        )
-                        .await
-                    {
-                        let terminalization = kernel
-                            .record_layer_interrupted(
+                    if let Err(error) = deadline
+                        .run_execution(
+                            AdaptiveRuntimeStage::LayerResultAuthority,
+                            || {
+                                format!(
+                                    "adaptive_run_id={}; layer_id={}; attempt={}; result_digest={}",
+                                    request.adaptive_run_id.as_str(),
+                                    scoped_layer_id.as_str(),
+                                    context.attempt,
+                                    result_digest.as_str()
+                                )
+                            },
+                            kernel.record_layer_result_validated(
                                 &capability,
                                 &scoped_layer_id,
                                 context.attempt,
+                                &result_digest,
+                            ),
+                        )
+                        .await
+                    {
+                        let terminalization = deadline
+                            .run_terminalization(
+                                AdaptiveRuntimeStage::LayerInterruption,
+                                kernel.record_layer_interrupted(
+                                    &capability,
+                                    &scoped_layer_id,
+                                    context.attempt,
+                                ),
                             )
                             .await;
                         let finalization = finalize_acquired_layer(
-                            kernel,
-                            &capability,
-                            runtime,
+                            AcquiredLayerFinalizationContext {
+                                kernel,
+                                capability: &capability,
+                                runtime,
+                                layer_id: &scoped_layer_id,
+                                attempt: context.attempt,
+                                deadline: &deadline,
+                            },
                             layer,
-                            &scoped_layer_id,
-                            context.attempt,
                             terminalization,
                         )
                         .await;
                         return Err(attach_layer_finalization_error(error, finalization));
                     }
                     finalize_acquired_layer(
-                        kernel,
-                        &capability,
-                        runtime,
+                        AcquiredLayerFinalizationContext {
+                            kernel,
+                            capability: &capability,
+                            runtime,
+                            layer_id: &scoped_layer_id,
+                            attempt: context.attempt,
+                            deadline: &deadline,
+                        },
                         layer,
-                        &scoped_layer_id,
-                        context.attempt,
                         Ok(()),
                     )
                     .await?;
@@ -2134,17 +2867,40 @@ where
             run_lease.disarm();
             Ok(outcome)
         }
+        Err(primary) if deadline_observation_ms(&primary).is_some() => {
+            let observed_at_ms = deadline_observation_ms(&primary)
+                .unwrap_or_else(|| deadline.observed_expired_at_ms());
+            let observation = deadline
+                .run_terminalization(
+                    AdaptiveRuntimeStage::DeadlineObservation,
+                    kernel.observe_deadline(&capability, observed_at_ms),
+                )
+                .await;
+            match observation {
+                Ok(()) => {
+                    run_lease.disarm();
+                    Err(primary)
+                }
+                Err(error) => Err(operation_error_with_followup_failures(
+                    primary,
+                    vec![("adaptive deadline observation", error)],
+                )),
+            }
+        }
         Err(primary) if cancel_confirmed => {
             run_lease.disarm();
             Err(primary)
         }
         Err(primary) => {
-            let failures = cancel_run_until_confirmed(kernel, &capability)
-                .await
+            let (confirmed, failures) =
+                cancel_run_until_confirmed(kernel, &capability, &deadline).await;
+            let failures = failures
                 .into_iter()
                 .map(|error| ("adaptive cancellation retry", error))
                 .collect();
-            run_lease.disarm();
+            if confirmed {
+                run_lease.disarm();
+            }
             Err(operation_error_with_followup_failures(primary, failures))
         }
     }
@@ -2818,6 +3574,22 @@ pub enum AdaptiveError {
     InvalidResultSchema(String),
     #[error("layer result does not satisfy declared schema")]
     LayerResultSchemaViolation,
+    #[error(
+        "adaptive wall-clock deadline exceeded during {stage}; deadline_ms={deadline_ms}; observed_at_ms={observed_at_ms}; diagnostics={diagnostics}"
+    )]
+    DeadlineExceeded {
+        stage: AdaptiveRuntimeStage,
+        deadline_ms: u64,
+        observed_at_ms: u64,
+        diagnostics: String,
+    },
+    #[error(
+        "adaptive terminalization window expired during {stage}; adaptive_deadline_ms={deadline_ms}"
+    )]
+    TerminalizationDeadlineExceeded {
+        stage: AdaptiveRuntimeStage,
+        deadline_ms: u64,
+    },
     #[error("adaptive driver runtime failed: {0}")]
     DriverRuntime(String),
     #[error("adaptive operation failed: {primary}; cleanup/terminalization also failed: {cleanup}")]
@@ -2900,9 +3672,18 @@ mod tests {
             max_total_spawned_members: value,
             max_active_members: value,
             max_retained_layer_mobs: value,
-            max_wall_clock_ms: value,
+            max_wall_clock_ms: 60_000,
             max_aggregate_tokens: value,
             max_aggregate_tool_calls: value,
+        }
+    }
+
+    fn deadline_policy(max_wall_clock_ms: u64) -> AdaptivePolicy {
+        let mut limits = limits(10);
+        limits.max_wall_clock_ms = max_wall_clock_ms;
+        AdaptivePolicy {
+            limits,
+            ..AdaptivePolicy::default()
         }
     }
 
@@ -3043,6 +3824,7 @@ mod tests {
         disposition_failures_remaining: Mutex<u64>,
         run_cancellations: Arc<AtomicUsize>,
         initialization_gate: Option<FakeInitializationGate>,
+        planning_decision_pending: bool,
     }
 
     #[derive(Clone)]
@@ -3116,6 +3898,15 @@ mod tests {
             Ok(())
         }
 
+        async fn observe_deadline(
+            &self,
+            _capability: &Self::Capability,
+            _observed_at_ms: u64,
+        ) -> Result<(), AdaptiveError> {
+            self.push("deadline");
+            Ok(())
+        }
+
         async fn record_planning_decision(
             &self,
             _capability: &Self::Capability,
@@ -3125,6 +3916,9 @@ mod tests {
                 LayerDecision::RunLayer { .. } => "decision:run_layer",
                 LayerDecision::Finish { .. } => "decision:finish",
             });
+            if self.planning_decision_pending {
+                return std::future::pending().await;
+            }
             Ok(())
         }
 
@@ -3303,6 +4097,11 @@ mod tests {
         cleanup_calls: usize,
     }
 
+    struct RetryableDestroyRuntime {
+        inner: FakeRuntime,
+        retained_cleanup_calls: usize,
+    }
+
     struct FakeLayerCancellationOwner;
 
     impl AdaptiveLayerCancellationOwner<String> for FakeLayerCancellationOwner {
@@ -3327,6 +4126,7 @@ mod tests {
         decision: Option<LayerDecision>,
         terminal_wait_entered: Arc<tokio::sync::Notify>,
         cleanup_calls: Arc<AtomicUsize>,
+        flow_cancellations: Arc<AtomicUsize>,
     }
 
     enum PlanningExit {
@@ -3336,6 +4136,7 @@ mod tests {
 
     struct PlanningExitRuntime {
         exit: PlanningExit,
+        planning_cancellations: Arc<AtomicUsize>,
     }
 
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -3351,6 +4152,7 @@ mod tests {
         async fn run_planning_turn(
             &mut self,
             _request: PlanningTurnRequest,
+            _deadline: &AdaptiveOperationDeadline,
         ) -> Result<LayerDecision, AdaptiveError> {
             match &self.exit {
                 PlanningExit::Error => Err(AdaptiveError::DriverRuntime(
@@ -3363,12 +4165,21 @@ mod tests {
             }
         }
 
+        async fn cancel_planning_turn(
+            &mut self,
+            _deadline: &AdaptiveOperationDeadline,
+        ) -> Result<(), AdaptiveError> {
+            self.planning_cancellations.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
         async fn provision_layer(
             &mut self,
             _capability: &Self::Capability,
             _layer_id: &LayerId,
             _attempt: u64,
             _compiled: &CompiledLayer,
+            _deadline: &AdaptiveOperationDeadline,
         ) -> AdaptiveLayerProvision<Self::Layer> {
             unreachable!("planning exit occurs before layer provisioning")
         }
@@ -3377,6 +4188,7 @@ mod tests {
             &mut self,
             _layer: &Self::Layer,
             _activation_params: BTreeMap<String, serde_json::Value>,
+            _deadline: &AdaptiveOperationDeadline,
         ) -> Result<RunId, AdaptiveError> {
             unreachable!("planning exit occurs before layer start")
         }
@@ -3385,8 +4197,18 @@ mod tests {
             &mut self,
             _layer: &Self::Layer,
             _run_id: RunId,
+            _deadline: &AdaptiveOperationDeadline,
         ) -> Result<MobRun, AdaptiveError> {
             unreachable!("planning exit occurs before layer wait")
+        }
+
+        async fn cancel_layer_flow(
+            &mut self,
+            _layer: &Self::Layer,
+            _run_id: RunId,
+            _deadline: &AdaptiveOperationDeadline,
+        ) -> Result<(), AdaptiveError> {
+            unreachable!("planning exit occurs before layer cancellation")
         }
 
         async fn cleanup_layer(
@@ -3394,6 +4216,7 @@ mod tests {
             _layer: &AdaptiveLayerLease<Self::Layer>,
             _layer_id: &LayerId,
             _attempt: u64,
+            _deadline: &AdaptiveOperationDeadline,
         ) -> Result<AdaptiveLayerCleanup, AdaptiveError> {
             unreachable!("planning exit occurs before layer cleanup")
         }
@@ -3412,8 +4235,16 @@ mod tests {
         async fn run_planning_turn(
             &mut self,
             _request: PlanningTurnRequest,
+            _deadline: &AdaptiveOperationDeadline,
         ) -> Result<LayerDecision, AdaptiveError> {
             Ok(self.decision.take().expect("single planning decision"))
+        }
+
+        async fn cancel_planning_turn(
+            &mut self,
+            _deadline: &AdaptiveOperationDeadline,
+        ) -> Result<(), AdaptiveError> {
+            Ok(())
         }
 
         async fn provision_layer(
@@ -3422,6 +4253,7 @@ mod tests {
             _layer_id: &LayerId,
             _attempt: u64,
             compiled: &CompiledLayer,
+            _deadline: &AdaptiveOperationDeadline,
         ) -> AdaptiveLayerProvision<Self::Layer> {
             AdaptiveLayerProvision::Ready(AdaptiveLayerLease::new(
                 compiled.child_mob_id.to_string(),
@@ -3435,6 +4267,7 @@ mod tests {
             &mut self,
             _layer: &Self::Layer,
             _activation_params: BTreeMap<String, serde_json::Value>,
+            _deadline: &AdaptiveOperationDeadline,
         ) -> Result<RunId, AdaptiveError> {
             Ok(RunId::new())
         }
@@ -3443,9 +4276,20 @@ mod tests {
             &mut self,
             _layer: &Self::Layer,
             _run_id: RunId,
+            _deadline: &AdaptiveOperationDeadline,
         ) -> Result<MobRun, AdaptiveError> {
             self.terminal_wait_entered.notify_one();
             std::future::pending().await
+        }
+
+        async fn cancel_layer_flow(
+            &mut self,
+            _layer: &Self::Layer,
+            _run_id: RunId,
+            _deadline: &AdaptiveOperationDeadline,
+        ) -> Result<(), AdaptiveError> {
+            self.flow_cancellations.fetch_add(1, Ordering::SeqCst);
+            Ok(())
         }
 
         async fn cleanup_layer(
@@ -3453,8 +4297,10 @@ mod tests {
             _layer: &AdaptiveLayerLease<Self::Layer>,
             _layer_id: &LayerId,
             _attempt: u64,
+            _deadline: &AdaptiveOperationDeadline,
         ) -> Result<AdaptiveLayerCleanup, AdaptiveError> {
-            unreachable!("pending runtime only exits through future cancellation")
+            self.cleanup_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(AdaptiveLayerCleanup::Destroyed)
         }
     }
 
@@ -3471,6 +4317,7 @@ mod tests {
         async fn run_planning_turn(
             &mut self,
             request: PlanningTurnRequest,
+            _deadline: &AdaptiveOperationDeadline,
         ) -> Result<LayerDecision, AdaptiveError> {
             if request.previous_layer_result.is_some() {
                 self.saw_previous_layer_result = true;
@@ -3481,12 +4328,20 @@ mod tests {
             Ok(self.decisions.pop_front().expect("planning decision"))
         }
 
+        async fn cancel_planning_turn(
+            &mut self,
+            _deadline: &AdaptiveOperationDeadline,
+        ) -> Result<(), AdaptiveError> {
+            Ok(())
+        }
+
         async fn provision_layer(
             &mut self,
             _capability: &Self::Capability,
             _layer_id: &LayerId,
             _attempt: u64,
             compiled: &CompiledLayer,
+            _deadline: &AdaptiveOperationDeadline,
         ) -> AdaptiveLayerProvision<Self::Layer> {
             let layer = AdaptiveLayerLease::new(
                 compiled.child_mob_id.to_string(),
@@ -3523,6 +4378,7 @@ mod tests {
             &mut self,
             _layer: &Self::Layer,
             _activation_params: BTreeMap<String, serde_json::Value>,
+            _deadline: &AdaptiveOperationDeadline,
         ) -> Result<RunId, AdaptiveError> {
             if let Some(error) = self.start_error.take() {
                 return Err(AdaptiveError::DriverRuntime(error));
@@ -3534,6 +4390,7 @@ mod tests {
             &mut self,
             _layer: &Self::Layer,
             _run_id: RunId,
+            _deadline: &AdaptiveOperationDeadline,
         ) -> Result<MobRun, AdaptiveError> {
             if let Some(error) = self.await_error.take() {
                 return Err(AdaptiveError::DriverRuntime(error));
@@ -3541,17 +4398,111 @@ mod tests {
             Ok(self.layer_run.take().expect("layer run"))
         }
 
+        async fn cancel_layer_flow(
+            &mut self,
+            _layer: &Self::Layer,
+            _run_id: RunId,
+            _deadline: &AdaptiveOperationDeadline,
+        ) -> Result<(), AdaptiveError> {
+            Ok(())
+        }
+
         async fn cleanup_layer(
             &mut self,
             _layer: &AdaptiveLayerLease<Self::Layer>,
             _layer_id: &LayerId,
             _attempt: u64,
+            _deadline: &AdaptiveOperationDeadline,
         ) -> Result<AdaptiveLayerCleanup, AdaptiveError> {
             self.cleanup_calls = self.cleanup_calls.saturating_add(1);
             if let Some(error) = self.cleanup_error.take() {
                 return Err(AdaptiveError::DriverRuntime(error));
             }
             Ok(AdaptiveLayerCleanup::Destroyed)
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AdaptiveDriverRuntime for RetryableDestroyRuntime {
+        type Capability = ();
+        type Layer = String;
+
+        fn now_ms(&mut self) -> u64 {
+            self.inner.now_ms()
+        }
+
+        async fn run_planning_turn(
+            &mut self,
+            request: PlanningTurnRequest,
+            deadline: &AdaptiveOperationDeadline,
+        ) -> Result<LayerDecision, AdaptiveError> {
+            self.inner.run_planning_turn(request, deadline).await
+        }
+
+        async fn cancel_planning_turn(
+            &mut self,
+            deadline: &AdaptiveOperationDeadline,
+        ) -> Result<(), AdaptiveError> {
+            self.inner.cancel_planning_turn(deadline).await
+        }
+
+        async fn provision_layer(
+            &mut self,
+            capability: &Self::Capability,
+            layer_id: &LayerId,
+            attempt: u64,
+            compiled: &CompiledLayer,
+            deadline: &AdaptiveOperationDeadline,
+        ) -> AdaptiveLayerProvision<Self::Layer> {
+            self.inner
+                .provision_layer(capability, layer_id, attempt, compiled, deadline)
+                .await
+        }
+
+        async fn start_layer_flow(
+            &mut self,
+            layer: &Self::Layer,
+            activation_params: BTreeMap<String, serde_json::Value>,
+            deadline: &AdaptiveOperationDeadline,
+        ) -> Result<RunId, AdaptiveError> {
+            self.inner
+                .start_layer_flow(layer, activation_params, deadline)
+                .await
+        }
+
+        async fn await_layer_terminal(
+            &mut self,
+            layer: &Self::Layer,
+            run_id: RunId,
+            deadline: &AdaptiveOperationDeadline,
+        ) -> Result<MobRun, AdaptiveError> {
+            self.inner
+                .await_layer_terminal(layer, run_id, deadline)
+                .await
+        }
+
+        async fn cancel_layer_flow(
+            &mut self,
+            layer: &Self::Layer,
+            run_id: RunId,
+            deadline: &AdaptiveOperationDeadline,
+        ) -> Result<(), AdaptiveError> {
+            self.inner.cancel_layer_flow(layer, run_id, deadline).await
+        }
+
+        async fn cleanup_layer(
+            &mut self,
+            _layer: &AdaptiveLayerLease<Self::Layer>,
+            _layer_id: &LayerId,
+            _attempt: u64,
+            deadline: &AdaptiveOperationDeadline,
+        ) -> Result<AdaptiveLayerCleanup, AdaptiveError> {
+            self.retained_cleanup_calls = self.retained_cleanup_calls.saturating_add(1);
+            tokio_time::sleep(deadline.cleanup_remaining()).await;
+            Ok(AdaptiveLayerCleanup::Retained(
+                crate::AdaptiveLayerDisposition::Retained,
+            ))
         }
     }
 
@@ -3593,8 +4544,10 @@ mod tests {
 
     #[test]
     fn driver_initialization_limits_map_policy_to_deadline_payload() {
+        let mut limits = limits(7);
+        limits.max_wall_clock_ms = 7;
         let policy = AdaptivePolicy {
-            limits: limits(7),
+            limits,
             ..AdaptivePolicy::default()
         };
         let runtime_limits = adaptive_run_limits_from_policy(&policy, 1_000).unwrap();
@@ -3630,6 +4583,7 @@ mod tests {
         let run_cancellations = Arc::clone(&kernel.run_cancellations);
         let mut runtime = PlanningExitRuntime {
             exit: PlanningExit::Error,
+            planning_cancellations: Arc::new(AtomicUsize::new(0)),
         };
 
         let error = run_adaptive_loop(
@@ -3670,6 +4624,7 @@ mod tests {
             };
             let mut runtime = PlanningExitRuntime {
                 exit: PlanningExit::Pending(task_planning_entered),
+                planning_cancellations: Arc::new(AtomicUsize::new(0)),
             };
             run_adaptive_loop(
                 &kernel,
@@ -3728,6 +4683,7 @@ mod tests {
             };
             let mut runtime = PlanningExitRuntime {
                 exit: PlanningExit::Error,
+                planning_cancellations: Arc::new(AtomicUsize::new(0)),
             };
             run_adaptive_loop(
                 &kernel,
@@ -4266,6 +5222,7 @@ mod tests {
                 }),
                 terminal_wait_entered: task_wait_entered,
                 cleanup_calls: task_cleanup_calls,
+                flow_cancellations: Arc::new(AtomicUsize::new(0)),
             };
             run_adaptive_loop(
                 &kernel,
@@ -4351,6 +5308,233 @@ mod tests {
             "destroyed:run-response-loss-verify-findings".to_string(),
             "cancel".to_string(),
         ]));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn adaptive_deadline_cancels_stuck_planning_custody_before_terminalizing() {
+        let kernel = FakeKernel::default();
+        let planning_cancellations = Arc::new(AtomicUsize::new(0));
+        let mut runtime = PlanningExitRuntime {
+            exit: PlanningExit::Pending(Arc::new(tokio::sync::Notify::new())),
+            planning_cancellations: Arc::clone(&planning_cancellations),
+        };
+
+        let error = run_adaptive_loop(
+            &kernel,
+            &mut runtime,
+            AdaptiveRunRequest {
+                adaptive_run_id: AdaptiveRunId::new("deadline-stuck-planning").unwrap(),
+                policy: deadline_policy(10),
+                compile_context: compile_context(),
+                objective: "Bound a stuck planning flow.".to_string(),
+                started_at_ms: 1_000,
+            },
+        )
+        .await
+        .expect_err("the adaptive deadline must terminate a stuck planning turn");
+
+        assert!(matches!(
+            error,
+            AdaptiveError::DeadlineExceeded {
+                stage: AdaptiveRuntimeStage::Planning,
+                ..
+            }
+        ));
+        assert_eq!(
+            kernel.events(),
+            vec!["initialize:deadline-stuck-planning", "deadline"]
+        );
+        assert_eq!(
+            planning_cancellations.load(Ordering::SeqCst),
+            1,
+            "the outer adaptive deadline must cancel custody of the exact planning flow"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn adaptive_deadline_bounds_stuck_machine_authority_acknowledgement() {
+        let kernel = FakeKernel {
+            planning_decision_pending: true,
+            ..FakeKernel::default()
+        };
+        let mut runtime = FakeRuntime {
+            decisions: VecDeque::from([LayerDecision::Finish {
+                reason: "exercise machine acknowledgement deadline".to_string(),
+                result: FinishResult {
+                    result: serde_json::json!({"ok": true}),
+                },
+            }]),
+            layer_run: None,
+            saw_previous_layer_result: false,
+            planning_error: None,
+            provision_failure: None,
+            start_error: None,
+            await_error: None,
+            cleanup_error: None,
+            cleanup_calls: 0,
+        };
+
+        let error = run_adaptive_loop(
+            &kernel,
+            &mut runtime,
+            AdaptiveRunRequest {
+                adaptive_run_id: AdaptiveRunId::new("deadline-machine-ack").unwrap(),
+                policy: deadline_policy(10),
+                compile_context: compile_context(),
+                objective: "Bound a stuck machine acknowledgement.".to_string(),
+                started_at_ms: 1_000,
+            },
+        )
+        .await
+        .expect_err("machine authority acknowledgement must obey the adaptive deadline");
+
+        assert!(matches!(
+            error,
+            AdaptiveError::DeadlineExceeded {
+                stage: AdaptiveRuntimeStage::PlanningDecision,
+                ..
+            }
+        ));
+        assert!(
+            kernel
+                .events()
+                .ends_with(&["decision:finish".to_string(), "deadline".to_string(),])
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn adaptive_deadline_cancels_stuck_child_and_drains_layer_before_terminalizing() {
+        let kernel = FakeKernel::default();
+        let flow_cancellations = Arc::new(AtomicUsize::new(0));
+        let cleanup_calls = Arc::new(AtomicUsize::new(0));
+        let mut runtime = PendingCancellationRuntime {
+            decision: Some(LayerDecision::RunLayer {
+                reason: "exercise child deadline".to_string(),
+                plan: layer_plan(),
+            }),
+            terminal_wait_entered: Arc::new(tokio::sync::Notify::new()),
+            cleanup_calls: Arc::clone(&cleanup_calls),
+            flow_cancellations: Arc::clone(&flow_cancellations),
+        };
+
+        let error = run_adaptive_loop(
+            &kernel,
+            &mut runtime,
+            AdaptiveRunRequest {
+                adaptive_run_id: AdaptiveRunId::new("deadline-stuck-child").unwrap(),
+                policy: deadline_policy(10),
+                compile_context: compile_context(),
+                objective: "Bound a stuck child flow.".to_string(),
+                started_at_ms: 1_000,
+            },
+        )
+        .await
+        .expect_err("the adaptive deadline must terminate a stuck child flow");
+
+        assert!(matches!(
+            error,
+            AdaptiveError::DeadlineExceeded {
+                stage: AdaptiveRuntimeStage::LayerTerminal,
+                ..
+            }
+        ));
+        assert_eq!(flow_cancellations.load(Ordering::SeqCst), 1);
+        assert_eq!(cleanup_calls.load(Ordering::SeqCst), 1);
+        assert!(kernel.events().ends_with(&[
+            "interrupted:deadline-stuck-child-verify-findings".to_string(),
+            "destroyed:deadline-stuck-child-verify-findings".to_string(),
+            "deadline".to_string(),
+        ]));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn adaptive_deadline_records_retained_custody_when_destroy_keeps_retrying() {
+        let kernel = FakeKernel::default();
+        let output = serde_json::json!({"verifications": [{"id": "F-1", "ok": true}]});
+        let mut runtime = RetryableDestroyRuntime {
+            inner: FakeRuntime {
+                decisions: VecDeque::from([LayerDecision::RunLayer {
+                    reason: "exercise bounded destroy".to_string(),
+                    plan: layer_plan(),
+                }]),
+                layer_run: Some(completed_layer_run(output)),
+                saw_previous_layer_result: false,
+                planning_error: None,
+                provision_failure: None,
+                start_error: None,
+                await_error: None,
+                cleanup_error: None,
+                cleanup_calls: 0,
+            },
+            retained_cleanup_calls: 0,
+        };
+
+        let error = run_adaptive_loop(
+            &kernel,
+            &mut runtime,
+            AdaptiveRunRequest {
+                adaptive_run_id: AdaptiveRunId::new("deadline-retryable-destroy").unwrap(),
+                policy: deadline_policy(10),
+                compile_context: compile_context(),
+                objective: "Bound retryable physical cleanup.".to_string(),
+                started_at_ms: 1_000,
+            },
+        )
+        .await
+        .expect_err("cleanup retries must not outrun the adaptive deadline");
+
+        assert!(matches!(
+            error,
+            AdaptiveError::DeadlineExceeded {
+                stage: AdaptiveRuntimeStage::LayerCleanup,
+                ..
+            }
+        ));
+        assert_eq!(runtime.retained_cleanup_calls, 1);
+        assert!(kernel.events().ends_with(&[
+            "retained:deadline-retryable-destroy-verify-findings".to_string(),
+            "deadline".to_string(),
+        ]));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn adaptive_run_cancel_ack_retries_are_bounded_by_terminalization_window() {
+        let kernel = FakeKernel {
+            cancel_failures_remaining: Mutex::new(u64::MAX),
+            ..FakeKernel::default()
+        };
+        let mut runtime = PlanningExitRuntime {
+            exit: PlanningExit::Error,
+            planning_cancellations: Arc::new(AtomicUsize::new(0)),
+        };
+        let started = tokio_time::Instant::now();
+
+        let error = run_adaptive_loop(
+            &kernel,
+            &mut runtime,
+            AdaptiveRunRequest {
+                adaptive_run_id: AdaptiveRunId::new("bounded-missing-cancel-ack").unwrap(),
+                policy: deadline_policy(10),
+                compile_context: compile_context(),
+                objective: "Bound a missing cancellation acknowledgement.".to_string(),
+                started_at_ms: 1_000,
+            },
+        )
+        .await
+        .expect_err("missing cancellation acknowledgement must remain visible");
+
+        assert!(error.to_string().contains("cancel acknowledgement failed"));
+        assert!(
+            tokio_time::Instant::now().duration_since(started)
+                <= Duration::from_millis(10) + ADAPTIVE_TERMINALIZATION_GRACE
+        );
+        let cancel_attempts = kernel
+            .events()
+            .into_iter()
+            .filter(|event| event == "cancel")
+            .count();
+        assert!(cancel_attempts > 1);
+        assert!(cancel_attempts < 100);
     }
 
     #[test]

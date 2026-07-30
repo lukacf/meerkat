@@ -1627,6 +1627,12 @@ mod tests {
 
     #[test]
     fn migration_that_ends_the_transaction_is_refused_unstamped() {
+        fn no_op(_tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+            Ok(())
+        }
+        fn verify_empty_predecessor(_conn: &Connection) -> Result<(), String> {
+            Ok(())
+        }
         fn commits_underneath(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
             tx.execute_batch("CREATE TABLE escaped_commit (x INTEGER); COMMIT")
         }
@@ -1644,59 +1650,93 @@ mod tests {
         }
         const COMMITS: SchemaDomain = SchemaDomain {
             name: "custody-commit",
-            migrations: &[Migration {
+            migrations: &[
+                Migration {
+                    version: 1,
+                    name: "base",
+                    apply: no_op,
+                },
+                Migration {
+                    version: 2,
+                    name: "commits-underneath",
+                    apply: commits_underneath,
+                },
+            ],
+            initialize_current: no_op,
+            allowed_existing_versions: &[1, 2],
+            released_predecessors: &[SchemaPredecessor {
                 version: 1,
-                name: "commits-underneath",
-                apply: commits_underneath,
+                verify: verify_empty_predecessor,
             }],
-            initialize_current: commits_underneath,
-            allowed_existing_versions: &[1],
-            released_predecessors: &[],
-            owned_objects: &[SchemaObject {
-                kind: SchemaObjectKind::Table,
-                name: "escaped_commit",
-            }],
+            owned_objects: &[],
             retired_objects: &[],
         };
         const ROLLS_BACK: SchemaDomain = SchemaDomain {
             name: "custody-rollback",
-            migrations: &[Migration {
+            migrations: &[
+                Migration {
+                    version: 1,
+                    name: "base",
+                    apply: no_op,
+                },
+                Migration {
+                    version: 2,
+                    name: "rolls-back-underneath",
+                    apply: rolls_back_underneath,
+                },
+            ],
+            initialize_current: no_op,
+            allowed_existing_versions: &[1, 2],
+            released_predecessors: &[SchemaPredecessor {
                 version: 1,
-                name: "rolls-back-underneath",
-                apply: rolls_back_underneath,
+                verify: verify_empty_predecessor,
             }],
-            initialize_current: rolls_back_underneath,
-            allowed_existing_versions: &[1],
-            released_predecessors: &[],
             owned_objects: &[],
             retired_objects: &[],
         };
         const COMMITS_THEN_BEGINS: SchemaDomain = SchemaDomain {
             name: "custody-commit-begin",
-            migrations: &[Migration {
+            migrations: &[
+                Migration {
+                    version: 1,
+                    name: "base",
+                    apply: no_op,
+                },
+                Migration {
+                    version: 2,
+                    name: "commits-then-begins",
+                    apply: commits_then_begins,
+                },
+            ],
+            initialize_current: no_op,
+            allowed_existing_versions: &[1, 2],
+            released_predecessors: &[SchemaPredecessor {
                 version: 1,
-                name: "commits-then-begins",
-                apply: commits_then_begins,
+                verify: verify_empty_predecessor,
             }],
-            initialize_current: commits_then_begins,
-            allowed_existing_versions: &[1],
-            released_predecessors: &[],
-            owned_objects: &[SchemaObject {
-                kind: SchemaObjectKind::Table,
-                name: "escaped_commit_begin",
-            }],
+            owned_objects: &[],
             retired_objects: &[],
         };
         const ROLLS_BACK_THEN_BEGINS: SchemaDomain = SchemaDomain {
             name: "custody-rollback-begin",
-            migrations: &[Migration {
+            migrations: &[
+                Migration {
+                    version: 1,
+                    name: "base",
+                    apply: no_op,
+                },
+                Migration {
+                    version: 2,
+                    name: "rolls-back-then-begins",
+                    apply: rolls_back_then_begins,
+                },
+            ],
+            initialize_current: no_op,
+            allowed_existing_versions: &[1, 2],
+            released_predecessors: &[SchemaPredecessor {
                 version: 1,
-                name: "rolls-back-then-begins",
-                apply: rolls_back_then_begins,
+                verify: verify_empty_predecessor,
             }],
-            initialize_current: rolls_back_then_begins,
-            allowed_existing_versions: &[1],
-            released_predecessors: &[],
             owned_objects: &[],
             retired_objects: &[],
         };
@@ -1708,6 +1748,12 @@ mod tests {
         ] {
             let dir = tempfile::tempdir().expect("tempdir");
             let mut conn = temp_conn(&dir);
+            conn.execute_batch(CREATE_LEDGER_SQL).expect("ledger");
+            conn.execute(
+                "INSERT INTO main.meerkat_schema (domain, version) VALUES (?1, 1)",
+                [domain.name],
+            )
+            .expect("released predecessor");
             let err = apply_domain_migrations(&mut conn, domain).expect_err("custody violation");
             match err {
                 SqliteStoreError::MigrationBrokeTransaction {
@@ -1716,18 +1762,58 @@ mod tests {
                     name,
                 } => {
                     assert_eq!(err_domain, domain.name);
-                    assert_eq!(version, 1);
+                    assert_eq!(version, 2);
                     assert_eq!(name, expected_name);
                 }
                 other => panic!("wrong error: {other}"),
             }
-            // The stamp never landed: custody broke before the ledger write.
-            assert_eq!(domain_version(&conn, domain.name).expect("read"), None);
+            // The new stamp never landed: custody broke before the ledger
+            // update, so the authenticated predecessor remains authoritative.
+            assert_eq!(domain_version(&conn, domain.name).expect("read"), Some(1));
         }
     }
 
     #[test]
-    fn migration_using_its_own_savepoints_keeps_custody() {
+    fn initializer_that_ends_the_transaction_is_refused_unstamped() {
+        fn commits_underneath(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+            tx.execute_batch("CREATE TABLE escaped_initializer (x INTEGER); COMMIT")
+        }
+        const COMMITS: SchemaDomain = SchemaDomain {
+            name: "initializer-custody-commit",
+            migrations: &[Migration {
+                version: 1,
+                name: "base",
+                apply: commits_underneath,
+            }],
+            initialize_current: commits_underneath,
+            allowed_existing_versions: &[1],
+            released_predecessors: &[],
+            owned_objects: &[SchemaObject {
+                kind: SchemaObjectKind::Table,
+                name: "escaped_initializer",
+            }],
+            retired_objects: &[],
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut conn = temp_conn(&dir);
+        let err = apply_domain_migrations(&mut conn, &COMMITS).expect_err("custody violation");
+        match err {
+            SqliteStoreError::MigrationBrokeTransaction {
+                domain,
+                version,
+                name,
+            } => {
+                assert_eq!(domain, COMMITS.name);
+                assert_eq!(version, 1);
+                assert_eq!(name, "initialize-current");
+            }
+            other => panic!("wrong error: {other}"),
+        }
+        assert_eq!(domain_version(&conn, COMMITS.name).expect("read"), None);
+    }
+
+    #[test]
+    fn initializer_using_its_own_savepoints_keeps_custody() {
         // A body may nest its own savepoints; custody only trips when the
         // runner's enclosing transaction (and with it the custody savepoint)
         // is gone.

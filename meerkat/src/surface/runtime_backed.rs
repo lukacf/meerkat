@@ -1285,44 +1285,14 @@ impl<B: SessionAgentBuilder + 'static> CoreExecutor for PersistentRuntimeExecuto
             .map_err(CoreExecutorError::apply_failed_from_session_error)
     }
 
-    async fn acknowledge_whole_blob_session_boundary(
+    async fn acknowledge_committed_session_boundary(
         &mut self,
-        committed_store_revision: u64,
-        committed_blob_sha256: &str,
+        authority: &meerkat_core::CommittedSessionBoundaryAuthority,
     ) -> Result<(), CoreExecutorError> {
         self.service
-            .acknowledge_whole_blob_runtime_session_boundary_under_runtime_turn_boundary(
+            .acknowledge_committed_runtime_session_boundary_under_runtime_turn_boundary(
                 &self.session_id,
-                committed_store_revision,
-                committed_blob_sha256,
-            )
-            .await
-            .map_err(CoreExecutorError::apply_failed_from_session_error)
-    }
-
-    async fn acknowledge_head_canonical_session_boundary(
-        &mut self,
-        boundary_head_cas_token: &str,
-    ) -> Result<(), CoreExecutorError> {
-        self.service
-            .acknowledge_head_canonical_runtime_session_boundary_under_runtime_turn_boundary(
-                &self.session_id,
-                boundary_head_cas_token,
-            )
-            .await
-            .map_err(CoreExecutorError::apply_failed_from_session_error)
-    }
-
-    async fn acknowledge_provisional_session_boundary(
-        &mut self,
-        committed_store_revision: u64,
-        committed_authority_token: &str,
-    ) -> Result<(), CoreExecutorError> {
-        self.service
-            .acknowledge_provisional_runtime_session_boundary_under_runtime_turn_boundary(
-                &self.session_id,
-                committed_store_revision,
-                committed_authority_token,
+                authority,
             )
             .await
             .map_err(CoreExecutorError::apply_failed_from_session_error)

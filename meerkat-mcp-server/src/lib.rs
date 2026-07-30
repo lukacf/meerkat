@@ -5477,9 +5477,11 @@ mod tests {
 
     async fn state_with_persisted_session() -> (MeerkatMcpState, String) {
         let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
         let state = MeerkatMcpState::new_with_store_options_and_llm(
             Arc::clone(&store),
-            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+            Arc::clone(&runtime_store),
             None,
             Some(Arc::new(TestClient::default())),
         )
@@ -5511,6 +5513,7 @@ mod tests {
             .set_build_state(meerkat_core::SessionBuildState::default())
             .expect("session build state should serialize");
         store.save(&session).await.expect("persisted session");
+        seed_runtime_authority_session(&runtime_store, &session).await;
         (state, session_id)
     }
 
@@ -7994,6 +7997,7 @@ mod tests {
             })
             .expect("session metadata should serialize");
         store.save(&session).await.expect("persisted session");
+        seed_runtime_authority_session(&runtime_store, &session).await;
 
         let blocker_session = Session::new();
         let blocker_id = blocker_session.id().clone();
@@ -8351,7 +8355,13 @@ mod tests {
     #[tokio::test]
     async fn test_handle_meerkat_resume_keep_alive_live_missing_failure_unregisters_runtime() {
         let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
-        let state = MeerkatMcpState::new_with_store(Arc::clone(&store)).await;
+        let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+        let state = MeerkatMcpState::new_with_store_and_runtime_store(
+            Arc::clone(&store),
+            Arc::clone(&runtime_store),
+        )
+        .await;
         let mut session = Session::new();
         let session_id = session.id().clone();
         session
@@ -8379,6 +8389,7 @@ mod tests {
             .set_build_state(meerkat_core::SessionBuildState::default())
             .expect("session build state should serialize");
         store.save(&session).await.expect("persisted session");
+        seed_runtime_authority_session(&runtime_store, &session).await;
         let result = Box::pin(handle_meerkat_resume(
             &state,
             MeerkatResumeInput {
@@ -8436,7 +8447,13 @@ mod tests {
     async fn test_handle_meerkat_resume_keep_alive_live_missing_failure_preserves_existing_runtime()
     {
         let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
-        let state = MeerkatMcpState::new_with_store(Arc::clone(&store)).await;
+        let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+        let state = MeerkatMcpState::new_with_store_and_runtime_store(
+            Arc::clone(&store),
+            Arc::clone(&runtime_store),
+        )
+        .await;
         let mut session = Session::new();
         let session_id = session.id().clone();
         session
@@ -8464,6 +8481,7 @@ mod tests {
             .set_build_state(meerkat_core::SessionBuildState::default())
             .expect("session build state should serialize");
         store.save(&session).await.expect("persisted session");
+        seed_runtime_authority_session(&runtime_store, &session).await;
         state
             .runtime_adapter
             .ensure_session_with_executor(
@@ -9141,6 +9159,22 @@ mod tests {
         ))
         .await
         .expect("archive through runtime authority should succeed");
+        let archived_runtime_state = meerkat_runtime::store::load_runtime_state(
+            runtime_store.as_ref(),
+            &meerkat_runtime::identifiers::LogicalRuntimeId::for_session(session.id()),
+        )
+        .await
+        .expect("archive runtime state should remain readable");
+        assert!(
+            matches!(
+                archived_runtime_state,
+                Some(
+                    meerkat_runtime::RuntimeState::Retired
+                        | meerkat_runtime::RuntimeState::Destroyed
+                )
+            ),
+            "archive must leave an absorbing runtime terminal, got {archived_runtime_state:?}"
+        );
 
         let archived_history = Box::pin(handle_tools_call(
             &state,

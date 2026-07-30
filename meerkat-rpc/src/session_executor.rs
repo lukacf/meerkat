@@ -667,17 +667,15 @@ impl CoreExecutor for SessionRuntimeExecutor {
             .map_err(CoreExecutorError::apply_failed_from_session_error)
     }
 
-    async fn acknowledge_whole_blob_session_boundary(
+    async fn acknowledge_committed_session_boundary(
         &mut self,
-        committed_store_revision: u64,
-        committed_blob_sha256: &str,
+        authority: &meerkat_core::CommittedSessionBoundaryAuthority,
     ) -> Result<(), CoreExecutorError> {
         self.runtime
             .persistent_service()
-            .acknowledge_whole_blob_runtime_session_boundary_under_runtime_turn_boundary(
+            .acknowledge_committed_runtime_session_boundary_under_runtime_turn_boundary(
                 &self.session_id,
-                committed_store_revision,
-                committed_blob_sha256,
+                authority,
             )
             .await
             .map_err(CoreExecutorError::apply_failed_from_session_error)
@@ -880,16 +878,14 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
             .map_err(CoreExecutorError::apply_failed_from_session_error)
     }
 
-    async fn acknowledge_whole_blob_session_boundary(
+    async fn acknowledge_committed_session_boundary(
         &mut self,
-        committed_store_revision: u64,
-        committed_blob_sha256: &str,
+        authority: &meerkat_core::CommittedSessionBoundaryAuthority,
     ) -> Result<(), CoreExecutorError> {
         self.session_service
-            .acknowledge_whole_blob_runtime_session_boundary_under_turn_finalization_boundary(
+            .acknowledge_committed_runtime_session_boundary_under_turn_finalization_boundary(
                 &self.session_id,
-                committed_store_revision,
-                committed_blob_sha256,
+                authority,
             )
             .await
             .map_err(CoreExecutorError::apply_failed_from_session_error)
@@ -1089,6 +1085,16 @@ mod tests {
     #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
     #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
     impl MobSessionService for BoundaryCancelSessionService {
+        async fn acknowledge_committed_runtime_session_boundary_under_turn_finalization_boundary(
+            &self,
+            _session_id: &SessionId,
+            _authority: &meerkat_core::CommittedSessionBoundaryAuthority,
+        ) -> Result<(), SessionError> {
+            Err(SessionError::Unsupported(
+                "boundary-cancel test service has no store-owned boundary authority".to_string(),
+            ))
+        }
+
         /// Test double: the two-read composition is the exact truth here.
         async fn load_session_for_resume(
             &self,

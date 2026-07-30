@@ -193,6 +193,7 @@ pub use handles::{
     PeerResponseTerminalRenderPayload, PeerResponseTerminalRouteIdentity,
     PeerResponseTerminalSource, PeerResponseTerminalTransportIdentity, SessionAdmissionHandle,
     SurfaceDiagnosticSnapshot, SurfaceSnapshot, TurnStateHandle, TurnStateSnapshot,
+    peer_response_terminal_context_key,
 };
 pub use hooks::{
     HookCapability, HookDecision, HookEngine, HookEngineError, HookExecutionMode,
@@ -225,14 +226,14 @@ pub use lifecycle::run_primitive::{
     ProviderParamsCarrier, ProviderParamsMergeError, ProviderParamsOverride, ProviderTag,
 };
 pub use lifecycle::{
-    ConversationAppend, ConversationAppendRole, CoreApplyFailureCause, CoreApplyFailureCauseKind,
-    CoreBoundaryStageError, CoreBoundaryStageOutput, CoreControlFailureCause,
-    CoreControlFailureCauseKind, CoreExecutor, CoreExecutorBoundaryHandle, CoreExecutorError,
-    CoreExecutorInterruptHandle, CoreExecutorPostStopCleanupHandle, CoreExecutorPublicationHandle,
-    CoreExecutorTeardownReason, CoreExecutorTurnFinalizationBoundaryHandle,
-    CoreExecutorTurnFinalizationGuard, CoreInteractionTerminalPublicationReceipt, CoreRenderable,
-    InputId, RunApplyBoundary, RunBoundaryReceipt, RunBoundaryReceiptDraft, RunEvent, RunId,
-    RunPrimitive, StagedRunInput,
+    CommittedSessionBoundaryAuthority, ConversationAppend, ConversationAppendRole,
+    CoreApplyFailureCause, CoreApplyFailureCauseKind, CoreBoundaryStageError,
+    CoreBoundaryStageOutput, CoreControlFailureCause, CoreControlFailureCauseKind, CoreExecutor,
+    CoreExecutorBoundaryHandle, CoreExecutorError, CoreExecutorInterruptHandle,
+    CoreExecutorPostStopCleanupHandle, CoreExecutorPublicationHandle, CoreExecutorTeardownReason,
+    CoreExecutorTurnFinalizationBoundaryHandle, CoreExecutorTurnFinalizationGuard,
+    CoreInteractionTerminalPublicationReceipt, CoreRenderable, InputId, RunApplyBoundary,
+    RunBoundaryReceipt, RunBoundaryReceiptDraft, RunEvent, RunId, RunPrimitive, StagedRunInput,
 };
 pub use mcp_config::{McpConfig, McpConfigError, McpScope, McpServerConfig, McpServerWithScope};
 pub use memory::{
@@ -270,7 +271,8 @@ pub use peer_correlation::{
 pub use peer_meta::PeerMeta;
 pub use persistence_contract::{
     HeadCanonicalProvisionalTailAuthority, ProvisionalTailAuthorityError, RunCheckpointAuthority,
-    RunCheckpointReceipt, SessionCheckpointer, WholeBlobProvisionalTailAuthority,
+    RunCheckpointReceipt, SessionCheckpointer, SessionControlCommitReceipt,
+    WholeBlobProvisionalTailAuthority,
 };
 pub use placement::{ExecutionPlacement, ExecutionPlacementIdentity, PlacementError};
 pub use prompt::{AGENTS_MD_MAX_BYTES, DEFAULT_SYSTEM_PROMPT, SystemPromptConfig};
@@ -343,9 +345,8 @@ pub use session::{
     resolve_session_llm_identity_override, session_metadata_document_from_slice,
     session_metadata_schema_version, session_version,
     transcript_history_full_body_materializations, transcript_messages_digest,
-    transcript_rewrite_prefix_commit_serializations, transcript_rewrite_prefix_digest,
-    try_lifecycle_terminal_from_map, try_session_metadata_from_map,
-    validate_current_persisted_transcript_history_slice,
+    transcript_rewrite_prefix_digest, try_lifecycle_terminal_from_map,
+    try_session_metadata_from_map, validate_current_persisted_transcript_history_slice,
 };
 pub use session_component_sidecar::{
     ComponentEventDigest, ComponentEventPrefixAuthority, ComponentEventPrefixDigest,

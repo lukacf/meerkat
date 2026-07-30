@@ -1165,19 +1165,19 @@ mod tests {
     struct RetryRecordingTerminalPublisher {
         attempts: AtomicUsize,
         published: StdMutex<Vec<meerkat_core::event::AgentEvent>>,
-        retry_entered: Arc<crate::tokio::sync::Notify>,
+        durable_append_entered: Arc<crate::tokio::sync::Notify>,
         retry_release: Arc<crate::tokio::sync::Notify>,
     }
 
     impl RetryRecordingTerminalPublisher {
         fn new(
-            retry_entered: Arc<crate::tokio::sync::Notify>,
+            durable_append_entered: Arc<crate::tokio::sync::Notify>,
             retry_release: Arc<crate::tokio::sync::Notify>,
         ) -> Self {
             Self {
                 attempts: AtomicUsize::new(0),
                 published: StdMutex::new(Vec::new()),
-                retry_entered,
+                durable_append_entered,
                 retry_release,
             }
         }
@@ -1202,11 +1202,11 @@ mod tests {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 published.extend_from_slice(events);
+                self.durable_append_entered.notify_one();
                 return Err(CoreExecutorError::Internal(
                     "synthetic receipt loss after durable terminal append".to_string(),
                 ));
             }
-            self.retry_entered.notify_one();
             self.retry_release.notified().await;
             let published = self
                 .published
@@ -1309,10 +1309,10 @@ mod tests {
                 registry.register(nondirected_input_id.clone()),
             )
         };
-        let retry_entered = Arc::new(crate::tokio::sync::Notify::new());
+        let durable_append_entered = Arc::new(crate::tokio::sync::Notify::new());
         let retry_release = Arc::new(crate::tokio::sync::Notify::new());
         let publisher = Arc::new(RetryRecordingTerminalPublisher::new(
-            Arc::clone(&retry_entered),
+            Arc::clone(&durable_append_entered),
             Arc::clone(&retry_release),
         ));
         let stop_calls = Arc::new(AtomicUsize::new(0));
@@ -1339,9 +1339,12 @@ mod tests {
             .await
         });
 
-        crate::tokio::time::timeout(std::time::Duration::from_secs(1), retry_entered.notified())
-            .await
-            .expect("committed runless carrier should enter its publication retry");
+        crate::tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            durable_append_entered.notified(),
+        )
+        .await
+        .expect("first runless terminal publication must commit before losing its receipt");
         assert_eq!(
             publisher
                 .published

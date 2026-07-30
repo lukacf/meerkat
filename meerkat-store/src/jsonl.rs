@@ -935,14 +935,12 @@ mod tests {
         )));
         first.save(&session).await?;
 
-        let mut stale = first
-            .load(session.id())
-            .await?
-            .expect("session should exist");
-        let mut newer = second
-            .load(session.id())
-            .await?
-            .expect("session should exist");
+        // A raw WholeBlob reload intentionally has no current exact
+        // row-lineage authority. Keep two writers from the exact constructed
+        // state so the rewrite itself is valid and this probe reaches the
+        // store's stale-parent guard.
+        let mut stale = session.clone();
+        let mut newer = session.clone();
         newer.push(Message::User(UserMessage::text("intervening".to_string())));
         second.save(&newer).await?;
 

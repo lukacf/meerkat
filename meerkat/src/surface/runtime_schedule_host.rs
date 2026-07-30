@@ -9,10 +9,11 @@ use super::schedule_host::{
     schedule_runtime_delivery_idempotency_key,
 };
 use super::{
-    NoopScheduleMobHost, ScheduledPromptDispatch, SharedScheduleTargetAdapter,
-    SurfaceScheduleMobHost, SurfaceScheduleSessionHost, default_persistent_executor,
-    default_persistent_executor_with_workgraph_service, materialize_session,
-    recover_mob_member_identity_from_session_target, schedule_host_supported, spawn_schedule_host,
+    NoopScheduleMobHost, ScheduledEventDispatch, ScheduledPromptDispatch,
+    SharedScheduleTargetAdapter, SurfaceScheduleMobHost, SurfaceScheduleSessionHost,
+    default_persistent_executor, default_persistent_executor_with_workgraph_service,
+    materialize_session, recover_mob_member_identity_from_session_target, schedule_host_supported,
+    spawn_schedule_host,
 };
 use crate::{
     Config, CreateSessionRequest, PersistentSessionService, ScheduleDomainError, ScheduleService,
@@ -659,10 +660,7 @@ impl<B: SessionAgentBuilder + 'static> SurfaceScheduleSessionHost
         session_id: &SessionId,
         occurrence: &crate::Occurrence,
         identity: &ScheduleDeliveryIdentity,
-        event_type: String,
-        payload: serde_json::Value,
-        render_metadata: Option<meerkat_core::types::RenderMetadata>,
-        materialized_session_id: Option<SessionId>,
+        dispatch: ScheduledEventDispatch,
     ) -> Result<crate::DeliveryDispatch, ScheduleDomainError> {
         let admission = self.ensure_runtime_session_registered(session_id).await?;
 
@@ -688,11 +686,11 @@ impl<B: SessionAgentBuilder + 'static> SurfaceScheduleSessionHost
                 supersession_key: None,
                 correlation_id: Some(schedule_runtime_correlation_id(identity)?),
             },
-            event_type,
-            payload,
+            event_type: dispatch.event_type,
+            payload: dispatch.payload,
             blocks: None,
             handling_mode: meerkat_core::types::HandlingMode::Queue,
-            render_metadata,
+            render_metadata: dispatch.render_metadata,
         });
 
         let (outcome, handle) = self
@@ -706,7 +704,7 @@ impl<B: SessionAgentBuilder + 'static> SurfaceScheduleSessionHost
             identity,
             outcome,
             handle,
-            materialized_session_id,
+            dispatch.materialized_session_id,
         )
         .await
     }

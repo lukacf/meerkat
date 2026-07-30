@@ -2,8 +2,8 @@ use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
 use meerkat::surface::{
-    NoopScheduleMobHost, ScheduledPromptDispatch, SharedScheduleTargetAdapter,
-    SurfaceScheduleMobHost, SurfaceScheduleSessionHost,
+    NoopScheduleMobHost, ScheduledEventDispatch, ScheduledPromptDispatch,
+    SharedScheduleTargetAdapter, SurfaceScheduleMobHost, SurfaceScheduleSessionHost,
     recover_mob_member_identity_from_session_target, runtime_delivery_dispatch_from_admission,
     schedule_host_supported, schedule_runtime_correlation_id,
     schedule_runtime_delivery_idempotency_key, spawn_schedule_host,
@@ -168,22 +168,11 @@ impl SurfaceScheduleSessionHost for RpcScheduleTargetAdapter {
         session_id: &SessionId,
         occurrence: &Occurrence,
         identity: &ScheduleDeliveryIdentity,
-        event_type: String,
-        payload: serde_json::Value,
-        render_metadata: Option<meerkat_core::types::RenderMetadata>,
-        materialized_session_id: Option<SessionId>,
+        dispatch: ScheduledEventDispatch,
     ) -> Result<DeliveryDispatch, ScheduleDomainError> {
         let runtime = self.upgrade_runtime()?;
         runtime
-            .deliver_scheduled_event(
-                session_id,
-                occurrence,
-                identity,
-                event_type,
-                payload,
-                render_metadata,
-                materialized_session_id,
-            )
+            .deliver_scheduled_event(session_id, occurrence, identity, dispatch)
             .await
     }
 }
@@ -434,10 +423,7 @@ impl SessionRuntime {
         session_id: &SessionId,
         occurrence: &Occurrence,
         identity: &ScheduleDeliveryIdentity,
-        event_type: String,
-        payload: serde_json::Value,
-        render_metadata: Option<meerkat_core::types::RenderMetadata>,
-        materialized_session_id: Option<SessionId>,
+        dispatch: ScheduledEventDispatch,
     ) -> Result<DeliveryDispatch, ScheduleDomainError> {
         self.ensure_runtime_executor(session_id)
             .await
@@ -485,11 +471,11 @@ impl SessionRuntime {
                 supersession_key: None,
                 correlation_id: Some(schedule_runtime_correlation_id(identity)?),
             },
-            event_type,
-            payload,
+            event_type: dispatch.event_type,
+            payload: dispatch.payload,
             blocks: None,
             handling_mode: meerkat_core::types::HandlingMode::Queue,
-            render_metadata,
+            render_metadata: dispatch.render_metadata,
         });
 
         let (outcome, handle) = self
@@ -505,7 +491,7 @@ impl SessionRuntime {
             identity,
             outcome,
             handle,
-            materialized_session_id,
+            dispatch.materialized_session_id,
         )
         .await
     }

@@ -4,11 +4,11 @@ use async_trait::async_trait;
 #[cfg(not(feature = "mob"))]
 use meerkat::surface::NoopScheduleMobHost;
 use meerkat::surface::{
-    ScheduledPromptDispatch, SharedScheduleTargetAdapter, SurfaceScheduleMobHost,
-    SurfaceScheduleSessionHost, recover_mob_member_identity_from_session_target,
-    runtime_delivery_dispatch_from_admission, schedule_host_supported,
-    schedule_runtime_correlation_id, schedule_runtime_delivery_idempotency_key,
-    spawn_schedule_host,
+    ScheduledEventDispatch, ScheduledPromptDispatch, SharedScheduleTargetAdapter,
+    SurfaceScheduleMobHost, SurfaceScheduleSessionHost,
+    recover_mob_member_identity_from_session_target, runtime_delivery_dispatch_from_admission,
+    schedule_host_supported, schedule_runtime_correlation_id,
+    schedule_runtime_delivery_idempotency_key, spawn_schedule_host,
 };
 use meerkat::{
     AgentBuildConfig, DeliveryDispatch, IdentityTargetBinding, Occurrence,
@@ -353,22 +353,9 @@ impl SurfaceScheduleSessionHost for RestScheduleTargetAdapter {
         session_id: &SessionId,
         occurrence: &Occurrence,
         identity: &ScheduleDeliveryIdentity,
-        event_type: String,
-        payload: serde_json::Value,
-        render_metadata: Option<meerkat_core::types::RenderMetadata>,
-        materialized_session_id: Option<SessionId>,
+        dispatch: ScheduledEventDispatch,
     ) -> Result<DeliveryDispatch, ScheduleDomainError> {
-        deliver_scheduled_event(
-            &self.context,
-            session_id,
-            occurrence,
-            identity,
-            event_type,
-            payload,
-            render_metadata,
-            materialized_session_id,
-        )
-        .await
+        deliver_scheduled_event(&self.context, session_id, occurrence, identity, dispatch).await
     }
 }
 
@@ -520,10 +507,7 @@ async fn deliver_scheduled_event(
     session_id: &SessionId,
     occurrence: &Occurrence,
     identity: &ScheduleDeliveryIdentity,
-    event_type: String,
-    payload: serde_json::Value,
-    render_metadata: Option<meerkat_core::types::RenderMetadata>,
-    materialized_session_id: Option<SessionId>,
+    dispatch: ScheduledEventDispatch,
 ) -> Result<DeliveryDispatch, ScheduleDomainError> {
     context
         .ensure_runtime_session_registered(session_id)
@@ -552,11 +536,11 @@ async fn deliver_scheduled_event(
             supersession_key: None,
             correlation_id: Some(schedule_runtime_correlation_id(identity)?),
         },
-        event_type,
-        payload,
+        event_type: dispatch.event_type,
+        payload: dispatch.payload,
         blocks: None,
         handling_mode: meerkat_core::types::HandlingMode::Queue,
-        render_metadata,
+        render_metadata: dispatch.render_metadata,
     });
     let (outcome, handle) = context
         .runtime
@@ -571,7 +555,7 @@ async fn deliver_scheduled_event(
         identity,
         outcome,
         handle,
-        materialized_session_id,
+        dispatch.materialized_session_id,
     )
     .await
 }

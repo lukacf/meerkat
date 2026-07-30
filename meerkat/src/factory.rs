@@ -4435,7 +4435,15 @@ impl AgentFactory {
         let explicit_mob_override =
             !matches!(build_config.override_mob, ToolCategoryOverride::Inherit);
         let resumed_session_metadata = Self::apply_resumed_session_metadata(&mut build_config)?;
-        let mut session = build_config.resume_session.clone().unwrap_or_default();
+        let mut session =
+            build_config.resume_session.clone().unwrap_or_else(|| {
+                match &build_config.runtime_build_mode {
+                    RuntimeBuildMode::SessionOwned(bindings) => {
+                        Session::with_id(bindings.session_id().clone())
+                    }
+                    RuntimeBuildMode::StandaloneEphemeral => Session::default(),
+                }
+            });
         if let RuntimeBuildMode::SessionOwned(bindings) = &build_config.runtime_build_mode {
             if !meerkat_runtime::session_runtime_bindings_have_machine_authority(bindings) {
                 return Err(BuildAgentError::Config(

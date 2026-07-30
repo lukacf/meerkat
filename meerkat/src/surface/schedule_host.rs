@@ -149,6 +149,14 @@ pub struct ScheduledPromptDispatch {
     pub materialized_session_id: Option<SessionId>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ScheduledEventDispatch {
+    pub event_type: String,
+    pub payload: serde_json::Value,
+    pub render_metadata: Option<RenderMetadata>,
+    pub materialized_session_id: Option<SessionId>,
+}
+
 #[derive(Serialize)]
 struct MobMemberScheduleIdentityKey<'a> {
     schema: &'static str,
@@ -304,16 +312,12 @@ pub trait SurfaceScheduleSessionHost: Send + Sync {
         dispatch: ScheduledPromptDispatch,
     ) -> Result<DeliveryDispatch, ScheduleDomainError>;
 
-    #[allow(clippy::too_many_arguments)]
     async fn deliver_event(
         &self,
         session_id: &SessionId,
         occurrence: &Occurrence,
         identity: &ScheduleDeliveryIdentity,
-        event_type: String,
-        payload: serde_json::Value,
-        render_metadata: Option<RenderMetadata>,
-        materialized_session_id: Option<SessionId>,
+        dispatch: ScheduledEventDispatch,
     ) -> Result<DeliveryDispatch, ScheduleDomainError>;
 }
 
@@ -728,10 +732,12 @@ impl SharedScheduleTargetAdapter {
                         &resolved.session_id,
                         occurrence,
                         identity,
-                        event_type.clone(),
-                        payload.clone(),
-                        render_metadata.clone(),
-                        resolved.materialized_session_id,
+                        ScheduledEventDispatch {
+                            event_type: event_type.clone(),
+                            payload: payload.clone(),
+                            render_metadata: render_metadata.clone(),
+                            materialized_session_id: resolved.materialized_session_id,
+                        },
                     )
                     .await
             }
@@ -2874,10 +2880,7 @@ mod tests {
             _session_id: &SessionId,
             occurrence: &Occurrence,
             identity: &ScheduleDeliveryIdentity,
-            _event_type: String,
-            _payload: serde_json::Value,
-            _render_metadata: Option<RenderMetadata>,
-            _materialized_session_id: Option<SessionId>,
+            _dispatch: ScheduledEventDispatch,
         ) -> Result<DeliveryDispatch, ScheduleDomainError> {
             Ok(immediate_completed_dispatch(
                 occurrence,
@@ -2963,10 +2966,7 @@ mod tests {
             _session_id: &SessionId,
             occurrence: &Occurrence,
             identity: &ScheduleDeliveryIdentity,
-            _event_type: String,
-            _payload: serde_json::Value,
-            _render_metadata: Option<RenderMetadata>,
-            _materialized_session_id: Option<SessionId>,
+            _dispatch: ScheduledEventDispatch,
         ) -> Result<DeliveryDispatch, ScheduleDomainError> {
             Ok(immediate_completed_dispatch(
                 occurrence,
@@ -3018,10 +3018,7 @@ mod tests {
             _session_id: &SessionId,
             occurrence: &Occurrence,
             identity: &ScheduleDeliveryIdentity,
-            _event_type: String,
-            _payload: serde_json::Value,
-            _render_metadata: Option<RenderMetadata>,
-            _materialized_session_id: Option<SessionId>,
+            _dispatch: ScheduledEventDispatch,
         ) -> Result<DeliveryDispatch, ScheduleDomainError> {
             Ok(immediate_completed_dispatch(
                 occurrence,

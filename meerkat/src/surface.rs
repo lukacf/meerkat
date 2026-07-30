@@ -82,7 +82,7 @@ pub use runtime_schedule_host::{
 };
 pub use schedule_host::{
     AcceptedScheduledInput, MobMemberCurrentSessionScheduleResolver, NoopScheduleMobHost,
-    ScheduleAdmissionOutcome, ScheduleHostHandle, ScheduledPromptDispatch,
+    ScheduleAdmissionOutcome, ScheduleHostHandle, ScheduledEventDispatch, ScheduledPromptDispatch,
     SharedScheduleTargetAdapter, SurfaceScheduleMobHost, SurfaceScheduleSessionHost,
     async_completion_dispatch, async_completion_dispatch_with_admission_outcome,
     build_dispatch_from_accepted, immediate_completed_dispatch,

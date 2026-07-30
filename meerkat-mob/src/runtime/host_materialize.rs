@@ -2363,13 +2363,7 @@ impl HostMemberMaterializer {
                 })
                 .await?
             }
-            None => {
-                let mut config = crate::build::build_agent_config(base).await?;
-                // Fresh builds pin the admitted session id through a
-                // pre-created empty session (the provisioner template).
-                config.resume_session = Some(meerkat_core::Session::with_id(session_id.clone()));
-                config
-            }
+            None => crate::build::build_agent_config(base).await?,
         };
 
         if matches!(decompiled.system_prompt, DecompiledSystemPrompt::Disable)

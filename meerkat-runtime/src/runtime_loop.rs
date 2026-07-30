@@ -1956,37 +1956,75 @@ async fn recover_committed_runtime_projections_before_teardown(
                 ),
             }
         })?;
-        let batch_key = crate::input_state::InteractionTerminalBatchKey::Run {
-            run_id: pending.run_id.clone(),
-        };
-        publish_authorized_runtime_terminal_batch(
-            driver,
-            Some(completions),
-            Some(authority_guard.take().ok_or_else(|| {
-                crate::RuntimeDriverError::RecoveryCorruption {
-                    reason: format!(
-                        "runtime teardown lost exact authority before non-directed recovery for {}",
+        let failed_execution_attempt = pending.terminal.is_none()
+            && pending.terminal_observation
+                == crate::meerkat_machine::dsl::RuntimeCompletionTerminalObservation::MachineTerminal
+            && pending.completion_error_metadata.is_some();
+        if failed_execution_attempt {
+            // This carrier represents durable RunFailed, not a fabricated
+            // terminal for every contributor. Reuse the live resolver so a
+            // mixed batch splits its durably terminal and requeued recipients
+            // identically during abnormal teardown.
+            let reason = pending
+                .completion_error_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.detail.clone())
+                .unwrap_or_else(|| {
+                    format!(
+                        "runtime run {} failed after admission and was requeued",
                         pending.run_id
-                    ),
-                }
-            })?),
-            executor,
-            &pending.input_ids,
-            &[],
-            &batch_key,
-            pending.terminal_observation,
-            pending.terminal.as_ref(),
-            None,
-            crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Succeeded,
-            pending.completion_error_metadata,
-            None,
-        )
-        .await
-        .map_err(|error| {
-            crate::RuntimeDriverError::Internal(format!(
-                "failed to recover persisted non-directed runtime terminal: {error}"
-            ))
-        })?;
+                    )
+                });
+            resolve_machine_terminal_completion_waiters(
+                driver,
+                Some(completions),
+                authority_guard.take().ok_or_else(|| {
+                    crate::RuntimeDriverError::RecoveryCorruption {
+                        reason: format!(
+                            "runtime teardown lost exact authority before failed-attempt recovery for {}",
+                            pending.run_id
+                        ),
+                    }
+                })?,
+                teardown_slot,
+                &pending.input_ids,
+                &pending.run_id,
+                reason,
+            )
+            .await;
+        } else {
+            let batch_key = crate::input_state::InteractionTerminalBatchKey::Run {
+                run_id: pending.run_id.clone(),
+            };
+            publish_authorized_runtime_terminal_batch(
+                driver,
+                Some(completions),
+                Some(authority_guard.take().ok_or_else(|| {
+                    crate::RuntimeDriverError::RecoveryCorruption {
+                        reason: format!(
+                            "runtime teardown lost exact authority before non-directed recovery for {}",
+                            pending.run_id
+                        ),
+                    }
+                })?),
+                executor,
+                &pending.input_ids,
+                &[],
+                &batch_key,
+                pending.terminal_observation,
+                pending.terminal.as_ref(),
+                None,
+                crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Succeeded,
+                pending.completion_error_metadata,
+                None,
+            )
+            .await
+            .map_err(|error| {
+                crate::RuntimeDriverError::Internal(format!(
+                    "failed to recover persisted non-directed runtime terminal: {error}"
+                ))
+            })?;
+        }
         teardown_slot.clear_pending_nondirected_run_terminal(&pending.run_id);
     } else {
         drop(authority_guard.take());
@@ -2009,6 +2047,41 @@ async fn recover_committed_runtime_projections_before_teardown(
     Ok(())
 }
 
+fn resolve_process_local_failed_run_waiters(
+    driver: &crate::meerkat_machine::driver::DriverEntry,
+    completions: &mut crate::completion::CompletionRegistry,
+    input_ids: Vec<InputId>,
+    run_id: &RunId,
+    reason: String,
+) {
+    let authorized = machine_terminal_completion_error(driver, reason)
+        .and_then(|error_metadata| {
+            crate::meerkat_machine::driver::machine_resolve_runtime_completion_result(
+                driver,
+                Some(run_id),
+                crate::meerkat_machine::dsl::RuntimeCompletionTerminalObservation::MachineTerminal,
+                crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Succeeded,
+            )
+            .map(|authority| (authority, error_metadata))
+        })
+        .map_err(|error| {
+            crate::completion::CompletionWaitError::AuthorityUnavailable(format!(
+                "runtime process-local completion authority missing: {error}"
+            ))
+        });
+    match authorized {
+        Ok((authority, error_metadata)) => {
+            completions.resolve_process_local_runtime_completion_authorized(
+                input_ids,
+                None,
+                authority,
+                error_metadata,
+            );
+        }
+        Err(error) => completions.fail_inputs(input_ids, error),
+    }
+}
+
 async fn resolve_machine_terminal_completion_waiters(
     driver: &crate::meerkat_machine::SharedDriver,
     completions: Option<&crate::meerkat_machine::SharedCompletionRegistry>,
@@ -2029,27 +2102,25 @@ async fn resolve_machine_terminal_completion_waiters(
     let handoff = tokio::spawn(async move {
         let _authority_guard = authority_guard;
         let mut driver_guard = driver.lock_owned().await;
-        let (durable_input_ids, delivery_input_ids, already_finalized) = match driver_guard
+        let (durable_input_ids, process_local_input_ids, already_finalized) = match driver_guard
             .input_terminal_completion_batch_for_run(&owned_run_id, &owned_input_ids)
         {
             Ok(Some((durable_input_ids, already_finalized))) => {
-                let requested = owned_input_ids
+                let durable = durable_input_ids
                     .iter()
                     .collect::<std::collections::HashSet<_>>();
-                let delivery_input_ids = durable_input_ids
+                let process_local_input_ids = owned_input_ids
                     .iter()
-                    .filter(|input_id| requested.contains(input_id))
+                    .filter(|input_id| !durable.contains(input_id))
                     .cloned()
                     .collect::<Vec<_>>();
-                (durable_input_ids, delivery_input_ids, already_finalized)
+                (
+                    Some(durable_input_ids),
+                    process_local_input_ids,
+                    already_finalized,
+                )
             }
-            Ok(None) => {
-                // A recoverable failed run can requeue every contributor.
-                // With no terminal receipt batch, none of these waiter
-                // identities reached a terminal outcome.
-                teardown_slot.clear_pending_nondirected_run_terminal(&owned_run_id);
-                return;
-            }
+            Ok(None) => (None, owned_input_ids.clone(), false),
             Err(error) => {
                 let _driver_guard = driver_guard;
                 let mut completion_guard = completions.lock_owned().await;
@@ -2063,13 +2134,42 @@ async fn resolve_machine_terminal_completion_waiters(
                 return;
             }
         };
-        if delivery_input_ids.is_empty() || already_finalized {
-            // Directed publication resolves the complete durable recipient
-            // batch, including non-directed inputs, before this follow-up.
-            // Requeued contributors are deliberately absent from the batch.
+        if already_finalized {
+            // Directed publication already consumed the durable batch
+            // authority and delivered its durable non-directed recipients.
+            // Any remaining IDs were requeued and therefore have no receipt;
+            // resolve only their process-local attempt observers.
+            if process_local_input_ids.is_empty() {
+                teardown_slot.clear_pending_nondirected_run_terminal(&owned_run_id);
+                return;
+            }
+            let mut completion_guard = completions.lock_owned().await;
+            resolve_process_local_failed_run_waiters(
+                &driver_guard,
+                &mut completion_guard,
+                process_local_input_ids,
+                &owned_run_id,
+                reason,
+            );
             teardown_slot.clear_pending_nondirected_run_terminal(&owned_run_id);
             return;
         }
+        let Some(durable_input_ids) = durable_input_ids else {
+            // A recoverable failed run can requeue every contributor. RunFailed
+            // is already durable here, but there is intentionally no input
+            // terminal receipt. Resolve the exact attempt observers from
+            // generated authority without changing the requeued input rows.
+            let mut completion_guard = completions.lock_owned().await;
+            resolve_process_local_failed_run_waiters(
+                &driver_guard,
+                &mut completion_guard,
+                process_local_input_ids,
+                &owned_run_id,
+                reason,
+            );
+            teardown_slot.clear_pending_nondirected_run_terminal(&owned_run_id);
+            return;
+        };
         let terminal_completion_witness = match driver_guard
             .input_terminal_completion_authorization_witness(&durable_input_ids)
         {
@@ -2078,7 +2178,7 @@ async fn resolve_machine_terminal_completion_waiters(
                 let _driver_guard = driver_guard;
                 let mut completion_guard = completions.lock_owned().await;
                 completion_guard.fail_inputs(
-                    delivery_input_ids,
+                    owned_input_ids,
                     crate::completion::CompletionWaitError::AuthorityUnavailable(format!(
                         "terminal completion batch authorization failed: {error}"
                     )),
@@ -2134,10 +2234,14 @@ async fn resolve_machine_terminal_completion_waiters(
         let mut completion_guard = completion_guard;
         match bundle {
             Ok(bundle) => {
+                // The generated result belongs to the whole failed run. Persist
+                // its terminal receipt only for the machine-terminal subset,
+                // then deliver the same non-cloneable decision to every
+                // non-directed waiter, including requeued contributors.
                 completion_guard
-                    .resolve_authorized_runtime_terminal_bundle(delivery_input_ids, bundle);
+                    .resolve_authorized_runtime_terminal_bundle(owned_input_ids, bundle);
             }
-            Err(error) => completion_guard.fail_inputs(delivery_input_ids, error),
+            Err(error) => completion_guard.fail_inputs(owned_input_ids, error),
         }
         teardown_slot.clear_pending_nondirected_run_terminal(&owned_run_id);
     });
@@ -2245,10 +2349,11 @@ struct RuntimeLoopRecoveryContext {
 
 /// Exact in-process recovery carrier for a persisted run outcome that has
 /// completion waiters but no directed Interaction event/outbox. The carrier is
-/// installed before the owning persistence await and is cleared only after
-/// authorized waiter delivery. Abnormal teardown can therefore replay the
-/// persisted payload with the retained executor instead of reclassifying it as
-/// a runless runtime termination.
+/// installed before the owning persistence await and is cleared only after the
+/// generated run result reaches those process-local observers. Abnormal
+/// teardown can therefore replay a terminal payload or report a durably failed
+/// execution attempt without reclassifying either as a runless runtime
+/// termination.
 #[derive(Clone)]
 struct PendingNondirectedRunTerminal {
     phase: PendingNondirectedRunTerminalPhase,
@@ -8957,7 +9062,7 @@ mod tests {
             args: serde_json::json!({ "value": "browser" }),
         });
 
-        registry.resolve_runtime_completion_authorized(
+        registry.resolve_process_local_runtime_completion_authorized(
             std::iter::once(input_id.clone()),
             terminal.as_ref(),
             crate::meerkat_machine::driver::test_runtime_completion_authority(
@@ -9000,7 +9105,7 @@ mod tests {
         };
         let terminal = Some(CoreApplyTerminal::RunResult(Box::new(run_result)));
 
-        registry.resolve_runtime_completion_authorized(
+        registry.resolve_process_local_runtime_completion_authorized(
             std::iter::once(input_id.clone()),
             terminal.as_ref(),
             crate::meerkat_machine::driver::test_runtime_completion_authority(
@@ -9015,6 +9120,36 @@ mod tests {
                 assert_eq!(result.text, "terminal authority");
             }
             other => panic!("Expected Completed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn process_local_failed_attempt_preserves_generated_runtime_failure() {
+        let mut registry = crate::completion::CompletionRegistry::new();
+        let input_id = InputId::new();
+        let handle = registry.register(input_id.clone());
+        let error =
+            meerkat_core::TurnErrorMetadata::runtime_apply_failure("injected runtime turn failure");
+
+        registry.resolve_process_local_runtime_completion_authorized(
+            std::iter::once(input_id),
+            None,
+            crate::meerkat_machine::driver::test_runtime_completion_authority(
+                crate::meerkat_machine::dsl::RuntimeCompletionResultClass::AbandonedWithError,
+                crate::meerkat_machine::dsl::RuntimeCompletionObservedOutcome::RuntimeApplyFailed,
+            ),
+            Some(error),
+        );
+
+        match handle.try_wait().await {
+            Ok(crate::completion::CompletionOutcome::AbandonedWithError { reason, error }) => {
+                assert_eq!(reason, "injected runtime turn failure");
+                assert_eq!(
+                    error.kind,
+                    meerkat_core::TurnTerminalCauseKind::RuntimeApplyFailure
+                );
+            }
+            other => panic!("Expected generated runtime failure, got {other:?}"),
         }
     }
 

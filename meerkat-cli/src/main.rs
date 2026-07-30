@@ -28,11 +28,11 @@ use chrono::Utc;
 #[cfg(not(feature = "mob"))]
 use meerkat::surface::NoopScheduleMobHost;
 use meerkat::surface::{
-    ScheduledPromptDispatch, SharedScheduleTargetAdapter, SurfaceScheduleMobHost,
-    SurfaceScheduleSessionHost, recover_mob_member_identity_from_session_target,
-    runtime_delivery_dispatch_from_admission, schedule_host_supported,
-    schedule_runtime_correlation_id, schedule_runtime_delivery_idempotency_key,
-    spawn_schedule_host,
+    ScheduledEventDispatch, ScheduledPromptDispatch, SharedScheduleTargetAdapter,
+    SurfaceScheduleMobHost, SurfaceScheduleSessionHost,
+    recover_mob_member_identity_from_session_target, runtime_delivery_dispatch_from_admission,
+    schedule_host_supported, schedule_runtime_correlation_id,
+    schedule_runtime_delivery_idempotency_key, spawn_schedule_host,
 };
 use meerkat::{
     AgentFactory, EphemeralSessionService, FactoryAgentBuilder, PersistenceBundle, ScheduleService,
@@ -12327,10 +12327,7 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
         session_id: &SessionId,
         occurrence: &meerkat::Occurrence,
         identity: &meerkat::ScheduleDeliveryIdentity,
-        event_type: String,
-        payload: serde_json::Value,
-        render_metadata: Option<meerkat_core::types::RenderMetadata>,
-        materialized_session_id: Option<SessionId>,
+        dispatch: ScheduledEventDispatch,
     ) -> Result<meerkat::DeliveryDispatch, meerkat::ScheduleDomainError> {
         self.ensure_runtime_session_registered(session_id).await?;
 
@@ -12356,11 +12353,11 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
                 supersession_key: None,
                 correlation_id: Some(schedule_runtime_correlation_id(identity)?),
             },
-            event_type,
-            payload,
+            event_type: dispatch.event_type,
+            payload: dispatch.payload,
             blocks: None,
             handling_mode: meerkat_core::types::HandlingMode::Queue,
-            render_metadata,
+            render_metadata: dispatch.render_metadata,
         });
         let (outcome, handle) = self
             .runtime_adapter
@@ -12374,7 +12371,7 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
             identity,
             outcome,
             handle,
-            materialized_session_id,
+            dispatch.materialized_session_id,
         )
         .await
     }

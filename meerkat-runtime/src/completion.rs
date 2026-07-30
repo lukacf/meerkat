@@ -1,9 +1,13 @@
-//! Input completion waiters — allows callers to await terminal outcome of an accepted input.
+//! Input completion waiters — allows callers to await the execution outcome of
+//! an accepted input.
 //!
 //! When a surface accepts an input via the runtime, it can optionally receive a
-//! `CompletionHandle` that resolves when the input reaches a terminal state
-//! (Consumed or Abandoned). This bridges the async accept/await pattern needed
-//! for surfaces that want synchronous-feeling turn execution through the runtime.
+//! `CompletionHandle`. It normally resolves when the input reaches a terminal
+//! state (Consumed or Abandoned). If an execution attempt fails durably and the
+//! machine requeues the input, the process-local handle resolves that generated
+//! attempt failure without terminalizing the durable input. This bridges the
+//! async accept/await pattern needed for surfaces that want synchronous-feeling
+//! turn execution through the runtime.
 //!
 //! `CompletionRegistry` is waiter plumbing only. Production code must never
 //! treat waiter presence, waiter counts, or sender membership as semantic
@@ -21,10 +25,9 @@ use meerkat_core::{TurnErrorMetadata, TurnTerminalCauseKind, TurnTerminalOutcome
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[cfg(test)]
-use crate::meerkat_machine::driver::RuntimeCompletionResultAttempt;
 use crate::meerkat_machine::driver::{
-    RuntimeCompletionResultAuthority, RuntimeCompletionResultRealized,
+    RuntimeCompletionResultAttempt, RuntimeCompletionResultAuthority,
+    RuntimeCompletionResultRealized,
 };
 use crate::meerkat_machine::dsl::RuntimeCompletionResultClass;
 use crate::tokio::sync::oneshot;
@@ -98,7 +101,11 @@ pub enum CompletionOutcome {
         reason: String,
         error: TurnErrorMetadata,
     },
-    /// The input was abandoned before completing, with typed failure metadata.
+    /// The accepted execution attempt ended with typed failure metadata.
+    ///
+    /// The durable input may be abandoned or machine-requeued; this public
+    /// result describes the caller's exact attempt, not a second lifecycle
+    /// authority.
     AbandonedWithError {
         reason: String,
         error: TurnErrorMetadata,
@@ -318,7 +325,7 @@ impl CompletionHandle {
             .unwrap_or(Err(CompletionWaitError::ChannelClosed))
     }
 
-    /// Wait for the input to reach a terminal state or report mechanical waiter failure.
+    /// Wait for the generated execution result or report mechanical waiter failure.
     pub async fn try_wait(self) -> Result<CompletionOutcome, CompletionWaitError> {
         self.try_wait_delivery()
             .await
@@ -334,7 +341,7 @@ impl CompletionHandle {
         Ok((delivery.outcome, delivery.cleanup_observation))
     }
 
-    /// Wait for the input to reach a terminal state or report mechanical waiter failure.
+    /// Wait for the generated execution result or report mechanical waiter failure.
     pub async fn wait(self) -> Result<CompletionOutcome, CompletionWaitError> {
         self.try_wait().await
     }
@@ -951,7 +958,6 @@ impl CompletionRegistry {
         self.fail_inputs(input_ids, error);
     }
 
-    #[cfg(test)]
     fn cleanup_from_realized_attempt(
         authority: RuntimeCompletionResultAttempt,
     ) -> CompletionCleanupObservation {
@@ -960,8 +966,8 @@ impl CompletionRegistry {
 
     /// Register a waiter for an input. Returns the handle the caller will await.
     ///
-    /// Multiple waiters can be registered for the same InputId — all will be
-    /// resolved when the input reaches a terminal state.
+    /// Multiple waiters can be registered for the same InputId — all observe
+    /// the same generated execution result.
     pub(crate) fn register(&mut self, input_id: InputId) -> CompletionHandle {
         let (tx, rx) = oneshot::channel();
         self.waiters.entry(input_id).or_default().push(tx);
@@ -1005,8 +1011,14 @@ impl CompletionRegistry {
         );
     }
 
-    #[cfg(test)]
-    pub(crate) fn resolve_runtime_completion_authorized<I>(
+    /// Resolve process-local waiters from generated runtime-result authority
+    /// without minting or persisting an input-terminal receipt.
+    ///
+    /// This is the exact seam for a durably recorded failed execution attempt
+    /// whose contributing inputs remain machine-owned and requeued. Waiter
+    /// delivery is mechanical observer plumbing; it must not mutate or
+    /// terminalize those input rows.
+    pub(crate) fn resolve_process_local_runtime_completion_authorized<I>(
         &mut self,
         input_ids: I,
         terminal: Option<&CoreApplyTerminal>,

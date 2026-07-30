@@ -29,8 +29,9 @@ use std::time::Duration;
 use anyhow::{Context as _, bail};
 use meerkat::PersistentSessionService;
 use meerkat::surface::{
-    NoopScheduleMobHost, ScheduledPromptDispatch, SharedScheduleTargetAdapter,
-    SurfaceScheduleSessionHost, runtime_delivery_dispatch_from_admission, schedule_host_supported,
+    NoopScheduleMobHost, ScheduledEventDispatch, ScheduledPromptDispatch,
+    SharedScheduleTargetAdapter, SurfaceScheduleSessionHost,
+    runtime_delivery_dispatch_from_admission, schedule_host_supported,
     schedule_runtime_correlation_id, schedule_runtime_delivery_idempotency_key,
     spawn_schedule_host,
 };
@@ -415,10 +416,7 @@ impl SurfaceScheduleSessionHost for TargetScheduleSessionHost {
         session_id: &SessionId,
         occurrence: &meerkat::Occurrence,
         identity: &ScheduleDeliveryIdentity,
-        event_type: String,
-        payload: serde_json::Value,
-        render_metadata: Option<meerkat_core::types::RenderMetadata>,
-        materialized_session_id: Option<SessionId>,
+        dispatch: ScheduledEventDispatch,
     ) -> Result<meerkat::DeliveryDispatch, meerkat::ScheduleDomainError> {
         self.ensure_runtime_session_registered(session_id).await?;
         self.update_peer_ingress_context(session_id).await;
@@ -445,11 +443,11 @@ impl SurfaceScheduleSessionHost for TargetScheduleSessionHost {
                 supersession_key: None,
                 correlation_id: Some(schedule_runtime_correlation_id(identity)?),
             },
-            event_type,
-            payload,
+            event_type: dispatch.event_type,
+            payload: dispatch.payload,
             blocks: None,
             handling_mode: HandlingMode::Queue,
-            render_metadata,
+            render_metadata: dispatch.render_metadata,
         });
 
         let (outcome, handle) = self
@@ -465,7 +463,7 @@ impl SurfaceScheduleSessionHost for TargetScheduleSessionHost {
             identity,
             outcome,
             handle,
-            materialized_session_id,
+            dispatch.materialized_session_id,
         )
         .await
     }

@@ -5578,26 +5578,20 @@ mod tests {
     fn build_event_provenance_binds_successful_invocation_workspace_and_config() {
         let temp = tempfile::tempdir().expect("tempdir");
         let (workspace, bep, bazel_bin) = build_event_fixture_paths(&temp);
-        std::fs::write(
-            &bep,
+        let events = [
             format!(
-                concat!(
-                    r#"{{"id":{{"started":{{}}}},"started":{{"uuid":"abc","command":"build","workspaceDirectory":{workspace}}}}}"#,
-                    "\n",
-                    r#"{"id":{"namedSet":{"id":"0"}},"namedSetOfFiles":{"files":[{"name":"meerkat-mob/smoke_mob_turn_latency_test","uri":"file:///x","pathPrefix":["bazel-out","darwin_arm64-fastbuild","bin"]}]}}"#,
-                    "\n",
-                    r#"{"id":{"namedSet":{"id":"1"}},"namedSetOfFiles":{"files":[{"name":"meerkat-cli/rkat","pathPrefix":["bazel-out","darwin_arm64-fastbuild","bin"]}],"fileSets":[{"id":"0"}]}}"#,
-                    "\n",
-                    r#"{"id":{"buildFinished":{}},"finished":{"overallSuccess":true}}"#,
-                    "\n",
-                ),
+                r#"{{"id":{{"started":{{}}}},"started":{{"uuid":"abc","command":"build","workspaceDirectory":{workspace}}}}}"#,
                 workspace = serde_json::to_string(
                     workspace.to_str().expect("utf8 fixture workspace")
                 )
                 .expect("encode workspace"),
             ),
-        )
-        .expect("write BEP fixture");
+            r#"{"id":{"namedSet":{"id":"0"}},"namedSetOfFiles":{"files":[{"name":"meerkat-mob/smoke_mob_turn_latency_test","uri":"file:///x","pathPrefix":["bazel-out","darwin_arm64-fastbuild","bin"]}]}}"#.to_string(),
+            r#"{"id":{"namedSet":{"id":"1"}},"namedSetOfFiles":{"files":[{"name":"meerkat-cli/rkat","pathPrefix":["bazel-out","darwin_arm64-fastbuild","bin"]}],"fileSets":[{"id":"0"}]}}"#.to_string(),
+            r#"{"id":{"buildFinished":{}},"finished":{"overallSuccess":true}}"#.to_string(),
+        ]
+        .join("\n");
+        std::fs::write(&bep, format!("{events}\n")).expect("write BEP fixture");
         let provenance =
             bazel_build_event_provenance(&bep, &workspace, &bazel_bin).expect("parse BEP");
         assert_eq!(provenance.invocation_id, "abc");

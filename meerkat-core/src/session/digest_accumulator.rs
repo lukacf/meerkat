@@ -418,12 +418,24 @@ fn record_boundary(state: &mut AccumulatorState, stream: &Midstate) {
 /// Reads deref to the message vector. Writes have no `DerefMut`: they must go
 /// through the typed mutators below, each of which states its effect on the
 /// accumulator. That is the whole invalidation-exhaustiveness argument.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct TranscriptMessages {
     messages: Arc<Vec<Message>>,
     /// Boxed for the same reason the state inside it is: `Session` rides the
     /// agent's nested async futures against a 2 MB production stack budget.
     accumulator: Box<TranscriptDigestAccumulator>,
+}
+
+impl Default for TranscriptMessages {
+    fn default() -> Self {
+        let accumulator = TranscriptDigestAccumulator::default();
+        let empty = SessionMessageRowPrefixAccumulator::empty();
+        accumulator.install_exact_row_lineage(empty.clone(), empty);
+        Self {
+            messages: Arc::default(),
+            accumulator: Box::new(accumulator),
+        }
+    }
 }
 
 impl Clone for TranscriptMessages {
@@ -730,6 +742,22 @@ mod tests {
             .unwrap();
         crate::session_store::SessionMessageRowPrefixAccumulator::from_serialized_rows(&rows)
             .unwrap()
+    }
+
+    #[test]
+    fn fresh_transcript_owns_exact_genesis_row_lineage() {
+        let mut messages = TranscriptMessages::default();
+        assert_eq!(
+            messages.exact_row_prefix_at(0),
+            Some(crate::session_store::SessionMessageRowPrefixAccumulator::empty())
+        );
+
+        messages.push(user("first"));
+        assert_eq!(
+            messages.exact_row_prefix_at(1),
+            Some(exact_row_prefix(&messages)),
+            "ordinary appends must extend fresh construction authority without a full rescan"
+        );
     }
 
     #[test]

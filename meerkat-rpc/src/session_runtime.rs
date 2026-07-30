@@ -10622,7 +10622,6 @@ mod tests {
             self_hosted_server_id: None,
             provider_params: None,
             auth_binding: None,
-            transient_turn_context: None,
         };
         let new = SessionLlmIdentity {
             model: "gpt-realtime-prior".to_string(),
@@ -11754,6 +11753,106 @@ mod tests {
 
     fn temp_factory(temp: &tempfile::TempDir) -> AgentFactory {
         AgentFactory::new(temp.path().join("sessions"))
+    }
+
+    fn make_runtime(factory: AgentFactory, max_sessions: usize) -> Arc<SessionRuntime> {
+        make_runtime_with_config(factory, max_sessions, Config::default())
+    }
+
+    fn make_runtime_with_config(
+        factory: AgentFactory,
+        max_sessions: usize,
+        config: Config,
+    ) -> Arc<SessionRuntime> {
+        let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+        let blob_store: Arc<dyn meerkat_core::BlobStore> =
+            Arc::new(meerkat_store::MemoryBlobStore::new());
+        Arc::new(SessionRuntime::new(
+            factory,
+            config,
+            max_sessions,
+            meerkat::PersistenceBundle::new(store, runtime_store, blob_store),
+            crate::router::NotificationSink::noop(),
+        ))
+    }
+
+    fn make_runtime_with_session_store(
+        factory: AgentFactory,
+        max_sessions: usize,
+        store: Arc<dyn meerkat::SessionStore>,
+    ) -> Arc<SessionRuntime> {
+        let blob_store: Arc<dyn meerkat_core::BlobStore> =
+            Arc::new(meerkat_store::MemoryBlobStore::new());
+        Arc::new(SessionRuntime::new(
+            factory,
+            Config::default(),
+            max_sessions,
+            meerkat::PersistenceBundle::new(
+                store,
+                Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+                blob_store,
+            ),
+            crate::router::NotificationSink::noop(),
+        ))
+    }
+
+    fn make_runtime_with_session_store_and_runtime_store(
+        factory: AgentFactory,
+        max_sessions: usize,
+        store: Arc<dyn meerkat::SessionStore>,
+    ) -> Arc<SessionRuntime> {
+        let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+        let blob_store: Arc<dyn meerkat_core::BlobStore> =
+            Arc::new(meerkat_store::MemoryBlobStore::new());
+        Arc::new(SessionRuntime::new(
+            factory,
+            Config::default(),
+            max_sessions,
+            meerkat::PersistenceBundle::new(store, runtime_store, blob_store),
+            crate::router::NotificationSink::noop(),
+        ))
+    }
+
+    fn make_runtime_with_runtime_store(
+        factory: AgentFactory,
+        max_sessions: usize,
+    ) -> Arc<SessionRuntime> {
+        let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+        let blob_store: Arc<dyn meerkat_core::BlobStore> =
+            Arc::new(meerkat_store::MemoryBlobStore::new());
+        Arc::new(SessionRuntime::new(
+            factory,
+            Config::default(),
+            max_sessions,
+            meerkat::PersistenceBundle::new(store, runtime_store, blob_store),
+            crate::router::NotificationSink::noop(),
+        ))
+    }
+
+    fn make_runtime_with_runtime_store_handle(
+        factory: AgentFactory,
+        max_sessions: usize,
+    ) -> (Arc<SessionRuntime>, Arc<dyn meerkat_runtime::RuntimeStore>) {
+        let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+        let blob_store: Arc<dyn meerkat_core::BlobStore> =
+            Arc::new(meerkat_store::MemoryBlobStore::new());
+        (
+            Arc::new(SessionRuntime::new(
+                factory,
+                Config::default(),
+                max_sessions,
+                meerkat::PersistenceBundle::new(store, Arc::clone(&runtime_store), blob_store),
+                crate::router::NotificationSink::noop(),
+            )),
+            runtime_store,
+        )
     }
 
     fn mock_build_config() -> AgentBuildConfig {
@@ -15796,7 +15895,7 @@ mod tests {
                 .as_ref()
                 .err()
                 .is_some_and(|err| matches!(err, SessionError::NotFound { .. })
-                    || archived_store_projection_session_error(err)),
+                    || archived_store_projection_session_error(&err)),
             "archived mob start_turn should fail closed before capacity: {rejected:?}"
         );
     }
@@ -15841,7 +15940,7 @@ mod tests {
                 .as_ref()
                 .err()
                 .is_some_and(|err| matches!(err, SessionError::NotFound { .. })
-                    || archived_store_projection_session_error(err)),
+                    || archived_store_projection_session_error(&err)),
             "archived mob runtime apply should fail closed before capacity: {rejected:?}"
         );
     }
@@ -20090,6 +20189,7 @@ mod tests {
             structured_output_retries: None,
             provider_params: None,
             auth_binding: None,
+            transient_turn_context: None,
         };
         let (event_tx, _event_rx) = mpsc::channel(100);
         let rejected = runtime
@@ -22145,7 +22245,7 @@ mod tests {
                     matches!(
                         reason,
                         meerkat_core::event::StreamTruncationReason::StreamLagged { dropped }
-                            if *dropped > 0
+                            if dropped > 0
                     ),
                     "StreamTruncated should carry the typed lag reason: {reason:?}"
                 );

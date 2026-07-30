@@ -163,6 +163,7 @@ mod tests {
         let writer_buf = SharedBuf(Arc::clone(&buf));
         let subscriber = tracing_subscriber::fmt()
             .with_max_level(tracing::Level::ERROR)
+            .with_ansi(false)
             .with_writer(move || writer_buf.clone())
             .finish();
         let guard = tracing::subscriber::set_default(subscriber);

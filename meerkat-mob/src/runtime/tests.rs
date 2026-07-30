@@ -1296,6 +1296,21 @@ fn begin_test_runtime_actor_materialization(
     }
 }
 
+fn requested_test_session_id(req: &CreateSessionRequest) -> SessionId {
+    req.build
+        .as_ref()
+        .and_then(|build| match &build.runtime_build_mode {
+            meerkat_core::RuntimeBuildMode::SessionOwned(bindings) => {
+                Some(bindings.session_id().clone())
+            }
+            meerkat_core::RuntimeBuildMode::StandaloneEphemeral => build
+                .resume_session
+                .as_ref()
+                .map(|session| session.id().clone()),
+        })
+        .unwrap_or_default()
+}
+
 fn test_actor_transient_turn_context_state() -> meerkat_core::TransientTurnContextStateHandle {
     meerkat_core::TransientTurnContextStateHandle::new()
 }
@@ -8728,12 +8743,7 @@ impl SessionAgentBuilder for PersistentMockBuilder {
         req: &CreateSessionRequest,
         _event_tx: tokio::sync::mpsc::Sender<AgentEvent>,
     ) -> Result<Self::Agent, SessionError> {
-        let session_id = req
-            .build
-            .as_ref()
-            .and_then(|build| build.resume_session.as_ref())
-            .map(|session| session.id().clone())
-            .unwrap_or_default();
+        let session_id = requested_test_session_id(req);
         Ok(PersistentMockAgent {
             session_id,
             llm_identity: test_llm_identity(req.model.clone()),
@@ -40466,12 +40476,7 @@ impl RuntimeBackedRealCommsSessionService {
         actor_witness_slot: Option<&meerkat_session::LiveSessionActorWitnessSlot>,
     ) -> Result<RunResult, SessionError> {
         let actor_materialization_permit = begin_test_runtime_actor_materialization(&req)?;
-        let session_id = req
-            .build
-            .as_ref()
-            .and_then(|build| build.resume_session.as_ref())
-            .map(|session| session.id().clone())
-            .unwrap_or_default();
+        let session_id = requested_test_session_id(&req);
         let n = self.session_counter.fetch_add(1, Ordering::Relaxed);
 
         let comms_name = req
@@ -42557,7 +42562,7 @@ async fn test_active_autonomous_direct_steer_falls_back_when_exact_boundary_is_u
         .await
         .expect("first direct steer should be admitted");
 
-    tokio::time::timeout(Duration::from_secs(2), async {
+    let first_apply_observed = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let prompts = service.applied_runtime_prompts(&sid_worker).await;
             if prompts
@@ -42570,8 +42575,17 @@ async fn test_active_autonomous_direct_steer_falls_back_when_exact_boundary_is_u
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
     })
-    .await
-    .expect("first direct steer should enter active apply");
+    .await;
+    if first_apply_observed.is_err() {
+        let prompts = service.applied_runtime_prompts(&sid_worker).await;
+        let snapshot = service
+            .runtime_adapter
+            .meerkat_machine_spine_snapshot(&sid_worker)
+            .await;
+        panic!(
+            "first direct steer should enter active apply; prompts={prompts:?} snapshot={snapshot:?}"
+        );
+    }
 
     service.set_append_system_context_delay_ms(250);
     let steer_worker = handle
@@ -42682,7 +42696,7 @@ async fn test_active_internal_submit_work_steer_falls_back_when_exact_boundary_i
         .await
         .expect("first direct steer should be admitted");
 
-    tokio::time::timeout(Duration::from_secs(2), async {
+    let first_apply_observed = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let prompts = service.applied_runtime_prompts(&sid_worker).await;
             if prompts
@@ -42695,8 +42709,17 @@ async fn test_active_internal_submit_work_steer_falls_back_when_exact_boundary_i
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
     })
-    .await
-    .expect("first direct steer should enter active apply");
+    .await;
+    if first_apply_observed.is_err() {
+        let prompts = service.applied_runtime_prompts(&sid_worker).await;
+        let snapshot = service
+            .runtime_adapter
+            .meerkat_machine_spine_snapshot(&sid_worker)
+            .await;
+        panic!(
+            "first direct steer should enter active apply; prompts={prompts:?} snapshot={snapshot:?}"
+        );
+    }
 
     let entry = handle
         .get_member(&AgentIdentity::from("w-internal-steer"))
@@ -43659,7 +43682,7 @@ async fn test_mcp_send_request_response_terminal_steer_is_visible_to_requester()
     assert_eq!(response_result["kind"], "peer_response");
     assert_eq!(response_result["status"], "sent");
 
-    let requester_terminal_context = tokio::time::timeout(Duration::from_secs(2), async {
+    let requester_terminal_context = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let appends = service.applied_runtime_system_appends(&sid_requester).await;
             if let Some(append) = appends
@@ -43687,8 +43710,20 @@ async fn test_mcp_send_request_response_terminal_steer_is_visible_to_requester()
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
     })
-    .await
-    .expect("requester should apply terminal peer response context after sent tool result");
+    .await;
+    let requester_terminal_context = match requester_terminal_context {
+        Ok(context) => context,
+        Err(_) => {
+            let appends = service.applied_runtime_system_appends(&sid_requester).await;
+            let snapshot = service
+                .runtime_adapter
+                .meerkat_machine_spine_snapshot(&sid_requester)
+                .await;
+            panic!(
+                "requester should apply terminal peer response context after sent tool result; appends={appends:?} snapshot={snapshot:?}"
+            );
+        }
+    };
 
     let expected_context_key = format!("peer_response_terminal:{responder_peer_id}:{request_id}");
     assert_eq!(

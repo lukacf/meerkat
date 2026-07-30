@@ -837,13 +837,15 @@ class HelpResponse:
 
 @dataclass
 class InjectSystemContextParams:
-    """Parameters for `session/inject_context`.
+    """Parameters for `session/inject_context`, which appends one ordinary durable
+ordered System message at the admitted transcript boundary.
 
 The injected body is the typed [`CoreRenderable`] owner rather than a bare
 `text` string: surfaces parse their inbound payload into the renderable at
 the ingress boundary and the handler threads it straight through to
 `AppendSystemContextRequest.content`. A plain-text client payload still
-deserializes via `CoreRenderable`'s tagged `text` variant."""
+deserializes via `CoreRenderable`'s tagged `text` variant. The rendered
+string is preserved exactly, including empty and whitespace-only content."""
     content: dict[str, Any]
     session_id: str
     idempotency_key: Optional[str] = None
@@ -1916,7 +1918,10 @@ class MobIngressInteractionResult:
 
 @dataclass
 class MobAppendSystemContextParams:
-    """Request payload for `mob/append_system_context`."""
+    """Request payload for `mob/append_system_context`.
+
+Appends one ordinary durable ordered System message to the member session
+at the admitted transcript boundary. The text is preserved exactly."""
     agent_identity: str
     mob_id: str
     text: str
@@ -7084,15 +7089,10 @@ SendTaintOverride = dict[str, SenderContentTaint] | Literal['undeclared']
 # Not `PartialEq`: the `BlockAssistant.blocks` variant carries
 # `WireAssistantBlock`s which hold opaque tool-call args as
 # `Box<RawValue>`. See `WireAssistantBlock` doc.
-class WireSystemMessageIdentity(TypedDict, total=False):
-    """Optional control-ingress identity carried by one durable System message."""
-    idempotency_key: NotRequired[Optional[str]]
-    source: NotRequired[Optional[str]]
-
 class WireSessionMessageSystem(TypedDict, total=False):
     content: Required[str]
     created_at: Required[str]
-    identity: NotRequired[Optional[WireSystemMessageIdentity]]
+    identity: NotRequired[Optional[dict[str, Any]]]
     role: Required[Literal['system']]
 
 class WireSessionMessageSystemNotice(TypedDict, total=False):

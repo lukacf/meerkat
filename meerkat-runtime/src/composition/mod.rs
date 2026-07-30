@@ -384,7 +384,8 @@ impl From<String> for ConsumerError {
 /// per resolved [`RoutedInput`]. The implementation is responsible for
 /// materializing the consumer-side typed input — the dispatcher only moves
 /// typed data across the seam.
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait ConsumerSurface: Send + Sync {
     /// Instance id this surface serves. The dispatcher matches against
     /// [`RoutedInput::instance_id`] to pick the right surface.

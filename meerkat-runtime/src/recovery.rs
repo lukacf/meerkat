@@ -64,7 +64,7 @@ use meerkat_core::session_document::{
     DurableTailStopReason, RunIdCardinality, SessionDocumentEffect, SessionDocumentKey,
     SessionDocumentMachineAuthority,
 };
-use meerkat_core::session_store::{PreparedHeadCanonicalMutation, SessionHead};
+use meerkat_core::session_store::PreparedHeadCanonicalMutation;
 use meerkat_core::types::SessionId;
 use meerkat_core::{Message, RunId, Session, StopReason, SystemNoticeKind, SystemNoticeMessage};
 use sha2::{Digest, Sha256};

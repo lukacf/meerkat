@@ -5522,6 +5522,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition TurnRunStarted => local seam NoOwnerRealization,
         disposition TurnBoundaryApplied => local seam NoOwnerRealization,
         disposition LiveBoundaryContextReceiptResolved => local seam NoOwnerRealization,
+        disposition LiveBoundaryUnavailableNormalized => local seam NoOwnerRealization,
         disposition TurnRunCompleted => local seam NoOwnerRealization,
         disposition DurableTailRecoveryAuthorized => local seam NoOwnerRealization,
         disposition DurableTailRecoveryCommitAuthorized => local seam NoOwnerRealization,

@@ -11,7 +11,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use indexmap::IndexMap;
 use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunId};
-use sha2::Digest as _;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::Mutex;
 #[cfg(target_arch = "wasm32")]
@@ -23,8 +22,7 @@ use super::{
     InputStateBatchCasImplementationProfile, InputStateBatchCasOutcome, InputStateRow,
     MachineLifecycleCasOutcome, MachineLifecycleCommit, MachineLifecycleExpectedVersion,
     MachineLifecycleObservation, MachineLifecycleStoreRecord, PreparedRecoveryInputSnapshot,
-    PreparedRecoveryInputStateMutation, PreparedRuntimeSessionCommit,
-    PreparedRuntimeSessionCommitPayload, PreparedRuntimeSessionCommitResult,
+    PreparedRecoveryInputStateMutation, PreparedRuntimeSessionCommitResult,
     PreparedWholeBlobProvisionalTail, PreparedWholeBlobRewriteStoreParts,
     PreparedWholeBlobSnapshot, PreparedWholeBlobSnapshotCas, RecoveryInputSetRevision,
     RecoveryInputStateMutation, RuntimeDeliveryAuthorityCasOutcome, RuntimeDeliveryAuthorityRecord,
@@ -35,8 +33,7 @@ use super::{
     complete_compaction_projection_intent, decoded_prepared_machine_lifecycle_replacement,
     execute_runtime_store_write_fence, parsed_whole_blob_snapshot, prepare_input_state_batch_cas,
     prepare_machine_lifecycle_replacement, prepare_recovery_input_state_mutations,
-    prepared_whole_blob_snapshot, validate_input_state_batch_read_ids,
-    validate_machine_lifecycle_replacement,
+    validate_input_state_batch_read_ids, validate_machine_lifecycle_replacement,
 };
 use crate::identifiers::{IdempotencyKey, LogicalRuntimeId};
 use crate::input_state::{InputStatePersistenceRecord, StoredInputState};
@@ -992,7 +989,9 @@ impl InMemoryRuntimeStore {
                     .input_states
                     .get(&runtime_id.0)
                     .and_then(|states| states.get(&target.state.input_id));
-                if current != Some(target) {
+                let current_digest = current.map(memory_input_row_version_digest).transpose()?;
+                let target_digest = memory_input_row_version_digest(target)?;
+                if current_digest.as_deref() != Some(target_digest.as_str()) {
                     return Err(RuntimeStoreError::SessionPersistenceAuthorityConflict {
                         runtime_id: runtime_id.to_string(),
                         detail: format!(

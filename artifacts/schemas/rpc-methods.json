@@ -685,7 +685,7 @@
       "result_type": "MobIngressInteractionResult"
     },
     {
-      "description": "Append one ordinary durable ordered System message to a mob member session",
+      "description": "Append system context for a mob member",
       "name": "mob/append_system_context",
       "params_type": "MobAppendSystemContextParams",
       "result_type": "MobAppendSystemContextResult"

@@ -457,7 +457,9 @@ impl MeerkatMachine {
             }
         };
 
-        let session_snapshot = prepared.session_snapshot().map(<[u8]>::to_vec);
+        let session_snapshot = prepared.session_snapshot().map(|snapshot| {
+            meerkat_core::lifecycle::core_executor::BoundSessionCommit::untyped(snapshot.to_vec())
+        });
         let realization = {
             let mut driver = witness.driver.lock().await;
             driver

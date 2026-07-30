@@ -5457,16 +5457,10 @@ export interface WireImageOperationPhaseTerminal {
 
 export type WireImageOperationPhase = WireImageOperationPhaseRequested | WireImageOperationPhaseValidating | WireImageOperationPhaseAwaitingApproval | WireImageOperationPhasePlanResolved | WireImageOperationPhaseProjectionSnapshotted | WireImageOperationPhaseScopedOverrideActive | WireImageOperationPhaseProviderCallInFlight | WireImageOperationPhaseProviderResultCaptured | WireImageOperationPhaseBlobCommitPending | WireImageOperationPhaseResultCommitted | WireImageOperationPhaseRestoringScopedOverride | WireImageOperationPhaseTerminal;
 
-/** Optional control-ingress identity carried by one durable System message. */
-export interface WireSystemMessageIdentity {
-  idempotency_key?: string | null;
-  source?: string | null;
-}
-
 export interface WireSessionMessageSystem {
   content: string;
   created_at: string;
-  identity?: WireSystemMessageIdentity | null;
+  identity?: Record<string, unknown> | null;
   role: "system";
 }
 

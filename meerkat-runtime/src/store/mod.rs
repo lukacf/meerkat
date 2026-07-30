@@ -415,8 +415,8 @@ pub enum RuntimeSessionPersistenceProfile {
 pub struct RuntimeSessionCatalogEntry {
     session_id: meerkat_core::types::SessionId,
     persistence_profile: RuntimeSessionPersistenceProfile,
-    created_at: std::time::SystemTime,
-    updated_at: std::time::SystemTime,
+    created_at: meerkat_core::time_compat::SystemTime,
+    updated_at: meerkat_core::time_compat::SystemTime,
     message_count: usize,
     total_tokens: u64,
     labels: BTreeMap<String, String>,
@@ -554,12 +554,12 @@ impl RuntimeSessionCatalogEntry {
     }
 
     #[must_use]
-    pub const fn created_at(&self) -> std::time::SystemTime {
+    pub const fn created_at(&self) -> meerkat_core::time_compat::SystemTime {
         self.created_at
     }
 
     #[must_use]
-    pub const fn updated_at(&self) -> std::time::SystemTime {
+    pub const fn updated_at(&self) -> meerkat_core::time_compat::SystemTime {
         self.updated_at
     }
 
@@ -1324,7 +1324,7 @@ impl std::fmt::Display for RuntimeSessionPersistenceProfile {
 /// metadata-prefix facts. Currentness is the store revision plus the exact
 /// committed head token; no fact inside a materialized `Session` participates
 /// in authority.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct HeadCanonicalStoreAuthority {
     authority_version: u16,
     session_id: meerkat_core::types::SessionId,
@@ -1588,7 +1588,7 @@ impl PreparedHeadCanonicalProvisionalTail {
 }
 
 /// Singular store-issued committed authority for a runtime session.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum RuntimeSessionAuthority {
     WholeBlob(WholeBlobStoreAuthority),
     HeadCanonical(HeadCanonicalStoreAuthority),
@@ -1946,7 +1946,7 @@ pub struct PreparedRecoveryReceiptDigestEnrichment {
 }
 
 impl PreparedRecoveryReceiptDigestEnrichment {
-    fn new(
+    pub(crate) fn new(
         source: &PreparedRecoveryReceiptSource,
         derived_conversation_digest: String,
     ) -> Result<Self, RuntimeStoreError> {

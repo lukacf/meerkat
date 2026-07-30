@@ -331,7 +331,8 @@ fn project_work_origin(
         })
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl ConsumerSurface for MeerkatConsumerSurface {
     fn instance_id(&self) -> &MachineInstanceId {
         meerkat_instance_id()

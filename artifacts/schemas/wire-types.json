@@ -1267,7 +1267,7 @@
             "type": "object"
           },
           {
-            "description": "A typed same-session transcript rewrite was durably committed.",
+            "description": "Released 0.8.10 generation-zero full-body compatibility row.\n\nCurrent writers must never emit this variant. It is decoded only by the\none-time compatibility reconciliation path; receipt batches supersede\nthe redundant body copy.",
             "properties": {
               "record": {
                 "$ref": "#/$defs/TranscriptRewriteRecord"
@@ -1288,7 +1288,34 @@
             "type": "object"
           },
           {
-            "description": "Inbound peer content was committed into this session's context.\n\nEmitted as a pure projection of the typed transcript carrier\n([`crate::types::SystemNoticeBlock::Comms`] with incoming direction)\nat the moment the agent commits it — a queued delivery appended to the\ntranscript at run assembly, or a steer delivery applied as runtime\nsystem context at the model boundary. One event per committed comms\nblock, so a host taint tracker classifies peer ingestion from typed\nfacts (canonical peer identity + the sender's signed content-taint\ndeclaration) instead of parsing rendered projection text.\n\nThe event stream is best-effort observability (see `event_tap`); the\ntranscript block remains the durable owner of these facts.",
+            "description": "Receipt-only evidence for one non-empty ordered rewrite suffix.\n\nThe sealed Session graph remains the singular body authority. The\noptional terminal assistant text is a delta-sized derived projection\nused to rebuild `summary.txt`; `None` explicitly removes a stale\nsummary when the retained successor has no assistant text.",
+            "properties": {
+              "final_assistant_text": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "receipt": {
+                "$ref": "#/$defs/TranscriptRewriteAuditReceiptBatch"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "transcript_rewrite_audit_receipt_committed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "receipt"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Inbound peer content was committed into this session's context.\n\nEmitted as a pure projection of the typed transcript carrier\n([`crate::types::SystemNoticeBlock::Comms`] with incoming direction)\nat the moment the agent commits it — a queued delivery appended to the\ntranscript at run assembly, or a steer delivery injected as a\nrequest-local User message at the model boundary. One event per committed comms\nblock, so a host taint tracker classifies peer ingestion from typed\nfacts (canonical peer identity + the sender's signed content-taint\ndeclaration) instead of parsing rendered projection text.\n\nThe event stream is best-effort observability (see `event_tap`); the\ntranscript block remains the durable owner of these facts.",
             "properties": {
               "kind": {
                 "$ref": "#/$defs/CommsNoticeKind",
@@ -1547,6 +1574,7 @@
         ]
       },
       "CompactionRewriteRange": {
+        "additionalProperties": false,
         "description": "Opaque range carried by the typed compaction rewrite semantic.",
         "properties": {
           "end": {
@@ -2130,17 +2158,26 @@
         ]
       },
       "LlmProviderErrorKind": {
-        "enum": [
-          "invalid_request",
-          "content_filtered",
-          "server_error",
-          "server_overloaded",
-          "connection_reset",
-          "unknown",
-          "stream_parse_error",
-          "incomplete_response"
-        ],
-        "type": "string"
+        "oneOf": [
+          {
+            "enum": [
+              "invalid_request",
+              "content_filtered",
+              "server_error",
+              "server_overloaded",
+              "connection_reset",
+              "unknown",
+              "stream_parse_error",
+              "incomplete_response"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "request_too_large",
+            "description": "The provider rejected (or preflight proved) a serialized request body\nthat exceeds its request-size cap.",
+            "type": "string"
+          }
+        ]
       },
       "LlmProviderErrorRetryability": {
         "enum": [
@@ -3160,6 +3197,7 @@
         "type": "string"
       },
       "TranscriptEditRewriteRange": {
+        "additionalProperties": false,
         "description": "Opaque current-format range carried by an ordinary transcript edit.",
         "properties": {
           "end": {
@@ -3206,7 +3244,31 @@
         ],
         "type": "object"
       },
+      "TranscriptRewriteAuditReceiptBatch": {
+        "description": "Receipt for one non-empty ordered transcript-rewrite suffix.\n\nThe transition is self-verifying:\n`start_prefix.extend(commits) == end_prefix`. Occurrence generations are\nchecked by [`TranscriptRewritePrefixAccumulator::extend`], so neither a gap\nnor a duplicate can be hidden inside one receipt.",
+        "properties": {
+          "commits": {
+            "items": {
+              "$ref": "#/$defs/TranscriptRewriteCommit"
+            },
+            "type": "array"
+          },
+          "end_prefix": {
+            "$ref": "#/$defs/TranscriptRewritePrefixAccumulator"
+          },
+          "start_prefix": {
+            "$ref": "#/$defs/TranscriptRewritePrefixAccumulator"
+          }
+        },
+        "required": [
+          "start_prefix",
+          "commits",
+          "end_prefix"
+        ],
+        "type": "object"
+      },
       "TranscriptRewriteCommit": {
+        "additionalProperties": false,
         "description": "Immutable rewrite commit that advances a session transcript head.",
         "properties": {
           "actor": {
@@ -3229,9 +3291,11 @@
             "type": "integer"
           },
           "original_span_digest": {
+            "description": "Audit label for the removed semantic span. Exact selection coordinates\nand row lineage are structural authority; this digest is checked on\ntargeted/final semantic materialization.",
             "type": "string"
           },
           "parent_revision": {
+            "description": "Content-addressed audit label for the occurrence parent.\n\nStructural continuity is owned by the occurrence generation, compact\nparent advance, exact row lineage, and graph prefix. This semantic\nlabel is re-proved when the targeted parent is materialized; ordinary\nappend/commit validation never re-hashes every historical body.",
             "type": "string"
           },
           "reason": {
@@ -3241,7 +3305,14 @@
             "type": "string"
           },
           "revision": {
+            "description": "Content-addressed audit label for the occurrence result, with the same\nlazy semantic-replay contract as [`Self::parent_revision`].",
             "type": "string"
+          },
+          "rewrite_generation": {
+            "description": "Serialized occurrence identity within one session's rewrite lineage.\n\nRevision strings identify content, not occurrences: a legitimate\nrewrite can return to earlier content, and two occurrences can even\ncarry byte-identical facts under a fixed/coarse clock. Current writers\ntherefore mint a strict contiguous `1..=n` generation. `0` exists only\nas the decode marker for 0.8.10 audit rows/graphs, which are normalized\nas an ordered set before they can enter current authority.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
           },
           "selection": {
             "$ref": "#/$defs/TranscriptRewriteSelection"
@@ -3260,7 +3331,26 @@
         ],
         "type": "object"
       },
+      "TranscriptRewritePrefixAccumulator": {
+        "description": "Rolling, canonical identity of an ordered exact rewrite-commit prefix.\n\nThis is a semantic graph fact, not a replay-cursor assertion. It is carried\nby the graph, folded into checkpoint authority, and independently matched\nagainst the EventStore's receipt. One ordinary lineage-tail commit extends\nthe accumulator with one commit serialization; it never re-hashes the\naccumulated prefix.",
+        "properties": {
+          "digest": {
+            "type": "string"
+          },
+          "occurrence_count": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "occurrence_count",
+          "digest"
+        ],
+        "type": "object"
+      },
       "TranscriptRewriteReason": {
+        "additionalProperties": false,
         "description": "Audit annotation carried with a transcript rewrite commit.\n\nThe free-form kind is for review, debugging, and provenance only. It never\nclassifies a rewrite as compaction; [`TranscriptRewriteSelection`] owns that\nsemantic through its opaque typed compaction range.",
         "properties": {
           "kind": {
@@ -3308,6 +3398,7 @@
         "description": "A concrete transcript span selected for same-session rewrite.",
         "oneOf": [
           {
+            "additionalProperties": false,
             "description": "Pre-semantic-marker range retained for source/API compatibility and\ndecoding prior durable records. New commits canonicalize this input to\n[`TranscriptRewriteSelection::EditMessageRange`] before persistence.",
             "properties": {
               "end": {
@@ -3333,6 +3424,7 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "description": "Current typed ordinary-edit semantic.",
             "properties": {
               "range": {
@@ -3350,6 +3442,7 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "description": "Replace a full transcript from a core-validated compaction rebuild.\n\nThe range payload has no public constructor. New values are minted only\nby the validated compaction path; deserialization exists solely for the\ndurable transcript graph and is revalidated against its retained bodies.",
             "properties": {
               "range": {
@@ -9342,6 +9435,11 @@
         "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
         "type": "string"
       },
+      "TurnRequestContext": {
+        "description": "Exact host-generated context projected into provider requests for one\nruntime-owned logical turn.\n\nThis is deliberately not a [`crate::types::Message`]: it cannot be appended\nto a [`crate::Session`] or acquire durable transcript semantics. Runtime\ninput persistence owns the bytes until the input reaches a terminal state;\nthe agent only borrows this clone-cheap value while composing foreground\nprovider requests for that turn.",
+        "minLength": 1,
+        "type": "string"
+      },
       "WireAnthropicCacheControlPolicy": {
         "enum": [
           "disabled",
@@ -10486,6 +10584,17 @@
               "string",
               "null"
             ]
+          },
+          "transient_turn_context": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/TurnRequestContext"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Host-regenerated request-only context for this delivery's logical turn."
           },
           "turn": {
             "anyOf": [
@@ -12325,6 +12434,11 @@
       "ToolName": {
         "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
         "type": "string"
+      },
+      "TurnRequestContext": {
+        "description": "Exact host-generated context projected into provider requests for one\nruntime-owned logical turn.\n\nThis is deliberately not a [`crate::types::Message`]: it cannot be appended\nto a [`crate::Session`] or acquire durable transcript semantics. Runtime\ninput persistence owns the bytes until the input reaches a terminal state;\nthe agent only borrows this clone-cheap value while composing foreground\nprovider requests for that turn.",
+        "minLength": 1,
+        "type": "string"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -12359,14 +12473,6 @@
           "$ref": "#/$defs/ContentInput"
         },
         "type": "array"
-      },
-      "transient_turn_context": {
-        "description": "Host-regenerated request-only context for this delivery's logical turn.",
-        "minLength": 1,
-        "type": [
-          "string",
-          "null"
-        ]
       },
       "input_id": {
         "description": "Canonical non-nil transport/idempotency UUID. For tracked completion\nthis is also the retained sidecar key; it is not implicitly the\ntranscript identity for untracked placed admission.",
@@ -12406,6 +12512,17 @@
           "string",
           "null"
         ]
+      },
+      "transient_turn_context": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/TurnRequestContext"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Host-regenerated request-only context for this delivery's logical turn."
       },
       "turn": {
         "anyOf": [
@@ -18534,7 +18651,7 @@
             "type": "object"
           },
           {
-            "description": "A typed same-session transcript rewrite was durably committed.",
+            "description": "Released 0.8.10 generation-zero full-body compatibility row.\n\nCurrent writers must never emit this variant. It is decoded only by the\none-time compatibility reconciliation path; receipt batches supersede\nthe redundant body copy.",
             "properties": {
               "record": {
                 "$ref": "#/$defs/TranscriptRewriteRecord"
@@ -18555,7 +18672,34 @@
             "type": "object"
           },
           {
-            "description": "Inbound peer content was committed into this session's context.\n\nEmitted as a pure projection of the typed transcript carrier\n([`crate::types::SystemNoticeBlock::Comms`] with incoming direction)\nat the moment the agent commits it — a queued delivery appended to the\ntranscript at run assembly, or a steer delivery applied as runtime\nsystem context at the model boundary. One event per committed comms\nblock, so a host taint tracker classifies peer ingestion from typed\nfacts (canonical peer identity + the sender's signed content-taint\ndeclaration) instead of parsing rendered projection text.\n\nThe event stream is best-effort observability (see `event_tap`); the\ntranscript block remains the durable owner of these facts.",
+            "description": "Receipt-only evidence for one non-empty ordered rewrite suffix.\n\nThe sealed Session graph remains the singular body authority. The\noptional terminal assistant text is a delta-sized derived projection\nused to rebuild `summary.txt`; `None` explicitly removes a stale\nsummary when the retained successor has no assistant text.",
+            "properties": {
+              "final_assistant_text": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "receipt": {
+                "$ref": "#/$defs/TranscriptRewriteAuditReceiptBatch"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "transcript_rewrite_audit_receipt_committed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "receipt"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Inbound peer content was committed into this session's context.\n\nEmitted as a pure projection of the typed transcript carrier\n([`crate::types::SystemNoticeBlock::Comms`] with incoming direction)\nat the moment the agent commits it — a queued delivery appended to the\ntranscript at run assembly, or a steer delivery injected as a\nrequest-local User message at the model boundary. One event per committed comms\nblock, so a host taint tracker classifies peer ingestion from typed\nfacts (canonical peer identity + the sender's signed content-taint\ndeclaration) instead of parsing rendered projection text.\n\nThe event stream is best-effort observability (see `event_tap`); the\ntranscript block remains the durable owner of these facts.",
             "properties": {
               "kind": {
                 "$ref": "#/$defs/CommsNoticeKind",
@@ -18855,6 +18999,7 @@
         ]
       },
       "CompactionRewriteRange": {
+        "additionalProperties": false,
         "description": "Opaque range carried by the typed compaction rewrite semantic.",
         "properties": {
           "end": {
@@ -19476,17 +19621,26 @@
         ]
       },
       "LlmProviderErrorKind": {
-        "enum": [
-          "invalid_request",
-          "content_filtered",
-          "server_error",
-          "server_overloaded",
-          "connection_reset",
-          "unknown",
-          "stream_parse_error",
-          "incomplete_response"
-        ],
-        "type": "string"
+        "oneOf": [
+          {
+            "enum": [
+              "invalid_request",
+              "content_filtered",
+              "server_error",
+              "server_overloaded",
+              "connection_reset",
+              "unknown",
+              "stream_parse_error",
+              "incomplete_response"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "request_too_large",
+            "description": "The provider rejected (or preflight proved) a serialized request body\nthat exceeds its request-size cap.",
+            "type": "string"
+          }
+        ]
       },
       "LlmProviderErrorRetryability": {
         "enum": [
@@ -20506,6 +20660,7 @@
         "type": "string"
       },
       "TranscriptEditRewriteRange": {
+        "additionalProperties": false,
         "description": "Opaque current-format range carried by an ordinary transcript edit.",
         "properties": {
           "end": {
@@ -20552,7 +20707,31 @@
         ],
         "type": "object"
       },
+      "TranscriptRewriteAuditReceiptBatch": {
+        "description": "Receipt for one non-empty ordered transcript-rewrite suffix.\n\nThe transition is self-verifying:\n`start_prefix.extend(commits) == end_prefix`. Occurrence generations are\nchecked by [`TranscriptRewritePrefixAccumulator::extend`], so neither a gap\nnor a duplicate can be hidden inside one receipt.",
+        "properties": {
+          "commits": {
+            "items": {
+              "$ref": "#/$defs/TranscriptRewriteCommit"
+            },
+            "type": "array"
+          },
+          "end_prefix": {
+            "$ref": "#/$defs/TranscriptRewritePrefixAccumulator"
+          },
+          "start_prefix": {
+            "$ref": "#/$defs/TranscriptRewritePrefixAccumulator"
+          }
+        },
+        "required": [
+          "start_prefix",
+          "commits",
+          "end_prefix"
+        ],
+        "type": "object"
+      },
       "TranscriptRewriteCommit": {
+        "additionalProperties": false,
         "description": "Immutable rewrite commit that advances a session transcript head.",
         "properties": {
           "actor": {
@@ -20575,9 +20754,11 @@
             "type": "integer"
           },
           "original_span_digest": {
+            "description": "Audit label for the removed semantic span. Exact selection coordinates\nand row lineage are structural authority; this digest is checked on\ntargeted/final semantic materialization.",
             "type": "string"
           },
           "parent_revision": {
+            "description": "Content-addressed audit label for the occurrence parent.\n\nStructural continuity is owned by the occurrence generation, compact\nparent advance, exact row lineage, and graph prefix. This semantic\nlabel is re-proved when the targeted parent is materialized; ordinary\nappend/commit validation never re-hashes every historical body.",
             "type": "string"
           },
           "reason": {
@@ -20587,7 +20768,14 @@
             "type": "string"
           },
           "revision": {
+            "description": "Content-addressed audit label for the occurrence result, with the same\nlazy semantic-replay contract as [`Self::parent_revision`].",
             "type": "string"
+          },
+          "rewrite_generation": {
+            "description": "Serialized occurrence identity within one session's rewrite lineage.\n\nRevision strings identify content, not occurrences: a legitimate\nrewrite can return to earlier content, and two occurrences can even\ncarry byte-identical facts under a fixed/coarse clock. Current writers\ntherefore mint a strict contiguous `1..=n` generation. `0` exists only\nas the decode marker for 0.8.10 audit rows/graphs, which are normalized\nas an ordered set before they can enter current authority.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
           },
           "selection": {
             "$ref": "#/$defs/TranscriptRewriteSelection"
@@ -20606,7 +20794,26 @@
         ],
         "type": "object"
       },
+      "TranscriptRewritePrefixAccumulator": {
+        "description": "Rolling, canonical identity of an ordered exact rewrite-commit prefix.\n\nThis is a semantic graph fact, not a replay-cursor assertion. It is carried\nby the graph, folded into checkpoint authority, and independently matched\nagainst the EventStore's receipt. One ordinary lineage-tail commit extends\nthe accumulator with one commit serialization; it never re-hashes the\naccumulated prefix.",
+        "properties": {
+          "digest": {
+            "type": "string"
+          },
+          "occurrence_count": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "occurrence_count",
+          "digest"
+        ],
+        "type": "object"
+      },
       "TranscriptRewriteReason": {
+        "additionalProperties": false,
         "description": "Audit annotation carried with a transcript rewrite commit.\n\nThe free-form kind is for review, debugging, and provenance only. It never\nclassifies a rewrite as compaction; [`TranscriptRewriteSelection`] owns that\nsemantic through its opaque typed compaction range.",
         "properties": {
           "kind": {
@@ -20654,6 +20861,7 @@
         "description": "A concrete transcript span selected for same-session rewrite.",
         "oneOf": [
           {
+            "additionalProperties": false,
             "description": "Pre-semantic-marker range retained for source/API compatibility and\ndecoding prior durable records. New commits canonicalize this input to\n[`TranscriptRewriteSelection::EditMessageRange`] before persistence.",
             "properties": {
               "end": {
@@ -20679,6 +20887,7 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "description": "Current typed ordinary-edit semantic.",
             "properties": {
               "range": {
@@ -20696,6 +20905,7 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "description": "Replace a full transcript from a core-validated compaction rebuild.\n\nThe range payload has no public constructor. New values are minted only\nby the validated compaction path; deserialization exists solely for the\ndurable transcript graph and is revalidated against its retained bodies.",
             "properties": {
               "range": {
@@ -22640,10 +22850,6 @@
               "created_at": {
                 "type": "string"
               },
-              "role": {
-                "const": "system",
-                "type": "string"
-              },
               "identity": {
                 "anyOf": [
                   {
@@ -22652,7 +22858,12 @@
                   {
                     "type": "null"
                   }
-                ]
+                ],
+                "description": "Optional exact control-ingress identity carried by this durable\ntranscript message. Provider adapters ignore it."
+              },
+              "role": {
+                "const": "system",
+                "type": "string"
               }
             },
             "required": [
@@ -22822,6 +23033,24 @@
         ],
         "type": "string"
       },
+      "WireSystemMessageIdentity": {
+        "description": "Public wire projection of one ordinary System message's optional\ncontrol-ingress identity.",
+        "properties": {
+          "idempotency_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "WireToolResult": {
         "description": "Tool result payload in a transcript.",
         "properties": {
@@ -22889,25 +23118,6 @@
             "type": "object"
           }
         ]
-      },
-      "WireSystemMessageIdentity": {
-        "description": "Public wire projection of one ordinary System message optional control-ingress identity.",
-        "properties": {
-          "idempotency_key": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "source": {
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "title": "WireSystemMessageIdentity",
-        "type": "object"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -26838,7 +27048,7 @@
             "type": "object"
           },
           {
-            "description": "A typed same-session transcript rewrite was durably committed.",
+            "description": "Released 0.8.10 generation-zero full-body compatibility row.\n\nCurrent writers must never emit this variant. It is decoded only by the\none-time compatibility reconciliation path; receipt batches supersede\nthe redundant body copy.",
             "properties": {
               "record": {
                 "$ref": "#/$defs/TranscriptRewriteRecord"
@@ -26859,7 +27069,34 @@
             "type": "object"
           },
           {
-            "description": "Inbound peer content was committed into this session's context.\n\nEmitted as a pure projection of the typed transcript carrier\n([`crate::types::SystemNoticeBlock::Comms`] with incoming direction)\nat the moment the agent commits it — a queued delivery appended to the\ntranscript at run assembly, or a steer delivery applied as runtime\nsystem context at the model boundary. One event per committed comms\nblock, so a host taint tracker classifies peer ingestion from typed\nfacts (canonical peer identity + the sender's signed content-taint\ndeclaration) instead of parsing rendered projection text.\n\nThe event stream is best-effort observability (see `event_tap`); the\ntranscript block remains the durable owner of these facts.",
+            "description": "Receipt-only evidence for one non-empty ordered rewrite suffix.\n\nThe sealed Session graph remains the singular body authority. The\noptional terminal assistant text is a delta-sized derived projection\nused to rebuild `summary.txt`; `None` explicitly removes a stale\nsummary when the retained successor has no assistant text.",
+            "properties": {
+              "final_assistant_text": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "receipt": {
+                "$ref": "#/$defs/TranscriptRewriteAuditReceiptBatch"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "transcript_rewrite_audit_receipt_committed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "receipt"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Inbound peer content was committed into this session's context.\n\nEmitted as a pure projection of the typed transcript carrier\n([`crate::types::SystemNoticeBlock::Comms`] with incoming direction)\nat the moment the agent commits it — a queued delivery appended to the\ntranscript at run assembly, or a steer delivery injected as a\nrequest-local User message at the model boundary. One event per committed comms\nblock, so a host taint tracker classifies peer ingestion from typed\nfacts (canonical peer identity + the sender's signed content-taint\ndeclaration) instead of parsing rendered projection text.\n\nThe event stream is best-effort observability (see `event_tap`); the\ntranscript block remains the durable owner of these facts.",
             "properties": {
               "kind": {
                 "$ref": "#/$defs/CommsNoticeKind",
@@ -28433,6 +28670,7 @@
         ]
       },
       "CompactionRewriteRange": {
+        "additionalProperties": false,
         "description": "Opaque range carried by the typed compaction rewrite semantic.",
         "properties": {
           "end": {
@@ -29143,17 +29381,26 @@
         ]
       },
       "LlmProviderErrorKind": {
-        "enum": [
-          "invalid_request",
-          "content_filtered",
-          "server_error",
-          "server_overloaded",
-          "connection_reset",
-          "unknown",
-          "stream_parse_error",
-          "incomplete_response"
-        ],
-        "type": "string"
+        "oneOf": [
+          {
+            "enum": [
+              "invalid_request",
+              "content_filtered",
+              "server_error",
+              "server_overloaded",
+              "connection_reset",
+              "unknown",
+              "stream_parse_error",
+              "incomplete_response"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "request_too_large",
+            "description": "The provider rejected (or preflight proved) a serialized request body\nthat exceeds its request-size cap.",
+            "type": "string"
+          }
+        ]
       },
       "LlmProviderErrorRetryability": {
         "enum": [
@@ -30748,6 +30995,7 @@
         "type": "string"
       },
       "TranscriptEditRewriteRange": {
+        "additionalProperties": false,
         "description": "Opaque current-format range carried by an ordinary transcript edit.",
         "properties": {
           "end": {
@@ -30794,7 +31042,31 @@
         ],
         "type": "object"
       },
+      "TranscriptRewriteAuditReceiptBatch": {
+        "description": "Receipt for one non-empty ordered transcript-rewrite suffix.\n\nThe transition is self-verifying:\n`start_prefix.extend(commits) == end_prefix`. Occurrence generations are\nchecked by [`TranscriptRewritePrefixAccumulator::extend`], so neither a gap\nnor a duplicate can be hidden inside one receipt.",
+        "properties": {
+          "commits": {
+            "items": {
+              "$ref": "#/$defs/TranscriptRewriteCommit"
+            },
+            "type": "array"
+          },
+          "end_prefix": {
+            "$ref": "#/$defs/TranscriptRewritePrefixAccumulator"
+          },
+          "start_prefix": {
+            "$ref": "#/$defs/TranscriptRewritePrefixAccumulator"
+          }
+        },
+        "required": [
+          "start_prefix",
+          "commits",
+          "end_prefix"
+        ],
+        "type": "object"
+      },
       "TranscriptRewriteCommit": {
+        "additionalProperties": false,
         "description": "Immutable rewrite commit that advances a session transcript head.",
         "properties": {
           "actor": {
@@ -30817,9 +31089,11 @@
             "type": "integer"
           },
           "original_span_digest": {
+            "description": "Audit label for the removed semantic span. Exact selection coordinates\nand row lineage are structural authority; this digest is checked on\ntargeted/final semantic materialization.",
             "type": "string"
           },
           "parent_revision": {
+            "description": "Content-addressed audit label for the occurrence parent.\n\nStructural continuity is owned by the occurrence generation, compact\nparent advance, exact row lineage, and graph prefix. This semantic\nlabel is re-proved when the targeted parent is materialized; ordinary\nappend/commit validation never re-hashes every historical body.",
             "type": "string"
           },
           "reason": {
@@ -30829,7 +31103,14 @@
             "type": "string"
           },
           "revision": {
+            "description": "Content-addressed audit label for the occurrence result, with the same\nlazy semantic-replay contract as [`Self::parent_revision`].",
             "type": "string"
+          },
+          "rewrite_generation": {
+            "description": "Serialized occurrence identity within one session's rewrite lineage.\n\nRevision strings identify content, not occurrences: a legitimate\nrewrite can return to earlier content, and two occurrences can even\ncarry byte-identical facts under a fixed/coarse clock. Current writers\ntherefore mint a strict contiguous `1..=n` generation. `0` exists only\nas the decode marker for 0.8.10 audit rows/graphs, which are normalized\nas an ordered set before they can enter current authority.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
           },
           "selection": {
             "$ref": "#/$defs/TranscriptRewriteSelection"
@@ -30848,7 +31129,26 @@
         ],
         "type": "object"
       },
+      "TranscriptRewritePrefixAccumulator": {
+        "description": "Rolling, canonical identity of an ordered exact rewrite-commit prefix.\n\nThis is a semantic graph fact, not a replay-cursor assertion. It is carried\nby the graph, folded into checkpoint authority, and independently matched\nagainst the EventStore's receipt. One ordinary lineage-tail commit extends\nthe accumulator with one commit serialization; it never re-hashes the\naccumulated prefix.",
+        "properties": {
+          "digest": {
+            "type": "string"
+          },
+          "occurrence_count": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "occurrence_count",
+          "digest"
+        ],
+        "type": "object"
+      },
       "TranscriptRewriteReason": {
+        "additionalProperties": false,
         "description": "Audit annotation carried with a transcript rewrite commit.\n\nThe free-form kind is for review, debugging, and provenance only. It never\nclassifies a rewrite as compaction; [`TranscriptRewriteSelection`] owns that\nsemantic through its opaque typed compaction range.",
         "properties": {
           "kind": {
@@ -30896,6 +31196,7 @@
         "description": "A concrete transcript span selected for same-session rewrite.",
         "oneOf": [
           {
+            "additionalProperties": false,
             "description": "Pre-semantic-marker range retained for source/API compatibility and\ndecoding prior durable records. New commits canonicalize this input to\n[`TranscriptRewriteSelection::EditMessageRange`] before persistence.",
             "properties": {
               "end": {
@@ -30921,6 +31222,7 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "description": "Current typed ordinary-edit semantic.",
             "properties": {
               "range": {
@@ -30938,6 +31240,7 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "description": "Replace a full transcript from a core-validated compaction rebuild.\n\nThe range payload has no public constructor. New values are minted only\nby the validated compaction path; deserialization exists solely for the\ndurable transcript graph and is revalidated against its retained bodies.",
             "properties": {
               "range": {
@@ -32253,10 +32556,6 @@
               "created_at": {
                 "type": "string"
               },
-              "role": {
-                "const": "system",
-                "type": "string"
-              },
               "identity": {
                 "anyOf": [
                   {
@@ -32265,7 +32564,12 @@
                   {
                     "type": "null"
                   }
-                ]
+                ],
+                "description": "Optional exact control-ingress identity carried by this durable\ntranscript message. Provider adapters ignore it."
+              },
+              "role": {
+                "const": "system",
+                "type": "string"
               }
             },
             "required": [
@@ -32435,6 +32739,24 @@
         ],
         "type": "string"
       },
+      "WireSystemMessageIdentity": {
+        "description": "Public wire projection of one ordinary System message's optional\ncontrol-ingress identity.",
+        "properties": {
+          "idempotency_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "WireToolResult": {
         "description": "Tool result payload in a transcript.",
         "properties": {
@@ -32502,25 +32824,6 @@
             "type": "object"
           }
         ]
-      },
-      "WireSystemMessageIdentity": {
-        "description": "Public wire projection of one ordinary System message optional control-ingress identity.",
-        "properties": {
-          "idempotency_key": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "source": {
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "title": "WireSystemMessageIdentity",
-        "type": "object"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -36483,7 +36786,7 @@
             "type": "object"
           },
           {
-            "description": "A typed same-session transcript rewrite was durably committed.",
+            "description": "Released 0.8.10 generation-zero full-body compatibility row.\n\nCurrent writers must never emit this variant. It is decoded only by the\none-time compatibility reconciliation path; receipt batches supersede\nthe redundant body copy.",
             "properties": {
               "record": {
                 "$ref": "#/$defs/TranscriptRewriteRecord"
@@ -36504,7 +36807,34 @@
             "type": "object"
           },
           {
-            "description": "Inbound peer content was committed into this session's context.\n\nEmitted as a pure projection of the typed transcript carrier\n([`crate::types::SystemNoticeBlock::Comms`] with incoming direction)\nat the moment the agent commits it — a queued delivery appended to the\ntranscript at run assembly, or a steer delivery applied as runtime\nsystem context at the model boundary. One event per committed comms\nblock, so a host taint tracker classifies peer ingestion from typed\nfacts (canonical peer identity + the sender's signed content-taint\ndeclaration) instead of parsing rendered projection text.\n\nThe event stream is best-effort observability (see `event_tap`); the\ntranscript block remains the durable owner of these facts.",
+            "description": "Receipt-only evidence for one non-empty ordered rewrite suffix.\n\nThe sealed Session graph remains the singular body authority. The\noptional terminal assistant text is a delta-sized derived projection\nused to rebuild `summary.txt`; `None` explicitly removes a stale\nsummary when the retained successor has no assistant text.",
+            "properties": {
+              "final_assistant_text": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "receipt": {
+                "$ref": "#/$defs/TranscriptRewriteAuditReceiptBatch"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "transcript_rewrite_audit_receipt_committed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "receipt"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Inbound peer content was committed into this session's context.\n\nEmitted as a pure projection of the typed transcript carrier\n([`crate::types::SystemNoticeBlock::Comms`] with incoming direction)\nat the moment the agent commits it — a queued delivery appended to the\ntranscript at run assembly, or a steer delivery injected as a\nrequest-local User message at the model boundary. One event per committed comms\nblock, so a host taint tracker classifies peer ingestion from typed\nfacts (canonical peer identity + the sender's signed content-taint\ndeclaration) instead of parsing rendered projection text.\n\nThe event stream is best-effort observability (see `event_tap`); the\ntranscript block remains the durable owner of these facts.",
             "properties": {
               "kind": {
                 "$ref": "#/$defs/CommsNoticeKind",
@@ -36926,6 +37256,17 @@
                   "string",
                   "null"
                 ]
+              },
+              "transient_turn_context": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/TurnRequestContext"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Host-regenerated request-only context for this delivery's logical turn."
               },
               "turn": {
                 "anyOf": [
@@ -40473,6 +40814,7 @@
         ]
       },
       "CompactionRewriteRange": {
+        "additionalProperties": false,
         "description": "Opaque range carried by the typed compaction rewrite semantic.",
         "properties": {
           "end": {
@@ -41306,17 +41648,26 @@
         ]
       },
       "LlmProviderErrorKind": {
-        "enum": [
-          "invalid_request",
-          "content_filtered",
-          "server_error",
-          "server_overloaded",
-          "connection_reset",
-          "unknown",
-          "stream_parse_error",
-          "incomplete_response"
-        ],
-        "type": "string"
+        "oneOf": [
+          {
+            "enum": [
+              "invalid_request",
+              "content_filtered",
+              "server_error",
+              "server_overloaded",
+              "connection_reset",
+              "unknown",
+              "stream_parse_error",
+              "incomplete_response"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "request_too_large",
+            "description": "The provider rejected (or preflight proved) a serialized request body\nthat exceeds its request-size cap.",
+            "type": "string"
+          }
+        ]
       },
       "LlmProviderErrorRetryability": {
         "enum": [
@@ -43961,6 +44312,7 @@
         "type": "string"
       },
       "TranscriptEditRewriteRange": {
+        "additionalProperties": false,
         "description": "Opaque current-format range carried by an ordinary transcript edit.",
         "properties": {
           "end": {
@@ -44007,7 +44359,31 @@
         ],
         "type": "object"
       },
+      "TranscriptRewriteAuditReceiptBatch": {
+        "description": "Receipt for one non-empty ordered transcript-rewrite suffix.\n\nThe transition is self-verifying:\n`start_prefix.extend(commits) == end_prefix`. Occurrence generations are\nchecked by [`TranscriptRewritePrefixAccumulator::extend`], so neither a gap\nnor a duplicate can be hidden inside one receipt.",
+        "properties": {
+          "commits": {
+            "items": {
+              "$ref": "#/$defs/TranscriptRewriteCommit"
+            },
+            "type": "array"
+          },
+          "end_prefix": {
+            "$ref": "#/$defs/TranscriptRewritePrefixAccumulator"
+          },
+          "start_prefix": {
+            "$ref": "#/$defs/TranscriptRewritePrefixAccumulator"
+          }
+        },
+        "required": [
+          "start_prefix",
+          "commits",
+          "end_prefix"
+        ],
+        "type": "object"
+      },
       "TranscriptRewriteCommit": {
+        "additionalProperties": false,
         "description": "Immutable rewrite commit that advances a session transcript head.",
         "properties": {
           "actor": {
@@ -44030,9 +44406,11 @@
             "type": "integer"
           },
           "original_span_digest": {
+            "description": "Audit label for the removed semantic span. Exact selection coordinates\nand row lineage are structural authority; this digest is checked on\ntargeted/final semantic materialization.",
             "type": "string"
           },
           "parent_revision": {
+            "description": "Content-addressed audit label for the occurrence parent.\n\nStructural continuity is owned by the occurrence generation, compact\nparent advance, exact row lineage, and graph prefix. This semantic\nlabel is re-proved when the targeted parent is materialized; ordinary\nappend/commit validation never re-hashes every historical body.",
             "type": "string"
           },
           "reason": {
@@ -44042,7 +44420,14 @@
             "type": "string"
           },
           "revision": {
+            "description": "Content-addressed audit label for the occurrence result, with the same\nlazy semantic-replay contract as [`Self::parent_revision`].",
             "type": "string"
+          },
+          "rewrite_generation": {
+            "description": "Serialized occurrence identity within one session's rewrite lineage.\n\nRevision strings identify content, not occurrences: a legitimate\nrewrite can return to earlier content, and two occurrences can even\ncarry byte-identical facts under a fixed/coarse clock. Current writers\ntherefore mint a strict contiguous `1..=n` generation. `0` exists only\nas the decode marker for 0.8.10 audit rows/graphs, which are normalized\nas an ordered set before they can enter current authority.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
           },
           "selection": {
             "$ref": "#/$defs/TranscriptRewriteSelection"
@@ -44061,7 +44446,26 @@
         ],
         "type": "object"
       },
+      "TranscriptRewritePrefixAccumulator": {
+        "description": "Rolling, canonical identity of an ordered exact rewrite-commit prefix.\n\nThis is a semantic graph fact, not a replay-cursor assertion. It is carried\nby the graph, folded into checkpoint authority, and independently matched\nagainst the EventStore's receipt. One ordinary lineage-tail commit extends\nthe accumulator with one commit serialization; it never re-hashes the\naccumulated prefix.",
+        "properties": {
+          "digest": {
+            "type": "string"
+          },
+          "occurrence_count": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "occurrence_count",
+          "digest"
+        ],
+        "type": "object"
+      },
       "TranscriptRewriteReason": {
+        "additionalProperties": false,
         "description": "Audit annotation carried with a transcript rewrite commit.\n\nThe free-form kind is for review, debugging, and provenance only. It never\nclassifies a rewrite as compaction; [`TranscriptRewriteSelection`] owns that\nsemantic through its opaque typed compaction range.",
         "properties": {
           "kind": {
@@ -44109,6 +44513,7 @@
         "description": "A concrete transcript span selected for same-session rewrite.",
         "oneOf": [
           {
+            "additionalProperties": false,
             "description": "Pre-semantic-marker range retained for source/API compatibility and\ndecoding prior durable records. New commits canonicalize this input to\n[`TranscriptRewriteSelection::EditMessageRange`] before persistence.",
             "properties": {
               "end": {
@@ -44134,6 +44539,7 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "description": "Current typed ordinary-edit semantic.",
             "properties": {
               "range": {
@@ -44151,6 +44557,7 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "description": "Replace a full transcript from a core-validated compaction rebuild.\n\nThe range payload has no public constructor. New values are minted only\nby the validated compaction path; deserialization exists solely for the\ndurable transcript graph and is revalidated against its retained bodies.",
             "properties": {
               "range": {
@@ -44188,6 +44595,11 @@
             "type": "string"
           }
         ]
+      },
+      "TurnRequestContext": {
+        "description": "Exact host-generated context projected into provider requests for one\nruntime-owned logical turn.\n\nThis is deliberately not a [`crate::types::Message`]: it cannot be appended\nto a [`crate::Session`] or acquire durable transcript semantics. Runtime\ninput persistence owns the bytes until the input reaches a terminal state;\nthe agent only borrows this clone-cheap value while composing foreground\nprovider requests for that turn.",
+        "minLength": 1,
+        "type": "string"
       },
       "TurnTerminalCauseKind": {
         "description": "Closed machine-owned classifier for why a turn reached a terminal failure.",
@@ -46371,10 +46783,6 @@
               "created_at": {
                 "type": "string"
               },
-              "role": {
-                "const": "system",
-                "type": "string"
-              },
               "identity": {
                 "anyOf": [
                   {
@@ -46383,7 +46791,12 @@
                   {
                     "type": "null"
                   }
-                ]
+                ],
+                "description": "Optional exact control-ingress identity carried by this durable\ntranscript message. Provider adapters ignore it."
+              },
+              "role": {
+                "const": "system",
+                "type": "string"
               }
             },
             "required": [
@@ -46586,6 +46999,24 @@
         ],
         "type": "string"
       },
+      "WireSystemMessageIdentity": {
+        "description": "Public wire projection of one ordinary System message's optional\ncontrol-ingress identity.",
+        "properties": {
+          "idempotency_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "WireToolResult": {
         "description": "Tool result payload in a transcript.",
         "properties": {
@@ -46653,25 +47084,6 @@
             "type": "object"
           }
         ]
-      },
-      "WireSystemMessageIdentity": {
-        "description": "Public wire projection of one ordinary System message optional control-ingress identity.",
-        "properties": {
-          "idempotency_key": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "source": {
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "title": "WireSystemMessageIdentity",
-        "type": "object"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -47253,6 +47665,17 @@
                   "string",
                   "null"
                 ]
+              },
+              "transient_turn_context": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/TurnRequestContext"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Host-regenerated request-only context for this delivery's logical turn."
               },
               "turn": {
                 "anyOf": [
@@ -50168,6 +50591,11 @@
         "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
         "type": "string"
       },
+      "TurnRequestContext": {
+        "description": "Exact host-generated context projected into provider requests for one\nruntime-owned logical turn.\n\nThis is deliberately not a [`crate::types::Message`]: it cannot be appended\nto a [`crate::Session`] or acquire durable transcript semantics. Runtime\ninput persistence owns the bytes until the input reaches a terminal state;\nthe agent only borrows this clone-cheap value while composing foreground\nprovider requests for that turn.",
+        "minLength": 1,
+        "type": "string"
+      },
       "WireAnthropicCacheControlPolicy": {
         "enum": [
           "disabled",
@@ -52417,7 +52845,7 @@
             "type": "object"
           },
           {
-            "description": "A typed same-session transcript rewrite was durably committed.",
+            "description": "Released 0.8.10 generation-zero full-body compatibility row.\n\nCurrent writers must never emit this variant. It is decoded only by the\none-time compatibility reconciliation path; receipt batches supersede\nthe redundant body copy.",
             "properties": {
               "record": {
                 "$ref": "#/$defs/TranscriptRewriteRecord"
@@ -52438,7 +52866,34 @@
             "type": "object"
           },
           {
-            "description": "Inbound peer content was committed into this session's context.\n\nEmitted as a pure projection of the typed transcript carrier\n([`crate::types::SystemNoticeBlock::Comms`] with incoming direction)\nat the moment the agent commits it — a queued delivery appended to the\ntranscript at run assembly, or a steer delivery applied as runtime\nsystem context at the model boundary. One event per committed comms\nblock, so a host taint tracker classifies peer ingestion from typed\nfacts (canonical peer identity + the sender's signed content-taint\ndeclaration) instead of parsing rendered projection text.\n\nThe event stream is best-effort observability (see `event_tap`); the\ntranscript block remains the durable owner of these facts.",
+            "description": "Receipt-only evidence for one non-empty ordered rewrite suffix.\n\nThe sealed Session graph remains the singular body authority. The\noptional terminal assistant text is a delta-sized derived projection\nused to rebuild `summary.txt`; `None` explicitly removes a stale\nsummary when the retained successor has no assistant text.",
+            "properties": {
+              "final_assistant_text": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "receipt": {
+                "$ref": "#/$defs/TranscriptRewriteAuditReceiptBatch"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "transcript_rewrite_audit_receipt_committed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "receipt"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Inbound peer content was committed into this session's context.\n\nEmitted as a pure projection of the typed transcript carrier\n([`crate::types::SystemNoticeBlock::Comms`] with incoming direction)\nat the moment the agent commits it — a queued delivery appended to the\ntranscript at run assembly, or a steer delivery injected as a\nrequest-local User message at the model boundary. One event per committed comms\nblock, so a host taint tracker classifies peer ingestion from typed\nfacts (canonical peer identity + the sender's signed content-taint\ndeclaration) instead of parsing rendered projection text.\n\nThe event stream is best-effort observability (see `event_tap`); the\ntranscript block remains the durable owner of these facts.",
             "properties": {
               "kind": {
                 "$ref": "#/$defs/CommsNoticeKind",
@@ -54724,6 +55179,7 @@
         ]
       },
       "CompactionRewriteRange": {
+        "additionalProperties": false,
         "description": "Opaque range carried by the typed compaction rewrite semantic.",
         "properties": {
           "end": {
@@ -55434,17 +55890,26 @@
         ]
       },
       "LlmProviderErrorKind": {
-        "enum": [
-          "invalid_request",
-          "content_filtered",
-          "server_error",
-          "server_overloaded",
-          "connection_reset",
-          "unknown",
-          "stream_parse_error",
-          "incomplete_response"
-        ],
-        "type": "string"
+        "oneOf": [
+          {
+            "enum": [
+              "invalid_request",
+              "content_filtered",
+              "server_error",
+              "server_overloaded",
+              "connection_reset",
+              "unknown",
+              "stream_parse_error",
+              "incomplete_response"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "request_too_large",
+            "description": "The provider rejected (or preflight proved) a serialized request body\nthat exceeds its request-size cap.",
+            "type": "string"
+          }
+        ]
       },
       "LlmProviderErrorRetryability": {
         "enum": [
@@ -57039,6 +57504,7 @@
         "type": "string"
       },
       "TranscriptEditRewriteRange": {
+        "additionalProperties": false,
         "description": "Opaque current-format range carried by an ordinary transcript edit.",
         "properties": {
           "end": {
@@ -57085,7 +57551,31 @@
         ],
         "type": "object"
       },
+      "TranscriptRewriteAuditReceiptBatch": {
+        "description": "Receipt for one non-empty ordered transcript-rewrite suffix.\n\nThe transition is self-verifying:\n`start_prefix.extend(commits) == end_prefix`. Occurrence generations are\nchecked by [`TranscriptRewritePrefixAccumulator::extend`], so neither a gap\nnor a duplicate can be hidden inside one receipt.",
+        "properties": {
+          "commits": {
+            "items": {
+              "$ref": "#/$defs/TranscriptRewriteCommit"
+            },
+            "type": "array"
+          },
+          "end_prefix": {
+            "$ref": "#/$defs/TranscriptRewritePrefixAccumulator"
+          },
+          "start_prefix": {
+            "$ref": "#/$defs/TranscriptRewritePrefixAccumulator"
+          }
+        },
+        "required": [
+          "start_prefix",
+          "commits",
+          "end_prefix"
+        ],
+        "type": "object"
+      },
       "TranscriptRewriteCommit": {
+        "additionalProperties": false,
         "description": "Immutable rewrite commit that advances a session transcript head.",
         "properties": {
           "actor": {
@@ -57108,9 +57598,11 @@
             "type": "integer"
           },
           "original_span_digest": {
+            "description": "Audit label for the removed semantic span. Exact selection coordinates\nand row lineage are structural authority; this digest is checked on\ntargeted/final semantic materialization.",
             "type": "string"
           },
           "parent_revision": {
+            "description": "Content-addressed audit label for the occurrence parent.\n\nStructural continuity is owned by the occurrence generation, compact\nparent advance, exact row lineage, and graph prefix. This semantic\nlabel is re-proved when the targeted parent is materialized; ordinary\nappend/commit validation never re-hashes every historical body.",
             "type": "string"
           },
           "reason": {
@@ -57120,7 +57612,14 @@
             "type": "string"
           },
           "revision": {
+            "description": "Content-addressed audit label for the occurrence result, with the same\nlazy semantic-replay contract as [`Self::parent_revision`].",
             "type": "string"
+          },
+          "rewrite_generation": {
+            "description": "Serialized occurrence identity within one session's rewrite lineage.\n\nRevision strings identify content, not occurrences: a legitimate\nrewrite can return to earlier content, and two occurrences can even\ncarry byte-identical facts under a fixed/coarse clock. Current writers\ntherefore mint a strict contiguous `1..=n` generation. `0` exists only\nas the decode marker for 0.8.10 audit rows/graphs, which are normalized\nas an ordered set before they can enter current authority.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
           },
           "selection": {
             "$ref": "#/$defs/TranscriptRewriteSelection"
@@ -57139,7 +57638,26 @@
         ],
         "type": "object"
       },
+      "TranscriptRewritePrefixAccumulator": {
+        "description": "Rolling, canonical identity of an ordered exact rewrite-commit prefix.\n\nThis is a semantic graph fact, not a replay-cursor assertion. It is carried\nby the graph, folded into checkpoint authority, and independently matched\nagainst the EventStore's receipt. One ordinary lineage-tail commit extends\nthe accumulator with one commit serialization; it never re-hashes the\naccumulated prefix.",
+        "properties": {
+          "digest": {
+            "type": "string"
+          },
+          "occurrence_count": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "occurrence_count",
+          "digest"
+        ],
+        "type": "object"
+      },
       "TranscriptRewriteReason": {
+        "additionalProperties": false,
         "description": "Audit annotation carried with a transcript rewrite commit.\n\nThe free-form kind is for review, debugging, and provenance only. It never\nclassifies a rewrite as compaction; [`TranscriptRewriteSelection`] owns that\nsemantic through its opaque typed compaction range.",
         "properties": {
           "kind": {
@@ -57187,6 +57705,7 @@
         "description": "A concrete transcript span selected for same-session rewrite.",
         "oneOf": [
           {
+            "additionalProperties": false,
             "description": "Pre-semantic-marker range retained for source/API compatibility and\ndecoding prior durable records. New commits canonicalize this input to\n[`TranscriptRewriteSelection::EditMessageRange`] before persistence.",
             "properties": {
               "end": {
@@ -57212,6 +57731,7 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "description": "Current typed ordinary-edit semantic.",
             "properties": {
               "range": {
@@ -57229,6 +57749,7 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "description": "Replace a full transcript from a core-validated compaction rebuild.\n\nThe range payload has no public constructor. New values are minted only\nby the validated compaction path; deserialization exists solely for the\ndurable transcript graph and is revalidated against its retained bodies.",
             "properties": {
               "range": {
@@ -58544,10 +59065,6 @@
               "created_at": {
                 "type": "string"
               },
-              "role": {
-                "const": "system",
-                "type": "string"
-              },
               "identity": {
                 "anyOf": [
                   {
@@ -58556,7 +59073,12 @@
                   {
                     "type": "null"
                   }
-                ]
+                ],
+                "description": "Optional exact control-ingress identity carried by this durable\ntranscript message. Provider adapters ignore it."
+              },
+              "role": {
+                "const": "system",
+                "type": "string"
               }
             },
             "required": [
@@ -58726,6 +59248,24 @@
         ],
         "type": "string"
       },
+      "WireSystemMessageIdentity": {
+        "description": "Public wire projection of one ordinary System message's optional\ncontrol-ingress identity.",
+        "properties": {
+          "idempotency_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "WireToolResult": {
         "description": "Tool result payload in a transcript.",
         "properties": {
@@ -58793,25 +59333,6 @@
             "type": "object"
           }
         ]
-      },
-      "WireSystemMessageIdentity": {
-        "description": "Public wire projection of one ordinary System message optional control-ingress identity.",
-        "properties": {
-          "idempotency_key": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "source": {
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "title": "WireSystemMessageIdentity",
-        "type": "object"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -61266,7 +61787,7 @@
             "type": "object"
           },
           {
-            "description": "A typed same-session transcript rewrite was durably committed.",
+            "description": "Released 0.8.10 generation-zero full-body compatibility row.\n\nCurrent writers must never emit this variant. It is decoded only by the\none-time compatibility reconciliation path; receipt batches supersede\nthe redundant body copy.",
             "properties": {
               "record": {
                 "$ref": "#/$defs/TranscriptRewriteRecord"
@@ -61287,7 +61808,34 @@
             "type": "object"
           },
           {
-            "description": "Inbound peer content was committed into this session's context.\n\nEmitted as a pure projection of the typed transcript carrier\n([`crate::types::SystemNoticeBlock::Comms`] with incoming direction)\nat the moment the agent commits it — a queued delivery appended to the\ntranscript at run assembly, or a steer delivery applied as runtime\nsystem context at the model boundary. One event per committed comms\nblock, so a host taint tracker classifies peer ingestion from typed\nfacts (canonical peer identity + the sender's signed content-taint\ndeclaration) instead of parsing rendered projection text.\n\nThe event stream is best-effort observability (see `event_tap`); the\ntranscript block remains the durable owner of these facts.",
+            "description": "Receipt-only evidence for one non-empty ordered rewrite suffix.\n\nThe sealed Session graph remains the singular body authority. The\noptional terminal assistant text is a delta-sized derived projection\nused to rebuild `summary.txt`; `None` explicitly removes a stale\nsummary when the retained successor has no assistant text.",
+            "properties": {
+              "final_assistant_text": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "receipt": {
+                "$ref": "#/$defs/TranscriptRewriteAuditReceiptBatch"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "transcript_rewrite_audit_receipt_committed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "receipt"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Inbound peer content was committed into this session's context.\n\nEmitted as a pure projection of the typed transcript carrier\n([`crate::types::SystemNoticeBlock::Comms`] with incoming direction)\nat the moment the agent commits it — a queued delivery appended to the\ntranscript at run assembly, or a steer delivery injected as a\nrequest-local User message at the model boundary. One event per committed comms\nblock, so a host taint tracker classifies peer ingestion from typed\nfacts (canonical peer identity + the sender's signed content-taint\ndeclaration) instead of parsing rendered projection text.\n\nThe event stream is best-effort observability (see `event_tap`); the\ntranscript block remains the durable owner of these facts.",
             "properties": {
               "kind": {
                 "$ref": "#/$defs/CommsNoticeKind",
@@ -61546,6 +62094,7 @@
         ]
       },
       "CompactionRewriteRange": {
+        "additionalProperties": false,
         "description": "Opaque range carried by the typed compaction rewrite semantic.",
         "properties": {
           "end": {
@@ -62193,17 +62742,26 @@
         ]
       },
       "LlmProviderErrorKind": {
-        "enum": [
-          "invalid_request",
-          "content_filtered",
-          "server_error",
-          "server_overloaded",
-          "connection_reset",
-          "unknown",
-          "stream_parse_error",
-          "incomplete_response"
-        ],
-        "type": "string"
+        "oneOf": [
+          {
+            "enum": [
+              "invalid_request",
+              "content_filtered",
+              "server_error",
+              "server_overloaded",
+              "connection_reset",
+              "unknown",
+              "stream_parse_error",
+              "incomplete_response"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "request_too_large",
+            "description": "The provider rejected (or preflight proved) a serialized request body\nthat exceeds its request-size cap.",
+            "type": "string"
+          }
+        ]
       },
       "LlmProviderErrorRetryability": {
         "enum": [
@@ -63248,6 +63806,7 @@
         "type": "string"
       },
       "TranscriptEditRewriteRange": {
+        "additionalProperties": false,
         "description": "Opaque current-format range carried by an ordinary transcript edit.",
         "properties": {
           "end": {
@@ -63294,7 +63853,31 @@
         ],
         "type": "object"
       },
+      "TranscriptRewriteAuditReceiptBatch": {
+        "description": "Receipt for one non-empty ordered transcript-rewrite suffix.\n\nThe transition is self-verifying:\n`start_prefix.extend(commits) == end_prefix`. Occurrence generations are\nchecked by [`TranscriptRewritePrefixAccumulator::extend`], so neither a gap\nnor a duplicate can be hidden inside one receipt.",
+        "properties": {
+          "commits": {
+            "items": {
+              "$ref": "#/$defs/TranscriptRewriteCommit"
+            },
+            "type": "array"
+          },
+          "end_prefix": {
+            "$ref": "#/$defs/TranscriptRewritePrefixAccumulator"
+          },
+          "start_prefix": {
+            "$ref": "#/$defs/TranscriptRewritePrefixAccumulator"
+          }
+        },
+        "required": [
+          "start_prefix",
+          "commits",
+          "end_prefix"
+        ],
+        "type": "object"
+      },
       "TranscriptRewriteCommit": {
+        "additionalProperties": false,
         "description": "Immutable rewrite commit that advances a session transcript head.",
         "properties": {
           "actor": {
@@ -63317,9 +63900,11 @@
             "type": "integer"
           },
           "original_span_digest": {
+            "description": "Audit label for the removed semantic span. Exact selection coordinates\nand row lineage are structural authority; this digest is checked on\ntargeted/final semantic materialization.",
             "type": "string"
           },
           "parent_revision": {
+            "description": "Content-addressed audit label for the occurrence parent.\n\nStructural continuity is owned by the occurrence generation, compact\nparent advance, exact row lineage, and graph prefix. This semantic\nlabel is re-proved when the targeted parent is materialized; ordinary\nappend/commit validation never re-hashes every historical body.",
             "type": "string"
           },
           "reason": {
@@ -63329,7 +63914,14 @@
             "type": "string"
           },
           "revision": {
+            "description": "Content-addressed audit label for the occurrence result, with the same\nlazy semantic-replay contract as [`Self::parent_revision`].",
             "type": "string"
+          },
+          "rewrite_generation": {
+            "description": "Serialized occurrence identity within one session's rewrite lineage.\n\nRevision strings identify content, not occurrences: a legitimate\nrewrite can return to earlier content, and two occurrences can even\ncarry byte-identical facts under a fixed/coarse clock. Current writers\ntherefore mint a strict contiguous `1..=n` generation. `0` exists only\nas the decode marker for 0.8.10 audit rows/graphs, which are normalized\nas an ordered set before they can enter current authority.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
           },
           "selection": {
             "$ref": "#/$defs/TranscriptRewriteSelection"
@@ -63348,7 +63940,26 @@
         ],
         "type": "object"
       },
+      "TranscriptRewritePrefixAccumulator": {
+        "description": "Rolling, canonical identity of an ordered exact rewrite-commit prefix.\n\nThis is a semantic graph fact, not a replay-cursor assertion. It is carried\nby the graph, folded into checkpoint authority, and independently matched\nagainst the EventStore's receipt. One ordinary lineage-tail commit extends\nthe accumulator with one commit serialization; it never re-hashes the\naccumulated prefix.",
+        "properties": {
+          "digest": {
+            "type": "string"
+          },
+          "occurrence_count": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "occurrence_count",
+          "digest"
+        ],
+        "type": "object"
+      },
       "TranscriptRewriteReason": {
+        "additionalProperties": false,
         "description": "Audit annotation carried with a transcript rewrite commit.\n\nThe free-form kind is for review, debugging, and provenance only. It never\nclassifies a rewrite as compaction; [`TranscriptRewriteSelection`] owns that\nsemantic through its opaque typed compaction range.",
         "properties": {
           "kind": {
@@ -63396,6 +64007,7 @@
         "description": "A concrete transcript span selected for same-session rewrite.",
         "oneOf": [
           {
+            "additionalProperties": false,
             "description": "Pre-semantic-marker range retained for source/API compatibility and\ndecoding prior durable records. New commits canonicalize this input to\n[`TranscriptRewriteSelection::EditMessageRange`] before persistence.",
             "properties": {
               "end": {
@@ -63421,6 +64033,7 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "description": "Current typed ordinary-edit semantic.",
             "properties": {
               "range": {
@@ -63438,6 +64051,7 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "description": "Replace a full transcript from a core-validated compaction rebuild.\n\nThe range payload has no public constructor. New values are minted only\nby the validated compaction path; deserialization exists solely for the\ndurable transcript graph and is revalidated against its retained bodies.",
             "properties": {
               "range": {
@@ -70522,7 +71136,7 @@
     "description": "Request payload for `live/open`.\n\nR3-1 (P1): `turning_mode` lets callers pick between the provider-managed\n(server-VAD) flow and the explicit-commit flow. The G9 typed text-only\n`live/commit_input { response_modality: text }` path requires\n`ExplicitCommit` because the OpenAI realtime API rejects\n`input_audio_buffer.commit` unless the session was opened with explicit\ncommit semantics (server VAD owns commits otherwise). Pre-R3-1 the\nhandler hard-coded `ProviderManaged`, which made the typed text-only\npath unreachable on a public channel — calling it killed the channel\ninstead of producing sideband text.\n\nDefault (`None`) preserves the prior wire shape: callers that omit the\nfield get `ProviderManaged`, matching the legacy behavior.",
     "properties": {
       "seed_max_chars": {
-        "description": "Optional serialized-character budget for the history seed messages\nsent to the realtime provider when the channel opens.\n\nOmitted means full-seed compatibility: project the complete canonical\nhistory. A positive value requests a core-owned, whole-turn suffix\nwindow. The resolved root prompt must fit and is never dropped; an\nexisting compaction-summary head may be retained. If any history is\nomitted, the open result reports degraded continuity rather than\npretending the bounded replay was complete.\n\nOptional System message identity is never provider-projected. Canonical multimodal identity, tombstone, and accounting state remain outside this dialogue window.\n`0` is valid at this serde-only wire layer so it can round-trip, but the\n`live/open` server validation rejects it; callers must send a positive\nvalue when the field is present.",
+        "description": "Optional serialized-character budget for the history seed messages\nsent to the realtime provider when the channel opens.\n\nOmitted means full-seed compatibility: project the complete canonical\nhistory. A positive value requests a core-owned, whole-turn dialogue\nsuffix window; an existing compaction-summary head may be retained. If\nany history is omitted, the open result reports degraded continuity\nrather than pretending the bounded replay was complete.\n\nOrdered System and SystemNotice messages are excluded from this replay\nbudget and projected separately from the full active materialized\ntranscript. Optional System message identity is never provider-projected.\nCanonical multimodal identity, tombstone, and accounting state remain\noutside this dialogue window.\n`0` is valid at this serde-only wire layer so it can round-trip, but the\n`live/open` server validation rejects it; callers must send a positive\nvalue when the field is present.",
         "format": "uint",
         "minimum": 1,
         "type": [
@@ -80458,10 +81072,6 @@
               "created_at": {
                 "type": "string"
               },
-              "role": {
-                "const": "system",
-                "type": "string"
-              },
               "identity": {
                 "anyOf": [
                   {
@@ -80470,7 +81080,12 @@
                   {
                     "type": "null"
                   }
-                ]
+                ],
+                "description": "Optional exact control-ingress identity carried by this durable\ntranscript message. Provider adapters ignore it."
+              },
+              "role": {
+                "const": "system",
+                "type": "string"
               }
             },
             "required": [
@@ -80640,6 +81255,24 @@
         ],
         "type": "string"
       },
+      "WireSystemMessageIdentity": {
+        "description": "Public wire projection of one ordinary System message's optional\ncontrol-ingress identity.",
+        "properties": {
+          "idempotency_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "WireToolResult": {
         "description": "Tool result payload in a transcript.",
         "properties": {
@@ -80707,25 +81340,6 @@
             "type": "object"
           }
         ]
-      },
-      "WireSystemMessageIdentity": {
-        "description": "Public wire projection of one ordinary System message optional control-ingress identity.",
-        "properties": {
-          "idempotency_key": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "source": {
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "title": "WireSystemMessageIdentity",
-        "type": "object"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -92974,6 +93588,7 @@
                 "type": "array"
               },
               "system_prompt": {
+                "description": "Ordinary System message appended at this scheduled turn boundary.",
                 "type": [
                   "string",
                   "null"
@@ -93156,6 +93771,7 @@
             ]
           },
           "system_prompt": {
+            "description": "Initial host-assembled configuration prompt for a newly materialized session.",
             "type": [
               "string",
               "null"
@@ -95332,6 +95948,7 @@
                 "type": "array"
               },
               "system_prompt": {
+                "description": "Ordinary System message appended at this scheduled turn boundary.",
                 "type": [
                   "string",
                   "null"
@@ -95514,6 +96131,7 @@
             ]
           },
           "system_prompt": {
+            "description": "Initial host-assembled configuration prompt for a newly materialized session.",
             "type": [
               "string",
               "null"
@@ -97669,6 +98287,32 @@
       "RuntimeDeliveryOutcome": {
         "oneOf": [
           {
+            "description": "The target admitted this occurrence's stable delivery identity for the\nfirst time.",
+            "properties": {
+              "kind": {
+                "const": "admission_accepted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The target had already admitted the same stable delivery identity and\nreturned its existing work. This is successful exactly-once admission,\nnot a delivery failure.",
+            "properties": {
+              "kind": {
+                "const": "admission_deduplicated",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "detail": {
                 "type": "string"
@@ -97814,6 +98458,7 @@
                 "type": "array"
               },
               "system_prompt": {
+                "description": "Ordinary System message appended at this scheduled turn boundary.",
                 "type": [
                   "string",
                   "null"
@@ -97996,6 +98641,7 @@
             ]
           },
           "system_prompt": {
+            "description": "Initial host-assembled configuration prompt for a newly materialized session.",
             "type": [
               "string",
               "null"
@@ -98714,6 +99360,7 @@
   "SessionTranscriptRewriteResult": {
     "$defs": {
       "CompactionRewriteRange": {
+        "additionalProperties": false,
         "description": "Opaque range carried by the typed compaction rewrite semantic.",
         "properties": {
           "end": {
@@ -98753,6 +99400,7 @@
         "type": "object"
       },
       "TranscriptEditRewriteRange": {
+        "additionalProperties": false,
         "description": "Opaque current-format range carried by an ordinary transcript edit.",
         "properties": {
           "end": {
@@ -98773,6 +99421,7 @@
         "type": "object"
       },
       "TranscriptRewriteCommit": {
+        "additionalProperties": false,
         "description": "Immutable rewrite commit that advances a session transcript head.",
         "properties": {
           "actor": {
@@ -98795,9 +99444,11 @@
             "type": "integer"
           },
           "original_span_digest": {
+            "description": "Audit label for the removed semantic span. Exact selection coordinates\nand row lineage are structural authority; this digest is checked on\ntargeted/final semantic materialization.",
             "type": "string"
           },
           "parent_revision": {
+            "description": "Content-addressed audit label for the occurrence parent.\n\nStructural continuity is owned by the occurrence generation, compact\nparent advance, exact row lineage, and graph prefix. This semantic\nlabel is re-proved when the targeted parent is materialized; ordinary\nappend/commit validation never re-hashes every historical body.",
             "type": "string"
           },
           "reason": {
@@ -98807,7 +99458,14 @@
             "type": "string"
           },
           "revision": {
+            "description": "Content-addressed audit label for the occurrence result, with the same\nlazy semantic-replay contract as [`Self::parent_revision`].",
             "type": "string"
+          },
+          "rewrite_generation": {
+            "description": "Serialized occurrence identity within one session's rewrite lineage.\n\nRevision strings identify content, not occurrences: a legitimate\nrewrite can return to earlier content, and two occurrences can even\ncarry byte-identical facts under a fixed/coarse clock. Current writers\ntherefore mint a strict contiguous `1..=n` generation. `0` exists only\nas the decode marker for 0.8.10 audit rows/graphs, which are normalized\nas an ordered set before they can enter current authority.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
           },
           "selection": {
             "$ref": "#/$defs/TranscriptRewriteSelection"
@@ -98827,6 +99485,7 @@
         "type": "object"
       },
       "TranscriptRewriteReason": {
+        "additionalProperties": false,
         "description": "Audit annotation carried with a transcript rewrite commit.\n\nThe free-form kind is for review, debugging, and provenance only. It never\nclassifies a rewrite as compaction; [`TranscriptRewriteSelection`] owns that\nsemantic through its opaque typed compaction range.",
         "properties": {
           "kind": {
@@ -98848,6 +99507,7 @@
         "description": "A concrete transcript span selected for same-session rewrite.",
         "oneOf": [
           {
+            "additionalProperties": false,
             "description": "Pre-semantic-marker range retained for source/API compatibility and\ndecoding prior durable records. New commits canonicalize this input to\n[`TranscriptRewriteSelection::EditMessageRange`] before persistence.",
             "properties": {
               "end": {
@@ -98873,6 +99533,7 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "description": "Current typed ordinary-edit semantic.",
             "properties": {
               "range": {
@@ -98890,6 +99551,7 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "description": "Replace a full transcript from a core-validated compaction rebuild.\n\nThe range payload has no public constructor. New values are minted only\nby the validated compaction path; deserialization exists solely for the\ndurable transcript graph and is revalidated against its retained bodies.",
             "properties": {
               "range": {
@@ -101423,6 +102085,7 @@
   },
   "TranscriptRewriteReason": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
     "description": "Audit annotation carried with a transcript rewrite commit.\n\nThe free-form kind is for review, debugging, and provenance only. It never\nclassifies a rewrite as compaction; [`TranscriptRewriteSelection`] owns that\nsemantic through its opaque typed compaction range.",
     "properties": {
       "kind": {
@@ -101444,6 +102107,7 @@
   "TranscriptRewriteSelection": {
     "$defs": {
       "CompactionRewriteRange": {
+        "additionalProperties": false,
         "description": "Opaque range carried by the typed compaction rewrite semantic.",
         "properties": {
           "end": {
@@ -101464,6 +102128,7 @@
         "type": "object"
       },
       "TranscriptEditRewriteRange": {
+        "additionalProperties": false,
         "description": "Opaque current-format range carried by an ordinary transcript edit.",
         "properties": {
           "end": {
@@ -101488,6 +102153,7 @@
     "description": "A concrete transcript span selected for same-session rewrite.",
     "oneOf": [
       {
+        "additionalProperties": false,
         "description": "Pre-semantic-marker range retained for source/API compatibility and\ndecoding prior durable records. New commits canonicalize this input to\n[`TranscriptRewriteSelection::EditMessageRange`] before persistence.",
         "properties": {
           "end": {
@@ -101513,6 +102179,7 @@
         "type": "object"
       },
       {
+        "additionalProperties": false,
         "description": "Current typed ordinary-edit semantic.",
         "properties": {
           "range": {
@@ -101530,6 +102197,7 @@
         "type": "object"
       },
       {
+        "additionalProperties": false,
         "description": "Replace a full transcript from a core-validated compaction rebuild.\n\nThe range payload has no public constructor. New values are minted only\nby the validated compaction path; deserialization exists solely for the\ndurable transcript graph and is revalidated against its retained bodies.",
         "properties": {
           "range": {
@@ -105351,7 +106019,7 @@
             "type": "object"
           },
           {
-            "description": "A typed same-session transcript rewrite was durably committed.",
+            "description": "Released 0.8.10 generation-zero full-body compatibility row.\n\nCurrent writers must never emit this variant. It is decoded only by the\none-time compatibility reconciliation path; receipt batches supersede\nthe redundant body copy.",
             "properties": {
               "record": {
                 "$ref": "#/$defs/TranscriptRewriteRecord"
@@ -105372,7 +106040,34 @@
             "type": "object"
           },
           {
-            "description": "Inbound peer content was committed into this session's context.\n\nEmitted as a pure projection of the typed transcript carrier\n([`crate::types::SystemNoticeBlock::Comms`] with incoming direction)\nat the moment the agent commits it — a queued delivery appended to the\ntranscript at run assembly, or a steer delivery applied as runtime\nsystem context at the model boundary. One event per committed comms\nblock, so a host taint tracker classifies peer ingestion from typed\nfacts (canonical peer identity + the sender's signed content-taint\ndeclaration) instead of parsing rendered projection text.\n\nThe event stream is best-effort observability (see `event_tap`); the\ntranscript block remains the durable owner of these facts.",
+            "description": "Receipt-only evidence for one non-empty ordered rewrite suffix.\n\nThe sealed Session graph remains the singular body authority. The\noptional terminal assistant text is a delta-sized derived projection\nused to rebuild `summary.txt`; `None` explicitly removes a stale\nsummary when the retained successor has no assistant text.",
+            "properties": {
+              "final_assistant_text": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "receipt": {
+                "$ref": "#/$defs/TranscriptRewriteAuditReceiptBatch"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "transcript_rewrite_audit_receipt_committed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "receipt"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Inbound peer content was committed into this session's context.\n\nEmitted as a pure projection of the typed transcript carrier\n([`crate::types::SystemNoticeBlock::Comms`] with incoming direction)\nat the moment the agent commits it — a queued delivery appended to the\ntranscript at run assembly, or a steer delivery injected as a\nrequest-local User message at the model boundary. One event per committed comms\nblock, so a host taint tracker classifies peer ingestion from typed\nfacts (canonical peer identity + the sender's signed content-taint\ndeclaration) instead of parsing rendered projection text.\n\nThe event stream is best-effort observability (see `event_tap`); the\ntranscript block remains the durable owner of these facts.",
             "properties": {
               "kind": {
                 "$ref": "#/$defs/CommsNoticeKind",
@@ -105631,6 +106326,7 @@
         ]
       },
       "CompactionRewriteRange": {
+        "additionalProperties": false,
         "description": "Opaque range carried by the typed compaction rewrite semantic.",
         "properties": {
           "end": {
@@ -106252,17 +106948,26 @@
         ]
       },
       "LlmProviderErrorKind": {
-        "enum": [
-          "invalid_request",
-          "content_filtered",
-          "server_error",
-          "server_overloaded",
-          "connection_reset",
-          "unknown",
-          "stream_parse_error",
-          "incomplete_response"
-        ],
-        "type": "string"
+        "oneOf": [
+          {
+            "enum": [
+              "invalid_request",
+              "content_filtered",
+              "server_error",
+              "server_overloaded",
+              "connection_reset",
+              "unknown",
+              "stream_parse_error",
+              "incomplete_response"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "request_too_large",
+            "description": "The provider rejected (or preflight proved) a serialized request body\nthat exceeds its request-size cap.",
+            "type": "string"
+          }
+        ]
       },
       "LlmProviderErrorRetryability": {
         "enum": [
@@ -107282,6 +107987,7 @@
         "type": "string"
       },
       "TranscriptEditRewriteRange": {
+        "additionalProperties": false,
         "description": "Opaque current-format range carried by an ordinary transcript edit.",
         "properties": {
           "end": {
@@ -107328,7 +108034,31 @@
         ],
         "type": "object"
       },
+      "TranscriptRewriteAuditReceiptBatch": {
+        "description": "Receipt for one non-empty ordered transcript-rewrite suffix.\n\nThe transition is self-verifying:\n`start_prefix.extend(commits) == end_prefix`. Occurrence generations are\nchecked by [`TranscriptRewritePrefixAccumulator::extend`], so neither a gap\nnor a duplicate can be hidden inside one receipt.",
+        "properties": {
+          "commits": {
+            "items": {
+              "$ref": "#/$defs/TranscriptRewriteCommit"
+            },
+            "type": "array"
+          },
+          "end_prefix": {
+            "$ref": "#/$defs/TranscriptRewritePrefixAccumulator"
+          },
+          "start_prefix": {
+            "$ref": "#/$defs/TranscriptRewritePrefixAccumulator"
+          }
+        },
+        "required": [
+          "start_prefix",
+          "commits",
+          "end_prefix"
+        ],
+        "type": "object"
+      },
       "TranscriptRewriteCommit": {
+        "additionalProperties": false,
         "description": "Immutable rewrite commit that advances a session transcript head.",
         "properties": {
           "actor": {
@@ -107351,9 +108081,11 @@
             "type": "integer"
           },
           "original_span_digest": {
+            "description": "Audit label for the removed semantic span. Exact selection coordinates\nand row lineage are structural authority; this digest is checked on\ntargeted/final semantic materialization.",
             "type": "string"
           },
           "parent_revision": {
+            "description": "Content-addressed audit label for the occurrence parent.\n\nStructural continuity is owned by the occurrence generation, compact\nparent advance, exact row lineage, and graph prefix. This semantic\nlabel is re-proved when the targeted parent is materialized; ordinary\nappend/commit validation never re-hashes every historical body.",
             "type": "string"
           },
           "reason": {
@@ -107363,7 +108095,14 @@
             "type": "string"
           },
           "revision": {
+            "description": "Content-addressed audit label for the occurrence result, with the same\nlazy semantic-replay contract as [`Self::parent_revision`].",
             "type": "string"
+          },
+          "rewrite_generation": {
+            "description": "Serialized occurrence identity within one session's rewrite lineage.\n\nRevision strings identify content, not occurrences: a legitimate\nrewrite can return to earlier content, and two occurrences can even\ncarry byte-identical facts under a fixed/coarse clock. Current writers\ntherefore mint a strict contiguous `1..=n` generation. `0` exists only\nas the decode marker for 0.8.10 audit rows/graphs, which are normalized\nas an ordered set before they can enter current authority.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
           },
           "selection": {
             "$ref": "#/$defs/TranscriptRewriteSelection"
@@ -107382,7 +108121,26 @@
         ],
         "type": "object"
       },
+      "TranscriptRewritePrefixAccumulator": {
+        "description": "Rolling, canonical identity of an ordered exact rewrite-commit prefix.\n\nThis is a semantic graph fact, not a replay-cursor assertion. It is carried\nby the graph, folded into checkpoint authority, and independently matched\nagainst the EventStore's receipt. One ordinary lineage-tail commit extends\nthe accumulator with one commit serialization; it never re-hashes the\naccumulated prefix.",
+        "properties": {
+          "digest": {
+            "type": "string"
+          },
+          "occurrence_count": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "occurrence_count",
+          "digest"
+        ],
+        "type": "object"
+      },
       "TranscriptRewriteReason": {
+        "additionalProperties": false,
         "description": "Audit annotation carried with a transcript rewrite commit.\n\nThe free-form kind is for review, debugging, and provenance only. It never\nclassifies a rewrite as compaction; [`TranscriptRewriteSelection`] owns that\nsemantic through its opaque typed compaction range.",
         "properties": {
           "kind": {
@@ -107430,6 +108188,7 @@
         "description": "A concrete transcript span selected for same-session rewrite.",
         "oneOf": [
           {
+            "additionalProperties": false,
             "description": "Pre-semantic-marker range retained for source/API compatibility and\ndecoding prior durable records. New commits canonicalize this input to\n[`TranscriptRewriteSelection::EditMessageRange`] before persistence.",
             "properties": {
               "end": {
@@ -107455,6 +108214,7 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "description": "Current typed ordinary-edit semantic.",
             "properties": {
               "range": {
@@ -107472,6 +108232,7 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "description": "Replace a full transcript from a core-validated compaction rebuild.\n\nThe range payload has no public constructor. New values are minted only\nby the validated compaction path; deserialization exists solely for the\ndurable transcript graph and is revalidated against its retained bodies.",
             "properties": {
               "range": {
@@ -109948,10 +110709,6 @@
               "created_at": {
                 "type": "string"
               },
-              "role": {
-                "const": "system",
-                "type": "string"
-              },
               "identity": {
                 "anyOf": [
                   {
@@ -109960,7 +110717,12 @@
                   {
                     "type": "null"
                   }
-                ]
+                ],
+                "description": "Optional exact control-ingress identity carried by this durable\ntranscript message. Provider adapters ignore it."
+              },
+              "role": {
+                "const": "system",
+                "type": "string"
               }
             },
             "required": [
@@ -110130,6 +110892,24 @@
         ],
         "type": "string"
       },
+      "WireSystemMessageIdentity": {
+        "description": "Public wire projection of one ordinary System message's optional\ncontrol-ingress identity.",
+        "properties": {
+          "idempotency_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "WireToolResult": {
         "description": "Tool result payload in a transcript.",
         "properties": {
@@ -110197,25 +110977,6 @@
             "type": "object"
           }
         ]
-      },
-      "WireSystemMessageIdentity": {
-        "description": "Public wire projection of one ordinary System message optional control-ingress identity.",
-        "properties": {
-          "idempotency_key": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "source": {
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "title": "WireSystemMessageIdentity",
-        "type": "object"
       }
     },
     "$ref": "#/$defs/WireSessionMessage",
@@ -116782,10 +117543,6 @@
               "created_at": {
                 "type": "string"
               },
-              "role": {
-                "const": "system",
-                "type": "string"
-              },
               "identity": {
                 "anyOf": [
                   {
@@ -116794,7 +117551,12 @@
                   {
                     "type": "null"
                   }
-                ]
+                ],
+                "description": "Optional exact control-ingress identity carried by this durable\ntranscript message. Provider adapters ignore it."
+              },
+              "role": {
+                "const": "system",
+                "type": "string"
               }
             },
             "required": [
@@ -116964,6 +117726,24 @@
         ],
         "type": "string"
       },
+      "WireSystemMessageIdentity": {
+        "description": "Public wire projection of one ordinary System message's optional\ncontrol-ingress identity.",
+        "properties": {
+          "idempotency_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "WireToolResult": {
         "description": "Tool result payload in a transcript.",
         "properties": {
@@ -117031,25 +117811,6 @@
             "type": "object"
           }
         ]
-      },
-      "WireSystemMessageIdentity": {
-        "description": "Public wire projection of one ordinary System message optional control-ingress identity.",
-        "properties": {
-          "idempotency_key": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "source": {
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "title": "WireSystemMessageIdentity",
-        "type": "object"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -122151,10 +122912,6 @@
               "created_at": {
                 "type": "string"
               },
-              "role": {
-                "const": "system",
-                "type": "string"
-              },
               "identity": {
                 "anyOf": [
                   {
@@ -122163,7 +122920,12 @@
                   {
                     "type": "null"
                   }
-                ]
+                ],
+                "description": "Optional exact control-ingress identity carried by this durable\ntranscript message. Provider adapters ignore it."
+              },
+              "role": {
+                "const": "system",
+                "type": "string"
               }
             },
             "required": [
@@ -122333,6 +123095,24 @@
         ],
         "type": "string"
       },
+      "WireSystemMessageIdentity": {
+        "description": "Public wire projection of one ordinary System message's optional\ncontrol-ingress identity.",
+        "properties": {
+          "idempotency_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "WireToolResult": {
         "description": "Tool result payload in a transcript.",
         "properties": {
@@ -122400,25 +123180,6 @@
             "type": "object"
           }
         ]
-      },
-      "WireSystemMessageIdentity": {
-        "description": "Public wire projection of one ordinary System message optional control-ingress identity.",
-        "properties": {
-          "idempotency_key": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "source": {
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "title": "WireSystemMessageIdentity",
-        "type": "object"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -124214,6 +124975,24 @@
         ],
         "type": "string"
       },
+      "WireSystemMessageIdentity": {
+        "description": "Public wire projection of one ordinary System message's optional\ncontrol-ingress identity.",
+        "properties": {
+          "idempotency_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "WireToolResult": {
         "description": "Tool result payload in a transcript.",
         "properties": {
@@ -124294,10 +125073,6 @@
           "created_at": {
             "type": "string"
           },
-          "role": {
-            "const": "system",
-            "type": "string"
-          },
           "identity": {
             "anyOf": [
               {
@@ -124306,7 +125081,12 @@
               {
                 "type": "null"
               }
-            ]
+            ],
+            "description": "Optional exact control-ingress identity carried by this durable\ntranscript message. Provider adapters ignore it."
+          },
+          "role": {
+            "const": "system",
+            "type": "string"
           }
         },
         "required": [
@@ -126721,10 +127501,6 @@
               "created_at": {
                 "type": "string"
               },
-              "role": {
-                "const": "system",
-                "type": "string"
-              },
               "identity": {
                 "anyOf": [
                   {
@@ -126733,7 +127509,12 @@
                   {
                     "type": "null"
                   }
-                ]
+                ],
+                "description": "Optional exact control-ingress identity carried by this durable\ntranscript message. Provider adapters ignore it."
+              },
+              "role": {
+                "const": "system",
+                "type": "string"
               }
             },
             "required": [
@@ -126903,6 +127684,24 @@
         ],
         "type": "string"
       },
+      "WireSystemMessageIdentity": {
+        "description": "Public wire projection of one ordinary System message's optional\ncontrol-ingress identity.",
+        "properties": {
+          "idempotency_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "WireToolResult": {
         "description": "Tool result payload in a transcript.",
         "properties": {
@@ -126970,25 +127769,6 @@
             "type": "object"
           }
         ]
-      },
-      "WireSystemMessageIdentity": {
-        "description": "Public wire projection of one ordinary System message optional control-ingress identity.",
-        "properties": {
-          "idempotency_key": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "source": {
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "title": "WireSystemMessageIdentity",
-        "type": "object"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -130911,25 +131691,6 @@
       "items"
     ],
     "title": "WorkItemsResult",
-    "type": "object"
-  },
-  "WireSystemMessageIdentity": {
-    "description": "Public wire projection of one ordinary System message optional control-ingress identity.",
-    "properties": {
-      "idempotency_key": {
-        "type": [
-          "string",
-          "null"
-        ]
-      },
-      "source": {
-        "type": [
-          "string",
-          "null"
-        ]
-      }
-    },
-    "title": "WireSystemMessageIdentity",
     "type": "object"
   }
 }

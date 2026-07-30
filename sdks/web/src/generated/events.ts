@@ -204,7 +204,7 @@ export type InteractionId = string;
 
 export type InteractionStreamAbandonReason = "send_failed" | "admission_rejected" | "response_rejected" | "terminal_delivery_failed";
 
-export type LlmProviderErrorKind = "invalid_request" | "content_filtered" | "server_error" | "server_overloaded" | "connection_reset" | "unknown" | "stream_parse_error" | "incomplete_response";
+export type LlmProviderErrorKind = "invalid_request" | "content_filtered" | "server_error" | "server_overloaded" | "connection_reset" | "unknown" | "stream_parse_error" | "incomplete_response" | "request_too_large";
 
 export type LlmProviderErrorRetryability = "retryable" | "non_retryable";
 
@@ -430,6 +430,12 @@ export type TranscriptRevisionBody = {
   revision: string;
 };
 
+export interface TranscriptRewriteAuditReceiptBatch {
+  commits: TranscriptRewriteCommit[];
+  end_prefix: TranscriptRewritePrefixAccumulator;
+  start_prefix: TranscriptRewritePrefixAccumulator;
+}
+
 export type TranscriptRewriteCommit = {
   actor?: string | null;
   committed_at: SystemTime;
@@ -440,8 +446,14 @@ export type TranscriptRewriteCommit = {
   reason: TranscriptRewriteReason;
   replacement_digest: string;
   revision: string;
+  rewrite_generation?: number;
   selection: TranscriptRewriteSelection;
 };
+
+export interface TranscriptRewritePrefixAccumulator {
+  digest: string;
+  occurrence_count: number;
+}
 
 export type TranscriptRewriteReason = {
   kind: string;
@@ -714,6 +726,13 @@ export interface TranscriptRewriteCommittedEvent {
   type: "transcript_rewrite_committed";
 }
 
+export interface TranscriptRewriteAuditReceiptCommittedEvent {
+  final_assistant_text?: string | null;
+  receipt: TranscriptRewriteAuditReceiptBatch;
+  session_id: SessionId;
+  type: "transcript_rewrite_audit_receipt_committed";
+}
+
 export interface PeerContentIngestedEvent {
   kind: CommsNoticeKind;
   peer?: SystemNoticePeer | null;
@@ -800,4 +819,5 @@ export type AgentEvent =
   ToolConfigChangedEvent |
   BackgroundJobCompletedEvent |
   TranscriptRewriteCommittedEvent |
+  TranscriptRewriteAuditReceiptCommittedEvent |
   PeerContentIngestedEvent;

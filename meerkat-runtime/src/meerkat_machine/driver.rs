@@ -2831,6 +2831,20 @@ impl DriverEntry {
                     "interaction terminal owner {candidate_owner_input_id} lost its completion recipients before publication"
                 ),
             })?;
+        let persisted_input_ids: std::collections::BTreeSet<_> =
+            completion_input_ids.iter().cloned().collect();
+        let outbox_input_ids: std::collections::BTreeSet<_> = outboxes
+            .iter()
+            .map(|outbox| outbox.input_id.clone())
+            .collect();
+        if persisted_input_ids != outbox_input_ids {
+            return Err(RuntimeDriverError::ValidationFailed {
+                reason: format!(
+                    "directed terminal completion recipients did not exactly match outbox rows: \
+                     expected={persisted_input_ids:?}, actual={outbox_input_ids:?}"
+                ),
+            });
+        }
         let expected_ids: std::collections::BTreeSet<_> = outboxes
             .iter()
             .map(|outbox| outbox.interaction_id.0)

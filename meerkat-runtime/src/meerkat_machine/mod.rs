@@ -1025,11 +1025,12 @@ pub(crate) use driver::{
     machine_authorize_runtime_loop_batch, machine_batch_primitive_projections,
     machine_batch_runtime_semantics, machine_commit_prepared_destroy,
     machine_commit_service_turn_terminal_receipt, machine_prepare_bindings_projection,
-    machine_prepare_destroy, machine_recover_ephemeral_driver, machine_recover_persistent_driver,
-    machine_recover_persistent_inputs, machine_recover_persistent_inputs_from_observed,
-    machine_recycle_preserving_work, machine_reset, machine_retire, machine_stop_runtime,
-    prepare_runtime_loop_batch_start,
+    machine_prepare_destroy, machine_recover_ephemeral_driver,
+    machine_recover_persistent_inputs_from_observed, machine_recycle_preserving_work,
+    machine_reset, machine_retire, machine_stop_runtime, prepare_runtime_loop_batch_start,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use driver::{machine_recover_persistent_driver, machine_recover_persistent_inputs};
 
 pub(crate) mod driver;
 

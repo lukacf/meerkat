@@ -455,9 +455,7 @@ impl From<&AgentError> for AgentErrorClass {
             AgentError::OperationNotFound(_) => Self::OperationNotFound,
             AgentError::DepthLimitExceeded { .. } => Self::DepthLimit,
             AgentError::ConcurrencyLimitExceeded => Self::ConcurrencyLimit,
-            AgentError::ConfigError(_) | AgentError::SystemMessageWireIncompatible { .. } => {
-                Self::Config
-            }
+            AgentError::ConfigError(_) => Self::Config,
             AgentError::InvalidToolAccess { .. } => Self::Tool,
             AgentError::SkillResolutionFailed { .. } => Self::Skill,
             AgentError::InternalError(_) => Self::Internal,

@@ -739,8 +739,10 @@ mod tests {
             &self,
             runtime_id: &meerkat_runtime::LogicalRuntimeId,
             boundary: meerkat_runtime::store::PreparedWholeBlobRewriteStoreParts,
-        ) -> Result<meerkat_runtime::RuntimeSessionAuthority, meerkat_runtime::RuntimeStoreError>
-        {
+        ) -> Result<
+            meerkat_runtime::store::WholeBlobStoreAuthority,
+            meerkat_runtime::RuntimeStoreError,
+        > {
             if self.fail_next.swap(false, Ordering::AcqRel) {
                 return Err(meerkat_runtime::RuntimeStoreError::WriteFailed(
                     "injected prepared WholeBlob rewrite boundary failure".to_string(),

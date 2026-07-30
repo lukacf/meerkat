@@ -768,6 +768,15 @@ struct StoreCheckpointer {
     latest_run_checkpoint_receipt: Mutex<Option<RunCheckpointReceipt>>,
 }
 
+struct HeadCanonicalProvisionalIntent<'a> {
+    committed: &'a HeadCanonicalStoreAuthority,
+    run_id: &'a RunId,
+    previous: Option<&'a meerkat_core::HeadCanonicalProvisionalTailAuthority>,
+    candidate_session: &'a Session,
+    successor_head: &'a SessionHead,
+    successor_head_token: &'a str,
+}
+
 async fn load_committed_whole_blob_session(
     runtime_store: &dyn RuntimeStore,
     session_id: &SessionId,
@@ -1259,13 +1268,16 @@ impl StoreCheckpointer {
     async fn write_head_canonical_provisional_intent(
         &self,
         runtime_id: &LogicalRuntimeId,
-        committed: &HeadCanonicalStoreAuthority,
-        run_id: &RunId,
-        previous: Option<&meerkat_core::HeadCanonicalProvisionalTailAuthority>,
-        candidate_session: &Session,
-        successor_head: &SessionHead,
-        successor_head_token: &str,
+        intent: HeadCanonicalProvisionalIntent<'_>,
     ) -> Result<HeadCanonicalProvisionalTailAuthority, AgentError> {
+        let HeadCanonicalProvisionalIntent {
+            committed,
+            run_id,
+            previous,
+            candidate_session,
+            successor_head,
+            successor_head_token,
+        } = intent;
         let candidate_sequence =
             previous
                 .map(|authority| {
@@ -1560,12 +1572,14 @@ impl StoreCheckpointer {
                 let provisional = self
                     .write_head_canonical_provisional_intent(
                         &runtime_id,
-                        committed_authority,
-                        run_id,
-                        previous,
-                        session,
-                        mutation.successor_head(),
-                        mutation.successor_head_token(),
+                        HeadCanonicalProvisionalIntent {
+                            committed: committed_authority,
+                            run_id,
+                            previous,
+                            candidate_session: session,
+                            successor_head: mutation.successor_head(),
+                            successor_head_token: mutation.successor_head_token(),
+                        },
                     )
                     .await?;
                 let committed_head_token = match incremental
@@ -1614,12 +1628,14 @@ impl StoreCheckpointer {
                 let provisional = self
                     .write_head_canonical_provisional_intent(
                         &runtime_id,
-                        committed_authority,
-                        run_id,
-                        previous,
-                        session,
-                        mutation.successor_head(),
-                        mutation.successor_head_token(),
+                        HeadCanonicalProvisionalIntent {
+                            committed: committed_authority,
+                            run_id,
+                            previous,
+                            candidate_session: session,
+                            successor_head: mutation.successor_head(),
+                            successor_head_token: mutation.successor_head_token(),
+                        },
                     )
                     .await?;
                 let committed_head_token = match incremental
@@ -6309,7 +6325,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 "committed runtime checkpoint bytes for session {id} do not match RuntimeStore authority"
             ))));
         };
-        if durable_snapshot.bytes() != session_snapshot.as_ref() {
+        if durable_snapshot.bytes() != session_snapshot.as_slice() {
             return Err(SessionError::Agent(AgentError::InternalError(format!(
                 "committed runtime checkpoint bytes for session {id} do not match RuntimeStore authority"
             ))));
@@ -8889,10 +8905,6 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
             }
         };
         self.reject_if_archived_session(id, &session).await?;
-        self.inner
-            .preflight_detached_system_message_append(&session, 1)
-            .await
-            .map_err(SessionControlError::Session)?;
         let status = session
             .append_system_message_idempotent(
                 req.content.render_text(),
@@ -9643,6 +9655,12 @@ mod tests {
 
     fn memory_blob_store() -> Arc<dyn BlobStore> {
         Arc::new(MemoryBlobStore::new())
+    }
+
+    fn session_marks_archived(session: &Session) -> bool {
+        session
+            .try_lifecycle_terminal()
+            .is_ok_and(|terminal| terminal.is_some_and(|terminal| terminal.is_archived()))
     }
 
     fn mutate_test_session(
@@ -11486,7 +11504,7 @@ mod tests {
             runtime_id: &LogicalRuntimeId,
             boundary: meerkat_runtime::store::PreparedWholeBlobRewriteStoreParts,
         ) -> Result<
-            meerkat_runtime::RuntimeSessionAuthority,
+            meerkat_runtime::store::WholeBlobStoreAuthority,
             meerkat_runtime::store::RuntimeStoreError,
         > {
             let ordinal = self
@@ -13744,7 +13762,7 @@ mod tests {
         runtime_store: &dyn RuntimeStore,
         session_id: &SessionId,
         output: &CoreApplyOutput,
-    ) {
+    ) -> Result<(), String> {
         let runtime_id = PersistentSessionService::<B>::runtime_id_for_session(session_id);
         let committed = output.committed().cloned();
         let provisional = committed
@@ -13783,6 +13801,11 @@ mod tests {
                         session_id.clone(),
                     )
                     .expect("bind HeadCanonical terminal receipt to checkpoint facts")
+                }
+                profile => {
+                    return Err(format!(
+                        "test runtime store uses unsupported session persistence profile {profile:?}"
+                    ));
                 }
             },
             None => meerkat_runtime::store::PreparedRuntimeSessionCommit::success(
@@ -13851,8 +13874,14 @@ mod tests {
                         .await
                         .expect("acknowledge exact HeadCanonical boundary");
                 }
+                profile => {
+                    return Err(format!(
+                        "test runtime store uses unsupported session persistence profile {profile:?}"
+                    ));
+                }
             }
         }
+        Ok(())
     }
 
     #[tokio::test]
@@ -14134,7 +14163,9 @@ mod tests {
             )
             .await
             .expect("runtime turn should apply");
-        machine_commit_runtime_output(service, runtime_store, id, &output).await;
+        machine_commit_runtime_output(service, runtime_store, id, &output)
+            .await
+            .expect("machine-owned runtime output should commit");
     }
 
     /// Machine-committed transcript fixture: a Defer-created runtime-backed
@@ -14304,6 +14335,136 @@ mod tests {
             RuntimeSessionPersistenceProfile::WholeBlobV1
         }
 
+        async fn commit_session_snapshot(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            session_delta: SerializedSessionSnapshot,
+        ) -> Result<(), meerkat_runtime::store::RuntimeStoreError> {
+            self.inner
+                .commit_session_snapshot(runtime_id, session_delta)
+                .await
+        }
+
+        async fn commit_prepared_whole_blob_rewrite_boundary(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            boundary: meerkat_runtime::store::PreparedWholeBlobRewriteStoreParts,
+        ) -> Result<WholeBlobStoreAuthority, meerkat_runtime::store::RuntimeStoreError> {
+            self.inner
+                .commit_prepared_whole_blob_rewrite_boundary(runtime_id, boundary)
+                .await
+        }
+
+        async fn atomic_apply(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            session_delta: Option<SerializedSessionSnapshot>,
+            receipt: meerkat_core::lifecycle::RunBoundaryReceipt,
+            input_updates: Vec<InputStatePersistenceRecord>,
+            session_store_key: Option<SessionId>,
+        ) -> Result<(), meerkat_runtime::store::RuntimeStoreError> {
+            self.inner
+                .atomic_apply(
+                    runtime_id,
+                    session_delta,
+                    receipt,
+                    input_updates,
+                    session_store_key,
+                )
+                .await
+        }
+
+        async fn load_input_states(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Vec<meerkat_runtime::InputStateRow>, meerkat_runtime::store::RuntimeStoreError>
+        {
+            self.inner.load_input_states(runtime_id).await
+        }
+
+        async fn load_boundary_receipt(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            run_id: &RunId,
+            sequence: u64,
+        ) -> Result<
+            Option<meerkat_core::lifecycle::RunBoundaryReceipt>,
+            meerkat_runtime::store::RuntimeStoreError,
+        > {
+            self.inner
+                .load_boundary_receipt(runtime_id, run_id, sequence)
+                .await
+        }
+
+        async fn load_session_snapshot(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Option<Arc<Vec<u8>>>, meerkat_runtime::store::RuntimeStoreError> {
+            self.inner.load_session_snapshot(runtime_id).await
+        }
+
+        async fn clear_session_snapshot(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<(), meerkat_runtime::store::RuntimeStoreError> {
+            self.inner.clear_session_snapshot(runtime_id).await
+        }
+
+        async fn replace_session_snapshot_if_current(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            expected_current: &[u8],
+            replacement: Vec<u8>,
+        ) -> Result<bool, meerkat_runtime::store::RuntimeStoreError> {
+            self.inner
+                .replace_session_snapshot_if_current(runtime_id, expected_current, replacement)
+                .await
+        }
+
+        async fn clear_session_snapshot_if_current(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            expected_current: &[u8],
+        ) -> Result<bool, meerkat_runtime::store::RuntimeStoreError> {
+            self.inner
+                .clear_session_snapshot_if_current(runtime_id, expected_current)
+                .await
+        }
+
+        async fn persist_input_state(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            state: &InputStatePersistenceRecord,
+        ) -> Result<(), meerkat_runtime::store::RuntimeStoreError> {
+            self.inner.persist_input_state(runtime_id, state).await
+        }
+
+        async fn load_input_state(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            input_id: &InputId,
+        ) -> Result<Option<StoredInputState>, meerkat_runtime::store::RuntimeStoreError> {
+            self.inner.load_input_state(runtime_id, input_id).await
+        }
+
+        async fn load_machine_lifecycle_record(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Option<Vec<u8>>, meerkat_runtime::store::RuntimeStoreError> {
+            self.inner.load_machine_lifecycle_record(runtime_id).await
+        }
+
+        async fn commit_machine_lifecycle(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            commit: meerkat_runtime::store::MachineLifecycleCommit,
+            input_states: &[InputStatePersistenceRecord],
+        ) -> Result<(), meerkat_runtime::store::RuntimeStoreError> {
+            self.inner
+                .commit_machine_lifecycle(runtime_id, commit, input_states)
+                .await
+        }
+
         async fn load_whole_blob_store_authority(
             &self,
             runtime_id: &LogicalRuntimeId,
@@ -14440,7 +14601,7 @@ mod tests {
             runtime_id: &LogicalRuntimeId,
             boundary: meerkat_runtime::store::PreparedWholeBlobRewriteStoreParts,
         ) -> Result<
-            meerkat_runtime::RuntimeSessionAuthority,
+            meerkat_runtime::store::WholeBlobStoreAuthority,
             meerkat_runtime::store::RuntimeStoreError,
         > {
             self.rewrite_snapshot_cas_calls
@@ -16501,10 +16662,7 @@ mod tests {
 
         projection_store.set_fail_save(false);
         service
-            .checkpoint_committed_runtime_session_snapshot(
-                &session_id,
-                Arc::new(runtime_bytes.clone()),
-            )
+            .checkpoint_committed_runtime_session_snapshot(&session_id, Arc::clone(&runtime_bytes))
             .await
             .expect("exact committed runtime bytes should repair projection and receipt");
         assert_eq!(
@@ -23033,7 +23191,8 @@ mod tests {
             &result.session_id,
             &output,
         )
-        .await;
+        .await
+        .expect("machine-owned runtime output should commit");
 
         let stale_store_row = store
             .load(&result.session_id)
@@ -23125,7 +23284,8 @@ mod tests {
             &result.session_id,
             &output,
         )
-        .await;
+        .await
+        .expect("machine-owned runtime output should commit");
         service
             .discard_live_session(&result.session_id)
             .await
@@ -23855,7 +24015,8 @@ mod tests {
             &result.session_id,
             &output,
         )
-        .await;
+        .await
+        .expect("machine-owned runtime output should commit");
         let live = service
             .export_live_session(&result.session_id)
             .await
@@ -23955,7 +24116,8 @@ mod tests {
             &result.session_id,
             &output,
         )
-        .await;
+        .await
+        .expect("machine-owned runtime output should commit");
         let live = service
             .export_live_session(&result.session_id)
             .await
@@ -24237,7 +24399,8 @@ mod tests {
             &result.session_id,
             &output,
         )
-        .await;
+        .await
+        .expect("machine-owned runtime output should commit");
 
         service
             .append_system_context(

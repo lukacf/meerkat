@@ -1243,7 +1243,8 @@ impl meerkat_runtime::RuntimeStore for PowerCutRuntimeStore {
         &self,
         runtime_id: &meerkat_runtime::LogicalRuntimeId,
         boundary: meerkat_runtime::store::PreparedWholeBlobRewriteStoreParts,
-    ) -> Result<meerkat_runtime::RuntimeSessionAuthority, meerkat_runtime::RuntimeStoreError> {
+    ) -> Result<meerkat_runtime::store::WholeBlobStoreAuthority, meerkat_runtime::RuntimeStoreError>
+    {
         if self.is_cut() {
             self.record_legacy_boundary_commit_rejection();
             return Err(meerkat_runtime::RuntimeStoreError::WriteFailed(

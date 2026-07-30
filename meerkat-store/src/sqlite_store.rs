@@ -8013,12 +8013,17 @@ mod tests {
         let root = PreparedHeadCanonicalMutation::prepare_root(&session)
             .expect("prepare rooted HeadCanonical mutation");
         let persisted_root = root.clone();
-        store
+        let root_outcome = store
             .in_write_txn(move |tx| {
                 apply_prepared_head_canonical_mutation_in_txn(tx, &persisted_root)
             })
             .await
             .unwrap();
+        assert_eq!(
+            root_outcome,
+            HeadCanonicalMutationApplyOutcome::Applied,
+            "the initial rooted mutation must be installed"
+        );
         root.acknowledge_session(&mut session, root.successor_head_token())
             .unwrap();
 
@@ -8037,23 +8042,33 @@ mod tests {
                 "one hot-key update must carry exactly one authenticated mutation"
             );
             let persisted = successor.clone();
-            store
+            let successor_outcome = store
                 .in_write_txn(move |tx| {
                     apply_prepared_head_canonical_mutation_in_txn(tx, &persisted)
                 })
                 .await
                 .unwrap();
+            assert_eq!(
+                successor_outcome,
+                HeadCanonicalMutationApplyOutcome::Applied,
+                "each new hot-key mutation must advance the canonical head"
+            );
             successor
                 .acknowledge_session(&mut session, successor.successor_head_token())
                 .unwrap();
 
             let exact_retry = successor.clone();
-            store
+            let retry_outcome = store
                 .in_write_txn(move |tx| {
                     apply_prepared_head_canonical_mutation_in_txn(tx, &exact_retry)
                 })
                 .await
                 .expect("the latest changed-cell bytes, proof, state, and lineage must re-prove");
+            assert_eq!(
+                retry_outcome,
+                HeadCanonicalMutationApplyOutcome::AlreadyApplied,
+                "an exact retry must re-prove the existing successor without rewriting it"
+            );
 
             let conn = open_connection(store.path()).unwrap();
             let bounded: (i64, i64, i64, i64, i64, i64, i64) = conn
@@ -8138,10 +8153,15 @@ mod tests {
         let (session, root) =
             prepared_root_with_metadata("application", serde_json::json!({"value": 1}));
         let initial = root.clone();
-        store
+        let initial_outcome = store
             .in_write_txn(move |tx| apply_prepared_head_canonical_mutation_in_txn(tx, &initial))
             .await
             .unwrap();
+        assert_eq!(
+            initial_outcome,
+            HeadCanonicalMutationApplyOutcome::Applied,
+            "the fixture root must be installed before its metadata cell is corrupted"
+        );
         let conn = open_connection(store.path()).unwrap();
         conn.execute(
             r"
@@ -8175,12 +8195,17 @@ mod tests {
         let (mut session, root) =
             prepared_root_with_metadata("application", serde_json::json!({"value": 1}));
         let persisted_root = root.clone();
-        store
+        let root_outcome = store
             .in_write_txn(move |tx| {
                 apply_prepared_head_canonical_mutation_in_txn(tx, &persisted_root)
             })
             .await
             .unwrap();
+        assert_eq!(
+            root_outcome,
+            HeadCanonicalMutationApplyOutcome::Applied,
+            "the predecessor fixture must be installed"
+        );
         let runtime_root = root.successor_head().clone();
         store
             .in_write_txn(move |tx| retain_runtime_boundary_head_metadata_in_txn(tx, &runtime_root))
@@ -8197,10 +8222,15 @@ mod tests {
             .unwrap();
         let successor = PreparedHeadCanonicalMutation::prepare(&session, Some(observed)).unwrap();
         let persisted = successor.clone();
-        store
+        let successor_outcome = store
             .in_write_txn(move |tx| apply_prepared_head_canonical_mutation_in_txn(tx, &persisted))
             .await
             .unwrap();
+        assert_eq!(
+            successor_outcome,
+            HeadCanonicalMutationApplyOutcome::Applied,
+            "the changed metadata cell must advance the canonical head"
+        );
         let runtime_successor = successor.successor_head().clone();
         store
             .in_write_txn(move |tx| {
@@ -8246,8 +8276,16 @@ mod tests {
             prepared_root_with_metadata("application", serde_json::json!({"value": "older"}));
         store
             .in_write_txn(move |tx| {
-                apply_prepared_head_canonical_mutation_in_txn(tx, &newer_root)?;
-                apply_prepared_head_canonical_mutation_in_txn(tx, &older_root)?;
+                assert_eq!(
+                    apply_prepared_head_canonical_mutation_in_txn(tx, &newer_root)?,
+                    HeadCanonicalMutationApplyOutcome::Applied,
+                    "the newer list fixture must be installed"
+                );
+                assert_eq!(
+                    apply_prepared_head_canonical_mutation_in_txn(tx, &older_root)?,
+                    HeadCanonicalMutationApplyOutcome::Applied,
+                    "the older list fixture must be installed"
+                );
                 Ok(())
             })
             .await
@@ -8300,10 +8338,15 @@ mod tests {
         let (session, root) =
             prepared_root_with_metadata("application", serde_json::json!({"value": 1}));
         let initial = root.clone();
-        store
+        let initial_outcome = store
             .in_write_txn(move |tx| apply_prepared_head_canonical_mutation_in_txn(tx, &initial))
             .await
             .unwrap();
+        assert_eq!(
+            initial_outcome,
+            HeadCanonicalMutationApplyOutcome::Applied,
+            "the fixture root must be installed before its metadata cell is removed"
+        );
         let conn = open_connection(store.path()).unwrap();
         conn.execute(
             "DELETE FROM session_head_metadata_cells WHERE session_id = ?1",

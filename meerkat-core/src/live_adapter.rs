@@ -160,9 +160,9 @@ pub enum LiveAdapterCommand {
     /// identity (model swaps require close + reopen — OpenAI Realtime has
     /// no mutable `model` field) and issuing a single `session.update`
     /// carrying the new instructions / tools / audio config. The
-    /// snapshot's `ordered_system_instructions` is derived from the canonical
-    /// transcript's contiguous leading System prefix and applied as provider
-    /// session config, not as a second out-of-band authority.
+    /// snapshot's `ordered_system_instructions` is derived from every
+    /// canonical System row in authored System-message order and applied as
+    /// provider session config, not as a second out-of-band authority.
     ///
     /// Adapters that do not support live re-config should treat this as a
     /// no-op or surface a typed error observation.
@@ -759,9 +759,9 @@ pub struct LiveProjectionSnapshot {
     // `ToolDef` does not yet derive `JsonSchema`; same treatment.
     #[cfg_attr(feature = "schema", schemars(with = "Vec<serde_json::Value>"))]
     pub visible_tools: Vec<ToolDef>,
-    /// Provider-facing singular lowering of a contiguous leading
-    /// `Message::System` prefix. This is a projection, never session metadata
-    /// or durable authority for a privileged initial message.
+    /// Provider-facing singular lowering of every `Message::System` row in
+    /// authored System-message order. This is a projection, never session
+    /// metadata or durable authority for a privileged initial message.
     pub ordered_system_instructions: Option<String>,
     pub model_id: String,
     // Typed in memory (the realtime refresh guard compares

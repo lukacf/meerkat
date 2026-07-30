@@ -19,21 +19,17 @@ Session transcript and derives each provider request from it:
 - Standard OpenAI Responses and OpenAI-compatible Chat Completions preserve
   each instruction at its position among user and assistant messages.
 - Anthropic, Gemini, the private ChatGPT Responses backend, and OpenAI
-  Realtime expose top-level-only instruction channels. Their adapters lift a
-  contiguous leading `System` prefix, using distinct provider blocks or parts
-  where supported and `"\n\n"` as the stable separator for singular strings.
-  A later `System` is rejected locally because hoisting it would change
-  chronology. `SystemNotice` remains an explicit in-place event.
+  Realtime expose top-level-only instruction channels. Their adapters collect
+  every `System` payload in authored System-message order, using distinct
+  provider blocks or parts where supported and `"\n\n"` as the stable
+  separator for singular strings. `SystemNotice` remains an explicit in-place
+  event.
 
 Empty, whitespace-only, and duplicate instructions are significant: adapters
-do not trim, deduplicate, replace, or silently drop them. If a backend cannot
-carry the complete byte sequence in order, request construction fails locally.
-Turn admission checks provider feasibility before appending a proposed System,
-and provider/model switches preflight the existing transcript before rebind, so
-the request-construction failure is a final backstop rather than the first
-point at which an incompatible durable transcript is discovered.
-Realtime reconnect and refresh use the same transcript-derived leading-prefix
-projection; there is no provider-only `runtime_system_context` sidecar.
+do not trim, deduplicate, replace, or silently drop them. System placement is
+never a session-admission or provider-rebind restriction. Realtime reconnect
+and refresh use the same transcript-derived ordered projection; there is no
+provider-only `runtime_system_context` sidecar.
 
 ## Provider setup
 

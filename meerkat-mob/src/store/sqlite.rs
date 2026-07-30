@@ -10,20 +10,21 @@ use super::{
     IdentityMemberTargetObservation, IdentityMemberTargetState, IdentityWiringEventCommitOutcome,
     IdentityWiringTargetObservation, IdentityWiringTargetState, MobEventStore,
     MobExternalDeliveryBeginOutcome, MobExternalDeliveryCompleteOutcome, MobExternalDeliveryIntent,
-    MobExternalDeliveryPhase, MobExternalDeliveryRecord, MobExternalDeliveryTerminal,
-    MobHostAuthorityDeletionAuthority, MobHostAuthorityPersistenceAuthority,
-    MobHostAuthorityRecord, MobIdentityMemberStore, MobIdentityStatusStore, MobIdentityStore,
-    MobIdentityStoreClock, MobMemberEventCursorRecord, MobMemberLiveCleanupRecord,
-    MobMemberOperatorPruneAuthority, MobMemberOperatorRequestBegin, MobMemberOperatorRequestKey,
-    MobMemberOperatorRequestRecord, MobOperatorGrantDeletionAuthority,
+    MobExternalDeliveryPhase, MobExternalDeliveryRecord, MobExternalDeliveryRepairOutcome,
+    MobExternalDeliveryRepairState, MobExternalDeliveryTerminal, MobHostAuthorityDeletionAuthority,
+    MobHostAuthorityPersistenceAuthority, MobHostAuthorityRecord, MobIdentityMemberStore,
+    MobIdentityStatusStore, MobIdentityStore, MobIdentityStoreClock, MobMemberEventCursorRecord,
+    MobMemberLiveCleanupRecord, MobMemberOperatorPruneAuthority, MobMemberOperatorRequestBegin,
+    MobMemberOperatorRequestKey, MobMemberOperatorRequestRecord, MobOperatorGrantDeletionAuthority,
     MobOperatorGrantPersistenceAuthority, MobOperatorGrantRecord,
     MobPlacedSpawnBindingPromotionAuthority, MobPlacedSpawnCarrierRecord,
     MobPlacedSpawnCleanupAuthority, MobPlacedSpawnCommitPersistenceAuthority,
     MobPlacedSpawnPendingPersistenceAuthority, MobRunStore, MobRuntimeMetadataStore, MobSpecStore,
     MobStoreError, PlacedSpawnCarrierPhase, PromotePlacedSpawnBindingResult,
     SupervisorAuthorityDeletionAuthority, SupervisorAuthorityPersistenceAuthority,
-    SupervisorAuthorityRecord, SystemMobIdentityStoreClock, identity_member_target_state,
-    identity_structural_projection_is_anchor, identity_wiring_target_state, private,
+    SupervisorAuthorityRecord, SystemMobIdentityStoreClock, external_delivery_repair_now_ms,
+    identity_member_target_state, identity_structural_projection_is_anchor,
+    identity_wiring_target_state, next_external_delivery_repair_state, private,
     step_failed_event_identity, terminal_event_identity, validate_external_delivery_record,
     validate_external_delivery_terminal, validate_identity_member_commit_authority,
     validate_identity_wiring_commit_authority, validate_mob_event_write_authority,
@@ -7790,7 +7791,9 @@ mod tests {
     use crate::ids::{AgentIdentity, Generation, ProfileName};
     use crate::profile::{Profile, ProfileBinding, ToolConfig};
     use crate::run::StepRunStatus;
-    use crate::store::ExternalBindingOverlayStatus;
+    use crate::store::{
+        ExternalBindingOverlayStatus, MobExternalDeliveryIdentity, MobExternalDeliveryTargetKind,
+    };
     use futures::future::join_all;
     use indexmap::IndexMap;
     use meerkat_contracts::wire::{

@@ -289,10 +289,6 @@ fn fallback_raw_value() -> Box<serde_json::value::RawValue> {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl AgentLlmClient for LlmClientAdapter {
-    fn system_message_wire_capability(&self) -> meerkat_core::SystemMessageWireCapability {
-        self.client.system_message_wire_capability()
-    }
-
     async fn stream_response(
         &self,
         messages: &[Message],

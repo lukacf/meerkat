@@ -268,10 +268,6 @@ impl OpenAiRealtimeTextAdapter {
 
 #[async_trait]
 impl LlmClient for OpenAiRealtimeTextAdapter {
-    fn system_message_wire_capability(&self) -> meerkat_core::SystemMessageWireCapability {
-        meerkat_core::SystemMessageWireCapability::LeadingPrefixOnly
-    }
-
     fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
         project_realtime_replay_messages(messages)
     }
@@ -469,19 +465,10 @@ const ORDERED_SYSTEM_INSTRUCTION_SEPARATOR: &str = "\n\n";
 fn convert_messages(messages: &[Message]) -> Result<(Option<String>, Vec<Item>), LlmError> {
     let mut instructions_parts: Vec<String> = Vec::new();
     let mut items: Vec<Item> = Vec::new();
-    let mut leading_system_prefix = true;
 
     for msg in messages {
-        if !matches!(msg, Message::System(_)) {
-            leading_system_prefix = false;
-        }
         match msg {
             Message::System(s) => {
-                if !leading_system_prefix {
-                    return Err(LlmError::InvalidInputShape {
-                        message: "OpenAI Realtime cannot faithfully represent a System message after non-System transcript content".to_string(),
-                    });
-                }
                 instructions_parts.push(s.content.clone());
             }
             Message::SystemNotice(notice) => {
@@ -855,12 +842,7 @@ mod tests {
     }
 
     #[test]
-    fn convert_messages_preserves_leading_system_prefix_and_interleaved_notice() {
-        let client = OpenAiRealtimeTextAdapter::new("test-key");
-        assert_eq!(
-            client.system_message_wire_capability(),
-            meerkat_core::SystemMessageWireCapability::LeadingPrefixOnly
-        );
+    fn convert_messages_collects_all_systems_and_preserves_interleaved_notice() {
         let (absent, _) = convert_messages(&[]).expect("convert absent System");
         assert_eq!(absent, None);
 
@@ -875,13 +857,14 @@ mod tests {
                 "notice",
             )),
             user("continue"),
+            sys("late instruction"),
         ];
         let original = messages.clone();
         let (ordered, items) = convert_messages(&messages).expect("convert ordered Systems");
         assert_eq!(messages, original);
         assert_eq!(
             ordered.as_deref(),
-            Some("\n\n \t \n\nduplicate\n\nduplicate")
+            Some("\n\n \t \n\nduplicate\n\nduplicate\n\nlate instruction")
         );
         assert_eq!(items.len(), 3);
         assert!(matches!(
@@ -895,13 +878,6 @@ mod tests {
                 [ContentPart::InputText { text }] if text.contains("notice")
             )
         ));
-    }
-
-    #[test]
-    fn convert_messages_rejects_mid_thread_system_instead_of_hoisting_it() {
-        let error = convert_messages(&[user("work"), sys("late instruction")])
-            .expect_err("mid-thread System must not be hoisted");
-        assert!(matches!(error, LlmError::InvalidInputShape { .. }));
     }
 
     #[test]

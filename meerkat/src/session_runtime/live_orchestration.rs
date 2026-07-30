@@ -3,8 +3,8 @@
 //! Populated by W2-A. Hosts the surface-agnostic helper free functions
 //! that build live projection snapshots and decide when a live channel
 //! needs a forced close vs in-place refresh. Canonical ordered
-//! A contiguous leading `Message::System` prefix is deterministically lowered
-//! into the provider's singular
+//! `Message::System` rows are deterministically collected in authored
+//! System-message order into the provider's singular
 //! `RealtimeSessionOpenConfig.ordered_system_instructions` projection.
 //!
 //! Gated by the `live` feature on the `meerkat` facade so surfaces
@@ -340,17 +340,9 @@ impl LiveConfigPropagationReport {
     }
 }
 
-/// Lift a contiguous leading System prefix into the provider's single typed
-/// instructions field. A later System is an unsupported provider input shape.
-fn realtime_projection_ordered_system_instructions(
-    session: &Session,
-) -> Result<Option<String>, meerkat_llm_core::LlmError> {
-    RealtimeSessionOpenConfig::lower_leading_system_messages(session.messages())
-}
-
 /// Caller-selected bound for the canonical transcript seed used by a live
 /// provider open. The count covers serialized replayable dialogue/tool
-/// messages after image hydration. Leading System rows use the separate
+/// messages after image hydration. System rows use the separate
 /// full-active-transcript instruction projection; SystemNotice remains
 /// replayable history and consumes budget in its authored position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -432,9 +424,9 @@ pub enum RealtimeSessionOpenProjectionError {
 }
 
 fn realtime_projection_messages_full(session: &Session) -> Result<Vec<Message>, SessionError> {
-    // The validated leading System prefix has its own projection derived from
-    // the complete active materialized transcript. SystemNotice remains an
-    // explicit in-place provider history event.
+    // Every ordered System row has a separate top-level projection derived
+    // from the complete active materialized transcript. SystemNotice remains
+    // an explicit in-place provider history event.
     Ok(session
         .messages()
         .iter()
@@ -445,9 +437,8 @@ fn realtime_projection_messages_full(session: &Session) -> Result<Vec<Message>, 
 
 /// Project replayable dialogue/tool history for realtime delivery.
 ///
-/// System rows are deliberately absent: the open config derives the leading
-/// prefix projection separately from the full active
-/// materialized transcript.
+/// System rows are deliberately absent: the open config derives their ordered
+/// top-level projection separately from the full active transcript.
 pub fn realtime_projection_messages(session: &Session) -> Result<Vec<Message>, SessionError> {
     realtime_projection_messages_full(session)
 }
@@ -3068,8 +3059,7 @@ mod prompt_truth_tests {
     use super::{
         LiveSeedProjectionError, LiveSeedProjectionStatus, LiveSeedWindow,
         build_live_projection_snapshot_for_runtime, realtime_projection_messages,
-        realtime_projection_messages_with_window, realtime_projection_ordered_system_instructions,
-        serialized_message_chars,
+        realtime_projection_messages_with_window, serialized_message_chars,
     };
     use meerkat_core::types::{
         AssistantBlock, BlockAssistantMessage, Message, SessionId, StopReason, SystemMessage,
@@ -3123,9 +3113,7 @@ mod prompt_truth_tests {
             Vec::<Message>::new()
         );
         assert_eq!(
-            realtime_projection_ordered_system_instructions(&session)
-                .expect("leading System must be representable")
-                .as_deref(),
+            RealtimeSessionOpenConfig::lower_ordered_system_messages(session.messages()).as_deref(),
             Some("transcript fallback")
         );
     }
@@ -3134,8 +3122,7 @@ mod prompt_truth_tests {
     fn ordered_system_lowering_distinguishes_absence_from_authored_whitespace() {
         let empty_session = Session::new();
         assert_eq!(
-            realtime_projection_ordered_system_instructions(&empty_session)
-                .expect("empty transcript must be representable"),
+            RealtimeSessionOpenConfig::lower_ordered_system_messages(empty_session.messages()),
             None
         );
 
@@ -3146,15 +3133,13 @@ mod prompt_truth_tests {
             Message::User(UserMessage::text("work")),
         ]);
         assert_eq!(
-            realtime_projection_ordered_system_instructions(&session)
-                .expect("leading System prefix must be representable")
-                .as_deref(),
+            RealtimeSessionOpenConfig::lower_ordered_system_messages(session.messages()).as_deref(),
             Some("\n\n \t ")
         );
     }
 
     #[test]
-    fn live_projection_rejects_non_leading_system_instead_of_hoisting_it() {
+    fn live_projection_collects_all_systems_without_rewriting_history() {
         let current = "current instruction";
         let mut session = Session::new();
         session.push_batch(vec![
@@ -3170,10 +3155,10 @@ mod prompt_truth_tests {
                 assistant_text("old assistant"),
             ]
         );
-        assert!(matches!(
-            realtime_projection_ordered_system_instructions(&session),
-            Err(meerkat_llm_core::LlmError::InvalidInputShape { .. })
-        ));
+        assert_eq!(
+            RealtimeSessionOpenConfig::lower_ordered_system_messages(session.messages()).as_deref(),
+            Some("initial instruction\n\ncurrent instruction")
+        );
     }
 
     #[test]
@@ -3333,7 +3318,7 @@ mod prompt_truth_tests {
             projection.messages,
             session.messages(),
         )
-        .expect("large leading System prefix must be representable");
+        .expect("ordered System messages must be representable");
         assert_eq!(config.seed_messages(), &full[2..]);
         let expected_instructions = format!("{huge}\n\n");
         assert_eq!(
@@ -3354,7 +3339,7 @@ mod prompt_truth_tests {
                 Message::User(UserMessage::text("hi")),
             ],
         )
-        .expect("leading System prefix must be representable");
+        .expect("ordered System messages must be representable");
         let snapshot = build_live_projection_snapshot_for_runtime(&SessionId::new(), &open_config);
         assert_eq!(
             snapshot.ordered_system_instructions.as_deref(),

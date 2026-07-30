@@ -146,14 +146,6 @@ pub enum AgentBuildPolicyError {
     CompactionMemoryReconcile { message: String },
     #[error("durable compaction-memory stages require a resultful runtime commit coordinator")]
     MissingCompactionCommitCoordinator,
-    #[error(
-        "provider {provider:?} cannot represent System message at transcript index {incompatible_index} with wire capability {capability:?}"
-    )]
-    SystemMessageWireIncompatible {
-        provider: crate::Provider,
-        capability: crate::SystemMessageWireCapability,
-        incompatible_index: usize,
-    },
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -549,19 +541,6 @@ impl AgentBuilder {
         } else {
             None
         };
-        let system_message_wire_capability = client.system_message_wire_capability();
-        if let Some(incompatible_index) = system_message_wire_capability
-            .first_incompatible_index_after_system_append(
-                session.messages(),
-                usize::from(system_prompt.is_some()),
-            )
-        {
-            return Err(AgentBuildPolicyError::SystemMessageWireIncompatible {
-                provider: client.provider(),
-                capability: system_message_wire_capability,
-                incompatible_index,
-            });
-        }
         if let Some(prompt) = system_prompt {
             session.append_system_message(prompt);
         }
@@ -1182,10 +1161,6 @@ mod tests {
 
         fn model(&self) -> &'static str {
             "mock-model"
-        }
-
-        fn system_message_wire_capability(&self) -> crate::SystemMessageWireCapability {
-            crate::SystemMessageWireCapability::Interleaved
         }
     }
 

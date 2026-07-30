@@ -55652,6 +55652,9 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
         MobError::BridgeCommandRejected { cause, .. } => {
             format!("bridge_command_rejected:{cause:?}")
         }
+        MobError::MemberProvisionFailed { cause } => {
+            format!("member_provision_failed:{cause:?}")
+        }
         MobError::MemberRestoreFailed { .. } => "member_restore_failed".to_string(),
         MobError::SpawnMemberAdmissionDenied { .. } => "spawn_member_admission_denied".to_string(),
         MobError::BridgeRequestTimedOut { .. } => "bridge_request_timed_out".to_string(),

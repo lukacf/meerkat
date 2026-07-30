@@ -71,12 +71,6 @@ impl ModelFallbackClient {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl AgentLlmClient for ModelFallbackClient {
-    fn system_message_wire_capability(&self) -> meerkat_core::SystemMessageWireCapability {
-        self.candidates[self.active_index()]
-            .client
-            .system_message_wire_capability()
-    }
-
     async fn stream_response(
         &self,
         messages: &[meerkat_core::Message],

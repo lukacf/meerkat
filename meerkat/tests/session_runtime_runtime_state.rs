@@ -78,8 +78,10 @@ impl meerkat_runtime::store::RuntimeStore for FailDeleteOpsLifecycleOnceStore {
         &self,
         runtime_id: &meerkat_runtime::LogicalRuntimeId,
         boundary: meerkat_runtime::store::PreparedWholeBlobRewriteStoreParts,
-    ) -> Result<meerkat_runtime::RuntimeSessionAuthority, meerkat_runtime::store::RuntimeStoreError>
-    {
+    ) -> Result<
+        meerkat_runtime::store::WholeBlobStoreAuthority,
+        meerkat_runtime::store::RuntimeStoreError,
+    > {
         self.inner
             .commit_prepared_whole_blob_rewrite_boundary(runtime_id, boundary)
             .await

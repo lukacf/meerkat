@@ -3327,6 +3327,7 @@ mod tests {
     use crate::ids::{AgentIdentity, Generation, ProfileName};
     use crate::profile::{Profile, ProfileBinding, ToolConfig};
     use crate::run::StepRunStatus;
+    use crate::store::{MobExternalDeliveryIdentity, MobExternalDeliveryTargetKind};
     use futures::future::join_all;
     use meerkat_contracts::wire::{
         PortableDefinitionExtract, PortableProfile, PortableSystemPrompt,

@@ -4802,13 +4802,13 @@ pub(super) async fn prepare_prepared_runtime_session_state(
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
-    use super::{
-        DeferredTurnEventOutcome, MultiBackendProvisioner,
-        defer_turn_events_until_machine_completion, runtime_completion_to_mob_result,
-        session_turn_error_to_mob_error,
-    };
+    use super::session_turn_error_to_mob_error;
     #[cfg(feature = "runtime-adapter")]
-    use super::{MemberSessionDisposalArc, RuntimeSessionDisposalTarget, RuntimeSessionState};
+    use super::{
+        DeferredTurnEventOutcome, MemberSessionDisposalArc, MultiBackendProvisioner,
+        RuntimeSessionDisposalTarget, RuntimeSessionState, SessionBackend,
+        defer_turn_events_until_machine_completion, runtime_completion_to_mob_result,
+    };
     use crate::error::MobError;
     use meerkat_core::service::SessionError;
     use meerkat_core::types::SessionId;
@@ -4830,7 +4830,7 @@ mod tests {
                 }),
         };
 
-        let input = MultiBackendProvisioner::runtime_input_from_turn_request(&request)
+        let input = SessionBackend::runtime_input_from_turn_request(&request)
             .expect("valid stable runtime input identity");
 
         assert_eq!(
@@ -4868,7 +4868,7 @@ mod tests {
         };
 
         assert!(
-            MultiBackendProvisioner::runtime_input_from_turn_request(&request).is_err(),
+            SessionBackend::runtime_input_from_turn_request(&request).is_err(),
             "runtime input creation must reject correlation prose before admission"
         );
     }

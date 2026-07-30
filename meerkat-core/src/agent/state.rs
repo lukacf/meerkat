@@ -6035,7 +6035,6 @@ mod tests {
     struct HotSwapLimitRecordingClient {
         model: String,
         seen_max_tokens: Mutex<Vec<u32>>,
-        system_message_wire_capability: crate::SystemMessageWireCapability,
     }
 
     impl HotSwapLimitRecordingClient {
@@ -6043,16 +6042,6 @@ mod tests {
             Self {
                 model: model.to_string(),
                 seen_max_tokens: Mutex::new(Vec::new()),
-                system_message_wire_capability: crate::SystemMessageWireCapability::Interleaved,
-            }
-        }
-
-        fn leading_prefix_only(model: &str) -> Self {
-            Self {
-                model: model.to_string(),
-                seen_max_tokens: Mutex::new(Vec::new()),
-                system_message_wire_capability:
-                    crate::SystemMessageWireCapability::LeadingPrefixOnly,
             }
         }
 
@@ -6365,10 +6354,6 @@ mod tests {
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
     #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     impl AgentLlmClient for HotSwapLimitRecordingClient {
-        fn system_message_wire_capability(&self) -> crate::SystemMessageWireCapability {
-            self.system_message_wire_capability
-        }
-
         async fn stream_response(
             &self,
             _messages: &[Message],
@@ -8323,25 +8308,13 @@ mod tests {
 
     struct BoundaryContextRecordingClient {
         call_count: Mutex<u32>,
-        seen_system_messages: Mutex<Vec<String>>,
-        seen_terminal_notice_counts: Mutex<Vec<usize>>,
     }
 
     impl BoundaryContextRecordingClient {
         fn new() -> Self {
             Self {
                 call_count: Mutex::new(0),
-                seen_system_messages: Mutex::new(Vec::new()),
-                seen_terminal_notice_counts: Mutex::new(Vec::new()),
             }
-        }
-
-        fn seen_system_messages(&self) -> Vec<String> {
-            self.seen_system_messages.lock().unwrap().clone()
-        }
-
-        fn seen_terminal_notice_counts(&self) -> Vec<usize> {
-            self.seen_terminal_notice_counts.lock().unwrap().clone()
         }
     }
 
@@ -8349,41 +8322,12 @@ mod tests {
     impl AgentLlmClient for BoundaryContextRecordingClient {
         async fn stream_response(
             &self,
-            messages: &[Message],
+            _messages: &[Message],
             _tools: &[Arc<ToolDef>],
             _max_tokens: u32,
             _temperature: Option<f32>,
             _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
         ) -> Result<super::LlmStreamResult, AgentError> {
-            self.seen_system_messages.lock().unwrap().push(
-                messages
-                    .iter()
-                    .filter_map(|message| match message {
-                        Message::System(system) => Some(system.content.clone()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            );
-            self.seen_terminal_notice_counts.lock().unwrap().push(
-                messages
-                    .iter()
-                    .filter(|message| {
-                        matches!(
-                            message,
-                            Message::SystemNotice(notice)
-                                if notice.blocks.iter().any(|block| matches!(
-                                    block,
-                                    crate::types::SystemNoticeBlock::Comms {
-                                        kind: crate::types::CommsNoticeKind::ResponseTerminal,
-                                        ..
-                                    }
-                                ))
-                        )
-                    })
-                    .count(),
-            );
-
             let mut calls = self.call_count.lock().unwrap();
             let response = if *calls == 0 {
                 super::LlmStreamResult::new(
@@ -8416,28 +8360,6 @@ mod tests {
 
         fn model(&self) -> &'static str {
             "mock-model"
-        }
-    }
-
-    struct BlockingToolDispatcher {
-        tools: Arc<[Arc<ToolDef>]>,
-        started: Arc<Notify>,
-        release: Arc<Notify>,
-    }
-
-    #[async_trait]
-    impl AgentToolDispatcher for BlockingToolDispatcher {
-        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
-            Arc::clone(&self.tools)
-        }
-
-        async fn dispatch(
-            &self,
-            call: ToolCallView<'_>,
-        ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
-            self.started.notify_waiters();
-            self.release.notified().await;
-            Ok(ToolResult::new(call.id.to_string(), "released".to_string(), false).into())
         }
     }
 
@@ -11299,10 +11221,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn explicit_hot_swap_rejects_incompatible_system_shape_before_live_mutation() {
+    async fn explicit_hot_swap_preserves_arbitrary_position_system_messages() {
         let registry = fallback_activation_test_registry();
         let primary = Arc::new(HotSwapLimitRecordingClient::new("primary"));
-        let incompatible = Arc::new(HotSwapLimitRecordingClient::leading_prefix_only("backup"));
+        let backup = Arc::new(HotSwapLimitRecordingClient::new("backup"));
         let mut session = explicit_hot_swap_session("primary");
         session.push(Message::User(UserMessage::text("ordinary turn")));
         session.push(Message::System(crate::SystemMessage::new(
@@ -11319,49 +11241,40 @@ mod tests {
         .build_standalone(primary.clone(), Arc::new(NoTools), Arc::new(NoopStore))
         .await;
         agent.config.max_turns = Some(1);
-        let before =
-            serde_json::to_value(agent.session()).expect("pre-swap session should serialize");
+        let before_messages = agent.session().messages().to_vec();
 
-        let error = agent
+        agent
             .hot_swap_llm_identity(
-                incompatible.clone(),
+                backup.clone(),
                 explicit_hot_swap_identity("backup"),
                 explicit_hot_swap_policy("backup"),
             )
-            .expect_err("target wire must reject the interleaved System shape");
-        assert!(matches!(
-            error,
-            AgentError::SystemMessageWireIncompatible {
-                provider: crate::Provider::OpenAI,
-                capability: crate::SystemMessageWireCapability::LeadingPrefixOnly,
-                incompatible_index: 1,
-            }
-        ));
+            .expect("System placement must not constrain a provider hot swap");
         assert_eq!(
-            serde_json::to_value(agent.session()).expect("rejected-swap session should serialize"),
-            before,
-            "failed wire preflight must not change transcript or durable metadata"
+            agent.session().messages(),
+            before_messages,
+            "hot swap must not rewrite, hoist, or remove ordered transcript data"
         );
         assert_eq!(
             agent
                 .active_model_profile
                 .as_ref()
                 .map(crate::ModelProfileWitness::model),
-            Some("primary")
+            Some("backup")
         );
 
         agent
-            .run("old client remains active".into())
+            .run("backup client is active".into())
             .await
-            .expect("the original client should remain live");
-        assert_eq!(primary.seen_max_tokens(), vec![8192]);
-        assert!(incompatible.seen_max_tokens().is_empty());
+            .expect("the replacement client should run");
+        assert!(primary.seen_max_tokens().is_empty());
+        assert_eq!(backup.seen_max_tokens(), vec![8192]);
     }
 
     #[tokio::test]
-    async fn direct_client_replacement_rejects_incompatible_system_shape_before_mutation() {
+    async fn direct_client_replacement_preserves_arbitrary_position_system_messages() {
         let primary = Arc::new(HotSwapLimitRecordingClient::new("primary"));
-        let incompatible = Arc::new(HotSwapLimitRecordingClient::leading_prefix_only("backup"));
+        let replacement = Arc::new(HotSwapLimitRecordingClient::new("backup"));
         let mut session = explicit_hot_swap_session("primary");
         session.push(Message::User(UserMessage::text("ordinary turn")));
         session.push(Message::System(crate::SystemMessage::new(
@@ -11371,25 +11284,19 @@ mod tests {
             .build_standalone(primary.clone(), Arc::new(NoTools), Arc::new(NoopStore))
             .await;
         agent.config.max_turns = Some(1);
-
-        let error = agent
-            .replace_client(incompatible.clone())
-            .expect_err("replacement wire must reject the interleaved System shape");
-        assert!(matches!(
-            error,
-            AgentError::SystemMessageWireIncompatible {
-                capability: crate::SystemMessageWireCapability::LeadingPrefixOnly,
-                incompatible_index: 1,
-                ..
-            }
-        ));
+        let before_messages = agent.session().messages().to_vec();
 
         agent
-            .run("old client remains active".into())
+            .replace_client(replacement.clone())
+            .expect("System placement must not constrain direct client replacement");
+        assert_eq!(agent.session().messages(), before_messages);
+
+        agent
+            .run("replacement client is active".into())
             .await
-            .expect("the original client should remain live");
-        assert_eq!(primary.seen_max_tokens(), vec![8192]);
-        assert!(incompatible.seen_max_tokens().is_empty());
+            .expect("the replacement client should run");
+        assert!(primary.seen_max_tokens().is_empty());
+        assert_eq!(replacement.seen_max_tokens().len(), 1);
     }
 
     #[tokio::test]

@@ -121,7 +121,7 @@ impl HeadCanonicalRuntimeBoundaryAuthority {
         if derived != committed_head_token {
             return Err(
                 meerkat_core::SessionStoreError::TranscriptRevisionConflict {
-                    id: boundary_head.id.clone(),
+                    id: boundary_head.id,
                     expected: derived,
                     actual: committed_head_token,
                 },
@@ -1265,28 +1265,6 @@ pub trait SessionAgentBuilder: Send + Sync {
         meerkat_models::inline_video_support_for(identity.provider, &identity.model)
     }
 
-    /// Validate a detached durable transcript plus a proposed tail append of
-    /// ordinary `System` messages against the exact client wire that would be
-    /// bound when this session is materialized.
-    ///
-    /// Store-only control writes have no live [`SessionAgent`] to consult. The
-    /// restrictive default refuses nonempty appends instead of persisting a
-    /// transcript the eventual provider cannot represent.
-    async fn preflight_detached_system_message_append(
-        &self,
-        _session: &meerkat_core::Session,
-        count: usize,
-    ) -> Result<(), SessionError> {
-        if count == 0 {
-            Ok(())
-        } else {
-            Err(SessionError::Agent(AgentError::ConfigError(
-                "detached System-message wire preflight is not supported by this session builder"
-                    .to_string(),
-            )))
-        }
-    }
-
     /// Build an agent for a new session.
     async fn build_agent(
         &self,
@@ -1650,28 +1628,10 @@ pub trait SessionAgent: Send {
 
     /// Append ordinary ordered System messages at the current transcript tail.
     ///
-    /// SessionTask calls [`Self::preflight_system_message_append`] before any
-    /// turn mutation, then invokes this method only for the admitted append.
     fn append_system_messages(&mut self, _contents: Vec<String>) -> Result<(), AgentError> {
         Err(AgentError::ConfigError(
             "ordinary System-message append is not supported by this session agent".to_string(),
         ))
-    }
-
-    /// Validate a proposed tail append of ordinary `System` messages without
-    /// changing transcript, metadata, client, or durable projection state.
-    ///
-    /// The restrictive default refuses nonempty appends. Concrete agents must
-    /// delegate to the exact active client capability they will use for the
-    /// subsequent provider request.
-    fn preflight_system_message_append(&self, count: usize) -> Result<(), AgentError> {
-        if count == 0 {
-            Ok(())
-        } else {
-            Err(AgentError::ConfigError(
-                "System-message wire preflight is not supported by this session agent".to_string(),
-            ))
-        }
     }
 
     /// Append one ordinary ordered System message with explicit control identity.
@@ -1840,17 +1800,6 @@ pub struct EphemeralSessionService<B: SessionAgentBuilder> {
 }
 
 impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    pub(crate) async fn preflight_detached_system_message_append(
-        &self,
-        session: &meerkat_core::Session,
-        count: usize,
-    ) -> Result<(), SessionError> {
-        self.builder
-            .preflight_detached_system_message_append(session, count)
-            .await
-    }
-
     /// Deliver cooperative cancellation to one exact live run.
     ///
     /// Machine-owned boundary handles must use this run-scoped seam. The
@@ -5199,13 +5148,6 @@ async fn session_task<A: SessionAgent>(
                 result_tx,
                 active_admission,
             } => {
-                if let Err(error) = agent.preflight_system_message_append(system_messages.len()) {
-                    abort_admitted_turn(&control);
-                    let _ = result_tx.send(SessionTurnExecutionOutcome::without_machine_terminal(
-                        Err(error),
-                    ));
-                    continue;
-                }
                 let runtime = *runtime;
                 let metadata = runtime.turn_metadata;
                 let render_metadata = metadata
@@ -6102,12 +6044,9 @@ async fn session_task<A: SessionAgent>(
                 let _ = reply_tx.send(agent.update_mob_tool_authority_context(authority_context));
             }
             SessionCommand::AppendSystemMessageControl { req, reply_tx } => {
-                let result = match agent.preflight_system_message_append(1) {
-                    Ok(()) => match control.archive_snapshot_gate.enter_apply() {
-                        Ok(_gate) => agent.append_system_message_control(req),
-                        Err(error) => Err(AgentError::InternalError(error.to_string())),
-                    },
-                    Err(error) => Err(error),
+                let result = match control.archive_snapshot_gate.enter_apply() {
+                    Ok(_gate) => agent.append_system_message_control(req),
+                    Err(error) => Err(AgentError::InternalError(error.to_string())),
                 };
                 if result.is_ok() {
                     let snap = agent.snapshot();
@@ -6908,7 +6847,6 @@ mod injected_context_turn_tests {
     #[derive(Clone)]
     struct InjectedContextProbeBuilder {
         observed_turns: Arc<Mutex<Vec<(String, Vec<String>)>>>,
-        system_message_wire_capability: meerkat_core::SystemMessageWireCapability,
     }
 
     struct InjectedContextProbeAgent {
@@ -6916,7 +6854,6 @@ mod injected_context_turn_tests {
         session: meerkat_core::Session,
         identity: SessionLlmIdentity,
         observed_turns: Arc<Mutex<Vec<(String, Vec<String>)>>>,
-        system_message_wire_capability: meerkat_core::SystemMessageWireCapability,
         transient_turn_context_state: meerkat_core::TransientTurnContextStateHandle,
     }
 
@@ -6941,7 +6878,6 @@ mod injected_context_turn_tests {
                 session,
                 identity: probe_llm_identity(&req.model),
                 observed_turns: Arc::clone(&self.observed_turns),
-                system_message_wire_capability: self.system_message_wire_capability,
                 transient_turn_context_state: meerkat_core::TransientTurnContextStateHandle::new(),
             })
         }
@@ -7044,23 +6980,8 @@ mod injected_context_turn_tests {
         }
 
         fn append_system_messages(&mut self, contents: Vec<String>) -> Result<(), AgentError> {
-            self.preflight_system_message_append(contents.len())?;
             for content in contents {
                 self.session.append_system_message(content);
-            }
-            Ok(())
-        }
-
-        fn preflight_system_message_append(&self, count: usize) -> Result<(), AgentError> {
-            let capability = self.system_message_wire_capability;
-            if let Some(incompatible_index) = capability
-                .first_incompatible_index_after_system_append(self.session.messages(), count)
-            {
-                return Err(AgentError::SystemMessageWireIncompatible {
-                    provider: self.identity.provider,
-                    capability,
-                    incompatible_index,
-                });
             }
             Ok(())
         }
@@ -7106,8 +7027,6 @@ mod injected_context_turn_tests {
         let service = EphemeralSessionService::new(
             InjectedContextProbeBuilder {
                 observed_turns: Arc::clone(&observed_turns),
-                system_message_wire_capability:
-                    meerkat_core::SystemMessageWireCapability::Interleaved,
             },
             1,
         );
@@ -7142,8 +7061,6 @@ mod injected_context_turn_tests {
         let service = EphemeralSessionService::new(
             InjectedContextProbeBuilder {
                 observed_turns: Arc::clone(&observed_turns),
-                system_message_wire_capability:
-                    meerkat_core::SystemMessageWireCapability::Interleaved,
             },
             1,
         );
@@ -7184,8 +7101,6 @@ mod injected_context_turn_tests {
         let service = EphemeralSessionService::new(
             InjectedContextProbeBuilder {
                 observed_turns: Arc::clone(&observed_turns),
-                system_message_wire_capability:
-                    meerkat_core::SystemMessageWireCapability::Interleaved,
             },
             1,
         );
@@ -7279,84 +7194,6 @@ mod injected_context_turn_tests {
         );
     }
 
-    #[tokio::test]
-    async fn start_turn_wire_refusal_leaves_transcript_snapshot_untouched() {
-        let observed_turns = Arc::new(Mutex::new(Vec::new()));
-        let service = EphemeralSessionService::new(
-            InjectedContextProbeBuilder {
-                observed_turns: Arc::clone(&observed_turns),
-                system_message_wire_capability:
-                    meerkat_core::SystemMessageWireCapability::LeadingPrefixOnly,
-            },
-            1,
-        );
-        let created = service
-            .create_session(create_request(
-                "defer",
-                Vec::new(),
-                InitialTurnPolicy::Defer,
-            ))
-            .await
-            .expect("deferred session should create");
-        service
-            .start_turn(
-                &created.session_id,
-                StartTurnRequest {
-                    prompt: ContentInput::Text("first user".to_string()),
-                    injected_context: Vec::new(),
-                    system_prompt: None,
-                    event_tx: None,
-                    runtime: meerkat_core::service::StartTurnRuntimeSemantics::default(),
-                },
-            )
-            .await
-            .expect("ordinary first turn should run");
-        let before = service
-            .export_session(&created.session_id)
-            .await
-            .expect("export before refused turn");
-        let before_json = serde_json::to_value(&before).expect("serialize before snapshot");
-
-        let error = service
-            .start_turn(
-                &created.session_id,
-                StartTurnRequest {
-                    prompt: ContentInput::Text("must not append".to_string()),
-                    injected_context: Vec::new(),
-                    system_prompt: Some("late instruction".to_string()),
-                    event_tx: None,
-                    runtime: meerkat_core::service::StartTurnRuntimeSemantics::default(),
-                },
-            )
-            .await
-            .expect_err("leading-prefix-only wire must refuse a late System message");
-        assert!(matches!(
-            error,
-            SessionError::Agent(AgentError::SystemMessageWireIncompatible {
-                provider: meerkat_core::Provider::OpenAI,
-                capability: meerkat_core::SystemMessageWireCapability::LeadingPrefixOnly,
-                incompatible_index: 1,
-            })
-        ));
-        let after = service
-            .export_session(&created.session_id)
-            .await
-            .expect("export after refused turn");
-        assert_eq!(
-            serde_json::to_value(&after).expect("serialize after snapshot"),
-            before_json,
-            "wire refusal must precede System append, user append, and durable snapshot mutation"
-        );
-        assert_eq!(
-            observed_turns
-                .lock()
-                .expect("observed turns lock poisoned")
-                .as_slice(),
-            &[("first user".to_string(), Vec::new())],
-            "the refused turn must never reach the agent run boundary"
-        );
-    }
-
     /// Deferred create has no first turn to attach injected context to; the
     /// service fails closed instead of silently dropping host context.
     #[tokio::test]
@@ -7365,8 +7202,6 @@ mod injected_context_turn_tests {
         let service = EphemeralSessionService::new(
             InjectedContextProbeBuilder {
                 observed_turns: Arc::clone(&observed_turns),
-                system_message_wire_capability:
-                    meerkat_core::SystemMessageWireCapability::Interleaved,
             },
             1,
         );
@@ -7462,7 +7297,6 @@ mod injected_context_turn_tests {
             session: meerkat_core::Session::new(),
             identity: probe_llm_identity("default-guard"),
             observed_turns: Arc::clone(&observed_turns),
-            system_message_wire_capability: meerkat_core::SystemMessageWireCapability::Interleaved,
             transient_turn_context_state: meerkat_core::TransientTurnContextStateHandle::new(),
         });
 

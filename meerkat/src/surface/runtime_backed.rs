@@ -12,9 +12,10 @@ use meerkat_core::service::{
     DeferredPromptPolicy, InitialTurnPolicy, StartTurnRequest, StartTurnRuntimeSemantics,
 };
 use meerkat_core::types::HandlingMode;
+use meerkat_core::{AgentEvent, EventEnvelope};
+#[cfg(test)]
 use meerkat_core::{
-    AgentEvent, EventEnvelope, SurfaceSessionRecoveryContext, SurfaceSessionRecoveryOverrides,
-    build_recovered_session,
+    SurfaceSessionRecoveryContext, SurfaceSessionRecoveryOverrides, build_recovered_session,
 };
 use meerkat_runtime::meerkat_machine::RuntimeBindingsError;
 use meerkat_runtime::{

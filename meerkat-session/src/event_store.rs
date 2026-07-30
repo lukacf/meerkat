@@ -152,7 +152,6 @@ impl TranscriptRewritePrefixReceipt {
     /// Storage-specific proof remains the implementing store's obligation;
     /// this constructor prevents downstream backends from depending on private
     /// FileEventStore token bytes.
-    #[must_use]
     pub fn new(
         session_id: SessionId,
         through_log_seq: u64,
@@ -1419,6 +1418,26 @@ struct AppendedIndexRow {
     byte_len: u64,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+struct EventLogAppend<'a> {
+    session_id: &'a SessionId,
+    pre_fingerprint: EventLogFingerprint,
+    post_fingerprint: EventLogFingerprint,
+    bytes: &'a [u8],
+    rows: &'a [AppendedIndexRow],
+    stored_events: &'a [StoredEvent],
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct ReconciledEventLogHead {
+    session_id: SessionId,
+    fingerprint: EventLogFingerprint,
+    through_log_seq: u64,
+    last_line: Option<EventLogLineAnchor>,
+    last_distinct_rewrite_seq: u64,
+    legacy_generation_zero_normalized: bool,
+}
+
 #[derive(Debug)]
 #[cfg(not(target_arch = "wasm32"))]
 struct FullTranscriptRewriteAuditScan {
@@ -1621,10 +1640,12 @@ impl EventLogIndex {
         );
 
         if can_extend {
-            let prefix = self
-                .transcript_rewrite_prefix
-                .as_mut()
-                .expect("can_extend requires a prefix");
+            let Some(prefix) = self.transcript_rewrite_prefix.as_mut() else {
+                return Err(EventStoreError::Store(
+                    "event-log index lost its transcript rewrite prefix while extending it"
+                        .to_string(),
+                ));
+            };
             prefix.accumulator = prefix
                 .accumulator
                 .extend(commit)
@@ -2305,27 +2326,22 @@ impl FileEventStore {
 
     async fn stage_reconciled_event_log_head(
         &self,
-        session_id: &SessionId,
-        fingerprint: EventLogFingerprint,
-        through_log_seq: u64,
-        last_line: Option<EventLogLineAnchor>,
-        last_distinct_rewrite_seq: u64,
+        reconciled: ReconciledEventLogHead,
         receipt: TranscriptRewritePrefixReceipt,
-        legacy_generation_zero_normalized: bool,
     ) -> Result<TranscriptRewritePrefixReceipt, EventStoreError> {
         let last_rewrite_generation = receipt.accumulator.occurrence_count();
         let body = DurableEventLogHeadBody {
             schema_version: EVENT_LOG_HEAD_SCHEMA_VERSION,
-            session_id: session_id.clone(),
-            through_log_seq,
-            covered_log_len: fingerprint.len,
-            covered_log_fingerprint: fingerprint,
-            last_line,
-            last_distinct_rewrite_seq,
+            session_id: reconciled.session_id,
+            through_log_seq: reconciled.through_log_seq,
+            covered_log_len: reconciled.fingerprint.len,
+            covered_log_fingerprint: reconciled.fingerprint,
+            last_line: reconciled.last_line,
+            last_distinct_rewrite_seq: reconciled.last_distinct_rewrite_seq,
             last_rewrite_generation,
             last_rewrite_commit: receipt.last_commit.clone(),
             rewrite_prefix: Some(receipt.accumulator.clone()),
-            legacy_generation_zero_normalized,
+            legacy_generation_zero_normalized: reconciled.legacy_generation_zero_normalized,
         };
         self.stage_event_log_head(receipt, body).await
     }
@@ -2643,6 +2659,11 @@ impl FileEventStore {
         if sidecar.rewrite_prefix.as_ref() != Some(expected_prefix) {
             return Ok(None);
         }
+        let authorized_prefix = sidecar.rewrite_prefix.clone().ok_or_else(|| {
+            EventStoreError::Store(
+                "authorized event-log head lost its transcript rewrite prefix".to_string(),
+            )
+        })?;
 
         let path = self.log_path(session_id);
         let mut file = match tokio::fs::File::open(&path).await {
@@ -2656,9 +2677,7 @@ impl FileEventStore {
                     receipt: Some(TranscriptRewritePrefixReceipt {
                         session_id: session_id.clone(),
                         through_log_seq: 0,
-                        accumulator: sidecar
-                            .rewrite_prefix
-                            .expect("authorized head carries rewrite prefix"),
+                        accumulator: authorized_prefix.clone(),
                         last_commit: sidecar.last_rewrite_commit,
                         finalization_id: None,
                     }),
@@ -2708,9 +2727,7 @@ impl FileEventStore {
                 receipt: Some(TranscriptRewritePrefixReceipt {
                     session_id: session_id.clone(),
                     through_log_seq: sidecar.through_log_seq,
-                    accumulator: sidecar
-                        .rewrite_prefix
-                        .expect("authorized head carries rewrite prefix"),
+                    accumulator: authorized_prefix.clone(),
                     last_commit: sidecar.last_rewrite_commit,
                     finalization_id: None,
                 }),
@@ -2724,10 +2741,7 @@ impl FileEventStore {
         let mut line = String::new();
         let mut offset = sidecar.covered_log_len;
         let mut observed_seq = sidecar.through_log_seq;
-        let mut accumulator = sidecar
-            .rewrite_prefix
-            .clone()
-            .expect("authorized head carries rewrite prefix");
+        let mut accumulator = authorized_prefix;
         let mut last_generation = sidecar.last_rewrite_generation;
         let mut last_commit = sidecar.last_rewrite_commit.clone();
         let mut last_distinct_rewrite_seq = sidecar.last_distinct_rewrite_seq;
@@ -3355,22 +3369,14 @@ impl FileEventStore {
         Ok((rows, after))
     }
 
-    async fn note_appended_rows(
-        &self,
-        session_id: &SessionId,
-        pre_fingerprint: EventLogFingerprint,
-        post_fingerprint: EventLogFingerprint,
-        appended_bytes: &[u8],
-        rows: &[AppendedIndexRow],
-        stored_events: &[StoredEvent],
-    ) {
-        let shared = self.event_log_index(session_id).await;
+    async fn note_appended_rows(&self, append: &EventLogAppend<'_>) {
+        let shared = self.event_log_index(append.session_id).await;
         let mut index = shared.lock().await;
-        let Ok(appended_len) = u64::try_from(appended_bytes.len()) else {
+        let Ok(appended_len) = u64::try_from(append.bytes.len()) else {
             *index = EventLogIndex::default();
             return;
         };
-        let Some(expected_post_len) = pre_fingerprint.len.checked_add(appended_len) else {
+        let Some(expected_post_len) = append.pre_fingerprint.len.checked_add(appended_len) else {
             *index = EventLogIndex::default();
             return;
         };
@@ -3378,7 +3384,7 @@ impl FileEventStore {
         // fingerprint after fsync but before this cooperative update acquired
         // the mutex. Never erase that newer validated snapshot. Mechanical
         // extension is legal only from the exact pre-append state.
-        if index.fingerprint != Some(pre_fingerprint) {
+        if index.fingerprint != Some(append.pre_fingerprint) {
             // The first append creates the JSONL after `last_seq()` validated
             // its absence. Bind that still-empty index to the newly-created
             // zero-byte file before mechanically extending it. No other
@@ -3386,23 +3392,23 @@ impl FileEventStore {
             if index.fingerprint.is_none()
                 && index.row_count == 0
                 && index.last_seq == 0
-                && pre_fingerprint.len == 0
+                && append.pre_fingerprint.len == 0
             {
-                index.fingerprint = Some(pre_fingerprint);
+                index.fingerprint = Some(append.pre_fingerprint);
             } else {
                 return;
             }
         }
-        if post_fingerprint.len != expected_post_len {
+        if append.post_fingerprint.len != expected_post_len {
             *index = EventLogIndex::default();
             return;
         }
-        let append_start = pre_fingerprint.len;
-        if rows.len() != stored_events.len() {
+        let append_start = append.pre_fingerprint.len;
+        if append.rows.len() != append.stored_events.len() {
             *index = EventLogIndex::default();
             return;
         }
-        for (row, event) in rows.iter().zip(stored_events) {
+        for (row, event) in append.rows.iter().zip(append.stored_events) {
             if index.row_count > 0 && row.seq <= index.last_seq {
                 *index = EventLogIndex::default();
                 return;
@@ -3423,7 +3429,7 @@ impl FileEventStore {
                 *index = EventLogIndex::default();
                 return;
             };
-            let Some(line) = appended_bytes.get(relative_start..relative_end) else {
+            let Some(line) = append.bytes.get(relative_start..relative_end) else {
                 *index = EventLogIndex::default();
                 return;
             };
@@ -3453,14 +3459,14 @@ impl FileEventStore {
                 row.byte_len,
             );
             if index
-                .note_transcript_rewrite_commit(session_id, event)
+                .note_transcript_rewrite_commit(append.session_id, event)
                 .is_err()
             {
                 *index = EventLogIndex::default();
                 return;
             }
         }
-        index.fingerprint = Some(post_fingerprint);
+        index.fingerprint = Some(append.post_fingerprint);
     }
 
     #[cfg(test)]
@@ -3593,17 +3599,12 @@ impl FileEventStore {
 
     fn event_log_head_after_append(
         &self,
-        session_id: &SessionId,
         mut head: DurableEventLogHeadBody,
-        pre_fingerprint: EventLogFingerprint,
-        post_fingerprint: EventLogFingerprint,
-        appended_bytes: &[u8],
-        rows: &[AppendedIndexRow],
-        stored_events: &[StoredEvent],
+        append: &EventLogAppend<'_>,
     ) -> Result<DurableEventLogHeadBody, EventStoreError> {
-        if head.covered_log_fingerprint != pre_fingerprint
-            || head.covered_log_len != pre_fingerprint.len
-            || rows.len() != stored_events.len()
+        if head.covered_log_fingerprint != append.pre_fingerprint
+            || head.covered_log_len != append.pre_fingerprint.len
+            || append.rows.len() != append.stored_events.len()
         {
             return Err(EventStoreError::Store(
                 "validated event-log head no longer matches append pre-state".to_string(),
@@ -3614,12 +3615,12 @@ impl FileEventStore {
         let mut last_generation = head.last_rewrite_generation;
         let mut last_commit = head.last_rewrite_commit.take();
         let mut last_distinct_rewrite_seq = head.last_distinct_rewrite_seq;
-        for event in stored_events {
+        for event in append.stored_events {
             let Some((event_session_id, commits)) = transcript_rewrite_event_parts(&event.event)
             else {
                 continue;
             };
-            if event_session_id != session_id {
+            if event_session_id != append.session_id {
                 continue;
             }
             let Some(accumulator) = rewrite_prefix.as_mut() else {
@@ -3629,7 +3630,7 @@ impl FileEventStore {
                 if receipt.end_prefix() == accumulator {
                     if last_commit.as_ref() != receipt.commits().last() {
                         return Err(EventStoreError::TranscriptRewriteGenerationConflict {
-                            session_id: session_id.clone(),
+                            session_id: append.session_id.to_owned(),
                             generation: last_generation,
                             first_seq: last_distinct_rewrite_seq,
                             conflicting_seq: event.seq,
@@ -3650,7 +3651,7 @@ impl FileEventStore {
                 if commit.rewrite_generation == last_generation {
                     if last_commit.as_ref() != Some(commit) {
                         return Err(EventStoreError::TranscriptRewriteGenerationConflict {
-                            session_id: session_id.clone(),
+                            session_id: append.session_id.to_owned(),
                             generation: commit.rewrite_generation,
                             first_seq: last_distinct_rewrite_seq,
                             conflicting_seq: event.seq,
@@ -3682,7 +3683,7 @@ impl FileEventStore {
             head.legacy_generation_zero_normalized = false;
         }
 
-        let Some(last_row) = rows.last() else {
+        let Some(last_row) = append.rows.last() else {
             return Err(EventStoreError::Store(
                 "nonempty append has no event-log head row".to_string(),
             ));
@@ -3701,12 +3702,13 @@ impl FileEventStore {
                 "appended event-log head row has an unaddressable offset".to_string(),
             ));
         };
-        let Some(line) = appended_bytes.get(relative_start..relative_end) else {
+        let Some(line) = append.bytes.get(relative_start..relative_end) else {
             return Err(EventStoreError::Store(
                 "appended event-log head row is outside serialized bytes".to_string(),
             ));
         };
-        let absolute_offset = pre_fingerprint
+        let absolute_offset = append
+            .pre_fingerprint
             .len
             .checked_add(last_row.relative_offset)
             .ok_or_else(|| {
@@ -3715,8 +3717,8 @@ impl FileEventStore {
                 )
             })?;
         head.through_log_seq = last_row.seq;
-        head.covered_log_len = post_fingerprint.len;
-        head.covered_log_fingerprint = post_fingerprint;
+        head.covered_log_len = append.post_fingerprint.len;
+        head.covered_log_fingerprint = append.post_fingerprint;
         head.last_line = Some(Self::event_log_line_anchor(
             absolute_offset,
             last_row.byte_len,
@@ -3988,31 +3990,29 @@ impl FileEventStore {
         let pre_fingerprint = Self::event_log_fingerprint_from_metadata(&file.metadata().await?);
         // Validate and advance semantic head facts before the authority write:
         // a same-generation conflict must fail without appending a corrupt row.
+        let prospective_append = EventLogAppend {
+            session_id,
+            pre_fingerprint,
+            post_fingerprint: pre_fingerprint,
+            bytes: lines.as_bytes(),
+            rows: &appended_index_rows,
+            stored_events: &stored_events,
+        };
         let mut prospective_head = exact_pre_head
-            .map(|head| {
-                self.event_log_head_after_append(
-                    session_id,
-                    head,
-                    pre_fingerprint,
-                    pre_fingerprint,
-                    lines.as_bytes(),
-                    &appended_index_rows,
-                    &stored_events,
-                )
-            })
+            .map(|head| self.event_log_head_after_append(head, &prospective_append))
             .transpose()?;
         file.write_all(lines.as_bytes()).await?;
         file.flush().await?;
         file.sync_all().await?;
         let post_fingerprint = Self::event_log_fingerprint_from_metadata(&file.metadata().await?);
-        self.note_appended_rows(
+        self.note_appended_rows(&EventLogAppend {
             session_id,
             pre_fingerprint,
             post_fingerprint,
-            lines.as_bytes(),
-            &appended_index_rows,
-            &stored_events,
-        )
+            bytes: lines.as_bytes(),
+            rows: &appended_index_rows,
+            stored_events: &stored_events,
+        })
         .await;
         // JSONL fsync is the authority boundary. Exactly one atomic metadata
         // replacement follows it: sequence allocation and rewrite-tail
@@ -4456,13 +4456,15 @@ impl EventStore for FileEventStore {
                     });
                 receipt = Some(
                     self.stage_reconciled_event_log_head(
-                        session_id,
-                        fingerprint,
-                        scan.observed_through_log_seq,
-                        scan.last_line,
-                        last_distinct_rewrite_seq,
+                        ReconciledEventLogHead {
+                            session_id: session_id.clone(),
+                            fingerprint,
+                            through_log_seq: scan.observed_through_log_seq,
+                            last_line: scan.last_line,
+                            last_distinct_rewrite_seq,
+                            legacy_generation_zero_normalized: legacy_normalized,
+                        },
                         candidate_receipt,
-                        legacy_normalized,
                     )
                     .await?,
                 );

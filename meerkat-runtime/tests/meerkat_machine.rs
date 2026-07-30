@@ -295,7 +295,7 @@ impl RuntimeStore for HarnessRuntimeStore {
         &self,
         runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
         boundary: meerkat_runtime::store::PreparedWholeBlobRewriteStoreParts,
-    ) -> Result<meerkat_runtime::RuntimeSessionAuthority, RuntimeStoreError> {
+    ) -> Result<meerkat_runtime::store::WholeBlobStoreAuthority, RuntimeStoreError> {
         self.inner
             .commit_prepared_whole_blob_rewrite_boundary(runtime_id, boundary)
             .await

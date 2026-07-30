@@ -43,10 +43,6 @@ struct MockLlmClient;
 
 #[async_trait]
 impl LlmClient for MockLlmClient {
-    fn system_message_wire_capability(&self) -> meerkat_core::SystemMessageWireCapability {
-        meerkat_core::SystemMessageWireCapability::Interleaved
-    }
-
     fn project_replay_messages(
         &self,
         messages: &[meerkat_core::Message],

@@ -83,7 +83,6 @@ pub mod storage_durability;
 pub mod storage_layout;
 pub mod streaming_tool;
 pub mod surface_metadata;
-pub mod system_message_wire;
 pub mod time_compat;
 pub mod tool_catalog;
 pub mod tool_execution;
@@ -142,41 +141,6 @@ pub use compact::{
     CompactionSummary, CompactionWindow, Compactor, CuratedCompactionSummary,
     ProviderRequestPressure, SESSION_COMPACTION_CADENCE_KEY, SessionCompactionCadence,
 };
-pub use memory::{
-    CompactionCommitCoordinationError, CompactionCommitCoordinator, CompactionProjectionId,
-    CompactionProjectionIntent, CompactionProjectionPersistence, CompactionStageReceipt,
-    CompactionStageReconcileReceipt, EmbeddingModel, HnswParams, MemoryEnumerationPage,
-    MemoryEnumerationRequest, MemoryIndexBatch, MemoryIndexReceipt, MemoryIndexRequest,
-    MemoryIndexScope, MemoryMetadata, MemoryOwner, MemoryRankingPolicy, MemoryRecord, MemoryResult,
-    MemoryScopeDropReceipt, MemorySearchScope, MemorySource, MemoryStore, MemoryStoreError,
-    MessageRange, SESSION_COMPACTION_PROJECTION_INTENTS_KEY,
-};
-pub use model_profile::{ModelCatalog, ModelProfile};
-pub use model_registry::{
-    ModelCapability, ModelProfileWitness, ModelRegistry, ModelRegistryEntry, SelfHostedServerRef,
-    UnsupportedModelCapabilityEvidence, UnsupportedModelCapabilityReason,
-};
-pub use peer_correlation::{
-    InboundPeerRequestState, InteractionStreamAbandonReason, InteractionStreamState,
-    OutboundPeerRequestState, PeerCorrelationId,
-};
-pub use peer_meta::PeerMeta;
-pub use persistence_contract::{
-    HeadCanonicalProvisionalTailAuthority, ProvisionalTailAuthorityError, RunCheckpointAuthority,
-    RunCheckpointReceipt, SessionCheckpointer, WholeBlobProvisionalTailAuthority,
-};
-pub use placement::{ExecutionPlacement, ExecutionPlacementIdentity, PlacementError};
-pub use streaming_tool::{
-    ToolCancellationToken, ToolProgressFrame, ToolProgressFrameError, ToolProgressReportError,
-    ToolProgressSink, ToolStreamingDispatchContext,
-};
-pub use surface_metadata::{
-    MEERKAT_METADATA_PREFIX, RESERVED_MOB_LABEL_KEYS, ReservedMetadataKey, RuntimeMetadata,
-    SurfaceMetadata, SurfaceMetadataError, is_reserved_meerkat_label_key,
-    is_reserved_meerkat_metadata_key, validate_public_app_context, validate_public_labels,
-};
-pub use system_message_wire::SystemMessageWireCapability;
-
 pub use completion_feed::{
     CompletionBatch, CompletionEnrichmentData, CompletionEnrichmentProvider, CompletionEntry,
     CompletionFeed, CompletionSeq,
@@ -271,7 +235,21 @@ pub use lifecycle::{
     RunPrimitive, StagedRunInput,
 };
 pub use mcp_config::{McpConfig, McpConfigError, McpScope, McpServerConfig, McpServerWithScope};
+pub use memory::{
+    CompactionCommitCoordinationError, CompactionCommitCoordinator, CompactionProjectionId,
+    CompactionProjectionIntent, CompactionProjectionPersistence, CompactionStageReceipt,
+    CompactionStageReconcileReceipt, EmbeddingModel, HnswParams, MemoryEnumerationPage,
+    MemoryEnumerationRequest, MemoryIndexBatch, MemoryIndexReceipt, MemoryIndexRequest,
+    MemoryIndexScope, MemoryMetadata, MemoryOwner, MemoryRankingPolicy, MemoryRecord, MemoryResult,
+    MemoryScopeDropReceipt, MemorySearchScope, MemorySource, MemoryStore, MemoryStoreError,
+    MessageRange, SESSION_COMPACTION_PROJECTION_INTENTS_KEY,
+};
 pub use model_defaults::ModelOperationalDefaultsResolver;
+pub use model_profile::{ModelCatalog, ModelProfile};
+pub use model_registry::{
+    ModelCapability, ModelProfileWitness, ModelRegistry, ModelRegistryEntry, SelfHostedServerRef,
+    UnsupportedModelCapabilityEvidence, UnsupportedModelCapabilityReason,
+};
 pub use oauth_identity::OAuthProviderIdentity;
 pub use ops::{
     AsyncOpRef, ConcurrencyLimits, ContextStrategy, ForkBranch, ForkBudgetPolicy, OpEvent,
@@ -285,6 +263,16 @@ pub use ops_lifecycle::{
     OperationTerminalOutcome, OpsLifecycleError, OpsLifecycleRegistry, WaitAllResult,
     WaitAllSatisfied,
 };
+pub use peer_correlation::{
+    InboundPeerRequestState, InteractionStreamAbandonReason, InteractionStreamState,
+    OutboundPeerRequestState, PeerCorrelationId,
+};
+pub use peer_meta::PeerMeta;
+pub use persistence_contract::{
+    HeadCanonicalProvisionalTailAuthority, ProvisionalTailAuthorityError, RunCheckpointAuthority,
+    RunCheckpointReceipt, SessionCheckpointer, WholeBlobProvisionalTailAuthority,
+};
+pub use placement::{ExecutionPlacement, ExecutionPlacementIdentity, PlacementError};
 pub use prompt::{AGENTS_MD_MAX_BYTES, DEFAULT_SYSTEM_PROMPT, SystemPromptConfig};
 pub use provider::Provider;
 pub use realtime_transcript::{
@@ -385,6 +373,15 @@ pub use storage_diagnostics::{
 pub use storage_durability::{DurabilityClass, DurabilityDeclaration, DurabilityResolution};
 pub use storage_layout::{
     ResolvedStorage, StorageLayout, StorageLayoutInputs, find_project_root, local_realms_candidate,
+};
+pub use streaming_tool::{
+    ToolCancellationToken, ToolProgressFrame, ToolProgressFrameError, ToolProgressReportError,
+    ToolProgressSink, ToolStreamingDispatchContext,
+};
+pub use surface_metadata::{
+    MEERKAT_METADATA_PREFIX, RESERVED_MOB_LABEL_KEYS, ReservedMetadataKey, RuntimeMetadata,
+    SurfaceMetadata, SurfaceMetadataError, is_reserved_meerkat_label_key,
+    is_reserved_meerkat_metadata_key, validate_public_app_context, validate_public_labels,
 };
 pub use tool_catalog::{
     ToolCallability, ToolCatalogCapabilities, ToolCatalogDeferredEligibility, ToolCatalogEntry,

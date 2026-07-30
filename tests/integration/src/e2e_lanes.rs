@@ -5609,7 +5609,14 @@ mod tests {
             "meerkat-mob:smoke_mob_idle_burn",
         )
         .expect_err("artifact absent from the invocation must refuse");
-        assert!(refusal.contains("stale binary"), "{refusal}");
+        assert!(
+            refusal.contains(
+                "Bazel e2e artifact for meerkat-mob:smoke_mob_idle_burn \
+                 (bazel-out/darwin_arm64-fastbuild/bin/meerkat-mob/smoke_mob_idle_burn_test) \
+                 is not an output of foundation invocation abc"
+            ),
+            "{refusal}"
+        );
         // No recorded provenance (runfiles flow): the check stands down.
         assert!(require_built_by_recorded_invocation(None, "anything", "label").is_ok());
     }

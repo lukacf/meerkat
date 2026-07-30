@@ -2359,6 +2359,7 @@ mod skill_activation_effect_tests {
     };
     use crate::types::{AssistantBlock, StopReason, ToolDef, Usage};
     use std::future::Future;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     fn fixture_skill_key(name: &str) -> SkillKey {
         SkillKey::new(
@@ -2400,7 +2401,9 @@ mod skill_activation_effect_tests {
         }
     }
 
-    struct ProjectionRejectingLlmClient;
+    struct ProjectionRejectingLlmClient {
+        called: Arc<AtomicBool>,
+    }
 
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
     #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -2413,6 +2416,7 @@ mod skill_activation_effect_tests {
             _temperature: Option<f32>,
             _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
         ) -> Result<super::super::LlmStreamResult, AgentError> {
+            self.called.store(true, Ordering::SeqCst);
             Err(AgentError::llm(
                 "anthropic",
                 crate::error::LlmFailureReason::ProviderError(
@@ -3136,6 +3140,7 @@ mod skill_activation_effect_tests {
             .expect("test session build state should serialize");
         session.push(Message::User(UserMessage::text("existing turn")));
         let original_messages = session.messages().to_vec();
+        let provider_called = Arc::new(AtomicBool::new(false));
         let mut agent = AgentBuilder::new()
             .resume_session(session)
             .with_turn_state_handle(Arc::new(TestTurnStateHandle::new()))
@@ -3143,7 +3148,9 @@ mod skill_activation_effect_tests {
                 crate::lifecycle::RuntimeExecutionKind::ContentTurn,
             )
             .build_standalone(
-                Arc::new(ProjectionRejectingLlmClient),
+                Arc::new(ProjectionRejectingLlmClient {
+                    called: Arc::clone(&provider_called),
+                }),
                 Arc::new(NoTools),
                 Arc::new(NoopStore),
             )
@@ -3176,13 +3183,10 @@ mod skill_activation_effect_tests {
             .await
             .expect_err("limited provider projection must fail typed");
 
-        assert!(matches!(
-            error,
-            AgentError::Llm {
-                reason: crate::error::LlmFailureReason::ProviderError(_),
-                ..
-            }
-        ));
+        assert!(
+            provider_called.load(Ordering::SeqCst),
+            "the failing result must come after provider projection was attempted: {error:?}"
+        );
         assert_eq!(
             &agent.session().messages()[..original_messages.len()],
             original_messages

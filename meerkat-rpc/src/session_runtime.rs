@@ -12498,9 +12498,7 @@ mod tests {
             .await
             .expect("export live session");
         let expected_system_messages =
-            meerkat_client::RealtimeSessionOpenConfig::canonical_system_messages(
-                live_session.messages(),
-            );
+            RealtimeSessionOpenConfig::canonical_system_messages(live_session.messages());
         assert_eq!(
             canonical_system_messages,
             expected_system_messages.as_slice(),
@@ -12897,9 +12895,7 @@ mod tests {
 
         let canonical_system_messages = open_config.canonical_system_messages_ref();
         let seed_system_messages =
-            meerkat_client::RealtimeSessionOpenConfig::canonical_system_messages(
-                open_config.seed_messages(),
-            );
+            RealtimeSessionOpenConfig::canonical_system_messages(open_config.seed_messages());
         assert_eq!(
             canonical_system_messages,
             seed_system_messages.as_slice(),
@@ -13079,9 +13075,7 @@ mod tests {
 
         let canonical_system_messages = open_config.canonical_system_messages_ref();
         let seed_system_messages =
-            meerkat_client::RealtimeSessionOpenConfig::canonical_system_messages(
-                open_config.seed_messages(),
-            );
+            RealtimeSessionOpenConfig::canonical_system_messages(open_config.seed_messages());
         assert_eq!(
             canonical_system_messages,
             seed_system_messages.as_slice(),
@@ -22290,7 +22284,7 @@ mod tests {
                     matches!(
                         reason,
                         meerkat_core::event::StreamTruncationReason::StreamLagged { dropped }
-                            if dropped > 0
+                            if *dropped > 0
                     ),
                     "StreamTruncated should carry the typed lag reason: {reason:?}"
                 );

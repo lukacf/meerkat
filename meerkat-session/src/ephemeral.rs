@@ -8,9 +8,7 @@ use async_trait::async_trait;
 use indexmap::IndexMap;
 use meerkat_core::error::AgentError;
 use meerkat_core::event::{AgentEvent, EventEnvelope, EventSourceIdentity};
-use meerkat_core::image_content::{
-    MissingBlobBehavior, externalize_deferred_turn_state, hydrate_deferred_turn_state,
-};
+use meerkat_core::image_content::{MissingBlobBehavior, hydrate_deferred_turn_state};
 use meerkat_core::lifecycle::core_executor::{
     BoundSessionCommit, CoreApplyOutput, CoreApplyTerminal,
 };
@@ -34,7 +32,7 @@ use meerkat_core::{
     CancelAfterBoundaryCommand, CancelAfterBoundarySender, ConsumedDeferredTurnInputs,
     DeferredFirstTurnPhase, InputId, RealtimeTranscriptApplyOutcome, RealtimeTranscriptEvent,
     RealtimeTranscriptMaterializedMessage, RunId, SessionDeferredTurnState, SessionLlmIdentity,
-    SnapshotProjectionError, TransientTurnContextStateHandle, TurnStateHandle,
+    SnapshotProjectionError, TurnStateHandle,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
@@ -3978,7 +3976,6 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         let initial_runtime = meerkat_core::service::StartTurnRuntimeSemantics::new(
             initial_handling_mode,
             initial_turn_tool_overlay,
-            Vec::new(),
             initial_turn_metadata,
         );
 

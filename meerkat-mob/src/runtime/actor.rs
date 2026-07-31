@@ -119,6 +119,10 @@ pub(super) const RETIRE_LOCAL_TRUST_CLEANUP_CONCURRENCY: usize = 32;
 
 const STARTUP_FAILURE_AUTONOMOUS_STOP_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const STARTUP_FAILURE_AUTONOMOUS_STOP_DEADLINE: Duration = Duration::from_secs(10);
+/// A status projection is observational and must never hold the single mob
+/// actor behind a slow or wedged session-runtime read. Unknown progress is a
+/// truthful result; delaying lifecycle commands is not.
+const MEMBER_PROGRESS_OBSERVATION_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// Actor-owned task termination policy at a `JoinError` boundary.
 ///
@@ -10195,9 +10199,13 @@ impl MobActor {
 
         let progress = if include_local_session_details {
             match current_bridge_session_id.as_ref() {
-                Some(session_id) => match self.session_service.execution_snapshot(session_id).await
+                Some(session_id) => match tokio::time::timeout(
+                    MEMBER_PROGRESS_OBSERVATION_TIMEOUT,
+                    self.session_service.execution_snapshot(session_id),
+                )
+                .await
                 {
-                    Ok(Some(snapshot)) => {
+                    Ok(Ok(Some(snapshot))) => {
                         let run_open = snapshot.active_run_id.is_some() && !snapshot.turn_terminal;
                         let pending_operations = snapshot
                             .pending_operation_ids
@@ -10296,7 +10304,7 @@ impl MobActor {
                             health,
                         })
                     }
-                    Ok(None) | Err(_) => Some(super::handle::MemberProgressSnapshot {
+                    Ok(Ok(None) | Err(_)) | Err(_) => Some(super::handle::MemberProgressSnapshot {
                         run_state: super::handle::MemberRunState::Unknown,
                         in_flight_work: 0,
                         last_progress_at_ms: 0,

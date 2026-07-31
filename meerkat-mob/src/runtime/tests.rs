@@ -1499,6 +1499,8 @@ struct MockSessionService {
     inject_calls: Arc<AtomicU64>,
     flow_turn_in_flight: Arc<AtomicU64>,
     flow_turn_max_in_flight: Arc<AtomicU64>,
+    execution_snapshot_delay_ms: AtomicU64,
+    execution_snapshot_started: tokio::sync::Notify,
     create_session_delay_ms: AtomicU64,
     load_persisted_session_delay_ms: AtomicU64,
     load_persisted_session_started: tokio::sync::Notify,
@@ -1593,6 +1595,8 @@ impl MockSessionService {
             inject_calls: Arc::new(AtomicU64::new(0)),
             flow_turn_in_flight: Arc::new(AtomicU64::new(0)),
             flow_turn_max_in_flight: Arc::new(AtomicU64::new(0)),
+            execution_snapshot_delay_ms: AtomicU64::new(0),
+            execution_snapshot_started: tokio::sync::Notify::new(),
             create_session_delay_ms: AtomicU64::new(0),
             load_persisted_session_delay_ms: AtomicU64::new(0),
             load_persisted_session_started: tokio::sync::Notify::new(),
@@ -2043,6 +2047,15 @@ impl MockSessionService {
     fn set_load_persisted_session_delay_ms(&self, delay_ms: u64) {
         self.load_persisted_session_delay_ms
             .store(delay_ms, Ordering::Relaxed);
+    }
+
+    fn set_execution_snapshot_delay_ms(&self, delay_ms: u64) {
+        self.execution_snapshot_delay_ms
+            .store(delay_ms, Ordering::Relaxed);
+    }
+
+    async fn wait_for_execution_snapshot(&self) {
+        self.execution_snapshot_started.notified().await;
     }
 
     async fn wait_for_load_persisted_session(&self) {
@@ -3369,6 +3382,18 @@ impl MobSessionService for MockSessionService {
         _authority: meerkat_runtime::MachineSessionControlAuthority,
     ) -> Result<(), SessionError> {
         SessionService::cancel_after_boundary(self, session_id).await
+    }
+
+    async fn execution_snapshot(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<Option<meerkat_core::agent::AgentExecutionSnapshot>, SessionError> {
+        self.execution_snapshot_started.notify_one();
+        let delay_ms = self.execution_snapshot_delay_ms.load(Ordering::Relaxed);
+        if delay_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        }
+        Ok(None)
     }
 
     async fn archive_with_mob_lifecycle_authority(
@@ -46113,6 +46138,68 @@ async fn test_member_status_round_trips_through_machine_command_surface() {
         snapshot.current_bridge_session_id.as_ref(),
         Some(receipt.bridge_session_id().expect("session-backed")),
         "machine-routed member_status should preserve the active session binding"
+    );
+}
+
+#[tokio::test]
+async fn test_busy_member_execution_snapshot_cannot_block_mob_lifecycle_commands() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    handle
+        .spawn(
+            ProfileName::from("worker"),
+            AgentIdentity::from("w-busy-status"),
+            None,
+        )
+        .await
+        .expect("spawn worker");
+    let objective_id = handle
+        .member_status(&AgentIdentity::from("w-busy-status"))
+        .await
+        .expect("initial member status")
+        .kickoff
+        .and_then(|kickoff| kickoff.objective_id)
+        .expect("spawned worker should have a kickoff objective");
+    service.set_execution_snapshot_delay_ms(5_000);
+
+    let status_handle = handle.clone();
+    let status_started_at = Instant::now();
+    let status_task = tokio::spawn(async move {
+        status_handle
+            .member_status(&AgentIdentity::from("w-busy-status"))
+            .await
+    });
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        service.wait_for_execution_snapshot(),
+    )
+    .await
+    .expect("member status should begin the execution observation");
+
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        handle.conclude_objective(
+            &AgentIdentity::from("w-busy-status"),
+            objective_id,
+            "worker completed while its status observation was busy",
+        ),
+    )
+    .await
+    .expect("a busy status observation must not hold the mob command lane")
+    .expect("objective conclusion should succeed after the bounded observation");
+
+    let snapshot = tokio::time::timeout(Duration::from_secs(1), status_task)
+        .await
+        .expect("member status should return promptly")
+        .expect("member status task should not panic")
+        .expect("member status should return an observation");
+    assert!(
+        status_started_at.elapsed() < Duration::from_secs(1),
+        "member status must degrade to unknown instead of awaiting the busy session turn"
+    );
+    assert_eq!(
+        snapshot.progress.map(|progress| progress.run_state),
+        Some(crate::runtime::handle::MemberRunState::Unknown),
+        "a timed-out execution observation must be represented truthfully as unknown"
     );
 }
 

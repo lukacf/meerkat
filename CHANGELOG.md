@@ -196,6 +196,10 @@ via cargo-semver-checks against the published baselines).
 
 ### Fixed
 
+- **Member-status observation cannot wedge the mob command lane.** A busy
+  member's execution snapshot is bounded to 250 ms; timeout degrades the
+  progress projection to typed `Unknown` instead of holding lifecycle
+  commands such as objective completion behind an unbounded read.
 - **P0: scheduled deliveries longer than the 60s lease were reclaimed
   mid-flight**, dispatching a duplicate turn every ~60s under
   `MisfirePolicy::CatchUpWithin` (a production fleet measured its largest

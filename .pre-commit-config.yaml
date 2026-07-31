@@ -76,8 +76,12 @@ repos:
     rev: v4.6.0
     hooks:
       - id: trailing-whitespace
+        # Released fixture bytes are manifest-hashed and must not be rewritten.
+        exclude: '^meerkat-runtime/tests/fixtures/v0_8_10_released_realm/corpus/realm/'
         stages: [pre-push]
       - id: end-of-file-fixer
+        # Released fixture bytes are manifest-hashed and must not be rewritten.
+        exclude: '^meerkat-runtime/tests/fixtures/v0_8_10_released_realm/corpus/realm/'
         stages: [pre-push]
       - id: check-yaml
         stages: [pre-push]

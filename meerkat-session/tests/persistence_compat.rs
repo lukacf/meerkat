@@ -156,14 +156,14 @@ fn future_session_metadata_schema_version_fails_closed_on_session_read() {
 fn stored_input_state_version_is_pinned_to_current() {
     // The runtime crate owns `StoredInputState` serde; this pins the shared
     // constant so the rejection tests there and the authority here agree.
-    // v5 adds the exact durable completion outcome. The supported 0.8.10
-    // floor wrote v4, so the generated authority admits only v4-to-v5 plus
-    // current v5; v3 and older versions are intentionally retired.
+    // v5 adds the exact durable completion outcome. A supported 0.8.10
+    // deployment may still contain retained v3 rows, so the generated
+    // authority admits v3-to-v5, v4-to-v5, and current v5.
     assert_eq!(STORED_INPUT_STATE_VERSION, 5);
-    assert!(restore_stored_input_state_version(3).is_err());
+    assert_eq!(restore_stored_input_state_version(3), Ok(5));
     assert_eq!(restore_stored_input_state_version(4), Ok(5));
     assert_eq!(restore_stored_input_state_version(5), Ok(5));
-    assert_eq!(SESSION_VERSION, 2);
+    assert_eq!(SESSION_VERSION, 3);
     assert_eq!(SESSION_METADATA_SCHEMA_VERSION, 2);
 }
 

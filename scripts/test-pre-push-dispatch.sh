@@ -16,13 +16,18 @@ head_sha="$(git -C "$TEST_ROOT" rev-parse HEAD)"
 
 FAKE_PRE_COMMIT="${HARNESS_ROOT}/pre-commit"
 INVOCATION_LOG="${HARNESS_ROOT}/invocation"
+NESTED_INIT_ROOT="${HARNESS_ROOT}/nested-init"
 cat > "$FAKE_PRE_COMMIT" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+mkdir -p "$MEERKAT_DISPATCH_NESTED_INIT_ROOT"
+git -C "$MEERKAT_DISPATCH_NESTED_INIT_ROOT" init -q
 {
   printf 'args=%s\n' "$*"
   printf 'cwd=%s\n' "$PWD"
   printf 'head=%s\n' "$(git rev-parse HEAD)"
+  printf 'git_dir_env=%s\n' "${GIT_DIR:-}"
+  printf 'git_work_tree_env=%s\n' "${GIT_WORK_TREE:-}"
   printf 'to=%s\n' "${PRE_COMMIT_TO_REF:-}"
   printf 'from=%s\n' "${PRE_COMMIT_FROM_REF:-}"
   printf 'remote_name=%s\n' "${PRE_COMMIT_REMOTE_NAME:-}"
@@ -40,7 +45,10 @@ run_dispatch() {
   (
     cd "$TEST_ROOT"
     PATH="${HARNESS_ROOT}:$PATH" \
+      GIT_DIR="${TEST_ROOT}/.git" \
+      GIT_WORK_TREE="$TEST_ROOT" \
       MEERKAT_DISPATCH_INVOCATION_LOG="$INVOCATION_LOG" \
+      MEERKAT_DISPATCH_NESTED_INIT_ROOT="$NESTED_INIT_ROOT" \
       RUST_LANE_ID="" \
       "$REPO_ROOT/scripts/pre-push-dispatch.sh" origin example.invalid \
       <<<"$stdin_payload"
@@ -61,6 +69,8 @@ touch "$TEST_ROOT/dirty-source-only"
 run_dispatch "refs/heads/main ${head_sha} refs/heads/main ${base_sha}"
 assert_log_line "args=run --config .pre-commit-config.yaml --hook-stage pre-push --from-ref ${base_sha} --to-ref ${head_sha}"
 assert_log_line "head=${head_sha}"
+assert_log_line "git_dir_env="
+assert_log_line "git_work_tree_env="
 assert_log_line "to=${head_sha}"
 assert_log_line "from=${base_sha}"
 assert_log_line "remote_name=origin"
@@ -73,6 +83,10 @@ fi
 validated_cwd="$(sed -n 's/^cwd=//p' "$INVOCATION_LOG")"
 if [[ -e "$validated_cwd" ]]; then
   echo "dispatcher leaked its detached validation worktree: ${validated_cwd}" >&2
+  exit 1
+fi
+if [[ "$(git -C "$TEST_ROOT" config --bool core.bare)" != "false" ]]; then
+  echo "dispatcher allowed a nested git command to mutate the source repository" >&2
   exit 1
 fi
 

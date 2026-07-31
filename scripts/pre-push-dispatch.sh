@@ -14,6 +14,13 @@ REMOTE_URL="$2"
 SOURCE_ROOT="$(git rev-parse --show-toplevel)"
 ZERO_SHA="0000000000000000000000000000000000000000"
 
+# Git exports repository-local variables to hooks. They must not cross into the
+# detached validation worktree: nested git commands would otherwise continue
+# targeting the source repository regardless of their cwd or `-C` argument.
+while IFS= read -r git_local_env; do
+  [[ -n "$git_local_env" ]] && unset "$git_local_env"
+done < <(git -C "$SOURCE_ROOT" rev-parse --local-env-vars)
+
 ref_count=0
 local_ref=""
 local_sha=""
@@ -41,11 +48,11 @@ if [[ "$local_sha" == "$ZERO_SHA" ]]; then
   exit 0
 fi
 
-if ! pushed_commit="$(git rev-parse --verify "${local_sha}^{commit}" 2>/dev/null)"; then
+if ! pushed_commit="$(git -C "$SOURCE_ROOT" rev-parse --verify "${local_sha}^{commit}" 2>/dev/null)"; then
   echo "Pushed ref ${local_ref} does not resolve to a commit: ${local_sha}" >&2
   exit 1
 fi
-checked_out_commit="$(git rev-parse --verify HEAD)"
+checked_out_commit="$(git -C "$SOURCE_ROOT" rev-parse --verify HEAD)"
 if [[ "$pushed_commit" != "$checked_out_commit" ]]; then
   echo "Pre-push validation for ${local_ref} -> ${remote_ref} requires the pushed commit (${pushed_commit}) to equal checked-out HEAD (${checked_out_commit})." >&2
   echo "Push the checked-out branch or tag alone from its own checkout." >&2
@@ -68,7 +75,7 @@ export PRE_COMMIT_REMOTE_NAME="$REMOTE_NAME"
 export PRE_COMMIT_REMOTE_URL="$REMOTE_URL"
 export PRE_COMMIT_TO_REF="$pushed_commit"
 if [[ "$remote_sha" == "$ZERO_SHA" ]]; then
-  PRE_COMMIT_FROM_REF="$(git hash-object -t tree /dev/null)"
+  PRE_COMMIT_FROM_REF="$(git -C "$SOURCE_ROOT" hash-object -t tree /dev/null)"
 else
   PRE_COMMIT_FROM_REF="$remote_sha"
 fi

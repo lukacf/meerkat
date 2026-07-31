@@ -42,6 +42,27 @@
 #[cfg(target_arch = "wasm32")]
 pub mod tokio {
     pub use tokio_with_wasm::alias::*;
+
+    pub mod time {
+        use std::future::Future;
+
+        pub use meerkat_core::time_compat::Instant;
+        pub use tokio_with_wasm::alias::time::*;
+
+        pub async fn timeout_at<F>(
+            deadline: Instant,
+            future: F,
+        ) -> Result<F::Output, tokio_with_wasm::alias::time::Elapsed>
+        where
+            F: Future,
+        {
+            tokio_with_wasm::alias::time::timeout(
+                deadline.saturating_duration_since(Instant::now()),
+                future,
+            )
+            .await
+        }
+    }
 }
 
 #[doc(hidden)]

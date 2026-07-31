@@ -7,10 +7,11 @@ use crate::{
     MobStorage, Profile, ProfileName, RunId, SpawnMemberSpec, mob_machine_run_status_is_terminal,
 };
 use async_trait::async_trait;
+use meerkat_core::time_compat::{SystemTime, UNIX_EPOCH};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::time as tokio_time;
 
@@ -934,7 +935,7 @@ fn fresh_run_id() -> Result<crate::adaptive::AdaptiveRunId, MobError> {
 
 fn now_ms() -> u64 {
     SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
+        .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
         .min(u128::from(u64::MAX)) as u64

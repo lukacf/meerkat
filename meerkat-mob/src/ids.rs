@@ -451,6 +451,13 @@ pub struct WorkSpec {
     /// Whether this is an externally-originated turn (user input) or an
     /// internally-originated turn (mob coordination).
     pub origin: WorkOrigin,
+    /// Optional ordinary System message authored for this exact member turn.
+    ///
+    /// This is per-turn content, not immutable member/session configuration:
+    /// repeated submissions may carry different values, and each present
+    /// value is appended at that turn's admitted transcript boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
     /// Host-attached injected context delivered alongside (not inside) the
     /// work content. Each entry materializes as a separate typed
     /// injected-context transcript message immediately before the work
@@ -486,11 +493,19 @@ impl WorkSpec {
         Self {
             content: content.into(),
             origin,
+            system_prompt: None,
             injected_context: Vec::new(),
             transient_turn_context: None,
             interaction_id: None,
             objective_id: None,
         }
+    }
+
+    /// Attach one ordinary System message to this exact member turn.
+    #[must_use]
+    pub fn with_system_prompt(mut self, system_prompt: impl Into<String>) -> Self {
+        self.system_prompt = Some(system_prompt.into());
+        self
     }
 
     #[must_use]
@@ -579,6 +594,23 @@ mod tests {
         let json = serde_json::to_value(&keyed).unwrap();
         let parsed: WorkSpec = serde_json::from_value(json).unwrap();
         assert_eq!(parsed.interaction_id, Some(id));
+    }
+
+    #[test]
+    fn work_spec_system_prompt_is_per_turn_and_serde_additive() {
+        let absent = WorkSpec::new("first turn", WorkOrigin::Internal);
+        let absent_json = serde_json::to_value(&absent).unwrap();
+        assert!(absent_json.get("system_prompt").is_none());
+
+        let present = WorkSpec::new("second turn", WorkOrigin::Internal)
+            .with_system_prompt("updated instructions");
+        let json = serde_json::to_value(&present).unwrap();
+        assert_eq!(json["system_prompt"], "updated instructions");
+        let decoded: WorkSpec = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            decoded.system_prompt.as_deref(),
+            Some("updated instructions")
+        );
     }
 
     #[test]

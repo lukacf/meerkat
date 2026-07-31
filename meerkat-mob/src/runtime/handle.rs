@@ -3441,6 +3441,7 @@ impl MobHandle {
                     work_ref,
                     content: spec.content,
                     origin: spec.origin,
+                    system_prompt: spec.system_prompt,
                     injected_context: spec.injected_context,
                     interaction_id: spec.interaction_id,
                     objective_id: spec.objective_id,

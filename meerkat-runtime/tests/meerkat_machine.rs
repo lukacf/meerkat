@@ -1647,6 +1647,7 @@ async fn recycle_attached_runtime_wakes_preserved_queued_work() {
         Input::Peer(PeerInput {
             directed_interaction_id: None,
             objective_id: None,
+            system_prompts: Vec::new(),
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {

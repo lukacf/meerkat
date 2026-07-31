@@ -75,6 +75,7 @@ mod tests {
         let input = Input::Peer(PeerInput {
             directed_interaction_id: None,
             objective_id: None,
+            system_prompts: Vec::new(),
             injected_context: Vec::new(),
             sender_taint: None,
             header: make_header(),
@@ -98,6 +99,7 @@ mod tests {
         let input = Input::Peer(PeerInput {
             directed_interaction_id: None,
             objective_id: None,
+            system_prompts: Vec::new(),
             injected_context: Vec::new(),
             sender_taint: None,
             header: make_header(),
@@ -117,6 +119,7 @@ mod tests {
         let input = Input::Peer(PeerInput {
             directed_interaction_id: None,
             objective_id: None,
+            system_prompts: Vec::new(),
             injected_context: Vec::new(),
             sender_taint: None,
             header: make_header(),
@@ -136,6 +139,7 @@ mod tests {
         let input = Input::Peer(PeerInput {
             directed_interaction_id: None,
             objective_id: None,
+            system_prompts: Vec::new(),
             injected_context: Vec::new(),
             sender_taint: None,
             header: make_header(),
@@ -152,6 +156,7 @@ mod tests {
         let input = Input::Peer(PeerInput {
             directed_interaction_id: None,
             objective_id: None,
+            system_prompts: Vec::new(),
             injected_context: Vec::new(),
             sender_taint: None,
             header: make_header(),
@@ -171,6 +176,7 @@ mod tests {
         let input = Input::Peer(PeerInput {
             directed_interaction_id: None,
             objective_id: None,
+            system_prompts: Vec::new(),
             injected_context: Vec::new(),
             sender_taint: None,
             header: make_header(),
@@ -189,6 +195,7 @@ mod tests {
         let input = Input::Peer(PeerInput {
             directed_interaction_id: None,
             objective_id: None,
+            system_prompts: Vec::new(),
             injected_context: vec![meerkat_core::types::ContentInput::Text(
                 "ambient".to_string(),
             )],
@@ -213,6 +220,7 @@ mod tests {
         let input = Input::Peer(PeerInput {
             directed_interaction_id: None,
             objective_id: None,
+            system_prompts: Vec::new(),
             injected_context: vec![meerkat_core::types::ContentInput::Text(
                 "ambient".to_string(),
             )],
@@ -247,6 +255,7 @@ mod tests {
             let input = Input::Peer(PeerInput {
                 directed_interaction_id: None,
                 objective_id: None,
+                system_prompts: Vec::new(),
                 injected_context: Vec::new(),
                 sender_taint: None,
                 header: make_header(),

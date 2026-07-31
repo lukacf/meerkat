@@ -100,6 +100,7 @@ impl MobBoundMemberRuntimeBridge for LocalMobRuntimeBridge {
         input_id: &str,
         content: ContentInput,
         handling_mode: HandlingMode,
+        system_prompt: Option<String>,
         injected_context: Vec<ContentInput>,
     ) -> Result<BridgeDeliveryResponse, MobError> {
         use meerkat_runtime::input::{
@@ -116,6 +117,7 @@ impl MobBoundMemberRuntimeBridge for LocalMobRuntimeBridge {
         let input = Input::Peer(PeerInput {
             directed_interaction_id: None,
             objective_id: None,
+            system_prompts: system_prompt.into_iter().collect(),
             header: InputHeader {
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),

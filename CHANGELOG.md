@@ -89,6 +89,11 @@ via cargo-semver-checks against the published baselines).
   `supports_mid_conversation_system_messages`. External model catalogs must
   declare whether each model admits ordered System messages after the leading
   prefix; unknown and older models should set it to `false`.
+- Mob work delivery adds the per-turn System carrier:
+  `WorkSpec::system_prompt`, `BridgeDeliveryPayload::system_prompt`, and
+  `PeerInput::system_prompts`. `MobBoundMemberRuntimeBridge::deliver_member_input`
+  adds the `system_prompt: Option<String>` parameter. External struct literals
+  and bridge implementations must initialize and forward these fields.
 - `StickyModelFallbackCommitOperation::wait` now returns
   `Option<SessionControlCommitReceipt>` instead of `()`, exposing the exact
   durable control receipt when one was committed.
@@ -233,7 +238,11 @@ via cargo-semver-checks against the published baselines).
   transcript. `StartTurnRequest.system_prompt` is accepted on every turn and
   appends exactly one System message at that turn boundary. It is not a
   create-time field, does not replace an earlier System message, and is not
-  inferred from transcript text or position. Resume preserves the exact
+  inferred from transcript text or position. `WorkSpec::system_prompt` carries
+  the same semantics through turn-driven and placed mob-member delivery,
+  including different System messages on successive turns. Controller-local
+  autonomous inbox delivery rejects it before admission because that
+  plain-event path has no authored turn boundary. Resume preserves the exact
   ordered prefix; compaction retains every System message in relative order;
   provider adapters preserve exact chronology where their wire supports it.
   A limited provider wire returns a typed projection error when it cannot

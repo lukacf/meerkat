@@ -2349,6 +2349,9 @@ impl SessionBackend {
         if turn_metadata.turn_tool_overlay.is_none() {
             turn_metadata.turn_tool_overlay = req.runtime.turn_tool_overlay.clone();
         }
+        turn_metadata
+            .system_prompts
+            .extend(req.system_prompt.iter().cloned());
         let prompt = req.prompt.clone();
         let (idempotency_key, correlation_id) = match &req.runtime.input_identity {
             Some(identity) => {
@@ -4849,6 +4852,32 @@ mod tests {
                 .as_ref()
                 .map(ToString::to_string),
             Some(correlation_id.to_string())
+        );
+    }
+
+    #[cfg(feature = "runtime-adapter")]
+    #[test]
+    fn runtime_turn_input_preserves_per_turn_system_prompt() {
+        let request = meerkat_core::service::StartTurnRequest {
+            injected_context: Vec::new(),
+            prompt: meerkat_core::types::ContentInput::Text("do the work".to_string()),
+            system_prompt: Some("updated member instructions".to_string()),
+            event_tx: None,
+            runtime: meerkat_core::service::StartTurnRuntimeSemantics::default(),
+        };
+
+        let input = SessionBackend::runtime_input_from_turn_request(&request)
+            .expect("per-turn System content lowers into runtime metadata");
+        let meerkat_runtime::Input::Prompt(prompt) = input else {
+            panic!("member turn must lower to a prompt input");
+        };
+        assert_eq!(
+            prompt
+                .turn_metadata
+                .expect("runtime metadata is always present")
+                .system_prompts,
+            ["updated member instructions"],
+            "runtime-backed delivery must not drop the StartTurnRequest System row"
         );
     }
 
@@ -9687,6 +9716,7 @@ impl MobProvisioner for MultiBackendProvisioner {
                 expected_member: Some(request.expected_member.clone()),
                 // Flow steps carry no supervisor-attached injected context;
                 // the member-side admission rejects a non-empty carrier.
+                system_prompt: None,
                 injected_context: Vec::new(),
                 transient_turn_context: None,
                 turn: Some(request.directive.clone()),
@@ -10732,6 +10762,7 @@ fn plain_delivery_payload(
         content: req.prompt.clone(),
         handling_mode: req.runtime.handling_mode,
         objective_id: turn_request_objective_id(req),
+        system_prompt: req.system_prompt.clone(),
         expected_member,
         injected_context: req.injected_context.clone(),
         transient_turn_context: req

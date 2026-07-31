@@ -1494,6 +1494,8 @@ impl SubmitWorkDispatchCompletion {
 
 struct SubmitWorkDispatchRequest {
     content: ContentInput,
+    /// Optional ordinary System message authored for this exact work turn.
+    system_prompt: Option<String>,
     /// Host-attached injected context riding with the work content.
     /// Deliverable on queue-mode turn-driven dispatch (local and remote);
     /// autonomous inbox delivery and steer dispatch reject it fail-closed.
@@ -1601,6 +1603,9 @@ fn unsupported_turn_metadata_fields(
     }
     if metadata.additional_instructions.is_some() {
         fields.push("additional_instructions");
+    }
+    if !metadata.system_prompts.is_empty() {
+        fields.push("system_prompts");
     }
     if !allow_transient_turn_context && metadata.transient_turn_context.is_some() {
         fields.push("transient_turn_context");
@@ -44938,6 +44943,7 @@ impl MobActor {
             work_ref,
             content,
             origin,
+            system_prompt,
             injected_context,
             mut interaction_id,
             objective_id,
@@ -45200,6 +45206,16 @@ impl MobActor {
                 });
             }
         }
+        if system_prompt.is_some()
+            && !remotely_hosted
+            && entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost
+        {
+            return Err(MobError::UnsupportedForMode {
+                mode: entry.runtime_mode,
+                reason: "autonomous inbox delivery carries no admitted turn boundary for ordinary System content"
+                    .to_string(),
+            });
+        }
         if super::member_runtime_is_host_owned(self.dsl_authority.state(), &entry.agent_identity)
             && interaction_id.is_some_and(|interaction_id| interaction_id.0.is_nil())
         {
@@ -45361,6 +45377,7 @@ impl MobActor {
                 ingress_authority,
                 SubmitWorkDispatchRequest {
                     content,
+                    system_prompt,
                     injected_context,
                     interaction_id: effective_interaction_id,
                     objective_id,
@@ -45936,6 +45953,7 @@ impl MobActor {
                 ingress_authority,
                 SubmitWorkDispatchRequest {
                     content,
+                    system_prompt: None,
                     // Spawn kickoff is mob-internal coordination content; the
                     // injected-context slot belongs to the submit-work lane.
                     injected_context: Vec::new(),
@@ -46195,6 +46213,7 @@ impl MobActor {
     ) -> Result<SubmitWorkDispatchCompletion, MobError> {
         let SubmitWorkDispatchRequest {
             content,
+            system_prompt,
             injected_context,
             interaction_id,
             objective_id,
@@ -46356,7 +46375,7 @@ impl MobActor {
             let req = meerkat_core::service::StartTurnRequest {
                 injected_context,
                 prompt: content,
-                system_prompt: None,
+                system_prompt,
                 event_tx: None,
                 runtime: submit_work_runtime_semantics(
                     handling_mode,
@@ -46431,7 +46450,7 @@ impl MobActor {
                         // fork, so this carrier is invariantly empty here.
                         injected_context: Vec::new(),
                         prompt: content,
-                        system_prompt: None,
+                        system_prompt,
                         event_tx,
                         runtime: submit_work_runtime_semantics(
                             handling_mode,
@@ -46529,7 +46548,7 @@ impl MobActor {
                     // session-service members materialize it in the runner.
                     injected_context,
                     prompt: content,
-                    system_prompt: None,
+                    system_prompt,
                     event_tx,
                     runtime: submit_work_runtime_semantics(
                         handling_mode,

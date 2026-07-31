@@ -44,11 +44,15 @@ pub trait MobBoundMemberRuntimeBridge: Send + Sync {
     /// injected-context transcript message immediately before the work
     /// content (mirrors `BridgeDeliveryPayload::injected_context` on the
     /// remote protocol).
+    ///
+    /// `system_prompt` is one ordinary System message authored for this
+    /// exact turn. It is never member/session configuration.
     async fn deliver_member_input(
         &self,
         input_id: &str,
         content: ContentInput,
         handling_mode: HandlingMode,
+        system_prompt: Option<String>,
         injected_context: Vec<ContentInput>,
     ) -> Result<BridgeDeliveryResponse, MobError>;
 

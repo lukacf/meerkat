@@ -80,7 +80,8 @@ impl BridgeProtocolVersion {
     /// `PollMemberEvents`), live-channel family, the member-originated
     /// `MemberOperatorRequest` family, exact-run `HardCancelMember`, and the
     /// optional `DeliverMemberInput.turn` / `expected_member` /
-    /// `outcome_tracking` / `transcript_interaction_id` extensions.
+    /// `outcome_tracking` / `transcript_interaction_id` / `system_prompt`
+    /// extensions.
     pub const V4: Self = Self(4);
     /// Current protocol version implemented by this bridge contract.
     pub const CURRENT: Self = Self::V4;
@@ -240,7 +241,8 @@ impl<'de> Deserialize<'de> for BridgeProtocolVersion {
 ///   `MemberLiveChannelStatus` / `ControlMemberLiveChannel`), exactly one
 ///   member-originated family (`MemberOperatorRequest`), exact-run
 ///   `HardCancelMember`, and the optional `DeliverMemberInput.turn` /
-///   `expected_member` / `transcript_interaction_id` extensions
+///   `expected_member` / `transcript_interaction_id` / `system_prompt`
+///   extensions
 ///   (absent-omitted; an extended delivery fails closed on pre-V4 receivers
 ///   via `deny_unknown_fields`).
 ///   The new supervisor authority is submitted only through the closed
@@ -572,7 +574,10 @@ fn bridge_command_minimum_protocol(
                 .is_some_and(|tracking| !tracking.is_null())
                 || value
                     .get("transcript_interaction_id")
-                    .is_some_and(|interaction_id| !interaction_id.is_null()) =>
+                    .is_some_and(|interaction_id| !interaction_id.is_null())
+                || value
+                    .get("system_prompt")
+                    .is_some_and(|system_prompt| !system_prompt.is_null()) =>
         {
             BridgeProtocolVersion::V4
         }
@@ -2722,6 +2727,11 @@ pub struct BridgeDeliveryPayload {
     /// Durable delegated-objective causality for this work delivery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub objective_id: Option<meerkat_core::interaction::ObjectiveId>,
+    /// One ordinary System message authored for this exact member turn.
+    ///
+    /// This is per-turn content, not immutable member/session configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
     /// Exact destination residency for host-materialized members. Required
     /// whenever the target session has a host journal; peer-only legacy
     /// deliveries may omit it.
@@ -3579,6 +3589,7 @@ mod tests {
             content: meerkat_core::types::ContentInput::Text("hello".to_string()),
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             expected_member: None,
+            system_prompt: Some("updated member instructions".to_string()),
             injected_context: Vec::new(),
             transient_turn_context: None,
             turn: None,
@@ -3683,6 +3694,7 @@ mod tests {
             content: meerkat_core::types::ContentInput::Text("hello".to_string()),
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             expected_member: None,
+            system_prompt: None,
             injected_context: vec![
                 meerkat_core::types::ContentInput::Text("ambient alpha".to_string()),
                 meerkat_core::types::ContentInput::Text("ambient beta".to_string()),
@@ -3706,6 +3718,7 @@ mod tests {
             content: meerkat_core::types::ContentInput::Text("hello".to_string()),
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             expected_member: None,
+            system_prompt: None,
             injected_context: Vec::new(),
             transient_turn_context: None,
             turn: None,
@@ -3754,6 +3767,7 @@ mod tests {
             content: meerkat_core::types::ContentInput::Text("hello".to_string()),
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             expected_member: None,
+            system_prompt: None,
             injected_context: Vec::new(),
             transient_turn_context: None,
             turn: None,
@@ -3776,6 +3790,10 @@ mod tests {
             value.get("transcript_interaction_id").is_none(),
             "absent transcript interaction id must preserve the legacy shape: {value}"
         );
+        assert!(
+            value.get("system_prompt").is_none(),
+            "absent per-turn System content must be omitted: {value}"
+        );
 
         let mut pre_field = serde_json::to_value(&payload).expect("serialize payload");
         pre_field
@@ -3786,6 +3804,7 @@ mod tests {
             serde_json::from_value(pre_field).expect("pre-field payload deserializes");
         assert!(parsed.injected_context.is_empty());
         assert!(parsed.transcript_interaction_id.is_none());
+        assert!(parsed.system_prompt.is_none());
     }
 
     #[test]
@@ -3800,6 +3819,7 @@ mod tests {
             content: meerkat_core::types::ContentInput::Text("hello".to_string()),
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             expected_member: None,
+            system_prompt: None,
             injected_context: Vec::new(),
             transient_turn_context: None,
             turn: None,
@@ -3815,6 +3835,15 @@ mod tests {
         assert!(matches!(
             decode_bridge_command(value)
                 .expect_err("the transcript identity carrier was introduced in V4"),
+            BridgeCommandDecodeError::UnsupportedProtocolVersion(_)
+        ));
+
+        let mut system_prompt_value =
+            serde_json::to_value(&legacy).expect("serialize legacy delivery");
+        system_prompt_value["system_prompt"] = json!("updated member instructions");
+        assert!(matches!(
+            decode_bridge_command(system_prompt_value)
+                .expect_err("the per-turn System carrier was introduced in V4"),
             BridgeCommandDecodeError::UnsupportedProtocolVersion(_)
         ));
     }
@@ -5139,6 +5168,7 @@ mod tests {
                 generation: 3,
                 fence_token: 7,
             }),
+            system_prompt: None,
             injected_context: Vec::new(),
             transient_turn_context: None,
             turn: None,
@@ -5154,6 +5184,7 @@ mod tests {
             content: meerkat_core::types::ContentInput::Text("turn".to_string()),
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             expected_member: None,
+            system_prompt: None,
             injected_context: Vec::new(),
             transient_turn_context: None,
             turn: Some(BridgeTurnDirective {
@@ -5468,6 +5499,7 @@ mod tests {
             content: meerkat_core::types::ContentInput::Text("step".to_string()),
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             expected_member: None,
+            system_prompt: None,
             injected_context: Vec::new(),
             transient_turn_context: None,
             turn: Some(BridgeTurnDirective {
@@ -5518,6 +5550,7 @@ mod tests {
             content: meerkat_core::types::ContentInput::Text("step".to_string()),
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             expected_member: None,
+            system_prompt: None,
             injected_context: Vec::new(),
             transient_turn_context: None,
             turn: None,
@@ -5571,6 +5604,7 @@ mod tests {
             content: meerkat_core::types::ContentInput::Text("work".to_string()),
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             expected_member: Some(sample_member_incarnation()),
+            system_prompt: None,
             injected_context: Vec::new(),
             transient_turn_context: None,
             turn: None,

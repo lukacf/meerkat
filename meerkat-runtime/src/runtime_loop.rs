@@ -59,6 +59,7 @@ pub(crate) fn for_input(
         },
         Input::Peer(peer) => RuntimeTurnMetadata {
             handling_mode: peer.handling_mode,
+            system_prompts: peer.system_prompts.clone(),
             transcript_identity: TranscriptMessageIdentity {
                 objective_id: peer.objective_id,
                 ..Default::default()
@@ -7371,6 +7372,7 @@ mod tests {
         let input = Input::Peer(PeerInput {
             directed_interaction_id: None,
             objective_id: None,
+            system_prompts: Vec::new(),
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
@@ -7400,6 +7402,7 @@ mod tests {
         let input = Input::Peer(PeerInput {
             directed_interaction_id: None,
             objective_id: None,
+            system_prompts: Vec::new(),
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
@@ -7430,6 +7433,7 @@ mod tests {
         let input = Input::Peer(PeerInput {
             directed_interaction_id: None,
             objective_id: None,
+            system_prompts: Vec::new(),
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
@@ -7471,6 +7475,7 @@ mod tests {
         let input = Input::Peer(PeerInput {
             directed_interaction_id: None,
             objective_id: None,
+            system_prompts: Vec::new(),
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
@@ -7525,6 +7530,7 @@ mod tests {
         let input = Input::Peer(PeerInput {
             directed_interaction_id: None,
             objective_id: None,
+            system_prompts: Vec::new(),
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
@@ -7686,6 +7692,7 @@ mod tests {
         let input = Input::Peer(PeerInput {
             directed_interaction_id: None,
             objective_id: None,
+            system_prompts: Vec::new(),
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
@@ -7758,6 +7765,7 @@ mod tests {
         let input = Input::Peer(PeerInput {
             directed_interaction_id: None,
             objective_id: None,
+            system_prompts: Vec::new(),
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
@@ -7814,6 +7822,7 @@ mod tests {
         let input = Input::Peer(PeerInput {
             directed_interaction_id: None,
             objective_id: None,
+            system_prompts: Vec::new(),
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
@@ -7866,6 +7875,7 @@ mod tests {
         let input = Input::Peer(PeerInput {
             directed_interaction_id: None,
             objective_id: None,
+            system_prompts: Vec::new(),
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
@@ -7933,6 +7943,7 @@ mod tests {
         let input = Input::Peer(PeerInput {
             directed_interaction_id: None,
             objective_id: None,
+            system_prompts: Vec::new(),
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
@@ -8005,6 +8016,7 @@ mod tests {
         Input::Peer(PeerInput {
             directed_interaction_id: None,
             objective_id: None,
+            system_prompts: Vec::new(),
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
@@ -8419,6 +8431,7 @@ mod tests {
         Input::Peer(PeerInput {
             directed_interaction_id: None,
             objective_id: None,
+            system_prompts: Vec::new(),
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
@@ -8637,6 +8650,7 @@ mod tests {
         let input = Input::Peer(PeerInput {
             directed_interaction_id: None,
             objective_id: None,
+            system_prompts: Vec::new(),
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
@@ -8700,6 +8714,7 @@ mod tests {
         let input = Input::Peer(PeerInput {
             directed_interaction_id: None,
             objective_id: None,
+            system_prompts: Vec::new(),
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
@@ -8757,6 +8772,7 @@ mod tests {
         let input = Input::Peer(PeerInput {
             directed_interaction_id: None,
             objective_id: None,
+            system_prompts: Vec::new(),
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
@@ -8813,6 +8829,7 @@ mod tests {
         let input = Input::Peer(PeerInput {
             directed_interaction_id: None,
             objective_id: None,
+            system_prompts: Vec::new(),
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
@@ -10248,6 +10265,7 @@ mod tests {
         let input = Input::Peer(PeerInput {
             directed_interaction_id: None,
             objective_id: None,
+            system_prompts: Vec::new(),
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {
@@ -10292,6 +10310,7 @@ mod tests {
         let peer = Input::Peer(PeerInput {
             directed_interaction_id: None,
             objective_id: None,
+            system_prompts: Vec::new(),
             injected_context: Vec::new(),
             sender_taint: None,
             header: InputHeader {

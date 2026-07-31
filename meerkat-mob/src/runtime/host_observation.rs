@@ -3884,6 +3884,7 @@ mod tests {
         let input = meerkat_runtime::input::Input::Peer(meerkat_runtime::input::PeerInput {
             directed_interaction_id: Some(InteractionId(stable)),
             objective_id: Some(meerkat_core::interaction::ObjectiveId::new()),
+            system_prompts: Vec::new(),
             injected_context: vec![meerkat_core::types::ContentInput::Text(
                 "private ambient context".to_string(),
             )],

@@ -2334,6 +2334,7 @@ export interface BridgeDeliveryPayload {
   outcome_tracking?: "interaction" | null;
   protocol_version: BridgeProtocolVersion;
   supervisor: BridgePeerSpec;
+  system_prompt?: string | null;
   transcript_interaction_id?: string | null;
   transient_turn_context?: string | null;
   turn?: BridgeTurnDirective | null;
@@ -3247,6 +3248,7 @@ export interface BridgeCommandDeliverMemberInput {
   outcome_tracking?: "interaction" | null;
   protocol_version: BridgeProtocolVersion;
   supervisor: BridgePeerSpec;
+  system_prompt?: string | null;
   transcript_interaction_id?: string | null;
   transient_turn_context?: string | null;
   turn?: BridgeTurnDirective | null;

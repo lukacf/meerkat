@@ -405,6 +405,13 @@ pub struct PeerInput {
     pub sender_taint: Option<meerkat_core::comms::SenderContentTaint>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub objective_id: Option<meerkat_core::interaction::ObjectiveId>,
+    /// Ordinary System messages authored for this exact peer-delivered turn.
+    ///
+    /// This is per-turn transcript content, not immutable session
+    /// configuration. The runtime preserves exact bytes, duplicates, and
+    /// admission order when merging a batch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub system_prompts: Vec<String>,
     /// Host-attached injected context carried by supervisor-authored work
     /// deliveries (remote mob members over the supervisor bridge). Each entry
     /// lowers into a separate
@@ -479,6 +486,7 @@ pub fn peer_response_terminal_input(
     Input::Peer(PeerInput {
         directed_interaction_id: None,
         objective_id: None,
+        system_prompts: Vec::new(),
         injected_context: Vec::new(),
         header: InputHeader {
             id: InputId::new(),
@@ -1500,6 +1508,7 @@ mod tests {
         let input = Input::Peer(PeerInput {
             directed_interaction_id: None,
             objective_id: None,
+            system_prompts: Vec::new(),
             injected_context: vec![ContentInput::Text("supervisor ambient".to_string())],
             sender_taint: None,
             header,
@@ -1586,6 +1595,7 @@ mod tests {
         let input = Input::Peer(PeerInput {
             directed_interaction_id: None,
             objective_id: None,
+            system_prompts: Vec::new(),
             injected_context: Vec::new(),
             sender_taint: None,
             header: make_header(),
@@ -1615,6 +1625,7 @@ mod tests {
         Input::Peer(PeerInput {
             directed_interaction_id: None,
             objective_id: None,
+            system_prompts: Vec::new(),
             injected_context: Vec::new(),
             sender_taint: None,
             header,
@@ -1729,6 +1740,7 @@ mod tests {
         let input = Input::Peer(PeerInput {
             directed_interaction_id: None,
             objective_id: None,
+            system_prompts: Vec::new(),
             injected_context: Vec::new(),
             sender_taint: None,
             header,
@@ -1798,6 +1810,7 @@ mod tests {
             let input = Input::Peer(PeerInput {
                 directed_interaction_id: None,
                 objective_id: None,
+                system_prompts: Vec::new(),
                 injected_context: Vec::new(),
                 sender_taint: declared,
                 header,
@@ -1859,6 +1872,7 @@ mod tests {
         let input = Input::Peer(PeerInput {
             directed_interaction_id: None,
             objective_id: None,
+            system_prompts: Vec::new(),
             injected_context: Vec::new(),
             sender_taint: None,
             header,
@@ -1979,6 +1993,7 @@ mod tests {
         let input = Input::Peer(PeerInput {
             directed_interaction_id: None,
             objective_id: None,
+            system_prompts: Vec::new(),
             injected_context: Vec::new(),
             sender_taint: None,
             header,
@@ -2056,6 +2071,7 @@ mod tests {
         let input = Input::Peer(PeerInput {
             directed_interaction_id: None,
             objective_id: None,
+            system_prompts: Vec::new(),
             injected_context: Vec::new(),
             sender_taint: None,
             header,
@@ -2097,6 +2113,7 @@ mod tests {
         let input = Input::Peer(PeerInput {
             directed_interaction_id: None,
             objective_id: None,
+            system_prompts: Vec::new(),
             injected_context: Vec::new(),
             sender_taint: None,
             header: make_header(),
@@ -2122,6 +2139,7 @@ mod tests {
         let input = Input::Peer(PeerInput {
             directed_interaction_id: None,
             objective_id: None,
+            system_prompts: Vec::new(),
             injected_context: Vec::new(),
             sender_taint: None,
             header: make_header(),
@@ -2143,6 +2161,7 @@ mod tests {
         let input = Input::Peer(PeerInput {
             directed_interaction_id: None,
             objective_id: None,
+            system_prompts: Vec::new(),
             injected_context: Vec::new(),
             sender_taint: None,
             header: make_header(),
@@ -2248,6 +2267,7 @@ mod tests {
         let input = Input::Peer(PeerInput {
             directed_interaction_id: Some(interaction_id),
             objective_id: Some(meerkat_core::interaction::ObjectiveId::new()),
+            system_prompts: Vec::new(),
             injected_context: vec![ContentInput::Text("ambient context".to_string())],
             sender_taint: None,
             header: InputHeader {
@@ -2521,6 +2541,7 @@ mod tests {
         let peer_msg = Input::Peer(PeerInput {
             directed_interaction_id: None,
             objective_id: None,
+            system_prompts: Vec::new(),
             injected_context: Vec::new(),
             sender_taint: None,
             header: make_header(),
@@ -2534,6 +2555,7 @@ mod tests {
         let peer_req = Input::Peer(PeerInput {
             directed_interaction_id: None,
             objective_id: None,
+            system_prompts: Vec::new(),
             injected_context: Vec::new(),
             sender_taint: None,
             header: make_header(),
@@ -2627,6 +2649,7 @@ mod tests {
         let input = Input::Peer(PeerInput {
             directed_interaction_id: None,
             objective_id: None,
+            system_prompts: Vec::new(),
             injected_context: Vec::new(),
             sender_taint: None,
             header: make_header(),
@@ -2753,6 +2776,7 @@ mod tests {
         let input = Input::Peer(PeerInput {
             directed_interaction_id: None,
             objective_id: None,
+            system_prompts: Vec::new(),
             injected_context: Vec::new(),
             sender_taint: None,
             header: make_header(),
@@ -2775,6 +2799,7 @@ mod tests {
         let input = Input::Peer(PeerInput {
             directed_interaction_id: None,
             objective_id: None,
+            system_prompts: Vec::new(),
             injected_context: Vec::new(),
             sender_taint: None,
             header: make_header(),

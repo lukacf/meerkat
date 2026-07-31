@@ -135,6 +135,7 @@ fn peer_input_from_ingress_fact(
 
     Ok(Input::Peer(PeerInput {
         directed_interaction_id: None,
+        system_prompts: Vec::new(),
         injected_context: Vec::new(),
         header: InputHeader {
             id: InputId::new(),

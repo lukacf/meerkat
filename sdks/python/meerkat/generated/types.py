@@ -3332,6 +3332,7 @@ class BridgeDeliveryPayload:
     injected_context: Optional[list[ContentInput]] = None
     objective_id: Optional[str] = None
     outcome_tracking: Optional[Literal['interaction']] = None
+    system_prompt: Optional[str] = None
     transcript_interaction_id: Optional[str] = None
     transient_turn_context: Optional[str] = None
     turn: Optional[BridgeTurnDirective] = None
@@ -6375,6 +6376,7 @@ class BridgeCommandDeliverMemberInput(TypedDict, total=False):
     outcome_tracking: NotRequired[Optional[Literal['interaction']]]
     protocol_version: Required[BridgeProtocolVersion]
     supervisor: Required[BridgePeerSpec]
+    system_prompt: NotRequired[Optional[str]]
     transcript_interaction_id: NotRequired[Optional[str]]
     transient_turn_context: NotRequired[Optional[str]]
     turn: NotRequired[Optional[BridgeTurnDirective]]

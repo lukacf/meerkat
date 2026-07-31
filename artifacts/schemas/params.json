@@ -2292,6 +2292,13 @@
               "supervisor": {
                 "$ref": "#/$defs/BridgePeerSpec"
               },
+              "system_prompt": {
+                "description": "One ordinary System message authored for this exact member turn.\n\nThis is per-turn content, not immutable member/session configuration.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "transcript_interaction_id": {
                 "description": "Transcript correlation for this placed work item. Independent from\n`input_id`: ingress-acknowledged delivery keeps a fresh transport /\nidempotency key while preserving the caller's interaction identity.\nTurn-completed delivery intentionally uses the same canonical UUID for\nboth because its retained sidecar is keyed by `input_id`.",
                 "type": [

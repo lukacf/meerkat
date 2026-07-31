@@ -1470,6 +1470,8 @@ struct MockSessionService {
     keep_alive_start_turn_calls: AtomicU64,
     keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool,
     start_turn_prompts: RwLock<Vec<(SessionId, String)>>,
+    /// Ordered ordinary System content received at the member boundary.
+    start_turn_system_prompts: RwLock<Vec<(SessionId, Vec<String>)>>,
     /// Per turn request: the user-channel shape the runner would materialize
     /// — `(is_injected_context, text)` pairs in transcript order, derived
     /// from the request's active lowering carrier (typed appends in runtime
@@ -1574,6 +1576,7 @@ impl MockSessionService {
             keep_alive_start_turn_calls: AtomicU64::new(0),
             keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool::new(false),
             start_turn_prompts: RwLock::new(Vec::new()),
+            start_turn_system_prompts: RwLock::new(Vec::new()),
             start_turn_user_channel: RwLock::new(Vec::new()),
             start_turn_metadata: RwLock::new(Vec::new()),
             injected_interaction_ids: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -1713,6 +1716,10 @@ impl MockSessionService {
 
     async fn recorded_start_turn_prompts(&self) -> Vec<(SessionId, String)> {
         self.start_turn_prompts.read().await.clone()
+    }
+
+    async fn recorded_start_turn_system_prompts(&self) -> Vec<(SessionId, Vec<String>)> {
+        self.start_turn_system_prompts.read().await.clone()
     }
 
     async fn recorded_start_turn_user_channel(&self) -> Vec<(SessionId, Vec<(bool, String)>)> {
@@ -2599,6 +2606,17 @@ impl SessionService for MockSessionService {
             .write()
             .await
             .push((id.clone(), req.prompt.text_content()));
+        let mut system_prompts = req
+            .runtime
+            .turn_metadata
+            .as_ref()
+            .map(|metadata| metadata.system_prompts.clone())
+            .unwrap_or_default();
+        system_prompts.extend(req.system_prompt.iter().cloned());
+        self.start_turn_system_prompts
+            .write()
+            .await
+            .push((id.clone(), system_prompts));
         let user_channel: Vec<(bool, String)> = if req.runtime.typed_turn_appends.is_empty() {
             req.injected_context
                 .iter()
@@ -13889,6 +13907,7 @@ async fn test_rotate_supervisor_reauthorizes_live_remote_members_and_rejects_sta
     let stale_command = super::bridge_protocol::BridgeCommand::DeliverMemberInput(
         super::bridge_protocol::BridgeDeliveryPayload {
             objective_id: None,
+            system_prompt: None,
             injected_context: Vec::new(),
             transient_turn_context: None,
             supervisor: old_bridge
@@ -44584,6 +44603,78 @@ async fn test_turn_driven_submit_work_delivers_injected_context_before_work_cont
     );
 }
 
+#[tokio::test]
+async fn test_turn_driven_submit_work_allows_system_prompt_updates_between_turns() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let member_id = AgentIdentity::from("worker-system-prompt");
+    handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            member_id.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn turn-driven worker");
+    let entry = handle
+        .get_member(&member_id)
+        .await
+        .unwrap()
+        .expect("member exists");
+    let baseline_start_turn_calls = service.start_turn_call_count();
+    let baseline_recorded_prompts = service.recorded_start_turn_system_prompts().await.len();
+
+    handle
+        .submit_work(
+            entry.agent_runtime_id.clone(),
+            entry.fence_token,
+            WorkRef::new(),
+            WorkSpec::new("first turn", WorkOrigin::Internal)
+                .with_system_prompt("first instructions"),
+        )
+        .await
+        .expect("submit first per-turn System message");
+    wait_for_start_turn_call_count(
+        &service,
+        baseline_start_turn_calls + 1,
+        "first System-bearing work should start",
+    )
+    .await;
+
+    handle
+        .submit_work(
+            entry.agent_runtime_id,
+            entry.fence_token,
+            WorkRef::new(),
+            WorkSpec::new("second turn", WorkOrigin::Internal)
+                .with_system_prompt("updated instructions"),
+        )
+        .await
+        .expect("submit updated per-turn System message");
+    wait_for_start_turn_call_count(
+        &service,
+        baseline_start_turn_calls + 2,
+        "updated System-bearing work should start",
+    )
+    .await;
+
+    let recorded = service.recorded_start_turn_system_prompts().await;
+    let prompts = recorded[baseline_recorded_prompts..]
+        .iter()
+        .map(|(_, prompts)| prompts.clone())
+        .collect::<Vec<_>>();
+    let recorded_turns = service.recorded_start_turn_prompts().await;
+    assert_eq!(
+        prompts,
+        [
+            vec!["first instructions".to_string()],
+            vec!["updated instructions".to_string()]
+        ],
+        "System content is authored per turn and must not become immutable member configuration; observed turn prompts: {recorded_turns:?}"
+    );
+}
+
 /// Ask-15 addendum (turn-driven): a host-supplied `WorkSpec.interaction_id`
 /// is stamped into the delivered turn's
 /// `RuntimeTurnMetadata.transcript_identity`, so the runner persists it onto
@@ -44772,6 +44863,59 @@ async fn test_autonomous_submit_work_with_injected_context_rejected() {
     assert!(
         matches!(err, MobError::InjectedContextUndeliverable { .. }),
         "expected typed InjectedContextUndeliverable, got {err:?}"
+    );
+    assert_eq!(
+        service.inject_call_count(),
+        baseline_injects,
+        "rejected work must not be partially injected"
+    );
+}
+
+#[tokio::test]
+async fn test_autonomous_submit_work_with_system_prompt_rejected_before_injection() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let member_id = AgentIdentity::from("lead-system-prompt");
+    handle
+        .spawn_with_options(
+            ProfileName::from("lead"),
+            member_id.clone(),
+            None,
+            Some(crate::MobRuntimeMode::AutonomousHost),
+            None,
+        )
+        .await
+        .expect("spawn autonomous lead");
+    let entry = handle
+        .get_member(&member_id)
+        .await
+        .unwrap()
+        .expect("member exists");
+
+    let baseline_injects = service.inject_call_count();
+    let err = handle
+        .submit_work(
+            entry.agent_runtime_id.clone(),
+            entry.fence_token,
+            WorkRef::new(),
+            WorkSpec::new("do the thing", WorkOrigin::External)
+                .with_system_prompt("updated member instructions"),
+        )
+        .await
+        .expect_err("autonomous inbox delivery cannot carry ordinary System content");
+    assert!(
+        matches!(
+            &err,
+            MobError::UnsupportedForMode {
+                mode: crate::MobRuntimeMode::AutonomousHost,
+                ..
+            }
+        ),
+        "expected typed AutonomousHost rejection, got {err:?}"
+    );
+    assert!(
+        err.to_string()
+            .contains("no admitted turn boundary for ordinary System content"),
+        "rejection must name the unrepresentable System boundary: {err}"
     );
     assert_eq!(
         service.inject_call_count(),

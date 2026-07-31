@@ -1155,6 +1155,7 @@ fn peer_input_from_delivery_payload(
             turn_metadata: Some(
                 meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
                     handling_mode: Some(payload.handling_mode),
+                    system_prompts: payload.system_prompt.into_iter().collect(),
                     transient_turn_context: Some(context),
                     transcript_identity: meerkat_core::types::TranscriptMessageIdentity {
                         objective_id: payload.objective_id,
@@ -1168,6 +1169,7 @@ fn peer_input_from_delivery_payload(
     Ok(Input::Peer(PeerInput {
         directed_interaction_id,
         objective_id: payload.objective_id,
+        system_prompts: payload.system_prompt.into_iter().collect(),
         header,
         convention: Some(PeerConvention::Message),
         content: payload.content,
@@ -1205,6 +1207,9 @@ fn validate_delivery_tracking_request(payload: &BridgeDeliveryPayload) -> Result
             "turn and outcome_tracking are mutually exclusive terminal-custody requests"
                 .to_string(),
         );
+    }
+    if payload.turn.is_some() && payload.system_prompt.is_some() {
+        return Err("system_prompt is not supported on directive-bearing deliveries".to_string());
     }
     if payload.outcome_tracking.is_some() && !payload.protocol_version.supports_multi_host() {
         return Err(
@@ -10296,6 +10301,7 @@ mod tests {
         let input = crate::input::Input::Peer(crate::input::PeerInput {
             directed_interaction_id: None,
             objective_id: None,
+            system_prompts: Vec::new(),
             injected_context: Vec::new(),
             header: crate::input::InputHeader {
                 id: meerkat_core::lifecycle::InputId::new(),
@@ -10604,6 +10610,7 @@ mod tests {
             PeerId::parse(PEER_ID_SUPERVISOR).expect("valid supervisor peer id"),
             BridgeDeliveryPayload {
                 objective_id: None,
+                system_prompt: None,
                 injected_context: Vec::new(),
                 transient_turn_context: None,
                 supervisor: supervisor_bridge_spec(),
@@ -10661,6 +10668,7 @@ mod tests {
         let objective_id = meerkat_core::interaction::ObjectiveId::new();
         let payload = BridgeDeliveryPayload {
             objective_id: Some(objective_id),
+            system_prompt: Some("updated member instructions".to_string()),
             injected_context: vec![meerkat_core::types::ContentInput::Text(
                 "tracked ambient context".to_string(),
             )],
@@ -10699,6 +10707,11 @@ mod tests {
         assert_eq!(peer.directed_interaction_id, Some(expected));
         assert_eq!(peer.objective_id, Some(objective_id));
         assert_eq!(
+            peer.system_prompts,
+            ["updated member instructions"],
+            "supervisor-authored System content must survive bridge lowering"
+        );
+        assert_eq!(
             peer.injected_context,
             vec![meerkat_core::types::ContentInput::Text(
                 "tracked ambient context".to_string()
@@ -10712,9 +10725,12 @@ mod tests {
         let semantics =
             crate::ingress_types::RuntimeInputSemantics::try_from_generated_admission(&input, true)
                 .expect("placed peer admission semantics");
+        let turn_metadata = crate::runtime_loop::for_input(&input, semantics);
+        assert_eq!(turn_metadata.directed_interaction_ids, vec![expected]);
         assert_eq!(
-            crate::runtime_loop::for_input(&input, semantics).directed_interaction_ids,
-            vec![expected]
+            turn_metadata.system_prompts,
+            ["updated member instructions"],
+            "the runtime boundary must preserve the exact per-turn System row"
         );
     }
 
@@ -10725,6 +10741,7 @@ mod tests {
         let transcript_interaction_id = Uuid::new_v4();
         let payload = BridgeDeliveryPayload {
             objective_id: None,
+            system_prompt: None,
             injected_context: Vec::new(),
             transient_turn_context: None,
             supervisor: supervisor_bridge_spec(),
@@ -10802,6 +10819,7 @@ mod tests {
             PeerId::parse(PEER_ID_SUPERVISOR).expect("valid supervisor peer id"),
             BridgeDeliveryPayload {
                 objective_id: None,
+                system_prompt: None,
                 injected_context: Vec::new(),
                 transient_turn_context: None,
                 supervisor: supervisor_bridge_spec(),
@@ -10845,6 +10863,7 @@ mod tests {
         let session_id = SessionId::new();
         let mut payload = BridgeDeliveryPayload {
             objective_id: None,
+            system_prompt: None,
             injected_context: Vec::new(),
             transient_turn_context: None,
             supervisor: supervisor_bridge_spec(),
@@ -10960,6 +10979,7 @@ mod tests {
             PeerId::parse(PEER_ID_SUPERVISOR).expect("valid supervisor peer id"),
             BridgeDeliveryPayload {
                 objective_id: None,
+                system_prompt: None,
                 injected_context: Vec::new(),
                 transient_turn_context: None,
                 supervisor: supervisor_bridge_spec(),
@@ -10999,6 +11019,7 @@ mod tests {
             PeerId::parse(PEER_ID_SUPERVISOR).expect("valid supervisor peer id"),
             BridgeDeliveryPayload {
                 objective_id: None,
+                system_prompt: None,
                 injected_context: Vec::new(),
                 transient_turn_context: None,
                 supervisor: supervisor_bridge_spec(),
@@ -11028,6 +11049,7 @@ mod tests {
             PeerId::parse(PEER_ID_SUPERVISOR).expect("valid supervisor peer id"),
             BridgeDeliveryPayload {
                 objective_id: Some(objective_id),
+                system_prompt: None,
                 injected_context: vec![
                     meerkat_core::types::ContentInput::Text("ambient alpha".to_string()),
                     meerkat_core::types::ContentInput::Text("ambient beta".to_string()),

@@ -70,6 +70,7 @@ fn make_peer_terminal(body: &str) -> Input {
     Input::Peer(PeerInput {
         directed_interaction_id: None,
         objective_id: None,
+        system_prompts: Vec::new(),
         injected_context: Vec::new(),
         sender_taint: None,
         header: InputHeader {
@@ -100,6 +101,7 @@ fn make_peer_progress() -> Input {
     Input::Peer(PeerInput {
         directed_interaction_id: None,
         objective_id: None,
+        system_prompts: Vec::new(),
         injected_context: Vec::new(),
         sender_taint: None,
         header: InputHeader {
@@ -614,6 +616,7 @@ async fn accept_peer_response_progress_with_handling_mode_returns_rejected() {
     let input = Input::Peer(PeerInput {
         directed_interaction_id: None,
         objective_id: None,
+        system_prompts: Vec::new(),
         injected_context: Vec::new(),
         sender_taint: None,
         header: InputHeader {
@@ -651,6 +654,7 @@ async fn accept_peer_response_terminal_with_handling_mode_returns_accepted() {
     let input = Input::Peer(PeerInput {
         directed_interaction_id: None,
         objective_id: None,
+        system_prompts: Vec::new(),
         injected_context: Vec::new(),
         sender_taint: None,
         header: InputHeader {
@@ -710,6 +714,7 @@ async fn accept_peer_response_terminal_with_empty_request_id_returns_rejected() 
     let input = Input::Peer(PeerInput {
         directed_interaction_id: None,
         objective_id: None,
+        system_prompts: Vec::new(),
         injected_context: Vec::new(),
         sender_taint: None,
         header: InputHeader {
@@ -747,6 +752,7 @@ async fn accept_peer_message_with_steer_handling_mode_returns_accepted() {
     let input = Input::Peer(PeerInput {
         directed_interaction_id: None,
         objective_id: None,
+        system_prompts: Vec::new(),
         injected_context: Vec::new(),
         sender_taint: None,
         header: InputHeader {
@@ -841,6 +847,7 @@ async fn post_admission_signal_steer_is_request_immediate() {
     let steer_input = Input::Peer(PeerInput {
         directed_interaction_id: None,
         objective_id: None,
+        system_prompts: Vec::new(),
         injected_context: Vec::new(),
         sender_taint: None,
         header: InputHeader {
@@ -886,6 +893,7 @@ async fn post_admission_signal_queue_peer_message_while_running_interrupts_yield
     let peer = Input::Peer(PeerInput {
         directed_interaction_id: None,
         objective_id: None,
+        system_prompts: Vec::new(),
         injected_context: Vec::new(),
         sender_taint: None,
         header: InputHeader {

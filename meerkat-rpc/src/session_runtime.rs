@@ -13441,6 +13441,7 @@ mod tests {
                 meerkat_runtime::Input::Peer(meerkat_runtime::PeerInput {
                     directed_interaction_id: None,
                     objective_id: None,
+                    system_prompts: Vec::new(),
                     injected_context: Vec::new(),
                     sender_taint: None,
                     header: meerkat_runtime::InputHeader {
@@ -13558,6 +13559,7 @@ mod tests {
                 meerkat_runtime::Input::Peer(meerkat_runtime::PeerInput {
                     directed_interaction_id: None,
                     objective_id: None,
+                    system_prompts: Vec::new(),
                     injected_context: Vec::new(),
                     sender_taint: None,
                     header: meerkat_runtime::InputHeader {
@@ -13731,6 +13733,7 @@ mod tests {
                 meerkat_runtime::Input::Peer(meerkat_runtime::PeerInput {
                     directed_interaction_id: None,
                     objective_id: None,
+                    system_prompts: Vec::new(),
                     injected_context: Vec::new(),
                     sender_taint: None,
                     header: meerkat_runtime::InputHeader {
@@ -13850,6 +13853,7 @@ mod tests {
                 meerkat_runtime::Input::Peer(meerkat_runtime::PeerInput {
                     directed_interaction_id: None,
                     objective_id: None,
+                    system_prompts: Vec::new(),
                     injected_context: Vec::new(),
                     sender_taint: None,
                     header: meerkat_runtime::InputHeader {
@@ -17362,6 +17366,7 @@ mod tests {
         let input = meerkat_runtime::Input::Peer(meerkat_runtime::PeerInput {
             directed_interaction_id: None,
             objective_id: None,
+            system_prompts: Vec::new(),
             injected_context: Vec::new(),
             sender_taint: None,
             header: meerkat_runtime::InputHeader {

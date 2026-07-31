@@ -119,9 +119,9 @@ impl MeerkatMachine {
         Ok(report)
     }
 
-    pub(super) async fn reset_runtime_for_promoted_archived_resume(
+    pub(super) async fn reset_runtime_for_authorized_archived_resume(
         &self,
-        lease: &PromotedArchivedResumeCommitLease,
+        lease: &AuthorizedArchivedResumeCommitLease,
     ) -> Result<ResetReport, RuntimeDriverError> {
         let lease = &lease.prepared;
         let (driver, completions) = {

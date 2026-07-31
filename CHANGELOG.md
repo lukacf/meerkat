@@ -23,11 +23,11 @@ via cargo-semver-checks against the published baselines).
   operations are removed from the live persistence contract. Store-issued
   revisions and physical tokens are the only write, resume, and recovery
   authority. The exact 0.8.10 envelope is accepted by a one-time activation
-  importer: stamped documents run the frozen released verifier once, while
-  unstamped documents require same-transaction proof of the released store
-  schema and exact source row/blob identity. Both paths strip the old proof
-  fields and install current store authority. State older than 0.8.10 must be
-  migrated with an older binary before upgrading.
+  importer only with same-transaction proof of the released store schema and
+  exact source row/blob identity. Old embedded stamps and witnesses are
+  untrusted migration input: they are stripped rather than treated as
+  self-authentication. State older than 0.8.10 must be migrated with an older
+  binary before upgrading.
 - `Session::set_system_prompt*`, `SystemPromptMutationKind`,
   `SessionSystemPromptSource`, and the generated system-prompt mutation
   authorization surface are removed. A system instruction is an ordinary
@@ -56,18 +56,22 @@ via cargo-semver-checks against the published baselines).
 - `WireProviderTag::OpenAi` adds the `prompt_cache_enabled` field.
 - `SessionError` adds the `DurableTailRecoveryRefused` variant (code
   `SESSION_DURABLE_TAIL_RECOVERY_REFUSED`), `DurableResumeHold` adds
-  `RecoveryRefused` (wire token `recovery_refused`). A machine-REFUSED
+  `RecoveryRefused` (wire token `recovery_refused`), and
+  `DurableTailRecoveryError` adds `InvalidEvidence`.
+  `DurableTailRecoveryOutcome` adds `AlreadyAligned { recovered }`, while
+  `Committed` gains the exact recovered `Session`. A machine-REFUSED
   durable-tail recovery
   (conflicting persisted runtime facts: another live runtime, or boundary
   receipts that already cover or contradict the tail) no longer surfaces as
   `DurableTailHeldForRecovery`; operators now get the refusal's own cause
   and remediation (retry after the conflicting runtime quiesces) instead of
   the hold's "await reconciliation".
-- `meerkat_runtime::recovery::recover_durable_tail` now accepts only a
-  `RuntimeStore` and stable `SessionId`. The former public
-  `DurableTailRecoveryRequest` construction seam is removed: recovery loads
-  and seals the exact store-owned source, classification, receipt facts,
-  candidate identity, and CAS tokens internally.
+- `DurableTailRecoveryRequest` and
+  `authorize_and_commit_durable_tail_recovery` are removed. Call
+  `meerkat_runtime::recovery::recover_durable_tail(&dyn RuntimeStore,
+  &SessionId)` instead. Recovery loads and seals the exact store-owned source,
+  classification, receipt facts, candidate identity, and CAS tokens
+  internally; callers no longer provide recovered bytes or recovery facts.
 - `meerkat_core::BlobStoreError` adds the exhaustive
   `WriteLimitExceeded { max_blob_bytes, actual_encoded_bytes }` variant —
   the typed store-side refusal of an oversized write. Downstream exhaustive
@@ -95,16 +99,49 @@ via cargo-semver-checks against the published baselines).
   adds the `system_prompt: Option<String>` parameter. External struct literals
   and bridge implementations must initialize and forward these fields.
 - `StickyModelFallbackCommitOperation::wait` now returns
-  `Option<SessionControlCommitReceipt>` instead of `()`, exposing the exact
-  durable control receipt when one was committed.
+  `Result<Option<SessionControlCommitReceipt>,
+  StickyModelFallbackCommitError>` instead of
+  `Result<(), StickyModelFallbackCommitError>`, exposing the exact durable
+  control receipt when one was committed. Callers that need only completion
+  may explicitly discard the optional receipt.
 - `CoreExecutor` adds
   `acknowledge_committed_session_boundary(&CommittedSessionBoundaryAuthority)`.
   Store-backed executors must override the rejecting default and consume the
   exact typed authority after the runtime boundary commits.
+  `checkpoint_committed_session_snapshot` now receives `Arc<Vec<u8>>`;
+  implementations should retain or borrow the shared serialized artifact
+  instead of copying the accumulated document.
+- `RuntimeStore` adds the required
+  `session_authority_ops(&self) -> &dyn RuntimeSessionAuthorityOps` accessor.
+  This doc-hidden, implementor-only carrier owns the complete store-issued
+  session-authority capability block. All 19 operations are required, so real
+  backends must implement profile-specific support or an explicit typed
+  refusal instead of inheriting a silent `Unsupported` default. Operational
+  callers continue to use `RuntimeStore`, preserving transparent and
+  fault-injection decorator overrides; decorators forward the carrier accessor
+  and override only the individual `RuntimeStore` operations they intentionally
+  perturb.
 - `MobSessionService` adds the required
   `acknowledge_committed_runtime_session_boundary_under_turn_finalization_boundary`
   method. Implementations and wrappers must forward the exhaustive
-  `CommittedSessionBoundaryAuthority` carrier.
+  `CommittedSessionBoundaryAuthority` carrier. Its committed-session
+  checkpoint hooks now receive `Arc<Vec<u8>>` for the same shared-artifact
+  contract.
+- `MobSessionService` adds the required
+  `prepare_session_for_resume(&SessionId) -> Result<(), SessionError>` method.
+  Persistent implementations converge any store-owned durable tail before an
+  operational resume materializes the committed Session body; transparent
+  wrappers must forward it. The composed `materialize_session_for_resume`
+  helper performs preparation followed by the existing typed resume load,
+  while observation-only callers continue using `load_session_for_resume`.
+- Archived-resume authority is renamed to match its store-owned semantics:
+  `PromotedArchivedResumeCommitLease` becomes
+  `AuthorizedArchivedResumeCommitLease`,
+  `PreparedArchivedResumeCommitLease::confirm_document_promoted` becomes
+  `confirm_runtime_store_authority`, and
+  `MobSessionService::promote_revivable_retired_session` becomes
+  `authorize_revivable_retired_session`. Revival no longer mutates or
+  persists an Archived marker in the Session document.
 - `OccurrenceLifecycleInput` and `OccurrenceLifecycleEffect` add
   `DispatchAccepted`; exhaustive matches must add arms. The input carries
   `DeliveryAdmissionOutcome` plus `at_utc`.
@@ -203,6 +240,28 @@ via cargo-semver-checks against the published baselines).
   boundary as the selected physical profile. It contains listing and
   lifecycle facts only, never a transcript, graph, component body, or
   serialized Session.
+- **Opaque JSON now has one durable transcript identity.** Tool-use arguments
+  and structured tool results serialize as recursively key-sorted JSON, and
+  transcript digest format 3 binds that canonical value instead of producer
+  spelling. Exact 0.8.10 activation accepts the released format-2 graph only
+  under store-issued physical authority, validates the observable graph and
+  row topology, remaps every revision and span identity together, drops only
+  rewrite occurrences whose endpoints become identical after
+  canonicalization, renumbers retained occurrences contiguously, and then
+  runs the full current validator. Current-format reads remain strict; the
+  one-time importer is the only relaxed boundary.
+- **Recovered WorkGraph jobs honor durable cancellation before replay.** A
+  cancelled monitor acknowledges immediately after process containment,
+  without a redundant settlement-lease CAS or diagnostic drain in front of
+  the terminal write. If the host dies in that window, recovery applies the
+  persisted cancel request from `LossObserved` before considering replay or
+  checkpoint resume, so a cancelled job cannot restart after reboot.
+- **Retired session revival no longer rewrites a Session lifecycle marker.**
+  The exact prepared runtime lease authorizes the store-owned
+  `Retired -> Idle` transition while the Session body remains ordinary domain
+  state. Catalog or physical boundary authority still protects a retained
+  session, but a bare lifecycle registration left after body loss is treated
+  as executor residue instead of resurrecting archive ownership.
 
 ### Added
 

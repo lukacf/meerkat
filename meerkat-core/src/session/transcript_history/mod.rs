@@ -11,11 +11,12 @@ pub(crate) mod validate;
 
 pub use audit_receipt::TranscriptRewriteAuditReceiptBatch;
 pub use graph::{
-    TRANSCRIPT_HISTORY_FORMAT_CURRENT, TranscriptEndpointWitness, TranscriptGraphPrefixAccumulator,
-    TranscriptHistoryState, TranscriptParentAdvance, TranscriptRevisionBody,
-    TranscriptRevisionEdge, TranscriptRewriteCommit, TranscriptRewriteParentTransition,
-    TranscriptRewritePatch, TranscriptRewritePrefixAccumulator, TranscriptRewriteRecord,
-    extend_transcript_rewrite_prefix_accumulator, transcript_history_full_body_materializations,
+    ProvenReleased0810RewriteRemap, TRANSCRIPT_HISTORY_FORMAT_CURRENT, TranscriptEndpointWitness,
+    TranscriptGraphPrefixAccumulator, TranscriptHistoryState, TranscriptParentAdvance,
+    TranscriptRevisionBody, TranscriptRevisionEdge, TranscriptRewriteCommit,
+    TranscriptRewriteParentTransition, TranscriptRewritePatch, TranscriptRewritePrefixAccumulator,
+    TranscriptRewriteRecord, extend_transcript_rewrite_prefix_accumulator,
+    remap_proven_released_0810_rewrite_record, transcript_history_full_body_materializations,
     transcript_rewrite_prefix_digest,
 };
 pub use sealed::{ValidatedTranscriptHistory, ValidatedTranscriptRewriteSuffix};

@@ -103,6 +103,36 @@ pub(super) fn validate_transcript_rewrite_record(
     parent_body: &TranscriptRevisionBody,
     revision_body: &TranscriptRevisionBody,
 ) -> Result<(), TranscriptEditError> {
+    validate_transcript_rewrite_record_with_digest(
+        commit,
+        parent_body,
+        revision_body,
+        transcript_messages_digest,
+    )
+}
+
+pub(super) fn validate_released_0810_transcript_rewrite_record(
+    commit: &TranscriptRewriteCommit,
+    parent_body: &TranscriptRevisionBody,
+    revision_body: &TranscriptRevisionBody,
+) -> Result<(), TranscriptEditError> {
+    validate_released_0810_transcript_rewrite_structure(commit, parent_body, revision_body)
+}
+
+/// Validate the exact structure still observable after released 0.8.10
+/// metadata buffering.
+///
+/// That release could mint a format-2 label before `RawValue` object spelling
+/// was normalized into `serde_json::Value`, irreversibly losing the bytes
+/// needed to re-prove the label. The one-time importer therefore proves
+/// topology and exact retained message relations here, under the enclosing
+/// checkpoint/store source authority, then rebinds every semantic id. Current
+/// graph ingress never calls this relaxed validator.
+fn validate_released_0810_transcript_rewrite_structure(
+    commit: &TranscriptRewriteCommit,
+    parent_body: &TranscriptRevisionBody,
+    revision_body: &TranscriptRevisionBody,
+) -> Result<(), TranscriptEditError> {
     if parent_body.revision != commit.parent_revision {
         return Err(TranscriptEditError::HistoryStateMalformed(format!(
             "parent body revision {} does not match commit parent {}",
@@ -120,7 +150,111 @@ pub(super) fn validate_transcript_rewrite_record(
             revision: commit.revision.clone(),
         });
     }
-    let parent_digest = transcript_messages_digest(&parent_body.messages)
+    let (start, end) = commit.selection.bounds();
+    if start > end || end > parent_body.messages.len() {
+        return Err(TranscriptEditError::InvalidRewriteRange {
+            start,
+            end,
+            message_count: parent_body.messages.len(),
+        });
+    }
+    if commit.messages_before != parent_body.messages.len()
+        || commit.messages_after != revision_body.messages.len()
+    {
+        return Err(TranscriptEditError::HistoryStateMalformed(format!(
+            "commit message counts {} -> {} do not match revision bodies {} -> {}",
+            commit.messages_before,
+            commit.messages_after,
+            parent_body.messages.len(),
+            revision_body.messages.len()
+        )));
+    }
+    let removed_len = end - start;
+    let retained_len = commit
+        .messages_before
+        .checked_sub(removed_len)
+        .ok_or_else(|| {
+            TranscriptEditError::HistoryStateMalformed(
+                "commit removed more messages than it recorded before rewrite".to_string(),
+            )
+        })?;
+    let replacement_len = commit
+        .messages_after
+        .checked_sub(retained_len)
+        .ok_or_else(|| {
+            TranscriptEditError::HistoryStateMalformed(
+                "commit message counts cannot describe a replacement span".to_string(),
+            )
+        })?;
+    let replacement_end = start.checked_add(replacement_len).ok_or_else(|| {
+        TranscriptEditError::HistoryStateMalformed("replacement span end overflowed".to_string())
+    })?;
+    if replacement_end > revision_body.messages.len() {
+        return Err(TranscriptEditError::InvalidRewriteRange {
+            start,
+            end: replacement_end,
+            message_count: revision_body.messages.len(),
+        });
+    }
+    let parent_prefix = transcript_messages_digest(&parent_body.messages[..start])
+        .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
+    let revision_prefix = transcript_messages_digest(&revision_body.messages[..start])
+        .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
+    let parent_suffix = transcript_messages_digest(&parent_body.messages[end..])
+        .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
+    let revision_suffix = transcript_messages_digest(&revision_body.messages[replacement_end..])
+        .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
+    if parent_prefix != revision_prefix || parent_suffix != revision_suffix {
+        return Err(TranscriptEditError::HistoryStateMalformed(
+            "released 0.8.10 rewrite changed retained messages outside its selected span"
+                .to_string(),
+        ));
+    }
+    if commit.selection.semantic() == TranscriptRewriteSemantic::Compaction {
+        let summary_count = revision_body.messages[start..replacement_end]
+            .iter()
+            .filter(|message| {
+                matches!(message, Message::User(user) if user.transcript_role.is_compaction_summary())
+            })
+            .count();
+        if start != 0
+            || end != commit.messages_before
+            || commit.messages_after >= commit.messages_before
+            || summary_count != 1
+        {
+            return Err(TranscriptEditError::HistoryStateMalformed(
+                "typed compaction rewrite must shrink the full transcript and carry exactly one CompactionSummary"
+                    .to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_transcript_rewrite_record_with_digest(
+    commit: &TranscriptRewriteCommit,
+    parent_body: &TranscriptRevisionBody,
+    revision_body: &TranscriptRevisionBody,
+    digest: fn(&[Message]) -> Result<String, serde_json::Error>,
+) -> Result<(), TranscriptEditError> {
+    if parent_body.revision != commit.parent_revision {
+        return Err(TranscriptEditError::HistoryStateMalformed(format!(
+            "parent body revision {} does not match commit parent {}",
+            parent_body.revision, commit.parent_revision
+        )));
+    }
+    if revision_body.revision != commit.revision {
+        return Err(TranscriptEditError::HistoryStateMalformed(format!(
+            "revision body {} does not match commit revision {}",
+            revision_body.revision, commit.revision
+        )));
+    }
+    if commit.parent_revision == commit.revision {
+        return Err(TranscriptEditError::NoOpRewrite {
+            revision: commit.revision.clone(),
+        });
+    }
+    let parent_digest = digest(&parent_body.messages)
         .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
     if parent_digest != commit.parent_revision {
         return Err(TranscriptEditError::HistoryStateMalformed(format!(
@@ -128,7 +262,7 @@ pub(super) fn validate_transcript_rewrite_record(
             commit.parent_revision
         )));
     }
-    let revision_digest = transcript_messages_digest(&revision_body.messages)
+    let revision_digest = digest(&revision_body.messages)
         .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
     if revision_digest != commit.revision {
         return Err(TranscriptEditError::HistoryStateMalformed(format!(
@@ -155,7 +289,7 @@ pub(super) fn validate_transcript_rewrite_record(
             revision_body.messages.len()
         )));
     }
-    let original_span_digest = transcript_messages_digest(&parent_body.messages[start..end])
+    let original_span_digest = digest(&parent_body.messages[start..end])
         .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
     if original_span_digest != commit.original_span_digest {
         return Err(TranscriptEditError::HistoryStateMalformed(format!(
@@ -208,28 +342,26 @@ pub(super) fn validate_transcript_rewrite_record(
             ));
         }
     }
-    let parent_prefix_digest = transcript_messages_digest(&parent_body.messages[..start])
+    let parent_prefix_digest = digest(&parent_body.messages[..start])
         .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
-    let revision_prefix_digest = transcript_messages_digest(&revision_body.messages[..start])
+    let revision_prefix_digest = digest(&revision_body.messages[..start])
         .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
     if parent_prefix_digest != revision_prefix_digest {
         return Err(TranscriptEditError::HistoryStateMalformed(
             "rewrite revision changed messages before the selected span".to_string(),
         ));
     }
-    let parent_suffix_digest = transcript_messages_digest(&parent_body.messages[end..])
+    let parent_suffix_digest = digest(&parent_body.messages[end..])
         .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
-    let revision_suffix_digest =
-        transcript_messages_digest(&revision_body.messages[replacement_end..])
-            .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
+    let revision_suffix_digest = digest(&revision_body.messages[replacement_end..])
+        .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
     if parent_suffix_digest != revision_suffix_digest {
         return Err(TranscriptEditError::HistoryStateMalformed(
             "rewrite revision changed messages after the selected span".to_string(),
         ));
     }
-    let replacement_digest =
-        transcript_messages_digest(&revision_body.messages[start..replacement_end])
-            .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
+    let replacement_digest = digest(&revision_body.messages[start..replacement_end])
+        .map_err(|err| TranscriptEditError::HistoryStateMalformed(err.to_string()))?;
     if replacement_digest != commit.replacement_digest {
         return Err(TranscriptEditError::HistoryStateMalformed(format!(
             "replacement span digest {replacement_digest} does not match commit digest {}",

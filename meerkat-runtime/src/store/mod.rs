@@ -1734,10 +1734,17 @@ impl PreparedDurableTailRecoverySource {
             || committed_session.total_usage() != boundary_head.usage
             || !committed_metadata_matches
         {
-            return Err(conflict(
-                "committed recovery materialization differs from the exact retained boundary envelope"
-                    .to_string(),
-            ));
+            return Err(conflict(format!(
+                "committed recovery materialization differs from the exact retained boundary envelope \
+                     (message_count={}, revision={}, version={}, created_at={}, updated_at={}, usage={}, metadata={})",
+                committed_session.messages().len() as u64 == boundary_head.message_count,
+                committed_revision == boundary_head.head_revision,
+                committed_session.version() == boundary_head.version,
+                committed_session.created_at() == boundary_head.created_at,
+                committed_session.updated_at() == boundary_head.updated_at,
+                committed_session.total_usage() == boundary_head.usage,
+                committed_metadata_matches,
+            )));
         }
         let physical_revision = physical_session
             .transcript_content_digest()
@@ -2895,24 +2902,31 @@ impl PreparedRecoveryEvidence {
             conflict("prepared recovery has no sealed head-canonical mutation".to_string())
         })?;
         let successor_head = head_boundary.mutation().successor_head();
-        let successor_row_prefix = successor_head.message_row_prefix.clone().ok_or_else(|| {
-            conflict(
-                "prepared recovered head has no exact message-row prefix authority".to_string(),
-            )
+        let recovered_message_count = u64::try_from(recovered.messages().len()).map_err(|_| {
+            conflict("recovered document message count exceeds u64 authority".to_string())
         })?;
-        let recovered_head =
-            meerkat_core::session_store::SessionHead::from_session_with_proved_storage_authority(
-                recovered,
-                successor_head.strand.clone(),
-                successor_head.rewrite_prefix.clone(),
-                successor_row_prefix,
-            )
-            .map_err(|error| {
-                conflict(format!(
-                    "failed to bind recovered document to prepared head authority: {error}"
-                ))
-            })?;
-        if &recovered_head != successor_head {
+        let conversation_digest = recovered.transcript_content_digest().map_err(|error| {
+            conflict(format!(
+                "failed to derive recovered conversation digest: {error}"
+            ))
+        })?;
+        let metadata_matches =
+            successor_head
+                .matches_session_metadata(recovered)
+                .map_err(|error| {
+                    conflict(format!(
+                        "failed to compare recovered document metadata authority: {error}"
+                    ))
+                })?;
+        if &successor_head.id != recovered.id()
+            || successor_head.version != recovered.version()
+            || successor_head.head_revision != conversation_digest
+            || successor_head.message_count != recovered_message_count
+            || successor_head.created_at != recovered.created_at()
+            || successor_head.updated_at != recovered.updated_at()
+            || successor_head.usage != recovered.total_usage()
+            || !metadata_matches
+        {
             return Err(conflict(
                 "prepared recovered head differs from the exact recovered document".to_string(),
             ));
@@ -2935,11 +2949,6 @@ impl PreparedRecoveryEvidence {
                     .to_string(),
             ));
         }
-        let conversation_digest = recovered.transcript_content_digest().map_err(|error| {
-            conflict(format!(
-                "failed to derive recovered conversation digest: {error}"
-            ))
-        })?;
         if receipt.conversation_digest.as_deref() != Some(conversation_digest.as_str()) {
             return Err(conflict(
                 "recovery receipt does not bind the exact recovered conversation".to_string(),
@@ -7117,41 +7126,167 @@ pub async fn load_input_states_for_recovery(
 /// its successor key, so a valid key swap is accepted regardless of mutation
 /// order. A duplicate final claim or a claim held by a row outside the mutation
 /// set rejects the entire operation without exposing any sibling effect.
+///
+/// This object-safe carrier is implemented only by real persistence backends.
+/// Its methods have the same contracts as the corresponding forwarding
+/// methods on [`RuntimeStore`]. Every method is required: profile-specific
+/// capability refusals are explicit backend behavior, never inherited
+/// defaults.
+///
+/// This is an implementor seam. Operational callers use [`RuntimeStore`] so a
+/// decorator's intentional per-operation overrides remain observable.
+#[doc(hidden)]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+pub trait RuntimeSessionAuthorityOps: Send + Sync {
+    fn session_persistence_profile(&self) -> RuntimeSessionPersistenceProfile;
+
+    fn session_boundary_authority_read_cost(&self) -> RuntimeSessionAuthorityReadCost;
+
+    async fn commit_prepared_session_boundary(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        request: PreparedRuntimeSessionCommit,
+    ) -> Result<PreparedRuntimeSessionCommitResult, RuntimeStoreError>;
+
+    async fn load_session_boundary_authority(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<RuntimeSessionAuthority>, RuntimeStoreError>;
+
+    async fn load_whole_blob_store_authority(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<WholeBlobStoreAuthority>, RuntimeStoreError>;
+
+    async fn load_committed_whole_blob_snapshot(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<CommittedWholeBlobSnapshot>, RuntimeStoreError>;
+
+    async fn commit_prepared_whole_blob_snapshot_cas(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        prepared: PreparedWholeBlobSnapshotCas,
+    ) -> Result<WholeBlobSnapshotCasOutcome, RuntimeStoreError>;
+
+    async fn delete_runtime_session_catalog_entry(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<(), RuntimeStoreError>;
+
+    async fn load_runtime_session_catalog_entry(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<RuntimeSessionCatalogEntry>, RuntimeStoreError>;
+
+    async fn list_runtime_session_catalog_entries(
+        &self,
+        filter: meerkat_core::SessionFilter,
+    ) -> Result<Vec<RuntimeSessionCatalogEntry>, RuntimeStoreError>;
+
+    async fn write_prepared_whole_blob_provisional_tail(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        prepared: PreparedWholeBlobProvisionalTail,
+    ) -> Result<WholeBlobProvisionalTailAuthority, RuntimeStoreError>;
+
+    async fn load_whole_blob_provisional_tail(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<CommittedWholeBlobProvisionalTail>, RuntimeStoreError>;
+
+    async fn discard_whole_blob_provisional_tail(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        expected: &WholeBlobProvisionalTailAuthority,
+    ) -> Result<bool, RuntimeStoreError>;
+
+    async fn write_prepared_head_canonical_provisional_tail(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        prepared: PreparedHeadCanonicalProvisionalTail,
+    ) -> Result<HeadCanonicalProvisionalTailAuthority, RuntimeStoreError>;
+
+    async fn load_head_canonical_provisional_tail(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<HeadCanonicalProvisionalTailAuthority>, RuntimeStoreError>;
+
+    async fn discard_head_canonical_provisional_tail(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        expected: &HeadCanonicalProvisionalTailAuthority,
+    ) -> Result<bool, RuntimeStoreError>;
+
+    async fn load_durable_tail_recovery_source(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<PreparedDurableTailRecoverySource>, RuntimeStoreError>;
+
+    async fn load_durable_tail_recovery_receipts(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        run_id: &RunId,
+    ) -> Result<Vec<PreparedRecoveryReceiptSource>, RuntimeStoreError>;
+
+    async fn load_committed_recovery_boundary(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        candidate_id: &str,
+    ) -> Result<Option<CommittedRecoveryBoundary>, RuntimeStoreError>;
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait RuntimeStore: Send + Sync {
+    /// Required carrier for the complete store-owned session-authority seam.
+    ///
+    /// Decorators forward this one accessor. A fault-injection decorator may
+    /// still override the individual forwarding method it intentionally
+    /// perturbs. Omitting the carrier is therefore a compile error instead of
+    /// a runtime `Unsupported` surprise.
+    #[doc(hidden)]
+    fn session_authority_ops(&self) -> &dyn RuntimeSessionAuthorityOps;
+
     /// Durable session representation owned by this store.
     ///
-    /// Every implementation must choose explicitly. `WholeBlobV1`
+    /// Every backend carrier must choose explicitly. `WholeBlobV1`
     /// materializes and writes the accumulated session document at each
     /// boundary, so its ordinary persistence cost is O(document).
     /// `HeadCanonicalV1` commits the prepared head/suffix mutation and small
     /// runtime authority incrementally. Every profile must implement
-    /// [`Self::commit_prepared_session_boundary`] directly; there is no
-    /// checkpoint-derived or whole-blob compatibility bridge.
-    fn session_persistence_profile(&self) -> RuntimeSessionPersistenceProfile;
+    /// [`RuntimeSessionAuthorityOps::commit_prepared_session_boundary`]
+    /// directly; there is no checkpoint-derived or whole-blob compatibility
+    /// bridge.
+    fn session_persistence_profile(&self) -> RuntimeSessionPersistenceProfile {
+        self.session_authority_ops().session_persistence_profile()
+    }
 
     /// Declared cost of [`Self::load_session_boundary_authority`].
     ///
-    /// The default is deliberately unsupported. Implementations must opt in
-    /// only after maintaining authority separately from the document body.
+    /// The carrier default is deliberately unsupported. Backends opt in only
+    /// after maintaining authority separately from the document body.
     fn session_boundary_authority_read_cost(&self) -> RuntimeSessionAuthorityReadCost {
-        RuntimeSessionAuthorityReadCost::Unsupported
+        self.session_authority_ops()
+            .session_boundary_authority_read_cost()
     }
 
     /// Commit one valid-by-construction prepared session boundary.
     ///
-    /// Every store must override this method. Only the backend can allocate the
-    /// next physical revision and atomically bind it to the exact body/head,
-    /// catalog projection, receipts, input rows, and lifecycle effects. A
-    /// generic default cannot honestly mint store-issued authority.
+    /// Every backend carrier must override this operation. Only the backend
+    /// can allocate the next physical revision and atomically bind it to the
+    /// exact body/head, catalog projection, receipts, input rows, and lifecycle
+    /// effects. A generic implementation cannot honestly mint store-issued
+    /// authority.
     async fn commit_prepared_session_boundary(
         &self,
-        _runtime_id: &LogicalRuntimeId,
-        _request: PreparedRuntimeSessionCommit,
+        runtime_id: &LogicalRuntimeId,
+        request: PreparedRuntimeSessionCommit,
     ) -> Result<PreparedRuntimeSessionCommitResult, RuntimeStoreError> {
-        let profile = self.session_persistence_profile();
-        Err(RuntimeStoreError::PreparedSessionBoundaryRequiresOverride { profile })
+        self.session_authority_ops()
+            .commit_prepared_session_boundary(runtime_id, request)
+            .await
     }
 
     /// Load the versioned session authority for a runtime.
@@ -7163,21 +7298,21 @@ pub trait RuntimeStore: Send + Sync {
     /// operation into an invisible O(document) loop.
     async fn load_session_boundary_authority(
         &self,
-        _runtime_id: &LogicalRuntimeId,
+        runtime_id: &LogicalRuntimeId,
     ) -> Result<Option<RuntimeSessionAuthority>, RuntimeStoreError> {
-        Err(RuntimeStoreError::Unsupported(
-            "bounded session-boundary authority observation".to_string(),
-        ))
+        self.session_authority_ops()
+            .load_session_boundary_authority(runtime_id)
+            .await
     }
 
     /// Observe only the fixed-size store-issued WholeBlob identity.
     async fn load_whole_blob_store_authority(
         &self,
-        _runtime_id: &LogicalRuntimeId,
+        runtime_id: &LogicalRuntimeId,
     ) -> Result<Option<WholeBlobStoreAuthority>, RuntimeStoreError> {
-        Err(RuntimeStoreError::Unsupported(
-            "bounded WholeBlob store authority observation".to_string(),
-        ))
+        self.session_authority_ops()
+            .load_whole_blob_store_authority(runtime_id)
+            .await
     }
 
     /// Atomically pair the WholeBlob body with its store-issued identity.
@@ -7186,11 +7321,11 @@ pub trait RuntimeStore: Send + Sync {
     /// callers must use [`Self::load_whole_blob_store_authority`] instead.
     async fn load_committed_whole_blob_snapshot(
         &self,
-        _runtime_id: &LogicalRuntimeId,
+        runtime_id: &LogicalRuntimeId,
     ) -> Result<Option<CommittedWholeBlobSnapshot>, RuntimeStoreError> {
-        Err(RuntimeStoreError::Unsupported(
-            "atomic WholeBlob snapshot/authority observation".to_string(),
-        ))
+        self.session_authority_ops()
+            .load_committed_whole_blob_snapshot(runtime_id)
+            .await
     }
 
     /// Commit one typed WholeBlob successor only while its exact store-issued
@@ -7201,108 +7336,108 @@ pub trait RuntimeStore: Send + Sync {
     /// whole document.
     async fn commit_prepared_whole_blob_snapshot_cas(
         &self,
-        _runtime_id: &LogicalRuntimeId,
-        _prepared: PreparedWholeBlobSnapshotCas,
+        runtime_id: &LogicalRuntimeId,
+        prepared: PreparedWholeBlobSnapshotCas,
     ) -> Result<WholeBlobSnapshotCasOutcome, RuntimeStoreError> {
-        Err(RuntimeStoreError::Unsupported(
-            "typed WholeBlob snapshot compare-and-swap".to_string(),
-        ))
+        self.session_authority_ops()
+            .commit_prepared_whole_blob_snapshot_cas(runtime_id, prepared)
+            .await
     }
 
     /// Delete one exact runtime's catalog projection.
     async fn delete_runtime_session_catalog_entry(
         &self,
-        _runtime_id: &LogicalRuntimeId,
+        runtime_id: &LogicalRuntimeId,
     ) -> Result<(), RuntimeStoreError> {
-        Err(RuntimeStoreError::Unsupported(
-            "runtime session catalog delete".to_string(),
-        ))
+        self.session_authority_ops()
+            .delete_runtime_session_catalog_entry(runtime_id)
+            .await
     }
 
     /// Load one bounded, body-free runtime session catalog entry.
     async fn load_runtime_session_catalog_entry(
         &self,
-        _runtime_id: &LogicalRuntimeId,
+        runtime_id: &LogicalRuntimeId,
     ) -> Result<Option<RuntimeSessionCatalogEntry>, RuntimeStoreError> {
-        Err(RuntimeStoreError::Unsupported(
-            "runtime session catalog load".to_string(),
-        ))
+        self.session_authority_ops()
+            .load_runtime_session_catalog_entry(runtime_id)
+            .await
     }
 
     /// List body-free catalog entries in deterministic updated-descending,
     /// session-id-ascending order.
     async fn list_runtime_session_catalog_entries(
         &self,
-        _filter: meerkat_core::SessionFilter,
+        filter: meerkat_core::SessionFilter,
     ) -> Result<Vec<RuntimeSessionCatalogEntry>, RuntimeStoreError> {
-        Err(RuntimeStoreError::Unsupported(
-            "runtime session catalog list".to_string(),
-        ))
+        self.session_authority_ops()
+            .list_runtime_session_catalog_entries(filter)
+            .await
     }
 
     /// Write one typed provisional WholeBlob candidate exactly once.
     async fn write_prepared_whole_blob_provisional_tail(
         &self,
-        _runtime_id: &LogicalRuntimeId,
-        _prepared: PreparedWholeBlobProvisionalTail,
+        runtime_id: &LogicalRuntimeId,
+        prepared: PreparedWholeBlobProvisionalTail,
     ) -> Result<WholeBlobProvisionalTailAuthority, RuntimeStoreError> {
-        Err(RuntimeStoreError::Unsupported(
-            "WholeBlob provisional-tail writes".to_string(),
-        ))
+        self.session_authority_ops()
+            .write_prepared_whole_blob_provisional_tail(runtime_id, prepared)
+            .await
     }
 
     /// Atomically load one provisional authority and its candidate body.
     async fn load_whole_blob_provisional_tail(
         &self,
-        _runtime_id: &LogicalRuntimeId,
+        runtime_id: &LogicalRuntimeId,
     ) -> Result<Option<CommittedWholeBlobProvisionalTail>, RuntimeStoreError> {
-        Err(RuntimeStoreError::Unsupported(
-            "WholeBlob provisional-tail observation".to_string(),
-        ))
+        self.session_authority_ops()
+            .load_whole_blob_provisional_tail(runtime_id)
+            .await
     }
 
     /// Discard only the exact provisional candidate named by `expected`.
     async fn discard_whole_blob_provisional_tail(
         &self,
-        _runtime_id: &LogicalRuntimeId,
-        _expected: &WholeBlobProvisionalTailAuthority,
+        runtime_id: &LogicalRuntimeId,
+        expected: &WholeBlobProvisionalTailAuthority,
     ) -> Result<bool, RuntimeStoreError> {
-        Err(RuntimeStoreError::Unsupported(
-            "WholeBlob provisional-tail discard".to_string(),
-        ))
+        self.session_authority_ops()
+            .discard_whole_blob_provisional_tail(runtime_id, expected)
+            .await
     }
 
     /// Persist one exact HeadCanonical provisional intent before the physical
     /// SessionStore CAS it authorizes.
     async fn write_prepared_head_canonical_provisional_tail(
         &self,
-        _runtime_id: &LogicalRuntimeId,
-        _prepared: PreparedHeadCanonicalProvisionalTail,
+        runtime_id: &LogicalRuntimeId,
+        prepared: PreparedHeadCanonicalProvisionalTail,
     ) -> Result<HeadCanonicalProvisionalTailAuthority, RuntimeStoreError> {
-        Err(RuntimeStoreError::Unsupported(
-            "HeadCanonical provisional-tail writes".to_string(),
-        ))
+        self.session_authority_ops()
+            .write_prepared_head_canonical_provisional_tail(runtime_id, prepared)
+            .await
     }
 
     /// Load only the fixed-size HeadCanonical provisional authority.
     async fn load_head_canonical_provisional_tail(
         &self,
-        _runtime_id: &LogicalRuntimeId,
+        runtime_id: &LogicalRuntimeId,
     ) -> Result<Option<HeadCanonicalProvisionalTailAuthority>, RuntimeStoreError> {
-        Err(RuntimeStoreError::Unsupported(
-            "HeadCanonical provisional-tail observation".to_string(),
-        ))
+        self.session_authority_ops()
+            .load_head_canonical_provisional_tail(runtime_id)
+            .await
     }
 
     /// Discard only the exact HeadCanonical provisional authority supplied.
     async fn discard_head_canonical_provisional_tail(
         &self,
-        _runtime_id: &LogicalRuntimeId,
-        _expected: &HeadCanonicalProvisionalTailAuthority,
+        runtime_id: &LogicalRuntimeId,
+        expected: &HeadCanonicalProvisionalTailAuthority,
     ) -> Result<bool, RuntimeStoreError> {
-        Err(RuntimeStoreError::Unsupported(
-            "HeadCanonical provisional-tail discard".to_string(),
-        ))
+        self.session_authority_ops()
+            .discard_head_canonical_provisional_tail(runtime_id, expected)
+            .await
     }
 
     /// Load one store-owned durable-tail source from a single verified
@@ -7313,13 +7448,11 @@ pub trait RuntimeStore: Send + Sync {
     /// accepting caller-supplied session/head facts.
     async fn load_durable_tail_recovery_source(
         &self,
-        _runtime_id: &LogicalRuntimeId,
+        runtime_id: &LogicalRuntimeId,
     ) -> Result<Option<PreparedDurableTailRecoverySource>, RuntimeStoreError> {
-        Err(
-            RuntimeStoreError::PreparedRecoveryRequiresAtomicPhysicalHeadCas {
-                profile: self.session_persistence_profile(),
-            },
-        )
+        self.session_authority_ops()
+            .load_durable_tail_recovery_source(runtime_id)
+            .await
     }
 
     /// Load every exact original receipt row for one store-derived recovery
@@ -7329,14 +7462,12 @@ pub trait RuntimeStore: Send + Sync {
     /// conversation digest be enriched in the same transaction as recovery.
     async fn load_durable_tail_recovery_receipts(
         &self,
-        _runtime_id: &LogicalRuntimeId,
-        _run_id: &RunId,
+        runtime_id: &LogicalRuntimeId,
+        run_id: &RunId,
     ) -> Result<Vec<PreparedRecoveryReceiptSource>, RuntimeStoreError> {
-        Err(
-            RuntimeStoreError::PreparedRecoveryRequiresAtomicPhysicalHeadCas {
-                profile: self.session_persistence_profile(),
-            },
-        )
+        self.session_authority_ops()
+            .load_durable_tail_recovery_receipts(runtime_id, run_id)
+            .await
     }
 
     /// Load the durable exact-retry witness for one recovery candidate.
@@ -7347,14 +7478,12 @@ pub trait RuntimeStore: Send + Sync {
     /// refuses rather than presenting a partial commit as converged recovery.
     async fn load_committed_recovery_boundary(
         &self,
-        _runtime_id: &LogicalRuntimeId,
-        _candidate_id: &str,
+        runtime_id: &LogicalRuntimeId,
+        candidate_id: &str,
     ) -> Result<Option<CommittedRecoveryBoundary>, RuntimeStoreError> {
-        Err(
-            RuntimeStoreError::PreparedRecoveryRequiresAtomicPhysicalHeadCas {
-                profile: self.session_persistence_profile(),
-            },
-        )
+        self.session_authority_ops()
+            .load_committed_recovery_boundary(runtime_id, candidate_id)
+            .await
     }
 
     /// Whether [`RuntimeStore::atomic_apply`] durably records typed compaction

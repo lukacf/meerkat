@@ -1,9 +1,9 @@
 //! Acceptance pin for OB3's exact Meerkat 0.8.10 recovery-migration session.
 //!
 //! The fixture contains one system message and no user/provider transcript.
-//! It proves the frozen `RecoveryMigration` + legacy authority-base stamp only
-//! at the explicit importer boundary; the resulting domain Session carries no
-//! checkpoint vocabulary.
+//! The explicit importer accepts it only under exact physical store authority;
+//! its retired `RecoveryMigration` + legacy authority-base stamp is stripped
+//! as untrusted metadata from the resulting domain Session.
 
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
@@ -19,14 +19,18 @@ const PROVENANCE: &[u8] =
 const FIXTURE_SHA256: &str = "43e49a7b216cf61f6ba8f289824c9d6e24a64a81d873f9eb4a09c5b3f6f0cd98";
 const RELEASED_RUNTIME_CHECKPOINT_PROVENANCE_KEY: &str = "session_runtime_checkpoint_provenance_v1";
 
-fn sha256_hex(bytes: &[u8]) -> String {
+fn hex_encode(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
 
     let mut encoded = String::with_capacity(64);
-    for byte in Sha256::digest(bytes) {
+    for byte in bytes {
         write!(&mut encoded, "{byte:02x}").unwrap();
     }
     encoded
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    hex_encode(&Sha256::digest(bytes))
 }
 
 fn released_stamp_key(metadata: &serde_json::Map<String, serde_json::Value>) -> Option<&str> {
@@ -67,7 +71,7 @@ fn ob3_released_recovery_migration_runs_only_through_one_time_importer() {
     let raw_stamp = raw_metadata
         .get(stamp_key)
         .and_then(serde_json::Value::as_object)
-        .expect("exact released fixture carries its frozen stamp");
+        .expect("exact released fixture carries its retired stamp");
     assert_eq!(raw_stamp["schema_version"], 1);
     assert_eq!(raw_stamp["provenance"], "recovery_migration");
     assert_eq!(raw_stamp["generation"], 0);
@@ -88,13 +92,13 @@ fn ob3_released_recovery_migration_runs_only_through_one_time_importer() {
     );
 
     let imported = import_released_0810_session(FIXTURE)
-        .expect("the explicit importer must verify this exact released document once");
+        .expect("the explicit importer accepts this exact released document shape");
     assert_eq!(
         imported.receipt().evidence(),
-        Released0810ImportEvidence::FrozenCheckpointVerified
+        Released0810ImportEvidence::StoreAuthorizationRequired
     );
     assert_eq!(
-        sha256_hex(imported.receipt().source_document_sha256()),
+        hex_encode(imported.receipt().source_document_sha256()),
         FIXTURE_SHA256
     );
     let (session, _single_use_receipt) = imported.into_parts();
@@ -142,7 +146,7 @@ fn unstamped_released_envelope_requires_store_authorization_receipt() {
         raw["id"].as_str().expect("fixture session id")
     );
     assert_eq!(
-        sha256_hex(imported.receipt().source_document_sha256()),
+        hex_encode(imported.receipt().source_document_sha256()),
         sha256_hex(&unstamped)
     );
     assert!(released_stamp_key(imported.session().metadata()).is_none());
@@ -164,7 +168,7 @@ fn released_importer_requires_json_eof() {
 }
 
 #[test]
-fn released_runtime_checkpoint_provenance_is_verified_stripped_and_refused_current() {
+fn released_runtime_checkpoint_provenance_is_stripped_and_refused_current() {
     let mut released: serde_json::Value =
         serde_json::from_slice(FIXTURE).expect("released fixture is JSON");
     released["metadata"]
@@ -176,7 +180,7 @@ fn released_runtime_checkpoint_provenance_is_verified_stripped_and_refused_curre
         );
     let released = serde_json::to_vec(&released).expect("released envelope with legacy carrier");
     let imported = import_released_0810_session(&released)
-        .expect("frozen digest excludes the released runtime-provenance carrier");
+        .expect("physical-authority importer ignores the retired runtime-provenance carrier");
     assert!(
         !imported
             .session()

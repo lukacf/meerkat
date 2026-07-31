@@ -271,13 +271,13 @@ pub trait MobSessionService:
     }
 
     #[cfg(feature = "runtime-adapter")]
-    async fn promote_revivable_retired_session(
+    async fn authorize_revivable_retired_session(
         &self,
         _session_id: &SessionId,
         _authority: meerkat_runtime::PreparedArchivedResumeCommitLease,
-    ) -> Result<meerkat_runtime::PromotedArchivedResumeCommitLease, SessionError> {
+    ) -> Result<meerkat_runtime::AuthorizedArchivedResumeCommitLease, SessionError> {
         Err(SessionError::Unsupported(
-            "session service does not support archived document revival".into(),
+            "session service does not support exact retired-session authorization".into(),
         ))
     }
     /// Subscribe to session-wide events regardless of triggering interaction.
@@ -498,6 +498,16 @@ pub trait MobSessionService:
         Ok(None)
     }
 
+    /// Converge store-owned durable-tail authority before an operational
+    /// resume materializes a Session body.
+    ///
+    /// REQUIRED, deliberately without a default: a persistent wrapper that
+    /// forgets this transition would compile while recreating an actor from
+    /// stale committed authority whenever the physical head is ahead after a
+    /// power cut. Observation paths must continue to use
+    /// [`Self::load_session_for_resume`] directly and remain read-only.
+    async fn prepare_session_for_resume(&self, session_id: &SessionId) -> Result<(), SessionError>;
+
     /// Typed resume-seam read: never collapses "archived", "absent", and
     /// "archived but not revivable" into one `None`.
     ///
@@ -513,6 +523,16 @@ pub trait MobSessionService:
         &self,
         session_id: &SessionId,
     ) -> Result<ResumeSessionLoad, SessionError>;
+
+    /// Operational resume composition: first converge durable-tail authority,
+    /// then load the exact resulting committed body.
+    async fn materialize_session_for_resume(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<ResumeSessionLoad, SessionError> {
+        self.prepare_session_for_resume(session_id).await?;
+        self.load_session_for_resume(session_id).await
+    }
 
     /// Load the persisted session METADATA view when available.
     ///
@@ -739,6 +759,13 @@ where
         req: meerkat_core::service::CreateSessionRequest,
     ) -> Result<meerkat_core::RunResult, SessionError> {
         <Self as meerkat_core::service::SessionService>::create_session(self, req).await
+    }
+
+    async fn prepare_session_for_resume(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<(), SessionError> {
+        Ok(())
     }
 
     /// In-memory service: nothing durable survives archive, so the two-read
@@ -1080,6 +1107,26 @@ where
             .await
     }
 
+    async fn prepare_session_for_resume(&self, session_id: &SessionId) -> Result<(), SessionError> {
+        match self.recover_committed_boundary(session_id).await {
+            Ok(
+                meerkat_session::CommittedBoundaryRecovery::AlreadyCommitted
+                | meerkat_session::CommittedBoundaryRecovery::Recovered { .. },
+            ) => {
+                // Rewrite-audit replay/finalization is an operational repair,
+                // not an observation side effect. Keep it behind the explicit
+                // preparation seam, after store-owned A/H convergence.
+                let _ = self.load_authoritative_session(session_id).await?;
+                Ok(())
+            }
+            Err(SessionError::NotFound { .. }) => Ok(()),
+            Ok(meerkat_session::CommittedBoundaryRecovery::Unprovable { reason }) => Err(
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(reason)),
+            ),
+            Err(error) => Err(error),
+        }
+    }
+
     async fn create_session_with_actor_witness_under_runtime_turn_boundary(
         &self,
         req: meerkat_core::service::CreateSessionRequest,
@@ -1142,11 +1189,11 @@ where
     }
 
     #[cfg(feature = "runtime-adapter")]
-    async fn promote_revivable_retired_session(
+    async fn authorize_revivable_retired_session(
         &self,
         session_id: &SessionId,
         authority: meerkat_runtime::PreparedArchivedResumeCommitLease,
-    ) -> Result<meerkat_runtime::PromotedArchivedResumeCommitLease, SessionError> {
+    ) -> Result<meerkat_runtime::AuthorizedArchivedResumeCommitLease, SessionError> {
         self.revive_archived_session_with_prepared_materialization(session_id, authority)
             .await
     }
@@ -1264,7 +1311,7 @@ where
         &self,
         session_id: &SessionId,
     ) -> Result<ResumeSessionLoad, SessionError> {
-        let Some(session) = self.load_authoritative_session(session_id).await? else {
+        let Some(session) = self.observe_authoritative_session_body(session_id).await? else {
             return Ok(ResumeSessionLoad::Absent);
         };
         let runtime_state = self.persisted_runtime_state(session_id).await?;
@@ -1281,7 +1328,7 @@ where
         }
         match runtime_state {
             // Quiescent: no executor is attached and no run is in progress, so
-            // promoting the archived document cannot race a live writer.
+            // the exact archived-resume lease cannot race a live writer.
             Some(meerkat_runtime::RuntimeState::Retired | meerkat_runtime::RuntimeState::Idle) => {
                 Ok(ResumeSessionLoad::Revivable(Box::new(session)))
             }

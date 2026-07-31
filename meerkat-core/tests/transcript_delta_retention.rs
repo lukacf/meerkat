@@ -15,6 +15,7 @@
 
 use meerkat_core::lifecycle::RunId;
 use meerkat_core::service::{TranscriptRewriteReason, TranscriptRewriteSelection};
+use meerkat_core::session::transcript_messages_digest;
 use meerkat_core::types::{
     AssistantBlock, BlockAssistantMessage, ContentBlock, ImageData, Message, StopReason,
     ToolResult, TranscriptMessageIdentity, UserMessage,
@@ -526,6 +527,12 @@ fn compact_edges_are_byte_faithful_over_rich_content() {
                     data: "iVBORw0KGgoAAAANSUhEUgAAAAE=".to_string(),
                 },
             },
+            ContentBlock::Structured {
+                data: serde_json::value::RawValue::from_string(
+                    r#"{"z":1,"a":{"y":2,"x":3}}"#.to_string(),
+                )
+                .expect("raw structured tool result"),
+            },
         ],
         false,
     )]));
@@ -543,11 +550,44 @@ fn compact_edges_are_byte_faithful_over_rich_content() {
 
     let history = history_value(&session);
     assert_compact_graph_wire(&history, 1);
+    let state = state_of(&session);
+    let wire_anchor_messages: Vec<Message> =
+        serde_json::from_value(history["anchor"]["messages"].clone())
+            .expect("wire anchor messages decode");
+    let direct_anchor_rows = state
+        .anchor()
+        .messages()
+        .iter()
+        .map(|message| serde_json::to_vec(message).expect("direct anchor row serializes"))
+        .collect::<Vec<_>>();
+    let buffered_anchor_rows = wire_anchor_messages
+        .iter()
+        .map(|message| serde_json::to_vec(message).expect("buffered anchor row serializes"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        direct_anchor_rows, buffered_anchor_rows,
+        "durable message serialization must canonicalize opaque JSON so exact row \
+         lineage survives metadata buffering"
+    );
+    assert_eq!(
+        transcript_messages_digest(state.anchor().messages()).expect("anchor digest"),
+        state.anchor().revision(),
+        "fixture construction must bind the rich anchor to its semantic identity"
+    );
+    assert_eq!(
+        transcript_messages_digest(&wire_anchor_messages).expect("metadata-buffered anchor digest"),
+        state.anchor().revision(),
+        "opaque JSON key order normalized by metadata buffering must not change \
+         the anchor's semantic identity"
+    );
     let before = materialized_bodies(&session);
     assert!(
-        serde_json::to_string(&before)
-            .expect("materialized bodies serialize")
-            .contains("tc_rich_1"),
+        {
+            let materialized =
+                serde_json::to_string(&before).expect("materialized bodies serialize");
+            materialized.contains("tc_rich_1")
+                && materialized.contains(r#""a":{"x":3,"y":2},"z":1"#)
+        },
         "fixture must actually retain the rich content it claims to test"
     );
 

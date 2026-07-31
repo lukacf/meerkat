@@ -3502,6 +3502,13 @@ mod tests {
 
     #[async_trait::async_trait]
     impl MobSessionService for BoundarySessionService {
+        async fn prepare_session_for_resume(
+            &self,
+            _session_id: &meerkat_core::SessionId,
+        ) -> Result<(), meerkat_core::service::SessionError> {
+            Ok(())
+        }
+
         async fn acknowledge_committed_runtime_session_boundary_under_turn_finalization_boundary(
             &self,
             _session_id: &SessionId,

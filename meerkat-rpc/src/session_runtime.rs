@@ -1067,6 +1067,14 @@ impl SessionServiceHistoryExt for RpcMobSessionService {
 #[cfg(feature = "mob")]
 #[async_trait::async_trait]
 impl meerkat_mob::MobSessionService for RpcMobSessionService {
+    async fn prepare_session_for_resume(&self, session_id: &SessionId) -> Result<(), SessionError> {
+        <PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::prepare_session_for_resume(
+            &self.service,
+            session_id,
+        )
+        .await
+    }
+
     async fn create_session_under_runtime_turn_boundary(
         &self,
         req: meerkat_core::service::CreateSessionRequest,
@@ -1128,12 +1136,12 @@ impl meerkat_mob::MobSessionService for RpcMobSessionService {
         .await
     }
 
-    async fn promote_revivable_retired_session(
+    async fn authorize_revivable_retired_session(
         &self,
         session_id: &SessionId,
         authority: meerkat_runtime::PreparedArchivedResumeCommitLease,
-    ) -> Result<meerkat_runtime::PromotedArchivedResumeCommitLease, SessionError> {
-        <PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::promote_revivable_retired_session(
+    ) -> Result<meerkat_runtime::AuthorizedArchivedResumeCommitLease, SessionError> {
+        <PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::authorize_revivable_retired_session(
             &self.service,
             session_id,
             authority,
@@ -11348,6 +11356,10 @@ mod tests {
 
     #[async_trait::async_trait]
     impl meerkat_runtime::RuntimeStore for FailingLifecycleRuntimeStore {
+        fn session_authority_ops(&self) -> &dyn meerkat_runtime::store::RuntimeSessionAuthorityOps {
+            self.inner.session_authority_ops()
+        }
+
         fn session_persistence_profile(
             &self,
         ) -> meerkat_runtime::store::RuntimeSessionPersistenceProfile {

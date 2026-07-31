@@ -2,16 +2,15 @@
 //!
 //! Released checkpoint and transcript-witness formats are deliberately absent
 //! from ordinary [`Session`] deserialization. This module is the sole boundary
-//! allowed to interpret them. A successful import proves the frozen released
-//! evidence at most once, strips every legacy proof carrier, and returns a
-//! domain Session plus a non-cloneable receipt that a store must consume while
-//! atomically adopting the imported state under its own physical authority.
+//! allowed to interpret them. A successful import validates the exact released
+//! domain shape, strips every retired proof carrier as untrusted metadata, and
+//! returns a domain Session plus a non-cloneable receipt that a store must
+//! consume while atomically adopting the imported state under its own physical
+//! authority.
 
 use super::*;
 use crate::types::SystemMessage;
 use std::collections::{BTreeMap, BTreeSet};
-
-mod frozen_checkpoint;
 
 const RELEASED_SESSION_ENVELOPE_VERSION: u32 = 2;
 const RELEASED_CHECKPOINT_STAMP_KEY: &str = "session_checkpoint_stamp_v1";
@@ -98,16 +97,13 @@ pub(super) fn contains_released_checkpoint_metadata(
 
 /// Why the exact released document may be adopted.
 ///
-/// `FrozenCheckpointVerified` is self-contained evidence from a stamped
-/// 0.8.10 document. `StoreAuthorizationRequired` deliberately is not:
-/// unstamped 0.8.10 rows may be imported only when the backend consumes the
+/// Every 0.8.10 row requires store authorization. The backend must consume the
 /// receipt in the same operation that proves the released physical store
 /// schema, the exact source row/blob identity, and installs a store-issued
-/// current authority. Envelope bytes alone cannot distinguish a graph-less
-/// unstamped 0.8.10 Session from current graph-less domain state.
+/// current authority. Envelope bytes and retired checkpoint metadata cannot
+/// establish physical authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Released0810ImportEvidence {
-    FrozenCheckpointVerified,
     StoreAuthorizationRequired,
 }
 
@@ -176,8 +172,6 @@ pub enum Released0810ImportError {
     CurrentTranscriptHistory,
     #[error("released importer refuses current-only metadata `{0}`")]
     CurrentMetadata(&'static str),
-    #[error("released checkpoint verification failed: {0}")]
-    Checkpoint(String),
     #[error("released transcript-history import failed: {0}")]
     TranscriptHistory(String),
     #[error("released System-context timestamp is outside the supported UTC range")]
@@ -220,35 +214,43 @@ pub fn import_released_0810_session(
         ));
     }
 
-    let stamped = session.metadata.contains_key(RELEASED_CHECKPOINT_STAMP_KEY);
-    let imported_history = frozen_checkpoint::verify(&session, stamped)
-        .map_err(Released0810ImportError::Checkpoint)?;
+    let imported_history = session
+        .metadata
+        .get(SESSION_TRANSCRIPT_HISTORY_STATE_KEY)
+        .cloned()
+        .map(import_released_0810_history)
+        .transpose()
+        .map_err(|error| Released0810ImportError::TranscriptHistory(error.to_string()))?
+        .flatten()
+        .map(Arc::new);
 
     if let Some(history) = imported_history {
         install_imported_history(&mut session, history)?;
+    } else if matches!(history_kind, Some(TranscriptHistoryWireKind::Released0810)) {
+        // Every released occurrence collapsed to one current semantic body.
+        // Retaining the predecessor full-body wire would make ordinary
+        // current ingress reinterpret it, so the migration squash removes it.
+        session
+            .metadata
+            .remove(SESSION_TRANSCRIPT_HISTORY_STATE_KEY);
     }
     adopt_released_system_context_into_transcript(&mut session)?;
     strip_released_checkpoint_metadata(&mut session);
     session.version = SESSION_VERSION;
 
-    let evidence = if stamped {
-        Released0810ImportEvidence::FrozenCheckpointVerified
-    } else {
-        Released0810ImportEvidence::StoreAuthorizationRequired
-    };
     let session_id = session.id().clone();
     Ok(ImportedReleased0810Session {
         session,
         receipt: Released0810ImportReceipt {
             session_id,
             source_document_sha256,
-            evidence,
+            evidence: Released0810ImportEvidence::StoreAuthorizationRequired,
         },
     })
 }
 
 /// Retire the 0.8.10 out-of-band prompt projection while the frozen envelope
-/// is already verified but before current store authority is installed.
+/// is being imported but before current store authority is installed.
 ///
 /// The released shape did not retain an original transcript position for
 /// applied prompt context. Its only honest ordered conversion point is this

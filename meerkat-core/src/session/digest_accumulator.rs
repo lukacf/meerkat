@@ -12,7 +12,9 @@
 //!
 //! # What this does NOT change
 //!
-//! The digest VALUE. `digest_format` stays `2`; nothing new is persisted. The
+//! The digest VALUE for the current format. `digest_format = 3` adds canonical
+//! opaque-JSON values; the incremental byte stream itself remains element-wise.
+//! The
 //! byte stream that `serde_json::to_vec(&canonicalize_messages_for_digest(m))`
 //! produces is
 //!
@@ -22,7 +24,7 @@
 //!
 //! which is append-extendable, and `sha2::Sha256` is `Clone`. So a retained
 //! hasher midstate over the identity byte stream plus the appended suffix
-//! yields the EXACT format-2 digest of the grown transcript. Every value this
+//! yields the EXACT format-3 digest of the grown transcript. Every value this
 //! module serves is byte-identical to a full recompute; only the cost differs.
 //!
 //! # Invalidation

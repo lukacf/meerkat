@@ -9735,6 +9735,17 @@ impl meerkat_core::service::SessionServiceHistoryExt for RunMobSessionService {
 #[async_trait::async_trait]
 #[cfg(feature = "mob")]
 impl meerkat_mob::MobSessionService for RunMobSessionService {
+    async fn prepare_session_for_resume(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::prepare_session_for_resume(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
+
     async fn create_session_under_runtime_turn_boundary(
         &self,
         req: meerkat_core::service::CreateSessionRequest,
@@ -12609,6 +12620,17 @@ impl meerkat_core::service::SessionServiceHistoryExt for MobCliSessionService {
 #[async_trait::async_trait]
 #[cfg(all(feature = "mob", feature = "session-store"))]
 impl meerkat_mob::MobSessionService for MobCliSessionService {
+    async fn prepare_session_for_resume(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::prepare_session_for_resume(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
+
     async fn create_session_under_runtime_turn_boundary(
         &self,
         req: meerkat_core::service::CreateSessionRequest,
@@ -12670,15 +12692,15 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
         .await
     }
 
-    async fn promote_revivable_retired_session(
+    async fn authorize_revivable_retired_session(
         &self,
         session_id: &SessionId,
         authority: meerkat_runtime::PreparedArchivedResumeCommitLease,
     ) -> Result<
-        meerkat_runtime::PromotedArchivedResumeCommitLease,
+        meerkat_runtime::AuthorizedArchivedResumeCommitLease,
         meerkat_core::service::SessionError,
     > {
-        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::promote_revivable_retired_session(
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::authorize_revivable_retired_session(
             &self.inner,
             session_id,
             authority,
@@ -19486,6 +19508,13 @@ default_model = "gemma"
     #[cfg(feature = "mob")]
     #[async_trait]
     impl meerkat_mob::MobSessionService for TestMobSessionService {
+        async fn prepare_session_for_resume(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<(), SessionError> {
+            Ok(())
+        }
+
         async fn acknowledge_committed_runtime_session_boundary_under_turn_finalization_boundary(
             &self,
             _session_id: &SessionId,

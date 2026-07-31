@@ -339,6 +339,7 @@ async fn resume_preserves_model_metadata() {
     // Reconstruct service with a DIFFERENT configured default model — resume
     // must preserve the original session model.
     let state2 = s.state_with_config_default_model("gpt-5.2");
+    let session_service = Arc::clone(&state2.session_service);
     let (status, _) = resume_session(
         state2,
         &sid,
@@ -347,9 +348,8 @@ async fn resume_preserves_model_metadata() {
     .await;
     assert_eq!(status, StatusCode::OK);
 
-    let session = s
-        .store
-        .load(&SessionId::parse(&sid).expect("parse sid"))
+    let session = session_service
+        .load_authoritative_session(&SessionId::parse(&sid).expect("parse sid"))
         .await
         .expect("load")
         .expect("session exists");
@@ -372,6 +372,7 @@ async fn resume_preserves_max_tokens() {
 
     // Reconstruct with wildly different max_tokens on the server.
     let state2 = s.state_with_max_tokens(9999);
+    let session_service = Arc::clone(&state2.session_service);
     let (status, _) = resume_session(
         state2,
         &sid,
@@ -380,9 +381,8 @@ async fn resume_preserves_max_tokens() {
     .await;
     assert_eq!(status, StatusCode::OK);
 
-    let session = s
-        .store
-        .load(&SessionId::parse(&sid).expect("parse sid"))
+    let session = session_service
+        .load_authoritative_session(&SessionId::parse(&sid).expect("parse sid"))
         .await
         .expect("load")
         .expect("session exists");
@@ -405,6 +405,7 @@ async fn resume_preserves_tooling_flags() {
 
     // Reconstruct service — a fresh AppState from the same store.
     let state2 = s.state();
+    let session_service = Arc::clone(&state2.session_service);
     let (status, _) = resume_session(
         state2,
         &sid,
@@ -413,9 +414,8 @@ async fn resume_preserves_tooling_flags() {
     .await;
     assert_eq!(status, StatusCode::OK);
 
-    let session = s
-        .store
-        .load(&SessionId::parse(&sid).expect("parse sid"))
+    let session = session_service
+        .load_authoritative_session(&SessionId::parse(&sid).expect("parse sid"))
         .await
         .expect("load")
         .expect("session exists");
@@ -437,8 +437,10 @@ async fn resume_preserves_tooling_flags() {
 async fn resume_preserves_provider() {
     let s = Scaffold::new();
 
+    let state = s.state();
+    let session_service = Arc::clone(&state.session_service);
     let (sid, _) = create_session(
-        s.state(),
+        state,
         json!({
             "prompt": "Say ok.",
             "max_tokens": 128
@@ -446,9 +448,8 @@ async fn resume_preserves_provider() {
     )
     .await;
 
-    let session = s
-        .store
-        .load(&SessionId::parse(&sid).expect("parse sid"))
+    let session = session_service
+        .load_authoritative_session(&SessionId::parse(&sid).expect("parse sid"))
         .await
         .expect("load")
         .expect("session exists");
@@ -457,6 +458,7 @@ async fn resume_preserves_provider() {
     // Reconstruct with a different configured default model (which implies a
     // different provider).
     let state2 = s.state_with_config_default_model("gpt-5.2");
+    let session_service = Arc::clone(&state2.session_service);
     let (status, _) = resume_session(
         state2,
         &sid,
@@ -465,9 +467,8 @@ async fn resume_preserves_provider() {
     .await;
     assert_eq!(status, StatusCode::OK);
 
-    let session = s
-        .store
-        .load(&SessionId::parse(&sid).expect("parse sid"))
+    let session = session_service
+        .load_authoritative_session(&SessionId::parse(&sid).expect("parse sid"))
         .await
         .expect("load")
         .expect("session exists");
@@ -479,8 +480,10 @@ async fn resume_preserves_provider() {
 async fn resume_message_count_increases() {
     let s = Scaffold::new();
 
+    let state = s.state();
+    let session_service = Arc::clone(&state.session_service);
     let (sid, _) = create_session(
-        s.state(),
+        state,
         json!({
             "prompt": "Say ok.",
             "max_tokens": 128
@@ -488,9 +491,8 @@ async fn resume_message_count_increases() {
     )
     .await;
 
-    let session_before = s
-        .store
-        .load(&SessionId::parse(&sid).expect("parse sid"))
+    let session_before = session_service
+        .load_authoritative_session(&SessionId::parse(&sid).expect("parse sid"))
         .await
         .expect("load")
         .expect("session exists");
@@ -498,6 +500,7 @@ async fn resume_message_count_increases() {
 
     // Reconstruct and resume.
     let state2 = s.state();
+    let session_service = Arc::clone(&state2.session_service);
     let (status, _) = resume_session(
         state2,
         &sid,
@@ -506,9 +509,8 @@ async fn resume_message_count_increases() {
     .await;
     assert_eq!(status, StatusCode::OK);
 
-    let session_after = s
-        .store
-        .load(&SessionId::parse(&sid).expect("parse sid"))
+    let session_after = session_service
+        .load_authoritative_session(&SessionId::parse(&sid).expect("parse sid"))
         .await
         .expect("load")
         .expect("session exists");

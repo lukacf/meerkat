@@ -667,6 +667,10 @@ mod tests {
     #[cfg(all(feature = "memory-store-session", feature = "session-compaction"))]
     #[async_trait::async_trait]
     impl RuntimeStore for FailNextAtomicApplyStore {
+        fn session_authority_ops(&self) -> &dyn meerkat_runtime::store::RuntimeSessionAuthorityOps {
+            self.inner.session_authority_ops()
+        }
+
         fn session_persistence_profile(
             &self,
         ) -> meerkat_runtime::store::RuntimeSessionPersistenceProfile {
@@ -721,6 +725,39 @@ mod tests {
         > {
             self.inner
                 .commit_prepared_whole_blob_snapshot_cas(runtime_id, prepared)
+                .await
+        }
+
+        async fn delete_runtime_session_catalog_entry(
+            &self,
+            runtime_id: &meerkat_runtime::LogicalRuntimeId,
+        ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
+            self.inner
+                .delete_runtime_session_catalog_entry(runtime_id)
+                .await
+        }
+
+        async fn load_runtime_session_catalog_entry(
+            &self,
+            runtime_id: &meerkat_runtime::LogicalRuntimeId,
+        ) -> Result<
+            Option<meerkat_runtime::store::RuntimeSessionCatalogEntry>,
+            meerkat_runtime::RuntimeStoreError,
+        > {
+            self.inner
+                .load_runtime_session_catalog_entry(runtime_id)
+                .await
+        }
+
+        async fn list_runtime_session_catalog_entries(
+            &self,
+            filter: meerkat_core::SessionFilter,
+        ) -> Result<
+            Vec<meerkat_runtime::store::RuntimeSessionCatalogEntry>,
+            meerkat_runtime::RuntimeStoreError,
+        > {
+            self.inner
+                .list_runtime_session_catalog_entries(filter)
                 .await
         }
 

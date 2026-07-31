@@ -66,9 +66,11 @@ proof-observable acceptance seam; this fixture must not be stretched to
 certify facts absent from its bytes.
 
 The shape is accepted only by the explicit one-time 0.8.10 importer. The
-frozen verifier runs before the importer strips the stamp and returns ordinary
-domain state plus a single-use store-adoption receipt. Current Session decode
-and current writers do not interpret or mint this checkpoint vocabulary.
+importer validates the released domain shape, strips the retired stamp as
+untrusted metadata, and returns ordinary domain state plus a single-use receipt
+that must be bound to the exact physical source by the adopting store. Current
+Session decode and current writers do not interpret or mint this checkpoint
+vocabulary.
 
 ## 0.8.10 → 0.8.11 release evidence
 

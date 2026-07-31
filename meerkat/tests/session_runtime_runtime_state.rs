@@ -28,6 +28,10 @@ impl FailDeleteOpsLifecycleOnceStore {
 
 #[async_trait::async_trait]
 impl meerkat_runtime::store::RuntimeStore for FailDeleteOpsLifecycleOnceStore {
+    fn session_authority_ops(&self) -> &dyn meerkat_runtime::store::RuntimeSessionAuthorityOps {
+        self.inner.session_authority_ops()
+    }
+
     fn session_persistence_profile(
         &self,
     ) -> meerkat_runtime::store::RuntimeSessionPersistenceProfile {

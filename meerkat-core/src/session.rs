@@ -132,20 +132,21 @@ pub use import_0810::{
     ImportedReleased0810Session, Released0810ImportError, Released0810ImportEvidence,
     Released0810ImportReceipt, import_released_0810_session,
 };
-pub(crate) use transcript_history::graph::{
-    TRANSCRIPT_DIGEST_FORMAT_CURRENT, import_released_0810_history,
-};
+#[cfg(test)]
+pub(crate) use transcript_history::graph::TRANSCRIPT_DIGEST_FORMAT_RELEASED_0810;
+pub(crate) use transcript_history::graph::import_released_0810_history;
 pub(crate) use transcript_history::validate::validate_transcript_history_state;
 use transcript_history::validate::{
     assistant_tool_use_ids, message_role_name, validate_transcript_tool_result_shape,
 };
 pub use transcript_history::{
-    TRANSCRIPT_HISTORY_FORMAT_CURRENT, TranscriptEndpointWitness, TranscriptGraphPrefixAccumulator,
-    TranscriptHistoryState, TranscriptParentAdvance, TranscriptRevisionBody,
-    TranscriptRevisionEdge, TranscriptRewriteAuditReceiptBatch, TranscriptRewriteCommit,
-    TranscriptRewriteParentTransition, TranscriptRewritePatch, TranscriptRewritePrefixAccumulator,
-    TranscriptRewriteRecord, ValidatedTranscriptHistory, ValidatedTranscriptRewriteSuffix,
-    extend_transcript_rewrite_prefix_accumulator, transcript_history_full_body_materializations,
+    ProvenReleased0810RewriteRemap, TRANSCRIPT_HISTORY_FORMAT_CURRENT, TranscriptEndpointWitness,
+    TranscriptGraphPrefixAccumulator, TranscriptHistoryState, TranscriptParentAdvance,
+    TranscriptRevisionBody, TranscriptRevisionEdge, TranscriptRewriteAuditReceiptBatch,
+    TranscriptRewriteCommit, TranscriptRewriteParentTransition, TranscriptRewritePatch,
+    TranscriptRewritePrefixAccumulator, TranscriptRewriteRecord, ValidatedTranscriptHistory,
+    ValidatedTranscriptRewriteSuffix, extend_transcript_rewrite_prefix_accumulator,
+    remap_proven_released_0810_rewrite_record, transcript_history_full_body_materializations,
     transcript_rewrite_prefix_digest,
 };
 
@@ -405,6 +406,30 @@ fn canonicalize_digest_image_blocks(blocks: &mut [crate::types::ContentBlock]) {
     }
 }
 
+/// Normalize opaque JSON payloads before they participate in transcript identity.
+///
+/// `Session` metadata is buffered through [`serde_json::Value`] on durable
+/// ingress. That buffering is allowed to reorder object keys, while
+/// [`serde_json::value::RawValue`] otherwise preserves the producer's original
+/// spelling. Transcript revisions therefore must bind the JSON value, not its
+/// incidental object-key order or whitespace.
+fn canonicalize_raw_json_for_digest(
+    raw: &serde_json::value::RawValue,
+) -> Box<serde_json::value::RawValue> {
+    // `RawValue` is constructible only from valid JSON. Preserve the exact
+    // payload if that invariant ever changes instead of manufacturing a
+    // different transcript identity.
+    crate::types::canonicalize_raw_json(raw).unwrap_or_else(|_| raw.to_owned())
+}
+
+fn canonicalize_digest_structured_blocks(blocks: &mut [crate::types::ContentBlock]) {
+    for block in blocks {
+        if let crate::types::ContentBlock::Structured { data } = block {
+            *data = canonicalize_raw_json_for_digest(data);
+        }
+    }
+}
+
 /// Canonicalize image payloads to their content-addressed blob identity so the
 /// transcript digest is invariant to inline-vs-blob representation.
 ///
@@ -437,6 +462,36 @@ fn canonicalize_message_images_for_digest_in_place(message: &mut Message) {
                         canonicalize_digest_image_blocks(content);
                     }
                     _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn canonicalize_message_raw_json_for_digest_in_place(message: &mut Message) {
+    match message {
+        Message::User(user) => canonicalize_digest_structured_blocks(&mut user.content),
+        Message::ToolResults { results, .. } => {
+            for result in results.iter_mut() {
+                canonicalize_digest_structured_blocks(&mut result.content);
+            }
+        }
+        Message::SystemNotice(notice) => {
+            for block in &mut notice.blocks {
+                match block {
+                    crate::types::SystemNoticeBlock::Comms { content, .. }
+                    | crate::types::SystemNoticeBlock::ExternalEvent { content, .. } => {
+                        canonicalize_digest_structured_blocks(content);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Message::BlockAssistant(assistant) => {
+            for block in &mut assistant.blocks {
+                if let crate::types::AssistantBlock::ToolUse { args, .. } = block {
+                    *args = canonicalize_raw_json_for_digest(args);
                 }
             }
         }
@@ -508,9 +563,11 @@ fn digest_timestamp_sentinel() -> crate::types::MessageTimestamp {
 /// Canonicalize messages to their conversational content before hashing so the
 /// transcript revision is a content address, not a construction record.
 ///
-/// Two normalizations compose:
+/// Three normalizations compose:
 /// - image payloads collapse to their content-addressed blob identity
 ///   ([`canonicalize_message_images_for_digest`]);
+/// - opaque JSON payloads bind their recursively key-sorted value rather than
+///   producer spelling, so metadata buffering cannot change a revision;
 /// - per-construction bookkeeping is erased: [`TranscriptMessageIdentity`]
 ///   (run/interaction ids are runtime-binding atoms — a re-created authority
 ///   re-stamps them) and `created_at` timestamps. A resume that re-projects
@@ -523,6 +580,20 @@ fn digest_timestamp_sentinel() -> crate::types::MessageTimestamp {
 /// `render_metadata`, notice kinds and blocks — because changing them changes
 /// the transcript's meaning.
 pub(crate) fn canonicalize_messages_for_digest(messages: &[Message]) -> Vec<Message> {
+    let mut canonical = canonicalize_message_images_for_digest(messages);
+    for message in &mut canonical {
+        canonicalize_message_raw_json_for_digest_in_place(message);
+        erase_message_construction_bookkeeping(message);
+    }
+    canonical
+}
+
+/// Frozen semantic projection minted by released 0.8.10 format-2 revisions.
+///
+/// The one-time importer uses this only while proving predecessor graph
+/// identities. Current code must never mint a new revision from it.
+#[cfg(test)]
+pub(crate) fn canonicalize_released_0810_messages_for_digest(messages: &[Message]) -> Vec<Message> {
     let mut canonical = canonicalize_message_images_for_digest(messages);
     for message in &mut canonical {
         erase_message_construction_bookkeeping(message);
@@ -563,6 +634,7 @@ fn erase_message_construction_bookkeeping(message: &mut Message) {
 pub(crate) fn canonicalize_message_for_digest(message: &Message) -> Message {
     let mut canonical = message.clone();
     canonicalize_message_images_for_digest_in_place(&mut canonical);
+    canonicalize_message_raw_json_for_digest_in_place(&mut canonical);
     erase_message_construction_bookkeeping(&mut canonical);
     canonical
 }
@@ -4265,7 +4337,6 @@ impl Session {
         self.history_caches.shared_state.set(state);
         self.transcript_history_metadata_validation =
             TranscriptHistoryMetadataValidation::Validated;
-        self.mark_content_mutated(SystemTime::now());
         Ok(())
     }
 
@@ -5238,6 +5309,10 @@ impl Session {
                 state.head()
             )));
         }
+        // Installing a store- or audit-proved graph is materialization of
+        // authority that already belongs to this transcript, not a new domain
+        // mutation. The rewrite mutation seams advance `updated_at` after
+        // changing content; this projection-only seam must remain neutral.
         self.install_validated_transcript_history_state(state)
             .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))
     }
@@ -6445,6 +6520,36 @@ mod tests {
         })
     }
 
+    fn replace_all_bytes(haystack: &mut Vec<u8>, needle: &[u8], replacement: &[u8]) -> usize {
+        let mut replaced = 0;
+        let mut cursor = 0;
+        while let Some(offset) = haystack[cursor..]
+            .windows(needle.len())
+            .position(|candidate| candidate == needle)
+        {
+            let start = cursor + offset;
+            haystack.splice(start..start + needle.len(), replacement.iter().copied());
+            cursor = start + replacement.len();
+            replaced += 1;
+        }
+        replaced
+    }
+
+    fn released_0810_transcript_messages_digest_with_raw_spelling(
+        messages: &[Message],
+        canonical_raw: &str,
+        released_raw: &str,
+    ) -> String {
+        let canonical = canonicalize_released_0810_messages_for_digest(messages);
+        let mut bytes = serde_json::to_vec(&canonical).expect("released digest form serializes");
+        replace_all_bytes(
+            &mut bytes,
+            canonical_raw.as_bytes(),
+            released_raw.as_bytes(),
+        );
+        format!("sha256:{:x}", Sha256::digest(bytes))
+    }
+
     fn released_0810_document(
         session: &Session,
         head: String,
@@ -6500,7 +6605,7 @@ mod tests {
                 "head": head,
                 "commits": commits,
                 "revisions": revisions,
-                "digest_format": TRANSCRIPT_DIGEST_FORMAT_CURRENT,
+                "digest_format": TRANSCRIPT_DIGEST_FORMAT_RELEASED_0810,
             }),
         );
         document
@@ -7499,6 +7604,427 @@ mod tests {
             compact.last_commit().expect("rewrite commit").revision
         );
         validate_transcript_history_state(&compact).expect("compacted history remains valid");
+    }
+
+    #[test]
+    fn released_0_8_10_lost_raw_json_spelling_is_authorized_then_rebound_once() {
+        let opaque = r#"{"z":1,"a":{"y":2,"x":3}}"#;
+        let canonical_opaque = r#"{"a":{"x":3,"y":2},"z":1}"#;
+        let mut session = Session::new();
+        session.append_system_message("system".to_string());
+        session.push(Message::User(UserMessage::text("question".to_string())));
+        session.push(Message::BlockAssistant(BlockAssistantMessage::new(
+            vec![AssistantBlock::ToolUse {
+                id: "tool-1".to_string(),
+                name: "opaque".to_string(),
+                args: serde_json::value::RawValue::from_string(opaque.to_string())
+                    .expect("valid tool args"),
+                meta: None,
+            }],
+            StopReason::ToolUse,
+        )));
+        session.push(Message::tool_results(vec![
+            crate::types::ToolResult::with_blocks(
+                "tool-1".to_string(),
+                vec![ContentBlock::Structured {
+                    data: serde_json::value::RawValue::from_string(opaque.to_string())
+                        .expect("valid structured result"),
+                }],
+                false,
+            ),
+        ]));
+        session.push(Message::User(UserMessage::text("tail".to_string())));
+        session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 2, end: 3 },
+                vec![Message::BlockAssistant(BlockAssistantMessage::new(
+                    vec![AssistantBlock::ToolUse {
+                        id: "tool-1".to_string(),
+                        name: "opaque-revised".to_string(),
+                        args: serde_json::value::RawValue::from_string(opaque.to_string())
+                            .expect("valid revised tool args"),
+                        meta: None,
+                    }],
+                    StopReason::ToolUse,
+                ))],
+                TranscriptRewriteReason::new("released-rich-content"),
+                Some("unit-test".to_string()),
+                None,
+            )
+            .expect("seed current rewrite");
+
+        let state = session
+            .transcript_history_state()
+            .expect("current state")
+            .expect("current graph");
+        let revisions = state
+            .materialize_revision_bodies()
+            .expect("released bodies materialize");
+        let released_ids = revisions
+            .iter()
+            .map(|body| {
+                (
+                    body.revision.clone(),
+                    released_0810_transcript_messages_digest_with_raw_spelling(
+                        &body.messages,
+                        canonical_opaque,
+                        opaque,
+                    ),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert!(
+            released_ids
+                .iter()
+                .any(|(current, released)| current != released),
+            "fixture must reproduce a real pre-buffer format-2 identity mismatch"
+        );
+        let released_span_ids = (0..state.commit_count())
+            .map(|index| {
+                let record = rewrite_record_at(&state, index);
+                let (start, end) = record.commit.selection.bounds();
+                let removed = end - start;
+                let retained = record.commit.messages_before - removed;
+                let replacement_len = record.commit.messages_after - retained;
+                (
+                    released_0810_transcript_messages_digest_with_raw_spelling(
+                        &record.parent_body.messages[start..end],
+                        canonical_opaque,
+                        opaque,
+                    ),
+                    released_0810_transcript_messages_digest_with_raw_spelling(
+                        &record.revision_body.messages[start..start + replacement_len],
+                        canonical_opaque,
+                        opaque,
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+        for (index, (released_original, released_replacement)) in
+            released_span_ids.iter().enumerate()
+        {
+            let record = rewrite_record_at(&state, index);
+            assert_ne!(
+                released_original, &record.commit.original_span_digest,
+                "fixture must reproduce a real pre-buffer format-2 original-span mismatch"
+            );
+            assert_ne!(
+                released_replacement, &record.commit.replacement_digest,
+                "fixture must reproduce a real pre-buffer format-2 replacement-span mismatch"
+            );
+        }
+        let mut released = released_0810_document(&session, state.head().to_string(), revisions);
+        let history = released["metadata"][SESSION_TRANSCRIPT_HISTORY_STATE_KEY]
+            .as_object_mut()
+            .expect("released history object");
+        let revisions = history["revisions"]
+            .as_array_mut()
+            .expect("released revision vector");
+        for body in revisions {
+            body["revision"] = serde_json::Value::String(
+                released_ids
+                    .get(body["revision"].as_str().expect("body revision"))
+                    .expect("body remap")
+                    .clone(),
+            );
+            if let Some(parent) = body["parent_revision"].as_str() {
+                body["parent_revision"] = serde_json::Value::String(
+                    released_ids.get(parent).expect("parent remap").clone(),
+                );
+            }
+        }
+        history["head"] = serde_json::Value::String(
+            released_ids
+                .get(history["head"].as_str().expect("released head"))
+                .expect("head remap")
+                .clone(),
+        );
+        for (index, commit) in history["commits"]
+            .as_array_mut()
+            .expect("released commits")
+            .iter_mut()
+            .enumerate()
+        {
+            commit["parent_revision"] = serde_json::Value::String(
+                released_ids
+                    .get(commit["parent_revision"].as_str().expect("commit parent"))
+                    .expect("commit parent remap")
+                    .clone(),
+            );
+            commit["revision"] = serde_json::Value::String(
+                released_ids
+                    .get(commit["revision"].as_str().expect("commit revision"))
+                    .expect("commit revision remap")
+                    .clone(),
+            );
+            commit["original_span_digest"] =
+                serde_json::Value::String(released_span_ids[index].0.clone());
+            commit["replacement_digest"] =
+                serde_json::Value::String(released_span_ids[index].1.clone());
+        }
+
+        let mut inconsistent = released.clone();
+        inconsistent["metadata"][SESSION_TRANSCRIPT_HISTORY_STATE_KEY]["commits"][0]["messages_before"] =
+            serde_json::json!(999);
+        let inconsistent = serde_json::to_vec(&inconsistent).expect("inconsistent released bytes");
+        assert!(
+            import_released_0810_session(&inconsistent).is_err(),
+            "source authorization must not launder contradictory commit/body topology"
+        );
+
+        let released = serde_json::to_vec(&released).expect("released bytes");
+        let imported = import_released_0810_session(&released)
+            .expect("store-authorized 0.8.10 lost-spelling graph imports");
+        assert_eq!(
+            imported.receipt().evidence(),
+            Released0810ImportEvidence::StoreAuthorizationRequired
+        );
+        let imported_state = imported
+            .session()
+            .transcript_history_state()
+            .expect("imported state")
+            .expect("imported graph");
+        assert_eq!(
+            imported_state.digest_format(),
+            transcript_history::graph::TRANSCRIPT_DIGEST_FORMAT_CURRENT
+        );
+        for body in imported_state
+            .materialize_revision_bodies()
+            .expect("current bodies materialize")
+        {
+            assert_eq!(
+                body.revision,
+                transcript_messages_digest(&body.messages).expect("current body digest"),
+                "every released format-2 label must be replaced by current identity"
+            );
+        }
+        let current = serde_json::to_vec(imported.session()).expect("current session serializes");
+        let restored: Session =
+            serde_json::from_slice(&current).expect("current session round-trips");
+        assert_eq!(
+            restored.transcript_revision().expect("restored revision"),
+            imported
+                .session()
+                .transcript_revision()
+                .expect("imported revision")
+        );
+    }
+
+    #[test]
+    fn released_0_8_10_collapsed_raw_json_rewrite_is_squashed_and_tail_rebased() {
+        let canonical_raw = r#"{"a":2,"z":1}"#;
+        let released_raw = r#"{"z":1,"a":2}"#;
+        let tool_message = |name: &str, raw: &str| {
+            Message::BlockAssistant(BlockAssistantMessage::new(
+                vec![AssistantBlock::ToolUse {
+                    id: "tool-1".to_string(),
+                    name: name.to_string(),
+                    args: serde_json::value::RawValue::from_string(raw.to_string())
+                        .expect("valid tool args"),
+                    meta: None,
+                }],
+                StopReason::ToolUse,
+            ))
+        };
+
+        let parent_messages = vec![tool_message("opaque", released_raw)];
+        let collapsed_messages = vec![tool_message("opaque", canonical_raw)];
+        let final_messages = vec![tool_message("opaque-revised", released_raw)];
+        let old_parent = released_0810_transcript_messages_digest_with_raw_spelling(
+            &parent_messages,
+            canonical_raw,
+            released_raw,
+        );
+        let old_collapsed = released_0810_transcript_messages_digest_with_raw_spelling(
+            &collapsed_messages,
+            canonical_raw,
+            canonical_raw,
+        );
+        let old_final = released_0810_transcript_messages_digest_with_raw_spelling(
+            &final_messages,
+            canonical_raw,
+            released_raw,
+        );
+        assert_ne!(old_parent, old_collapsed);
+        assert_eq!(
+            transcript_messages_digest(&parent_messages).expect("current parent digest"),
+            transcript_messages_digest(&collapsed_messages).expect("current collapsed digest"),
+            "only released RawValue spelling may distinguish the squashed endpoints"
+        );
+
+        let body = |revision: String, parent_revision: Option<String>, messages: Vec<Message>| {
+            TranscriptRevisionBody {
+                revision,
+                parent_revision,
+                messages,
+                created_at: SystemTime::UNIX_EPOCH,
+            }
+        };
+        let parent_body = body(old_parent.clone(), None, parent_messages.clone());
+        let collapsed_body = body(
+            old_collapsed.clone(),
+            Some(old_parent.clone()),
+            collapsed_messages.clone(),
+        );
+        let final_body = body(
+            old_final.clone(),
+            Some(old_collapsed.clone()),
+            final_messages.clone(),
+        );
+        let commit = |parent_revision: String,
+                      revision: String,
+                      original_span_digest: String,
+                      replacement_digest: String| TranscriptRewriteCommit {
+            rewrite_generation: 0,
+            parent_revision,
+            revision,
+            selection: TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+            original_span_digest,
+            replacement_digest,
+            messages_before: 1,
+            messages_after: 1,
+            reason: TranscriptRewriteReason::new("released-rich-content"),
+            actor: Some("unit-test".to_string()),
+            committed_at: SystemTime::UNIX_EPOCH,
+        };
+        let collapsed_commit = commit(
+            old_parent,
+            old_collapsed.clone(),
+            released_0810_transcript_messages_digest_with_raw_spelling(
+                &parent_messages,
+                canonical_raw,
+                released_raw,
+            ),
+            released_0810_transcript_messages_digest_with_raw_spelling(
+                &collapsed_messages,
+                canonical_raw,
+                canonical_raw,
+            ),
+        );
+        let final_commit = commit(
+            old_collapsed.clone(),
+            old_final.clone(),
+            released_0810_transcript_messages_digest_with_raw_spelling(
+                &collapsed_messages,
+                canonical_raw,
+                canonical_raw,
+            ),
+            released_0810_transcript_messages_digest_with_raw_spelling(
+                &final_messages,
+                canonical_raw,
+                released_raw,
+            ),
+        );
+
+        let mut session = Session::new();
+        session.push(final_messages[0].clone());
+        let mut released = serde_json::to_value(&session).expect("released session serializes");
+        released["version"] = serde_json::json!(2);
+        released["metadata"][SESSION_TRANSCRIPT_HISTORY_STATE_KEY] = serde_json::json!({
+            "head": old_final,
+            "commits": [collapsed_commit, final_commit],
+            "revisions": [parent_body, collapsed_body, final_body],
+            "digest_format": TRANSCRIPT_DIGEST_FORMAT_RELEASED_0810,
+        });
+
+        for invalid_format in [None, Some(1), Some(3)] {
+            let mut invalid = released.clone();
+            match invalid_format {
+                Some(format) => {
+                    invalid["metadata"][SESSION_TRANSCRIPT_HISTORY_STATE_KEY]["digest_format"] =
+                        serde_json::json!(format);
+                }
+                None => {
+                    invalid["metadata"][SESSION_TRANSCRIPT_HISTORY_STATE_KEY]
+                        .as_object_mut()
+                        .expect("history object")
+                        .remove("digest_format");
+                }
+            }
+            assert!(
+                import_released_0810_session(
+                    &serde_json::to_vec(&invalid).expect("invalid released bytes")
+                )
+                .is_err(),
+                "released history digest format {invalid_format:?} must fail closed"
+            );
+        }
+
+        let mut retired_stamp = released.clone();
+        retired_stamp["metadata"]["session_checkpoint_stamp_v1"] =
+            serde_json::json!("untrusted-retired-metadata");
+        let retired_stamp_import = import_released_0810_session(
+            &serde_json::to_vec(&retired_stamp).expect("released fixture with retired stamp"),
+        )
+        .expect("retired checkpoint metadata does not claim physical authority");
+        assert_eq!(
+            retired_stamp_import.receipt().evidence(),
+            Released0810ImportEvidence::StoreAuthorizationRequired
+        );
+        assert!(
+            !retired_stamp_import
+                .session()
+                .metadata()
+                .contains_key("session_checkpoint_stamp_v1")
+        );
+
+        let mut all_collapsed = released.clone();
+        all_collapsed["messages"] =
+            serde_json::to_value(&collapsed_messages).expect("collapsed live messages");
+        all_collapsed["metadata"][SESSION_TRANSCRIPT_HISTORY_STATE_KEY]["head"] =
+            serde_json::Value::String(old_collapsed);
+        all_collapsed["metadata"][SESSION_TRANSCRIPT_HISTORY_STATE_KEY]["commits"]
+            .as_array_mut()
+            .expect("released commits")
+            .truncate(1);
+        all_collapsed["metadata"][SESSION_TRANSCRIPT_HISTORY_STATE_KEY]["revisions"]
+            .as_array_mut()
+            .expect("released bodies")
+            .truncate(2);
+        let all_collapsed = import_released_0810_session(
+            &serde_json::to_vec(&all_collapsed).expect("all-collapsed fixture"),
+        )
+        .expect("fully collapsed released graph imports");
+        assert!(
+            all_collapsed
+                .session()
+                .transcript_history_state()
+                .expect("current history query")
+                .is_none(),
+            "a graph containing only semantic no-ops disappears at migration"
+        );
+
+        let imported = import_released_0810_session(
+            &serde_json::to_vec(&released).expect("released collapse fixture"),
+        )
+        .expect("source-proven collapsed rewrite imports");
+        let state = imported
+            .session()
+            .transcript_history_state()
+            .expect("current graph decodes")
+            .expect("retained tail keeps one graph");
+        assert_eq!(state.commit_count(), 1);
+        assert_eq!(
+            state.commit(0).expect("retained tail").rewrite_generation,
+            1,
+            "collapsed occurrences do not consume current generations"
+        );
+        assert_eq!(
+            state
+                .materialize_revision_bodies()
+                .expect("current bodies materialize")
+                .len(),
+            2,
+            "collapsed body identity is deduplicated"
+        );
+        assert_eq!(
+            state.commit(0).expect("retained tail").parent_revision,
+            transcript_messages_digest(&parent_messages).expect("current parent digest")
+        );
+        assert_eq!(
+            state.head(),
+            transcript_messages_digest(&final_messages).expect("current final digest")
+        );
     }
 
     #[test]

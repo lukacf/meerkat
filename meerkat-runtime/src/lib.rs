@@ -548,20 +548,20 @@ pub use meerkat_core::types::HandlingMode;
 #[cfg(not(target_arch = "wasm32"))]
 pub use meerkat_machine::ProviderAuthRuntimeAuthority;
 pub use meerkat_machine::{
-    ArchivedSessionActorMaterializationAuthorization,
+    ArchivedSessionActorMaterializationAuthorization, AuthorizedArchivedResumeCommitLease,
     CommittedRuntimeExecutorAttachmentPublicationLease, CommsDrainMode, CommsDrainPhase,
     DrainExitReason, EnsureRuntimeExecutorAttachment, LocalSessionMaterializationMode,
     MachineServiceTurnCommitLease, MachineServiceTurnIdentity, MachineSessionArchiveLease,
     MachineSessionControlAuthority, MeerkatConsumerSurface, MeerkatMachine, PeerIngressOwner,
     PendingRuntimeExecutorAttachment, PreparedArchivedResumeCommitLease,
     PreparedAttachedSessionActorRecovery, PreparedRuntimeExecutorAttachmentRetirement,
-    PreparedSessionMaterialization, PromotedArchivedResumeCommitLease, RuntimeBindingsError,
-    RuntimeCleanupTaskSpawner, RuntimeExecutorAttachmentRetirementCompletion,
-    RuntimeExecutorAttachmentWitness, RuntimeLifecycleFacts, RuntimeLoopQueueAdmissionPlan,
-    RuntimeSessionLifecycleObservation, RuntimeSessionRegistrationOutcome,
-    RuntimeSessionRegistrationWitness, StandaloneSessionRuntimeAuthorities,
-    classify_runtime_lifecycle_state, classify_runtime_loop_queue_admission,
-    standalone_session_runtime_authorities, standalone_tool_visibility_owner,
+    PreparedSessionMaterialization, RuntimeBindingsError, RuntimeCleanupTaskSpawner,
+    RuntimeExecutorAttachmentRetirementCompletion, RuntimeExecutorAttachmentWitness,
+    RuntimeLifecycleFacts, RuntimeLoopQueueAdmissionPlan, RuntimeSessionLifecycleObservation,
+    RuntimeSessionRegistrationOutcome, RuntimeSessionRegistrationWitness,
+    StandaloneSessionRuntimeAuthorities, classify_runtime_lifecycle_state,
+    classify_runtime_loop_queue_admission, standalone_session_runtime_authorities,
+    standalone_tool_visibility_owner,
 };
 pub use meerkat_machine_types::{
     HydratedSessionLlmState, ImageOperationRoutingRequest, ImageOperationRoutingResult,

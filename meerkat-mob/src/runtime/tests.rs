@@ -1389,6 +1389,10 @@ struct MockSessionService {
     actor_registry: meerkat_session::LiveSessionActorRegistry,
     live_session_data: RwLock<HashMap<SessionId, Session>>,
     persisted_sessions: RwLock<HashMap<SessionId, Session>>,
+    /// Test-only physical-head bodies installed by the explicit operational
+    /// resume preparation seam.
+    prepared_resume_sessions: RwLock<HashMap<SessionId, Session>>,
+    resume_prepare_calls: AtomicU64,
     keep_alive_notifiers: RwLock<HashMap<SessionId, Arc<tokio::sync::Notify>>>,
     session_comms_names: RwLock<HashMap<SessionId, String>>,
     /// Optional test-only key seed for the next materialization of a durable
@@ -1540,6 +1544,8 @@ impl MockSessionService {
             actor_registry: meerkat_session::LiveSessionActorRegistry::default(),
             live_session_data: RwLock::new(HashMap::new()),
             persisted_sessions: RwLock::new(HashMap::new()),
+            prepared_resume_sessions: RwLock::new(HashMap::new()),
+            resume_prepare_calls: AtomicU64::new(0),
             keep_alive_notifiers: RwLock::new(HashMap::new()),
             session_comms_names: RwLock::new(HashMap::new()),
             comms_identity_seeds: RwLock::new(HashMap::new()),
@@ -1657,6 +1663,13 @@ impl MockSessionService {
 
     async fn delete_persisted_session(&self, session_id: &SessionId) {
         self.persisted_sessions.write().await.remove(session_id);
+    }
+
+    async fn stage_prepared_resume_session(&self, session: Session) {
+        self.prepared_resume_sessions
+            .write()
+            .await
+            .insert(session.id().clone(), session);
     }
 
     /// Construct a process-restart-faithful service around the same durable
@@ -3226,6 +3239,22 @@ impl SessionServiceControlExt for MockSessionService {
 
 #[async_trait]
 impl MobSessionService for MockSessionService {
+    async fn prepare_session_for_resume(&self, session_id: &SessionId) -> Result<(), SessionError> {
+        self.resume_prepare_calls.fetch_add(1, Ordering::Relaxed);
+        if let Some(prepared) = self
+            .prepared_resume_sessions
+            .write()
+            .await
+            .remove(session_id)
+        {
+            self.persisted_sessions
+                .write()
+                .await
+                .insert(session_id.clone(), prepared);
+        }
+        Ok(())
+    }
+
     /// Test double: nothing durable survives archive here, so the two-read
     /// composition is the exact truth — `ArchivedNotRevivable` cannot exist.
     async fn load_session_for_resume(
@@ -8936,6 +8965,10 @@ impl SessionServiceControlExt for PersistedListingSessionService {
 
 #[async_trait]
 impl MobSessionService for PersistedListingSessionService {
+    async fn prepare_session_for_resume(&self, session_id: &SessionId) -> Result<(), SessionError> {
+        self.inner.prepare_session_for_resume(session_id).await
+    }
+
     async fn acknowledge_committed_runtime_session_boundary_under_turn_finalization_boundary(
         &self,
         session_id: &SessionId,
@@ -9245,6 +9278,10 @@ impl SessionServiceControlExt for InactiveReadSessionService {
 
 #[async_trait]
 impl MobSessionService for InactiveReadSessionService {
+    async fn prepare_session_for_resume(&self, session_id: &SessionId) -> Result<(), SessionError> {
+        self.inner.prepare_session_for_resume(session_id).await
+    }
+
     async fn acknowledge_committed_runtime_session_boundary_under_turn_finalization_boundary(
         &self,
         session_id: &SessionId,
@@ -20492,6 +20529,18 @@ async fn test_resume_repoints_snapshotless_member_head_to_latest_persisted_sessi
         .write()
         .await
         .remove(&replacement.session_id);
+    let mut recovered_head = service
+        .persisted_session_clone(&replacement.session_id)
+        .await
+        .expect("replacement committed body");
+    let mut recovered_metadata = recovered_head
+        .session_metadata()
+        .expect("replacement metadata");
+    recovered_metadata.model = "recovered-head-model".to_string();
+    recovered_head
+        .set_session_metadata(recovered_metadata)
+        .expect("recovered-head metadata should serialize");
+    service.stage_prepared_resume_session(recovered_head).await;
 
     let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
         events.clone(),
@@ -20510,6 +20559,21 @@ async fn test_resume_repoints_snapshotless_member_head_to_latest_persisted_sessi
         .resume()
         .await
         .expect("explicit resume should self-heal snapshotless head");
+    assert!(
+        service.resume_prepare_calls.load(Ordering::Relaxed) > 0,
+        "replacement materialization must cross explicit resume preparation"
+    );
+    assert_eq!(
+        service
+            .create_requests
+            .read()
+            .await
+            .last()
+            .expect("replacement materialization request")
+            .model,
+        "recovered-head-model",
+        "replacement config must be compiled from metadata on recovered H, not stale A"
+    );
 
     let snapshot = resumed
         .member_status(&identity)
@@ -33616,23 +33680,23 @@ async fn test_retired_session_revival_failure_preserves_resumable_document() {
         .load_authoritative_session(&session_id)
         .await
         .expect("load authoritative preserved session")
-        .expect("promoted session remains durable under runtime authority");
+        .expect("authorized session remains durable under runtime authority");
     // RuntimeStore owns lifecycle truth. The portable Session body need not
     // mirror an Active marker; ordinary visibility and explicit resume below
-    // prove that the durable promotion survived the lost response.
+    // prove that the store-owned reset survived the lost response.
     assert!(
         service
             .load_persisted_session(&session_id)
             .await
-            .expect("ordinary read after failed promoted revival")
+            .expect("ordinary read after failed authorized revival")
             .is_some(),
-        "the promoted document must remain eligible for explicit resume"
+        "the authorized session must remain eligible for explicit resume"
     );
     assert!(
         !service
             .has_live_session(&session_id)
             .await
-            .expect("live-session lookup after failed promoted revival"),
+            .expect("live-session lookup after failed authorized revival"),
         "failed receipt publication must quiesce the unpublished actor incarnation"
     );
     assert!(
@@ -40127,6 +40191,13 @@ impl SessionServiceControlExt for RealCommsSessionService {
 
 #[async_trait]
 impl MobSessionService for RealCommsSessionService {
+    async fn prepare_session_for_resume(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<(), SessionError> {
+        Ok(())
+    }
+
     async fn acknowledge_committed_runtime_session_boundary_under_turn_finalization_boundary(
         &self,
         _session_id: &SessionId,
@@ -41256,6 +41327,13 @@ impl SessionServiceControlExt for RuntimeBackedRealCommsSessionService {
 
 #[async_trait]
 impl MobSessionService for RuntimeBackedRealCommsSessionService {
+    async fn prepare_session_for_resume(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<(), SessionError> {
+        Ok(())
+    }
+
     async fn acknowledge_committed_runtime_session_boundary_under_turn_finalization_boundary(
         &self,
         _session_id: &SessionId,

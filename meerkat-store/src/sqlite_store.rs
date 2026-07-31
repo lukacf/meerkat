@@ -9650,7 +9650,7 @@ mod tests {
                 released_commit(&second_parent, &second, 2, 3, "released edit two"),
             ],
             "revisions": revisions,
-            "digest_format": 1,
+            "digest_format": 2,
         });
         let mut envelope = serde_json::to_value(Session::new()).expect("serialize envelope");
         envelope["version"] = serde_json::json!(2);
@@ -9660,7 +9660,7 @@ mod tests {
         });
         let bytes = serde_json::to_vec(&envelope).expect("serialize released fixture");
         meerkat_core::import_released_0810_session(&bytes)
-            .expect("frozen released importer accepts exact splice fixture")
+            .expect("released importer accepts exact store-authorized splice fixture")
             .into_parts()
             .0
     }

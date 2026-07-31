@@ -2,7 +2,10 @@
 
 use std::sync::Arc;
 
-use meerkat_core::session_store::{IncrementalSessionStore, session_head_cas_token};
+use meerkat_core::session_store::{
+    IncrementalSessionStore, PreparedHeadCanonicalMutation, PreparedHeadCanonicalRewriteMutation,
+    session_head_cas_token,
+};
 use meerkat_core::{
     Message, Session, SessionHead, SessionHeadCas, SessionStoreError, TranscriptRewriteReason,
     TranscriptRewriteRecord, TranscriptRewriteSelection, TranscriptStrandId, UserMessage,
@@ -39,7 +42,29 @@ pub async fn incremental(factory: &dyn SessionStoreFactory) -> Result<(), Confor
     save_head_cas(&steps, inc.as_ref()).await?;
     rewrite_commit_and_adoption(&steps, factory, &store, inc.as_ref()).await?;
     chained_prefix_rewrites(&steps, factory, &store, inc.as_ref()).await?;
-    range_read_capability(&steps, &store, inc.as_ref()).await?;
+    range_read_capability(&steps, &store, inc.as_ref(), true).await?;
+    Ok(())
+}
+
+/// Incremental profile for stores whose rewrite boundary is the sealed,
+/// atomically adopted [`PreparedHeadCanonicalRewriteMutation`] carrier.
+pub async fn incremental_head_canonical(
+    factory: &dyn SessionStoreFactory,
+) -> Result<(), ConformanceFailure> {
+    let steps = Steps::chapter(CHAPTER);
+    let store = factory.open().await?;
+    let Some(inc) = Arc::clone(&store).as_incremental() else {
+        return Err(steps.fail(
+            "capability_probe",
+            "incremental profile invoked for a store whose as_incremental() returned None",
+        ));
+    };
+
+    append_and_head_create(&steps, &store, inc.as_ref()).await?;
+    append_contract(&steps, inc.as_ref()).await?;
+    save_head_cas(&steps, inc.as_ref()).await?;
+    prepared_rewrite_commit_and_adoption(&steps, factory, &store, inc.as_ref()).await?;
+    range_read_capability(&steps, &store, inc.as_ref(), false).await?;
     Ok(())
 }
 
@@ -75,6 +100,7 @@ async fn range_read_capability(
     steps: &Steps,
     store: &Arc<dyn meerkat_core::SessionStore>,
     inc: &dyn IncrementalSessionStore,
+    exercise_legacy_rewrite: bool,
 ) -> Result<(), ConformanceFailure> {
     const STEP: &str = "range_read_capability";
     let (session, head, token) = seed(steps, STEP, inc, &["range one", "range two"]).await?;
@@ -157,6 +183,10 @@ async fn range_read_capability(
                 )?;
             }
         }
+    }
+
+    if !exercise_legacy_rewrite {
+        return Ok(());
     }
 
     // Rewrite lifecycle: the commit view tracks adoption exactly.
@@ -407,6 +437,30 @@ async fn seed(
     Ok((session, head, token))
 }
 
+async fn seed_prepared_head_canonical(
+    steps: &Steps,
+    step: &'static str,
+    inc: &dyn IncrementalSessionStore,
+    texts: &[&str],
+) -> Result<(Session, SessionHead), ConformanceFailure> {
+    let mut session = fixtures::session_with_texts(texts)?;
+    let root = steps.wrap(step, PreparedHeadCanonicalMutation::prepare_root(&session))?;
+    let committed_token = steps.wrap(
+        step,
+        inc.apply_prepared_head_canonical_mutation(&root).await,
+    )?;
+    steps.ensure(
+        step,
+        committed_token == root.successor_head_token(),
+        "prepared root must return its exact sealed successor token",
+    )?;
+    steps.wrap(
+        step,
+        root.acknowledge_session(&mut session, &committed_token),
+    )?;
+    Ok((session, root.successor_head().clone()))
+}
+
 async fn append_and_head_create(
     steps: &Steps,
     store: &Arc<dyn meerkat_core::SessionStore>,
@@ -650,6 +704,162 @@ async fn save_head_cas(
         )),
         Ok(()) => Err(steps.fail(STEP, "same-strand head shrink must be rejected")),
     }
+}
+
+async fn prepared_rewrite_commit_and_adoption(
+    steps: &Steps,
+    factory: &dyn SessionStoreFactory,
+    store: &Arc<dyn meerkat_core::SessionStore>,
+    inc: &dyn IncrementalSessionStore,
+) -> Result<(), ConformanceFailure> {
+    const STEP: &str = "prepared_rewrite_commit_and_adoption";
+
+    // A prepared carrier seals the real predecessor token. Advance a
+    // separate session after preparation to prove the stale CAS fails before
+    // recording or adopting any rewrite occurrence.
+    let (stale_session, stale_head) =
+        seed_prepared_head_canonical(steps, STEP, inc, &["stale one", "stale two"]).await?;
+    let mut stale_rewritten = stale_session.clone();
+    steps.wrap(
+        STEP,
+        stale_rewritten.commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange { start: 0, end: 2 },
+            vec![Message::User(UserMessage::text(
+                "[conformance] stale prepared summary".to_string(),
+            ))],
+            TranscriptRewriteReason::new("conformance"),
+            Some("meerkat-store-conformance".to_string()),
+            None,
+        ),
+    )?;
+    let stale_mutation = steps.wrap(
+        STEP,
+        PreparedHeadCanonicalRewriteMutation::prepare_intra_turn(
+            &stale_rewritten,
+            &stale_head,
+            stale_head.clone(),
+        ),
+    )?;
+    let mut advanced = stale_session.clone();
+    advanced.push(Message::User(UserMessage::text(
+        "stale-token advance".to_string(),
+    )));
+    let advance = steps.wrap(
+        STEP,
+        PreparedHeadCanonicalMutation::prepare(&advanced, Some(stale_head.clone())),
+    )?;
+    steps.wrap(
+        STEP,
+        inc.apply_prepared_head_canonical_mutation(&advance).await,
+    )?;
+    match inc
+        .apply_prepared_head_canonical_rewrite_mutation(&stale_mutation)
+        .await
+    {
+        Err(SessionStoreError::TranscriptRevisionConflict { .. }) => {}
+        Err(other) => {
+            return Err(steps.fail(
+                STEP,
+                format!(
+                    "stale prepared rewrite must fail with TranscriptRevisionConflict, got: \
+                     {other}"
+                ),
+            ));
+        }
+        Ok(_) => return Err(steps.fail(STEP, "stale prepared rewrite must be rejected")),
+    }
+    steps.ensure(
+        STEP,
+        steps
+            .wrap(STEP, inc.load_rewrites(stale_session.id()).await)?
+            .is_empty(),
+        "stale prepared rewrite must not record or adopt an occurrence",
+    )?;
+
+    let (session, head) = seed_prepared_head_canonical(steps, STEP, inc, &["one", "two"]).await?;
+    let mut rewritten = session.clone();
+    let commit = steps.wrap(
+        STEP,
+        rewritten.commit_transcript_rewrite(
+            TranscriptRewriteSelection::MessageRange { start: 0, end: 2 },
+            vec![Message::User(UserMessage::text(
+                "[conformance] rewritten summary".to_string(),
+            ))],
+            TranscriptRewriteReason::new("conformance"),
+            Some("meerkat-store-conformance".to_string()),
+            None,
+        ),
+    )?;
+    let mutation = steps.wrap(
+        STEP,
+        PreparedHeadCanonicalRewriteMutation::prepare_intra_turn(&rewritten, &head, head.clone()),
+    )?;
+    steps.ensure(
+        STEP,
+        steps
+            .wrap(STEP, inc.load_rewrites(session.id()).await)?
+            .is_empty(),
+        "preparing a rewrite must not make it visible",
+    )?;
+    let committed_token = steps.wrap(
+        STEP,
+        inc.apply_prepared_head_canonical_rewrite_mutation(&mutation)
+            .await,
+    )?;
+    steps.ensure(
+        STEP,
+        committed_token == mutation.successor_head_token(),
+        "prepared rewrite must return its exact sealed successor token",
+    )?;
+    let rewrites = steps.wrap(STEP, inc.load_rewrites(session.id()).await)?;
+    steps.ensure(
+        STEP,
+        rewrites.len() == 1 && rewrites[0].commit.revision == commit.revision,
+        "atomically adopted prepared rewrite must round-trip",
+    )?;
+    let slim = steps
+        .wrap(STEP, store.load(session.id()).await)?
+        .ok_or_else(|| steps.fail(STEP, "rewritten session must load"))?;
+    steps.ensure(
+        STEP,
+        slim.messages() == rewritten.messages(),
+        "prepared rewrite load must serve exactly the rewritten transcript",
+    )?;
+
+    let retried_token = steps.wrap(
+        STEP,
+        inc.apply_prepared_head_canonical_rewrite_mutation(&mutation)
+            .await,
+    )?;
+    steps.ensure(
+        STEP,
+        retried_token == committed_token,
+        "exact prepared rewrite retry must be idempotent",
+    )?;
+
+    let reopened = factory.open().await?;
+    let reopened_inc = Arc::clone(&reopened).as_incremental().ok_or_else(|| {
+        steps.fail(
+            STEP,
+            "reopened handle must still expose the incremental capability",
+        )
+    })?;
+    let survived_head = steps
+        .wrap(STEP, reopened_inc.load_head(session.id()).await)?
+        .ok_or_else(|| steps.fail(STEP, "prepared rewrite head must survive reopen"))?;
+    steps.ensure(
+        STEP,
+        survived_head == *mutation.successor_head(),
+        "reopened head must equal the sealed prepared successor",
+    )?;
+    let survived = steps
+        .wrap(STEP, reopened.load(session.id()).await)?
+        .ok_or_else(|| steps.fail(STEP, "prepared rewrite must load after reopen"))?;
+    steps.ensure(
+        STEP,
+        survived.messages() == rewritten.messages(),
+        "reopened prepared rewrite must serve exactly the rewritten transcript",
+    )
 }
 
 async fn rewrite_commit_and_adoption(

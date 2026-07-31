@@ -7903,19 +7903,13 @@ ORDER BY runtime_id";
     }
 
     #[async_trait::async_trait]
-    impl RuntimeStore for SqliteRuntimeStore {
+    impl crate::store::RuntimeSessionAuthorityOps for SqliteRuntimeStore {
         fn session_persistence_profile(&self) -> RuntimeSessionPersistenceProfile {
             self.session_persistence_profile
         }
 
         fn session_boundary_authority_read_cost(&self) -> RuntimeSessionAuthorityReadCost {
             RuntimeSessionAuthorityReadCost::Bounded
-        }
-
-        fn input_state_batch_cas_implementation_profile(
-            &self,
-        ) -> InputStateBatchCasImplementationProfile {
-            InputStateBatchCasImplementationProfile::MultiWriter
         }
 
         async fn commit_prepared_session_boundary(
@@ -9170,10 +9164,11 @@ ORDER BY runtime_id";
             runtime_id: &LogicalRuntimeId,
         ) -> Result<Option<RuntimeSessionAuthority>, RuntimeStoreError> {
             if self.session_persistence_profile == RuntimeSessionPersistenceProfile::WholeBlobV1 {
-                return self
-                    .load_whole_blob_store_authority(runtime_id)
-                    .await
-                    .map(|authority| authority.map(RuntimeSessionAuthority::WholeBlob));
+                return crate::store::RuntimeSessionAuthorityOps::load_whole_blob_store_authority(
+                    self, runtime_id,
+                )
+                .await
+                .map(|authority| authority.map(RuntimeSessionAuthority::WholeBlob));
             }
 
             let path = self.path.clone();
@@ -9408,6 +9403,627 @@ ORDER BY runtime_id";
             })
             .await
             .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
+        async fn load_whole_blob_store_authority(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Option<WholeBlobStoreAuthority>, RuntimeStoreError> {
+            self.require_whole_blob_session_operation(
+                runtime_id,
+                "load_whole_blob_store_authority",
+            )?;
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            tokio::task::spawn_blocking(move || {
+                let conn = open_runtime_connection(&path)?;
+                load_whole_blob_store_authority(&conn, &runtime_id)
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
+        async fn delete_runtime_session_catalog_entry(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<(), RuntimeStoreError> {
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            tokio::task::spawn_blocking(move || {
+                let conn = open_runtime_connection(&path)?;
+                conn.execute(
+                    "DELETE FROM runtime_session_catalog WHERE runtime_id = ?1",
+                    params![runtime_id_text(&runtime_id)],
+                )
+                .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                Ok(())
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
+        async fn load_runtime_session_catalog_entry(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Option<crate::store::RuntimeSessionCatalogEntry>, RuntimeStoreError> {
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            tokio::task::spawn_blocking(move || {
+                let conn = open_runtime_connection(&path)?;
+                load_runtime_session_catalog_entry_in_txn(&conn, &runtime_id)
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
+        async fn list_runtime_session_catalog_entries(
+            &self,
+            filter: meerkat_core::SessionFilter,
+        ) -> Result<Vec<crate::store::RuntimeSessionCatalogEntry>, RuntimeStoreError> {
+            let path = self.path.clone();
+            tokio::task::spawn_blocking(move || {
+                let conn = open_runtime_connection(&path)?;
+                list_runtime_session_catalog_entries_in_conn(&conn, filter)
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
+        async fn load_committed_whole_blob_snapshot(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Option<CommittedWholeBlobSnapshot>, RuntimeStoreError> {
+            self.require_whole_blob_session_operation(
+                runtime_id,
+                "load_committed_whole_blob_snapshot",
+            )?;
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut conn = open_runtime_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                let authority = load_whole_blob_store_authority(&tx, &runtime_id)?;
+                let observed = match authority {
+                    None => None,
+                    Some(authority) => {
+                        let bytes = tx
+                            .query_row(
+                                "SELECT session_snapshot FROM runtime_whole_blob_bodies WHERE blob_sha256 = ?1",
+                                params![authority.blob_sha256()],
+                                |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
+                            )
+                            .optional()
+                            .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?
+                            .ok_or_else(|| {
+                                session_authority_conflict(
+                                    &runtime_id,
+                                    "WholeBlob authority references a missing body",
+                                )
+                            })?;
+                        Some(CommittedWholeBlobSnapshot::new(
+                            Arc::new(bytes),
+                            authority,
+                        )?)
+                    }
+                };
+                tx.commit()
+                    .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+                Ok(observed)
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
+        async fn commit_prepared_whole_blob_snapshot_cas(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            prepared: PreparedWholeBlobSnapshotCas,
+        ) -> Result<WholeBlobSnapshotCasOutcome, RuntimeStoreError> {
+            self.require_whole_blob_session_operation(
+                runtime_id,
+                "commit_prepared_whole_blob_snapshot_cas",
+            )?;
+            let (expected, candidate_session, candidate_bytes, candidate_blob_sha256) =
+                prepared.into_parts();
+            if &LogicalRuntimeId::for_session(candidate_session.id()) != runtime_id
+                || candidate_session.id() != expected.session_id()
+            {
+                return Err(session_authority_conflict(
+                    runtime_id,
+                    "prepared WholeBlob snapshot CAS does not bind this runtime/session",
+                ));
+            }
+            let compaction_projection_intents =
+                crate::store::validated_compaction_projection_intents(candidate_session.as_ref())?;
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut conn = open_runtime_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                refuse_whole_blob_write_under_head_authority(
+                    &tx,
+                    &runtime_id,
+                    "typed WholeBlob snapshot CAS",
+                )?;
+                let Some(current) = load_whole_blob_store_authority(&tx, &runtime_id)? else {
+                    return Ok(WholeBlobSnapshotCasOutcome::Conflict);
+                };
+                if current != expected {
+                    return Ok(WholeBlobSnapshotCasOutcome::Conflict);
+                }
+                if current.blob_sha256() == candidate_blob_sha256 {
+                    return Ok(WholeBlobSnapshotCasOutcome::Committed(current));
+                }
+                if load_whole_blob_provisional_authority(&tx, &runtime_id)?.is_some() {
+                    return Err(session_authority_conflict(
+                        &runtime_id,
+                        "snapshot CAS cannot bypass a store-owned WholeBlob provisional candidate",
+                    ));
+                }
+                ensure_compaction_intents_already_outboxed_list(
+                    &tx,
+                    &runtime_id,
+                    &compaction_projection_intents,
+                )?;
+                let runtime_state = load_runtime_session_catalog_entry_in_txn(&tx, &runtime_id)?
+                    .and_then(|entry| entry.runtime_state());
+                let catalog_entry = crate::store::RuntimeSessionCatalogEntry::from_session(
+                    candidate_session.as_ref(),
+                    RuntimeSessionPersistenceProfile::WholeBlobV1,
+                    runtime_state,
+                )?;
+                let authority = upsert_runtime_snapshot_issued(
+                    &tx,
+                    &runtime_id,
+                    candidate_bytes.as_ref(),
+                    candidate_session.id(),
+                    &candidate_blob_sha256,
+                    &catalog_entry,
+                )?;
+                tx.commit()
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                Ok(WholeBlobSnapshotCasOutcome::Committed(authority))
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
+        async fn write_prepared_whole_blob_provisional_tail(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            prepared: PreparedWholeBlobProvisionalTail,
+        ) -> Result<WholeBlobProvisionalTailAuthority, RuntimeStoreError> {
+            self.require_whole_blob_session_operation(
+                runtime_id,
+                "write_prepared_whole_blob_provisional_tail",
+            )?;
+            let (
+                authority,
+                candidate_artifact,
+                conversation_digest,
+                message_count,
+                catalog_entry,
+                compaction_projection_intents,
+            ) = prepared.into_parts();
+            let candidate_bytes = candidate_artifact.bytes_arc();
+            if &LogicalRuntimeId::for_session(authority.session_id()) != runtime_id
+                || catalog_entry.session_id() != authority.session_id()
+                || catalog_entry.persistence_profile()
+                    != RuntimeSessionPersistenceProfile::WholeBlobV1
+                || u64::try_from(catalog_entry.message_count()).ok() != Some(message_count)
+                || candidate_artifact.row_sha256_token() != authority.candidate_blob_sha256()
+            {
+                return Err(session_authority_conflict(
+                    runtime_id,
+                    "WholeBlob provisional artifact/catalog does not bind this runtime/session authority",
+                ));
+            }
+            let catalog_json = serde_json::to_vec(&catalog_entry)
+                .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+            let compaction_intents_json = serde_json::to_vec(&compaction_projection_intents)
+                .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut conn = open_runtime_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                let current =
+                    load_whole_blob_store_authority(&tx, &runtime_id)?.ok_or_else(|| {
+                        session_authority_conflict(
+                            &runtime_id,
+                            "WholeBlob provisional candidate has no committed base",
+                        )
+                    })?;
+                if current.session_id() != authority.session_id()
+                    || current.store_revision() != authority.base_store_revision()
+                    || current.blob_sha256() != authority.base_blob_sha256()
+                {
+                    return Err(session_authority_conflict(
+                        &runtime_id,
+                        "WholeBlob provisional candidate base is stale",
+                    ));
+                }
+                let existing = load_whole_blob_provisional_metadata(&tx, &runtime_id)?;
+                if let Some(existing) = existing.as_ref() {
+                    if existing.authority == authority {
+                        if existing.conversation_digest != conversation_digest
+                            || existing.message_count != message_count
+                        {
+                            return Err(session_authority_conflict(
+                                &runtime_id,
+                                "WholeBlob provisional retry changes bounded candidate facts",
+                            ));
+                        }
+                        return Ok(authority);
+                    }
+                    let required_sequence = existing
+                        .authority
+                        .candidate_sequence()
+                        .checked_add(1)
+                        .ok_or_else(|| {
+                            RuntimeStoreError::WriteFailed(
+                                "WholeBlob provisional candidate sequence exhausted".to_string(),
+                            )
+                        })?;
+                    if existing.authority.session_id() != authority.session_id()
+                        || existing.authority.base_store_revision()
+                            != authority.base_store_revision()
+                        || existing.authority.base_blob_sha256()
+                            != authority.base_blob_sha256()
+                        || existing.authority.run_id() != authority.run_id()
+                        || authority.candidate_sequence() != required_sequence
+                    {
+                        return Err(session_authority_conflict(
+                            &runtime_id,
+                            "WholeBlob provisional replacement is stale or skips sequence",
+                        ));
+                    }
+                } else if authority.candidate_sequence() != 1 {
+                    return Err(session_authority_conflict(
+                        &runtime_id,
+                        "first WholeBlob provisional candidate sequence must be one",
+                    ));
+                }
+                let base_revision = i64::try_from(authority.base_store_revision()).map_err(|_| {
+                    RuntimeStoreError::WriteFailed(format!(
+                        "WholeBlob provisional base revision exceeds SQLite INTEGER for runtime {runtime_id}"
+                    ))
+                })?;
+                let message_count = i64::try_from(message_count).map_err(|_| {
+                    RuntimeStoreError::WriteFailed(format!(
+                        "WholeBlob provisional message count exceeds SQLite INTEGER for runtime {runtime_id}"
+                    ))
+                })?;
+                tx.execute(
+                    r"
+                    INSERT INTO runtime_whole_blob_bodies (blob_sha256, session_snapshot)
+                    VALUES (?1, ?2)
+                    ON CONFLICT(blob_sha256) DO NOTHING
+                    ",
+                    params![authority.candidate_blob_sha256(), candidate_bytes.as_ref()],
+                )
+                .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                if let Some(existing) = existing {
+                    let updated = tx
+                        .execute(
+                            r"
+                            UPDATE runtime_whole_blob_provisional_tails
+                            SET candidate_sequence = ?7,
+                                candidate_blob_sha256 = ?8,
+                                conversation_digest = ?9,
+                                message_count = ?10,
+                                catalog_json = ?11,
+                                compaction_intents_json = ?12
+                            WHERE runtime_id = ?1
+                              AND session_id = ?2
+                              AND base_store_revision = ?3
+                              AND base_blob_sha256 = ?4
+                              AND run_id = ?5
+                              AND candidate_sequence = ?6
+                            ",
+                            params![
+                                runtime_id_text(&runtime_id),
+                                authority.session_id().to_string(),
+                                base_revision,
+                                authority.base_blob_sha256(),
+                                authority.run_id().0.to_string(),
+                                i64::try_from(existing.authority.candidate_sequence()).map_err(
+                                    |_| RuntimeStoreError::WriteFailed(
+                                        "WholeBlob provisional sequence exceeds SQLite INTEGER"
+                                            .to_string(),
+                                    ),
+                                )?,
+                                i64::try_from(authority.candidate_sequence()).map_err(|_| {
+                                    RuntimeStoreError::WriteFailed(
+                                        "WholeBlob provisional sequence exceeds SQLite INTEGER"
+                                            .to_string(),
+                                    )
+                                })?,
+                                authority.candidate_blob_sha256(),
+                                conversation_digest,
+                                message_count,
+                                catalog_json,
+                                compaction_intents_json,
+                            ],
+                        )
+                        .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                    if updated != 1 {
+                        return Err(session_authority_conflict(
+                            &runtime_id,
+                            "WholeBlob provisional candidate changed during replacement",
+                        ));
+                    }
+                    if existing.authority.candidate_blob_sha256()
+                        != authority.candidate_blob_sha256()
+                    {
+                        tx.execute(
+                            r"
+                            DELETE FROM runtime_whole_blob_bodies
+                            WHERE blob_sha256 = ?1
+                              AND NOT EXISTS (
+                                  SELECT 1 FROM runtime_whole_blob_authority
+                                  WHERE blob_sha256 = ?1
+                              )
+                              AND NOT EXISTS (
+                                  SELECT 1 FROM runtime_whole_blob_provisional_tails
+                                  WHERE candidate_blob_sha256 = ?1
+                              )
+                            ",
+                            params![existing.authority.candidate_blob_sha256()],
+                        )
+                        .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                    }
+                } else {
+                    tx.execute(
+                        r"
+                        INSERT INTO runtime_whole_blob_provisional_tails
+                            (runtime_id, authority_version, session_id, base_store_revision,
+                             base_blob_sha256, run_id, candidate_sequence,
+                             candidate_blob_sha256, conversation_digest, message_count,
+                             catalog_json, compaction_intents_json)
+                        VALUES (?1, 1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                        ",
+                        params![
+                            runtime_id_text(&runtime_id),
+                            authority.session_id().to_string(),
+                            base_revision,
+                            authority.base_blob_sha256(),
+                            authority.run_id().0.to_string(),
+                            i64::try_from(authority.candidate_sequence()).map_err(|_| {
+                                RuntimeStoreError::WriteFailed(
+                                    "WholeBlob provisional sequence exceeds SQLite INTEGER"
+                                        .to_string(),
+                                )
+                            })?,
+                            authority.candidate_blob_sha256(),
+                            conversation_digest,
+                            message_count,
+                            catalog_json,
+                            compaction_intents_json,
+                        ],
+                    )
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                }
+                tx.commit()
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                Ok(authority)
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
+        async fn load_whole_blob_provisional_tail(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Option<CommittedWholeBlobProvisionalTail>, RuntimeStoreError> {
+            self.require_whole_blob_session_operation(
+                runtime_id,
+                "load_whole_blob_provisional_tail",
+            )?;
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut conn = open_runtime_connection(&path)?;
+                let tx = conn
+                    .transaction()
+                    .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+                let observed = load_whole_blob_provisional_tail(&tx, &runtime_id)?;
+                tx.commit()
+                    .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+                Ok(observed)
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
+        async fn discard_whole_blob_provisional_tail(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            expected: &WholeBlobProvisionalTailAuthority,
+        ) -> Result<bool, RuntimeStoreError> {
+            self.require_whole_blob_session_operation(
+                runtime_id,
+                "discard_whole_blob_provisional_tail",
+            )?;
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            let expected = expected.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut conn = open_runtime_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                let deleted = tx
+                    .execute(
+                        r"
+                        DELETE FROM runtime_whole_blob_provisional_tails
+                        WHERE runtime_id = ?1
+                          AND session_id = ?2
+                          AND base_store_revision = ?3
+                          AND base_blob_sha256 = ?4
+                          AND run_id = ?5
+                          AND candidate_blob_sha256 = ?6
+                          AND candidate_sequence = ?7
+                        ",
+                        params![
+                            runtime_id_text(&runtime_id),
+                            expected.session_id().to_string(),
+                            i64::try_from(expected.base_store_revision()).map_err(|_| {
+                                RuntimeStoreError::WriteFailed(
+                                    "WholeBlob provisional base revision exceeds SQLite INTEGER"
+                                        .to_string(),
+                                )
+                            })?,
+                            expected.base_blob_sha256(),
+                            expected.run_id().0.to_string(),
+                            expected.candidate_blob_sha256(),
+                            i64::try_from(expected.candidate_sequence()).map_err(|_| {
+                                RuntimeStoreError::WriteFailed(
+                                    "WholeBlob provisional sequence exceeds SQLite INTEGER"
+                                        .to_string(),
+                                )
+                            })?,
+                        ],
+                    )
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                if deleted == 1 {
+                    tx.execute(
+                        r"
+                        DELETE FROM runtime_whole_blob_bodies
+                        WHERE blob_sha256 = ?1
+                          AND NOT EXISTS (
+                              SELECT 1 FROM runtime_whole_blob_authority
+                              WHERE blob_sha256 = ?1
+                          )
+                          AND NOT EXISTS (
+                              SELECT 1 FROM runtime_whole_blob_provisional_tails
+                              WHERE candidate_blob_sha256 = ?1
+                          )
+                        ",
+                        params![expected.candidate_blob_sha256()],
+                    )
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                }
+                tx.commit()
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                Ok(deleted == 1)
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
+        async fn write_prepared_head_canonical_provisional_tail(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            prepared: PreparedHeadCanonicalProvisionalTail,
+        ) -> Result<HeadCanonicalProvisionalTailAuthority, RuntimeStoreError> {
+            self.require_head_canonical_session_operation(
+                runtime_id,
+                "write_prepared_head_canonical_provisional_tail",
+            )?;
+            if &LogicalRuntimeId::for_session(prepared.committed().session_id()) != runtime_id
+                || &prepared.successor_head().id != prepared.committed().session_id()
+            {
+                return Err(session_authority_conflict(
+                    runtime_id,
+                    "HeadCanonical provisional intent does not bind this runtime/session",
+                ));
+            }
+            let derived_successor_token = meerkat_core::session_head_cas_token(
+                prepared.successor_head(),
+            )
+            .map_err(|error| {
+                session_authority_conflict(
+                    runtime_id,
+                    format!("HeadCanonical provisional successor is invalid: {error}"),
+                )
+            })?;
+            if derived_successor_token.as_str() != prepared.successor_head_token() {
+                return Err(session_authority_conflict(
+                    runtime_id,
+                    "HeadCanonical provisional successor token differs from its exact head",
+                ));
+            }
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut conn = open_head_canonical_runtime_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                let authority = issue_head_canonical_provisional_tail_authority_in_txn(
+                    &tx,
+                    &runtime_id,
+                    prepared.committed(),
+                    prepared.run_id(),
+                    prepared.successor_head(),
+                    prepared.successor_head_token(),
+                    prepared.candidate_message_count(),
+                    prepared.candidate_conversation_digest(),
+                    prepared.catalog_entry(),
+                    prepared.compaction_projection_intents(),
+                )?;
+                tx.commit()
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                Ok(authority)
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
+        async fn load_head_canonical_provisional_tail(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Option<HeadCanonicalProvisionalTailAuthority>, RuntimeStoreError> {
+            self.require_head_canonical_session_operation(
+                runtime_id,
+                "load_head_canonical_provisional_tail",
+            )?;
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            tokio::task::spawn_blocking(move || {
+                let conn = open_head_canonical_runtime_connection(&path)?;
+                load_head_canonical_provisional_tail_authority(&conn, &runtime_id)
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
+        async fn discard_head_canonical_provisional_tail(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            expected: &HeadCanonicalProvisionalTailAuthority,
+        ) -> Result<bool, RuntimeStoreError> {
+            self.require_head_canonical_session_operation(
+                runtime_id,
+                "discard_head_canonical_provisional_tail",
+            )?;
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            let expected = expected.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut conn = open_head_canonical_runtime_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                let discarded = discard_head_canonical_provisional_tail_authority_in_txn(
+                    &tx,
+                    &runtime_id,
+                    &expected,
+                )?;
+                tx.commit()
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                Ok(discarded)
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RuntimeStore for SqliteRuntimeStore {
+        fn session_authority_ops(&self) -> &dyn crate::store::RuntimeSessionAuthorityOps {
+            self
+        }
+
+        fn input_state_batch_cas_implementation_profile(
+            &self,
+        ) -> InputStateBatchCasImplementationProfile {
+            InputStateBatchCasImplementationProfile::MultiWriter
         }
 
         fn supports_compaction_projection_outbox(&self) -> bool {
@@ -10484,615 +11100,6 @@ ORDER BY runtime_id";
             .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))??;
             Ok(snapshot.map(Arc::new))
         }
-
-        async fn load_whole_blob_store_authority(
-            &self,
-            runtime_id: &LogicalRuntimeId,
-        ) -> Result<Option<WholeBlobStoreAuthority>, RuntimeStoreError> {
-            self.require_whole_blob_session_operation(
-                runtime_id,
-                "load_whole_blob_store_authority",
-            )?;
-            let path = self.path.clone();
-            let runtime_id = runtime_id.clone();
-            tokio::task::spawn_blocking(move || {
-                let conn = open_runtime_connection(&path)?;
-                load_whole_blob_store_authority(&conn, &runtime_id)
-            })
-            .await
-            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
-        }
-
-        async fn delete_runtime_session_catalog_entry(
-            &self,
-            runtime_id: &LogicalRuntimeId,
-        ) -> Result<(), RuntimeStoreError> {
-            let path = self.path.clone();
-            let runtime_id = runtime_id.clone();
-            tokio::task::spawn_blocking(move || {
-                let conn = open_runtime_connection(&path)?;
-                conn.execute(
-                    "DELETE FROM runtime_session_catalog WHERE runtime_id = ?1",
-                    params![runtime_id_text(&runtime_id)],
-                )
-                .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
-                Ok(())
-            })
-            .await
-            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
-        }
-
-        async fn load_runtime_session_catalog_entry(
-            &self,
-            runtime_id: &LogicalRuntimeId,
-        ) -> Result<Option<crate::store::RuntimeSessionCatalogEntry>, RuntimeStoreError> {
-            let path = self.path.clone();
-            let runtime_id = runtime_id.clone();
-            tokio::task::spawn_blocking(move || {
-                let conn = open_runtime_connection(&path)?;
-                load_runtime_session_catalog_entry_in_txn(&conn, &runtime_id)
-            })
-            .await
-            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
-        }
-
-        async fn list_runtime_session_catalog_entries(
-            &self,
-            filter: meerkat_core::SessionFilter,
-        ) -> Result<Vec<crate::store::RuntimeSessionCatalogEntry>, RuntimeStoreError> {
-            let path = self.path.clone();
-            tokio::task::spawn_blocking(move || {
-                let conn = open_runtime_connection(&path)?;
-                list_runtime_session_catalog_entries_in_conn(&conn, filter)
-            })
-            .await
-            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
-        }
-
-        async fn load_committed_whole_blob_snapshot(
-            &self,
-            runtime_id: &LogicalRuntimeId,
-        ) -> Result<Option<CommittedWholeBlobSnapshot>, RuntimeStoreError> {
-            self.require_whole_blob_session_operation(
-                runtime_id,
-                "load_committed_whole_blob_snapshot",
-            )?;
-            let path = self.path.clone();
-            let runtime_id = runtime_id.clone();
-            tokio::task::spawn_blocking(move || {
-                let mut conn = open_runtime_connection(&path)?;
-                let tx = begin_runtime_transaction(&mut conn)?;
-                let authority = load_whole_blob_store_authority(&tx, &runtime_id)?;
-                let observed = match authority {
-                    None => None,
-                    Some(authority) => {
-                        let bytes = tx
-                            .query_row(
-                                "SELECT session_snapshot FROM runtime_whole_blob_bodies WHERE blob_sha256 = ?1",
-                                params![authority.blob_sha256()],
-                                |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
-                            )
-                            .optional()
-                            .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?
-                            .ok_or_else(|| {
-                                session_authority_conflict(
-                                    &runtime_id,
-                                    "WholeBlob authority references a missing body",
-                                )
-                            })?;
-                        Some(CommittedWholeBlobSnapshot::new(
-                            Arc::new(bytes),
-                            authority,
-                        )?)
-                    }
-                };
-                tx.commit()
-                    .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
-                Ok(observed)
-            })
-            .await
-            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
-        }
-
-        async fn commit_prepared_whole_blob_snapshot_cas(
-            &self,
-            runtime_id: &LogicalRuntimeId,
-            prepared: PreparedWholeBlobSnapshotCas,
-        ) -> Result<WholeBlobSnapshotCasOutcome, RuntimeStoreError> {
-            self.require_whole_blob_session_operation(
-                runtime_id,
-                "commit_prepared_whole_blob_snapshot_cas",
-            )?;
-            let (expected, candidate_session, candidate_bytes, candidate_blob_sha256) =
-                prepared.into_parts();
-            if &LogicalRuntimeId::for_session(candidate_session.id()) != runtime_id
-                || candidate_session.id() != expected.session_id()
-            {
-                return Err(session_authority_conflict(
-                    runtime_id,
-                    "prepared WholeBlob snapshot CAS does not bind this runtime/session",
-                ));
-            }
-            let compaction_projection_intents =
-                crate::store::validated_compaction_projection_intents(candidate_session.as_ref())?;
-            let path = self.path.clone();
-            let runtime_id = runtime_id.clone();
-            tokio::task::spawn_blocking(move || {
-                let mut conn = open_runtime_connection(&path)?;
-                let tx = begin_runtime_transaction(&mut conn)?;
-                refuse_whole_blob_write_under_head_authority(
-                    &tx,
-                    &runtime_id,
-                    "typed WholeBlob snapshot CAS",
-                )?;
-                let Some(current) = load_whole_blob_store_authority(&tx, &runtime_id)? else {
-                    return Ok(WholeBlobSnapshotCasOutcome::Conflict);
-                };
-                if current != expected {
-                    return Ok(WholeBlobSnapshotCasOutcome::Conflict);
-                }
-                if current.blob_sha256() == candidate_blob_sha256 {
-                    return Ok(WholeBlobSnapshotCasOutcome::Committed(current));
-                }
-                if load_whole_blob_provisional_authority(&tx, &runtime_id)?.is_some() {
-                    return Err(session_authority_conflict(
-                        &runtime_id,
-                        "snapshot CAS cannot bypass a store-owned WholeBlob provisional candidate",
-                    ));
-                }
-                ensure_compaction_intents_already_outboxed_list(
-                    &tx,
-                    &runtime_id,
-                    &compaction_projection_intents,
-                )?;
-                let runtime_state = load_runtime_session_catalog_entry_in_txn(&tx, &runtime_id)?
-                    .and_then(|entry| entry.runtime_state());
-                let catalog_entry = crate::store::RuntimeSessionCatalogEntry::from_session(
-                    candidate_session.as_ref(),
-                    RuntimeSessionPersistenceProfile::WholeBlobV1,
-                    runtime_state,
-                )?;
-                let authority = upsert_runtime_snapshot_issued(
-                    &tx,
-                    &runtime_id,
-                    candidate_bytes.as_ref(),
-                    candidate_session.id(),
-                    &candidate_blob_sha256,
-                    &catalog_entry,
-                )?;
-                tx.commit()
-                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
-                Ok(WholeBlobSnapshotCasOutcome::Committed(authority))
-            })
-            .await
-            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
-        }
-
-        async fn write_prepared_whole_blob_provisional_tail(
-            &self,
-            runtime_id: &LogicalRuntimeId,
-            prepared: PreparedWholeBlobProvisionalTail,
-        ) -> Result<WholeBlobProvisionalTailAuthority, RuntimeStoreError> {
-            self.require_whole_blob_session_operation(
-                runtime_id,
-                "write_prepared_whole_blob_provisional_tail",
-            )?;
-            let (
-                authority,
-                candidate_artifact,
-                conversation_digest,
-                message_count,
-                catalog_entry,
-                compaction_projection_intents,
-            ) = prepared.into_parts();
-            let candidate_bytes = candidate_artifact.bytes_arc();
-            if &LogicalRuntimeId::for_session(authority.session_id()) != runtime_id
-                || catalog_entry.session_id() != authority.session_id()
-                || catalog_entry.persistence_profile()
-                    != RuntimeSessionPersistenceProfile::WholeBlobV1
-                || u64::try_from(catalog_entry.message_count()).ok() != Some(message_count)
-                || candidate_artifact.row_sha256_token() != authority.candidate_blob_sha256()
-            {
-                return Err(session_authority_conflict(
-                    runtime_id,
-                    "WholeBlob provisional artifact/catalog does not bind this runtime/session authority",
-                ));
-            }
-            let catalog_json = serde_json::to_vec(&catalog_entry)
-                .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
-            let compaction_intents_json = serde_json::to_vec(&compaction_projection_intents)
-                .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
-            let path = self.path.clone();
-            let runtime_id = runtime_id.clone();
-            tokio::task::spawn_blocking(move || {
-                let mut conn = open_runtime_connection(&path)?;
-                let tx = begin_runtime_transaction(&mut conn)?;
-                let current =
-                    load_whole_blob_store_authority(&tx, &runtime_id)?.ok_or_else(|| {
-                        session_authority_conflict(
-                            &runtime_id,
-                            "WholeBlob provisional candidate has no committed base",
-                        )
-                    })?;
-                if current.session_id() != authority.session_id()
-                    || current.store_revision() != authority.base_store_revision()
-                    || current.blob_sha256() != authority.base_blob_sha256()
-                {
-                    return Err(session_authority_conflict(
-                        &runtime_id,
-                        "WholeBlob provisional candidate base is stale",
-                    ));
-                }
-                let existing = load_whole_blob_provisional_metadata(&tx, &runtime_id)?;
-                if let Some(existing) = existing.as_ref() {
-                    if existing.authority == authority {
-                        if existing.conversation_digest != conversation_digest
-                            || existing.message_count != message_count
-                        {
-                            return Err(session_authority_conflict(
-                                &runtime_id,
-                                "WholeBlob provisional retry changes bounded candidate facts",
-                            ));
-                        }
-                        return Ok(authority);
-                    }
-                    let required_sequence = existing
-                        .authority
-                        .candidate_sequence()
-                        .checked_add(1)
-                        .ok_or_else(|| {
-                            RuntimeStoreError::WriteFailed(
-                                "WholeBlob provisional candidate sequence exhausted".to_string(),
-                            )
-                        })?;
-                    if existing.authority.session_id() != authority.session_id()
-                        || existing.authority.base_store_revision()
-                            != authority.base_store_revision()
-                        || existing.authority.base_blob_sha256()
-                            != authority.base_blob_sha256()
-                        || existing.authority.run_id() != authority.run_id()
-                        || authority.candidate_sequence() != required_sequence
-                    {
-                        return Err(session_authority_conflict(
-                            &runtime_id,
-                            "WholeBlob provisional replacement is stale or skips sequence",
-                        ));
-                    }
-                } else if authority.candidate_sequence() != 1 {
-                    return Err(session_authority_conflict(
-                        &runtime_id,
-                        "first WholeBlob provisional candidate sequence must be one",
-                    ));
-                }
-                let base_revision = i64::try_from(authority.base_store_revision()).map_err(|_| {
-                    RuntimeStoreError::WriteFailed(format!(
-                        "WholeBlob provisional base revision exceeds SQLite INTEGER for runtime {runtime_id}"
-                    ))
-                })?;
-                let message_count = i64::try_from(message_count).map_err(|_| {
-                    RuntimeStoreError::WriteFailed(format!(
-                        "WholeBlob provisional message count exceeds SQLite INTEGER for runtime {runtime_id}"
-                    ))
-                })?;
-                tx.execute(
-                    r"
-                    INSERT INTO runtime_whole_blob_bodies (blob_sha256, session_snapshot)
-                    VALUES (?1, ?2)
-                    ON CONFLICT(blob_sha256) DO NOTHING
-                    ",
-                    params![authority.candidate_blob_sha256(), candidate_bytes.as_ref()],
-                )
-                .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
-                if let Some(existing) = existing {
-                    let updated = tx
-                        .execute(
-                            r"
-                            UPDATE runtime_whole_blob_provisional_tails
-                            SET candidate_sequence = ?7,
-                                candidate_blob_sha256 = ?8,
-                                conversation_digest = ?9,
-                                message_count = ?10,
-                                catalog_json = ?11,
-                                compaction_intents_json = ?12
-                            WHERE runtime_id = ?1
-                              AND session_id = ?2
-                              AND base_store_revision = ?3
-                              AND base_blob_sha256 = ?4
-                              AND run_id = ?5
-                              AND candidate_sequence = ?6
-                            ",
-                            params![
-                                runtime_id_text(&runtime_id),
-                                authority.session_id().to_string(),
-                                base_revision,
-                                authority.base_blob_sha256(),
-                                authority.run_id().0.to_string(),
-                                i64::try_from(existing.authority.candidate_sequence()).map_err(
-                                    |_| RuntimeStoreError::WriteFailed(
-                                        "WholeBlob provisional sequence exceeds SQLite INTEGER"
-                                            .to_string(),
-                                    ),
-                                )?,
-                                i64::try_from(authority.candidate_sequence()).map_err(|_| {
-                                    RuntimeStoreError::WriteFailed(
-                                        "WholeBlob provisional sequence exceeds SQLite INTEGER"
-                                            .to_string(),
-                                    )
-                                })?,
-                                authority.candidate_blob_sha256(),
-                                conversation_digest,
-                                message_count,
-                                catalog_json,
-                                compaction_intents_json,
-                            ],
-                        )
-                        .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
-                    if updated != 1 {
-                        return Err(session_authority_conflict(
-                            &runtime_id,
-                            "WholeBlob provisional candidate changed during replacement",
-                        ));
-                    }
-                    if existing.authority.candidate_blob_sha256()
-                        != authority.candidate_blob_sha256()
-                    {
-                        tx.execute(
-                            r"
-                            DELETE FROM runtime_whole_blob_bodies
-                            WHERE blob_sha256 = ?1
-                              AND NOT EXISTS (
-                                  SELECT 1 FROM runtime_whole_blob_authority
-                                  WHERE blob_sha256 = ?1
-                              )
-                              AND NOT EXISTS (
-                                  SELECT 1 FROM runtime_whole_blob_provisional_tails
-                                  WHERE candidate_blob_sha256 = ?1
-                              )
-                            ",
-                            params![existing.authority.candidate_blob_sha256()],
-                        )
-                        .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
-                    }
-                } else {
-                    tx.execute(
-                        r"
-                        INSERT INTO runtime_whole_blob_provisional_tails
-                            (runtime_id, authority_version, session_id, base_store_revision,
-                             base_blob_sha256, run_id, candidate_sequence,
-                             candidate_blob_sha256, conversation_digest, message_count,
-                             catalog_json, compaction_intents_json)
-                        VALUES (?1, 1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-                        ",
-                        params![
-                            runtime_id_text(&runtime_id),
-                            authority.session_id().to_string(),
-                            base_revision,
-                            authority.base_blob_sha256(),
-                            authority.run_id().0.to_string(),
-                            i64::try_from(authority.candidate_sequence()).map_err(|_| {
-                                RuntimeStoreError::WriteFailed(
-                                    "WholeBlob provisional sequence exceeds SQLite INTEGER"
-                                        .to_string(),
-                                )
-                            })?,
-                            authority.candidate_blob_sha256(),
-                            conversation_digest,
-                            message_count,
-                            catalog_json,
-                            compaction_intents_json,
-                        ],
-                    )
-                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
-                }
-                tx.commit()
-                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
-                Ok(authority)
-            })
-            .await
-            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
-        }
-
-        async fn load_whole_blob_provisional_tail(
-            &self,
-            runtime_id: &LogicalRuntimeId,
-        ) -> Result<Option<CommittedWholeBlobProvisionalTail>, RuntimeStoreError> {
-            self.require_whole_blob_session_operation(
-                runtime_id,
-                "load_whole_blob_provisional_tail",
-            )?;
-            let path = self.path.clone();
-            let runtime_id = runtime_id.clone();
-            tokio::task::spawn_blocking(move || {
-                let mut conn = open_runtime_connection(&path)?;
-                let tx = conn
-                    .transaction()
-                    .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
-                let observed = load_whole_blob_provisional_tail(&tx, &runtime_id)?;
-                tx.commit()
-                    .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
-                Ok(observed)
-            })
-            .await
-            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
-        }
-
-        async fn discard_whole_blob_provisional_tail(
-            &self,
-            runtime_id: &LogicalRuntimeId,
-            expected: &WholeBlobProvisionalTailAuthority,
-        ) -> Result<bool, RuntimeStoreError> {
-            self.require_whole_blob_session_operation(
-                runtime_id,
-                "discard_whole_blob_provisional_tail",
-            )?;
-            let path = self.path.clone();
-            let runtime_id = runtime_id.clone();
-            let expected = expected.clone();
-            tokio::task::spawn_blocking(move || {
-                let mut conn = open_runtime_connection(&path)?;
-                let tx = begin_runtime_transaction(&mut conn)?;
-                let deleted = tx
-                    .execute(
-                        r"
-                        DELETE FROM runtime_whole_blob_provisional_tails
-                        WHERE runtime_id = ?1
-                          AND session_id = ?2
-                          AND base_store_revision = ?3
-                          AND base_blob_sha256 = ?4
-                          AND run_id = ?5
-                          AND candidate_blob_sha256 = ?6
-                          AND candidate_sequence = ?7
-                        ",
-                        params![
-                            runtime_id_text(&runtime_id),
-                            expected.session_id().to_string(),
-                            i64::try_from(expected.base_store_revision()).map_err(|_| {
-                                RuntimeStoreError::WriteFailed(
-                                    "WholeBlob provisional base revision exceeds SQLite INTEGER"
-                                        .to_string(),
-                                )
-                            })?,
-                            expected.base_blob_sha256(),
-                            expected.run_id().0.to_string(),
-                            expected.candidate_blob_sha256(),
-                            i64::try_from(expected.candidate_sequence()).map_err(|_| {
-                                RuntimeStoreError::WriteFailed(
-                                    "WholeBlob provisional sequence exceeds SQLite INTEGER"
-                                        .to_string(),
-                                )
-                            })?,
-                        ],
-                    )
-                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
-                if deleted == 1 {
-                    tx.execute(
-                        r"
-                        DELETE FROM runtime_whole_blob_bodies
-                        WHERE blob_sha256 = ?1
-                          AND NOT EXISTS (
-                              SELECT 1 FROM runtime_whole_blob_authority
-                              WHERE blob_sha256 = ?1
-                          )
-                          AND NOT EXISTS (
-                              SELECT 1 FROM runtime_whole_blob_provisional_tails
-                              WHERE candidate_blob_sha256 = ?1
-                          )
-                        ",
-                        params![expected.candidate_blob_sha256()],
-                    )
-                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
-                }
-                tx.commit()
-                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
-                Ok(deleted == 1)
-            })
-            .await
-            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
-        }
-
-        async fn write_prepared_head_canonical_provisional_tail(
-            &self,
-            runtime_id: &LogicalRuntimeId,
-            prepared: PreparedHeadCanonicalProvisionalTail,
-        ) -> Result<HeadCanonicalProvisionalTailAuthority, RuntimeStoreError> {
-            self.require_head_canonical_session_operation(
-                runtime_id,
-                "write_prepared_head_canonical_provisional_tail",
-            )?;
-            if &LogicalRuntimeId::for_session(prepared.committed().session_id()) != runtime_id
-                || &prepared.successor_head().id != prepared.committed().session_id()
-            {
-                return Err(session_authority_conflict(
-                    runtime_id,
-                    "HeadCanonical provisional intent does not bind this runtime/session",
-                ));
-            }
-            let derived_successor_token = meerkat_core::session_head_cas_token(
-                prepared.successor_head(),
-            )
-            .map_err(|error| {
-                session_authority_conflict(
-                    runtime_id,
-                    format!("HeadCanonical provisional successor is invalid: {error}"),
-                )
-            })?;
-            if derived_successor_token.as_str() != prepared.successor_head_token() {
-                return Err(session_authority_conflict(
-                    runtime_id,
-                    "HeadCanonical provisional successor token differs from its exact head",
-                ));
-            }
-            let path = self.path.clone();
-            let runtime_id = runtime_id.clone();
-            tokio::task::spawn_blocking(move || {
-                let mut conn = open_head_canonical_runtime_connection(&path)?;
-                let tx = begin_runtime_transaction(&mut conn)?;
-                let authority = issue_head_canonical_provisional_tail_authority_in_txn(
-                    &tx,
-                    &runtime_id,
-                    prepared.committed(),
-                    prepared.run_id(),
-                    prepared.successor_head(),
-                    prepared.successor_head_token(),
-                    prepared.candidate_message_count(),
-                    prepared.candidate_conversation_digest(),
-                    prepared.catalog_entry(),
-                    prepared.compaction_projection_intents(),
-                )?;
-                tx.commit()
-                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
-                Ok(authority)
-            })
-            .await
-            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
-        }
-
-        async fn load_head_canonical_provisional_tail(
-            &self,
-            runtime_id: &LogicalRuntimeId,
-        ) -> Result<Option<HeadCanonicalProvisionalTailAuthority>, RuntimeStoreError> {
-            self.require_head_canonical_session_operation(
-                runtime_id,
-                "load_head_canonical_provisional_tail",
-            )?;
-            let path = self.path.clone();
-            let runtime_id = runtime_id.clone();
-            tokio::task::spawn_blocking(move || {
-                let conn = open_head_canonical_runtime_connection(&path)?;
-                load_head_canonical_provisional_tail_authority(&conn, &runtime_id)
-            })
-            .await
-            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
-        }
-
-        async fn discard_head_canonical_provisional_tail(
-            &self,
-            runtime_id: &LogicalRuntimeId,
-            expected: &HeadCanonicalProvisionalTailAuthority,
-        ) -> Result<bool, RuntimeStoreError> {
-            self.require_head_canonical_session_operation(
-                runtime_id,
-                "discard_head_canonical_provisional_tail",
-            )?;
-            let path = self.path.clone();
-            let runtime_id = runtime_id.clone();
-            let expected = expected.clone();
-            tokio::task::spawn_blocking(move || {
-                let mut conn = open_head_canonical_runtime_connection(&path)?;
-                let tx = begin_runtime_transaction(&mut conn)?;
-                let discarded = discard_head_canonical_provisional_tail_authority_in_txn(
-                    &tx,
-                    &runtime_id,
-                    &expected,
-                )?;
-                tx.commit()
-                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
-                Ok(discarded)
-            })
-            .await
-            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
-        }
-
         async fn clear_session_snapshot(
             &self,
             runtime_id: &LogicalRuntimeId,
@@ -15104,6 +15111,11 @@ ORDER BY runtime_id";
                 .validated_transcript_history_state()
                 .unwrap()
                 .expect("fixture rewrite graph exists");
+            assert_eq!(
+                history.digest_format(),
+                3,
+                "fixture source must exercise the current transcript format"
+            );
             assert_eq!(history.commit_count(), 1, "fixture has one rewrite");
             let commit = history.last_commit().expect("fixture rewrite commit");
             let (start, end) = commit.selection.bounds();
@@ -15123,7 +15135,7 @@ ORDER BY runtime_id";
                     history.materialize_revision(&commit.parent_revision).unwrap(),
                     history.materialize_revision(&commit.revision).unwrap(),
                 ],
-                "digest_format": history.digest_format(),
+                "digest_format": 2,
             });
             let mut encoded = serde_json::to_value(session).unwrap();
             encoded["version"] = serde_json::json!(2);

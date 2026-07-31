@@ -506,6 +506,8 @@ impl TranscriptRewriteAuditExpectation<'_> {
 struct RawStoredEventWire {
     seq: u64,
     schema_version: u32,
+    #[serde(default = "stored_event_legacy_source")]
+    source: EventSourceIdentity,
     event: Box<serde_json::value::RawValue>,
 }
 
@@ -522,6 +524,67 @@ struct IndexedStoredEventWire {
     #[serde(default = "stored_event_legacy_source")]
     source: EventSourceIdentity,
     event: Box<serde_json::value::RawValue>,
+}
+
+/// Exact released-0.8.10 full-body rewrite row.
+///
+/// This decoder is deliberately separate from `AgentEvent`: the current
+/// `TranscriptRewriteRecord` decoder can heal digest generations whose labels
+/// remain reproducible from typed messages, but 0.8.10 could hash `RawValue`
+/// object spelling before internally-tagged message buffering erased it.
+/// Only the one-time generation-zero reconciliation may admit this shape.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Released0810TranscriptRewriteEventWire {
+    #[serde(rename = "type")]
+    event_type: String,
+    session_id: SessionId,
+    record: Released0810TranscriptRewriteRecordWire,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Released0810TranscriptRewriteRecordWire {
+    commit: Released0810TranscriptRewriteCommitWire,
+    parent_body: Released0810TranscriptRevisionBodyWire,
+    revision_body: Released0810TranscriptRevisionBodyWire,
+    digest_format: u32,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Released0810TranscriptRewriteCommitWire {
+    parent_revision: String,
+    revision: String,
+    selection: meerkat_core::TranscriptRewriteSelection,
+    original_span_digest: String,
+    replacement_digest: String,
+    messages_before: usize,
+    messages_after: usize,
+    reason: meerkat_core::TranscriptRewriteReason,
+    #[serde(default)]
+    actor: Option<String>,
+    committed_at: SystemTime,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Released0810TranscriptRevisionBodyWire {
+    revision: String,
+    #[serde(default)]
+    parent_revision: Option<String>,
+    messages: Vec<meerkat_core::Message>,
+    created_at: SystemTime,
+}
+
+#[derive(Deserialize)]
+struct TranscriptRewriteDigestFormatProbe {
+    record: TranscriptRewriteRecordDigestFormatProbe,
+}
+
+#[derive(Deserialize)]
+struct TranscriptRewriteRecordDigestFormatProbe {
+    digest_format: u32,
 }
 
 /// Placeholder source used only to let a pre-bump row deserialize so the typed
@@ -1455,6 +1518,78 @@ struct PendingTranscriptRewriteHead {
     body: DurableEventLogHeadBody,
 }
 
+/// Decode one exact physical released row, then delegate its semantic remap to
+/// the singular core importer algorithm.
+#[cfg(not(target_arch = "wasm32"))]
+fn remap_released_0810_rewrite_row(
+    session_id: &SessionId,
+    expected_generation: u64,
+    payload: &serde_json::value::RawValue,
+) -> Result<meerkat_core::session::ProvenReleased0810RewriteRemap, EventStoreError> {
+    let wire: Released0810TranscriptRewriteEventWire = serde_json::from_str(payload.get())
+        .map_err(|error| EventStoreError::Serialization(error.to_string()))?;
+    if wire.event_type != "transcript_rewrite_committed" {
+        return Err(EventStoreError::Store(
+            "generation-zero compatibility row changed event variant".to_string(),
+        ));
+    }
+    if wire.session_id != *session_id {
+        return Err(EventStoreError::Store(format!(
+            "transcript rewrite event for session {} is stored in session {session_id}'s log",
+            wire.session_id
+        )));
+    }
+    if wire.record.digest_format != 2 {
+        return Err(EventStoreError::Store(format!(
+            "generation-zero compatibility row carries unsupported digest format {}",
+            wire.record.digest_format
+        )));
+    }
+
+    let Released0810TranscriptRewriteRecordWire {
+        commit,
+        parent_body,
+        revision_body,
+        ..
+    } = wire.record;
+    let released_commit = TranscriptRewriteCommit {
+        rewrite_generation: 0,
+        parent_revision: commit.parent_revision,
+        revision: commit.revision,
+        selection: commit.selection,
+        original_span_digest: commit.original_span_digest,
+        replacement_digest: commit.replacement_digest,
+        messages_before: commit.messages_before,
+        messages_after: commit.messages_after,
+        reason: commit.reason,
+        actor: commit.actor,
+        committed_at: commit.committed_at,
+    };
+    let released_parent = meerkat_core::TranscriptRevisionBody {
+        revision: parent_body.revision,
+        parent_revision: parent_body.parent_revision,
+        messages: parent_body.messages,
+        created_at: parent_body.created_at,
+    };
+    let released_revision = meerkat_core::TranscriptRevisionBody {
+        revision: revision_body.revision,
+        parent_revision: revision_body.parent_revision,
+        messages: revision_body.messages,
+        created_at: revision_body.created_at,
+    };
+    meerkat_core::session::remap_proven_released_0810_rewrite_record(
+        released_commit,
+        released_parent,
+        released_revision,
+        expected_generation,
+    )
+    .map_err(|error| {
+        EventStoreError::Store(format!(
+            "released 0.8.10 rewrite row failed current structural replay: {error}"
+        ))
+    })
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 impl EventLogIndex {
     fn note_exact_interaction_occupant(
@@ -1795,7 +1930,7 @@ impl EventLogIndex {
         // validate from these same payload bytes. The resulting head remains a
         // private candidate until that validation and replay succeed.
         let mut physical_legacy_counts = HashMap::<Vec<u8>, u64>::new();
-        let mut healed_legacy_count = 0_usize;
+        let mut normalized_legacy_count = 0_usize;
         for row in rewrite_rows {
             let Some((_, indexed_commits)) =
                 meerkat_core::event::transcript_rewrite_commits_from_payload(&row.event)
@@ -1820,30 +1955,30 @@ impl EventLogIndex {
             if indexed_commit.rewrite_generation != 0 {
                 continue;
             }
-            let event: AgentEvent = serde_json::from_str(row.event.get())
-                .map_err(|error| EventStoreError::Serialization(error.to_string()))?;
-            let AgentEvent::TranscriptRewriteCommitted {
-                session_id: event_session_id,
-                record,
-            } = event
-            else {
-                return Err(EventStoreError::Store(
-                    "full rewrite reconciliation contains a non-rewrite payload".to_string(),
-                ));
-            };
-            if event_session_id != *session_id {
+            let format =
+                serde_json::from_str::<TranscriptRewriteDigestFormatProbe>(row.event.get())
+                    .map_err(|error| EventStoreError::Serialization(error.to_string()))?
+                    .record
+                    .digest_format;
+            if format != 2 {
                 return Err(EventStoreError::Store(format!(
-                    "transcript rewrite event for session {event_session_id} is stored in session {session_id}'s log"
+                    "generation-zero compatibility row carries unsupported digest format {format}"
                 )));
             }
-            if record.commit.rewrite_generation != 0 {
-                return Err(EventStoreError::Store(
-                    "generation-zero rewrite changed occurrence identity during compatibility decode"
-                        .to_string(),
-                ));
-            }
-            healed_legacy_count = healed_legacy_count.saturating_add(1);
-            let identity = serde_json::to_vec(&record.commit)
+            let outcome = remap_released_0810_rewrite_row(session_id, 1, &row.event)?;
+            normalized_legacy_count = normalized_legacy_count.saturating_add(1);
+            let meerkat_core::session::ProvenReleased0810RewriteRemap::Retained(record) = outcome
+            else {
+                // Core has structurally proved that this exact physical
+                // occurrence differs only by RawValue spelling erased by the
+                // current canonical identity. It contributes no current
+                // semantic occurrence, but still counts as one retained
+                // generation-zero physical row above.
+                continue;
+            };
+            let mut normalized = record.commit;
+            normalized.rewrite_generation = 0;
+            let identity = serde_json::to_vec(&normalized)
                 .map_err(|error| EventStoreError::Serialization(error.to_string()))?;
             if !allowed_legacy_counts.contains_key(&identity) {
                 // A generation-zero fact foreign to the sealed graph cannot
@@ -1852,7 +1987,7 @@ impl EventLogIndex {
             }
             *physical_legacy_counts.entry(identity).or_default() += 1;
         }
-        if healed_legacy_count != self.legacy_transcript_rewrite_commits.len() {
+        if normalized_legacy_count != self.legacy_transcript_rewrite_commits.len() {
             return Err(EventStoreError::Store(
                 "full rewrite reconciliation did not retain every indexed generation-zero row"
                     .to_string(),
@@ -2555,6 +2690,14 @@ impl FileEventStore {
     /// Applies the same schema-version gate on the same field; only the
     /// payload is left as stored bytes.
     fn decode_raw_event_line(&self, line: &str) -> Result<RawStoredEvent, EventStoreError> {
+        self.decode_raw_event_line_with_source(line)
+            .map(|(row, _source)| row)
+    }
+
+    fn decode_raw_event_line_with_source(
+        &self,
+        line: &str,
+    ) -> Result<(RawStoredEvent, EventSourceIdentity), EventStoreError> {
         #[cfg(test)]
         self.decoded_rows.fetch_add(1, Ordering::Relaxed);
         let wire: RawStoredEventWire = serde_json::from_str(line)
@@ -2565,10 +2708,13 @@ impl FileEventStore {
                 found: wire.schema_version,
             });
         }
-        Ok(RawStoredEvent {
-            seq: wire.seq,
-            event: wire.event,
-        })
+        Ok((
+            RawStoredEvent {
+                seq: wire.seq,
+                event: wire.event,
+            },
+            wire.source,
+        ))
     }
 
     /// Decode only the row metadata retained by the sparse index.
@@ -2924,7 +3070,7 @@ impl FileEventStore {
                         path.display()
                     ))
                 })?;
-                let row = self.decode_raw_event_line(&line)?;
+                let (row, source) = self.decode_raw_event_line_with_source(&line)?;
                 if row.seq <= observed_seq {
                     return Err(EventStoreError::Store(format!(
                         "event log '{}' sequence {} is not strictly greater than {}",
@@ -2943,6 +3089,12 @@ impl FileEventStore {
                 else {
                     continue;
                 };
+                if source != EventSourceIdentity::session(session_id.clone()) {
+                    return Err(EventStoreError::Store(format!(
+                        "transcript rewrite row {} has non-session source {source:?}",
+                        raw_rewrite.seq
+                    )));
+                }
                 index.note_transcript_rewrite_payload(
                     session_id,
                     raw_rewrite.seq,
@@ -5440,20 +5592,107 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn legacy_generation_zero_receipt_uses_the_same_body_authorized_heal_as_replay()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        let root = temp.path().join("events");
-        let store = FileEventStore::new(&root);
-        let session_id = SessionId::new();
-        let parent_messages = vec![
-            meerkat_core::Message::User(meerkat_core::types::UserMessage::text("old one")),
-            meerkat_core::Message::User(meerkat_core::types::UserMessage::text("old two")),
+    fn released_0810_tool_exchange(
+        id: &str,
+        args: &str,
+        result: &str,
+    ) -> Result<Vec<meerkat_core::Message>, serde_json::Error> {
+        use meerkat_core::types::{
+            AssistantBlock, BlockAssistantMessage, ContentBlock, StopReason, ToolResult,
+        };
+        Ok(vec![
+            meerkat_core::Message::BlockAssistant(BlockAssistantMessage::new(
+                vec![AssistantBlock::ToolUse {
+                    id: id.to_string(),
+                    name: "opaque".to_string(),
+                    args: serde_json::value::RawValue::from_string(args.to_string())?,
+                    meta: None,
+                }],
+                StopReason::ToolUse,
+            )),
+            meerkat_core::Message::tool_results(vec![ToolResult::with_blocks(
+                id.to_string(),
+                vec![ContentBlock::Structured {
+                    data: serde_json::value::RawValue::from_string(result.to_string())?,
+                }],
+                false,
+            )]),
+        ])
+    }
+
+    fn released_0810_messages_digest(
+        messages: &[meerkat_core::Message],
+        raw_replacements: &[(&str, &str)],
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let epoch: meerkat_core::types::MessageTimestamp =
+            serde_json::from_str("\"1970-01-01T00:00:00Z\"")?;
+        let mut released = messages.to_vec();
+        for message in &mut released {
+            match message {
+                meerkat_core::Message::User(user) => {
+                    user.identity = Default::default();
+                    user.created_at = epoch;
+                }
+                meerkat_core::Message::BlockAssistant(assistant) => {
+                    assistant.identity = Default::default();
+                    assistant.created_at = epoch;
+                }
+                meerkat_core::Message::ToolResults { created_at, .. } => {
+                    *created_at = epoch;
+                }
+                _ => {
+                    return Err(
+                        "released raw-JSON fixture contains an unexpected message kind".into(),
+                    );
+                }
+            }
+        }
+        let mut bytes = serde_json::to_string(&released)?;
+        for (canonical, physical) in raw_replacements {
+            if !bytes.contains(canonical) {
+                return Err(format!(
+                    "released digest fixture lost canonical JSON fragment {canonical}"
+                )
+                .into());
+            }
+            bytes = bytes.replace(canonical, physical);
+        }
+        Ok(format!("sha256:{:x}", Sha256::digest(bytes.as_bytes())))
+    }
+
+    fn released_0810_raw_json_row(
+        session_id: &SessionId,
+        malformed_lineage: bool,
+    ) -> Result<(String, TranscriptRewriteCommit), Box<dyn std::error::Error>> {
+        use meerkat_core::types::UserMessage;
+
+        let old_tool_args = r#"{"z":1,"a":{"y":2,"x":3}}"#;
+        let old_tool_result = r#"{"tail":4,"body":{"q":6,"p":5}}"#;
+        let new_tool_args = r#"{"omega":7,"alpha":{"d":9,"c":8}}"#;
+        let new_tool_result = r#"{"right":10,"left":{"n":12,"m":11}}"#;
+        let old_raw_replacements = [
+            (r#"{"a":{"x":3,"y":2},"z":1}"#, old_tool_args),
+            (r#"{"body":{"p":5,"q":6},"tail":4}"#, old_tool_result),
         ];
-        let revision_messages = vec![meerkat_core::Message::User(
-            meerkat_core::types::UserMessage::compaction_summary("summary"),
-        )];
+        let new_raw_replacements = [
+            (r#"{"alpha":{"c":8,"d":9},"omega":7}"#, new_tool_args),
+            (r#"{"left":{"m":11,"n":12},"right":10}"#, new_tool_result),
+        ];
+        let mut parent_messages = vec![meerkat_core::Message::User(UserMessage::text("before"))];
+        parent_messages.extend(released_0810_tool_exchange(
+            "tool-old",
+            old_tool_args,
+            old_tool_result,
+        )?);
+        parent_messages.push(meerkat_core::Message::User(UserMessage::text("after")));
+        let mut revision_messages = vec![meerkat_core::Message::User(UserMessage::text("before"))];
+        revision_messages.extend(released_0810_tool_exchange(
+            "tool-new",
+            new_tool_args,
+            new_tool_result,
+        )?);
+        revision_messages.push(meerkat_core::Message::User(UserMessage::text("after")));
+
         let parent_body = meerkat_core::TranscriptRevisionBody {
             revision: meerkat_core::transcript_messages_digest(&parent_messages)?,
             parent_revision: None,
@@ -5466,63 +5705,373 @@ mod tests {
             messages: revision_messages,
             created_at: SystemTime::UNIX_EPOCH,
         };
-        let commit = TranscriptRewriteCommit {
+        let expected = TranscriptRewriteCommit {
             rewrite_generation: 1,
             parent_revision: parent_body.revision.clone(),
             revision: revision_body.revision.clone(),
-            selection: meerkat_core::TranscriptRewriteSelection::MessageRange {
-                start: 0,
-                end: parent_body.messages.len(),
-            },
-            original_span_digest: meerkat_core::transcript_messages_digest(&parent_body.messages)?,
-            replacement_digest: meerkat_core::transcript_messages_digest(&revision_body.messages)?,
+            selection: meerkat_core::TranscriptRewriteSelection::MessageRange { start: 1, end: 3 },
+            original_span_digest: meerkat_core::transcript_messages_digest(
+                &parent_body.messages[1..3],
+            )?,
+            replacement_digest: meerkat_core::transcript_messages_digest(
+                &revision_body.messages[1..3],
+            )?,
             messages_before: parent_body.messages.len(),
             messages_after: revision_body.messages.len(),
-            reason: meerkat_core::TranscriptRewriteReason::new("legacy-compaction"),
-            actor: None,
+            reason: meerkat_core::TranscriptRewriteReason::new("released-0810-raw-json"),
+            actor: Some("released-0810".to_string()),
             committed_at: SystemTime::UNIX_EPOCH,
         };
-        let mut legacy_record =
-            meerkat_core::TranscriptRewriteRecord::new(commit, parent_body, revision_body)?;
-        legacy_record.commit.rewrite_generation = 0;
-        legacy_record.digest_format = 0;
-        let legacy_event = transcript_rewrite_event(&session_id, legacy_record);
-
-        // Full payload decode owns compatibility healing because the retained
-        // bodies are the authority for classifying a legacy compaction.
-        let encoded = serde_json::to_string(&legacy_event)?;
-        let AgentEvent::TranscriptRewriteCommitted {
-            record: healed_record,
-            ..
-        } = serde_json::from_str::<AgentEvent>(&encoded)?
-        else {
-            return Err(std::io::Error::other("legacy event changed variant").into());
+        let released_parent =
+            released_0810_messages_digest(&parent_body.messages, &old_raw_replacements)?;
+        let released_revision =
+            released_0810_messages_digest(&revision_body.messages, &new_raw_replacements)?;
+        let released_original_span =
+            released_0810_messages_digest(&parent_body.messages[1..3], &old_raw_replacements)?;
+        let released_replacement_span =
+            released_0810_messages_digest(&revision_body.messages[1..3], &new_raw_replacements)?;
+        assert_ne!(released_parent, expected.parent_revision);
+        assert_ne!(released_revision, expected.revision);
+        assert_ne!(released_original_span, expected.original_span_digest);
+        assert_ne!(released_replacement_span, expected.replacement_digest);
+        let record = meerkat_core::TranscriptRewriteRecord::new(
+            expected.clone(),
+            parent_body,
+            revision_body,
+        )?;
+        let event = transcript_rewrite_event(session_id, record);
+        let stored = StoredEvent {
+            seq: 1,
+            schema_version: EVENT_SCHEMA_VERSION,
+            timestamp: SystemTime::UNIX_EPOCH,
+            source: EventSourceIdentity::session(session_id.clone()),
+            mob_id: None,
+            stream_seq: 1,
+            event,
         };
-        assert!(matches!(
-            healed_record.commit.selection,
-            meerkat_core::TranscriptRewriteSelection::CompactionMessageRange { .. }
-        ));
-        let mut expected_commit = healed_record.commit;
-        expected_commit.rewrite_generation = 1;
-        let expected_commits = vec![expected_commit.clone()];
+        let mut row = serde_json::to_value(stored)?;
+        let record = row
+            .get_mut("event")
+            .and_then(|event| event.get_mut("record"))
+            .and_then(serde_json::Value::as_object_mut)
+            .ok_or("serialized rewrite row lost its record")?;
+        let commit = record
+            .get_mut("commit")
+            .and_then(serde_json::Value::as_object_mut)
+            .ok_or("serialized rewrite row lost its commit")?;
+        commit.remove("rewrite_generation");
+        commit.insert(
+            "parent_revision".to_string(),
+            serde_json::Value::String(released_parent.clone()),
+        );
+        commit.insert(
+            "revision".to_string(),
+            serde_json::Value::String(released_revision.clone()),
+        );
+        commit.insert(
+            "original_span_digest".to_string(),
+            serde_json::Value::String(released_original_span),
+        );
+        commit.insert(
+            "replacement_digest".to_string(),
+            serde_json::Value::String(released_replacement_span),
+        );
+        let parent = record
+            .get_mut("parent_body")
+            .and_then(serde_json::Value::as_object_mut)
+            .ok_or("serialized rewrite row lost its parent body")?;
+        parent.insert(
+            "revision".to_string(),
+            serde_json::Value::String(released_parent.clone()),
+        );
+        let revision = record
+            .get_mut("revision_body")
+            .and_then(serde_json::Value::as_object_mut)
+            .ok_or("serialized rewrite row lost its revision body")?;
+        revision.insert(
+            "revision".to_string(),
+            serde_json::Value::String(released_revision.clone()),
+        );
+        revision.insert(
+            "parent_revision".to_string(),
+            serde_json::Value::String(if malformed_lineage {
+                released_revision
+            } else {
+                released_parent
+            }),
+        );
+        record.insert("digest_format".to_string(), serde_json::json!(2));
+
+        let mut encoded = serde_json::to_string(&row)?;
+        for (canonical, released) in old_raw_replacements.into_iter().chain(new_raw_replacements) {
+            if !encoded.contains(canonical) {
+                return Err(format!("fixture lost canonical JSON fragment {canonical}").into());
+            }
+            encoded = encoded.replace(canonical, released);
+        }
+        for released in [
+            old_tool_args,
+            old_tool_result,
+            new_tool_args,
+            new_tool_result,
+        ] {
+            if !encoded.contains(released) {
+                return Err(format!("fixture lost released JSON spelling {released}").into());
+            }
+        }
+        Ok((encoded, expected))
+    }
+
+    fn released_0810_collapse_then_retained_rows(
+        session_id: &SessionId,
+    ) -> Result<(Vec<String>, TranscriptRewriteCommit), Box<dyn std::error::Error>> {
+        use meerkat_core::types::UserMessage;
+
+        let canonical_args = r#"{"a":{"x":3,"y":2},"z":1}"#;
+        let canonical_result = r#"{"body":{"p":5,"q":6},"tail":4}"#;
+        let parent_args = r#"{"z":1,"a":{"y":2,"x":3}}"#;
+        let parent_result = r#"{"tail":4,"body":{"q":6,"p":5}}"#;
+        let collapsed_args = r#"{"a":{"y":2,"x":3},"z":1}"#;
+        let collapsed_result = r#"{"body":{"q":6,"p":5},"tail":4}"#;
+        let retained_args = r#"{"z":9,"a":{"y":8,"x":7}}"#;
+        let retained_result = r#"{"tail":10,"body":{"q":12,"p":11}}"#;
+        let parent_replacements = [
+            (canonical_args, parent_args),
+            (canonical_result, parent_result),
+        ];
+        let collapsed_replacements = [
+            (canonical_args, collapsed_args),
+            (canonical_result, collapsed_result),
+        ];
+        let retained_canonical_args = r#"{"a":{"x":7,"y":8},"z":9}"#;
+        let retained_canonical_result = r#"{"body":{"p":11,"q":12},"tail":10}"#;
+        let retained_replacements = [
+            (retained_canonical_args, retained_args),
+            (retained_canonical_result, retained_result),
+        ];
+
+        let mut parent_messages = vec![meerkat_core::Message::User(UserMessage::text("before"))];
+        parent_messages.extend(released_0810_tool_exchange(
+            "tool-same",
+            parent_args,
+            parent_result,
+        )?);
+        parent_messages.push(meerkat_core::Message::User(UserMessage::text("after")));
+        let mut collapsed_messages = vec![meerkat_core::Message::User(UserMessage::text("before"))];
+        collapsed_messages.extend(released_0810_tool_exchange(
+            "tool-same",
+            collapsed_args,
+            collapsed_result,
+        )?);
+        collapsed_messages.push(meerkat_core::Message::User(UserMessage::text("after")));
+        assert_eq!(
+            meerkat_core::transcript_messages_digest(&parent_messages)?,
+            meerkat_core::transcript_messages_digest(&collapsed_messages)?,
+            "the first released occurrence must collapse only under current JSON identity"
+        );
+        let mut retained_messages = vec![meerkat_core::Message::User(UserMessage::text("before"))];
+        retained_messages.extend(released_0810_tool_exchange(
+            "tool-next",
+            retained_args,
+            retained_result,
+        )?);
+        retained_messages.push(meerkat_core::Message::User(UserMessage::text("after")));
+
+        let released_parent =
+            released_0810_messages_digest(&parent_messages, &parent_replacements)?;
+        let released_collapsed =
+            released_0810_messages_digest(&collapsed_messages, &collapsed_replacements)?;
+        let released_retained =
+            released_0810_messages_digest(&retained_messages, &retained_replacements)?;
+        let released_parent_span =
+            released_0810_messages_digest(&parent_messages[1..3], &parent_replacements)?;
+        let released_collapsed_span =
+            released_0810_messages_digest(&collapsed_messages[1..3], &collapsed_replacements)?;
+        let released_retained_span =
+            released_0810_messages_digest(&retained_messages[1..3], &retained_replacements)?;
+        assert_ne!(released_parent, released_collapsed);
+
+        let expected = TranscriptRewriteCommit {
+            rewrite_generation: 1,
+            parent_revision: meerkat_core::transcript_messages_digest(&collapsed_messages)?,
+            revision: meerkat_core::transcript_messages_digest(&retained_messages)?,
+            selection: meerkat_core::TranscriptRewriteSelection::MessageRange { start: 1, end: 3 },
+            original_span_digest: meerkat_core::transcript_messages_digest(
+                &collapsed_messages[1..3],
+            )?,
+            replacement_digest: meerkat_core::transcript_messages_digest(&retained_messages[1..3])?,
+            messages_before: collapsed_messages.len(),
+            messages_after: retained_messages.len(),
+            reason: meerkat_core::TranscriptRewriteReason::new("retained-after-collapse"),
+            actor: Some("released-0810".to_string()),
+            committed_at: SystemTime::UNIX_EPOCH,
+        };
+
+        let collapse_commit = TranscriptRewriteCommit {
+            rewrite_generation: 0,
+            parent_revision: released_parent.clone(),
+            revision: released_collapsed.clone(),
+            selection: meerkat_core::TranscriptRewriteSelection::MessageRange { start: 1, end: 3 },
+            original_span_digest: released_parent_span,
+            replacement_digest: released_collapsed_span,
+            messages_before: parent_messages.len(),
+            messages_after: collapsed_messages.len(),
+            reason: meerkat_core::TranscriptRewriteReason::new("raw-spelling-only"),
+            actor: Some("released-0810".to_string()),
+            committed_at: SystemTime::UNIX_EPOCH,
+        };
+        let retained_commit = TranscriptRewriteCommit {
+            rewrite_generation: 0,
+            parent_revision: released_collapsed,
+            revision: released_retained,
+            selection: expected.selection.clone(),
+            original_span_digest: released_0810_messages_digest(
+                &collapsed_messages[1..3],
+                &collapsed_replacements,
+            )?,
+            replacement_digest: released_retained_span,
+            messages_before: expected.messages_before,
+            messages_after: expected.messages_after,
+            reason: expected.reason.clone(),
+            actor: expected.actor.clone(),
+            committed_at: expected.committed_at,
+        };
+
+        #[allow(clippy::too_many_arguments)]
+        fn row(
+            session_id: &SessionId,
+            seq: u64,
+            commit: TranscriptRewriteCommit,
+            parent_revision: Option<String>,
+            parent_messages: Vec<meerkat_core::Message>,
+            revision_messages: Vec<meerkat_core::Message>,
+            parent_replacements: &[(&str, &str)],
+            revision_replacements: &[(&str, &str)],
+        ) -> Result<String, Box<dyn std::error::Error>> {
+            let revision = commit.revision.clone();
+            let parent = commit.parent_revision.clone();
+            let event = serde_json::json!({
+                "type": "transcript_rewrite_committed",
+                "session_id": session_id,
+                "record": {
+                    "commit": commit,
+                    "parent_body": meerkat_core::TranscriptRevisionBody {
+                        revision: parent.clone(),
+                        parent_revision,
+                        messages: parent_messages,
+                        created_at: SystemTime::UNIX_EPOCH,
+                    },
+                    "revision_body": meerkat_core::TranscriptRevisionBody {
+                        revision,
+                        parent_revision: Some(parent),
+                        messages: revision_messages,
+                        created_at: SystemTime::UNIX_EPOCH,
+                    },
+                    "digest_format": 2,
+                },
+            });
+            let stored = serde_json::json!({
+                "seq": seq,
+                "schema_version": EVENT_SCHEMA_VERSION,
+                "timestamp": SystemTime::UNIX_EPOCH,
+                "source": EventSourceIdentity::session(session_id.clone()),
+                "mob_id": null,
+                "stream_seq": seq,
+                "event": event,
+            });
+            let encoded = serde_json::to_string(&stored)?;
+            let revision_marker = "\"revision_body\":";
+            let split = encoded
+                .find(revision_marker)
+                .ok_or("fixture lost revision-body boundary")?;
+            let (parent_half, revision_half) = encoded.split_at(split);
+            let mut parent_half = parent_half.to_string();
+            let mut revision_half = revision_half.to_string();
+            for (canonical, physical) in parent_replacements {
+                if !parent_half.contains(canonical) {
+                    return Err(format!("fixture lost parent fragment {canonical}").into());
+                }
+                parent_half = parent_half.replace(canonical, physical);
+            }
+            for (canonical, physical) in revision_replacements {
+                if !revision_half.contains(canonical) {
+                    return Err(format!("fixture lost revision fragment {canonical}").into());
+                }
+                revision_half = revision_half.replace(canonical, physical);
+            }
+            Ok(parent_half + &revision_half)
+        }
+
+        let collapse = row(
+            session_id,
+            1,
+            collapse_commit,
+            None,
+            parent_messages,
+            collapsed_messages.clone(),
+            &parent_replacements,
+            &collapsed_replacements,
+        )?;
+        let retained = row(
+            session_id,
+            2,
+            retained_commit,
+            Some(released_parent),
+            collapsed_messages,
+            retained_messages,
+            &collapsed_replacements,
+            &retained_replacements,
+        )?;
+        Ok((vec![collapse, retained], expected))
+    }
+
+    async fn append_raw_json_line(
+        store: &FileEventStore,
+        session_id: &SessionId,
+        line: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        append_raw_json_lines(store, session_id, std::slice::from_ref(&line)).await
+    }
+
+    async fn append_raw_json_lines(
+        store: &FileEventStore,
+        session_id: &SessionId,
+        lines: &[&str],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        tokio::fs::create_dir_all(store.root()).await?;
+        let mut file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(store.log_path(session_id))
+            .await?;
+        for line in lines {
+            file.write_all(line.as_bytes()).await?;
+            file.write_all(b"\n").await?;
+        }
+        file.flush().await?;
+        file.sync_all().await?;
+        store
+            .write_sequence_owner(
+                session_id,
+                u64::try_from(lines.len()).map_err(std::io::Error::other)?,
+            )
+            .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn released_0810_generation_zero_row_remaps_noncanonical_raw_json_once()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("events");
+        let store = FileEventStore::new(&root);
+        let session_id = SessionId::new();
+        let (row, expected_commit) = released_0810_raw_json_row(&session_id, false)?;
+        append_raw_json_line(&store, &session_id, &row).await?;
+        let expected_commits = vec![expected_commit];
         let expected_prefix = TranscriptRewritePrefixAccumulator::from_commits(&expected_commits)?;
 
-        append_raw_test_rows(
-            &store,
-            &session_id,
-            &[StoredEvent {
-                seq: 1,
-                schema_version: EVENT_SCHEMA_VERSION,
-                timestamp: SystemTime::now(),
-                source: EventSourceIdentity::session(session_id.clone()),
-                mob_id: None,
-                stream_seq: 1,
-                event: legacy_event,
-            }],
-        )
-        .await?;
-
-        let migrated = store
+        let activation = store
             .read_transcript_rewrite_audit(
                 &session_id,
                 TranscriptRewriteAuditExpectation::LegacyGenerationZero {
@@ -5531,45 +6080,114 @@ mod tests {
                 },
             )
             .await?
-            .expect("file store supports generation-zero migration");
-        let TranscriptRewriteAuditRead::FullReconciliation(migrated) = migrated else {
-            return Err(
-                std::io::Error::other("legacy healing requires one full reconciliation").into(),
-            );
+            .expect("file store supports released activation");
+        let TranscriptRewriteAuditRead::FullReconciliation(activation) = activation else {
+            return Err(std::io::Error::other(
+                "released raw JSON row requires one full activation reconciliation",
+            )
+            .into());
         };
-        let receipt = migrated
+        let receipt = activation
             .receipt()
-            .expect("healed exact payloads must produce a staged receipt");
+            .expect("remapped row must bind the imported graph prefix");
         assert_eq!(receipt.accumulator(), &expected_prefix);
         store.finalize_transcript_rewrite_audit(receipt).await?;
-        assert!(
-            store
-                .read_durable_event_log_head(&session_id)
-                .await?
-                .expect("validated migration publishes a durable head")
-                .legacy_generation_zero_normalized
-        );
 
         let reopened = FileEventStore::new(&root);
-        reopened.reset_decoded_rows();
         let steady = reopened
             .read_transcript_rewrite_audit(
                 &session_id,
                 TranscriptRewriteAuditExpectation::Current(&expected_prefix),
             )
             .await?
-            .expect("normalized head authorizes the current prefix");
-        let TranscriptRewriteAuditRead::AuthorizedTail(steady) = steady else {
+            .expect("normalized activation supplies a current read");
+        assert!(matches!(
+            steady,
+            TranscriptRewriteAuditRead::AuthorizedTail(_)
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn released_0810_collapsed_raw_json_row_preserves_later_occurrence_order()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("events");
+        let store = FileEventStore::new(&root);
+        let session_id = SessionId::new();
+        let (rows, expected_commit) = released_0810_collapse_then_retained_rows(&session_id)?;
+        let row_refs = rows.iter().map(String::as_str).collect::<Vec<_>>();
+        append_raw_json_lines(&store, &session_id, &row_refs).await?;
+        let expected_commits = vec![expected_commit.clone()];
+        let expected_prefix = TranscriptRewritePrefixAccumulator::from_commits(&expected_commits)?;
+
+        let activation = store
+            .read_transcript_rewrite_audit(
+                &session_id,
+                TranscriptRewriteAuditExpectation::LegacyGenerationZero {
+                    expected_prefix: &expected_prefix,
+                    ordered_commits: &expected_commits,
+                },
+            )
+            .await?
+            .expect("file store supports collapse-aware released activation");
+        let TranscriptRewriteAuditRead::FullReconciliation(activation) = activation else {
             return Err(std::io::Error::other(
-                "normalized legacy head must avoid repeated full reconciliation",
+                "collapsed released row requires one full activation reconciliation",
             )
             .into());
         };
-        assert!(steady.rewrite_rows().is_empty());
         assert_eq!(
-            reopened.decoded_rows(),
-            0,
-            "a normalized legacy head must not decode historical JSONL rows"
+            activation.rewrite_rows().len(),
+            2,
+            "physical proof must retain both the collapsed row and its retained successor"
+        );
+        let receipt = activation
+            .receipt()
+            .expect("retained successor must bind the renumbered imported graph prefix");
+        assert_eq!(receipt.accumulator(), &expected_prefix);
+        assert_eq!(receipt.last_commit(), Some(&expected_commit));
+        store.finalize_transcript_rewrite_audit(receipt).await?;
+
+        let reopened = FileEventStore::new(&root);
+        let steady = reopened
+            .read_transcript_rewrite_audit(
+                &session_id,
+                TranscriptRewriteAuditExpectation::Current(&expected_prefix),
+            )
+            .await?
+            .expect("collapse-aware activation supplies a current read");
+        assert!(matches!(
+            steady,
+            TranscriptRewriteAuditRead::AuthorizedTail(_)
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn released_0810_generation_zero_row_rejects_malformed_body_lineage()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let store = FileEventStore::new(temp.path().join("events"));
+        let session_id = SessionId::new();
+        let (row, expected_commit) = released_0810_raw_json_row(&session_id, true)?;
+        append_raw_json_line(&store, &session_id, &row).await?;
+        let expected_commits = vec![expected_commit];
+        let expected_prefix = TranscriptRewritePrefixAccumulator::from_commits(&expected_commits)?;
+
+        let error = store
+            .read_transcript_rewrite_audit(
+                &session_id,
+                TranscriptRewriteAuditExpectation::LegacyGenerationZero {
+                    expected_prefix: &expected_prefix,
+                    ordered_commits: &expected_commits,
+                },
+            )
+            .await
+            .expect_err("malformed released row lineage must fail closed");
+        assert!(
+            matches!(&error, EventStoreError::Store(message) if message.contains("child body")),
+            "unexpected malformed-lineage verdict: {error:?}"
         );
         Ok(())
     }

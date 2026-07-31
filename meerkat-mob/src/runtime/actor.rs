@@ -3587,7 +3587,7 @@ impl DeferredResumeProvision {
         } = *self;
 
         let stored_session = session_service
-            .load_session_for_resume(&resume_id)
+            .materialize_session_for_resume(&resume_id)
             .await
             .map_err(MobError::from)?
             .into_session_or_error(&resume_id)?;
@@ -10563,24 +10563,35 @@ impl MobActor {
                 // left dangling.
                 let materialization = match self
                     .session_service
-                    .load_persisted_session(bridge_session_id)
+                    .materialize_session_for_resume(bridge_session_id)
                     .await
                 {
-                    Ok(Some(stored_session)) => {
+                    Ok(
+                        ResumeSessionLoad::Active(stored_session)
+                        | ResumeSessionLoad::Revivable(stored_session),
+                    ) => {
                         self.materialize_revived_member_session(
                             entry,
                             member_ref,
                             bridge_session_id,
-                            stored_session,
+                            *stored_session,
                             recovered_binding_without_endpoint,
                             restore_topology_immediately,
                         )
                         .await
                     }
-                    Ok(None) => Err(MobError::Internal(format!(
+                    Ok(ResumeSessionLoad::Absent) => Err(MobError::Internal(format!(
                         "durable snapshot for bridge session '{bridge_session_id}' vanished \
                          between the metadata presence probe and revival materialization"
                     ))),
+                    Ok(ResumeSessionLoad::ArchivedNotRevivable { runtime_state }) => {
+                        Err(MobError::SessionUnavailableForResume {
+                            session_id: bridge_session_id.clone(),
+                            reason:
+                                crate::error::SessionResumeUnavailableReason::ArchivedNotRevivable,
+                            runtime_state: runtime_state.map(|state| state.to_string()),
+                        })
+                    }
                     Err(error) => Err(MobError::SessionError(error)),
                 };
                 match materialization {
@@ -23332,7 +23343,7 @@ impl MobActor {
                     // are deliberately not widened by the session optimization.
                     let stored_session = self
                         .session_service
-                        .load_session_for_resume(&resume_id)
+                        .materialize_session_for_resume(&resume_id)
                         .await
                         .map_err(MobError::from)?
                         .into_session_or_error(&resume_id)?;

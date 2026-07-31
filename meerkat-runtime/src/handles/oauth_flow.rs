@@ -1793,6 +1793,7 @@ mod tests {
 
     #[derive(Debug, Default)]
     struct FailingOAuthSnapshotStore {
+        session_authority: crate::store::memory::InMemoryRuntimeStore,
         snapshot: StdMutex<Option<Vec<u8>>>,
         fail_oauth_persist: AtomicBool,
         blocking_oauth_persist: StdMutex<BlockingOAuthPersistState>,
@@ -1867,6 +1868,10 @@ mod tests {
 
     #[async_trait::async_trait]
     impl RuntimeStore for FailingOAuthSnapshotStore {
+        fn session_authority_ops(&self) -> &dyn crate::store::RuntimeSessionAuthorityOps {
+            self.session_authority.session_authority_ops()
+        }
+
         fn session_persistence_profile(&self) -> crate::store::RuntimeSessionPersistenceProfile {
             crate::store::RuntimeSessionPersistenceProfile::WholeBlobV1
         }

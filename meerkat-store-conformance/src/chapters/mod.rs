@@ -9,7 +9,8 @@
 //! | chapter                                    | applies to |
 //! |--------------------------------------------|------------|
 //! | [`baseline`]                               | every `SessionStore` |
-//! | [`incremental`]                            | stores whose `as_incremental` is `Some` |
+//! | [`incremental`]                            | legacy two-phase incremental stores |
+//! | [`incremental_head_canonical`]             | prepared HeadCanonical incremental stores |
 //! | [`transcript_rewrite`]                     | stores implementing `save_transcript_rewrite` |
 //! | [`guarded_projection`]                     | stores implementing `save_authoritative_projection_if_current_revision` |
 //! | [`append_only`]                            | every `SessionStore` (pins emulated-CAS semantics) |
@@ -32,5 +33,5 @@ pub use baseline::baseline;
 pub use blobs::{blobs, dangling_blob_reference};
 pub use capability::assert_forwards_incremental;
 pub use guarded_projection::guarded_projection;
-pub use incremental::incremental;
+pub use incremental::{incremental, incremental_head_canonical};
 pub use transcript_rewrite::transcript_rewrite;

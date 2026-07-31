@@ -328,6 +328,17 @@ impl JobManager {
             if job.machine_state.lifecycle_phase != JobPhase::LossObserved {
                 continue;
             }
+            // A cancellation accepted before the worker lease expired remains
+            // the durable lifecycle intent. Let the generated
+            // RequestCancelLossObserved arm terminalize it before considering
+            // replay, checkpoint resume, or worker-loss classification.
+            if job.machine_state.cancel_requested {
+                service
+                    .request_cancel(&job.job_id)
+                    .await
+                    .map_err(shell_job_error)?;
+                continue;
+            }
             match job.spec.restart_class {
                 RestartClass::Replayable => {
                     service
@@ -1660,6 +1671,23 @@ fn spawn_monitor_attempt_task(
             active_attempts.lock().await.remove(&public_job_id);
             return;
         }
+        let cancellation_was_requested = matches!(&wait_outcome, MonitorWaitOutcome::Cancelled);
+        // Containment is the cancellation acknowledgement boundary. Commit it
+        // before bounded reader drains, diagnostic processing, or any other
+        // store write can consume the lease's settlement margin.
+        let cancellation_terminal = if cancellation_was_requested {
+            Some(
+                acknowledge_monitor_cancel_after_containment(
+                    &service,
+                    &job_id,
+                    write.clone(),
+                    unix_time_ms(),
+                )
+                .await,
+            )
+        } else {
+            None
+        };
         if let Some(task) = stdout_task {
             join_reader_bounded(task, "durable monitor stdout").await;
         }
@@ -1667,27 +1695,34 @@ fn spawn_monitor_attempt_task(
             Some(task) => join_output_bounded(task, "durable monitor stderr").await,
             None => Vec::new(),
         };
-        let heartbeat_at_ms = unix_time_ms().max(last_heartbeat_at_ms.saturating_add(1));
-        if let Err(error) = renew_monitor_settlement_lease_bounded(
-            service.clone(),
-            job_id.clone(),
-            write.clone(),
-            heartbeat_at_ms,
-            attempt_lease_expiry_ms(heartbeat_at_ms, timeout_secs),
-        )
-        .await
-        {
-            warn!(
-                job_id = %public_job_id,
-                %error,
-                "monitor settlement lease renewal failed; refusing terminal acknowledgement"
-            );
-            active_attempts.lock().await.remove(&public_job_id);
-            return;
+        // Cancellation was acknowledged immediately after containment. A
+        // redundant renewal here would add a second SQLite CAS between the
+        // durable cancel request and terminality; if that best-effort write
+        // timed out, returning would strand the job in Running with
+        // cancel_requested=true.
+        if !cancellation_was_requested {
+            let heartbeat_at_ms = unix_time_ms().max(last_heartbeat_at_ms.saturating_add(1));
+            if let Err(error) = renew_monitor_settlement_lease_bounded(
+                service.clone(),
+                job_id.clone(),
+                write.clone(),
+                heartbeat_at_ms,
+                attempt_lease_expiry_ms(heartbeat_at_ms, timeout_secs),
+            )
+            .await
+            {
+                warn!(
+                    job_id = %public_job_id,
+                    %error,
+                    "monitor settlement lease renewal failed; refusing terminal acknowledgement"
+                );
+                active_attempts.lock().await.remove(&public_job_id);
+                return;
+            }
         }
         let diagnostics = decoder.retained_diagnostics();
         let protocol_health = decoder.health();
-        if protocol_health.diagnostic_bytes_dropped > 0 {
+        if !cancellation_was_requested && protocol_health.diagnostic_bytes_dropped > 0 {
             report_monitor_health(
                 &service,
                 &job_id,
@@ -1750,12 +1785,15 @@ fn spawn_monitor_attempt_task(
                     ),
                 }
             }
-            MonitorWaitOutcome::Cancelled => (
-                JobStatus::Cancelled { duration_secs },
-                service
-                    .acknowledge_cancel(&job_id, write.clone(), completed_at_ms)
-                    .await,
-            ),
+            MonitorWaitOutcome::Cancelled => {
+                let terminal = match cancellation_terminal {
+                    Some(terminal) => terminal,
+                    None => Err(DetachedJobError::Store(
+                        "monitor cancellation reached settlement without an acknowledgement".into(),
+                    )),
+                };
+                (JobStatus::Cancelled { duration_secs }, terminal)
+            }
             MonitorWaitOutcome::TimedOut => (
                 JobStatus::Failed {
                     error: "monitor timed out".into(),
@@ -2512,6 +2550,31 @@ fn lease_heartbeat_interval() -> Duration {
     }
 }
 
+async fn acknowledge_monitor_cancel_after_containment(
+    service: &DetachedJobService,
+    job_id: &meerkat_jobs::JobId,
+    write: AttemptWriteAuthority,
+    acknowledged_at_ms: u64,
+) -> Result<meerkat_jobs::JobSnapshot, DetachedJobError> {
+    let outcome = service
+        .acknowledge_cancel(job_id, write.clone(), acknowledged_at_ms)
+        .await;
+    match outcome {
+        // The monitor loop awaits each notification/heartbeat mutation before
+        // starting another. Dropping stdout ingress and proving containment
+        // therefore leaves at most one preempted monitor-owned mutation in
+        // flight. Reload once if it wins the CAS. Any additional contention
+        // remains typed StaleRevision; persisted cancel_requested then wins
+        // cold recovery before replay.
+        Err(DetachedJobError::StaleRevision { .. }) => {
+            service
+                .acknowledge_cancel(job_id, write, acknowledged_at_ms)
+                .await
+        }
+        outcome => outcome,
+    }
+}
+
 async fn renew_monitor_settlement_lease_bounded(
     service: DetachedJobService,
     job_id: meerkat_jobs::JobId,
@@ -2668,6 +2731,9 @@ mod durable_tests {
         inner: SqliteDetachedJobStore,
         heartbeat_pause_armed: AtomicBool,
         heartbeat_paused_once: AtomicBool,
+        reject_cancel_settlement_renewal: AtomicBool,
+        cancel_ack_stale_once: AtomicBool,
+        cancel_ack_attempts: AtomicUsize,
         heartbeat_entered: Notify,
         heartbeat_release: Notify,
     }
@@ -2678,6 +2744,9 @@ mod durable_tests {
                 inner: SqliteDetachedJobStore::open(path).expect("open detached job store"),
                 heartbeat_pause_armed: AtomicBool::new(false),
                 heartbeat_paused_once: AtomicBool::new(false),
+                reject_cancel_settlement_renewal: AtomicBool::new(false),
+                cancel_ack_stale_once: AtomicBool::new(false),
+                cancel_ack_attempts: AtomicUsize::new(0),
                 heartbeat_entered: Notify::new(),
                 heartbeat_release: Notify::new(),
             }
@@ -2685,6 +2754,15 @@ mod durable_tests {
 
         fn arm_heartbeat_pause(&self) {
             self.heartbeat_pause_armed.store(true, Ordering::SeqCst);
+        }
+
+        fn reject_cancel_settlement_renewal(&self) {
+            self.reject_cancel_settlement_renewal
+                .store(true, Ordering::SeqCst);
+        }
+
+        fn inject_one_cancel_ack_stale_revision(&self) {
+            self.cancel_ack_stale_once.store(true, Ordering::SeqCst);
         }
     }
 
@@ -2710,6 +2788,16 @@ mod durable_tests {
             replacement: StoredJob,
         ) -> Result<StoredJob, DetachedJobError> {
             let current = self.inner.get(&replacement.job_id).await?;
+            if replacement.terminal_result == Some(JobTerminalResult::Cancelled) {
+                self.cancel_ack_attempts.fetch_add(1, Ordering::SeqCst);
+                if self.cancel_ack_stale_once.swap(false, Ordering::SeqCst) {
+                    return Err(DetachedJobError::StaleRevision {
+                        job_id: replacement.job_id,
+                        expected: expected_revision,
+                        actual: expected_revision.saturating_add(1),
+                    });
+                }
+            }
             let is_heartbeat = current.as_ref().is_some_and(|current| {
                 current.machine_state.heartbeat_at_ms != replacement.machine_state.heartbeat_at_ms
                     && current.machine_state.cancel_requested
@@ -2717,6 +2805,16 @@ mod durable_tests {
                     && current.outbox == replacement.outbox
                     && current.terminal_result == replacement.terminal_result
             });
+            if is_heartbeat
+                && current
+                    .as_ref()
+                    .is_some_and(|current| current.machine_state.cancel_requested)
+                && self.reject_cancel_settlement_renewal.load(Ordering::SeqCst)
+            {
+                return Err(DetachedJobError::Store(
+                    "injected cancellation settlement renewal failure".into(),
+                ));
+            }
             if is_heartbeat
                 && self.heartbeat_pause_armed.load(Ordering::SeqCst)
                 && self
@@ -2970,6 +3068,70 @@ mod durable_tests {
             .expect("read")
             .expect("job");
         assert_eq!(recovered.phase, JobPhase::WorkerLost);
+        assert_eq!(recovered.attempt_count, 1);
+        assert_eq!(
+            recovered.current_attempt_id.as_ref(),
+            Some(&claimed.attempt_id)
+        );
+        assert_eq!(recovered.current_fence, claimed.fence);
+    }
+
+    #[tokio::test]
+    async fn recovery_terminalizes_persisted_cancel_before_checkpoint_resume() {
+        let temp = TempDir::new().expect("tempdir");
+        let session_id = SessionId::new();
+        let (runtime, job_store, config) = durable_fixture(&temp, session_id.clone());
+        let service = DetachedJobService::new(job_store);
+        let receipt = service
+            .submit(
+                test_monitor_job_spec(&runtime, session_id, "cancel-before-recovery-resume").await,
+            )
+            .await
+            .expect("submit");
+        let claimed = service
+            .claim_attempt(
+                &receipt.job_id,
+                AttemptClaim::new(
+                    WorkerId::new("worker-before-cancelled-recovery").expect("worker"),
+                    1,
+                    2,
+                    RunnerHandleRef::new("monitor-before-cancelled-recovery").expect("handle"),
+                ),
+            )
+            .await
+            .expect("claim");
+        service
+            .record_checkpoint(
+                &receipt.job_id,
+                (&claimed).into(),
+                meerkat_jobs::CheckpointRef::new("checkpoint:cancelled").expect("checkpoint"),
+                2,
+            )
+            .await
+            .expect("checkpoint");
+        let requested = service
+            .request_cancel(&receipt.job_id)
+            .await
+            .expect("persist cancellation before crash");
+        assert_eq!(requested.phase, JobPhase::Running);
+        assert!(requested.cancel_requested);
+
+        let manager = JobManager::new(config).with_durable_job_runtime(runtime);
+        manager
+            .ensure_recovered()
+            .await
+            .expect("cancel intent wins recovery");
+
+        let recovered = service
+            .get(&receipt.job_id)
+            .await
+            .expect("read")
+            .expect("job");
+        assert_eq!(recovered.phase, JobPhase::Cancelled);
+        assert_eq!(
+            recovered.terminal_result,
+            Some(JobTerminalResult::Cancelled)
+        );
         assert_eq!(recovered.attempt_count, 1);
         assert_eq!(
             recovered.current_attempt_id.as_ref(),
@@ -3689,6 +3851,8 @@ mod durable_tests {
         )
         .await
         .expect("monitor heartbeat should enter the deterministic SQLite gate");
+        pausing_store.reject_cancel_settlement_renewal();
+        pausing_store.inject_one_cancel_ack_stale_revision();
 
         let public_job_id = JobId::from_string(receipt.job_id.as_str());
         assert_eq!(
@@ -3724,6 +3888,11 @@ mod durable_tests {
                 meerkat_jobs::JobOutboxPayload::Terminal(JobTerminalResult::Cancelled)
             )
         }));
+        assert_eq!(
+            pausing_store.cancel_ack_attempts.load(Ordering::SeqCst),
+            2,
+            "one preempted monitor mutation permits exactly one cancellation authority reload"
+        );
 
         // Terminal delivery remains deliberately sequenced after the durable
         // cancellation commit. Release that projection so the attempt task can

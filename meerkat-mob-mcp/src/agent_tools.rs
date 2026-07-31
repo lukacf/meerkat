@@ -3572,6 +3572,13 @@ mod tests {
 
     #[async_trait]
     impl meerkat_mob::MobSessionService for RealCommsSessionSvc {
+        async fn prepare_session_for_resume(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<(), SessionError> {
+            Ok(())
+        }
+
         async fn acknowledge_committed_runtime_session_boundary_under_turn_finalization_boundary(
             &self,
             _session_id: &SessionId,

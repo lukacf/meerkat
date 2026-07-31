@@ -5,7 +5,10 @@
 
 use super::heal::{heal_legacy_compaction_rewrite_semantics, heal_legacy_revision_strings};
 use super::sealed::ValidatedTranscriptHistory;
-use super::validate::{validate_transcript_history_state, validate_transcript_rewrite_record};
+use super::validate::{
+    validate_released_0810_transcript_rewrite_record, validate_transcript_history_state,
+    validate_transcript_rewrite_record,
+};
 use crate::session::{
     TranscriptEditError, TranscriptRewriteReason, TranscriptRewriteSelection,
     transcript_messages_digest,
@@ -15,7 +18,7 @@ use crate::time_compat::SystemTime;
 use crate::types::Message;
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 /// Immutable rewrite commit that advances a session transcript head.
@@ -88,6 +91,7 @@ fn rewrite_generation_is_unknown(generation: &u64) -> bool {
 /// vectors have no graph-writer provenance and refuse fail-closed.
 ///
 /// Returns `true` only when a 0.8.10 all-zero vector was normalized.
+#[cfg(test)]
 fn normalize_legacy_graph_rewrite_generations(
     commits: &mut [TranscriptRewriteCommit],
 ) -> Result<bool, TranscriptEditError> {
@@ -368,8 +372,7 @@ struct Released0810HistoryWire {
     #[serde(default)]
     commits: Vec<Released0810Commit>,
     revisions: Vec<Released0810RevisionEntry>,
-    #[serde(default, rename = "digest_format")]
-    _digest_format: u32,
+    digest_format: u32,
     #[serde(default, rename = "replay_cursor")]
     _replay_cursor: Option<serde::de::IgnoredAny>,
 }
@@ -464,62 +467,6 @@ where
     Ok(bodies)
 }
 
-/// Frozen canonical witness input for the exact released-0.8.10 graph wire.
-///
-/// This intentionally never constructs [`TranscriptHistoryState`]. Formats 2
-/// and 3 must prove the predecessor bytes before current occurrence edges,
-/// row lineage, or generations are synthesized.
-pub(crate) fn canonicalize_released_0810_checkpoint_history(
-    value: &serde_json::Value,
-) -> Result<serde_json::Value, serde_json::Error> {
-    let wire: Released0810HistoryWire = serde_json::from_value(value.clone())?;
-    let ValidatedReleased0810Wire {
-        head,
-        commits,
-        revisions,
-    } = validate_released_0810_wire(wire)?;
-    let commits = released_0810_checkpoint_rewrite_commits_value(&commits)?;
-    let mut revisions = revisions
-        .into_iter()
-        .map(|body| {
-            serde_json::json!({
-                "revision": body.revision,
-                "messages": crate::session::canonicalize_messages_for_digest(&body.messages),
-            })
-        })
-        .collect::<Vec<_>>();
-    revisions.sort_by(|left, right| {
-        left.get("revision")
-            .and_then(serde_json::Value::as_str)
-            .cmp(&right.get("revision").and_then(serde_json::Value::as_str))
-    });
-    Ok(serde_json::json!({
-        "head": head,
-        "commits": commits,
-        "revisions": revisions,
-    }))
-}
-
-/// Project current in-memory commit values back onto the exact released
-/// 0.8.10 checkpoint witness shape.
-///
-/// Validation assigns occurrence generations before returning the commits,
-/// but those generations did not exist in the released bytes and therefore
-/// must not participate in their frozen checkpoint digest.
-fn released_0810_checkpoint_rewrite_commits_value(
-    commits: &[TranscriptRewriteCommit],
-) -> Result<serde_json::Value, serde_json::Error> {
-    let mut value = serde_json::to_value(commits)?;
-    if let Some(commits) = value.as_array_mut() {
-        for commit in commits {
-            if let Some(fields) = commit.as_object_mut() {
-                fields.remove("rewrite_generation");
-            }
-        }
-    }
-    Ok(value)
-}
-
 struct ValidatedReleased0810Wire {
     head: String,
     commits: Vec<TranscriptRewriteCommit>,
@@ -529,19 +476,26 @@ struct ValidatedReleased0810Wire {
 fn validate_released_0810_wire(
     wire: Released0810HistoryWire,
 ) -> Result<ValidatedReleased0810Wire, serde_json::Error> {
+    if wire.digest_format != TRANSCRIPT_DIGEST_FORMAT_RELEASED_0810 {
+        return Err(serde_json::Error::io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "released 0.8.10 transcript graph requires digest format {}, observed {}",
+                TRANSCRIPT_DIGEST_FORMAT_RELEASED_0810, wire.digest_format
+            ),
+        )));
+    }
     if wire.commits.is_empty() || wire.revisions.is_empty() {
         return Err(serde_json::Error::io(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "released 0.8.10 transcript graph must carry commits and bodies",
         )));
     }
-    let mut commits = wire
+    let commits = wire
         .commits
         .into_iter()
         .map(TranscriptRewriteCommit::from)
         .collect::<Vec<_>>();
-    normalize_legacy_graph_rewrite_generations(&mut commits)
-        .map_err(|error| serde_json::Error::io(std::io::Error::other(error.to_string())))?;
     let revisions = decode_released_0810_revision_chain::<serde_json::Error>(wire.revisions)?;
     let bodies_by_revision = revisions
         .iter()
@@ -581,7 +535,7 @@ fn validate_released_0810_wire(
                     ),
                 ))
             })?;
-        validate_transcript_rewrite_record(commit, parent, revision)
+        validate_released_0810_transcript_rewrite_record(commit, parent, revision)
             .map_err(|error| serde_json::Error::io(std::io::Error::other(error.to_string())))?;
     }
     Ok(ValidatedReleased0810Wire {
@@ -1070,7 +1024,8 @@ pub struct TranscriptRewriteRecord {
     pub parent_body: TranscriptRevisionBody,
     pub revision_body: TranscriptRevisionBody,
     /// Digest-format generation of this record's revision strings. Records
-    /// stamped `>= 2` were written by the content-addressed digest format, so
+    /// stamped with the current generation were written by the canonical
+    /// content-addressed digest format, so
     /// decode skips the per-decode legacy-heal probe (a full-transcript hash
     /// of BOTH bodies); absent/0 means unknown provenance and the probe runs,
     /// exactly as it did before the marker existed. A compatibility
@@ -1102,14 +1057,22 @@ impl<'de> Deserialize<'de> for TranscriptRewriteRecord {
         crate::digest_observability::record_rewrite_record_body_decode();
         let mut revisions = vec![wire.parent_body, wire.revision_body];
         let mut commits = vec![wire.commit];
-        // Fast path: a record stamped with the current digest format skips the
-        // heal outright — the heal hashes both full transcript bodies, and
-        // every authoritative load decodes every record in the append-only
-        // log. Unstamped records pay the probe exactly as before.
-        if wire.digest_format < TRANSCRIPT_DIGEST_FORMAT_CURRENT {
-            heal_legacy_revision_strings(&mut revisions, &mut commits, None)
-                .map_err(serde::de::Error::custom)?;
-            heal_legacy_compaction_rewrite_semantics(&mut commits, &revisions);
+        // Current records skip the O(document) heal. Only truly unstamped
+        // pre-marker records enter the older generic healer. The explicit
+        // released 0.8.10 format must cross its source-authorized importer,
+        // which remaps every revision and span identity together.
+        match wire.digest_format {
+            0 => {
+                heal_legacy_revision_strings(&mut revisions, &mut commits, None)
+                    .map_err(serde::de::Error::custom)?;
+                heal_legacy_compaction_rewrite_semantics(&mut commits, &revisions);
+            }
+            TRANSCRIPT_DIGEST_FORMAT_CURRENT => {}
+            unsupported => {
+                return Err(serde::de::Error::custom(format!(
+                    "current transcript rewrite record digest format {unsupported} is not supported"
+                )));
+            }
         }
         let mut revisions = revisions.into_iter();
         let parent_body = revisions
@@ -1126,8 +1089,7 @@ impl<'de> Deserialize<'de> for TranscriptRewriteRecord {
             commit,
             parent_body,
             revision_body,
-            // The heal above leaves current-format strings behind, so the
-            // decoded value is stamped whatever the wire carried.
+            // The only non-current accepted input was fully healed above.
             digest_format: TRANSCRIPT_DIGEST_FORMAT_CURRENT,
         })
     }
@@ -1327,7 +1289,8 @@ pub struct TranscriptHistoryState {
     rewrite_prefix: TranscriptRewritePrefixAccumulator,
     graph_prefix: TranscriptGraphPrefixAccumulator,
     /// Digest-format generation of the revision strings. Documents stamped
-    /// `>= 2` were written by the content-addressed digest format, so decode
+    /// equal to the current generation were written by the canonical
+    /// content-addressed digest format, so decode
     /// skips the per-decode legacy-heal probe (a full-transcript hash);
     /// absent/0 means unknown provenance and the probe runs once — the next
     /// save persists the marker. A compatibility convenience, not an
@@ -1374,7 +1337,8 @@ fn digest_format_is_unknown(format: &u32) -> bool {
 }
 
 /// The digest-format generation minted by [`transcript_messages_digest`].
-pub(crate) const TRANSCRIPT_DIGEST_FORMAT_CURRENT: u32 = 2;
+pub(crate) const TRANSCRIPT_DIGEST_FORMAT_RELEASED_0810: u32 = 2;
+pub(crate) const TRANSCRIPT_DIGEST_FORMAT_CURRENT: u32 = 3;
 
 impl Serialize for TranscriptHistoryState {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -1438,22 +1402,284 @@ impl<'de> Deserialize<'de> for TranscriptHistoryState {
     }
 }
 
-/// One-time 0.8.10 importer for the frozen full-body graph wire.
+/// One-time 0.8.10 importer for the released full-body graph wire.
 ///
 /// Normal [`TranscriptHistoryState`] deserialization is deliberately
 /// current-only. A released graph can cross this seam only after the enclosing
-/// importer has verified its untouched checkpoint evidence.
+/// importer has validated its exact released shape under store-owned source
+/// authority.
 pub(crate) fn import_released_0810_history(
     value: serde_json::Value,
-) -> Result<TranscriptHistoryState, serde_json::Error> {
+) -> Result<Option<TranscriptHistoryState>, serde_json::Error> {
     let wire: Released0810HistoryWire = serde_json::from_value(value)?;
     let ValidatedReleased0810Wire {
-        head,
-        commits,
-        revisions,
+        mut head,
+        mut commits,
+        mut revisions,
     } = validate_released_0810_wire(wire)?;
+    remap_released_0810_digest_identities(&mut head, &mut commits, &mut revisions)?;
+    if commits.is_empty() {
+        return Ok(None);
+    }
     TranscriptHistoryState::from_legacy_full_bodies(head, commits, revisions)
+        .map(Some)
         .map_err(|error| serde_json::Error::io(std::io::Error::other(error.to_string())))
+}
+
+/// Semantic result of rebinding one proven released-0.8.10 rewrite.
+#[derive(Debug)]
+#[doc(hidden)]
+pub enum ProvenReleased0810RewriteRemap {
+    /// The rewrite remains semantically distinct under current identity.
+    Retained(TranscriptRewriteRecord),
+    /// The released endpoints differ only in spelling erased by current
+    /// canonical identity. The occurrence is a proven semantic no-op.
+    Collapsed {
+        /// The singular current identity shared by both released endpoints.
+        current_revision: String,
+    },
+}
+
+/// Rebind one exact released-0.8.10 rewrite record to current semantic ids.
+///
+/// This helper owns the semantic half of the one-time migration. Callers must
+/// first bind the exact released document to store-issued physical source
+/// authority. The helper validates the observable released topology, requires
+/// canonical old digest labels and exact child lineage, then replaces both
+/// endpoint ids and both span ids together.
+///
+/// Ordinary current ingress must never call this. It rejects explicit format-2
+/// records instead of silently healing them.
+#[doc(hidden)]
+pub fn remap_proven_released_0810_rewrite_record(
+    mut commit: TranscriptRewriteCommit,
+    mut parent_body: TranscriptRevisionBody,
+    mut revision_body: TranscriptRevisionBody,
+    expected_generation: u64,
+) -> Result<ProvenReleased0810RewriteRemap, TranscriptEditError> {
+    let malformed = |message: &str| TranscriptEditError::HistoryStateMalformed(message.to_string());
+    if commit.rewrite_generation != 0 || expected_generation == 0 {
+        return Err(malformed(
+            "released 0.8.10 rewrite remap requires generation zero and a non-zero target generation",
+        ));
+    }
+    if decode_canonical_sha256(&parent_body.revision).is_none()
+        || decode_canonical_sha256(&revision_body.revision).is_none()
+        || decode_canonical_sha256(&commit.parent_revision).is_none()
+        || decode_canonical_sha256(&commit.revision).is_none()
+        || decode_canonical_sha256(&commit.original_span_digest).is_none()
+        || decode_canonical_sha256(&commit.replacement_digest).is_none()
+    {
+        return Err(malformed(
+            "released 0.8.10 rewrite remap requires canonical sha256 labels",
+        ));
+    }
+    validate_released_0810_transcript_rewrite_record(&commit, &parent_body, &revision_body)?;
+    if revision_body.parent_revision.as_deref() != Some(commit.parent_revision.as_str()) {
+        return Err(malformed(
+            "released 0.8.10 rewrite child body does not name its exact parent revision",
+        ));
+    }
+
+    let current_parent = transcript_messages_digest(&parent_body.messages)
+        .map_err(|error| malformed(&error.to_string()))?;
+    let current_revision = transcript_messages_digest(&revision_body.messages)
+        .map_err(|error| malformed(&error.to_string()))?;
+    let (start, end) = commit.selection.bounds();
+    let removed = end
+        .checked_sub(start)
+        .ok_or_else(|| malformed("released 0.8.10 rewrite selection is inverted"))?;
+    let retained = commit
+        .messages_before
+        .checked_sub(removed)
+        .ok_or_else(|| malformed("released 0.8.10 rewrite removes more rows than its parent"))?;
+    let replacement_len = commit
+        .messages_after
+        .checked_sub(retained)
+        .ok_or_else(|| malformed("released 0.8.10 rewrite replacement length is invalid"))?;
+    let replacement_end = start
+        .checked_add(replacement_len)
+        .ok_or_else(|| malformed("released 0.8.10 rewrite replacement span overflows"))?;
+    let current_original_span = transcript_messages_digest(&parent_body.messages[start..end])
+        .map_err(|error| malformed(&error.to_string()))?;
+    let current_replacement_span =
+        transcript_messages_digest(&revision_body.messages[start..replacement_end])
+            .map_err(|error| malformed(&error.to_string()))?;
+    if current_parent == current_revision {
+        if current_original_span != current_replacement_span {
+            return Err(malformed(
+                "released 0.8.10 collapsed endpoints retain different selected-span identities",
+            ));
+        }
+        return Ok(ProvenReleased0810RewriteRemap::Collapsed {
+            current_revision: current_parent,
+        });
+    }
+
+    commit.rewrite_generation = expected_generation;
+    commit.parent_revision = current_parent.clone();
+    commit.revision = current_revision.clone();
+    commit.original_span_digest = current_original_span;
+    commit.replacement_digest = current_replacement_span;
+    parent_body.revision = current_parent.clone();
+    // A singleton physical row does not carry the body preceding its parent,
+    // so this non-authoritative reconstruction hint cannot be remapped here.
+    parent_body.parent_revision = None;
+    revision_body.revision = current_revision;
+    revision_body.parent_revision = Some(current_parent);
+    TranscriptRewriteRecord::new(commit, parent_body, revision_body)
+        .map(ProvenReleased0810RewriteRemap::Retained)
+}
+
+/// Rebind one store-authorized released graph from format-2 semantic ids to
+/// the current digest generation.
+///
+/// This is importer-only and necessarily O(document): every retained 0.8.10
+/// body crossed the store-authorized source boundary and the exact retained
+/// rewrite topology was proved. Each body then receives its current content
+/// address exactly once before the compact occurrence graph is built. Lost
+/// pre-buffer `RawValue` spelling is never guessed or re-proved.
+fn remap_released_0810_digest_identities(
+    head: &mut String,
+    commits: &mut Vec<TranscriptRewriteCommit>,
+    revisions: &mut Vec<TranscriptRevisionBody>,
+) -> Result<(), serde_json::Error> {
+    let mut remap = BTreeMap::new();
+    for body in revisions.iter() {
+        if decode_canonical_sha256(&body.revision).is_none() {
+            return Err(serde_json::Error::io(std::io::Error::other(
+                "released 0.8.10 transcript body carries a non-canonical revision label",
+            )));
+        }
+        let current = transcript_messages_digest(&body.messages)?;
+        remap.insert(body.revision.clone(), current);
+    }
+
+    let bodies_by_released_revision = revisions
+        .iter()
+        .map(|body| (body.revision.as_str(), body))
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut remapped_commits = Vec::with_capacity(commits.len());
+    let mut collapsed_adjacency: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for commit in commits.iter() {
+        let parent = bodies_by_released_revision
+            .get(commit.parent_revision.as_str())
+            .copied()
+            .ok_or_else(|| {
+                serde_json::Error::io(std::io::Error::other(
+                    "released 0.8.10 commit parent body disappeared before remap",
+                ))
+            })?;
+        let revision = bodies_by_released_revision
+            .get(commit.revision.as_str())
+            .copied()
+            .ok_or_else(|| {
+                serde_json::Error::io(std::io::Error::other(
+                    "released 0.8.10 commit revision body disappeared before remap",
+                ))
+            })?;
+        let generation = u64::try_from(remapped_commits.len())
+            .ok()
+            .and_then(|index| index.checked_add(1))
+            .ok_or_else(|| {
+                serde_json::Error::io(std::io::Error::other(
+                    "released 0.8.10 rewrite generation overflowed",
+                ))
+            })?;
+        let outcome = remap_proven_released_0810_rewrite_record(
+            commit.clone(),
+            parent.clone(),
+            revision.clone(),
+            generation,
+        )
+        .map_err(|error| serde_json::Error::io(std::io::Error::other(error.to_string())))?;
+        match outcome {
+            ProvenReleased0810RewriteRemap::Retained(record) => {
+                remapped_commits.push(record.commit);
+            }
+            ProvenReleased0810RewriteRemap::Collapsed { current_revision } => {
+                if remap.get(&commit.parent_revision) != Some(&current_revision)
+                    || remap.get(&commit.revision) != Some(&current_revision)
+                {
+                    return Err(serde_json::Error::io(std::io::Error::other(
+                        "released 0.8.10 collapsed rewrite disagrees with graph body remap",
+                    )));
+                }
+                collapsed_adjacency
+                    .entry(commit.parent_revision.clone())
+                    .or_default()
+                    .insert(commit.revision.clone());
+                collapsed_adjacency
+                    .entry(commit.revision.clone())
+                    .or_default()
+                    .insert(commit.parent_revision.clone());
+            }
+        }
+    }
+
+    let mut current_owner: BTreeMap<String, String> = BTreeMap::new();
+    for (released, current) in &remap {
+        if let Some(previous) = current_owner.insert(current.clone(), released.clone())
+            && !released_ids_connected_by_collapsed_rewrites(
+                &collapsed_adjacency,
+                &previous,
+                released,
+            )
+        {
+            return Err(serde_json::Error::io(std::io::Error::other(
+                "released 0.8.10 transcript bodies collapse without a structurally proven rewrite path",
+            )));
+        }
+    }
+
+    *head = remap.get(head).cloned().ok_or_else(|| {
+        serde_json::Error::io(std::io::Error::other(
+            "released 0.8.10 transcript head has no verified format-2 body",
+        ))
+    })?;
+    for body in revisions.iter_mut() {
+        body.revision = remap.get(&body.revision).cloned().ok_or_else(|| {
+            serde_json::Error::io(std::io::Error::other(
+                "released 0.8.10 transcript body lost its format-2 identity",
+            ))
+        })?;
+        if let Some(parent) = body.parent_revision.as_mut() {
+            *parent = remap.get(parent).cloned().ok_or_else(|| {
+                serde_json::Error::io(std::io::Error::other(
+                    "released 0.8.10 transcript body parent has no verified format-2 identity",
+                ))
+            })?;
+        }
+    }
+    let mut retained_revision_ids = BTreeSet::new();
+    revisions.retain(|body| retained_revision_ids.insert(body.revision.clone()));
+    *commits = remapped_commits;
+    Ok(())
+}
+
+fn released_ids_connected_by_collapsed_rewrites(
+    adjacency: &BTreeMap<String, BTreeSet<String>>,
+    start: &str,
+    target: &str,
+) -> bool {
+    if start == target {
+        return true;
+    }
+    let mut visited = BTreeSet::new();
+    let mut pending = vec![start.to_string()];
+    while let Some(current) = pending.pop() {
+        if !visited.insert(current.clone()) {
+            continue;
+        }
+        let Some(neighbors) = adjacency.get(&current) else {
+            continue;
+        };
+        if neighbors.contains(target) {
+            return true;
+        }
+        pending.extend(neighbors.iter().cloned());
+    }
+    false
 }
 
 impl TranscriptHistoryState {
@@ -2950,6 +3176,18 @@ mod tests {
             "a current-format record must not enter importer-only semantic healing"
         );
 
+        let mut explicit_released_wire = current_wire.clone();
+        explicit_released_wire["digest_format"] =
+            serde_json::json!(TRANSCRIPT_DIGEST_FORMAT_RELEASED_0810);
+        let error = serde_json::from_value::<TranscriptRewriteRecord>(explicit_released_wire)
+            .expect_err("explicit released records require the source-authorized importer");
+        assert!(
+            error
+                .to_string()
+                .contains("current transcript rewrite record digest format 2 is not supported"),
+            "unexpected error: {error}"
+        );
+
         let mut released_wire = current_wire;
         released_wire
             .as_object_mut()
@@ -2960,6 +3198,22 @@ mod tests {
         assert!(
             !released.commit.selection.is_legacy_untyped(),
             "an unstamped released record retains its one-time typed compaction migration"
+        );
+    }
+
+    #[test]
+    fn ordinary_current_graph_ingress_refuses_released_digest_format() {
+        let current = rebuild(&rewrite_chain(1));
+        let mut wire = serde_json::to_value(current).expect("current graph serializes");
+        wire["digest_format"] = serde_json::json!(TRANSCRIPT_DIGEST_FORMAT_RELEASED_0810);
+
+        let error = serde_json::from_value::<TranscriptHistoryState>(wire)
+            .expect_err("released format must cross only the explicit 0.8.10 importer");
+        assert!(
+            error
+                .to_string()
+                .contains("current transcript graph digest format 2 is not supported"),
+            "unexpected error: {error}"
         );
     }
 

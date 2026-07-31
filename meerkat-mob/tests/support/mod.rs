@@ -698,6 +698,13 @@ impl meerkat_core::service::SessionServiceHistoryExt for FailingOnceSessionServi
 
 #[async_trait::async_trait]
 impl meerkat_mob::MobSessionService for FailingOnceSessionService {
+    async fn prepare_session_for_resume(
+        &self,
+        session_id: &meerkat_core::SessionId,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        self.inner.prepare_session_for_resume(session_id).await
+    }
+
     async fn acknowledge_committed_runtime_session_boundary_under_turn_finalization_boundary(
         &self,
         session_id: &meerkat_core::SessionId,
@@ -797,16 +804,16 @@ impl meerkat_mob::MobSessionService for FailingOnceSessionService {
         Ok(self.finish_create_call(call, result))
     }
 
-    async fn promote_revivable_retired_session(
+    async fn authorize_revivable_retired_session(
         &self,
         session_id: &meerkat_core::SessionId,
         authority: meerkat_runtime::PreparedArchivedResumeCommitLease,
     ) -> Result<
-        meerkat_runtime::PromotedArchivedResumeCommitLease,
+        meerkat_runtime::AuthorizedArchivedResumeCommitLease,
         meerkat_core::service::SessionError,
     > {
         self.inner
-            .promote_revivable_retired_session(session_id, authority)
+            .authorize_revivable_retired_session(session_id, authority)
             .await
     }
 

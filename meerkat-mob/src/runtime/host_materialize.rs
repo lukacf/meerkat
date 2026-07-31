@@ -49,7 +49,7 @@ use crate::runtime::provisioner::{
     MemberSessionDisposalVerdict, PreparedServiceActorTransaction, RuntimeSessionState,
     RuntimeTurnFinalizationBoundaryLease,
 };
-use crate::runtime::session_service::MobSessionService;
+use crate::runtime::session_service::{MobSessionService, ResumeSessionLoad};
 
 // ---------------------------------------------------------------------------
 // Tier-2 preflight probe (DEC-P3H-8) — widens the tier-1 presence probe
@@ -1601,21 +1601,30 @@ impl HostMemberMaterializer {
                 match self
                     .substrate
                     .session_service
-                    .load_persisted_session(&id)
+                    .materialize_session_for_resume(&id)
                     .await?
                 {
-                    Some(session) => (
+                    ResumeSessionLoad::Active(session) | ResumeSessionLoad::Revivable(session) => (
                         id,
-                        Some(session),
+                        Some(*session),
                         MaterializeLaunchOutcome::ResumedFromSnapshot,
                         generation_start_seq,
                         residency_update,
                         Some(boundary),
                     ),
                     // Never a silent Fresh (§19.F row 1).
-                    None => {
+                    ResumeSessionLoad::Absent => {
                         return Err(MaterializeServeError::ResumeSessionNotFound {
                             session_id: session_id.clone(),
+                        });
+                    }
+                    ResumeSessionLoad::ArchivedNotRevivable { runtime_state } => {
+                        return Err(MaterializeServeError::ResumeSessionNonRecoverable {
+                            session_id: session_id.clone(),
+                            state: runtime_state.map_or_else(
+                                || "<no runtime record>".to_string(),
+                                |state| state.to_string(),
+                            ),
                         });
                     }
                 }
@@ -2027,31 +2036,40 @@ impl HostMemberMaterializer {
         // quiescent and B excludes same-SessionId actor replacement. Reading
         // earlier can capture a snapshot while the old actor is still
         // committing its final turn, then recreate from stale durable state.
-        let session = self
+        let loaded = self
             .substrate
             .session_service
-            .load_persisted_session(&session_id)
+            .materialize_session_for_resume(&session_id)
             .await?;
-        let Some(session) = session else {
-            if self
-                .substrate
-                .session_service
-                .session_known_to_archive_authority(&session_id)
-                .await?
-            {
-                // The public resume read intentionally hides archived rows and
-                // runtime-Retired authority. Preserve that absorbing contract
-                // even after the in-process runtime registration disappears:
-                // this is a terminal same-tuple result, not a transient missing
-                // snapshot that should be retried forever.
+        let session = match loaded {
+            ResumeSessionLoad::Active(session) | ResumeSessionLoad::Revivable(session) => *session,
+            ResumeSessionLoad::ArchivedNotRevivable { runtime_state } => {
                 return Err(MaterializeServeError::ResumeSessionNonRecoverable {
                     session_id: recorded_session_id.to_string(),
-                    state: "Archived/Retired".to_string(),
+                    state: runtime_state.map_or_else(
+                        || "<no runtime record>".to_string(),
+                        |state| state.to_string(),
+                    ),
                 });
             }
-            return Err(MaterializeServeError::ResumeSessionNotFound {
-                session_id: recorded_session_id.to_string(),
-            });
+            ResumeSessionLoad::Absent => {
+                if self
+                    .substrate
+                    .session_service
+                    .session_known_to_archive_authority(&session_id)
+                    .await?
+                {
+                    // Preserve the absorbing contract when archive authority
+                    // knows a terminal row whose committed body is absent.
+                    return Err(MaterializeServeError::ResumeSessionNonRecoverable {
+                        session_id: recorded_session_id.to_string(),
+                        state: "Archived/Retired".to_string(),
+                    });
+                }
+                return Err(MaterializeServeError::ResumeSessionNotFound {
+                    session_id: recorded_session_id.to_string(),
+                });
+            }
         };
 
         let mut config = self

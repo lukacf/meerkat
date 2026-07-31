@@ -148,7 +148,7 @@ pub enum ContentBlock {
     Structured {
         /// Provider-opaque structured JSON, parsed at most once by consumers.
         #[serde(
-            serialize_with = "serialize_structured_data",
+            serialize_with = "serialize_canonical_raw_json",
             deserialize_with = "deserialize_structured_data"
         )]
         #[cfg_attr(feature = "schema", schemars(with = "serde_json::Value"))]
@@ -168,13 +168,28 @@ pub enum ContentBlock {
     },
 }
 
-/// Serializes a `Box<RawValue>` structured payload as inline JSON (no double
-/// string-encoding).
-fn serialize_structured_data<S>(data: &RawValue, serializer: S) -> Result<S::Ok, S::Error>
+/// Canonicalize opaque JSON without laundering it through a string field.
+///
+/// Message deserialization must buffer internally tagged variants through
+/// [`Value`], so object spelling and key order are not a durable property.
+/// Persisting the recursively key-sorted value makes direct serialization and
+/// buffered round trips byte-identical.
+pub(crate) fn canonicalize_raw_json(data: &RawValue) -> Result<Box<RawValue>, serde_json::Error> {
+    let value: Value = serde_json::from_str(data.get())?;
+    let mut canonical = Vec::new();
+    crate::digest_observability::write_canonical_json(&value, &mut canonical)?;
+    serde_json::from_slice(&canonical)
+}
+
+/// Serializes a `Box<RawValue>` structured payload as canonical inline JSON
+/// (no double string-encoding).
+fn serialize_canonical_raw_json<S>(data: &RawValue, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
 {
-    data.serialize(serializer)
+    canonicalize_raw_json(data)
+        .map_err(serde::ser::Error::custom)?
+        .serialize(serializer)
 }
 
 /// Deserializes a structured payload via `Value` so it survives the
@@ -823,7 +838,10 @@ pub enum AssistantBlock {
         id: String,
         name: String,
         /// Arguments as raw JSON - only dispatcher parses this
-        #[serde(deserialize_with = "deserialize_tool_use_args")]
+        #[serde(
+            serialize_with = "serialize_canonical_raw_json",
+            deserialize_with = "deserialize_tool_use_args"
+        )]
         args: Box<RawValue>,
         /// Provider continuity metadata
         #[serde(skip_serializing_if = "Option::is_none")]

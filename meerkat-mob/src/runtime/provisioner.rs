@@ -6850,13 +6850,13 @@ impl MobProvisioner for SessionBackend {
                     .as_ref()
                     .ok_or_else(|| {
                         MobError::Internal(format!(
-                            "revived session '{created_bridge_session_id}' lost its actor transaction before durable promotion"
+                            "revived session '{created_bridge_session_id}' lost its actor transaction before RuntimeStore authorization"
                         ))
                     })?
                     .prepared()
                     .map_err(|error| {
                     MobError::Internal(format!(
-                        "revived session '{created_bridge_session_id}' lost its exact prepared materialization before durable promotion: {error}"
+                        "revived session '{created_bridge_session_id}' lost its exact prepared materialization before RuntimeStore authorization: {error}"
                     ))
                 })?;
                 let commit_lease = prepared
@@ -6867,23 +6867,23 @@ impl MobProvisioner for SessionBackend {
                             "failed to acquire exact archived-resume commit lease for '{created_bridge_session_id}': {error}"
                         ))
                     })?;
-                let mut promoted_lease = backend.session_service
-                    .promote_revivable_retired_session(
+                let mut authorized_lease = backend.session_service
+                    .authorize_revivable_retired_session(
                         &created_bridge_session_id,
                         commit_lease,
                     )
                     .await
                     .map_err(|error| {
                         MobError::Internal(format!(
-                            "failed to promote revived durable session document '{created_bridge_session_id}': {error}"
+                            "failed to authorize revived durable session '{created_bridge_session_id}' against the shared RuntimeStore: {error}"
                         ))
                     })?;
-                promoted_lease
+                authorized_lease
                     .reset_retired_runtime()
                     .await
                     .map_err(|error| {
                         MobError::Internal(format!(
-                            "failed to promote revived durable session '{created_bridge_session_id}' to idle: {error}"
+                            "failed to reset revived durable session '{created_bridge_session_id}' to idle: {error}"
                         ))
                     })?;
                 session_origin = ProvisionSessionOrigin::RevivedRetired;

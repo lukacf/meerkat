@@ -3725,6 +3725,13 @@ impl SessionServiceHistoryExt for LocalSessionService {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl MobSessionService for LocalSessionService {
+    async fn prepare_session_for_resume(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<(), SessionError> {
+        Ok(())
+    }
+
     async fn create_session_under_runtime_turn_boundary(
         &self,
         req: CreateSessionRequest,
@@ -6625,6 +6632,13 @@ mod tests {
 
     #[async_trait]
     impl MobSessionService for MockSessionSvc {
+        async fn prepare_session_for_resume(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<(), SessionError> {
+            Ok(())
+        }
+
         async fn acknowledge_committed_runtime_session_boundary_under_turn_finalization_boundary(
             &self,
             _session_id: &SessionId,

@@ -1547,13 +1547,54 @@ fn ensure_compaction_intents_already_outboxed_list(
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl RuntimeStore for InMemoryRuntimeStore {
+impl super::RuntimeSessionAuthorityOps for InMemoryRuntimeStore {
     fn session_persistence_profile(&self) -> super::RuntimeSessionPersistenceProfile {
         super::RuntimeSessionPersistenceProfile::WholeBlobV1
     }
 
     fn session_boundary_authority_read_cost(&self) -> RuntimeSessionAuthorityReadCost {
         RuntimeSessionAuthorityReadCost::Bounded
+    }
+
+    async fn write_prepared_head_canonical_provisional_tail(
+        &self,
+        _runtime_id: &LogicalRuntimeId,
+        _prepared: super::PreparedHeadCanonicalProvisionalTail,
+    ) -> Result<meerkat_core::HeadCanonicalProvisionalTailAuthority, RuntimeStoreError> {
+        Err(RuntimeStoreError::Unsupported(
+            "HeadCanonical provisional-tail writes".to_string(),
+        ))
+    }
+
+    async fn load_head_canonical_provisional_tail(
+        &self,
+        _runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<meerkat_core::HeadCanonicalProvisionalTailAuthority>, RuntimeStoreError>
+    {
+        Err(RuntimeStoreError::Unsupported(
+            "HeadCanonical provisional-tail observation".to_string(),
+        ))
+    }
+
+    async fn discard_head_canonical_provisional_tail(
+        &self,
+        _runtime_id: &LogicalRuntimeId,
+        _expected: &meerkat_core::HeadCanonicalProvisionalTailAuthority,
+    ) -> Result<bool, RuntimeStoreError> {
+        Err(RuntimeStoreError::Unsupported(
+            "HeadCanonical provisional-tail discard".to_string(),
+        ))
+    }
+
+    async fn load_durable_tail_recovery_source(
+        &self,
+        _runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<super::PreparedDurableTailRecoverySource>, RuntimeStoreError> {
+        Err(
+            RuntimeStoreError::PreparedRecoveryRequiresAtomicPhysicalHeadCas {
+                profile: super::RuntimeSessionPersistenceProfile::WholeBlobV1,
+            },
+        )
     }
 
     async fn commit_prepared_session_boundary(
@@ -1722,6 +1763,355 @@ impl RuntimeStore for InMemoryRuntimeStore {
                 RuntimeSessionPersistenceProfile::WholeBlobV1,
             ),
         })
+    }
+
+    async fn load_durable_tail_recovery_receipts(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        run_id: &RunId,
+    ) -> Result<Vec<super::PreparedRecoveryReceiptSource>, RuntimeStoreError> {
+        let inner = self.inner.lock().await;
+        let mut receipts = inner
+            .receipts
+            .iter()
+            .filter(|(key, _)| key.runtime_id == runtime_id.0 && key.run_id == *run_id)
+            .map(|(_, receipt)| {
+                serde_json::to_vec(receipt)
+                    .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))
+                    .and_then(|bytes| {
+                        super::PreparedRecoveryReceiptSource::from_serialized_row(&bytes)
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        receipts.sort_by_key(|source| source.receipt().sequence);
+        Ok(receipts)
+    }
+
+    async fn load_committed_recovery_boundary(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        candidate_id: &str,
+    ) -> Result<Option<super::CommittedRecoveryBoundary>, RuntimeStoreError> {
+        Ok(self
+            .inner
+            .lock()
+            .await
+            .recovery_boundaries
+            .get(&(runtime_id.0.clone(), candidate_id.to_string()))
+            .cloned())
+    }
+
+    async fn load_whole_blob_store_authority(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<WholeBlobStoreAuthority>, RuntimeStoreError> {
+        Ok(self
+            .inner
+            .lock()
+            .await
+            .session_authorities
+            .get(&runtime_id.0)
+            .cloned())
+    }
+
+    async fn load_session_boundary_authority(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<RuntimeSessionAuthority>, RuntimeStoreError> {
+        super::RuntimeSessionAuthorityOps::load_whole_blob_store_authority(self, runtime_id)
+            .await
+            .map(|authority| authority.map(RuntimeSessionAuthority::WholeBlob))
+    }
+
+    async fn delete_runtime_session_catalog_entry(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<(), RuntimeStoreError> {
+        self.inner
+            .lock()
+            .await
+            .session_catalog
+            .remove(&runtime_id.0);
+        Ok(())
+    }
+
+    async fn load_runtime_session_catalog_entry(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<super::RuntimeSessionCatalogEntry>, RuntimeStoreError> {
+        Ok(self
+            .inner
+            .lock()
+            .await
+            .session_catalog
+            .get(&runtime_id.0)
+            .cloned())
+    }
+
+    async fn list_runtime_session_catalog_entries(
+        &self,
+        filter: meerkat_core::SessionFilter,
+    ) -> Result<Vec<super::RuntimeSessionCatalogEntry>, RuntimeStoreError> {
+        let inner = self.inner.lock().await;
+        let mut entries = inner
+            .session_catalog
+            .values()
+            .filter(|entry| {
+                filter
+                    .created_after
+                    .is_none_or(|after| entry.created_at() >= after)
+                    && filter
+                        .updated_after
+                        .is_none_or(|after| entry.updated_at() >= after)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| {
+            right.updated_at().cmp(&left.updated_at()).then_with(|| {
+                left.session_id()
+                    .to_string()
+                    .cmp(&right.session_id().to_string())
+            })
+        });
+        let offset = filter.offset.unwrap_or(0).min(entries.len());
+        let limit = filter.limit.unwrap_or(usize::MAX);
+        Ok(entries.into_iter().skip(offset).take(limit).collect())
+    }
+
+    async fn load_committed_whole_blob_snapshot(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<CommittedWholeBlobSnapshot>, RuntimeStoreError> {
+        let inner = self.inner.lock().await;
+        match (
+            inner.sessions.get(&runtime_id.0),
+            inner.session_authorities.get(&runtime_id.0),
+        ) {
+            (None, None) => Ok(None),
+            (Some(bytes), Some(authority)) => Ok(Some(CommittedWholeBlobSnapshot::new(
+                Arc::clone(bytes),
+                authority.clone(),
+            )?)),
+            _ => Err(RuntimeStoreError::SessionPersistenceAuthorityConflict {
+                runtime_id: runtime_id.to_string(),
+                detail: "WholeBlob body and store authority ledger disagree on row presence"
+                    .to_string(),
+            }),
+        }
+    }
+
+    async fn commit_prepared_whole_blob_snapshot_cas(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        prepared: PreparedWholeBlobSnapshotCas,
+    ) -> Result<WholeBlobSnapshotCasOutcome, RuntimeStoreError> {
+        let (expected, candidate_session, candidate_bytes, candidate_blob_sha256) =
+            prepared.into_parts();
+        if &LogicalRuntimeId::for_session(candidate_session.id()) != runtime_id
+            || candidate_session.id() != expected.session_id()
+        {
+            return Err(RuntimeStoreError::SessionPersistenceAuthorityConflict {
+                runtime_id: runtime_id.to_string(),
+                detail: "prepared WholeBlob snapshot CAS does not bind this runtime/session"
+                    .to_string(),
+            });
+        }
+        let compaction_projection_intents =
+            super::validated_compaction_projection_intents(candidate_session.as_ref())?;
+        let mut inner = self.inner.lock().await;
+        let Some(current) = inner.session_authorities.get(&runtime_id.0) else {
+            return Ok(WholeBlobSnapshotCasOutcome::Conflict);
+        };
+        if current != &expected {
+            return Ok(WholeBlobSnapshotCasOutcome::Conflict);
+        }
+        if current.blob_sha256() == candidate_blob_sha256 {
+            return Ok(WholeBlobSnapshotCasOutcome::Committed(current.clone()));
+        }
+        if inner
+            .whole_blob_provisional_tails
+            .contains_key(&runtime_id.0)
+        {
+            return Err(RuntimeStoreError::SessionPersistenceAuthorityConflict {
+                runtime_id: runtime_id.to_string(),
+                detail: "snapshot CAS cannot bypass a store-owned WholeBlob provisional candidate"
+                    .to_string(),
+            });
+        }
+        ensure_compaction_intents_already_outboxed_list(
+            &inner,
+            runtime_id,
+            &compaction_projection_intents,
+        )?;
+        let runtime_state = inner
+            .session_catalog
+            .get(&runtime_id.0)
+            .and_then(super::RuntimeSessionCatalogEntry::runtime_state);
+        let catalog_entry = super::RuntimeSessionCatalogEntry::from_session(
+            candidate_session.as_ref(),
+            super::RuntimeSessionPersistenceProfile::WholeBlobV1,
+            runtime_state,
+        )?;
+        let authority = issue_whole_blob_store_authority(
+            Some(&expected),
+            candidate_session.id(),
+            &candidate_blob_sha256,
+        )?;
+        inner.sessions.insert(runtime_id.0.clone(), candidate_bytes);
+        inner
+            .session_authorities
+            .insert(runtime_id.0.clone(), authority.clone());
+        inner
+            .session_catalog
+            .insert(runtime_id.0.clone(), catalog_entry);
+        inner.projection_quarantine.remove(&runtime_id.0);
+        Ok(WholeBlobSnapshotCasOutcome::Committed(authority))
+    }
+
+    async fn write_prepared_whole_blob_provisional_tail(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        prepared: PreparedWholeBlobProvisionalTail,
+    ) -> Result<WholeBlobProvisionalTailAuthority, RuntimeStoreError> {
+        let (
+            authority,
+            candidate_artifact,
+            conversation_digest,
+            message_count,
+            catalog_entry,
+            compaction_projection_intents,
+        ) = prepared.into_parts();
+        let candidate_bytes = candidate_artifact.bytes_arc();
+        if &LogicalRuntimeId::for_session(authority.session_id()) != runtime_id
+            || catalog_entry.session_id() != authority.session_id()
+            || catalog_entry.persistence_profile()
+                != super::RuntimeSessionPersistenceProfile::WholeBlobV1
+            || u64::try_from(catalog_entry.message_count()).ok() != Some(message_count)
+            || candidate_artifact.row_sha256_token() != authority.candidate_blob_sha256()
+        {
+            return Err(RuntimeStoreError::SessionPersistenceAuthorityConflict {
+                runtime_id: runtime_id.to_string(),
+                detail: "WholeBlob provisional artifact/catalog does not bind this runtime/session authority"
+                    .to_string(),
+            });
+        }
+        let mut inner = self.inner.lock().await;
+        let current = inner
+            .session_authorities
+            .get(&runtime_id.0)
+            .ok_or_else(|| RuntimeStoreError::SessionPersistenceAuthorityConflict {
+                runtime_id: runtime_id.to_string(),
+                detail: "WholeBlob provisional candidate has no committed base".to_string(),
+            })?;
+        if current.session_id() != authority.session_id()
+            || current.store_revision() != authority.base_store_revision()
+            || current.blob_sha256() != authority.base_blob_sha256()
+        {
+            return Err(RuntimeStoreError::SessionPersistenceAuthorityConflict {
+                runtime_id: runtime_id.to_string(),
+                detail: "WholeBlob provisional candidate base is stale".to_string(),
+            });
+        }
+        if let Some(existing) = inner.whole_blob_provisional_tails.get(&runtime_id.0) {
+            if existing.authority == authority {
+                if existing.conversation_digest != conversation_digest
+                    || existing.message_count != message_count
+                {
+                    return Err(RuntimeStoreError::SessionPersistenceAuthorityConflict {
+                        runtime_id: runtime_id.to_string(),
+                        detail: "WholeBlob provisional retry changes bounded candidate facts"
+                            .to_string(),
+                    });
+                }
+                return Ok(existing.authority.clone());
+            }
+            let required_sequence = existing
+                .authority
+                .candidate_sequence()
+                .checked_add(1)
+                .ok_or_else(|| {
+                    RuntimeStoreError::WriteFailed(
+                        "WholeBlob provisional candidate sequence exhausted".to_string(),
+                    )
+                })?;
+            if existing.authority.session_id() != authority.session_id()
+                || existing.authority.base_store_revision() != authority.base_store_revision()
+                || existing.authority.base_blob_sha256() != authority.base_blob_sha256()
+                || existing.authority.run_id() != authority.run_id()
+                || authority.candidate_sequence() != required_sequence
+            {
+                return Err(RuntimeStoreError::SessionPersistenceAuthorityConflict {
+                    runtime_id: runtime_id.to_string(),
+                    detail: "WholeBlob provisional replacement is stale or skips sequence"
+                        .to_string(),
+                });
+            }
+        } else if authority.candidate_sequence() != 1 {
+            return Err(RuntimeStoreError::SessionPersistenceAuthorityConflict {
+                runtime_id: runtime_id.to_string(),
+                detail: "first WholeBlob provisional candidate sequence must be one".to_string(),
+            });
+        }
+        inner.whole_blob_provisional_tails.insert(
+            runtime_id.0.clone(),
+            StoredWholeBlobProvisionalTail {
+                authority: authority.clone(),
+                candidate_bytes,
+                conversation_digest,
+                message_count,
+                catalog_entry,
+                compaction_projection_intents,
+            },
+        );
+        Ok(authority)
+    }
+
+    async fn load_whole_blob_provisional_tail(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<CommittedWholeBlobProvisionalTail>, RuntimeStoreError> {
+        let inner = self.inner.lock().await;
+        let Some(stored) = inner.whole_blob_provisional_tails.get(&runtime_id.0) else {
+            return Ok(None);
+        };
+        if whole_blob_body_sha256(stored.candidate_bytes.as_ref())
+            != stored.authority.candidate_blob_sha256()
+        {
+            return Err(RuntimeStoreError::SessionPersistenceAuthorityConflict {
+                runtime_id: runtime_id.to_string(),
+                detail: "WholeBlob provisional body digest differs from store authority"
+                    .to_string(),
+            });
+        }
+        Ok(Some(CommittedWholeBlobProvisionalTail::new(
+            stored.authority.clone(),
+            Arc::clone(&stored.candidate_bytes),
+        )))
+    }
+
+    async fn discard_whole_blob_provisional_tail(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        expected: &WholeBlobProvisionalTailAuthority,
+    ) -> Result<bool, RuntimeStoreError> {
+        let mut inner = self.inner.lock().await;
+        if inner
+            .whole_blob_provisional_tails
+            .get(&runtime_id.0)
+            .is_some_and(|stored| &stored.authority == expected)
+        {
+            inner.whole_blob_provisional_tails.remove(&runtime_id.0);
+            return Ok(true);
+        }
+        Ok(false)
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl RuntimeStore for InMemoryRuntimeStore {
+    fn session_authority_ops(&self) -> &dyn super::RuntimeSessionAuthorityOps {
+        self
     }
 
     fn supports_compaction_projection_outbox(&self) -> bool {
@@ -2160,42 +2550,6 @@ impl RuntimeStore for InMemoryRuntimeStore {
         Ok(receipts)
     }
 
-    async fn load_durable_tail_recovery_receipts(
-        &self,
-        runtime_id: &LogicalRuntimeId,
-        run_id: &RunId,
-    ) -> Result<Vec<super::PreparedRecoveryReceiptSource>, RuntimeStoreError> {
-        let inner = self.inner.lock().await;
-        let mut receipts = inner
-            .receipts
-            .iter()
-            .filter(|(key, _)| key.runtime_id == runtime_id.0 && key.run_id == *run_id)
-            .map(|(_, receipt)| {
-                serde_json::to_vec(receipt)
-                    .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))
-                    .and_then(|bytes| {
-                        super::PreparedRecoveryReceiptSource::from_serialized_row(&bytes)
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        receipts.sort_by_key(|source| source.receipt().sequence);
-        Ok(receipts)
-    }
-
-    async fn load_committed_recovery_boundary(
-        &self,
-        runtime_id: &LogicalRuntimeId,
-        candidate_id: &str,
-    ) -> Result<Option<super::CommittedRecoveryBoundary>, RuntimeStoreError> {
-        Ok(self
-            .inner
-            .lock()
-            .await
-            .recovery_boundaries
-            .get(&(runtime_id.0.clone(), candidate_id.to_string()))
-            .cloned())
-    }
-
     async fn load_input_states_with_versions(
         &self,
         runtime_id: &LogicalRuntimeId,
@@ -2210,311 +2564,6 @@ impl RuntimeStore for InMemoryRuntimeStore {
     ) -> Result<Option<Arc<Vec<u8>>>, RuntimeStoreError> {
         let inner = self.inner.lock().await;
         Ok(inner.sessions.get(&runtime_id.0).cloned())
-    }
-
-    async fn load_whole_blob_store_authority(
-        &self,
-        runtime_id: &LogicalRuntimeId,
-    ) -> Result<Option<WholeBlobStoreAuthority>, RuntimeStoreError> {
-        Ok(self
-            .inner
-            .lock()
-            .await
-            .session_authorities
-            .get(&runtime_id.0)
-            .cloned())
-    }
-
-    async fn load_session_boundary_authority(
-        &self,
-        runtime_id: &LogicalRuntimeId,
-    ) -> Result<Option<RuntimeSessionAuthority>, RuntimeStoreError> {
-        self.load_whole_blob_store_authority(runtime_id)
-            .await
-            .map(|authority| authority.map(RuntimeSessionAuthority::WholeBlob))
-    }
-
-    async fn delete_runtime_session_catalog_entry(
-        &self,
-        runtime_id: &LogicalRuntimeId,
-    ) -> Result<(), RuntimeStoreError> {
-        self.inner
-            .lock()
-            .await
-            .session_catalog
-            .remove(&runtime_id.0);
-        Ok(())
-    }
-
-    async fn load_runtime_session_catalog_entry(
-        &self,
-        runtime_id: &LogicalRuntimeId,
-    ) -> Result<Option<super::RuntimeSessionCatalogEntry>, RuntimeStoreError> {
-        Ok(self
-            .inner
-            .lock()
-            .await
-            .session_catalog
-            .get(&runtime_id.0)
-            .cloned())
-    }
-
-    async fn list_runtime_session_catalog_entries(
-        &self,
-        filter: meerkat_core::SessionFilter,
-    ) -> Result<Vec<super::RuntimeSessionCatalogEntry>, RuntimeStoreError> {
-        let inner = self.inner.lock().await;
-        let mut entries = inner
-            .session_catalog
-            .values()
-            .filter(|entry| {
-                filter
-                    .created_after
-                    .is_none_or(|after| entry.created_at() >= after)
-                    && filter
-                        .updated_after
-                        .is_none_or(|after| entry.updated_at() >= after)
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        entries.sort_by(|left, right| {
-            right.updated_at().cmp(&left.updated_at()).then_with(|| {
-                left.session_id()
-                    .to_string()
-                    .cmp(&right.session_id().to_string())
-            })
-        });
-        let offset = filter.offset.unwrap_or(0).min(entries.len());
-        let limit = filter.limit.unwrap_or(usize::MAX);
-        Ok(entries.into_iter().skip(offset).take(limit).collect())
-    }
-
-    async fn load_committed_whole_blob_snapshot(
-        &self,
-        runtime_id: &LogicalRuntimeId,
-    ) -> Result<Option<CommittedWholeBlobSnapshot>, RuntimeStoreError> {
-        let inner = self.inner.lock().await;
-        match (
-            inner.sessions.get(&runtime_id.0),
-            inner.session_authorities.get(&runtime_id.0),
-        ) {
-            (None, None) => Ok(None),
-            (Some(bytes), Some(authority)) => Ok(Some(CommittedWholeBlobSnapshot::new(
-                Arc::clone(bytes),
-                authority.clone(),
-            )?)),
-            _ => Err(RuntimeStoreError::SessionPersistenceAuthorityConflict {
-                runtime_id: runtime_id.to_string(),
-                detail: "WholeBlob body and store authority ledger disagree on row presence"
-                    .to_string(),
-            }),
-        }
-    }
-
-    async fn commit_prepared_whole_blob_snapshot_cas(
-        &self,
-        runtime_id: &LogicalRuntimeId,
-        prepared: PreparedWholeBlobSnapshotCas,
-    ) -> Result<WholeBlobSnapshotCasOutcome, RuntimeStoreError> {
-        let (expected, candidate_session, candidate_bytes, candidate_blob_sha256) =
-            prepared.into_parts();
-        if &LogicalRuntimeId::for_session(candidate_session.id()) != runtime_id
-            || candidate_session.id() != expected.session_id()
-        {
-            return Err(RuntimeStoreError::SessionPersistenceAuthorityConflict {
-                runtime_id: runtime_id.to_string(),
-                detail: "prepared WholeBlob snapshot CAS does not bind this runtime/session"
-                    .to_string(),
-            });
-        }
-        let compaction_projection_intents =
-            super::validated_compaction_projection_intents(candidate_session.as_ref())?;
-        let mut inner = self.inner.lock().await;
-        let Some(current) = inner.session_authorities.get(&runtime_id.0) else {
-            return Ok(WholeBlobSnapshotCasOutcome::Conflict);
-        };
-        if current != &expected {
-            return Ok(WholeBlobSnapshotCasOutcome::Conflict);
-        }
-        if current.blob_sha256() == candidate_blob_sha256 {
-            return Ok(WholeBlobSnapshotCasOutcome::Committed(current.clone()));
-        }
-        if inner
-            .whole_blob_provisional_tails
-            .contains_key(&runtime_id.0)
-        {
-            return Err(RuntimeStoreError::SessionPersistenceAuthorityConflict {
-                runtime_id: runtime_id.to_string(),
-                detail: "snapshot CAS cannot bypass a store-owned WholeBlob provisional candidate"
-                    .to_string(),
-            });
-        }
-        ensure_compaction_intents_already_outboxed_list(
-            &inner,
-            runtime_id,
-            &compaction_projection_intents,
-        )?;
-        let runtime_state = inner
-            .session_catalog
-            .get(&runtime_id.0)
-            .and_then(super::RuntimeSessionCatalogEntry::runtime_state);
-        let catalog_entry = super::RuntimeSessionCatalogEntry::from_session(
-            candidate_session.as_ref(),
-            super::RuntimeSessionPersistenceProfile::WholeBlobV1,
-            runtime_state,
-        )?;
-        let authority = issue_whole_blob_store_authority(
-            Some(&expected),
-            candidate_session.id(),
-            &candidate_blob_sha256,
-        )?;
-        inner.sessions.insert(runtime_id.0.clone(), candidate_bytes);
-        inner
-            .session_authorities
-            .insert(runtime_id.0.clone(), authority.clone());
-        inner
-            .session_catalog
-            .insert(runtime_id.0.clone(), catalog_entry);
-        inner.projection_quarantine.remove(&runtime_id.0);
-        Ok(WholeBlobSnapshotCasOutcome::Committed(authority))
-    }
-
-    async fn write_prepared_whole_blob_provisional_tail(
-        &self,
-        runtime_id: &LogicalRuntimeId,
-        prepared: PreparedWholeBlobProvisionalTail,
-    ) -> Result<WholeBlobProvisionalTailAuthority, RuntimeStoreError> {
-        let (
-            authority,
-            candidate_artifact,
-            conversation_digest,
-            message_count,
-            catalog_entry,
-            compaction_projection_intents,
-        ) = prepared.into_parts();
-        let candidate_bytes = candidate_artifact.bytes_arc();
-        if &LogicalRuntimeId::for_session(authority.session_id()) != runtime_id
-            || catalog_entry.session_id() != authority.session_id()
-            || catalog_entry.persistence_profile()
-                != super::RuntimeSessionPersistenceProfile::WholeBlobV1
-            || u64::try_from(catalog_entry.message_count()).ok() != Some(message_count)
-            || candidate_artifact.row_sha256_token() != authority.candidate_blob_sha256()
-        {
-            return Err(RuntimeStoreError::SessionPersistenceAuthorityConflict {
-                runtime_id: runtime_id.to_string(),
-                detail: "WholeBlob provisional artifact/catalog does not bind this runtime/session authority"
-                    .to_string(),
-            });
-        }
-        let mut inner = self.inner.lock().await;
-        let current = inner
-            .session_authorities
-            .get(&runtime_id.0)
-            .ok_or_else(|| RuntimeStoreError::SessionPersistenceAuthorityConflict {
-                runtime_id: runtime_id.to_string(),
-                detail: "WholeBlob provisional candidate has no committed base".to_string(),
-            })?;
-        if current.session_id() != authority.session_id()
-            || current.store_revision() != authority.base_store_revision()
-            || current.blob_sha256() != authority.base_blob_sha256()
-        {
-            return Err(RuntimeStoreError::SessionPersistenceAuthorityConflict {
-                runtime_id: runtime_id.to_string(),
-                detail: "WholeBlob provisional candidate base is stale".to_string(),
-            });
-        }
-        if let Some(existing) = inner.whole_blob_provisional_tails.get(&runtime_id.0) {
-            if existing.authority == authority {
-                if existing.conversation_digest != conversation_digest
-                    || existing.message_count != message_count
-                {
-                    return Err(RuntimeStoreError::SessionPersistenceAuthorityConflict {
-                        runtime_id: runtime_id.to_string(),
-                        detail: "WholeBlob provisional retry changes bounded candidate facts"
-                            .to_string(),
-                    });
-                }
-                return Ok(existing.authority.clone());
-            }
-            let required_sequence = existing
-                .authority
-                .candidate_sequence()
-                .checked_add(1)
-                .ok_or_else(|| {
-                    RuntimeStoreError::WriteFailed(
-                        "WholeBlob provisional candidate sequence exhausted".to_string(),
-                    )
-                })?;
-            if existing.authority.session_id() != authority.session_id()
-                || existing.authority.base_store_revision() != authority.base_store_revision()
-                || existing.authority.base_blob_sha256() != authority.base_blob_sha256()
-                || existing.authority.run_id() != authority.run_id()
-                || authority.candidate_sequence() != required_sequence
-            {
-                return Err(RuntimeStoreError::SessionPersistenceAuthorityConflict {
-                    runtime_id: runtime_id.to_string(),
-                    detail: "WholeBlob provisional replacement is stale or skips sequence"
-                        .to_string(),
-                });
-            }
-        } else if authority.candidate_sequence() != 1 {
-            return Err(RuntimeStoreError::SessionPersistenceAuthorityConflict {
-                runtime_id: runtime_id.to_string(),
-                detail: "first WholeBlob provisional candidate sequence must be one".to_string(),
-            });
-        }
-        inner.whole_blob_provisional_tails.insert(
-            runtime_id.0.clone(),
-            StoredWholeBlobProvisionalTail {
-                authority: authority.clone(),
-                candidate_bytes,
-                conversation_digest,
-                message_count,
-                catalog_entry,
-                compaction_projection_intents,
-            },
-        );
-        Ok(authority)
-    }
-
-    async fn load_whole_blob_provisional_tail(
-        &self,
-        runtime_id: &LogicalRuntimeId,
-    ) -> Result<Option<CommittedWholeBlobProvisionalTail>, RuntimeStoreError> {
-        let inner = self.inner.lock().await;
-        let Some(stored) = inner.whole_blob_provisional_tails.get(&runtime_id.0) else {
-            return Ok(None);
-        };
-        if whole_blob_body_sha256(stored.candidate_bytes.as_ref())
-            != stored.authority.candidate_blob_sha256()
-        {
-            return Err(RuntimeStoreError::SessionPersistenceAuthorityConflict {
-                runtime_id: runtime_id.to_string(),
-                detail: "WholeBlob provisional body digest differs from store authority"
-                    .to_string(),
-            });
-        }
-        Ok(Some(CommittedWholeBlobProvisionalTail::new(
-            stored.authority.clone(),
-            Arc::clone(&stored.candidate_bytes),
-        )))
-    }
-
-    async fn discard_whole_blob_provisional_tail(
-        &self,
-        runtime_id: &LogicalRuntimeId,
-        expected: &WholeBlobProvisionalTailAuthority,
-    ) -> Result<bool, RuntimeStoreError> {
-        let mut inner = self.inner.lock().await;
-        if inner
-            .whole_blob_provisional_tails
-            .get(&runtime_id.0)
-            .is_some_and(|stored| &stored.authority == expected)
-        {
-            inner.whole_blob_provisional_tails.remove(&runtime_id.0);
-            return Ok(true);
-        }
-        Ok(false)
     }
 
     async fn clear_session_snapshot(
@@ -3387,6 +3436,11 @@ mod tests {
             .validated_transcript_history_state()
             .unwrap()
             .expect("fixture rewrite graph exists");
+        assert_eq!(
+            history.digest_format(),
+            3,
+            "fixture source must exercise the current transcript format"
+        );
         assert_eq!(history.commit_count(), 1, "fixture has one rewrite");
         let commit = history.last_commit().expect("fixture rewrite commit");
         let (start, end) = commit.selection.bounds();
@@ -3406,7 +3460,7 @@ mod tests {
                 history.materialize_revision(&commit.parent_revision).unwrap(),
                 history.materialize_revision(&commit.revision).unwrap(),
             ],
-            "digest_format": history.digest_format(),
+            "digest_format": 2,
         });
         let mut encoded = serde_json::to_value(session).unwrap();
         encoded["version"] = serde_json::json!(2);

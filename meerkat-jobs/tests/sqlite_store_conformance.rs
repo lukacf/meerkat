@@ -261,7 +261,7 @@ fn sqlite_open_stamps_the_jobs_schema_domain() {
 }
 
 #[test]
-fn sqlite_open_upgrades_the_legacy_jobs_document_schema_before_new_writes() {
+fn sqlite_open_refuses_a_jobs_schema_below_the_0_8_10_floor() {
     let temp = tempfile::tempdir().expect("tempdir");
     let path = temp.path().join("jobs.sqlite3");
     let conn = rusqlite::Connection::open(&path).expect("raw open");
@@ -286,14 +286,26 @@ fn sqlite_open_upgrades_the_legacy_jobs_document_schema_before_new_writes() {
     .expect("legacy schema");
     drop(conn);
 
-    SqliteDetachedJobStore::open(&path).expect("upgrade");
+    let error = SqliteDetachedJobStore::open(&path)
+        .expect_err("jobs schema v1 predates the 0.8.10 compatibility floor");
+    assert!(matches!(
+        error,
+        meerkat_jobs::DetachedJobError::Sqlite(
+            meerkat_sqlite::SqliteStoreError::UnsupportedSchemaPredecessor {
+                ref domain,
+                found: 1,
+                supported: 2,
+                ref allowed,
+            }
+        ) if domain == "jobs" && allowed == &[2]
+    ));
     let version = meerkat_sqlite::domain_version(
         &meerkat_sqlite::open(&path, meerkat_sqlite::ConnectionProfile::ReadOnly)
             .expect("read-only open"),
         meerkat_jobs::JOBS_DOMAIN.name,
     )
     .expect("domain version");
-    assert_eq!(version, Some(2));
+    assert_eq!(version, Some(1), "refusal must not mutate the ledger");
 }
 
 #[test]

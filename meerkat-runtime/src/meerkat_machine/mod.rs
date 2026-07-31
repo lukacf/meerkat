@@ -1460,9 +1460,10 @@ pub struct PreparedSessionMaterialization {
 /// Exact post-actor commit authority for an Archived+Retired materialization.
 ///
 /// This non-clone lease retains the machine mutation gate while the session
-/// owner promotes its durable document and while the runtime performs the
-/// matching Retired -> Idle transition. A broad session-control token cannot
-/// cross either boundary while an exact materialization claim is outstanding.
+/// owner confirms the same RuntimeStore authority and while the runtime
+/// performs the Retired -> Idle transition. A broad session-control token
+/// cannot cross this boundary while an exact materialization claim is
+/// outstanding.
 pub struct PreparedArchivedResumeCommitLease {
     machine: Arc<MeerkatMachine>,
     session_id: SessionId,
@@ -1472,13 +1473,11 @@ pub struct PreparedArchivedResumeCommitLease {
     _mutation_guard: crate::tokio::sync::OwnedMutexGuard<()>,
 }
 
-/// Type-state proof that the session owner durably promoted the archived
-/// document through the same runtime store authority as this exact machine
-/// attachment claim.
+/// Type-state proof that the session owner and this exact machine attachment
+/// claim share one RuntimeStore authority.
 ///
-/// Only this promoted form can realize Retired -> Idle, making the required
-/// document-before-runtime ordering explicit at the API boundary.
-pub struct PromotedArchivedResumeCommitLease {
+/// Only this authorized form can realize Retired -> Idle.
+pub struct AuthorizedArchivedResumeCommitLease {
     prepared: PreparedArchivedResumeCommitLease,
 }
 
@@ -1487,37 +1486,35 @@ impl PreparedArchivedResumeCommitLease {
         &self.session_id
     }
 
-    /// Convert the exact prepared lease into its post-document-promotion
-    /// type state. The session service calls this only after its durable
-    /// document write succeeds, and the shared-store check prevents a foreign
-    /// service from authorizing this machine's runtime reset.
-    pub fn confirm_document_promoted(
+    /// Bind the exact prepared lease to the session owner's RuntimeStore.
+    /// The shared-store check prevents a foreign service from authorizing this
+    /// machine's runtime reset.
+    pub fn confirm_runtime_store_authority(
         self,
         runtime_store: &Arc<dyn crate::RuntimeStore>,
-    ) -> Result<PromotedArchivedResumeCommitLease, RuntimeDriverError> {
+    ) -> Result<AuthorizedArchivedResumeCommitLease, RuntimeDriverError> {
         if !self.machine.shares_runtime_store_authority(runtime_store) {
             return Err(RuntimeDriverError::StaleAuthority {
                 reason: format!(
-                    "archived document promotion for session {} used a runtime store not owned by the prepared machine",
+                    "archived-resume authorization for session {} used a runtime store not owned by the prepared machine",
                     self.session_id
                 ),
             });
         }
-        Ok(PromotedArchivedResumeCommitLease { prepared: self })
+        Ok(AuthorizedArchivedResumeCommitLease { prepared: self })
     }
 }
 
-impl PromotedArchivedResumeCommitLease {
+impl AuthorizedArchivedResumeCommitLease {
     pub fn session_id(&self) -> &SessionId {
         self.prepared.session_id()
     }
 
-    /// Realize the exact Retired -> Idle half after durable document
-    /// promotion has been certified by the session owner.
+    /// Realize the exact store-owned Retired -> Idle transition.
     pub async fn reset_retired_runtime(&mut self) -> Result<ResetReport, RuntimeDriverError> {
         self.prepared
             .machine
-            .reset_runtime_for_promoted_archived_resume(self)
+            .reset_runtime_for_authorized_archived_resume(self)
             .await
     }
 }

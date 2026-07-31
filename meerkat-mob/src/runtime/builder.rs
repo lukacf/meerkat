@@ -2598,14 +2598,18 @@ pub(super) async fn latest_persisted_session_for_member(
     let Some((_, winner_session_id)) = best else {
         return Ok(None);
     };
-    // Full-load ONLY the winner. A winner that vanishes between the metadata
-    // match and the full load reads as "no replacement" (`Ok(None)`) — the
-    // caller records the member's restore failure exactly as if no candidate
-    // had matched.
-    Ok(session_service
-        .load_persisted_session(&winner_session_id)
-        .await?
-        .map(|session| (winner_session_id, session)))
+    // Operationally prepare and full-load ONLY the winner. A winner that
+    // vanishes between the metadata match and materialization reads as "no
+    // replacement" (`Ok(None)`) — the caller records the member's restore
+    // failure exactly as if no candidate had matched.
+    let loaded = session_service
+        .materialize_session_for_resume(&winner_session_id)
+        .await?;
+    if matches!(&loaded, ResumeSessionLoad::Absent) {
+        return Ok(None);
+    }
+    let session = loaded.into_session_or_error(&winner_session_id)?;
+    Ok(Some((winner_session_id, session)))
 }
 
 fn persisted_session_matches_member(
@@ -8714,7 +8718,7 @@ impl MobBuilder {
                 // refusal (the transcript is intact on disk — rotating to a
                 // replacement session would silently abandon it).
                 let stored_session = match session_service
-                    .load_session_for_resume(&bridge_session_id)
+                    .materialize_session_for_resume(&bridge_session_id)
                     .await?
                 {
                     ResumeSessionLoad::Active(stored_session)

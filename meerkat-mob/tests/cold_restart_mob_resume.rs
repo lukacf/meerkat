@@ -36,13 +36,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::time::{Duration, Instant, sleep};
 
-fn mutate_test_session(
-    session: &mut meerkat_core::Session,
-    mutate: impl FnOnce(&mut meerkat_core::Session),
-) {
-    mutate(session);
-}
-
 #[derive(Clone)]
 struct Paths {
     user_config_root: PathBuf,
@@ -327,6 +320,25 @@ fn assert_member_active(entry: &MobMemberListEntry, context: &str) {
     );
 }
 
+fn assert_member_broken_after_authority_loss(entry: &MobMemberListEntry, context: &str) {
+    assert_eq!(
+        entry.status,
+        MobMemberStatus::Broken,
+        "[{context}] member {} should fail closed after RuntimeStore authority loss; error={:?}",
+        entry.agent_identity,
+        entry.error
+    );
+    assert!(
+        entry
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("missing durable session snapshot")),
+        "[{context}] member {} broke for an unexpected reason: {:?}",
+        entry.agent_identity,
+        entry.error
+    );
+}
+
 /// Drive the full mob cold-restart shape:
 ///   lifetime 1: create mob, spawn lead+worker, run turns, peer message,
 ///               stop without archiving;
@@ -483,6 +495,12 @@ async fn run_cold_restart_scenario(reuse_runtime_store: bool, lead_mode: MobRunt
     let w1_after = member_entry(&handle_2, "w-1").await;
     eprintln!("[lifetime2] lead={lead_after:?}");
     eprintln!("[lifetime2] w1={w1_after:?}");
+    if !reuse_runtime_store {
+        assert_member_broken_after_authority_loss(&lead_after, "post-reset");
+        assert_member_broken_after_authority_loss(&w1_after, "post-reset");
+        handle_2.shutdown().await.expect("final shutdown");
+        return;
+    }
     assert_member_active(&lead_after, "post-resume");
     assert_member_active(&w1_after, "post-resume");
 
@@ -617,9 +635,9 @@ async fn mob_cold_restart_resume_with_durable_runtime_store() {
     run_cold_restart_scenario(true, MobRuntimeMode::TurnDriven).await;
 }
 
-/// Runtime store is lost at restart (the shape the live smoke exercises): the
-/// runtime authority is re-created empty and the session-store row is the only
-/// resume source.
+/// RuntimeStore is the singular committed body/catalog authority. Replacing it
+/// with a blank store is durable data loss, so stale non-authoritative
+/// SessionStore projections must not resurrect either member.
 #[tokio::test(flavor = "multi_thread")]
 async fn mob_cold_restart_resume_with_reset_runtime_store() {
     run_cold_restart_scenario(false, MobRuntimeMode::TurnDriven).await;
@@ -637,8 +655,9 @@ async fn mob_cold_restart_resume_autonomous_lead_durable_runtime_store() {
 }
 
 /// An explicitly resumed member may adopt its archived+Retired session after a
-/// full host restart. The revival must promote both lifecycle projections and
-/// preserve the exact bridge-session identity and transcript.
+/// full host restart. Revival crosses the store-owned Retired terminal through
+/// the exact machine lease while preserving the content-only body, bridge
+/// session identity, and transcript.
 #[tokio::test(flavor = "multi_thread")]
 async fn mob_cold_restart_explicit_resume_revives_archived_retired_session_in_place() {
     let temp = tempfile::tempdir().expect("temp dir");
@@ -655,7 +674,7 @@ async fn mob_cold_restart_explicit_resume_revives_archived_retired_session_in_pl
     };
 
     // ---------------- Lifetime 1: create, use, then retire ----------------
-    let (service_1, store_1) = persistent_service(&paths, runtime_store.clone());
+    let (service_1, _store_1) = persistent_service(&paths, runtime_store.clone());
     let storage_1 = MobStorage::persistent(&paths.mob_db_path).expect("persistent mob storage");
     let handle_1 = MobBuilder::new(definition, storage_1)
         .with_session_service(service_1.clone())
@@ -695,7 +714,7 @@ async fn mob_cold_restart_explicit_resume_revives_archived_retired_session_in_pl
             .is_none(),
         "ordinary reads must continue to hide archived sessions"
     );
-    let mut archived = service_1
+    let archived = service_1
         .load_revivable_retired_session(&original_session_id)
         .await
         .expect("load retired session through explicit revival seam")
@@ -715,40 +734,15 @@ async fn mob_cold_restart_explicit_resume_revives_archived_retired_session_in_pl
         "retirement must durably retire runtime authority"
     );
 
-    // Mob retirement also accepts the older Retired-only compatibility shape,
-    // where the explicit document marker is absent. Exercise the stronger
-    // archived-document variant as well: older stores and direct machine
-    // archive authority can carry an explicit Archived marker, and revival
-    // must synchronize that promoted Active snapshot into the already-created
-    // live agent before its first checkpoint.
-    mutate_test_session(&mut archived, |session| {
-        session
-            .set_lifecycle_terminal(meerkat_core::session::SessionLifecycleTerminal::Archived)
-            .expect("set explicit archived document fixture");
-    });
-    runtime_store
-        .commit_session_snapshot(
-            &runtime_id,
-            meerkat_runtime::store::SerializedSessionSnapshot {
-                session_snapshot: serde_json::to_vec(&archived)
-                    .expect("serialize explicit archived runtime snapshot")
-                    .into(),
-            },
-        )
-        .await
-        .expect("persist explicit archived runtime snapshot");
-    store_1
-        .save_authoritative_projection(&archived)
-        .await
-        .expect("persist explicit archived compatibility projection");
-    assert_eq!(
+    assert_ne!(
         service_1
             .load_revivable_retired_session(&original_session_id)
             .await
-            .expect("reload explicit archived session")
-            .expect("explicit archived session remains revivable")
+            .expect("reload retired session")
+            .expect("retired session remains revivable")
             .lifecycle_terminal(),
-        Some(meerkat_core::session::SessionLifecycleTerminal::Archived)
+        Some(meerkat_core::session::SessionLifecycleTerminal::Archived),
+        "archive authority must remain store-owned instead of being copied into the Session body"
     );
 
     handle_1
@@ -759,7 +753,7 @@ async fn mob_cold_restart_explicit_resume_revives_archived_retired_session_in_pl
     drop(service_1);
 
     // ---------------- Lifetime 2: reopen, then explicitly revive ----------
-    let (service_2, store_2) = persistent_service(&paths, runtime_store.clone());
+    let (service_2, _store_2) = persistent_service(&paths, runtime_store.clone());
     let storage_2 = MobStorage::persistent(&paths.mob_db_path).expect("reopen mob storage");
     let handle_2 = MobBuilder::for_resume(storage_2)
         .with_session_service(service_2.clone())
@@ -789,10 +783,10 @@ async fn mob_cold_restart_explicit_resume_revives_archived_retired_session_in_pl
         .await
         .expect("load revived authoritative session")
         .expect("revived session must remain durable");
-    assert_eq!(
+    assert_ne!(
         revived.lifecycle_terminal(),
-        Some(meerkat_core::session::SessionLifecycleTerminal::Active),
-        "revival must promote the durable session document to Active"
+        Some(meerkat_core::session::SessionLifecycleTerminal::Archived),
+        "revival must preserve the content-only Session body"
     );
     assert!(
         service_2
@@ -838,20 +832,10 @@ async fn mob_cold_restart_explicit_resume_revives_archived_retired_session_in_pl
         .await
         .expect("load authoritative session after revived turn")
         .expect("revived session remains authoritative after turn");
-    assert_eq!(
+    assert_ne!(
         after_turn.lifecycle_terminal(),
-        Some(meerkat_core::session::SessionLifecycleTerminal::Active),
-        "the revived live agent must not checkpoint its stale Archived snapshot over durable Active"
-    );
-    let compatibility_projection = store_2
-        .load(&original_session_id)
-        .await
-        .expect("load compatibility projection after revived turn")
-        .expect("compatibility projection remains present after revived turn");
-    assert_eq!(
-        compatibility_projection.lifecycle_terminal(),
-        Some(meerkat_core::session::SessionLifecycleTerminal::Active),
-        "the first revived turn must preserve the Active compatibility projection"
+        Some(meerkat_core::session::SessionLifecycleTerminal::Archived),
+        "the revived live agent must preserve the content-only Session body"
     );
     assert!(
         service_2
@@ -874,7 +858,7 @@ async fn mob_cold_restart_partial_resume_respawns_wired_member() {
     let paths = Paths::new(temp.path());
     let runtime_store_1: Arc<dyn meerkat_runtime::RuntimeStore> =
         Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
-    let (service_1, store_1) = persistent_service(&paths, runtime_store_1);
+    let (service_1, store_1) = persistent_service(&paths, runtime_store_1.clone());
     let storage_1 = MobStorage::persistent(&paths.mob_db_path).expect("persistent mob storage");
     let definition = mob_definition(MobRuntimeMode::TurnDriven);
     let replacement_w2_comms_name = format!("{}/worker/w-2", definition.id);
@@ -927,12 +911,14 @@ async fn mob_cold_restart_partial_resume_respawns_wired_member() {
     store_1
         .delete(&w2_sid)
         .await
-        .expect("delete w2 durable session row");
+        .expect("delete stale w2 compatibility projection");
     drop(store_1);
+    runtime_store_1
+        .clear_session_snapshot(&meerkat_runtime::LogicalRuntimeId::for_session(&w2_sid))
+        .await
+        .expect("delete exact w2 RuntimeStore authority");
 
-    let runtime_store_2: Arc<dyn meerkat_runtime::RuntimeStore> =
-        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
-    let (service_2, _store_2) = persistent_service(&paths, runtime_store_2);
+    let (service_2, _store_2) = persistent_service(&paths, runtime_store_1);
     let storage_2 = MobStorage::persistent(&paths.mob_db_path).expect("reopen mob storage");
     let handle_2 = MobBuilder::for_resume(storage_2)
         .with_session_service(service_2.clone())
@@ -1080,10 +1066,20 @@ impl PowerCutRuntimeStore {
 
 #[async_trait::async_trait]
 impl meerkat_runtime::RuntimeStore for PowerCutRuntimeStore {
+    fn session_authority_ops(&self) -> &dyn meerkat_runtime::store::RuntimeSessionAuthorityOps {
+        self.inner.session_authority_ops()
+    }
+
     fn session_persistence_profile(
         &self,
     ) -> meerkat_runtime::store::RuntimeSessionPersistenceProfile {
         meerkat_runtime::RuntimeStore::session_persistence_profile(&self.inner)
+    }
+
+    fn session_boundary_authority_read_cost(
+        &self,
+    ) -> meerkat_runtime::store::RuntimeSessionAuthorityReadCost {
+        self.inner.session_boundary_authority_read_cost()
     }
 
     async fn commit_prepared_session_boundary(
@@ -1094,7 +1090,7 @@ impl meerkat_runtime::RuntimeStore for PowerCutRuntimeStore {
         meerkat_runtime::store::PreparedRuntimeSessionCommitResult,
         meerkat_runtime::RuntimeStoreError,
     > {
-        if self.is_cut() && request.session().is_some() {
+        if self.is_cut() {
             self.record_prepared_boundary_commit_rejection();
             return Err(meerkat_runtime::RuntimeStoreError::WriteFailed(
                 "power cut (commit_prepared_session_boundary): durable runtime-store write lost"
@@ -1114,6 +1110,74 @@ impl meerkat_runtime::RuntimeStore for PowerCutRuntimeStore {
         meerkat_runtime::RuntimeStoreError,
     > {
         self.inner.load_session_boundary_authority(runtime_id).await
+    }
+
+    async fn delete_runtime_session_catalog_entry(
+        &self,
+        runtime_id: &meerkat_runtime::LogicalRuntimeId,
+    ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
+        self.inner
+            .delete_runtime_session_catalog_entry(runtime_id)
+            .await
+    }
+
+    async fn load_runtime_session_catalog_entry(
+        &self,
+        runtime_id: &meerkat_runtime::LogicalRuntimeId,
+    ) -> Result<
+        Option<meerkat_runtime::store::RuntimeSessionCatalogEntry>,
+        meerkat_runtime::RuntimeStoreError,
+    > {
+        self.inner
+            .load_runtime_session_catalog_entry(runtime_id)
+            .await
+    }
+
+    async fn list_runtime_session_catalog_entries(
+        &self,
+        filter: meerkat_core::SessionFilter,
+    ) -> Result<
+        Vec<meerkat_runtime::store::RuntimeSessionCatalogEntry>,
+        meerkat_runtime::RuntimeStoreError,
+    > {
+        self.inner
+            .list_runtime_session_catalog_entries(filter)
+            .await
+    }
+
+    async fn write_prepared_head_canonical_provisional_tail(
+        &self,
+        runtime_id: &meerkat_runtime::LogicalRuntimeId,
+        prepared: meerkat_runtime::store::PreparedHeadCanonicalProvisionalTail,
+    ) -> Result<
+        meerkat_runtime::store::HeadCanonicalProvisionalTailAuthority,
+        meerkat_runtime::RuntimeStoreError,
+    > {
+        self.inner
+            .write_prepared_head_canonical_provisional_tail(runtime_id, prepared)
+            .await
+    }
+
+    async fn load_head_canonical_provisional_tail(
+        &self,
+        runtime_id: &meerkat_runtime::LogicalRuntimeId,
+    ) -> Result<
+        Option<meerkat_runtime::store::HeadCanonicalProvisionalTailAuthority>,
+        meerkat_runtime::RuntimeStoreError,
+    > {
+        self.inner
+            .load_head_canonical_provisional_tail(runtime_id)
+            .await
+    }
+
+    async fn discard_head_canonical_provisional_tail(
+        &self,
+        runtime_id: &meerkat_runtime::LogicalRuntimeId,
+        expected: &meerkat_runtime::store::HeadCanonicalProvisionalTailAuthority,
+    ) -> Result<bool, meerkat_runtime::RuntimeStoreError> {
+        self.inner
+            .discard_head_canonical_provisional_tail(runtime_id, expected)
+            .await
     }
 
     async fn load_durable_tail_recovery_source(
@@ -1797,6 +1861,20 @@ async fn mob_cold_restart_resume_after_kill_between_commit_points() {
         "kill-window-lifetime1",
     )
     .await;
+    wait_for_head_canonical_authority_convergence(
+        store_1.as_ref(),
+        runtime_store.as_ref(),
+        &w1_sid,
+        "PRE_CUT_W1_TURN",
+        "pre-cut-boundary",
+    )
+    .await;
+    let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&w1_sid);
+    let pre_cut_boundary_authority = runtime_store
+        .load_session_boundary_authority(&runtime_id)
+        .await
+        .expect("load pre-cut runtime session authority")
+        .expect("pre-cut runtime session authority present");
 
     // Power cut: durable-before-ack admission still lands, but the next
     // prepared session boundary is rejected as if the process died before
@@ -1835,10 +1913,14 @@ async fn mob_cold_restart_resume_after_kill_between_commit_points() {
         row_blob.len()
     );
     let committed_boundary_authority = runtime_store
-        .load_session_boundary_authority(&meerkat_runtime::LogicalRuntimeId::for_session(&w1_sid))
+        .load_session_boundary_authority(&runtime_id)
         .await
         .expect("load runtime session authority")
         .expect("runtime session authority present");
+    assert_eq!(
+        committed_boundary_authority, pre_cut_boundary_authority,
+        "the rejected boundary commit must leave the exact pre-cut RuntimeStore authority current"
+    );
     assert_eq!(
         committed_boundary_authority.profile(),
         meerkat_runtime::store::RuntimeSessionPersistenceProfile::HeadCanonicalV1
@@ -1847,27 +1929,6 @@ async fn mob_cold_restart_resume_after_kill_between_commit_points() {
         .head_canonical()
         .expect("head-canonical boundary authority");
     let boundary_head = committed_boundary_authority.boundary_head().clone();
-    let boundary_messages = store_1
-        .load_messages(
-            &w1_sid,
-            &boundary_head.strand,
-            0..boundary_head.message_count,
-        )
-        .await
-        .expect("load exact committed boundary rows");
-    let committed_boundary_session = boundary_head
-        .into_session(boundary_messages)
-        .expect("materialize exact committed boundary");
-    let committed_boundary_history =
-        to_string(committed_boundary_session.messages()).expect("serialize committed boundary");
-    assert!(
-        !committed_boundary_history.contains("POST_CUT_W1_TURN"),
-        "retained runtime boundary must be frozen before turn B by the cut"
-    );
-    assert!(
-        committed_boundary_history.contains("PRE_CUT_W1_TURN"),
-        "retained runtime boundary must still carry turn A: {committed_boundary_history}"
-    );
     // Synchronize on the kill window actually having happened: the boundary
     // commit for turn B must have been rejected BEFORE power is restored,
     // otherwise a late commit could converge the stores and the scenario
@@ -1915,7 +1976,7 @@ async fn mob_cold_restart_resume_after_kill_between_commit_points() {
         "the physical head must remain strictly ahead of retained runtime authority"
     );
     assert!(
-        ahead_head.message_count > committed_boundary_session.messages().len() as u64,
+        ahead_head.message_count > boundary_head.message_count,
         "the ahead physical head must contain a strict transcript continuation"
     );
 

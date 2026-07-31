@@ -139,10 +139,12 @@ Ownership splits three ways:
   Both are fenced on the observed store, lifecycle-row, and input-row
   identities, so a concurrent writer fails the whole boundary typed instead
   of being overwritten. No shell promotes or discards the tail.
-  `recover_durable_tail` is the only public preparation seam and accepts only
-  the `RuntimeStore` plus stable `SessionId`; it loads and seals the exact
-  store source, classification, receipt facts, candidate identity, and CAS
-  tokens internally before driving generated authority.
+  `recover_durable_tail(&dyn RuntimeStore, &SessionId)` is the only public
+  preparation seam. The store loads an opaque
+  `PreparedDurableTailRecoverySource`; recovery derives the classification,
+  receipt facts, candidate identity, and physical CAS before sealing
+  crate-owned `PreparedRecoveryEvidence`. There is no public request
+  constructor or caller-mintable recovery capability.
 
 The recovery rule is never-discard: every store-proven durable descendant is
 preserved. Recovery commits a completed tail as a recovered run boundary,

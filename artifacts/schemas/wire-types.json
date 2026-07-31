@@ -3375,7 +3375,7 @@
             "$ref": "#/$defs/TranscriptRewriteCommit"
           },
           "digest_format": {
-            "description": "Digest-format generation of this record's revision strings. Records\nstamped `>= 2` were written by the content-addressed digest format, so\ndecode skips the per-decode legacy-heal probe (a full-transcript hash\nof BOTH bodies); absent/0 means unknown provenance and the probe runs,\nexactly as it did before the marker existed. A compatibility\nconvenience, not an integrity boundary: the record's own validation\nagainst its commit owns integrity, and a stamped record that does not\nvalidate is rejected exactly as an unstamped one is.\n\nRecords are append-only and never restamped in place, so this skips\nthe probe only for records minted from the version that added it.",
+            "description": "Digest-format generation of this record's revision strings. Records\nstamped with the current generation were written by the canonical\ncontent-addressed digest format, so\ndecode skips the per-decode legacy-heal probe (a full-transcript hash\nof BOTH bodies); absent/0 means unknown provenance and the probe runs,\nexactly as it did before the marker existed. A compatibility\nconvenience, not an integrity boundary: the record's own validation\nagainst its commit owns integrity, and a stamped record that does not\nvalidate is rejected exactly as an unstamped one is.\n\nRecords are append-only and never restamped in place, so this skips\nthe probe only for records minted from the version that added it.",
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
@@ -20852,7 +20852,7 @@
             "$ref": "#/$defs/TranscriptRewriteCommit"
           },
           "digest_format": {
-            "description": "Digest-format generation of this record's revision strings. Records\nstamped `>= 2` were written by the content-addressed digest format, so\ndecode skips the per-decode legacy-heal probe (a full-transcript hash\nof BOTH bodies); absent/0 means unknown provenance and the probe runs,\nexactly as it did before the marker existed. A compatibility\nconvenience, not an integrity boundary: the record's own validation\nagainst its commit owns integrity, and a stamped record that does not\nvalidate is rejected exactly as an unstamped one is.\n\nRecords are append-only and never restamped in place, so this skips\nthe probe only for records minted from the version that added it.",
+            "description": "Digest-format generation of this record's revision strings. Records\nstamped with the current generation were written by the canonical\ncontent-addressed digest format, so\ndecode skips the per-decode legacy-heal probe (a full-transcript hash\nof BOTH bodies); absent/0 means unknown provenance and the probe runs,\nexactly as it did before the marker existed. A compatibility\nconvenience, not an integrity boundary: the record's own validation\nagainst its commit owns integrity, and a stamped record that does not\nvalidate is rejected exactly as an unstamped one is.\n\nRecords are append-only and never restamped in place, so this skips\nthe probe only for records minted from the version that added it.",
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
@@ -31187,7 +31187,7 @@
             "$ref": "#/$defs/TranscriptRewriteCommit"
           },
           "digest_format": {
-            "description": "Digest-format generation of this record's revision strings. Records\nstamped `>= 2` were written by the content-addressed digest format, so\ndecode skips the per-decode legacy-heal probe (a full-transcript hash\nof BOTH bodies); absent/0 means unknown provenance and the probe runs,\nexactly as it did before the marker existed. A compatibility\nconvenience, not an integrity boundary: the record's own validation\nagainst its commit owns integrity, and a stamped record that does not\nvalidate is rejected exactly as an unstamped one is.\n\nRecords are append-only and never restamped in place, so this skips\nthe probe only for records minted from the version that added it.",
+            "description": "Digest-format generation of this record's revision strings. Records\nstamped with the current generation were written by the canonical\ncontent-addressed digest format, so\ndecode skips the per-decode legacy-heal probe (a full-transcript hash\nof BOTH bodies); absent/0 means unknown provenance and the probe runs,\nexactly as it did before the marker existed. A compatibility\nconvenience, not an integrity boundary: the record's own validation\nagainst its commit owns integrity, and a stamped record that does not\nvalidate is rejected exactly as an unstamped one is.\n\nRecords are append-only and never restamped in place, so this skips\nthe probe only for records minted from the version that added it.",
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
@@ -44511,7 +44511,7 @@
             "$ref": "#/$defs/TranscriptRewriteCommit"
           },
           "digest_format": {
-            "description": "Digest-format generation of this record's revision strings. Records\nstamped `>= 2` were written by the content-addressed digest format, so\ndecode skips the per-decode legacy-heal probe (a full-transcript hash\nof BOTH bodies); absent/0 means unknown provenance and the probe runs,\nexactly as it did before the marker existed. A compatibility\nconvenience, not an integrity boundary: the record's own validation\nagainst its commit owns integrity, and a stamped record that does not\nvalidate is rejected exactly as an unstamped one is.\n\nRecords are append-only and never restamped in place, so this skips\nthe probe only for records minted from the version that added it.",
+            "description": "Digest-format generation of this record's revision strings. Records\nstamped with the current generation were written by the canonical\ncontent-addressed digest format, so\ndecode skips the per-decode legacy-heal probe (a full-transcript hash\nof BOTH bodies); absent/0 means unknown provenance and the probe runs,\nexactly as it did before the marker existed. A compatibility\nconvenience, not an integrity boundary: the record's own validation\nagainst its commit owns integrity, and a stamped record that does not\nvalidate is rejected exactly as an unstamped one is.\n\nRecords are append-only and never restamped in place, so this skips\nthe probe only for records minted from the version that added it.",
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
@@ -57710,7 +57710,7 @@
             "$ref": "#/$defs/TranscriptRewriteCommit"
           },
           "digest_format": {
-            "description": "Digest-format generation of this record's revision strings. Records\nstamped `>= 2` were written by the content-addressed digest format, so\ndecode skips the per-decode legacy-heal probe (a full-transcript hash\nof BOTH bodies); absent/0 means unknown provenance and the probe runs,\nexactly as it did before the marker existed. A compatibility\nconvenience, not an integrity boundary: the record's own validation\nagainst its commit owns integrity, and a stamped record that does not\nvalidate is rejected exactly as an unstamped one is.\n\nRecords are append-only and never restamped in place, so this skips\nthe probe only for records minted from the version that added it.",
+            "description": "Digest-format generation of this record's revision strings. Records\nstamped with the current generation were written by the canonical\ncontent-addressed digest format, so\ndecode skips the per-decode legacy-heal probe (a full-transcript hash\nof BOTH bodies); absent/0 means unknown provenance and the probe runs,\nexactly as it did before the marker existed. A compatibility\nconvenience, not an integrity boundary: the record's own validation\nagainst its commit owns integrity, and a stamped record that does not\nvalidate is rejected exactly as an unstamped one is.\n\nRecords are append-only and never restamped in place, so this skips\nthe probe only for records minted from the version that added it.",
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
@@ -64012,7 +64012,7 @@
             "$ref": "#/$defs/TranscriptRewriteCommit"
           },
           "digest_format": {
-            "description": "Digest-format generation of this record's revision strings. Records\nstamped `>= 2` were written by the content-addressed digest format, so\ndecode skips the per-decode legacy-heal probe (a full-transcript hash\nof BOTH bodies); absent/0 means unknown provenance and the probe runs,\nexactly as it did before the marker existed. A compatibility\nconvenience, not an integrity boundary: the record's own validation\nagainst its commit owns integrity, and a stamped record that does not\nvalidate is rejected exactly as an unstamped one is.\n\nRecords are append-only and never restamped in place, so this skips\nthe probe only for records minted from the version that added it.",
+            "description": "Digest-format generation of this record's revision strings. Records\nstamped with the current generation were written by the canonical\ncontent-addressed digest format, so\ndecode skips the per-decode legacy-heal probe (a full-transcript hash\nof BOTH bodies); absent/0 means unknown provenance and the probe runs,\nexactly as it did before the marker existed. A compatibility\nconvenience, not an integrity boundary: the record's own validation\nagainst its commit owns integrity, and a stamped record that does not\nvalidate is rejected exactly as an unstamped one is.\n\nRecords are append-only and never restamped in place, so this skips\nthe probe only for records minted from the version that added it.",
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
@@ -108193,7 +108193,7 @@
             "$ref": "#/$defs/TranscriptRewriteCommit"
           },
           "digest_format": {
-            "description": "Digest-format generation of this record's revision strings. Records\nstamped `>= 2` were written by the content-addressed digest format, so\ndecode skips the per-decode legacy-heal probe (a full-transcript hash\nof BOTH bodies); absent/0 means unknown provenance and the probe runs,\nexactly as it did before the marker existed. A compatibility\nconvenience, not an integrity boundary: the record's own validation\nagainst its commit owns integrity, and a stamped record that does not\nvalidate is rejected exactly as an unstamped one is.\n\nRecords are append-only and never restamped in place, so this skips\nthe probe only for records minted from the version that added it.",
+            "description": "Digest-format generation of this record's revision strings. Records\nstamped with the current generation were written by the canonical\ncontent-addressed digest format, so\ndecode skips the per-decode legacy-heal probe (a full-transcript hash\nof BOTH bodies); absent/0 means unknown provenance and the probe runs,\nexactly as it did before the marker existed. A compatibility\nconvenience, not an integrity boundary: the record's own validation\nagainst its commit owns integrity, and a stamped record that does not\nvalidate is rejected exactly as an unstamped one is.\n\nRecords are append-only and never restamped in place, so this skips\nthe probe only for records minted from the version that added it.",
             "format": "uint32",
             "minimum": 0,
             "type": "integer"

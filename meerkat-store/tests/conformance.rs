@@ -311,9 +311,9 @@ mod sqlite_store {
 
     #[tokio::test]
     async fn incremental() {
-        chapters::incremental(&SqliteFactory::new())
+        chapters::incremental_head_canonical(&SqliteFactory::new())
             .await
-            .expect("SqliteSessionStore must pass the incremental profile");
+            .expect("SqliteSessionStore must pass the prepared HeadCanonical incremental profile");
     }
 
     #[tokio::test]

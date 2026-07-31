@@ -9712,6 +9712,10 @@ async fn persistent_destroy_durable_commit_observes_canonical_destroy_truth() {
 
     #[async_trait::async_trait]
     impl RuntimeStore for BlockingDestroyCommitStore {
+        fn session_authority_ops(&self) -> &dyn crate::store::RuntimeSessionAuthorityOps {
+            self.inner.session_authority_ops()
+        }
+
         fn session_persistence_profile(&self) -> crate::store::RuntimeSessionPersistenceProfile {
             RuntimeStore::session_persistence_profile(self.inner.as_ref())
         }
@@ -25412,6 +25416,10 @@ impl RuntimeCommitAtomicityStore {
 
 #[async_trait::async_trait]
 impl RuntimeStore for RuntimeCommitAtomicityStore {
+    fn session_authority_ops(&self) -> &dyn crate::store::RuntimeSessionAuthorityOps {
+        self.inner.session_authority_ops()
+    }
+
     fn session_persistence_profile(&self) -> crate::store::RuntimeSessionPersistenceProfile {
         RuntimeStore::session_persistence_profile(self.inner.as_ref())
     }

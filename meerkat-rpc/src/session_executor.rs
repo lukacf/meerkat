@@ -1085,6 +1085,13 @@ mod tests {
     #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
     #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
     impl MobSessionService for BoundaryCancelSessionService {
+        async fn prepare_session_for_resume(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<(), SessionError> {
+            Ok(())
+        }
+
         async fn acknowledge_committed_runtime_session_boundary_under_turn_finalization_boundary(
             &self,
             _session_id: &SessionId,

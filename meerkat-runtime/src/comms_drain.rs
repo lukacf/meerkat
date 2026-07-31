@@ -1147,23 +1147,17 @@ fn peer_input_from_delivery_payload(
                     .to_string(),
             );
         }
+        let mut turn_metadata =
+            crate::runtime_loop::for_bridge_turn_directive(payload.handling_mode, None);
+        turn_metadata.system_prompts = payload.system_prompt.into_iter().collect();
+        turn_metadata.transient_turn_context = Some(context);
+        turn_metadata.transcript_identity.objective_id = payload.objective_id;
         return Ok(Input::FlowStep(FlowStepInput {
             header,
             step_id: format!("bridge-delivery:{}", payload.input_id),
             content: payload.content,
             directed_interaction_id,
-            turn_metadata: Some(
-                meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                    handling_mode: Some(payload.handling_mode),
-                    system_prompts: payload.system_prompt.into_iter().collect(),
-                    transient_turn_context: Some(context),
-                    transcript_identity: meerkat_core::types::TranscriptMessageIdentity {
-                        objective_id: payload.objective_id,
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                },
-            ),
+            turn_metadata: Some(turn_metadata),
         }));
     }
     Ok(Input::Peer(PeerInput {
@@ -10658,6 +10652,68 @@ mod tests {
                 .directed_interaction_ids
                 .is_empty(),
             "correlation alone must not opt legacy peer traffic into directed terminals"
+        );
+    }
+
+    #[test]
+    fn bridge_delivery_transient_context_preserves_runtime_owned_metadata() {
+        let stable_input_id = Uuid::new_v4();
+        let objective_id = meerkat_core::interaction::ObjectiveId::new();
+        let transient_context =
+            meerkat_core::lifecycle::run_primitive::TurnRequestContext::new("caller context")
+                .expect("non-empty transient context");
+        let input = peer_input_from_delivery_payload(
+            &SessionId::new(),
+            PeerId::parse(PEER_ID_SUPERVISOR).expect("valid supervisor peer id"),
+            BridgeDeliveryPayload {
+                objective_id: Some(objective_id),
+                system_prompt: Some("updated member instructions".to_string()),
+                injected_context: Vec::new(),
+                transient_turn_context: Some(transient_context.clone()),
+                supervisor: supervisor_bridge_spec(),
+                epoch: 1,
+                protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+                input_id: stable_input_id.to_string(),
+                transcript_interaction_id: None,
+                content: meerkat_core::types::ContentInput::Text("live follow-up".to_string()),
+                handling_mode: HandlingMode::Steer,
+                expected_member: None,
+                turn: None,
+                outcome_tracking: None,
+            },
+        )
+        .expect("transient-context bridge delivery lowers");
+
+        let Input::FlowStep(flow_step) = &input else {
+            panic!("transient-context delivery must use the flow-step carrier");
+        };
+        let metadata = flow_step
+            .turn_metadata
+            .as_ref()
+            .expect("flow-step carrier must preserve turn metadata");
+        assert_eq!(metadata.handling_mode, Some(HandlingMode::Steer));
+        assert_eq!(
+            metadata.system_prompts,
+            ["updated member instructions"],
+            "supervisor-authored System content must survive bridge lowering"
+        );
+        assert_eq!(
+            metadata.transient_turn_context.as_ref(),
+            Some(&transient_context)
+        );
+        assert_eq!(
+            metadata.transcript_identity.objective_id,
+            Some(objective_id)
+        );
+
+        let semantics =
+            crate::ingress_types::RuntimeInputSemantics::try_from_generated_admission(&input, true)
+                .expect("flow-step admission semantics");
+        let runtime_metadata = crate::runtime_loop::for_input(&input, semantics);
+        assert_eq!(
+            runtime_metadata.transcript_identity.interaction_id,
+            Some(meerkat_core::interaction::InteractionId(stable_input_id)),
+            "the runtime constructor must mint the transient turn's durable interaction identity"
         );
     }
 

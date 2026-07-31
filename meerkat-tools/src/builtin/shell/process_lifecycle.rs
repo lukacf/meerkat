@@ -88,12 +88,13 @@ impl OwnedProcessGroup {
                 if self.kill_already_requested
                     && error.kind() == std::io::ErrorKind::PermissionDenied =>
             {
-                // Drop-time cancellation already delivered an accepted
-                // SIGKILL fence to this owned group. On macOS, probing that
-                // numeric group after its leader exits can return EPERM rather
-                // than ESRCH once the identity is no longer signalable as our
-                // group. Reap the child and retire the stale identity; EPERM
-                // without the prior accepted fence remains a hard failure.
+                // A previously accepted SIGKILL is the containment fence. On
+                // macOS, probing that numeric group after its leader exits can
+                // return EPERM rather than ESRCH once the identity is no longer
+                // signalable as our group. Reap the child and retire the stale
+                // identity only with that fence. Reaping the leader alone says
+                // nothing about live descendants, so unfenced EPERM remains a
+                // hard error and leaves ownership armed.
                 let _ = tokio::time::timeout(self.kill_settle_timeout, child.wait()).await;
                 self.disarm();
                 return Ok(());
@@ -394,6 +395,42 @@ mod tests {
             1,
             "the accepted drop-time kill is the required ordering witness"
         );
+    }
+
+    #[tokio::test]
+    async fn reaped_leader_does_not_authorize_unfenced_permission_denied_retirement() {
+        let mut child = short_lived_child().await;
+        let control = Arc::new(PermissionDeniedAfterKillFenceControl {
+            signals: AtomicUsize::new(0),
+        });
+        let mut group = OwnedProcessGroup::with_control(
+            &child,
+            control.clone(),
+            Duration::ZERO,
+            Duration::ZERO,
+        );
+        child.wait().await.expect("reap short-lived leader");
+
+        let error = group
+            .terminate(&mut child)
+            .await
+            .expect_err("reaped leader cannot prove descendant containment");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(
+            group.pgid.is_some(),
+            "unfenced EPERM must keep process-group ownership armed"
+        );
+        assert!(
+            !group.kill_already_requested,
+            "the guard must not invent a kill fence from leader reaping"
+        );
+        assert_eq!(
+            control.signals.load(Ordering::SeqCst),
+            0,
+            "the EPERM probe happened before any accepted TERM or KILL"
+        );
+        group.disarm();
     }
 
     #[tokio::test]

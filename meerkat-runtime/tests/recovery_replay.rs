@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use meerkat_core::BlobStore;
-use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
 use meerkat_core::lifecycle::{InputId, RunId};
+use meerkat_core::types::SessionId;
 use meerkat_runtime::identifiers::LogicalRuntimeId;
 use meerkat_runtime::input::{
     Input, InputDurability, InputHeader, InputOrigin, InputVisibility, PromptInput,
@@ -15,8 +15,7 @@ use meerkat_runtime::input_state::{
     InputLifecycleState, InputState, InputStatePersistenceRecord, InputStateSeed, StoredInputState,
 };
 use meerkat_runtime::store::{InMemoryRuntimeStore, RuntimeStore};
-use meerkat_runtime::traits::RuntimeDriver;
-use meerkat_runtime::{EphemeralRuntimeDriver, PersistentRuntimeDriver};
+use meerkat_runtime::{EphemeralRuntimeDriver, MeerkatMachine, SessionServiceRuntimeExt};
 use meerkat_store::MemoryBlobStore;
 use uuid::Uuid;
 
@@ -98,7 +97,8 @@ fn sorted_ids(ids: impl IntoIterator<Item = InputId>) -> Vec<String> {
 
 #[tokio::test]
 async fn recovery_replay_red_ok_requeues_missing_boundary_contributors_through_persistent_driver() {
-    let runtime_id = make_runtime_id("missing-receipt");
+    let session_id = SessionId::new();
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
     let run_id = RunId::new();
     let first = make_prompt("first replay contribution");
     let second = make_prompt("second replay contribution");
@@ -122,27 +122,31 @@ async fn recovery_replay_red_ok_requeues_missing_boundary_contributors_through_p
         .await
         .expect("persist second applied state");
 
-    let mut driver =
-        PersistentRuntimeDriver::new(runtime_id.clone(), Arc::clone(&store), memory_blob_store());
-    let report = driver.recover().await.expect("recover persistent driver");
+    let machine = MeerkatMachine::persistent(Arc::clone(&store), memory_blob_store());
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("registration-authorized recovery must adopt replay contributors");
     assert_eq!(
-        report.inputs_recovered, 2,
-        "missing boundary receipts should roll both contributors back into replay"
-    );
-    assert_eq!(
-        sorted_ids(driver.active_input_ids()),
+        sorted_ids(
+            machine
+                .list_active_inputs(&session_id)
+                .await
+                .expect("list recovered inputs"),
+        ),
         expected,
         "recovery should preserve both contributors as active replay inputs"
     );
 
     for input_id in [&first_id, &second_id] {
-        assert!(
-            driver.input_state(input_id).is_some(),
-            "driver should expose recovered input state"
-        );
+        let recovered = machine
+            .input_state(&session_id, input_id)
+            .await
+            .expect("load recovered input state")
+            .expect("machine should expose recovered input state");
         assert_eq!(
-            driver.inner_ref().input_phase(input_id),
-            Some(InputLifecycleState::Queued),
+            recovered.seed.phase,
+            InputLifecycleState::Queued,
             "DSL phase should be requeued after recovery"
         );
 
@@ -156,24 +160,20 @@ async fn recovery_replay_red_ok_requeues_missing_boundary_contributors_through_p
         assert_eq!(stored.seed.last_boundary_sequence, Some(0));
     }
 
-    let replayed = vec![
-        driver
-            .contract_dequeue_next_for_recovery_tests()
-            .expect("first replay input")
-            .0,
-        driver
-            .contract_dequeue_next_for_recovery_tests()
-            .expect("second replay input")
-            .0,
-    ];
-    assert!(
-        driver.contract_dequeue_next_for_recovery_tests().is_none(),
-        "recovery should requeue only the missing-boundary contributors"
-    );
+    drop(machine);
+    let cold_machine = MeerkatMachine::persistent(Arc::clone(&store), memory_blob_store());
+    cold_machine
+        .register_session(session_id.clone())
+        .await
+        .expect("a second cold registration must recover the same exact active set");
     assert_eq!(
-        sorted_ids(replayed),
+        sorted_ids(
+            cold_machine
+                .list_active_inputs(&session_id)
+                .await
+                .expect("list inputs after second cold registration"),
+        ),
         expected,
-        "replay order should surface the recovered contributors exactly once"
+        "repeated cold recovery must not lose or duplicate replay contributors"
     );
-    let _ = RunApplyBoundary::RunStart;
 }

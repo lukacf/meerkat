@@ -13,7 +13,7 @@ via cargo-semver-checks against the published baselines).
 
 ## [Unreleased]
 
-## [0.8.11] - 2026-07-30
+## [0.8.11] - 2026-07-31
 
 ### Breaking
 
@@ -256,6 +256,15 @@ via cargo-semver-checks against the published baselines).
   the terminal write. If the host dies in that window, recovery applies the
   persisted cancel request from `LossObserved` before considering replay or
   checkpoint resume, so a cancelled job cannot restart after reboot.
+- **Detached shell cancellation now converges on durable job authority.**
+  Ordinary and monitor-backed executions observe cancel requests written by
+  another manager, contain the process before acknowledging cancellation, and
+  settle from the exact store-returned terminal snapshot. Competing delivery
+  acknowledgements, lease renewals, and terminal CAS writes are reloaded and
+  converged with bounded retries instead of leaving a job indefinitely
+  `Running` or publishing a process-local shadow terminal. A committed cancel
+  also prevents generated `Complete` or `Fail` transitions from winning while
+  the job is `Running` or `WaitingExternal`.
 - **Retired session revival no longer rewrites a Session lifecycle marker.**
   The exact prepared runtime lease authorizes the store-owned
   `Retired -> Idle` transition while the Session body remains ordinary domain
@@ -4850,7 +4859,8 @@ Meerkat 0.5 is a large architecture and surface cutover. It formalizes runtime o
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.8.11...HEAD
+[0.8.11]: https://github.com/lukacf/meerkat/compare/v0.8.10...v0.8.11
 [0.7.0]: https://github.com/lukacf/meerkat/compare/alpha/v0.7.0-alpha.0...v0.7.0
 [0.7.0-alpha.0]: https://github.com/lukacf/meerkat/releases/tag/alpha/v0.7.0-alpha.0
 [0.6.23]: https://github.com/lukacf/meerkat/compare/v0.6.22...v0.6.23

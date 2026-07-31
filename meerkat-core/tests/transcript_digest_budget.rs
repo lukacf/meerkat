@@ -58,6 +58,12 @@ fn strand() -> TranscriptStrandId {
     TranscriptStrandId::root()
 }
 
+fn durable_history_value(session: &Session) -> serde_json::Value {
+    serde_json::to_value(session).expect("session serializes")["metadata"]
+        [meerkat_core::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY]
+        .clone()
+}
+
 /// One ordinary turn boundary: append the turn, guard the save against the
 /// previously persisted row, project the durable head row.
 fn boundary_save_digest_count(turns: usize) -> u64 {
@@ -142,6 +148,9 @@ fn ordered_system_message_append_digest_budget_is_constant() {
         let mut previous = session_with_turns(turns);
         previous.push(user("before a later system message"));
         previous.append_system_message("later system message".to_string());
+        previous
+            .transcript_content_digest()
+            .expect("seed the persisted system-message boundary");
         let mut live = previous.clone();
         live.append_system_message("another later system message".to_string());
         live.push(user("after the later system message"));
@@ -236,11 +245,7 @@ fn history_bearing_boundary_save_hashes_zero_content_bytes() {
             None,
         )
         .expect("audited rewrite");
-        let audited_graph = live
-            .metadata()
-            .get(meerkat_core::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY)
-            .cloned()
-            .expect("audited graph");
+        let audited_graph = durable_history_value(&live);
         // Steady state: two warm-up boundaries, exactly like the plain
         // boundary measurement, each followed by an appended turn.
         let mut previous = live.clone();
@@ -259,10 +264,9 @@ fn history_bearing_boundary_save_hashes_zero_content_bytes() {
         let passes = session_content_digest_computations() - passes_before;
         let bytes = session_content_digest_bytes() - bytes_before;
         assert_eq!(
-            live.metadata()
-                .get(meerkat_core::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY),
-            Some(&audited_graph),
-            "ordinary appends must leave audited graph bytes untouched"
+            durable_history_value(&live),
+            audited_graph,
+            "ordinary appends must leave audited graph bytes untouched at the durable wire boundary"
         );
         (passes, bytes)
     }
@@ -393,11 +397,7 @@ fn history_bearing_append_digest_count_is_independent_of_transcript_size() {
                 None,
             )
             .expect("audited rewrite");
-        let audited_graph = live
-            .metadata()
-            .get(meerkat_core::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY)
-            .cloned()
-            .expect("audited graph");
+        let audited_graph = durable_history_value(&live);
         assert!(
             live.transcript_history_state()
                 .expect("history state decodes")
@@ -431,10 +431,9 @@ fn history_bearing_append_digest_count_is_independent_of_transcript_size() {
             "ordinary append must advance live identity without manufacturing a graph head"
         );
         assert_eq!(
-            live.metadata()
-                .get(meerkat_core::session::SESSION_TRANSCRIPT_HISTORY_STATE_KEY),
-            Some(&audited_graph),
-            "ordinary append must leave graph bytes untouched"
+            durable_history_value(&live),
+            audited_graph,
+            "ordinary append must leave graph bytes untouched at the durable wire boundary"
         );
         live.validate_transcript_history_state()
             .expect("graph must still validate after the fast-path appends");

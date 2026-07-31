@@ -348,10 +348,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `LoadBoundaryReceipt`(runtime_id: String, sequence: u64)
 - `AcceptWithCompletion`(input_id: InputId, request_immediate_processing: Bool, interrupt_yielding: Bool, wake_if_idle: Bool)
 - `AcceptWithoutWake`(input_id: InputId)
-- `LiveBoundaryUnavailable`(input_id: String)
 - `Recycle`
-- `ServiceTurnCommitted`(run_id: RunId)
-- `ArchiveTerminalInput`(input_id: String, phase: InputPhase, terminal_kind: InputTerminalKind, superseded_by: Option<String>, aggregate_id: Option<String>, abandon_reason: Option<InputAbandonReason>, abandon_attempt_count: Option<u64>, attempt_count: u64, run_id: Option<RunId>, boundary_sequence: Option<u64>, admission_sequence: Option<u64>, idempotency_key: Option<String>)
 - `RequestDeferredTools`(authorities: Map<ToolName, ToolVisibilityWitness>)
 
 ## Surface-only Inputs
@@ -416,6 +413,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RequestUntilChangedSwitchTurn`(request_id: String, target_model: String, target_realtime_capable: Bool, requires_approval: Bool, approval_available: Bool, approval_denied: Bool, approval_reason: Option<RoutingSwitchApprovalReason>, realtime_detach_allowed: Bool)
 - `CompleteUntilChangedSwitchTurnReconfigure`(request_id: String)
 - `ResolveLiveBoundaryContextReceipt`(run_id: RunId, input_id: String)
+- `LiveBoundaryUnavailable`(input_id: String)
 - `ResolveAdmissionPlan`(input_id: String, input_kind: AdmissionInputKind, requested_lane: Option<InputLane>, continuation_kind: AdmissionContinuationKind, silent_intent_match: Bool, existing_superseded_input_id: Option<String>, runtime_running: Bool, active_turn_boundary_available: Bool, without_wake: Bool)
 - `ResolveAdmissionValidation`(input_id: String, input_kind: AdmissionInputKind, input_origin: AdmissionInputOriginKind, durability: InputDurabilityKind, peer_handling_mode_valid: Bool, peer_response_terminal_structurally_valid: Bool, peer_response_terminal_observed_status: PeerResponseTerminalObservedStatus)
 - `ResolveAdmissionIdempotency`(input_id: String, idempotency_key: Option<String>)
@@ -469,6 +467,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `TimeBudgetExceeded`(run_id: RunId)
 - `ForceCancelNoRun`
 - `RunCompleted`(run_id: RunId)
+- `ServiceTurnCommitted`(run_id: RunId)
 - `RunFailed`(run_id: RunId, runtime_apply_failure_cause: Option<RuntimeApplyFailureCause>, runtime_apply_failure_message: Option<String>, machine_terminal_failure_observed: Bool, terminal_failure_source: Option<RunFailureSourceKind>, error: String)
 - `RunCancelled`(run_id: RunId)
 - `RecoverAdmittedInput`(input_id: String, input_kind: RecoveredInputKind, runtime_boundary: RecoveredRunApplyBoundary, runtime_execution_kind: RecoveredRuntimeExecutionKind, runtime_peer_response_terminal_apply_intent: Option<RecoveredPeerResponseTerminalApplyIntent>, lane: InputLane)
@@ -489,6 +488,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SupersedeInput`(input_id: String, superseded_by: String)
 - `CoalesceInput`(input_id: String, aggregate_id: String)
 - `AbandonInput`(input_id: String, reason: InputAbandonReason, attempt_count: u64)
+- `ArchiveTerminalInput`(input_id: String, phase: InputPhase, terminal_kind: InputTerminalKind, superseded_by: Option<String>, aggregate_id: Option<String>, abandon_reason: Option<InputAbandonReason>, abandon_attempt_count: Option<u64>, attempt_count: u64, run_id: Option<RunId>, boundary_sequence: Option<u64>, admission_sequence: Option<u64>, idempotency_key: Option<String>)
 - `RecordBoundarySeq`(input_id: String, run_id: RunId)
 - `RegisterOp`(operation_id: String, kind: OperationKind, source: Option<OperationSource>, max_concurrent: Option<u64>)
 - `StartOp`(operation_id: String)

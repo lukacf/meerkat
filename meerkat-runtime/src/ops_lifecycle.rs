@@ -140,8 +140,23 @@ pub struct PersistedOpsSnapshot {
     /// Persisted completion feed projection metadata. Canonical feed truth is
     /// captured in `authority_state.completion_feed_entries`.
     pub completion_entries: Vec<CompletionEntry>,
+    /// Exact bounded public-feed retention observed with `completion_entries`.
+    ///
+    /// Released 0.8.10 snapshots predate this carrier. Recovery of that
+    /// released shape preserves the retained public suffix but does not invent
+    /// an eviction gap from the sparse global completion sequence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    completion_feed_retention: Option<PersistedCompletionFeedRetention>,
     /// Consumer cursor snapshot at capture time.
     pub cursors: meerkat_core::EpochCursorSnapshot,
+}
+
+/// Store-owned facts about public completion rows actually evicted from the
+/// bounded feed projection.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+struct PersistedCompletionFeedRetention {
+    dropped_through: CompletionSeq,
+    dropped_count: u64,
 }
 
 #[derive(Debug)]
@@ -226,6 +241,31 @@ impl FeedBuffer {
 
         self.watermark_atomic.store(seq, Ordering::Release);
         self.notify.notify_waiters();
+    }
+
+    fn recover_evicted_prefix(
+        &self,
+        retention: PersistedCompletionFeedRetention,
+    ) -> Result<(), OpsLifecycleError> {
+        let PersistedCompletionFeedRetention {
+            dropped_through,
+            dropped_count,
+        } = retention;
+        if (dropped_through == 0) != (dropped_count == 0) || dropped_count > dropped_through {
+            return Err(OpsLifecycleError::Internal(
+                "persisted completion-feed retention carrier is inconsistent".to_string(),
+            ));
+        }
+        if dropped_count == 0 {
+            return Ok(());
+        }
+        let mut inner = self
+            .inner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        inner.dropped_through = dropped_through;
+        inner.dropped_count = dropped_count;
+        Ok(())
     }
 }
 
@@ -1959,7 +1999,10 @@ impl ShellState {
             })
             .count();
         let authority_completion_entries = self.completion_feed_authority_entries()?;
-        let published_completion_entries_by_id: HashMap<OperationId, CompletionEntry> = {
+        let (published_completion_entries_by_id, completion_feed_retention): (
+            HashMap<OperationId, CompletionEntry>,
+            PersistedCompletionFeedRetention,
+        ) = {
             let inner = self
                 .feed_buffer
                 .inner
@@ -1983,7 +2026,13 @@ impl ShellState {
                     )));
                 }
             }
-            entries
+            (
+                entries,
+                PersistedCompletionFeedRetention {
+                    dropped_through: inner.dropped_through,
+                    dropped_count: inner.dropped_count,
+                },
+            )
         };
         let mut completion_entries: Vec<CompletionEntry> = authority_completion_entries
             .iter()
@@ -2040,6 +2089,7 @@ impl ShellState {
             authority_state,
             operation_specs,
             completion_entries,
+            completion_feed_retention: Some(completion_feed_retention),
             cursors: self.completion_cursor_snapshot(),
         })
     }
@@ -2275,11 +2325,12 @@ impl RuntimeOpsLifecycleRegistry {
     /// seeded only after generated recovery authority accepts them.
     pub fn from_recovered(snapshot: PersistedOpsSnapshot) -> Result<Self, OpsLifecycleError> {
         let PersistedOpsSnapshot {
+            epoch_id: _,
             authority_state,
             operation_specs,
             completion_entries,
+            completion_feed_retention,
             cursors,
-            ..
         } = snapshot;
         let max_completed = authority_state.max_completed;
         let max_concurrent = authority_state.max_concurrent;
@@ -2415,6 +2466,23 @@ impl RuntimeOpsLifecycleRegistry {
         let mut recovered_entries: Vec<(OperationId, CompletionFeedCanonicalState)> =
             canonical_feed_entries.into_iter().collect();
         recovered_entries.sort_by_key(|(_, entry)| entry.seq);
+        if let Some(retention) = completion_feed_retention {
+            if retention.dropped_count > 0 && recovered_entries.is_empty() {
+                return Err(OpsLifecycleError::Internal(
+                    "persisted completion-feed retention has no retained public suffix".to_string(),
+                ));
+            }
+            if recovered_entries
+                .first()
+                .is_some_and(|(_, entry)| entry.seq <= retention.dropped_through)
+            {
+                return Err(OpsLifecycleError::Internal(
+                    "persisted completion-feed retention overlaps the retained public suffix"
+                        .to_string(),
+                ));
+            }
+            shell.feed_buffer.recover_evicted_prefix(retention)?;
+        }
         for (operation_id, entry) in recovered_entries {
             let projection = projection_entries_by_id.get(&operation_id);
             let display_name = operation_specs

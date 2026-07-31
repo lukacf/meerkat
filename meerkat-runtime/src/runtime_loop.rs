@@ -6338,6 +6338,11 @@ mod tests {
             .validated_transcript_history_state()
             .unwrap()
             .expect("fixture rewrite graph exists");
+        assert_eq!(
+            history.digest_format(),
+            3,
+            "fixture source must exercise the current transcript format"
+        );
         assert_eq!(history.commit_count(), 1, "fixture has one rewrite");
         let commit = history.last_commit().expect("fixture rewrite commit");
         let (start, end) = commit.selection.bounds();
@@ -6357,7 +6362,7 @@ mod tests {
                 history.materialize_revision(&commit.parent_revision).unwrap(),
                 history.materialize_revision(&commit.revision).unwrap(),
             ],
-            "digest_format": history.digest_format(),
+            "digest_format": 2,
         });
         let mut encoded = serde_json::to_value(session).unwrap();
         encoded["version"] = serde_json::json!(2);

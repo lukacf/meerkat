@@ -23,6 +23,7 @@ trait CoreExecutor {
     fn turn_finalization_boundary_handle(&self) {}
     fn apply(&mut self) {}
     fn checkpoint_committed_session_snapshot(&mut self) {}
+    fn acknowledge_committed_session_boundary(&mut self) {}
     fn reconcile_committed_compaction_projections(&mut self) {}
     fn abort_uncommitted_compaction_projections(&mut self) {}
     fn abort_rejected_run_projections(&mut self) {}
@@ -47,6 +48,7 @@ impl CoreExecutor for MachineManagedPostStopExecutor {
     fn turn_finalization_boundary_handle(&self) { self.inner.turn_finalization_boundary_handle() }
     fn apply(&mut self) { self.inner.apply() }
     fn checkpoint_committed_session_snapshot(&mut self) { self.inner.checkpoint_committed_session_snapshot() }
+    fn acknowledge_committed_session_boundary(&mut self) { self.inner.acknowledge_committed_session_boundary() }
     fn reconcile_committed_compaction_projections(&mut self) { self.inner.reconcile_committed_compaction_projections() }
     fn abort_uncommitted_compaction_projections(&mut self) { self.inner.abort_uncommitted_compaction_projections() }
     fn abort_rejected_run_projections(&mut self) { self.inner.abort_rejected_run_projections() }

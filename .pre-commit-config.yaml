@@ -1,6 +1,6 @@
 # Pre-commit configuration for Meerkat
 # Install: pip install pre-commit
-# Setup: pre-commit install && pre-commit install --hook-type pre-push
+# Setup: make install-hooks
 
 default_stages: [pre-commit]
 
@@ -119,6 +119,7 @@ repos:
         entry: scripts/pre-push-machines.sh
         language: script
         pass_filenames: false
+        always_run: true
         stages: [pre-push]
 
   # On push: strict @generated header truthfulness guard
@@ -160,10 +161,34 @@ repos:
   # On push: deterministic repo gate
   - repo: local
     hooks:
+      - id: pre-push-ref-dispatch-contract
+        name: pre-push dispatcher validates the exact single pushed ref
+        entry: scripts/test-pre-push-dispatch.sh
+        language: script
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
+
+      - id: pre-push-machine-status-contract
+        name: pre-push machine gate preserves classifier and codegen failures
+        entry: scripts/test-pre-push-machines.sh
+        language: script
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
+
+      - id: pre-push-unit-status-contract
+        name: pre-push deterministic gate preserves lane failures
+        entry: scripts/test-pre-push-unit-status.sh
+        language: script
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
+
       - id: cargo-test
-        name: workspace deterministic gate
+        name: workspace deterministic unit + integration + e2e gate
         entry: scripts/pre-push-unit.sh
         language: system
-        types: [rust]
         pass_filenames: false
+        always_run: true
         stages: [pre-push]

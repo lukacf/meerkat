@@ -653,10 +653,13 @@ pub(crate) async fn terminalize_async_stop_once(
             &completion_input_ids,
             termination_reason.clone(),
         )?;
-        if !matches!(
-            driver.runtime_state(),
-            crate::RuntimeState::Stopped | crate::RuntimeState::Destroyed
-        ) && let Err(error) = machine_stop_runtime(&mut driver).await
+        // `Stopped` must still replay RuntimeExecutorExited so an interrupted
+        // terminalization can idempotently repair cleanup facts. `Destroyed`
+        // is different: Destroy already committed the absorbing DSL terminal
+        // while the executor stop hook was in flight, and the machine
+        // intentionally has no RuntimeExecutorExited transition from it.
+        if driver.runtime_state() != crate::RuntimeState::Destroyed
+            && let Err(error) = machine_stop_runtime(&mut driver).await
         {
             driver.rollback_prepared_runless_interaction_terminal_outboxes(prepared);
             return Err(error);

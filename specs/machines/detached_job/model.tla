@@ -340,7 +340,7 @@ ClassifyNonResumableWorkerLoss(observed_at_ms) ==
 
 CompleteRunningAttempt(attempt_id, fence, completed_at_ms) ==
     /\ phase = "Running"
-    /\ ((current_attempt_id = Some(attempt_id)) /\ (current_fence = fence) /\ (lease_expired = FALSE) /\ (lease_expires_at_ms # None) /\ (completed_at_ms <= (IF "value" \in DOMAIN lease_expires_at_ms THEN lease_expires_at_ms["value"] ELSE None)))
+    /\ ((cancel_requested = FALSE) /\ (current_attempt_id = Some(attempt_id)) /\ (current_fence = fence) /\ (lease_expired = FALSE) /\ (lease_expires_at_ms # None) /\ (completed_at_ms <= (IF "value" \in DOMAIN lease_expires_at_ms THEN lease_expires_at_ms["value"] ELSE None)))
     /\ phase' = "Succeeded"
     /\ model_step_count' = model_step_count + 1
     /\ delivery_sequence' = (delivery_sequence) + 1
@@ -351,7 +351,7 @@ CompleteRunningAttempt(attempt_id, fence, completed_at_ms) ==
 
 CompleteWaitingExternalAttempt(attempt_id, fence, completed_at_ms) ==
     /\ phase = "WaitingExternal"
-    /\ ((current_attempt_id = Some(attempt_id)) /\ (current_fence = fence) /\ (lease_expired = FALSE) /\ (lease_expires_at_ms # None) /\ (completed_at_ms <= (IF "value" \in DOMAIN lease_expires_at_ms THEN lease_expires_at_ms["value"] ELSE None)))
+    /\ ((cancel_requested = FALSE) /\ (current_attempt_id = Some(attempt_id)) /\ (current_fence = fence) /\ (lease_expired = FALSE) /\ (lease_expires_at_ms # None) /\ (completed_at_ms <= (IF "value" \in DOMAIN lease_expires_at_ms THEN lease_expires_at_ms["value"] ELSE None)))
     /\ phase' = "Succeeded"
     /\ model_step_count' = model_step_count + 1
     /\ delivery_sequence' = (delivery_sequence) + 1
@@ -362,7 +362,7 @@ CompleteWaitingExternalAttempt(attempt_id, fence, completed_at_ms) ==
 
 FailRunningAttempt(attempt_id, fence, failed_at_ms) ==
     /\ phase = "Running"
-    /\ ((current_attempt_id = Some(attempt_id)) /\ (current_fence = fence) /\ (lease_expired = FALSE) /\ (lease_expires_at_ms # None) /\ (failed_at_ms <= (IF "value" \in DOMAIN lease_expires_at_ms THEN lease_expires_at_ms["value"] ELSE None)))
+    /\ ((cancel_requested = FALSE) /\ (current_attempt_id = Some(attempt_id)) /\ (current_fence = fence) /\ (lease_expired = FALSE) /\ (lease_expires_at_ms # None) /\ (failed_at_ms <= (IF "value" \in DOMAIN lease_expires_at_ms THEN lease_expires_at_ms["value"] ELSE None)))
     /\ phase' = "Failed"
     /\ model_step_count' = model_step_count + 1
     /\ delivery_sequence' = (delivery_sequence) + 1
@@ -373,7 +373,7 @@ FailRunningAttempt(attempt_id, fence, failed_at_ms) ==
 
 FailWaitingExternalAttempt(attempt_id, fence, failed_at_ms) ==
     /\ phase = "WaitingExternal"
-    /\ ((current_attempt_id = Some(attempt_id)) /\ (current_fence = fence) /\ (lease_expired = FALSE) /\ (lease_expires_at_ms # None) /\ (failed_at_ms <= (IF "value" \in DOMAIN lease_expires_at_ms THEN lease_expires_at_ms["value"] ELSE None)))
+    /\ ((cancel_requested = FALSE) /\ (current_attempt_id = Some(attempt_id)) /\ (current_fence = fence) /\ (lease_expired = FALSE) /\ (lease_expires_at_ms # None) /\ (failed_at_ms <= (IF "value" \in DOMAIN lease_expires_at_ms THEN lease_expires_at_ms["value"] ELSE None)))
     /\ phase' = "Failed"
     /\ model_step_count' = model_step_count + 1
     /\ delivery_sequence' = (delivery_sequence) + 1

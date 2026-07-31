@@ -504,16 +504,23 @@ clean:
 
 # Install pre-commit hooks
 install-hooks:
-	@echo "$(GREEN)Installing pre-commit hooks...$(NC)"
-	pre-commit install
-	pre-commit install --hook-type pre-push
+	@echo "$(GREEN)Installing repository-owned Git hooks...$(NC)"
+	@command -v pre-commit >/dev/null || { \
+		echo "pre-commit is required; install it before installing hooks" >&2; \
+		exit 1; \
+	}
+	@hooks="$$(git rev-parse --git-path hooks)"; \
+	mkdir -p "$$hooks"; \
+	install -m 0755 scripts/git-hooks/pre-commit "$$hooks/pre-commit"; \
+	install -m 0755 scripts/git-hooks/pre-push "$$hooks/pre-push"
 	@echo "$(GREEN)Hooks installed successfully!$(NC)"
 
 # Uninstall pre-commit hooks
 uninstall-hooks:
-	@echo "$(YELLOW)Uninstalling pre-commit hooks...$(NC)"
-	pre-commit uninstall
-	pre-commit uninstall --hook-type pre-push
+	@echo "$(YELLOW)Uninstalling repository-owned Git hooks...$(NC)"
+	@hooks="$$(git rev-parse --git-path hooks)"; \
+	if cmp -s scripts/git-hooks/pre-commit "$$hooks/pre-commit"; then rm -f "$$hooks/pre-commit"; fi; \
+	if cmp -s scripts/git-hooks/pre-push "$$hooks/pre-push"; then rm -f "$$hooks/pre-push"; fi
 
 # Run pre-commit on all files (useful for testing hooks)
 pre-commit-all:

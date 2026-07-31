@@ -9895,6 +9895,64 @@ async fn persistent_destroy_durable_commit_observes_canonical_destroy_truth() {
             self.inner.persist_input_state(runtime_id, state).await
         }
 
+        async fn persist_input_states_atomically(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            states: &[crate::input_state::InputStatePersistenceRecord],
+        ) -> Result<(), crate::store::RuntimeStoreError> {
+            self.inner
+                .persist_input_states_atomically(runtime_id, states)
+                .await
+        }
+
+        async fn compare_and_swap_input_states_atomically(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            expected: &[crate::input_state::StoredInputState],
+            replacements: &[crate::input_state::InputStatePersistenceRecord],
+        ) -> Result<crate::store::InputStateBatchCasOutcome, crate::store::RuntimeStoreError>
+        {
+            self.inner
+                .compare_and_swap_input_states_atomically(runtime_id, expected, replacements)
+                .await
+        }
+
+        async fn compare_and_swap_input_states_atomically_with_fence(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            expected: &[crate::input_state::StoredInputState],
+            replacements: &[crate::input_state::InputStatePersistenceRecord],
+            write_fence: Arc<dyn crate::store::RuntimeStoreWriteFence>,
+        ) -> Result<crate::store::FencedInputStateBatchCasOutcome, crate::store::RuntimeStoreError>
+        {
+            self.inner
+                .compare_and_swap_input_states_atomically_with_fence(
+                    runtime_id,
+                    expected,
+                    replacements,
+                    write_fence,
+                )
+                .await
+        }
+
+        async fn compare_and_swap_recovery_input_states_atomically_with_fence(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            expected_revision: crate::store::RecoveryInputSetRevision,
+            mutations: &[crate::store::RecoveryInputStateMutation],
+            write_fence: Arc<dyn crate::store::RuntimeStoreWriteFence>,
+        ) -> Result<crate::store::FencedInputStateBatchCasOutcome, crate::store::RuntimeStoreError>
+        {
+            self.inner
+                .compare_and_swap_recovery_input_states_atomically_with_fence(
+                    runtime_id,
+                    expected_revision,
+                    mutations,
+                    write_fence,
+                )
+                .await
+        }
+
         async fn load_input_state(
             &self,
             runtime_id: &LogicalRuntimeId,
@@ -9902,6 +9960,17 @@ async fn persistent_destroy_durable_commit_observes_canonical_destroy_truth() {
         ) -> Result<Option<crate::input_state::StoredInputState>, crate::store::RuntimeStoreError>
         {
             self.inner.load_input_state(runtime_id, input_id).await
+        }
+
+        async fn load_input_state_by_idempotency_key(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            key: &crate::IdempotencyKey,
+        ) -> Result<Option<crate::store::ExactInputStateObservation>, crate::store::RuntimeStoreError>
+        {
+            self.inner
+                .load_input_state_by_idempotency_key(runtime_id, key)
+                .await
         }
 
         async fn load_input_states_by_ids(
@@ -25041,6 +25110,11 @@ fn runtime_recovery_compaction_session(
             .validated_transcript_history_state()
             .expect("seal fixture rewrite graph")
             .expect("fixture rewrite graph exists");
+        assert_eq!(
+            history.digest_format(),
+            3,
+            "fixture source must exercise the current transcript format"
+        );
         assert_eq!(history.commit_count(), 1, "fixture has one rewrite");
         let commit = history.last_commit().expect("fixture rewrite commit");
         let (start, end) = commit.selection.bounds();
@@ -25065,7 +25139,7 @@ fn runtime_recovery_compaction_session(
                     .materialize_revision(&commit.revision)
                     .expect("materialize released fixture child"),
             ],
-            "digest_format": history.digest_format(),
+            "digest_format": 2,
         });
         let mut encoded = serde_json::to_value(session).expect("encode fixture session");
         encoded["version"] = serde_json::json!(2);
@@ -25712,6 +25786,24 @@ impl RuntimeStore for RuntimeCommitAtomicityStore {
             .await
     }
 
+    async fn compare_and_swap_input_states_atomically_with_fence(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        expected: &[crate::input_state::StoredInputState],
+        replacements: &[crate::input_state::InputStatePersistenceRecord],
+        write_fence: Arc<dyn crate::store::RuntimeStoreWriteFence>,
+    ) -> Result<crate::store::FencedInputStateBatchCasOutcome, crate::store::RuntimeStoreError>
+    {
+        self.inner
+            .compare_and_swap_input_states_atomically_with_fence(
+                runtime_id,
+                expected,
+                replacements,
+                write_fence,
+            )
+            .await
+    }
+
     async fn load_input_states_with_versions(
         &self,
         runtime_id: &LogicalRuntimeId,
@@ -25731,6 +25823,25 @@ impl RuntimeStore for RuntimeCommitAtomicityStore {
                 runtime_id,
                 expected_revision,
                 mutations,
+            )
+            .await
+    }
+
+    async fn compare_and_swap_recovery_input_states_atomically_with_fence(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        expected_revision: crate::store::RecoveryInputSetRevision,
+        mutations: &[crate::store::RecoveryInputStateMutation],
+        write_fence: Arc<dyn crate::store::RuntimeStoreWriteFence>,
+    ) -> Result<crate::store::FencedInputStateBatchCasOutcome, crate::store::RuntimeStoreError>
+    {
+        self.input_recovery_cas_calls.fetch_add(1, Ordering::SeqCst);
+        self.inner
+            .compare_and_swap_recovery_input_states_atomically_with_fence(
+                runtime_id,
+                expected_revision,
+                mutations,
+                write_fence,
             )
             .await
     }

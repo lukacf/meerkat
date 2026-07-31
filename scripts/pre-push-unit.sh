@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Pre-push deterministic test gate:
+# - validates the exact detached pushed tree selected by pre-push-dispatch.sh
 # - skips reruns for the same committed tree
 # - serializes runs so repeated pushes don't fight each other
 # - retries nextest once if discovery hangs
@@ -7,17 +8,12 @@ set -euo pipefail
 
 ROOT="${ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 CARGO="${CARGO:-$ROOT/scripts/repo-cargo}"
-source "${ROOT}/scripts/build-backend-env"
+GIT_BIN="${GIT_BIN:-git}"
 
-CACHE_VERSION="v3"
-backend="$(meerkat_selected_build_backend)"
-if meerkat_buildbuddy_enabled; then
-  NEXTEST_TIMEOUT_SECS="${MEERKAT_PRE_PUSH_NEXTEST_TIMEOUT_SECS:-600}"
-else
-  NEXTEST_TIMEOUT_SECS="${MEERKAT_PRE_PUSH_NEXTEST_TIMEOUT_SECS:-300}"
-fi
+CACHE_VERSION="v6"
+NEXTEST_TIMEOUT_SECS="${MEERKAT_PRE_PUSH_NEXTEST_TIMEOUT_SECS:-300}"
 LOCK_WAIT_SECS="${MEERKAT_PRE_PUSH_UNIT_LOCK_WAIT_SECS:-180}"
-GIT_DIR_PATH="$(git rev-parse --git-dir)"
+GIT_DIR_PATH="$("$GIT_BIN" rev-parse --git-common-dir)"
 HOOK_CACHE_ROOT="${GIT_DIR_PATH}/meerkat-hook-cache"
 HOOK_CACHE_DIR="${HOOK_CACHE_ROOT}/deterministic"
 LOCK_DIR="${HOOK_CACHE_ROOT}/deterministic.lock"
@@ -26,10 +22,35 @@ PID_FILE="${LOCK_DIR}/pid"
 mkdir -p "$HOOK_CACHE_DIR"
 
 tree_key() {
-  if git rev-parse --verify HEAD^{tree} >/dev/null 2>&1; then
-    git rev-parse HEAD^{tree}
+  if "$GIT_BIN" rev-parse --verify 'HEAD^{tree}' >/dev/null 2>&1; then
+    "$GIT_BIN" rev-parse 'HEAD^{tree}'
   else
-    git write-tree
+    "$GIT_BIN" write-tree
+  fi
+}
+
+require_exact_clean_head() {
+  local expected_head="${PRE_COMMIT_TO_REF:-}"
+  local actual_head worktree_status
+  actual_head="$("$GIT_BIN" rev-parse HEAD)"
+  if [[ -z "$expected_head" ]]; then
+    echo "Pre-push validation requires PRE_COMMIT_TO_REF from the raw exact-ref dispatcher." >&2
+    echo "Reinstall repository hooks with: make install-hooks" >&2
+    return 1
+  fi
+  if [[ "$expected_head" != "$actual_head" ]]; then
+    echo "Pre-push validation requires PRE_COMMIT_TO_REF (${expected_head}) to equal checked-out HEAD (${actual_head})." >&2
+    echo "Push the checked-out branch alone, or validate the other ref from its own clean checkout." >&2
+    return 1
+  fi
+  if ! worktree_status="$("$GIT_BIN" status --porcelain=v1 --untracked-files=all)"; then
+    echo "Failed to determine whether the exact pushed worktree is clean." >&2
+    return 1
+  fi
+  if [[ -n "$worktree_status" ]]; then
+    echo "Pre-push validation requires a clean worktree so tested bytes equal pushed HEAD." >&2
+    "$GIT_BIN" status --short --untracked-files=all >&2
+    return 1
   fi
 }
 
@@ -114,13 +135,15 @@ retry_lane() {
   local label="$1"
   shift
   local lane_cmd=("$@")
+  local status
 
   echo "Running ${label}..."
   if run_with_timeout "$NEXTEST_TIMEOUT_SECS" "${lane_cmd[@]}"; then
     return 0
+  else
+    status=$?
   fi
 
-  local status=$?
   if [[ "$status" -ne 124 ]]; then
     return "$status"
   fi
@@ -130,8 +153,12 @@ retry_lane() {
   run_with_timeout "$NEXTEST_TIMEOUT_SECS" "${lane_cmd[@]}"
 }
 
+acquire_lock
+trap release_lock EXIT
+
+require_exact_clean_head
 tree="$(tree_key)"
-stamp_key="${CACHE_VERSION}-${backend}-${tree}"
+stamp_key="${CACHE_VERSION}-cargo-${tree}"
 stamp_path="${HOOK_CACHE_DIR}/${stamp_key}.ok"
 
 if [[ "${MEERKAT_SKIP_PRE_PUSH_UNIT_CACHE:-0}" != "1" && -f "$stamp_path" ]]; then
@@ -139,30 +166,32 @@ if [[ "${MEERKAT_SKIP_PRE_PUSH_UNIT_CACHE:-0}" != "1" && -f "$stamp_path" ]]; th
   exit 0
 fi
 
-acquire_lock
-trap release_lock EXIT
+retry_lane \
+  "workspace unit lane" \
+  "$CARGO" nextest run --workspace --lib --no-fail-fast \
+    --show-progress none --status-level none --final-status-level fail
+retry_lane \
+  "workspace integration lane" \
+  "$CARGO" nextest run --workspace --tests --profile fast --no-fail-fast \
+    --show-progress none --status-level none --final-status-level fail
+retry_lane \
+  "HeadCanonical process-death lane" \
+  "$CARGO" nextest run -p meerkat-mob --test cold_restart_mob_resume \
+    --features test-support --profile fast --no-tests=fail \
+    --show-progress none --status-level none --final-status-level fail \
+    -E 'test(mob_cold_restart_resume_after_kill_between_commit_points)'
+retry_lane \
+  "e2e-fast lane" \
+  "$CARGO" nextest run -p meerkat-integration-tests --test e2e_fast_lane \
+    --no-fail-fast --show-progress none --status-level none --final-status-level fail
 
-if [[ "${MEERKAT_SKIP_PRE_PUSH_UNIT_CACHE:-0}" != "1" && -f "$stamp_path" ]]; then
-  echo "deterministic pre-push gate already validated for tree ${tree}; skipping."
-  exit 0
+require_exact_clean_head
+final_tree="$(tree_key)"
+if [[ "$final_tree" != "$tree" ]]; then
+  echo "Checked-out HEAD changed during pre-push validation; refusing a stale success stamp." >&2
+  exit 1
 fi
-
-if [[ "${backend}" == "buildbuddy" ]]; then
-  buildbuddy_mode="${MEERKAT_BUILDBUDDY_CI_MODE:-full-warm}"
-  retry_lane \
-    "BuildBuddy unit lane" \
-    env MEERKAT_BUILDBUDDY_CI_MODE="${buildbuddy_mode}" \
-      "$ROOT/scripts/buildbuddy-ci-lane" test-unit
-  retry_lane \
-    "BuildBuddy e2e-fast lane" \
-    env MEERKAT_BUILDBUDDY_CI_MODE="${buildbuddy_mode}" \
-      "$ROOT/scripts/buildbuddy-ci-lane" e2e-fast
-else
-  retry_lane \
-    "workspace unit lane" \
-    "$CARGO" unit
-  retry_lane \
-    "e2e-fast lane" \
-    "$CARGO" e2e-fast
-fi
-printf 'tree=%s\nbackend=%s\nrunners=unit,e2e-fast\n' "$tree" "$backend" > "$stamp_path"
+stamp_tmp="${stamp_path}.tmp.$$"
+printf 'tree=%s\nbackend=cargo\nrunners=unit,integration-fast,headcanonical-process-death,e2e-fast\n' \
+  "$tree" > "$stamp_tmp"
+mv "$stamp_tmp" "$stamp_path"

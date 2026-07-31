@@ -32,6 +32,13 @@ fn bg_spec(name: &str) -> OperationSpec {
     }
 }
 
+fn capacity_spec(name: &str) -> OperationSpec {
+    OperationSpec {
+        kind: OperationKind::BackgroundToolCapacitySlot,
+        ..bg_spec(name)
+    }
+}
+
 fn op_result(id: &meerkat_core::ops_lifecycle::OperationId) -> OperationResult {
     OperationResult {
         id: id.clone(),
@@ -110,6 +117,211 @@ fn persisted_ops_snapshot_preserves_cursor_values() {
 }
 
 // ─── Recovery — feed visibility ───
+
+#[test]
+fn recovered_suppressed_only_completion_does_not_invent_public_gap() {
+    let registry = RuntimeOpsLifecycleRegistry::new();
+    let capacity = capacity_spec("suppressed-only");
+    registry.register_operation(capacity.clone()).unwrap();
+    registry.provisioning_succeeded(&capacity.id).unwrap();
+    registry.mark_retired(&capacity.id).unwrap();
+
+    let snapshot = registry
+        .capture_persistence_snapshot(RuntimeEpochId::new(), &EpochCursorState::new())
+        .unwrap();
+    let recovered = RuntimeOpsLifecycleRegistry::from_recovered(snapshot).unwrap();
+    let batch = recovered
+        .completion_feed()
+        .expect("recovered completion feed")
+        .list_since(0);
+
+    assert!(batch.entries.is_empty());
+    assert_eq!(batch.watermark, 0);
+    assert_eq!(
+        batch.gap_after(0),
+        None,
+        "a suppressed global completion is not an evicted public completion"
+    );
+}
+
+#[test]
+fn recovered_suppressed_seq_one_then_public_seq_two_delivers_without_gap() {
+    let registry = RuntimeOpsLifecycleRegistry::new();
+
+    let capacity = capacity_spec("suppressed-first");
+    registry.register_operation(capacity.clone()).unwrap();
+    registry.provisioning_succeeded(&capacity.id).unwrap();
+    registry.mark_retired(&capacity.id).unwrap();
+
+    let public = bg_spec("public-second");
+    registry.register_operation(public.clone()).unwrap();
+    registry.provisioning_succeeded(&public.id).unwrap();
+    registry
+        .complete_operation(&public.id, op_result(&public.id))
+        .unwrap();
+
+    let snapshot = registry
+        .capture_persistence_snapshot(RuntimeEpochId::new(), &EpochCursorState::new())
+        .unwrap();
+    let recovered = RuntimeOpsLifecycleRegistry::from_recovered(snapshot).unwrap();
+    let batch = recovered
+        .completion_feed()
+        .expect("recovered completion feed")
+        .list_since(0);
+
+    assert_eq!(batch.entries.len(), 1);
+    assert_eq!(batch.entries[0].seq, 2);
+    assert_eq!(batch.entries[0].operation_id, public.id);
+    assert_eq!(batch.watermark, 2);
+    assert_eq!(
+        batch.gap_after(0),
+        None,
+        "the sparse global sequence before the first public completion is not a feed gap"
+    );
+}
+
+#[test]
+fn recovered_interleaved_feed_preserves_only_actual_public_eviction_gap() {
+    let registry = RuntimeOpsLifecycleRegistry::with_config(meerkat_runtime::OpsLifecycleConfig {
+        max_completed: 2,
+        max_concurrent: None,
+    });
+
+    let suppressed_one = capacity_spec("suppressed-1");
+    registry.register_operation(suppressed_one.clone()).unwrap();
+    registry.provisioning_succeeded(&suppressed_one.id).unwrap();
+    registry.mark_retired(&suppressed_one.id).unwrap();
+
+    let public_two = bg_spec("public-2");
+    registry.register_operation(public_two.clone()).unwrap();
+    registry.provisioning_succeeded(&public_two.id).unwrap();
+    registry
+        .complete_operation(&public_two.id, op_result(&public_two.id))
+        .unwrap();
+
+    let suppressed_three = capacity_spec("suppressed-3");
+    registry
+        .register_operation(suppressed_three.clone())
+        .unwrap();
+    registry
+        .provisioning_succeeded(&suppressed_three.id)
+        .unwrap();
+    registry.mark_retired(&suppressed_three.id).unwrap();
+
+    let public_four = bg_spec("public-4");
+    registry.register_operation(public_four.clone()).unwrap();
+    registry.provisioning_succeeded(&public_four.id).unwrap();
+    registry
+        .complete_operation(&public_four.id, op_result(&public_four.id))
+        .unwrap();
+
+    let public_five = bg_spec("public-5");
+    registry.register_operation(public_five.clone()).unwrap();
+    registry.provisioning_succeeded(&public_five.id).unwrap();
+    registry
+        .complete_operation(&public_five.id, op_result(&public_five.id))
+        .unwrap();
+
+    let snapshot = registry
+        .capture_persistence_snapshot(RuntimeEpochId::new(), &EpochCursorState::new())
+        .unwrap();
+    let recovered = RuntimeOpsLifecycleRegistry::from_recovered(snapshot).unwrap();
+    let feed = recovered
+        .completion_feed()
+        .expect("recovered completion feed");
+    let batch = feed.list_since(0);
+
+    assert_eq!(
+        batch
+            .entries
+            .iter()
+            .map(|entry| entry.seq)
+            .collect::<Vec<_>>(),
+        vec![4, 5]
+    );
+    assert_eq!(
+        batch.gap_after(0),
+        Some(meerkat_core::completion_feed::CompletionFeedGap {
+            requested_after_seq: 0,
+            dropped_through: 2,
+            watermark: 5,
+        }),
+        "only the actually evicted public seq 2 establishes the recovered gap threshold"
+    );
+    assert_eq!(feed.list_since(2).gap_after(2), None);
+}
+
+#[test]
+fn released_0_8_10_snapshot_without_retention_carrier_does_not_invent_gap() {
+    let registry = RuntimeOpsLifecycleRegistry::new();
+    let suppressed = capacity_spec("released-suppressed-first");
+    registry.register_operation(suppressed.clone()).unwrap();
+    registry.provisioning_succeeded(&suppressed.id).unwrap();
+    registry.mark_retired(&suppressed.id).unwrap();
+
+    let public = bg_spec("released-public-second");
+    registry.register_operation(public.clone()).unwrap();
+    registry.provisioning_succeeded(&public.id).unwrap();
+    registry
+        .complete_operation(&public.id, op_result(&public.id))
+        .unwrap();
+
+    let snapshot = registry
+        .capture_persistence_snapshot(RuntimeEpochId::new(), &EpochCursorState::new())
+        .unwrap();
+    let mut released_shape = serde_json::to_value(snapshot).unwrap();
+    released_shape
+        .as_object_mut()
+        .expect("persisted snapshot object")
+        .remove("completion_feed_retention");
+    let released_shape: PersistedOpsSnapshot = serde_json::from_value(released_shape).unwrap();
+    let recovered = RuntimeOpsLifecycleRegistry::from_recovered(released_shape).unwrap();
+    let batch = recovered
+        .completion_feed()
+        .expect("recovered completion feed")
+        .list_since(0);
+
+    assert_eq!(
+        batch
+            .entries
+            .iter()
+            .map(|entry| entry.seq)
+            .collect::<Vec<_>>(),
+        vec![2]
+    );
+    assert_eq!(
+        batch.gap_after(0),
+        None,
+        "a sparse global completion sequence is not proof that a public feed row was evicted"
+    );
+}
+
+#[test]
+fn recovered_positive_retention_requires_a_retained_public_suffix() {
+    let registry = RuntimeOpsLifecycleRegistry::new();
+    let snapshot = registry
+        .capture_persistence_snapshot(RuntimeEpochId::new(), &EpochCursorState::new())
+        .unwrap();
+    let mut corrupted = serde_json::to_value(snapshot).unwrap();
+    corrupted
+        .as_object_mut()
+        .expect("persisted snapshot object")
+        .insert(
+            "completion_feed_retention".to_string(),
+            serde_json::json!({
+                "dropped_through": 1,
+                "dropped_count": 1,
+            }),
+        );
+    let corrupted: PersistedOpsSnapshot = serde_json::from_value(corrupted).unwrap();
+
+    let error = RuntimeOpsLifecycleRegistry::from_recovered(corrupted)
+        .expect_err("positive retention without a retained suffix must fail closed");
+    assert!(
+        error.to_string().contains("no retained public suffix"),
+        "unexpected recovery error: {error}"
+    );
+}
 
 #[test]
 fn recovered_registry_contains_terminal_completion_entries() {
@@ -300,11 +512,12 @@ fn recovered_feed_watermark_matches_persisted_sequence() {
     );
 }
 
-// ─── Snapshot captures all feed entries, not just authority-retained ops ───
+// ─── Snapshot keeps projection and generated authority on one retention bound ───
 
 #[test]
-fn snapshot_captures_entries_beyond_authority_retention() {
-    // Use a registry with max_completed=2 so authority evicts early
+fn snapshot_captures_one_bounded_authority_and_projection_suffix() {
+    // Use a registry with max_completed=2 so both authority and projection
+    // retain the same bounded suffix.
     let registry = meerkat_runtime::RuntimeOpsLifecycleRegistry::with_config(
         meerkat_runtime::OpsLifecycleConfig {
             max_completed: 2,
@@ -313,7 +526,8 @@ fn snapshot_captures_entries_beyond_authority_retention() {
     );
     let cursor_state = Arc::new(EpochCursorState::new());
 
-    // Complete 4 ops — authority keeps last 2, but feed buffer keeps all 4
+    // Complete 4 ops. The first two become an explicit feed gap rather than
+    // surviving without generated authority.
     for i in 0..4 {
         let spec = bg_spec(&format!("evict-{i}"));
         let id = spec.id.clone();
@@ -326,25 +540,38 @@ fn snapshot_captures_entries_beyond_authority_retention() {
         .capture_persistence_snapshot(RuntimeEpochId::new(), &cursor_state)
         .unwrap();
 
-    // Snapshot should contain all 4 completion entries (from feed buffer),
-    // even though authority only retains 2 terminal ops
     assert_eq!(
         snapshot.completion_entries.len(),
-        4,
-        "snapshot should capture all feed projection entries ({} found), not just authority-retained",
+        2,
+        "snapshot should retain the same bounded completion suffix as generated authority ({} found)",
         snapshot.completion_entries.len()
     );
     assert_eq!(
         snapshot.authority_state.completion_feed_count(),
-        4,
-        "generated feed authority should retain every public completion"
+        2,
+        "generated feed authority and the public projection must share one retention bound"
     );
 
-    // Authority state should only have 2 ops (eviction)
     assert_eq!(
         snapshot.authority_state.operation_count(),
         2,
         "authority should retain max_completed=2 ops"
+    );
+
+    let recovered = RuntimeOpsLifecycleRegistry::from_recovered(snapshot).unwrap();
+    let feed = recovered
+        .completion_feed()
+        .expect("recovered registry should expose its bounded completion feed");
+    let batch = feed.list_since(0);
+    assert_eq!(batch.entries.len(), 2);
+    assert_eq!(
+        batch.gap_after(0),
+        Some(meerkat_core::completion_feed::CompletionFeedGap {
+            requested_after_seq: 0,
+            dropped_through: 2,
+            watermark: 4,
+        }),
+        "recovery must preserve the exact evicted prefix as a typed cursor gap"
     );
 }
 
@@ -480,6 +707,12 @@ impl RuntimeStore for FailingOpsLifecycleStore {
         self.inner.supports_compaction_projection_outbox()
     }
 
+    fn input_state_batch_cas_implementation_profile(
+        &self,
+    ) -> meerkat_runtime::store::InputStateBatchCasImplementationProfile {
+        self.inner.input_state_batch_cas_implementation_profile()
+    }
+
     async fn observe_machine_lifecycle(
         &self,
         runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
@@ -549,6 +782,16 @@ impl RuntimeStore for FailingOpsLifecycleStore {
         runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
     ) -> Result<Vec<meerkat_runtime::InputStateRow>, meerkat_runtime::RuntimeStoreError> {
         self.inner.load_input_states(runtime_id).await
+    }
+
+    async fn load_input_states_with_versions(
+        &self,
+        runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+    ) -> Result<
+        meerkat_runtime::store::PreparedRecoveryInputSnapshot,
+        meerkat_runtime::RuntimeStoreError,
+    > {
+        self.inner.load_input_states_with_versions(runtime_id).await
     }
 
     async fn load_boundary_receipt(
@@ -626,6 +869,121 @@ impl RuntimeStore for FailingOpsLifecycleStore {
         state: &meerkat_runtime::input_state::InputStatePersistenceRecord,
     ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
         self.inner.persist_input_state(runtime_id, state).await
+    }
+
+    async fn persist_input_states_atomically(
+        &self,
+        runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+        states: &[meerkat_runtime::input_state::InputStatePersistenceRecord],
+    ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
+        self.inner
+            .persist_input_states_atomically(runtime_id, states)
+            .await
+    }
+
+    async fn compare_and_swap_input_states_atomically(
+        &self,
+        runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+        expected: &[meerkat_runtime::input_state::StoredInputState],
+        replacements: &[meerkat_runtime::input_state::InputStatePersistenceRecord],
+    ) -> Result<meerkat_runtime::store::InputStateBatchCasOutcome, meerkat_runtime::RuntimeStoreError>
+    {
+        self.inner
+            .compare_and_swap_input_states_atomically(runtime_id, expected, replacements)
+            .await
+    }
+
+    async fn compare_and_swap_input_states_atomically_with_fence(
+        &self,
+        runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+        expected: &[meerkat_runtime::input_state::StoredInputState],
+        replacements: &[meerkat_runtime::input_state::InputStatePersistenceRecord],
+        write_fence: Arc<dyn meerkat_runtime::store::RuntimeStoreWriteFence>,
+    ) -> Result<
+        meerkat_runtime::store::FencedInputStateBatchCasOutcome,
+        meerkat_runtime::RuntimeStoreError,
+    > {
+        self.inner
+            .compare_and_swap_input_states_atomically_with_fence(
+                runtime_id,
+                expected,
+                replacements,
+                write_fence,
+            )
+            .await
+    }
+
+    async fn compare_and_swap_recovery_input_states_atomically(
+        &self,
+        runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+        expected_revision: meerkat_runtime::store::RecoveryInputSetRevision,
+        mutations: &[meerkat_runtime::store::RecoveryInputStateMutation],
+    ) -> Result<meerkat_runtime::store::InputStateBatchCasOutcome, meerkat_runtime::RuntimeStoreError>
+    {
+        self.inner
+            .compare_and_swap_recovery_input_states_atomically(
+                runtime_id,
+                expected_revision,
+                mutations,
+            )
+            .await
+    }
+
+    async fn compare_and_swap_recovery_input_states_atomically_with_fence(
+        &self,
+        runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+        expected_revision: meerkat_runtime::store::RecoveryInputSetRevision,
+        mutations: &[meerkat_runtime::store::RecoveryInputStateMutation],
+        write_fence: Arc<dyn meerkat_runtime::store::RuntimeStoreWriteFence>,
+    ) -> Result<
+        meerkat_runtime::store::FencedInputStateBatchCasOutcome,
+        meerkat_runtime::RuntimeStoreError,
+    > {
+        self.inner
+            .compare_and_swap_recovery_input_states_atomically_with_fence(
+                runtime_id,
+                expected_revision,
+                mutations,
+                write_fence,
+            )
+            .await
+    }
+
+    async fn load_input_state_by_idempotency_key(
+        &self,
+        runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+        key: &meerkat_runtime::identifiers::IdempotencyKey,
+    ) -> Result<
+        Option<meerkat_runtime::store::ExactInputStateObservation>,
+        meerkat_runtime::RuntimeStoreError,
+    > {
+        self.inner
+            .load_input_state_by_idempotency_key(runtime_id, key)
+            .await
+    }
+
+    async fn load_input_states_by_ids(
+        &self,
+        runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+        input_ids: &[meerkat_core::lifecycle::InputId],
+    ) -> Result<
+        Vec<Option<meerkat_runtime::input_state::StoredInputState>>,
+        meerkat_runtime::RuntimeStoreError,
+    > {
+        self.inner
+            .load_input_states_by_ids(runtime_id, input_ids)
+            .await
+    }
+
+    async fn load_pending_terminal_owner_ids_page(
+        &self,
+        runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+        after: Option<&meerkat_core::lifecycle::InputId>,
+        limit: usize,
+    ) -> Result<Vec<meerkat_core::lifecycle::InputId>, meerkat_runtime::RuntimeStoreError> {
+        self.inner
+            .load_pending_terminal_owner_ids_page(runtime_id, after, limit)
+            .await
     }
 
     async fn load_input_state(

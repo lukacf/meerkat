@@ -8,14 +8,18 @@ use chrono::Utc;
 use meerkat_core::BlobStore;
 use meerkat_core::lifecycle::{InputId, RunId, run_receipt::RunBoundaryReceipt};
 use meerkat_core::types::{ContentBlock, ImageData, SessionId};
-use meerkat_runtime::input_state::{
-    InputStatePersistenceRecord, InputStateSeed, InputTerminalOutcome, StoredInputState,
+use meerkat_runtime::input_state::{InputStatePersistenceRecord, InputStateSeed, StoredInputState};
+use meerkat_runtime::store::{
+    FencedInputStateBatchCasOutcome, InputStateBatchCasImplementationProfile,
+    InputStateBatchCasOutcome, InputStateRow, PreparedRecoveryInputSnapshot,
+    RecoveryInputSetRevision, RecoveryInputStateMutation, RuntimeStoreError,
+    RuntimeStoreWriteFence, load_runtime_state,
 };
-use meerkat_runtime::store::{InputStateRow, RuntimeStoreError, load_runtime_state};
 use meerkat_runtime::{
     EphemeralRuntimeDriver, InMemoryRuntimeStore, Input, InputDurability, InputHeader, InputOrigin,
     InputState, InputVisibility, LogicalRuntimeId, MeerkatMachine, PersistentRuntimeDriver,
     PromptInput, RuntimeDriver, RuntimeState, RuntimeStore, SerializedSessionSnapshot,
+    SessionServiceRuntimeExt,
 };
 use meerkat_store::MemoryBlobStore;
 
@@ -63,9 +67,6 @@ struct FailPersistInputStore {
     fail_persist_input_state: AtomicBool,
     fail_atomic_apply: AtomicBool,
     fail_commit_machine_lifecycle: AtomicBool,
-    fail_load_input_states_for: Option<LogicalRuntimeId>,
-    fail_load_boundary_receipt_for: Option<LogicalRuntimeId>,
-    fail_load_runtime_state_for: Option<LogicalRuntimeId>,
 }
 
 impl FailPersistInputStore {
@@ -75,9 +76,6 @@ impl FailPersistInputStore {
             fail_persist_input_state: AtomicBool::new(true),
             fail_atomic_apply: AtomicBool::new(false),
             fail_commit_machine_lifecycle: AtomicBool::new(false),
-            fail_load_input_states_for: None,
-            fail_load_boundary_receipt_for: None,
-            fail_load_runtime_state_for: None,
         }
     }
 
@@ -87,9 +85,6 @@ impl FailPersistInputStore {
             fail_persist_input_state: AtomicBool::new(false),
             fail_atomic_apply: AtomicBool::new(false),
             fail_commit_machine_lifecycle: AtomicBool::new(false),
-            fail_load_input_states_for: None,
-            fail_load_boundary_receipt_for: None,
-            fail_load_runtime_state_for: None,
         }
     }
 
@@ -99,54 +94,6 @@ impl FailPersistInputStore {
             fail_persist_input_state: AtomicBool::new(false),
             fail_atomic_apply: AtomicBool::new(false),
             fail_commit_machine_lifecycle: AtomicBool::new(true),
-            fail_load_input_states_for: None,
-            fail_load_boundary_receipt_for: None,
-            fail_load_runtime_state_for: None,
-        }
-    }
-
-    fn fail_load_input_states_for(
-        inner: Arc<InMemoryRuntimeStore>,
-        runtime_id: LogicalRuntimeId,
-    ) -> Self {
-        Self {
-            inner,
-            fail_persist_input_state: AtomicBool::new(false),
-            fail_atomic_apply: AtomicBool::new(false),
-            fail_commit_machine_lifecycle: AtomicBool::new(false),
-            fail_load_input_states_for: Some(runtime_id),
-            fail_load_boundary_receipt_for: None,
-            fail_load_runtime_state_for: None,
-        }
-    }
-
-    fn fail_load_boundary_receipt_for(
-        inner: Arc<InMemoryRuntimeStore>,
-        runtime_id: LogicalRuntimeId,
-    ) -> Self {
-        Self {
-            inner,
-            fail_persist_input_state: AtomicBool::new(false),
-            fail_atomic_apply: AtomicBool::new(false),
-            fail_commit_machine_lifecycle: AtomicBool::new(false),
-            fail_load_input_states_for: None,
-            fail_load_boundary_receipt_for: Some(runtime_id),
-            fail_load_runtime_state_for: None,
-        }
-    }
-
-    fn fail_load_runtime_state_for(
-        inner: Arc<InMemoryRuntimeStore>,
-        runtime_id: LogicalRuntimeId,
-    ) -> Self {
-        Self {
-            inner,
-            fail_persist_input_state: AtomicBool::new(false),
-            fail_atomic_apply: AtomicBool::new(false),
-            fail_commit_machine_lifecycle: AtomicBool::new(false),
-            fail_load_input_states_for: None,
-            fail_load_boundary_receipt_for: None,
-            fail_load_runtime_state_for: Some(runtime_id),
         }
     }
 }
@@ -181,6 +128,12 @@ impl RuntimeStore for FailPersistInputStore {
 
     fn supports_compaction_projection_outbox(&self) -> bool {
         self.inner.supports_compaction_projection_outbox()
+    }
+
+    fn input_state_batch_cas_implementation_profile(
+        &self,
+    ) -> InputStateBatchCasImplementationProfile {
+        self.inner.input_state_batch_cas_implementation_profile()
     }
 
     async fn observe_machine_lifecycle(
@@ -257,12 +210,14 @@ impl RuntimeStore for FailPersistInputStore {
         &self,
         runtime_id: &LogicalRuntimeId,
     ) -> Result<Vec<InputStateRow>, RuntimeStoreError> {
-        if self.fail_load_input_states_for.as_ref() == Some(runtime_id) {
-            return Err(RuntimeStoreError::ReadFailed(
-                "synthetic legacy input-state load failure".into(),
-            ));
-        }
         self.inner.load_input_states(runtime_id).await
+    }
+
+    async fn load_input_states_with_versions(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<PreparedRecoveryInputSnapshot, RuntimeStoreError> {
+        self.inner.load_input_states_with_versions(runtime_id).await
     }
 
     async fn load_boundary_receipt(
@@ -271,11 +226,6 @@ impl RuntimeStore for FailPersistInputStore {
         run_id: &RunId,
         sequence: u64,
     ) -> Result<Option<RunBoundaryReceipt>, RuntimeStoreError> {
-        if self.fail_load_boundary_receipt_for.as_ref() == Some(runtime_id) {
-            return Err(RuntimeStoreError::ReadFailed(
-                "synthetic legacy boundary-receipt load failure".into(),
-            ));
-        }
         self.inner
             .load_boundary_receipt(runtime_id, run_id, sequence)
             .await
@@ -363,6 +313,97 @@ impl RuntimeStore for FailPersistInputStore {
             .await
     }
 
+    async fn compare_and_swap_input_states_atomically(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        expected: &[StoredInputState],
+        replacements: &[InputStatePersistenceRecord],
+    ) -> Result<InputStateBatchCasOutcome, RuntimeStoreError> {
+        self.inner
+            .compare_and_swap_input_states_atomically(runtime_id, expected, replacements)
+            .await
+    }
+
+    async fn compare_and_swap_input_states_atomically_with_fence(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        expected: &[StoredInputState],
+        replacements: &[InputStatePersistenceRecord],
+        write_fence: Arc<dyn RuntimeStoreWriteFence>,
+    ) -> Result<FencedInputStateBatchCasOutcome, RuntimeStoreError> {
+        self.inner
+            .compare_and_swap_input_states_atomically_with_fence(
+                runtime_id,
+                expected,
+                replacements,
+                write_fence,
+            )
+            .await
+    }
+
+    async fn compare_and_swap_recovery_input_states_atomically(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        expected_revision: RecoveryInputSetRevision,
+        mutations: &[RecoveryInputStateMutation],
+    ) -> Result<InputStateBatchCasOutcome, RuntimeStoreError> {
+        self.inner
+            .compare_and_swap_recovery_input_states_atomically(
+                runtime_id,
+                expected_revision,
+                mutations,
+            )
+            .await
+    }
+
+    async fn compare_and_swap_recovery_input_states_atomically_with_fence(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        expected_revision: RecoveryInputSetRevision,
+        mutations: &[RecoveryInputStateMutation],
+        write_fence: Arc<dyn RuntimeStoreWriteFence>,
+    ) -> Result<FencedInputStateBatchCasOutcome, RuntimeStoreError> {
+        self.inner
+            .compare_and_swap_recovery_input_states_atomically_with_fence(
+                runtime_id,
+                expected_revision,
+                mutations,
+                write_fence,
+            )
+            .await
+    }
+
+    async fn load_input_state_by_idempotency_key(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        key: &meerkat_runtime::identifiers::IdempotencyKey,
+    ) -> Result<Option<meerkat_runtime::store::ExactInputStateObservation>, RuntimeStoreError> {
+        self.inner
+            .load_input_state_by_idempotency_key(runtime_id, key)
+            .await
+    }
+
+    async fn load_input_states_by_ids(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        input_ids: &[InputId],
+    ) -> Result<Vec<Option<StoredInputState>>, RuntimeStoreError> {
+        self.inner
+            .load_input_states_by_ids(runtime_id, input_ids)
+            .await
+    }
+
+    async fn load_pending_terminal_owner_ids_page(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        after: Option<&InputId>,
+        limit: usize,
+    ) -> Result<Vec<InputId>, RuntimeStoreError> {
+        self.inner
+            .load_pending_terminal_owner_ids_page(runtime_id, after, limit)
+            .await
+    }
+
     async fn load_input_state(
         &self,
         runtime_id: &LogicalRuntimeId,
@@ -375,11 +416,6 @@ impl RuntimeStore for FailPersistInputStore {
         &self,
         runtime_id: &LogicalRuntimeId,
     ) -> Result<Option<Vec<u8>>, RuntimeStoreError> {
-        if self.fail_load_runtime_state_for.as_ref() == Some(runtime_id) {
-            return Err(RuntimeStoreError::ReadFailed(
-                "synthetic legacy runtime-state load failure".into(),
-            ));
-        }
         self.inner.load_machine_lifecycle_record(runtime_id).await
     }
 
@@ -539,7 +575,8 @@ async fn dedup_not_persisted() {
 #[tokio::test]
 async fn recover_from_store() {
     let store = Arc::new(InMemoryRuntimeStore::new());
-    let rid = LogicalRuntimeId::new("test");
+    let session_id = SessionId::new();
+    let rid = LogicalRuntimeId::for_session(&session_id);
 
     // Pre-populate store with a state (simulating crash recovery)
     let input = make_prompt("hello");
@@ -552,70 +589,33 @@ async fn recover_from_store() {
         .await
         .unwrap();
 
-    // Create a fresh driver (simulating restart)
-    let mut driver = PersistentRuntimeDriver::new(rid, store, memory_blob_store());
+    let adapter = MeerkatMachine::persistent(store as Arc<dyn RuntimeStore>, memory_blob_store());
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("registration-authorized recovery must adopt durable input work");
 
-    // Recover
-    let report = driver.recover().await.unwrap();
-    assert_eq!(report.inputs_recovered, 1);
-
-    // State should now be in the driver
-    assert!(driver.input_state(&input_id).is_some());
-    let dequeued = driver.contract_dequeue_next_for_recovery_tests();
-    assert!(
-        dequeued.is_some(),
-        "Recovered queued input should be re-enqueued"
+    let recovered = adapter
+        .input_state(&session_id, &input_id)
+        .await
+        .unwrap()
+        .expect("recovered input remains queryable");
+    assert_eq!(
+        recovered.seed.phase,
+        meerkat_runtime::input_state::InputLifecycleState::Queued
     );
-    let (queued_id, queued_input) = dequeued.unwrap();
-    assert_eq!(queued_id, input_id);
-    assert_eq!(queued_input.id(), &input_id);
-}
-
-#[tokio::test]
-async fn recover_ignores_legacy_session_alias_input_states() {
-    let store = Arc::new(InMemoryRuntimeStore::new());
-    let session_id = SessionId::new();
-    let canonical_rid = LogicalRuntimeId::for_session(&session_id);
-    let legacy_rid = LogicalRuntimeId::legacy_session_uuid_alias(&session_id);
-
-    let canonical_input = make_prompt("canonical input");
-    let canonical_input_id = canonical_input.id().clone();
-    let mut canonical_state = InputState::new_accepted(canonical_input_id.clone());
-    canonical_state.persisted_input = Some(canonical_input);
-    canonical_state.durability = Some(InputDurability::Durable);
-    store
-        .persist_input_state(
-            &canonical_rid,
-            &persistable(stored_accepted(canonical_state)),
-        )
-        .await
-        .unwrap();
-
-    let legacy_input = make_prompt("legacy input");
-    let legacy_input_id = legacy_input.id().clone();
-    let mut legacy_state = InputState::new_accepted(legacy_input_id.clone());
-    legacy_state.persisted_input = Some(legacy_input);
-    legacy_state.durability = Some(InputDurability::Durable);
-    store
-        .persist_input_state(&legacy_rid, &persistable(stored_accepted(legacy_state)))
-        .await
-        .unwrap();
-
-    let mut driver = PersistentRuntimeDriver::new(canonical_rid, store, memory_blob_store());
-    let report = driver.recover().await.unwrap();
-
-    assert_eq!(report.inputs_recovered, 1);
-    assert!(driver.input_state(&canonical_input_id).is_some());
-    assert!(
-        driver.input_state(&legacy_input_id).is_none(),
-        "legacy raw session alias input state must not drive recovery"
+    assert_eq!(
+        adapter.list_active_inputs(&session_id).await.unwrap(),
+        vec![input_id],
+        "recovered queued input must remain active for replay"
     );
 }
 
 #[tokio::test]
 async fn recover_rebuilds_dedup_index() {
     let store = Arc::new(InMemoryRuntimeStore::new());
-    let rid = LogicalRuntimeId::new("test");
+    let session_id = SessionId::new();
+    let rid = LogicalRuntimeId::for_session(&session_id);
     let key = meerkat_runtime::identifiers::IdempotencyKey::new("dedup-key");
 
     // Pre-populate store with a state that has an idempotency key
@@ -633,16 +633,18 @@ async fn recover_rebuilds_dedup_index() {
         .await
         .unwrap();
 
-    // Create a fresh driver and recover
-    let mut driver = PersistentRuntimeDriver::new(rid, store, memory_blob_store());
-    driver.recover().await.unwrap();
+    let adapter = MeerkatMachine::persistent(store as Arc<dyn RuntimeStore>, memory_blob_store());
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("registration-authorized recovery must rebuild the dedup index");
 
     // Now try to accept a new input with the same idempotency key
     let mut dup_input = make_prompt("duplicate");
     if let Input::Prompt(ref mut p) = dup_input {
         p.header.idempotency_key = Some(key);
     }
-    let outcome = driver.accept_input(dup_input).await.unwrap();
+    let outcome = adapter.accept_input(&session_id, dup_input).await.unwrap();
     assert!(
         outcome.is_deduplicated(),
         "After recovery, dedup index should be rebuilt so duplicates are caught"
@@ -652,7 +654,8 @@ async fn recover_rebuilds_dedup_index() {
 #[tokio::test]
 async fn recover_discards_machine_classified_ephemeral_inputs() {
     let store = Arc::new(InMemoryRuntimeStore::new());
-    let rid = LogicalRuntimeId::new("test");
+    let session_id = SessionId::new();
+    let rid = LogicalRuntimeId::for_session(&session_id);
 
     // Pre-populate with an ephemeral input state
     let mut input = make_prompt("ephemeral recovered input");
@@ -668,17 +671,29 @@ async fn recover_discards_machine_classified_ephemeral_inputs() {
         .await
         .unwrap();
 
-    // Create fresh driver and recover
-    let mut driver = PersistentRuntimeDriver::new(rid, store, memory_blob_store());
-    let report = driver.recover().await.unwrap();
+    let adapter = MeerkatMachine::persistent(store as Arc<dyn RuntimeStore>, memory_blob_store());
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("registration-authorized recovery must discard ephemeral input work");
 
     // Generated recovery durability authority discards ephemeral rows before
     // the ledger or queue projections can recover them.
     assert!(
-        driver.input_state(&input_id).is_none(),
+        adapter
+            .input_state(&session_id, &input_id)
+            .await
+            .unwrap()
+            .is_none(),
         "Ephemeral inputs should be filtered during recovery"
     );
-    assert_eq!(report.inputs_recovered, 0);
+    assert!(
+        adapter
+            .list_active_inputs(&session_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -778,7 +793,8 @@ async fn durable_accept_failure_restores_canonical_ingress_state() {
 #[tokio::test]
 async fn recovery_lifecycle_commit_failure_restores_recovered_projection() {
     let inner = Arc::new(InMemoryRuntimeStore::new());
-    let rid = LogicalRuntimeId::new("test");
+    let session_id = SessionId::new();
+    let rid = LogicalRuntimeId::for_session(&session_id);
     let input = make_prompt("recover rollback");
     let input_id = input.id().clone();
     let mut state = InputState::new_accepted(input_id.clone());
@@ -792,10 +808,9 @@ async fn recovery_lifecycle_commit_failure_restores_recovered_projection() {
     let store: Arc<dyn RuntimeStore> = Arc::new(
         FailPersistInputStore::fail_commit_machine_lifecycle_once(inner.clone()),
     );
-    let mut driver = PersistentRuntimeDriver::new(rid.clone(), store, memory_blob_store());
-
-    let err = driver
-        .recover()
+    let adapter = MeerkatMachine::persistent(store, memory_blob_store());
+    let err = adapter
+        .register_session(session_id.clone())
         .await
         .expect_err("recovery lifecycle commit should fail");
     assert!(
@@ -804,12 +819,8 @@ async fn recovery_lifecycle_commit_failure_restores_recovered_projection() {
         "unexpected error: {err}",
     );
     assert!(
-        driver.input_state(&input_id).is_none(),
-        "failed recovery must not leave recovered input in the live driver",
-    );
-    assert!(
-        driver.contract_dequeue_next_for_recovery_tests().is_none(),
-        "failed recovery must not leave recovered queue projection",
+        !adapter.contains_session(&session_id).await,
+        "failed registration recovery must not retain a live runtime entry",
     );
     let stored = inner
         .load_input_state(&rid, &input_id)
@@ -875,76 +886,14 @@ async fn persistence_record_rejects_unstamped_recovered_row_before_store_write()
 }
 
 #[tokio::test]
-async fn recover_allows_legacy_unstamped_terminal_rows() {
-    use meerkat_runtime::input_state::InputLifecycleState;
-
-    let store = Arc::new(InMemoryRuntimeStore::new());
-    let rid = LogicalRuntimeId::new("test");
-
-    let input = make_prompt("legacy terminal row");
-    let input_id = input.id().clone();
-    let mut state = InputState::new_accepted(input_id.clone());
-    state.persisted_input = Some(input);
-    state.durability = Some(InputDurability::Durable);
-    store
-        .persist_input_state(
-            &rid,
-            &persistable(StoredInputState {
-                state,
-                seed: InputStateSeed {
-                    phase: InputLifecycleState::Consumed,
-                    last_run_id: None,
-                    last_boundary_sequence: None,
-                    terminal_outcome: Some(InputTerminalOutcome::Consumed),
-                    attempt_count: 0,
-                    admission_sequence: None,
-                    recovery_lane: None,
-                },
-            }),
-        )
-        .await
-        .unwrap();
-
-    let mut driver = PersistentRuntimeDriver::new(rid.clone(), store.clone(), memory_blob_store());
-    driver
-        .recover()
-        .await
-        .expect("legacy unstamped terminal row should not block recovery");
-
-    assert!(
-        driver.input_state(&input_id).is_some(),
-        "terminal history should remain queryable after recovery"
-    );
-    assert_eq!(
-        driver.input_phase(&input_id),
-        Some(InputLifecycleState::Consumed)
-    );
-    assert!(
-        driver.active_input_ids().is_empty(),
-        "terminal rows must not become active"
-    );
-    assert!(
-        driver.contract_dequeue_next_for_recovery_tests().is_none(),
-        "terminal rows must not enter runtime queues"
-    );
-
-    let stored = store
-        .load_input_state(&rid, &input_id)
-        .await
-        .unwrap()
-        .expect("terminal row should remain persisted");
-    assert_eq!(stored.seed.phase, InputLifecycleState::Consumed);
-    assert_eq!(stored.state.runtime_semantics, None);
-}
-
-#[tokio::test]
 async fn recover_consumes_committed_applied_pending_inputs() {
     use meerkat_core::lifecycle::RunId;
     use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
     use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
 
     let store = Arc::new(InMemoryRuntimeStore::new());
-    let rid = LogicalRuntimeId::new("test");
+    let session_id = SessionId::new();
+    let rid = LogicalRuntimeId::for_session(&session_id);
     let input = make_prompt("already committed");
     let input_id = input.id().clone();
     let run_id = RunId::new();
@@ -990,387 +939,24 @@ async fn recover_consumes_committed_applied_pending_inputs() {
         .await
         .unwrap();
 
-    let mut driver = PersistentRuntimeDriver::new(rid, store, memory_blob_store());
-    driver.recover().await.unwrap();
-
-    let recovered = driver.input_state(&input_id);
+    let adapter = MeerkatMachine::persistent(store as Arc<dyn RuntimeStore>, memory_blob_store());
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("registration-authorized recovery must adopt the committed input");
+    let recovered = adapter
+        .input_state(&session_id, &input_id)
+        .await
+        .unwrap()
+        .expect("committed input should remain queryable after recovery");
+    assert_eq!(recovered.seed.phase, InputLifecycleState::Consumed);
     assert!(
-        recovered.is_some(),
-        "committed input should remain queryable after recovery"
-    );
-    assert_eq!(
-        driver.inner_ref().input_phase(&input_id),
-        Some(InputLifecycleState::Consumed)
-    );
-    assert!(
-        driver.active_input_ids().is_empty(),
+        adapter
+            .list_active_inputs(&session_id)
+            .await
+            .unwrap()
+            .is_empty(),
         "committed applied inputs should not stay active after recovery"
-    );
-    assert!(
-        driver.contract_dequeue_next_for_recovery_tests().is_none(),
-        "committed applied inputs should not be replayed after recovery"
-    );
-}
-
-#[tokio::test]
-async fn recover_duplicate_legacy_input_row_keeps_canonical_boundary_receipt() {
-    use meerkat_core::lifecycle::RunId;
-    use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
-    use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
-    use meerkat_runtime::input_state::InputLifecycleState;
-
-    let store = Arc::new(InMemoryRuntimeStore::new());
-    let session_id = SessionId::new();
-    let canonical_rid = LogicalRuntimeId::for_session(&session_id);
-    let legacy_rid = LogicalRuntimeId::legacy_session_uuid_alias(&session_id);
-    let input = make_prompt("already committed under canonical alias");
-    let input_id = input.id().clone();
-    let run_id = RunId::new();
-
-    let mut canonical_state = InputState::new_accepted(input_id.clone());
-    canonical_state.persisted_input = Some(input.clone());
-    canonical_state.durability = Some(InputDurability::Durable);
-    stamp_runtime_semantics(&mut canonical_state);
-    let canonical_stored = StoredInputState {
-        state: canonical_state.clone(),
-        seed: InputStateSeed {
-            phase: InputLifecycleState::AppliedPendingConsumption,
-            last_run_id: Some(run_id.clone()),
-            last_boundary_sequence: Some(0),
-            terminal_outcome: None,
-            attempt_count: 1,
-            admission_sequence: None,
-            recovery_lane: Some(meerkat_core::types::HandlingMode::Queue),
-        },
-    };
-    store
-        .atomic_apply(
-            &canonical_rid,
-            None,
-            RunBoundaryReceipt {
-                run_id: run_id.clone(),
-                boundary: RunApplyBoundary::RunStart,
-                contributing_input_ids: vec![input_id.clone()],
-                conversation_digest: None,
-                message_count: 1,
-                sequence: 0,
-            },
-            vec![persistable(canonical_stored.clone())],
-            None,
-        )
-        .await
-        .unwrap();
-
-    let mut legacy_state = canonical_state;
-    legacy_state.updated_at = canonical_stored.state.updated_at + chrono::Duration::milliseconds(1);
-    let legacy_stored = StoredInputState {
-        state: legacy_state,
-        seed: canonical_stored.seed.clone(),
-    };
-    store
-        .persist_input_state(&legacy_rid, &persistable(legacy_stored))
-        .await
-        .unwrap();
-
-    let mut driver = PersistentRuntimeDriver::new(canonical_rid, store, memory_blob_store());
-    driver.recover().await.unwrap();
-
-    assert_eq!(
-        driver.inner_ref().input_phase(&input_id),
-        Some(InputLifecycleState::Consumed),
-        "duplicate legacy row must still consult the canonical boundary receipt"
-    );
-    assert!(
-        driver.contract_dequeue_next_for_recovery_tests().is_none(),
-        "canonical committed input must not be replayed because the newer duplicate row came from the legacy alias"
-    );
-}
-
-#[tokio::test]
-async fn recover_prefers_canonical_duplicate_over_newer_stale_legacy_row() {
-    use meerkat_core::lifecycle::RunId;
-    use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
-    use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
-    use meerkat_runtime::input_state::InputLifecycleState;
-
-    let store = Arc::new(InMemoryRuntimeStore::new());
-    let session_id = SessionId::new();
-    let canonical_rid = LogicalRuntimeId::for_session(&session_id);
-    let legacy_rid = LogicalRuntimeId::legacy_session_uuid_alias(&session_id);
-    let input = make_prompt("canonical applied row beats stale legacy accepted row");
-    let input_id = input.id().clone();
-    let run_id = RunId::new();
-
-    let mut canonical_state = InputState::new_accepted(input_id.clone());
-    canonical_state.persisted_input = Some(input.clone());
-    canonical_state.durability = Some(InputDurability::Durable);
-    stamp_runtime_semantics(&mut canonical_state);
-    let canonical_stored = StoredInputState {
-        state: canonical_state.clone(),
-        seed: InputStateSeed {
-            phase: InputLifecycleState::AppliedPendingConsumption,
-            last_run_id: Some(run_id.clone()),
-            last_boundary_sequence: Some(0),
-            terminal_outcome: None,
-            attempt_count: 1,
-            admission_sequence: None,
-            recovery_lane: Some(meerkat_core::types::HandlingMode::Queue),
-        },
-    };
-    store
-        .atomic_apply(
-            &canonical_rid,
-            None,
-            RunBoundaryReceipt {
-                run_id: run_id.clone(),
-                boundary: RunApplyBoundary::RunStart,
-                contributing_input_ids: vec![input_id.clone()],
-                conversation_digest: None,
-                message_count: 1,
-                sequence: 0,
-            },
-            vec![persistable(canonical_stored.clone())],
-            None,
-        )
-        .await
-        .unwrap();
-
-    let mut legacy_state = canonical_state;
-    legacy_state.updated_at = canonical_stored.state.updated_at + chrono::Duration::milliseconds(1);
-    store
-        .persist_input_state(&legacy_rid, &persistable(stored_accepted(legacy_state)))
-        .await
-        .unwrap();
-
-    let mut driver = PersistentRuntimeDriver::new(canonical_rid, store, memory_blob_store());
-    driver.recover().await.unwrap();
-
-    assert_eq!(
-        driver.inner_ref().input_phase(&input_id),
-        Some(InputLifecycleState::Consumed),
-        "canonical applied row must not be replaced by a newer stale legacy row"
-    );
-    assert!(
-        driver.contract_dequeue_next_for_recovery_tests().is_none(),
-        "newer stale legacy row must not replay a canonically committed input"
-    );
-}
-
-#[tokio::test]
-async fn recover_ignores_legacy_boundary_receipt_load_error_after_canonical_miss() {
-    use meerkat_core::lifecycle::RunId;
-    use meerkat_runtime::input_state::InputLifecycleState;
-
-    let inner = Arc::new(InMemoryRuntimeStore::new());
-    let session_id = SessionId::new();
-    let canonical_rid = LogicalRuntimeId::for_session(&session_id);
-    let legacy_rid = LogicalRuntimeId::legacy_session_uuid_alias(&session_id);
-    let input = make_prompt("canonical applied row with missing receipt");
-    let input_id = input.id().clone();
-    let run_id = RunId::new();
-
-    let mut state = InputState::new_accepted(input_id.clone());
-    state.persisted_input = Some(input);
-    state.durability = Some(InputDurability::Durable);
-    stamp_runtime_semantics(&mut state);
-    inner
-        .persist_input_state(
-            &canonical_rid,
-            &persistable(StoredInputState {
-                state,
-                seed: InputStateSeed {
-                    phase: InputLifecycleState::AppliedPendingConsumption,
-                    last_run_id: Some(run_id),
-                    last_boundary_sequence: Some(0),
-                    terminal_outcome: None,
-                    attempt_count: 1,
-                    admission_sequence: None,
-                    recovery_lane: Some(meerkat_core::types::HandlingMode::Queue),
-                },
-            }),
-        )
-        .await
-        .unwrap();
-
-    let store = Arc::new(FailPersistInputStore::fail_load_boundary_receipt_for(
-        inner, legacy_rid,
-    ));
-    let mut driver = PersistentRuntimeDriver::new(canonical_rid, store, memory_blob_store());
-
-    let report = driver
-        .recover()
-        .await
-        .expect("legacy receipt read failure must not poison canonical missing-receipt recovery");
-
-    assert_eq!(report.inputs_recovered, 1);
-    assert_eq!(
-        driver.inner_ref().input_phase(&input_id),
-        Some(InputLifecycleState::Queued),
-        "canonical missing receipt should recover by requeueing the input"
-    );
-    assert_eq!(
-        driver
-            .contract_dequeue_next_for_recovery_tests()
-            .map(|(queued_id, _)| queued_id),
-        Some(input_id),
-        "requeued canonical input should remain available for replay"
-    );
-}
-
-#[tokio::test]
-async fn recover_treats_canonical_boundary_receipt_miss_as_authoritative() {
-    use meerkat_core::lifecycle::RunId;
-    use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
-    use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
-    use meerkat_runtime::input_state::InputLifecycleState;
-
-    let store = Arc::new(InMemoryRuntimeStore::new());
-    let session_id = SessionId::new();
-    let canonical_rid = LogicalRuntimeId::for_session(&session_id);
-    let legacy_rid = LogicalRuntimeId::legacy_session_uuid_alias(&session_id);
-    let input = make_prompt("canonical missing receipt must not consume from legacy receipt");
-    let input_id = input.id().clone();
-    let run_id = RunId::new();
-
-    let mut state = InputState::new_accepted(input_id.clone());
-    state.persisted_input = Some(input);
-    state.durability = Some(InputDurability::Durable);
-    stamp_runtime_semantics(&mut state);
-    store
-        .persist_input_state(
-            &canonical_rid,
-            &persistable(StoredInputState {
-                state,
-                seed: InputStateSeed {
-                    phase: InputLifecycleState::AppliedPendingConsumption,
-                    last_run_id: Some(run_id.clone()),
-                    last_boundary_sequence: Some(0),
-                    terminal_outcome: None,
-                    attempt_count: 1,
-                    admission_sequence: None,
-                    recovery_lane: Some(meerkat_core::types::HandlingMode::Queue),
-                },
-            }),
-        )
-        .await
-        .unwrap();
-    store
-        .atomic_apply(
-            &legacy_rid,
-            None,
-            RunBoundaryReceipt {
-                run_id,
-                boundary: RunApplyBoundary::RunStart,
-                contributing_input_ids: vec![input_id.clone()],
-                conversation_digest: None,
-                message_count: 1,
-                sequence: 0,
-            },
-            vec![],
-            None,
-        )
-        .await
-        .unwrap();
-
-    let mut driver = PersistentRuntimeDriver::new(canonical_rid, store, memory_blob_store());
-    let report = driver
-        .recover()
-        .await
-        .expect("canonical receipt miss should not be poisoned by legacy receipt presence");
-
-    assert_eq!(report.inputs_recovered, 1);
-    assert_eq!(
-        driver.inner_ref().input_phase(&input_id),
-        Some(InputLifecycleState::Queued),
-        "canonical receipt miss should requeue instead of consuming from stale legacy receipt"
-    );
-    assert_eq!(
-        driver
-            .contract_dequeue_next_for_recovery_tests()
-            .map(|(queued_id, _)| queued_id),
-        Some(input_id),
-        "canonical missing-receipt input should remain queued for replay"
-    );
-}
-
-#[tokio::test]
-async fn recover_ignores_legacy_input_state_load_error_after_canonical_states() {
-    let inner = Arc::new(InMemoryRuntimeStore::new());
-    let session_id = SessionId::new();
-    let canonical_rid = LogicalRuntimeId::for_session(&session_id);
-    let legacy_rid = LogicalRuntimeId::legacy_session_uuid_alias(&session_id);
-    let input = make_prompt("canonical survives unreadable legacy alias");
-    let input_id = input.id().clone();
-
-    let mut state = InputState::new_accepted(input_id.clone());
-    state.persisted_input = Some(input);
-    state.durability = Some(InputDurability::Durable);
-    inner
-        .persist_input_state(&canonical_rid, &persistable(stored_accepted(state)))
-        .await
-        .unwrap();
-
-    let store = Arc::new(FailPersistInputStore::fail_load_input_states_for(
-        inner, legacy_rid,
-    ));
-    let mut driver = PersistentRuntimeDriver::new(canonical_rid, store, memory_blob_store());
-
-    let report = driver
-        .recover()
-        .await
-        .expect("legacy input-state read failure must not poison canonical recovery");
-
-    assert_eq!(report.inputs_recovered, 1);
-    assert!(
-        driver.input_state(&input_id).is_some(),
-        "canonical input state should recover even when legacy alias load fails"
-    );
-}
-
-#[tokio::test]
-async fn recover_ignores_legacy_input_state_load_error_after_empty_canonical_read() {
-    let inner = Arc::new(InMemoryRuntimeStore::new());
-    let session_id = SessionId::new();
-    let canonical_rid = LogicalRuntimeId::for_session(&session_id);
-    let legacy_rid = LogicalRuntimeId::legacy_session_uuid_alias(&session_id);
-    let store = Arc::new(FailPersistInputStore::fail_load_input_states_for(
-        inner, legacy_rid,
-    ));
-    let mut driver = PersistentRuntimeDriver::new(canonical_rid, store, memory_blob_store());
-
-    let report = driver
-        .recover()
-        .await
-        .expect("legacy input-state read failure must not poison empty canonical recovery");
-
-    assert_eq!(report.inputs_recovered, 0);
-    assert!(
-        driver.active_input_ids().is_empty(),
-        "empty canonical recovery should stay empty when legacy alias load fails"
-    );
-}
-
-#[tokio::test]
-async fn recover_ignores_legacy_runtime_state_load_error_after_canonical_miss() {
-    let inner = Arc::new(InMemoryRuntimeStore::new());
-    let session_id = SessionId::new();
-    let canonical_rid = LogicalRuntimeId::for_session(&session_id);
-    let legacy_rid = LogicalRuntimeId::legacy_session_uuid_alias(&session_id);
-    let store = Arc::new(FailPersistInputStore::fail_load_runtime_state_for(
-        inner, legacy_rid,
-    ));
-    let mut driver = PersistentRuntimeDriver::new(canonical_rid, store, memory_blob_store());
-
-    let report = driver
-        .recover()
-        .await
-        .expect("legacy runtime-state read failure must not poison a canonical miss");
-
-    assert_eq!(report.inputs_recovered, 0);
-    assert_eq!(
-        driver.runtime_state(),
-        RuntimeState::Idle,
-        "canonical runtime-state miss should retain the fresh idle runtime state"
     );
 }
 
@@ -1378,14 +964,17 @@ async fn recover_ignores_legacy_runtime_state_load_error_after_canonical_miss() 
 async fn driver_persistent_recovery_replaces_terminal_process_projection() {
     let inner = Arc::new(InMemoryRuntimeStore::new());
     let store = Arc::new(FailPersistInputStore::passthrough(inner));
-    let (_session_id, rid) = persist_destroyed_runtime_lifecycle(Arc::clone(&store)).await;
+    let (session_id, rid) = persist_destroyed_runtime_lifecycle(Arc::clone(&store)).await;
 
-    let mut driver = PersistentRuntimeDriver::new(rid.clone(), store.clone(), memory_blob_store());
-    let report = driver.recover().await.unwrap();
+    let adapter =
+        MeerkatMachine::persistent(store.clone() as Arc<dyn RuntimeStore>, memory_blob_store());
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("registration-authorized recovery must replace the dead process projection");
 
-    assert_eq!(report.inputs_recovered, 0);
     assert_eq!(
-        driver.runtime_state(),
+        adapter.runtime_state(&session_id).await.unwrap(),
         RuntimeState::Idle,
         "cold recovery must not adopt a dead process phase as live authority",
     );
@@ -1400,7 +989,7 @@ async fn driver_persistent_recovery_replaces_terminal_process_projection() {
 async fn driver_persistent_recovery_normalizes_phase_and_recovers_durable_input_independently() {
     let inner = Arc::new(InMemoryRuntimeStore::new());
     let store = Arc::new(FailPersistInputStore::passthrough(inner.clone()));
-    let (_session_id, rid) = persist_destroyed_runtime_lifecycle(Arc::clone(&store)).await;
+    let (session_id, rid) = persist_destroyed_runtime_lifecycle(Arc::clone(&store)).await;
     let input = make_prompt("terminal projection conflict");
     let input_id = input.id().clone();
     let mut state = InputState::new_accepted(input_id.clone());
@@ -1411,19 +1000,23 @@ async fn driver_persistent_recovery_normalizes_phase_and_recovers_durable_input_
         .await
         .unwrap();
 
-    let mut driver = PersistentRuntimeDriver::new(rid.clone(), store.clone(), memory_blob_store());
-    let report = driver
-        .recover()
+    let adapter =
+        MeerkatMachine::persistent(store.clone() as Arc<dyn RuntimeStore>, memory_blob_store());
+    adapter
+        .register_session(session_id.clone())
         .await
-        .expect("dead process phase and durable input recovery are independent");
-    assert_eq!(report.inputs_recovered, 1);
+        .expect("registration-authorized recovery must preserve durable input work");
     assert_eq!(
-        driver.runtime_state(),
+        adapter.runtime_state(&session_id).await.unwrap(),
         RuntimeState::Idle,
         "cold recovery must not force destroyed state from the store projection",
     );
     assert!(
-        driver.input_state(&input_id).is_some(),
+        adapter
+            .input_state(&session_id, &input_id)
+            .await
+            .unwrap()
+            .is_some(),
         "durable input work must survive lifecycle-shell normalization",
     );
     assert_eq!(

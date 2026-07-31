@@ -686,6 +686,28 @@ mod tests {
     use std::path::PathBuf;
     use tempfile::TempDir;
 
+    #[cfg(unix)]
+    fn process_can_execute(pid: i32) -> bool {
+        use nix::errno::Errno;
+        use nix::sys::signal::kill;
+        use nix::unistd::Pid;
+
+        match kill(Pid::from_raw(pid), None) {
+            Err(Errno::ESRCH) => false,
+            Err(_) => true,
+            Ok(()) => {
+                let output = std::process::Command::new("/bin/ps")
+                    .args(["-o", "state=", "-p", &pid.to_string()])
+                    .output();
+                !output
+                    .ok()
+                    .filter(|output| output.status.success())
+                    .and_then(|output| String::from_utf8(output.stdout).ok())
+                    .is_some_and(|state| state.trim_start().starts_with('Z'))
+            }
+        }
+    }
+
     #[cfg(feature = "integration-real-tests")]
     fn nu_available() -> bool {
         which::which("nu").is_ok()
@@ -851,8 +873,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn cancelling_foreground_shell_future_leaves_no_process_group_alive() {
-        use nix::errno::Errno;
-        use nix::sys::signal::{Signal, kill, killpg};
+        use nix::sys::signal::{Signal, killpg};
         use nix::unistd::Pid;
 
         let temp_dir = TempDir::new().unwrap();
@@ -910,14 +931,9 @@ mod tests {
         task.abort();
         let _ = task.await;
 
-        let process_exists = |pid| match kill(Pid::from_raw(pid), None) {
-            Ok(()) => true,
-            Err(Errno::ESRCH) => false,
-            Err(_) => true,
-        };
         let mut survived_cancellation = false;
         for _ in 0..50 {
-            survived_cancellation = process_exists(child_pid);
+            survived_cancellation = process_can_execute(child_pid);
             if !survived_cancellation {
                 break;
             }
@@ -937,7 +953,6 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn completed_foreground_shell_reaps_descendant_that_closed_output_pipes() {
-        use nix::errno::Errno;
         use nix::sys::signal::{Signal, kill, killpg};
         use nix::unistd::Pid;
 
@@ -977,11 +992,14 @@ mod tests {
             .trim()
             .parse()
             .unwrap();
-        let mut descendant_survived = match kill(Pid::from_raw(child_pid), None) {
-            Ok(()) => true,
-            Err(Errno::ESRCH) => false,
-            Err(_) => true,
-        };
+        let mut descendant_survived = true;
+        for _ in 0..100 {
+            descendant_survived = process_can_execute(child_pid);
+            if !descendant_survived {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
 
         match call_result {
             Ok(result) => {
@@ -1011,11 +1029,7 @@ mod tests {
             let _ = kill(Pid::from_raw(child_pid), Some(Signal::SIGKILL));
             let _ = killpg(Pid::from_raw(leader_pid), Signal::SIGKILL);
             for _ in 0..100 {
-                descendant_survived = match kill(Pid::from_raw(child_pid), None) {
-                    Ok(()) => true,
-                    Err(Errno::ESRCH) => false,
-                    Err(_) => true,
-                };
+                descendant_survived = process_can_execute(child_pid);
                 if !descendant_survived {
                     break;
                 }

@@ -1553,6 +1553,26 @@ impl meerkat_runtime::RuntimeStore for PowerCutRuntimeStore {
             .await
     }
 
+    async fn compare_and_swap_input_states_atomically_with_fence(
+        &self,
+        runtime_id: &meerkat_runtime::LogicalRuntimeId,
+        expected: &[meerkat_runtime::input_state::StoredInputState],
+        replacements: &[meerkat_runtime::input_state::InputStatePersistenceRecord],
+        write_fence: std::sync::Arc<dyn meerkat_runtime::store::RuntimeStoreWriteFence>,
+    ) -> Result<
+        meerkat_runtime::store::FencedInputStateBatchCasOutcome,
+        meerkat_runtime::RuntimeStoreError,
+    > {
+        self.inner
+            .compare_and_swap_input_states_atomically_with_fence(
+                runtime_id,
+                expected,
+                replacements,
+                write_fence,
+            )
+            .await
+    }
+
     async fn compare_and_swap_recovery_input_states_atomically(
         &self,
         runtime_id: &meerkat_runtime::LogicalRuntimeId,
@@ -1565,6 +1585,26 @@ impl meerkat_runtime::RuntimeStore for PowerCutRuntimeStore {
                 runtime_id,
                 expected_revision,
                 mutations,
+            )
+            .await
+    }
+
+    async fn compare_and_swap_recovery_input_states_atomically_with_fence(
+        &self,
+        runtime_id: &meerkat_runtime::LogicalRuntimeId,
+        expected_revision: meerkat_runtime::store::RecoveryInputSetRevision,
+        mutations: &[meerkat_runtime::store::RecoveryInputStateMutation],
+        write_fence: std::sync::Arc<dyn meerkat_runtime::store::RuntimeStoreWriteFence>,
+    ) -> Result<
+        meerkat_runtime::store::FencedInputStateBatchCasOutcome,
+        meerkat_runtime::RuntimeStoreError,
+    > {
+        self.inner
+            .compare_and_swap_recovery_input_states_atomically_with_fence(
+                runtime_id,
+                expected_revision,
+                mutations,
+                write_fence,
             )
             .await
     }

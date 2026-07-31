@@ -251,17 +251,13 @@ fn stacked_rewrites_reconstruct_exactly_with_compact_growth() {
             serde_json::to_value(session.messages()).expect("child transcript serializes"),
         ));
 
-        let audited_graph = session
-            .metadata()
-            .get(SESSION_TRANSCRIPT_HISTORY_STATE_KEY)
-            .cloned()
-            .expect("rewrite installs audited graph");
+        let audited_graph = history_value(&session);
         session.push(user(&format!("follow-up {round} {BODY}")));
         session.push(assistant(&format!("reply {round} {BODY}")));
         assert_eq!(
-            session.metadata().get(SESSION_TRANSCRIPT_HISTORY_STATE_KEY),
-            Some(&audited_graph),
-            "ordinary appends must not manufacture retained graph revisions"
+            history_value(&session),
+            audited_graph,
+            "ordinary appends must not manufacture retained graph revisions at the durable wire boundary"
         );
     }
 

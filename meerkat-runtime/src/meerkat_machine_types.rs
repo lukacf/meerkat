@@ -692,6 +692,7 @@ meerkat_machine_runtime_internal_inputs!(
     InputQueueLifecycle => [
         AbandonInput,
         AdvanceSessionContext,
+        ArchiveTerminalInput,
         BudgetExhausted,
         ChangeLane,
         CoalesceInput,
@@ -779,6 +780,7 @@ meerkat_machine_runtime_internal_inputs!(
         HydrateSessionLlmState,
         LlmReturnedTerminal,
         LlmReturnedToolCalls,
+        LiveBoundaryUnavailable,
         Prepare,
         PrimitiveApplied,
         RecordBoundarySeq,

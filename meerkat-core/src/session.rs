@@ -131,6 +131,7 @@ pub(crate) use import_0810::is_released_checkpoint_metadata_key;
 pub use import_0810::{
     ImportedReleased0810Session, Released0810ImportError, Released0810ImportEvidence,
     Released0810ImportReceipt, import_released_0810_session,
+    released_0810_transcript_serialized_rows_digest,
 };
 #[cfg(test)]
 pub(crate) use transcript_history::graph::TRANSCRIPT_DIGEST_FORMAT_RELEASED_0810;
@@ -592,7 +593,6 @@ pub(crate) fn canonicalize_messages_for_digest(messages: &[Message]) -> Vec<Mess
 ///
 /// The one-time importer uses this only while proving predecessor graph
 /// identities. Current code must never mint a new revision from it.
-#[cfg(test)]
 pub(crate) fn canonicalize_released_0810_messages_for_digest(messages: &[Message]) -> Vec<Message> {
     let mut canonical = canonicalize_message_images_for_digest(messages);
     for message in &mut canonical {

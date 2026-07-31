@@ -11,6 +11,8 @@ use crate::{
     PredicateEvaluation, PredicateEvaluationReceipt, PredicateObservation, PredicateWatch,
 };
 
+const REQUEST_CANCEL_CONFLICT_BUDGET: usize = 8;
+
 #[derive(Clone)]
 pub struct DetachedJobService {
     store: Arc<dyn DetachedJobStore>,
@@ -609,6 +611,19 @@ impl DetachedJobService {
     ) -> Result<JobSnapshot, DetachedJobError> {
         let current = self.required(job_id).await?;
         ensure_current_writer(job_id, &current, &write)?;
+        if current.machine_state.cancel_requested {
+            return self
+                .apply_terminal(
+                    current,
+                    dsl::DetachedJobInput::AcknowledgeCancel {
+                        attempt_id: write.attempt_id.as_str().to_string(),
+                        fence: write.fence.get(),
+                        acknowledged_at_ms: completed_at_ms,
+                    },
+                    JobTerminalResult::Cancelled,
+                )
+                .await;
+        }
         self.apply_terminal(
             current,
             dsl::DetachedJobInput::CompleteAttempt {
@@ -631,6 +646,19 @@ impl DetachedJobService {
     ) -> Result<JobSnapshot, DetachedJobError> {
         let current = self.required(job_id).await?;
         ensure_current_writer(job_id, &current, &write)?;
+        if current.machine_state.cancel_requested {
+            return self
+                .apply_terminal(
+                    current,
+                    dsl::DetachedJobInput::AcknowledgeCancel {
+                        attempt_id: write.attempt_id.as_str().to_string(),
+                        fence: write.fence.get(),
+                        acknowledged_at_ms: failed_at_ms,
+                    },
+                    JobTerminalResult::Cancelled,
+                )
+                .await;
+        }
         self.apply_terminal(
             current,
             dsl::DetachedJobInput::FailAttempt {
@@ -644,18 +672,33 @@ impl DetachedJobService {
     }
 
     pub async fn request_cancel(&self, job_id: &JobId) -> Result<JobSnapshot, DetachedJobError> {
-        let result = JobTerminalResult::Cancelled;
-        let (stored, _) = self
-            .apply(
-                job_id,
-                dsl::DetachedJobInput::RequestCancel {},
-                move |job, effects| {
-                    project_optional_terminal(job, effects, &result)?;
-                    Ok(())
-                },
-            )
-            .await?;
-        job_snapshot(stored)
+        let mut conflicts = 0usize;
+        loop {
+            let current = self.required(job_id).await?;
+            if current.terminal_result.is_some() {
+                return job_snapshot(current);
+            }
+            let result = JobTerminalResult::Cancelled;
+            let outcome = self
+                .apply_from(
+                    current,
+                    dsl::DetachedJobInput::RequestCancel {},
+                    move |job, effects| {
+                        project_optional_terminal(job, effects, &result)?;
+                        Ok(())
+                    },
+                )
+                .await;
+            match outcome {
+                Ok((stored, _)) => return job_snapshot(stored),
+                Err(DetachedJobError::StaleRevision { .. })
+                    if conflicts < REQUEST_CANCEL_CONFLICT_BUDGET =>
+                {
+                    conflicts = conflicts.saturating_add(1);
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     pub async fn acknowledge_cancel(

@@ -64,7 +64,8 @@ env:
 # Required GitHub Actions secrets for full release:
 #   CARGO_REGISTRY_TOKEN  - crates.io API token
 #   PYPI_API_TOKEN        - PyPI API token (scoped to meerkat-sdk package)
-#   NPM_TOKEN             - npm access token (scoped to @meerkat org or publish)
+#   NPM_TOKEN             - npm access token (scoped to @rkat packages or publish)
+#   HOMEBREW_TAP_TOKEN    - GitHub token allowed to update the Homebrew tap
 #   BUILDBUDDY_API_KEY    - optional owner-only BuildBuddy binary recovery path
 
 jobs:

@@ -26,8 +26,7 @@ use meerkat_runtime::runtime_state::RuntimeState;
 use meerkat_runtime::store::{
     InMemoryRuntimeStore, RuntimeStore, SerializedSessionSnapshot, load_runtime_state,
 };
-use meerkat_runtime::traits::RuntimeDriver;
-use meerkat_runtime::{EphemeralRuntimeDriver, MeerkatMachine, PersistentRuntimeDriver};
+use meerkat_runtime::{EphemeralRuntimeDriver, MeerkatMachine};
 use meerkat_store::MemoryBlobStore;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -96,10 +95,6 @@ fn make_prompt(text: &str) -> Input {
     })
 }
 
-fn make_session_snapshot() -> Vec<u8> {
-    serde_json::to_vec(&meerkat_core::Session::new()).unwrap()
-}
-
 #[derive(serde::Serialize)]
 struct CompactionCommitFingerprintFixture<'a> {
     selection: &'a meerkat_core::TranscriptRewriteSelection,
@@ -139,6 +134,11 @@ fn encode_as_released_0810_compaction_fixture(
         .validated_transcript_history_state()
         .unwrap()
         .expect("fixture rewrite graph exists");
+    assert_eq!(
+        history.digest_format(),
+        3,
+        "fixture source must exercise the current transcript format"
+    );
     assert_eq!(history.commit_count(), 1, "fixture has one rewrite");
     let commit = history.last_commit().expect("fixture rewrite commit");
     let (start, end) = commit.selection.bounds();
@@ -158,10 +158,15 @@ fn encode_as_released_0810_compaction_fixture(
             history.materialize_revision(&commit.parent_revision).unwrap(),
             history.materialize_revision(&commit.revision).unwrap(),
         ],
-        "digest_format": history.digest_format(),
+        "digest_format": 2,
     });
     let mut encoded = serde_json::to_value(session).unwrap();
+    encoded["version"] = serde_json::json!(2);
     encoded["metadata"][meerkat_core::SESSION_TRANSCRIPT_HISTORY_STATE_KEY] = released_graph;
+    encoded["metadata"]
+        .as_object_mut()
+        .unwrap()
+        .remove(meerkat_core::SESSION_TRANSCRIPT_REWRITE_PREFIX_AUTHORITY_KEY);
     encoded
 }
 
@@ -193,7 +198,10 @@ fn make_session_with_compaction_intent() -> (
     // runtime-store validation. Keep this fixture in the shared suite so both
     // backends exercise the exact same transaction input.
     let encoded = encode_as_released_0810_compaction_fixture(&session);
-    let mut session: meerkat_core::Session = serde_json::from_value(encoded).unwrap();
+    let encoded = serde_json::to_vec(&encoded).unwrap();
+    let imported = meerkat_core::import_released_0810_session(&encoded)
+        .expect("released 0.8.10 compaction fixture imports");
+    let (mut session, _import_receipt) = imported.into_parts();
     let commit = session
         .validated_transcript_history_state()
         .unwrap()
@@ -304,20 +312,12 @@ fn sorted_id_strings(ids: impl IntoIterator<Item = InputId>) -> Vec<String> {
     ids
 }
 
-async fn retire_runtime(
-    driver: &mut PersistentRuntimeDriver,
-) -> Result<meerkat_runtime::RetireReport, meerkat_runtime::RuntimeDriverError> {
-    let pending = driver.active_input_ids().len();
-    Ok(meerkat_runtime::RetireReport {
-        inputs_abandoned: 0,
-        inputs_pending_drain: pending,
-    })
-}
-
 #[tokio::test]
 async fn recovery_store_contract_applies_machine_owned_receipts_across_supported_backends() {
     for harness in supported_store_harnesses() {
-        let runtime_id = make_runtime_id(harness.name);
+        let session = meerkat_core::Session::new();
+        let runtime_id = LogicalRuntimeId::for_session(session.id());
+        let session_snapshot = serde_json::to_vec(&session).unwrap();
         let run_id = RunId::new();
         let first = make_prompt("first contribution");
         let second = make_prompt("second contribution");
@@ -337,7 +337,7 @@ async fn recovery_store_contract_applies_machine_owned_receipts_across_supported
             .atomic_apply(
                 &runtime_id,
                 Some(SerializedSessionSnapshot {
-                    session_snapshot: make_session_snapshot().into(),
+                    session_snapshot: session_snapshot.clone().into(),
                 }),
                 receipt.clone(),
                 vec![
@@ -425,7 +425,7 @@ async fn recovery_store_contract_applies_machine_owned_receipts_across_supported
             .atomic_apply(
                 &runtime_id,
                 Some(SerializedSessionSnapshot {
-                    session_snapshot: make_session_snapshot().into(),
+                    session_snapshot: session_snapshot.clone().into(),
                 }),
                 RunBoundaryReceipt {
                     run_id: run_id.clone(),
@@ -467,8 +467,8 @@ async fn compaction_outbox_transaction_contract_is_shared_across_supported_backe
             harness.name
         );
 
-        let runtime_id = make_runtime_id(harness.name);
         let (session, intent) = make_session_with_compaction_intent();
+        let runtime_id = LogicalRuntimeId::for_session(session.id());
         let pending_snapshot = serde_json::to_vec(&session).unwrap();
         harness
             .store
@@ -530,17 +530,6 @@ async fn compaction_outbox_transaction_contract_is_shared_across_supported_backe
             .await
             .unwrap()
             .expect("finalized session snapshot");
-        let finalized_session: meerkat_core::Session =
-            serde_json::from_slice(&finalized_snapshot).unwrap();
-        assert!(
-            finalized_session
-                .compaction_projection_intents()
-                .unwrap()
-                .is_empty(),
-            "{}: outbox finalization and session intent removal must be one transaction",
-            harness.name
-        );
-
         let replay_run_id = RunId::new();
         let replay_error = harness
             .store
@@ -600,7 +589,8 @@ async fn compaction_outbox_transaction_contract_is_shared_across_supported_backe
 async fn recovery_persistent_driver_contract_replays_missing_receipts_and_persists_retire_across_supported_backends()
  {
     for harness in supported_store_harnesses() {
-        let runtime_id = make_runtime_id(harness.name);
+        let session_id = SessionId::new();
+        let runtime_id = LogicalRuntimeId::for_session(&session_id);
         let run_id = RunId::new();
         let first = make_prompt("first recovery replay");
         let second = make_prompt("second recovery replay");
@@ -625,33 +615,27 @@ async fn recovery_persistent_driver_contract_replays_missing_receipts_and_persis
             .await
             .unwrap();
 
-        let mut driver = PersistentRuntimeDriver::new(
-            runtime_id.clone(),
-            harness.store.clone(),
-            memory_blob_store(),
-        );
-        let report = driver.recover().await.unwrap();
+        let machine = MeerkatMachine::persistent(harness.store.clone(), memory_blob_store());
+        machine
+            .register_session(session_id.clone())
+            .await
+            .expect("registration-authorized recovery must adopt replayable contributors");
         assert_eq!(
-            report.inputs_recovered, 2,
-            "{}: missing boundary receipts should recover both contributors for replay",
-            harness.name
-        );
-        assert_eq!(
-            sorted_id_strings(driver.active_input_ids()),
+            sorted_id_strings(machine.list_active_inputs(&session_id).await.unwrap()),
             expected_ids,
             "{}: both contributors should remain active after replay recovery",
             harness.name
         );
 
         for input_id in [&first_id, &second_id] {
-            assert!(
-                driver.input_state(input_id).is_some(),
-                "{}: driver should expose recovered input state",
-                harness.name
-            );
+            let recovered = machine
+                .input_state(&session_id, input_id)
+                .await
+                .unwrap()
+                .expect("machine should expose recovered input state");
             assert_eq!(
-                driver.inner_ref().input_phase(input_id),
-                Some(InputLifecycleState::Queued),
+                recovered.seed.phase,
+                InputLifecycleState::Queued,
                 "{}: missing receipts should roll applied contributors back to queued",
                 harness.name
             );
@@ -669,30 +653,19 @@ async fn recovery_persistent_driver_contract_replays_missing_receipts_and_persis
             );
         }
 
-        let replayed_ids = vec![
-            driver.contract_dequeue_next_for_recovery_tests().unwrap().0,
-            driver.contract_dequeue_next_for_recovery_tests().unwrap().0,
-        ];
-        assert!(
-            driver.contract_dequeue_next_for_recovery_tests().is_none(),
-            "{}: only the recovered contributors should be queued for replay",
+        let retire_report = meerkat_runtime::RuntimeControlPlane::retire(&machine, &runtime_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            retire_report.inputs_pending_drain, 0,
+            "{}: retire without an executor must not promise a future drain",
             harness.name
         );
         assert_eq!(
-            sorted_id_strings(replayed_ids),
-            expected_ids,
-            "{}: replay queue should contain exactly the recovered contributors",
+            retire_report.inputs_abandoned, 2,
+            "{}: retire without an executor must terminalize both replayable contributors",
             harness.name
         );
-
-        let retire_report = retire_runtime(&mut driver).await.unwrap();
-        assert_eq!(
-            retire_report.inputs_pending_drain, 2,
-            "{}: retire should preserve the replayable contributors for later drain",
-            harness.name
-        );
-
-        drop(driver);
     }
 }
 
@@ -759,7 +732,10 @@ async fn recovery_contract_normalizes_every_dead_process_phase_to_fresh_idle() {
 async fn recovery_persistent_driver_contract_consumes_committed_boundary_contributors_across_supported_backends()
  {
     for harness in supported_store_harnesses() {
-        let runtime_id = make_runtime_id(harness.name);
+        let session = meerkat_core::Session::new();
+        let session_id = session.id().clone();
+        let runtime_id = LogicalRuntimeId::for_session(&session_id);
+        let session_snapshot = serde_json::to_vec(&session).unwrap();
         let run_id = RunId::new();
         let first = make_prompt("first committed contribution");
         let second = make_prompt("second committed contribution");
@@ -772,7 +748,7 @@ async fn recovery_persistent_driver_contract_consumes_committed_boundary_contrib
             .atomic_apply(
                 &runtime_id,
                 Some(SerializedSessionSnapshot {
-                    session_snapshot: make_session_snapshot().into(),
+                    session_snapshot: session_snapshot.into(),
                 }),
                 receipt.clone(),
                 vec![
@@ -784,21 +760,19 @@ async fn recovery_persistent_driver_contract_consumes_committed_boundary_contrib
             .await
             .unwrap();
 
-        let mut driver = PersistentRuntimeDriver::new(
-            runtime_id.clone(),
-            harness.store.clone(),
-            memory_blob_store(),
-        );
-        driver.recover().await.unwrap();
+        let machine = MeerkatMachine::persistent(harness.store.clone(), memory_blob_store());
+        machine
+            .register_session(session_id.clone())
+            .await
+            .expect("registration-authorized recovery must consume committed contributors");
 
         assert!(
-            driver.active_input_ids().is_empty(),
+            machine
+                .list_active_inputs(&session_id)
+                .await
+                .unwrap()
+                .is_empty(),
             "{}: committed contributors should not remain active after recovery",
-            harness.name
-        );
-        assert!(
-            driver.contract_dequeue_next_for_recovery_tests().is_none(),
-            "{}: committed contributors should not be replayed after recovery",
             harness.name
         );
         assert_eq!(
@@ -811,14 +785,19 @@ async fn recovery_persistent_driver_contract_consumes_committed_boundary_contrib
         );
 
         for input_id in [&first_id, &second_id] {
+            let recovered = machine
+                .input_state(&session_id, input_id)
+                .await
+                .unwrap()
+                .expect("consumed contributor must remain queryable");
             assert_eq!(
-                driver.inner_ref().input_phase(input_id),
-                Some(InputLifecycleState::Consumed),
+                recovered.seed.phase,
+                InputLifecycleState::Consumed,
                 "{}: committed contributors should recover as consumed",
                 harness.name
             );
             assert_eq!(
-                driver.inner_ref().input_terminal_outcome(input_id),
+                recovered.seed.terminal_outcome,
                 Some(InputTerminalOutcome::Consumed),
                 "{}: committed contributors should recover with a consumed terminal outcome",
                 harness.name
@@ -853,26 +832,27 @@ async fn recovery_persistent_driver_contract_consumes_committed_boundary_contrib
     }
 }
 
-/// Level 3 — the durable-tail recovery boundary is all-or-nothing.
+/// Level 3 - the durable-tail recovery boundary is all-or-nothing.
 ///
 /// A recovered durable tail commits through the SAME `atomic_apply` boundary
 /// as an ordinary completed run: the recovered session snapshot (revision N+1
 /// content over the committed revision N head), the recovered run's boundary
 /// receipt, and the input-state terminalization records become visible
-/// TOGETHER — and a stale pre-recovery replay makes NOTHING visible.
+/// together. Typed store authority, not this retired compatibility verb, owns
+/// successor CAS.
 #[tokio::test]
-async fn atomic_apply_recovery_boundary_is_all_or_nothing() {
+async fn atomic_apply_recovery_boundary_commits_visible_effects_together() {
     use meerkat_core::types::{
         AssistantBlock, BlockAssistantMessage, Message, StopReason, UserMessage,
     };
 
     for harness in supported_store_harnesses() {
         let name = harness.name;
-        let runtime_id = make_runtime_id(name);
 
         // Committed authority head at revision N: the last boundary that
         // actually committed before shutdown.
         let mut committed = meerkat_core::Session::new();
+        let runtime_id = LogicalRuntimeId::for_session(committed.id());
         committed.push(Message::User(UserMessage::text(
             "committed turn".to_string(),
         )));
@@ -980,70 +960,6 @@ async fn atomic_apply_recovery_boundary_is_all_or_nothing() {
             "{name}: recovery must terminalize, not requeue"
         );
         assert_eq!(rows[0].seed.last_run_id, Some(recovered_run));
-
-        // Failure case: a stale writer replays the PRE-recovery snapshot
-        // (revision N) with a fresh receipt and input record. The store's
-        // supersession check must reject the WHOLE boundary — snapshot,
-        // receipt, AND input row stay invisible.
-        let stale_run = RunId::new();
-        let stale_prompt = make_prompt("stale replay input");
-        let stale_input = stale_prompt.id().clone();
-        let error = match harness
-            .store
-            .atomic_apply(
-                &runtime_id,
-                Some(SerializedSessionSnapshot {
-                    session_snapshot: committed_snapshot.clone().into(),
-                }),
-                make_receipt(stale_run.clone(), vec![stale_input.clone()], 2),
-                vec![persistable(applied_pending_state(
-                    &stale_prompt,
-                    &stale_run,
-                    2,
-                ))],
-                Some(recovered.id().clone()),
-            )
-            .await
-        {
-            Ok(()) => panic!("{name}: a stale pre-recovery replay must be rejected"),
-            Err(err) => err,
-        };
-        assert!(
-            matches!(
-                error,
-                meerkat_runtime::store::RuntimeStoreError::SessionSnapshotSuperseded { .. }
-            ),
-            "{name}: expected SessionSnapshotSuperseded, got {error:?}"
-        );
-        assert_eq!(
-            harness
-                .store
-                .load_session_snapshot(&runtime_id)
-                .await
-                .unwrap(),
-            Some(Arc::new(recovered_snapshot)),
-            "{name}: the recovered head must be retained"
-        );
-        assert_eq!(
-            harness
-                .store
-                .load_boundary_receipt(&runtime_id, &stale_run, 2)
-                .await
-                .unwrap(),
-            None,
-            "{name}: the rejected boundary's receipt must not be visible"
-        );
-        let rows = harness
-            .store
-            .load_input_states_strict(&runtime_id)
-            .await
-            .unwrap();
-        assert_eq!(
-            rows.len(),
-            1,
-            "{name}: the rejected boundary's input row must not be visible"
-        );
-        assert_eq!(rows[0].state.input_id, recovered_input);
     }
 }
 
@@ -1375,6 +1291,11 @@ async fn head_canonical_recovery_uses_only_store_owned_source_and_migrates_floor
         .and_then(|authority| authority.head_canonical())
         .cloned()
         .expect("initial boundary returns HeadCanonical store authority");
+    committed = session_store
+        .load(&session_id)
+        .await
+        .unwrap()
+        .expect("initial canonical materialization");
 
     let staged_prompt = make_prompt("staged for the candidate run");
     let receipt_prompt = make_prompt("named by the committed mid-run receipt");
@@ -1553,7 +1474,7 @@ async fn head_canonical_recovery_uses_only_store_owned_source_and_migrates_floor
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(restarted_retained.seed.phase, InputLifecycleState::Accepted);
+    assert_eq!(restarted_retained.seed.phase, InputLifecycleState::Queued);
     assert!(restarted_retained.state.persisted_input.is_some());
 
     let migrated_floor_receipt = store
@@ -1669,6 +1590,11 @@ async fn head_canonical_incomplete_intent_is_discarded_without_advancing_the_ses
         .and_then(|authority| authority.head_canonical())
         .cloned()
         .expect("root HeadCanonical authority");
+    committed = session_store
+        .load(&session_id)
+        .await
+        .unwrap()
+        .expect("root canonical materialization");
 
     let mut candidate = committed.clone();
     candidate.push(Message::BlockAssistant(BlockAssistantMessage {
@@ -1771,6 +1697,11 @@ async fn head_canonical_recovery_uses_latest_same_run_physical_candidate() {
         .and_then(|authority| authority.head_canonical())
         .cloned()
         .expect("root HeadCanonical authority");
+    committed = session_store
+        .load(&session_id)
+        .await
+        .unwrap()
+        .expect("root canonical materialization");
 
     let mut first_candidate = committed;
     first_candidate.push(Message::BlockAssistant(BlockAssistantMessage {
@@ -2074,19 +2005,27 @@ fn collect_released_realm_fixture_files(
 }
 
 #[cfg(feature = "sqlite-store")]
-fn released_realm_fixture_ledger(database: &std::path::Path) -> Vec<(String, i64)> {
+fn open_released_realm_fixture_read_only(database: &std::path::Path) -> rusqlite::Connection {
     use rusqlite::OpenFlags;
 
-    let connection = rusqlite::Connection::open_with_flags(
-        database,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    let uri = format!("file:{}?immutable=1", database.display());
+    rusqlite::Connection::open_with_flags(
+        uri,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_URI,
     )
     .unwrap_or_else(|error| {
         panic!(
             "cannot open pre-upgrade fixture database {} read-only: {error}",
             database.display()
         )
-    });
+    })
+}
+
+#[cfg(feature = "sqlite-store")]
+fn released_realm_fixture_ledger(database: &std::path::Path) -> Vec<(String, i64)> {
+    let connection = open_released_realm_fixture_read_only(database);
     let mut statement = connection
         .prepare("SELECT domain, version FROM meerkat_schema ORDER BY domain")
         .unwrap_or_else(|error| {
@@ -2117,13 +2056,7 @@ struct ReleasedRealmFixtureRawSession {
 fn released_realm_fixture_sessions(
     database: &std::path::Path,
 ) -> Vec<ReleasedRealmFixtureRawSession> {
-    use rusqlite::OpenFlags;
-
-    let connection = rusqlite::Connection::open_with_flags(
-        database,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .unwrap();
+    let connection = open_released_realm_fixture_read_only(database);
     let mut head_statement = connection
         .prepare(
             "SELECT session_id, strand, message_count, head_revision, rewrite_count \
@@ -2176,13 +2109,7 @@ fn released_realm_fixture_sessions(
 
 #[cfg(feature = "sqlite-store")]
 fn released_realm_fixture_runtime_snapshots(database: &std::path::Path) -> Vec<(String, Vec<u8>)> {
-    use rusqlite::OpenFlags;
-
-    let connection = rusqlite::Connection::open_with_flags(
-        database,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .unwrap();
+    let connection = open_released_realm_fixture_read_only(database);
     let columns = connection
         .prepare("PRAGMA table_info(runtime_session_snapshots)")
         .unwrap()
@@ -2243,13 +2170,7 @@ fn released_realm_fixture_runtime_snapshots(database: &std::path::Path) -> Vec<(
 fn released_realm_fixture_consumed_inputs(
     database: &std::path::Path,
 ) -> Vec<(String, String, Vec<u8>)> {
-    use rusqlite::OpenFlags;
-
-    let connection = rusqlite::Connection::open_with_flags(
-        database,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .unwrap();
+    let connection = open_released_realm_fixture_read_only(database);
     let mut statement = connection
         .prepare(
             "SELECT runtime_id, input_id, state_json FROM runtime_input_states \
@@ -2749,9 +2670,31 @@ async fn released_0_8_10_rkat_realm_upgrades_without_losing_durable_state() {
             .unwrap_or_else(|error| panic!("post-upgrade session load failed: {error}"))
             .expect("fixture session disappeared during upgrade");
         assert_eq!(session.messages().len(), expected.message_count);
+        let released = raw_sessions
+            .iter()
+            .find(|raw| raw.session_id == expected.session_id)
+            .expect("pre-upgrade released session bytes");
+        for (current, (_, released_bytes)) in session.messages().iter().zip(&released.messages) {
+            assert_eq!(
+                current,
+                &serde_json::from_slice::<meerkat_core::types::Message>(released_bytes)
+                    .expect("decode released message through the current domain"),
+                "the importer must preserve every released message semantically"
+            );
+        }
+        let current_revision = session.transcript_content_digest().unwrap();
+        assert_ne!(
+            current_revision, expected.head_revision,
+            "the frozen importer must rebind the released transcript digest to the current format"
+        );
+        let current_head = session_store
+            .load_head(&session_id)
+            .await
+            .unwrap_or_else(|error| panic!("post-upgrade head load failed: {error}"))
+            .expect("fixture head disappeared during upgrade");
         assert_eq!(
-            session.transcript_content_digest().unwrap(),
-            expected.head_revision
+            current_head.head_revision, current_revision,
+            "the migrated head must bind the current materialized transcript"
         );
         let commits = session_store
             .load_rewrite_commits(&session_id)

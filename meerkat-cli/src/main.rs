@@ -24240,7 +24240,25 @@ default_model = "gpt-5.4"
     #[cfg(all(feature = "mob", feature = "session-store"))]
     #[tokio::test]
     async fn test_cli_schedule_mob_host_delegates_mob_identity_targets() {
-        let host = cli_schedule_mob_host_from_state(meerkat_mob_mcp::MobMcpState::new_in_memory());
+        let mob_state = meerkat_mob_mcp::MobMcpState::new_in_memory();
+        let definition: meerkat_mob::MobDefinition = serde_json::from_value(serde_json::json!({
+            "id": "ops",
+            "profiles": {
+                "worker": {
+                    "model": "gpt-5.4",
+                    "external_addressable": true,
+                    "tools": {
+                        "comms": true
+                    }
+                }
+            }
+        }))
+        .expect("test mob definition should decode");
+        mob_state
+            .mob_create_definition(definition)
+            .await
+            .expect("test mob should provide durable external-delivery authority");
+        let host = cli_schedule_mob_host_from_state(Arc::clone(&mob_state));
         let identity =
             meerkat::surface::mob_member_schedule_identity(&meerkat_core::MobMemberBinding {
                 mob_id: "ops".to_string(),
@@ -24264,13 +24282,24 @@ default_model = "gpt-5.4"
             .expect("identity probe should delegate to mob adapter")
             .expect("mob identity should be handled by mob adapter");
         let meerkat::TargetProbeOutcome::Missing { detail } = probe else {
-            panic!("empty in-memory mob state should report missing member, got {probe:?}");
+            panic!("empty test mob should report missing member, got {probe:?}");
         };
         let detail = detail.expect("missing detail");
         assert!(
             !detail.contains("scheduled identity targets are not supported"),
             "CLI mob-enabled schedule host should not use session fallback for identity targets: {detail}"
         );
+        mob_state
+            .mob_spawn(
+                &meerkat_mob::MobId::from("ops"),
+                meerkat_mob::ProfileName::from("worker"),
+                meerkat_mob::AgentIdentity::from("deploy-monitor"),
+                Some(meerkat_mob::MobRuntimeMode::TurnDriven),
+                None,
+                None,
+            )
+            .await
+            .expect("test member should provide the delivery target");
 
         let schedule = meerkat::Schedule::new(meerkat::CreateScheduleRequest {
             name: Some("cli-mob-identity-test".to_string()),
@@ -24302,7 +24331,7 @@ default_model = "gpt-5.4"
             .expect("identity delivery should delegate to mob adapter")
             .expect("mob identity should be handled by mob adapter");
         let terminal = dispatch.completion.await.expect("delivery terminal");
-        assert_eq!(terminal.phase, meerkat::OccurrencePhase::DeliveryFailed);
+        assert_eq!(terminal.phase, meerkat::OccurrencePhase::Completed);
     }
 
     #[tokio::test]

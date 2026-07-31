@@ -112,6 +112,59 @@ fn waiting_external_writes_preserve_the_waiting_phase() {
 }
 
 #[test]
+fn requested_cancellation_makes_complete_and_fail_inadmissible() {
+    for phase in [DetachedJobPhase::Running, DetachedJobPhase::WaitingExternal] {
+        let mut authority = submitted();
+        claim(&mut authority, "attempt-1", 1);
+        if phase == DetachedJobPhase::WaitingExternal {
+            DetachedJobMachineMutator::apply(
+                &mut authority,
+                DetachedJobInput::WaitExternal {
+                    attempt_id: "attempt-1".into(),
+                    fence: 1,
+                    observed_at_ms: 25,
+                },
+            )
+            .expect("enter waiting external");
+        }
+        DetachedJobMachineMutator::apply(&mut authority, DetachedJobInput::RequestCancel {})
+            .expect("request cancel");
+        DetachedJobMachineMutator::apply(
+            &mut authority,
+            DetachedJobInput::RenewLease {
+                attempt_id: "attempt-1".into(),
+                fence: 1,
+                heartbeat_at_ms: 50,
+                lease_expires_at_ms: 200,
+            },
+        )
+        .expect("renewal remains admissible so heartbeat can observe durable cancellation");
+        let cancel_requested = authority.state().clone();
+        assert_eq!(cancel_requested.heartbeat_at_ms, Some(50));
+        assert_eq!(cancel_requested.lease_expires_at_ms, Some(200));
+
+        for input in [
+            DetachedJobInput::CompleteAttempt {
+                attempt_id: "attempt-1".into(),
+                fence: 1,
+                completed_at_ms: 50,
+            },
+            DetachedJobInput::FailAttempt {
+                attempt_id: "attempt-1".into(),
+                fence: 1,
+                failed_at_ms: 50,
+            },
+        ] {
+            DetachedJobMachineMutator::apply(&mut authority, input)
+                .expect_err("complete/fail cannot overtake committed cancellation intent");
+            assert_eq!(authority.state(), &cancel_requested);
+            assert_eq!(authority.state().lifecycle_phase, phase);
+            assert!(authority.state().cancel_requested);
+        }
+    }
+}
+
+#[test]
 fn checkpoint_and_wait_transitions_reject_observations_after_the_committed_lease() {
     let mut authority = submitted();
     claim(&mut authority, "attempt-1", 1);

@@ -17,14 +17,16 @@ use meerkat_core::time_compat::SystemTime;
 use meerkat_core::transcript_messages_digest;
 use meerkat_core::types::Message;
 use meerkat_core::{
-    ComponentEventPrefixAuthority, PreparedComponentEventSuffix, SerializedComponentEvent, Session,
-    SessionHeadMetadataCell, SessionHeadMetadataCellIdentity, SessionHeadMetadataIdentity,
-    SessionHeadMetadataProjection, SessionHeadMetadataValueDigest, SessionId, SessionMeta,
-    StoredComponentEventRow, TranscriptRevisionEdge, TranscriptRewriteCommit,
-    TranscriptRewritePrefixAccumulator, TranscriptRewriteRecord, ValidatedTranscriptHistory,
-    VerifiedComponentEventSequence,
+    ComponentEventPrefixAuthority, PreparedComponentEventSuffix, Released0810ImportEvidence,
+    SerializedComponentEvent, Session, SessionHeadMetadataCell, SessionHeadMetadataCellIdentity,
+    SessionHeadMetadataIdentity, SessionHeadMetadataProjection, SessionHeadMetadataValueDigest,
+    SessionId, SessionMeta, StoredComponentEventRow, TranscriptRevisionBody,
+    TranscriptRevisionEdge, TranscriptRewriteCommit, TranscriptRewritePrefixAccumulator,
+    TranscriptRewriteRecord, ValidatedTranscriptHistory, VerifiedComponentEventSequence,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -332,7 +334,653 @@ fn migration_0003_authenticated_head_sidecars(tx: &Transaction<'_>) -> Result<()
     tx.execute_batch(CREATE_SESSION_HEAD_METADATA_REFS_TABLE_SQL)?;
     tx.execute_batch(CREATE_SESSION_HEAD_METADATA_HEAD_LINEAGE_TABLE_SQL)?;
     tx.execute_batch(CREATE_SESSION_HEAD_METADATA_HEAD_LINEAGE_PREDECESSOR_INDEX_SQL)?;
-    tx.execute_batch(CREATE_SESSION_HEAD_METADATA_HEAD_LINEAGE_SUCCESSOR_INDEX_SQL)
+    tx.execute_batch(CREATE_SESSION_HEAD_METADATA_HEAD_LINEAGE_SUCCESSOR_INDEX_SQL)?;
+    migrate_released_blob_envelopes(tx)?;
+    migrate_released_head_envelopes(tx)
+}
+
+fn invalid_released_head_envelope(
+    session_id: &str,
+    detail: impl std::fmt::Display,
+) -> rusqlite::Error {
+    rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("released 0.8.10 session head '{session_id}' is invalid: {detail}"),
+    )))
+}
+
+fn released_session_document_from_head(
+    session_id: &str,
+    head_value: &serde_json::Value,
+    serialized_rows: &[Vec<u8>],
+    released_history: Option<&[u8]>,
+) -> Result<Vec<u8>, rusqlite::Error> {
+    let head = head_value
+        .as_object()
+        .ok_or_else(|| invalid_released_head_envelope(session_id, "head JSON is not an object"))?;
+    let required = |key: &'static str| {
+        head.get(key).ok_or_else(|| {
+            invalid_released_head_envelope(
+                session_id,
+                format!("head JSON has no required '{key}' field"),
+            )
+        })
+    };
+    let version = required("version")?;
+    let id = required("id")?;
+    let created_at = required("created_at")?;
+    let updated_at = required("updated_at")?;
+    let metadata = required("metadata")?.as_object().ok_or_else(|| {
+        invalid_released_head_envelope(session_id, "head metadata is not an object")
+    })?;
+    if released_history.is_some()
+        && metadata.contains_key(meerkat_core::SESSION_TRANSCRIPT_HISTORY_STATE_KEY)
+    {
+        return Err(invalid_released_head_envelope(
+            session_id,
+            "released head unexpectedly carries inline transcript history",
+        ));
+    }
+    let usage = required("usage")?;
+
+    let mut document = Vec::new();
+    document.extend_from_slice(br#"{"version":"#);
+    serde_json::to_writer(&mut document, version)
+        .map_err(|error| invalid_released_head_envelope(session_id, error))?;
+    document.extend_from_slice(br#","id":"#);
+    serde_json::to_writer(&mut document, id)
+        .map_err(|error| invalid_released_head_envelope(session_id, error))?;
+    document.extend_from_slice(br#","messages":["#);
+    for (index, row) in serialized_rows.iter().enumerate() {
+        if index > 0 {
+            document.push(b',');
+        }
+        let mut deserializer = serde_json::Deserializer::from_slice(row);
+        serde::de::IgnoredAny::deserialize(&mut deserializer)
+            .map_err(|error| invalid_released_head_envelope(session_id, error))?;
+        deserializer
+            .end()
+            .map_err(|error| invalid_released_head_envelope(session_id, error))?;
+        document.extend_from_slice(row);
+    }
+    document.extend_from_slice(br#"],"created_at":"#);
+    serde_json::to_writer(&mut document, created_at)
+        .map_err(|error| invalid_released_head_envelope(session_id, error))?;
+    document.extend_from_slice(br#","updated_at":"#);
+    serde_json::to_writer(&mut document, updated_at)
+        .map_err(|error| invalid_released_head_envelope(session_id, error))?;
+    document.extend_from_slice(br#","metadata":"#);
+    document.push(b'{');
+    let mut wrote_metadata = false;
+    for (key, value) in metadata {
+        if wrote_metadata {
+            document.push(b',');
+        }
+        serde_json::to_writer(&mut document, key)
+            .map_err(|error| invalid_released_head_envelope(session_id, error))?;
+        document.push(b':');
+        serde_json::to_writer(&mut document, value)
+            .map_err(|error| invalid_released_head_envelope(session_id, error))?;
+        wrote_metadata = true;
+    }
+    if let Some(history) = released_history {
+        if wrote_metadata {
+            document.push(b',');
+        }
+        serde_json::to_writer(
+            &mut document,
+            meerkat_core::SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
+        )
+        .map_err(|error| invalid_released_head_envelope(session_id, error))?;
+        document.push(b':');
+        document.extend_from_slice(history);
+    }
+    document.push(b'}');
+    document.extend_from_slice(br#","usage":"#);
+    serde_json::to_writer(&mut document, usage)
+        .map_err(|error| invalid_released_head_envelope(session_id, error))?;
+    document.push(b'}');
+    Ok(document)
+}
+
+#[derive(Serialize)]
+struct Released0810RevisionWire {
+    revision: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent_revision: Option<String>,
+    messages: Vec<Box<serde_json::value::RawValue>>,
+    created_at: SystemTime,
+}
+
+#[derive(Serialize)]
+struct Released0810HistoryWire {
+    head: String,
+    commits: Vec<serde_json::Value>,
+    revisions: Vec<Released0810RevisionWire>,
+    digest_format: u32,
+}
+
+fn verify_released_0810_rows_digest(
+    session_id: &str,
+    rows: &[Vec<u8>],
+    expected: &str,
+    label: &str,
+) -> Result<(), rusqlite::Error> {
+    let actual = meerkat_core::released_0810_transcript_serialized_rows_digest(rows)
+        .map_err(|error| invalid_released_head_envelope(session_id, error))?;
+    if actual != expected {
+        return Err(invalid_released_head_envelope(
+            session_id,
+            format!("{label} digest mismatch: expected {expected}, actual {actual}"),
+        ));
+    }
+    Ok(())
+}
+
+fn verify_released_0810_rewrite_row_digests(
+    session_id: &str,
+    row: &RewriteRow,
+    parent_rows: &[Vec<u8>],
+    child_rows: &[Vec<u8>],
+) -> Result<(), rusqlite::Error> {
+    if parent_rows.len() != row.commit.messages_before
+        || child_rows.len() != row.commit.messages_after
+    {
+        return Err(invalid_released_head_envelope(
+            session_id,
+            "released rewrite physical bodies do not match the commit message counts",
+        ));
+    }
+    verify_released_0810_rows_digest(
+        session_id,
+        parent_rows,
+        &row.commit.parent_revision,
+        "rewrite parent endpoint",
+    )?;
+    verify_released_0810_rows_digest(
+        session_id,
+        child_rows,
+        &row.commit.revision,
+        "rewrite child endpoint",
+    )?;
+
+    let (start, end) = row.commit.selection.bounds();
+    let removed = end.checked_sub(start).ok_or_else(|| {
+        invalid_released_head_envelope(session_id, "released rewrite selection is inverted")
+    })?;
+    if end > parent_rows.len() {
+        return Err(invalid_released_head_envelope(
+            session_id,
+            "released rewrite selection exceeds its parent body",
+        ));
+    }
+    let retained = row
+        .commit
+        .messages_before
+        .checked_sub(removed)
+        .ok_or_else(|| {
+            invalid_released_head_envelope(
+                session_id,
+                "released rewrite removes more rows than its parent contains",
+            )
+        })?;
+    let replacement_len = row
+        .commit
+        .messages_after
+        .checked_sub(retained)
+        .ok_or_else(|| {
+            invalid_released_head_envelope(
+                session_id,
+                "released rewrite replacement length is invalid",
+            )
+        })?;
+    let replacement_end = start.checked_add(replacement_len).ok_or_else(|| {
+        invalid_released_head_envelope(session_id, "released rewrite replacement span overflows")
+    })?;
+    if replacement_end > child_rows.len() {
+        return Err(invalid_released_head_envelope(
+            session_id,
+            "released rewrite replacement span exceeds its child body",
+        ));
+    }
+    verify_released_0810_rows_digest(
+        session_id,
+        &parent_rows[start..end],
+        &row.commit.original_span_digest,
+        "rewrite original span",
+    )?;
+    verify_released_0810_rows_digest(
+        session_id,
+        &child_rows[start..replacement_end],
+        &row.commit.replacement_digest,
+        "rewrite replacement span",
+    )
+}
+
+fn released_history_from_rewrite_rows(
+    tx: &Transaction<'_>,
+    head: &SessionHead,
+    links: &StrandLinks,
+) -> Result<Option<Vec<u8>>, rusqlite::Error> {
+    if head.rewrite_count == 0 {
+        return Ok(None);
+    }
+    let session_id = head.id.to_string();
+    let indexed = indexed_rewrite_rows_range_in_txn(tx, &head.id, 0, head.rewrite_count)
+        .map_err(|error| invalid_released_head_envelope(&session_id, error))?;
+    if u64::try_from(indexed.len()).ok() != Some(head.rewrite_count) {
+        return Err(invalid_released_head_envelope(
+            &session_id,
+            "released rewrite table does not cover the advertised generation",
+        ));
+    }
+
+    let mut child_parents = BTreeMap::new();
+    for (index, row) in &indexed {
+        if row.graph_edge_json.is_some() {
+            return Err(invalid_released_head_envelope(
+                &session_id,
+                "released rewrite row already carries a current graph edge",
+            ));
+        }
+        if child_parents
+            .insert(
+                row.commit.revision.clone(),
+                row.commit.parent_revision.clone(),
+            )
+            .is_some_and(|existing| existing != row.commit.parent_revision)
+        {
+            return Err(invalid_released_head_envelope(
+                &session_id,
+                format!("rewrite occurrence {index} gives one revision two parents"),
+            ));
+        }
+    }
+
+    let mut revisions = Vec::new();
+    let mut revision_bodies: BTreeMap<String, Vec<Vec<u8>>> = BTreeMap::new();
+    let mut commits = Vec::with_capacity(indexed.len());
+    for (expected_index, (index, row)) in indexed.iter().enumerate() {
+        if *index
+            != u64::try_from(expected_index)
+                .map_err(|error| invalid_released_head_envelope(&session_id, error))?
+        {
+            return Err(invalid_released_head_envelope(
+                &session_id,
+                "released rewrite occurrences are not contiguous",
+            ));
+        }
+        let parent_rows =
+            resolve_strand_bytes_in_txn(tx, &head.id, &row.parent_strand, 0..row.parent_len, links)
+                .map_err(|error| invalid_released_head_envelope(&session_id, error))?;
+        let child_rows =
+            resolve_strand_bytes_in_txn(tx, &head.id, &row.strand, 0..row.strand_len, links)
+                .map_err(|error| invalid_released_head_envelope(&session_id, error))?;
+        verify_released_0810_rewrite_row_digests(&session_id, row, &parent_rows, &child_rows)?;
+
+        for (revision, rows) in [
+            (&row.commit.parent_revision, parent_rows),
+            (&row.commit.revision, child_rows),
+        ] {
+            if let Some(existing) = revision_bodies.get(revision) {
+                if existing != &rows {
+                    return Err(invalid_released_head_envelope(
+                        &session_id,
+                        format!("released revision {revision} resolves to contradictory bodies"),
+                    ));
+                }
+                continue;
+            }
+            let messages = rows
+                .iter()
+                .map(|row| {
+                    serde_json::from_slice::<Box<serde_json::value::RawValue>>(row)
+                        .map_err(|error| invalid_released_head_envelope(&session_id, error))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            revisions.push(Released0810RevisionWire {
+                revision: revision.clone(),
+                parent_revision: child_parents.get(revision).cloned(),
+                messages,
+                created_at: SystemTime::UNIX_EPOCH,
+            });
+            revision_bodies.insert(revision.clone(), rows);
+        }
+
+        let mut commit = serde_json::to_value(&row.commit)
+            .map_err(|error| invalid_released_head_envelope(&session_id, error))?;
+        commit
+            .as_object_mut()
+            .ok_or_else(|| {
+                invalid_released_head_envelope(&session_id, "rewrite commit is not an object")
+            })?
+            .remove("rewrite_generation");
+        commits.push(commit);
+    }
+    let released_head = indexed
+        .last()
+        .map(|(_, row)| row.commit.revision.clone())
+        .ok_or_else(|| {
+            invalid_released_head_envelope(&session_id, "released rewrite history is empty")
+        })?;
+    serde_json::to_vec(&Released0810HistoryWire {
+        head: released_head,
+        commits,
+        revisions,
+        digest_format: 2,
+    })
+    .map(Some)
+    .map_err(|error| invalid_released_head_envelope(&session_id, error))
+}
+
+fn validate_released_pending_rewrite_tail(
+    tx: &Transaction<'_>,
+    head: &SessionHead,
+    links: &StrandLinks,
+) -> Result<bool, rusqlite::Error> {
+    let session_id = head.id.to_string();
+    let recorded = rewrite_row_count_in_txn(tx, &head.id)
+        .map_err(|error| invalid_released_head_envelope(&session_id, error))?;
+    if recorded == head.rewrite_count {
+        return Ok(false);
+    }
+    let pending_end = head.rewrite_count.checked_add(1).ok_or_else(|| {
+        invalid_released_head_envelope(&session_id, "released rewrite count overflowed")
+    })?;
+    if recorded != pending_end {
+        return Err(invalid_released_head_envelope(
+            &session_id,
+            format!(
+                "released rewrite table contains {recorded} rows for head generation {}",
+                head.rewrite_count
+            ),
+        ));
+    }
+    let pending = indexed_rewrite_rows_range_in_txn(tx, &head.id, head.rewrite_count, pending_end)
+        .map_err(|error| invalid_released_head_envelope(&session_id, error))?;
+    let [(rewrite_idx, row)] = pending.as_slice() else {
+        return Err(invalid_released_head_envelope(
+            &session_id,
+            "released pending rewrite row is missing or duplicated",
+        ));
+    };
+    if *rewrite_idx != head.rewrite_count
+        || row.commit.rewrite_generation != 0
+        || row.graph_edge_json.is_some()
+        || row.commit.parent_revision != head.head_revision
+        || row.parent_strand != head.strand
+        || row.parent_len
+            != u64::try_from(row.commit.messages_before)
+                .map_err(|error| invalid_released_head_envelope(&session_id, error))?
+        || row.strand != TranscriptStrandId::from_rewrite(&row.commit)
+        || row.strand_len
+            != u64::try_from(row.commit.messages_after)
+                .map_err(|error| invalid_released_head_envelope(&session_id, error))?
+    {
+        return Err(invalid_released_head_envelope(
+            &session_id,
+            "released pending rewrite row is not the exact unadopted successor of the head",
+        ));
+    }
+    let parent_rows =
+        resolve_strand_bytes_in_txn(tx, &head.id, &row.parent_strand, 0..row.parent_len, links)
+            .map_err(|error| invalid_released_head_envelope(&session_id, error))?;
+    let child_rows =
+        resolve_strand_bytes_in_txn(tx, &head.id, &row.strand, 0..row.strand_len, links)
+            .map_err(|error| invalid_released_head_envelope(&session_id, error))?;
+    verify_released_0810_rewrite_row_digests(&session_id, row, &parent_rows, &child_rows)?;
+    let decode = |rows: &[Vec<u8>]| {
+        rows.iter()
+            .map(|bytes| {
+                serde_json::from_slice::<Message>(bytes)
+                    .map_err(|error| invalid_released_head_envelope(&session_id, error))
+            })
+            .collect::<Result<Vec<_>, _>>()
+    };
+    let parent = TranscriptRevisionBody {
+        revision: row.commit.parent_revision.clone(),
+        parent_revision: None,
+        messages: decode(&parent_rows)?,
+        created_at: SystemTime::UNIX_EPOCH,
+    };
+    let child = TranscriptRevisionBody {
+        revision: row.commit.revision.clone(),
+        parent_revision: Some(row.commit.parent_revision.clone()),
+        messages: decode(&child_rows)?,
+        created_at: SystemTime::UNIX_EPOCH,
+    };
+    meerkat_core::session::remap_proven_released_0810_rewrite_record(
+        row.commit.clone(),
+        parent,
+        child,
+        1,
+    )
+    .map_err(|error| invalid_released_head_envelope(&session_id, error))?;
+    Ok(true)
+}
+
+fn migrate_released_blob_envelopes(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+    let released_blobs = {
+        let mut statement = tx.prepare(
+            "SELECT blob.session_id, blob.session_json
+             FROM sessions AS blob
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM session_heads AS head
+                 WHERE head.session_id = blob.session_id
+             )
+             ORDER BY blob.session_id",
+        )?;
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, JsonColumnBytes>(1)?.into_bytes(),
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+
+    for (session_id, source_document) in released_blobs {
+        let value: serde_json::Value = serde_json::from_slice(&source_document)
+            .map_err(|error| invalid_released_head_envelope(&session_id, error))?;
+        let version = value.get("version").and_then(serde_json::Value::as_u64);
+        if version != Some(2) {
+            return Err(invalid_released_head_envelope(
+                &session_id,
+                format!(
+                    "blob-only row has unsupported envelope version {}",
+                    version.map_or_else(
+                        || "missing or non-integer".to_string(),
+                        |version| version.to_string()
+                    )
+                ),
+            ));
+        }
+        let source_sha256: [u8; 32] = Sha256::digest(&source_document).into();
+        let imported = meerkat_core::import_released_0810_session(&source_document)
+            .map_err(|error| invalid_released_head_envelope(&session_id, error))?;
+        let (session, receipt) = imported.into_parts();
+        if session.id().to_string() != session_id
+            || receipt.session_id() != session.id()
+            || receipt.source_document_sha256() != &source_sha256
+            || receipt.evidence() != Released0810ImportEvidence::StoreAuthorizationRequired
+        {
+            return Err(invalid_released_head_envelope(
+                &session_id,
+                "frozen importer receipt does not bind the exact blob-only source",
+            ));
+        }
+        write_session_snapshot_in_txn(tx, &session)
+            .map_err(|error| invalid_released_head_envelope(&session_id, error))?;
+    }
+    Ok(())
+}
+
+fn migrate_released_head_envelopes(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+    let released_heads = {
+        let mut statement = tx.prepare(
+            "SELECT session_id, head_json, cas_token
+             FROM session_heads
+             WHERE version = ?1
+             ORDER BY session_id",
+        )?;
+        statement
+            .query_map(params![2_i64], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, JsonColumnBytes>(1)?.into_bytes(),
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+
+    for (session_id, head_json, stored_token) in released_heads {
+        let head_value: serde_json::Value = serde_json::from_slice(&head_json)
+            .map_err(|error| invalid_released_head_envelope(&session_id, error))?;
+        let embedded_version = head_value
+            .get("version")
+            .and_then(serde_json::Value::as_u64);
+        if embedded_version != Some(2) {
+            return Err(invalid_released_head_envelope(
+                &session_id,
+                format!(
+                    "row version is 2 but embedded head version is {}",
+                    embedded_version.map_or_else(
+                        || "missing or non-integer".to_string(),
+                        |version| { version.to_string() }
+                    )
+                ),
+            ));
+        }
+        let head: SessionHead = serde_json::from_value(head_value.clone())
+            .map_err(|error| invalid_released_head_envelope(&session_id, error))?;
+        if head.id.to_string() != session_id {
+            return Err(invalid_released_head_envelope(
+                &session_id,
+                format!("embedded head identity is '{}'", head.id),
+            ));
+        }
+        let released_token = format!("head-sha256:{:x}", Sha256::digest(&head_json));
+        if released_token != stored_token {
+            return Err(invalid_released_head_envelope(
+                &session_id,
+                "stored CAS token does not bind the exact released head",
+            ));
+        }
+
+        let links = strand_links_in_txn(tx, &head.id)
+            .map_err(|error| invalid_released_head_envelope(&session_id, error))?;
+        validate_strand_links_acyclic(&head.id, &links)
+            .map_err(|error| invalid_released_head_envelope(&session_id, error))?;
+        validate_released_pending_rewrite_tail(tx, &head, &links)?;
+        let serialized_rows =
+            resolve_strand_bytes_in_txn(tx, &head.id, &head.strand, 0..head.message_count, &links)
+                .map_err(|error| invalid_released_head_envelope(&session_id, error))?;
+        let released_message_count = u64::try_from(serialized_rows.len())
+            .map_err(|error| invalid_released_head_envelope(&session_id, error))?;
+        // This one-time O(document) boundary replays the frozen 0.8.10 digest
+        // framing directly from exact physical row bytes. In particular it
+        // retains producer spelling inside released RawValue slots, which a
+        // current Message decode would irreversibly normalize. Live current
+        // persistence never enters this verifier; the same transaction below
+        // rebuilds the topology and mints current row/head authority.
+        if released_message_count != head.message_count {
+            return Err(invalid_released_head_envelope(
+                &session_id,
+                format!(
+                    "resolved transcript does not cover the released head projection \
+                     (count {released_message_count}/{})",
+                    head.message_count
+                ),
+            ));
+        }
+        verify_released_0810_rows_digest(
+            &session_id,
+            &serialized_rows,
+            &head.head_revision,
+            "live head",
+        )?;
+        let released_history = released_history_from_rewrite_rows(tx, &head, &links)?;
+        let source_document = released_session_document_from_head(
+            &session_id,
+            &head_value,
+            &serialized_rows,
+            released_history.as_deref(),
+        )?;
+        let source_sha256: [u8; 32] = Sha256::digest(&source_document).into();
+        let imported = meerkat_core::import_released_0810_session(&source_document)
+            .map_err(|error| invalid_released_head_envelope(&session_id, error))?;
+        let (session, receipt) = imported.into_parts();
+        if receipt.session_id() != &head.id
+            || receipt.source_document_sha256() != &source_sha256
+            || receipt.evidence() != Released0810ImportEvidence::StoreAuthorizationRequired
+        {
+            return Err(invalid_released_head_envelope(
+                &session_id,
+                "frozen importer receipt does not bind the exact released source",
+            ));
+        }
+
+        let released_count = usize::try_from(head.message_count)
+            .map_err(|error| invalid_released_head_envelope(&session_id, error))?;
+        let released_messages = serialized_rows
+            .iter()
+            .map(|row| {
+                serde_json::from_slice::<Message>(row)
+                    .map_err(|error| invalid_released_head_envelope(&session_id, error))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if session.id() != &head.id
+            || session.messages().len() < released_count
+            || session.messages()[..released_count] != released_messages
+        {
+            return Err(invalid_released_head_envelope(
+                &session_id,
+                "frozen importer changed the released live transcript prefix",
+            ));
+        }
+        for sql in [
+            "DELETE FROM session_rewrites WHERE session_id = ?1",
+            "DELETE FROM session_strand_links WHERE session_id = ?1",
+            "DELETE FROM session_strand_messages WHERE session_id = ?1",
+        ] {
+            tx.execute(sql, params![head.id.to_string()])?;
+        }
+        let (layout, current_head) = layout_for_blob_session(&session)
+            .map_err(|error| invalid_released_head_envelope(&session_id, error))?;
+        persist_blob_strand_layout_in_txn(tx, &head.id, &layout)
+            .map_err(|error| invalid_released_head_envelope(&session_id, error))?;
+        let current_links = strand_links_in_txn(tx, &head.id)
+            .map_err(|error| invalid_released_head_envelope(&session_id, error))?;
+        validate_strand_links_acyclic(&head.id, &current_links)
+            .map_err(|error| invalid_released_head_envelope(&session_id, error))?;
+        let settled = settle_resolved_strand_direct_in_txn(
+            tx,
+            &head.id,
+            &current_head.strand,
+            current_head.message_count,
+            &current_links,
+        )
+        .map_err(|error| invalid_released_head_envelope(&session_id, error))?;
+        let expected_rows = session
+            .messages()
+            .iter()
+            .map(|message| {
+                serde_json::to_vec(message)
+                    .map_err(|error| invalid_released_head_envelope(&session_id, error))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if current_head.id != head.id || settled != expected_rows {
+            return Err(invalid_released_head_envelope(
+                &session_id,
+                "canonical rebuild changed the imported session or its current rows",
+            ));
+        }
+        write_head_row_only_in_txn(tx, &current_head)
+            .map_err(|error| invalid_released_head_envelope(&session_id, error))?;
+    }
+    Ok(())
 }
 
 fn initialize_current_session_schema(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
@@ -498,6 +1146,47 @@ pub const SESSION_STORE_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::S
 mod schema_floor_tests {
     use super::*;
 
+    fn insert_head_with_versions(
+        conn: &mut Connection,
+        row_version: i64,
+        embedded_version: u32,
+    ) -> (SessionId, serde_json::Value, String) {
+        let session = Session::new();
+        let mut head = SessionHead::from_session(&session, TranscriptStrandId::root(), 0)
+            .expect("project fixture head");
+        head.version = embedded_version;
+        let head_json = serde_json::to_value(&head).expect("serialize fixture head");
+        let token = session_head_cas_token(&head).expect("fixture head token");
+        let id = head.id.clone();
+        let tx = conn.transaction().expect("head fixture transaction");
+        write_head_row_only_in_txn(&tx, &head).expect("insert session head");
+        tx.execute(
+            "UPDATE session_heads SET version = ?1 WHERE session_id = ?2",
+            params![row_version, id.to_string()],
+        )
+        .expect("set fixture row version");
+        tx.commit().expect("commit head fixture");
+        (id, head_json, token)
+    }
+
+    fn raw_head(conn: &Connection, id: &SessionId) -> (i64, serde_json::Value, String) {
+        conn.query_row(
+            "SELECT version, head_json, cas_token
+             FROM session_heads
+             WHERE session_id = ?1",
+            params![id.to_string()],
+            |row| {
+                let head_json = row.get::<_, JsonColumnBytes>(1)?.into_bytes();
+                Ok((
+                    row.get(0)?,
+                    serde_json::from_slice(&head_json).expect("decode head JSON"),
+                    row.get(2)?,
+                ))
+            },
+        )
+        .expect("read fixture head")
+    }
+
     fn released_v2() -> Connection {
         let mut conn = Connection::open_in_memory().expect("open");
         let tx = conn.transaction().expect("tx");
@@ -521,6 +1210,125 @@ mod schema_floor_tests {
             .expect("upgrade");
         assert_eq!(report.from_version, 2);
         assert_eq!(report.to_version, 3);
+    }
+
+    #[test]
+    fn exact_released_v2_head_document_imports_atomically_with_schema_floor() {
+        let mut conn = released_v2();
+        let (id, _, released_token) = insert_head_with_versions(&mut conn, 2, 2);
+
+        let report = meerkat_sqlite::apply_domain_migrations(&mut conn, &SESSION_STORE_DOMAIN)
+            .expect("upgrade");
+
+        assert_eq!((report.from_version, report.to_version), (2, 3));
+        let (row_version, migrated_json, migrated_token) = raw_head(&conn, &id);
+        assert_eq!(
+            row_version,
+            i64::from(meerkat_core::SESSION_VERSION),
+            "the indexed row envelope advances in the migration transaction"
+        );
+        let migrated: SessionHead =
+            serde_json::from_value(migrated_json).expect("deserialize migrated head");
+        assert_eq!(migrated.version, meerkat_core::SESSION_VERSION);
+        assert_eq!(migrated.id, id);
+        assert!(
+            migrated.message_row_prefix.is_some() && migrated.row_lineage_anchor.is_some(),
+            "the frozen import must publish a fully materializable current head"
+        );
+        assert_ne!(
+            migrated_token, released_token,
+            "the CAS token must advance with the imported current authority"
+        );
+        assert_eq!(
+            migrated_token,
+            session_head_cas_token(&migrated).expect("current migrated token")
+        );
+    }
+
+    #[test]
+    fn released_v2_migration_leaves_non_v2_head_envelopes_byte_semantically_unchanged() {
+        let mut conn = released_v2();
+        let (older_id, older_json, older_token) = insert_head_with_versions(&mut conn, 1, 1);
+        let (released_id, _, _) = insert_head_with_versions(&mut conn, 2, 2);
+        let future_version = meerkat_core::SESSION_VERSION + 1;
+        let (future_id, future_json, future_token) =
+            insert_head_with_versions(&mut conn, i64::from(future_version), future_version);
+
+        let report = meerkat_sqlite::apply_domain_migrations(&mut conn, &SESSION_STORE_DOMAIN)
+            .expect("v2 to current");
+        assert_eq!((report.from_version, report.to_version), (2, 3));
+
+        assert_eq!(raw_head(&conn, &older_id), (1, older_json, older_token));
+        assert_eq!(
+            raw_head(&conn, &future_id),
+            (i64::from(future_version), future_json, future_token)
+        );
+        assert_eq!(
+            raw_head(&conn, &released_id).0,
+            i64::from(meerkat_core::SESSION_VERSION)
+        );
+    }
+
+    #[test]
+    fn released_v2_schema_rejects_a_nonreleased_head_envelope_without_stamping_current() {
+        let mut conn = released_v2();
+        let (id, original_json, original_token) =
+            insert_head_with_versions(&mut conn, 2, meerkat_core::SESSION_VERSION);
+
+        let error = meerkat_sqlite::apply_domain_migrations(&mut conn, &SESSION_STORE_DOMAIN)
+            .expect_err("row/header version disagreement is not released 0.8.10");
+
+        assert!(
+            error
+                .to_string()
+                .contains("row version is 2 but embedded head version is 3"),
+            "unexpected migration error: {error}"
+        );
+        assert_eq!(
+            meerkat_sqlite::domain_version(&conn, SESSION_STORE_DOMAIN.name)
+                .expect("schema ledger"),
+            Some(2),
+            "failed conversion must roll back the schema floor"
+        );
+        assert_eq!(
+            raw_head(&conn, &id),
+            (2, original_json, original_token),
+            "failed conversion must leave the head row untouched"
+        );
+    }
+
+    #[test]
+    fn released_v2_schema_rejects_a_mismatched_head_identity_without_stamping_current() {
+        let mut conn = released_v2();
+        let (embedded_id, original_json, original_token) =
+            insert_head_with_versions(&mut conn, 2, 2);
+        let row_id = Session::new().id().clone();
+        conn.execute(
+            "UPDATE session_heads SET session_id = ?1 WHERE session_id = ?2",
+            params![row_id.to_string(), embedded_id.to_string()],
+        )
+        .expect("install mismatched row identity");
+
+        let error = meerkat_sqlite::apply_domain_migrations(&mut conn, &SESSION_STORE_DOMAIN)
+            .expect_err("released row identity must bind the embedded head");
+
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("embedded head identity is '{embedded_id}'")),
+            "unexpected migration error: {error}"
+        );
+        assert_eq!(
+            meerkat_sqlite::domain_version(&conn, SESSION_STORE_DOMAIN.name)
+                .expect("schema ledger"),
+            Some(2),
+            "identity mismatch must roll back the schema floor"
+        );
+        assert_eq!(
+            raw_head(&conn, &row_id),
+            (2, original_json, original_token),
+            "identity mismatch must leave the head row untouched"
+        );
     }
 
     #[test]
@@ -3144,8 +3952,7 @@ fn backfill_rewrite_graph_edges_from_validated_session_in_txn(
             // a missing edge has no authorized migration provenance.
             return Err(SessionStoreError::Corrupted(id.clone()));
         }
-        let mut normalized_commit = row.commit.clone();
-        normalized_commit.rewrite_generation = expected_generation;
+        let normalized_commit = expected.commit.clone();
         let expected_parent_len = expected
             .parent_base_seq
             .checked_add(
@@ -3160,11 +3967,11 @@ fn backfill_rewrite_graph_edges_from_validated_session_in_txn(
         // physical vocabulary here; current compact migrations never enter
         // this backfill because their edge bytes are written atomically.
         let expected_released_parent = if edge.parent_advance().exact_splice().is_some() {
-            TranscriptStrandId::rebase(&normalized_commit.parent_revision)
+            TranscriptStrandId::rebase(&row.commit.parent_revision)
         } else {
             expected_released_source.clone()
         };
-        let expected_released_child = TranscriptStrandId::from_rewrite(&normalized_commit);
+        let expected_released_child = TranscriptStrandId::from_rewrite(&row.commit);
         if *rewrite_idx != expected_idx
             || normalized_commit.rewrite_generation != expected_generation
             || normalized_commit != *edge.commit()
@@ -4492,8 +5299,10 @@ fn verify_head_canonical_with_metadata_owner_in_txn(
                 lineage,
             )
         }
-        None if anchor_is_current => head.verify_serialized_rows(serialized_rows),
-        _ => Err(SessionStoreError::Corrupted(head.id.clone())),
+        None if head.rewrite_count == 0 && anchor_is_current => {
+            head.verify_serialized_rows(serialized_rows)
+        }
+        None => head.verify_serialized_rows_with_lineage(serialized_rows, lineage),
     }?;
     verified.with_validated_transcript_history(history)
 }
@@ -4722,13 +5531,10 @@ pub fn ensure_head_canonical_for_runtime_in_txn(
     if head.realtime_event_prefix.is_some() {
         return Ok(Some((head, token)));
     }
-    let links = strand_links_in_txn(tx, id)?;
-    validate_strand_links_acyclic(id, &links)?;
-    let serialized_rows =
-        resolve_strand_bytes_in_txn(tx, id, &head.strand, 0..head.message_count, &links)?;
-    let mut session = head
-        .clone()
-        .into_session_from_serialized_rows(serialized_rows)?;
+    let mut session = verify_physical_head_canonical_in_txn(tx, &head)?
+        .session()
+        .as_ref()
+        .clone();
     activate_realtime_component_in_txn(tx, &mut session)?;
     let message_row_prefix = head
         .message_row_prefix
@@ -7481,6 +8287,80 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn exact_released_0810_corpus_imports_and_fully_loads_current_session() {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "../meerkat-runtime/tests/fixtures/v0_8_10_released_realm/corpus/realm/sessions.sqlite3",
+        );
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("sessions.sqlite3");
+        std::fs::copy(&source, &path).expect("copy exact released 0.8.10 corpus database");
+
+        let raw = open_connection(&path).unwrap();
+        let raw_id = raw
+            .query_row(
+                "SELECT session_id FROM session_heads ORDER BY session_id LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("released corpus head identity");
+        drop(raw);
+        let id = SessionId::parse(&raw_id).expect("released corpus session identity");
+
+        let store = SqliteSessionStore::open(&path)
+            .expect("current store migrates the exact released 0.8.10 corpus");
+        let session = store
+            .load(&id)
+            .await
+            .expect("fully materialize migrated released session")
+            .expect("released corpus session remains present");
+        assert_eq!(session.version(), meerkat_core::SESSION_VERSION);
+        assert_eq!(session.messages().len(), 5);
+        assert!(
+            !session
+                .metadata()
+                .contains_key("session_checkpoint_stamp_v1"),
+            "the frozen importer must retire released checkpoint metadata"
+        );
+        assert!(
+            !session
+                .metadata()
+                .contains_key("session_system_context_state"),
+            "the frozen importer must adopt and retire released System context"
+        );
+        session
+            .validated_transcript_history_state()
+            .expect("imported transcript history must use the current validated wire");
+
+        let head = IncrementalSessionStore::load_head(&store, &id)
+            .await
+            .expect("load migrated released head")
+            .expect("released corpus head remains present");
+        assert_eq!(head.version, meerkat_core::SESSION_VERSION);
+
+        let migrated = open_connection(&path).unwrap();
+        let (row_version, embedded_version, stored_token): (i64, u32, String) = migrated
+            .query_row(
+                "SELECT version, head_json, cas_token
+                 FROM session_heads
+                 WHERE session_id = ?1",
+                params![id.to_string()],
+                |row| {
+                    let head_json = row.get::<_, JsonColumnBytes>(1)?.into_bytes();
+                    let head: SessionHead =
+                        serde_json::from_slice(&head_json).expect("decode migrated corpus head");
+                    Ok((row.get(0)?, head.version, row.get(2)?))
+                },
+            )
+            .expect("read migrated corpus head envelope");
+        assert_eq!(row_version, i64::from(meerkat_core::SESSION_VERSION));
+        assert_eq!(embedded_version, meerkat_core::SESSION_VERSION);
+        assert_eq!(
+            stored_token,
+            session_head_cas_token(&head).expect("migrated corpus head token")
+        );
+    }
+
     #[test]
     fn ensure_schema_refuses_a_future_domain_version() {
         let dir = TempDir::new().unwrap();
@@ -9582,7 +10462,7 @@ mod tests {
         TranscriptRewriteRecord::new(commit.clone(), parent, child).unwrap()
     }
 
-    fn imported_released_exact_splice_session() -> Session {
+    fn released_exact_splice_document() -> Vec<u8> {
         fn revision(messages: &[Message]) -> String {
             transcript_messages_digest(messages).expect("digest released revision")
         }
@@ -9631,20 +10511,29 @@ mod tests {
         second_parent.push(user("appended parent row"));
         let mut second = second_parent.clone();
         second[2] = user("second rewrite");
+        let anchor_revision = revision(&anchor);
+        let first_revision = revision(&first);
+        let second_parent_revision = revision(&second_parent);
+        let second_revision = revision(&second);
         let created_at = serde_json::to_value(SystemTime::UNIX_EPOCH).expect("serialize time");
-        let revisions = [&anchor, &first, &second_parent, &second]
-            .into_iter()
-            .map(|messages| {
-                serde_json::json!({
-                    "revision": revision(messages),
-                    "parent_revision": serde_json::Value::Null,
-                    "messages": messages,
-                    "created_at": created_at.clone(),
-                })
+        let revisions = [
+            (&anchor, None),
+            (&first, Some(anchor_revision)),
+            (&second_parent, Some(first_revision)),
+            (&second, Some(second_parent_revision)),
+        ]
+        .into_iter()
+        .map(|(messages, parent_revision)| {
+            serde_json::json!({
+                "revision": revision(messages),
+                "parent_revision": parent_revision,
+                "messages": messages,
+                "created_at": created_at.clone(),
             })
-            .collect::<Vec<_>>();
+        })
+        .collect::<Vec<_>>();
         let history = serde_json::json!({
-            "head": revision(&second),
+            "head": second_revision,
             "commits": [
                 released_commit(&anchor, &first, 1, 2, "released edit one"),
                 released_commit(&second_parent, &second, 2, 3, "released edit two"),
@@ -9658,11 +10547,1664 @@ mod tests {
         envelope["metadata"] = serde_json::json!({
             (meerkat_core::SESSION_TRANSCRIPT_HISTORY_STATE_KEY): history,
         });
-        let bytes = serde_json::to_vec(&envelope).expect("serialize released fixture");
-        meerkat_core::import_released_0810_session(&bytes)
+        serde_json::to_vec(&envelope).expect("serialize released fixture")
+    }
+
+    fn imported_released_exact_splice_session() -> Session {
+        meerkat_core::import_released_0810_session(&released_exact_splice_document())
             .expect("released importer accepts exact store-authorized splice fixture")
             .into_parts()
             .0
+    }
+
+    fn released_v2_file(path: &Path) -> Connection {
+        let mut connection = Connection::open(path).expect("open released fixture database");
+        let transaction = connection
+            .transaction()
+            .expect("released schema transaction");
+        build_released_0_8_10_session_schema(&transaction).expect("install released schema");
+        transaction.commit().expect("commit released schema");
+        connection
+            .execute_batch(
+                "CREATE TABLE meerkat_schema (
+                     domain TEXT PRIMARY KEY,
+                     version INTEGER NOT NULL
+                 );
+                 INSERT INTO meerkat_schema VALUES ('session-store', 2);",
+            )
+            .expect("stamp released schema ledger");
+        connection
+    }
+
+    fn insert_released_blob_row(connection: &Connection, source_document: &[u8]) -> Session {
+        let imported = meerkat_core::import_released_0810_session(source_document)
+            .expect("released blob source imports")
+            .into_parts()
+            .0;
+        let source: serde_json::Value =
+            serde_json::from_slice(source_document).expect("decode released blob source");
+        let metadata = source
+            .get("metadata")
+            .and_then(serde_json::Value::as_object)
+            .expect("released blob metadata");
+        connection
+            .execute(
+                "INSERT INTO sessions (
+                     session_id, created_at_ms, updated_at_ms, message_count,
+                     total_tokens, metadata_json, session_json
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    imported.id().to_string(),
+                    system_time_millis(imported.created_at()),
+                    system_time_millis(imported.updated_at()),
+                    i64::try_from(
+                        source
+                            .get("messages")
+                            .and_then(serde_json::Value::as_array)
+                            .expect("released blob messages")
+                            .len()
+                    )
+                    .expect("released message count"),
+                    i64::try_from(imported.total_tokens()).expect("released token count"),
+                    serde_json::to_string(metadata).expect("released metadata JSON"),
+                    source_document,
+                ],
+            )
+            .expect("insert released blob row");
+        imported
+    }
+
+    fn insert_released_rewrite_head(connection: &mut Connection, session: &Session) -> SessionHead {
+        let history = session
+            .validated_transcript_history_state()
+            .expect("released fixture current history validates")
+            .expect("released fixture carries rewrite history");
+        let layout =
+            strand_layout_for_history(session, Some(&history)).expect("lay out released history");
+        assert_eq!(layout.rewrites.len(), 2);
+
+        let transaction = connection.transaction().expect("released head transaction");
+        let mut released_source = TranscriptStrandId::root();
+        let mut released_head_strand = released_source.clone();
+        for (index, expected) in layout.rewrites.iter().enumerate() {
+            let parent = history
+                .materialize_rewrite_parent(&expected.commit)
+                .expect("materialize released parent")
+                .messages;
+            let child = history
+                .materialize_rewrite_child(&expected.commit)
+                .expect("materialize released child")
+                .messages;
+            let released_parent = match &expected.parent_transition {
+                PreparedHeadCanonicalParentTransition::ExactAppend => released_source.clone(),
+                PreparedHeadCanonicalParentTransition::ExactSplice(_) => {
+                    TranscriptStrandId::rebase(&expected.commit.parent_revision)
+                }
+            };
+            let mut released_commit = expected.commit.clone();
+            released_commit.rewrite_generation = 0;
+            let released_child = TranscriptStrandId::from_rewrite(&released_commit);
+            insert_strand_rows_in_txn(&transaction, session.id(), &released_parent, 0, &parent)
+                .expect("insert released parent body");
+            insert_strand_rows_in_txn(&transaction, session.id(), &released_child, 0, &child)
+                .expect("insert released child body");
+            let mut commit_json =
+                serde_json::to_value(&released_commit).expect("serialize released commit");
+            commit_json
+                .as_object_mut()
+                .expect("released commit object")
+                .remove("rewrite_generation");
+            transaction
+                .execute(
+                    "INSERT INTO session_rewrites (
+                         session_id, rewrite_idx, parent_strand, parent_len,
+                         strand, strand_len, commit_json, created_at_ms
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    params![
+                        session.id().to_string(),
+                        i64::try_from(index).expect("released rewrite index"),
+                        released_parent.as_str(),
+                        i64::try_from(parent.len()).expect("released parent length"),
+                        released_child.as_str(),
+                        i64::try_from(child.len()).expect("released child length"),
+                        serde_json::to_vec(&commit_json).expect("released commit bytes"),
+                        now_millis(),
+                    ],
+                )
+                .expect("insert released rewrite row");
+            supersede_strand_in_txn(
+                &transaction,
+                session.id(),
+                &released_parent,
+                &released_child,
+            )
+            .expect("install released supersession link");
+            released_source = released_child.clone();
+            released_head_strand = released_child;
+        }
+
+        let projected =
+            SessionHead::from_session(session, released_head_strand, layout.rewrites.len() as u64)
+                .expect("project released head");
+        let mut released_head_json =
+            serde_json::to_value(&projected).expect("serialize projected head");
+        let released_head = released_head_json
+            .as_object_mut()
+            .expect("released head object");
+        released_head.insert("version".to_string(), serde_json::json!(2));
+        for current_only in [
+            "message_row_prefix",
+            "row_lineage_anchor",
+            "rewrite_prefix",
+            "graph_prefix",
+            "realtime_event_prefix",
+            "metadata_identity",
+        ] {
+            released_head.remove(current_only);
+        }
+        let released_head: SessionHead =
+            serde_json::from_value(released_head_json).expect("decode exact released head shape");
+        let released_head_bytes =
+            serde_json::to_vec(&released_head).expect("serialize exact released head bytes");
+        let released_token = format!("head-sha256:{:x}", Sha256::digest(&released_head_bytes));
+        transaction
+            .execute(
+                "INSERT INTO session_heads (
+                     session_id, version, strand, head_revision, message_count,
+                     rewrite_count, total_tokens, created_at_ms, updated_at_ms,
+                     metadata_json, head_json, cas_token
+                 ) VALUES (?1, 2, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    released_head.id.to_string(),
+                    released_head.strand.as_str(),
+                    released_head.head_revision,
+                    i64::try_from(released_head.message_count).expect("released head count"),
+                    i64::try_from(released_head.rewrite_count).expect("released rewrite count"),
+                    i64::try_from(released_head.usage.total_tokens())
+                        .expect("released head token count"),
+                    system_time_millis(released_head.created_at),
+                    system_time_millis(released_head.updated_at),
+                    serde_json::to_string(&released_head.metadata).expect("released head metadata"),
+                    released_head_bytes,
+                    released_token,
+                ],
+            )
+            .expect("write exact released head");
+        transaction
+            .commit()
+            .expect("commit released rewrite fixture");
+        released_head
+    }
+
+    fn released_prompt_row(generation: usize) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "role": "system",
+            "content": format!("HomeCore prompt generation {generation}"),
+            "mutation_kind": "explicit_build",
+            "created_at": "2026-07-30T13:43:00Z",
+        }))
+        .expect("serialize exact released prompt row")
+    }
+
+    fn released_rows_digest(rows: &[Vec<u8>]) -> String {
+        meerkat_core::released_0810_transcript_serialized_rows_digest(rows)
+            .expect("digest exact released rows")
+    }
+
+    fn insert_released_prompt_rewrite_chain(
+        connection: &mut Connection,
+        rewrite_count: usize,
+    ) -> (SessionId, SessionHead) {
+        assert!(rewrite_count > 0, "released prompt chain must be non-empty");
+        let id = SessionId::new();
+        let transaction = connection
+            .transaction()
+            .expect("released prompt-chain transaction");
+        let mut parent_row = released_prompt_row(0);
+        let mut parent_revision = released_rows_digest(std::slice::from_ref(&parent_row));
+        let mut parent_strand = TranscriptStrandId::root();
+
+        transaction
+            .execute(
+                "INSERT INTO session_strand_messages (
+                     session_id, strand, seq, message_json, created_at_ms
+                 ) VALUES (?1, ?2, 0, ?3, ?4)",
+                params![
+                    id.to_string(),
+                    parent_strand.as_str(),
+                    &parent_row,
+                    now_millis(),
+                ],
+            )
+            .expect("insert released prompt anchor");
+
+        for index in 0..rewrite_count {
+            let child_row = released_prompt_row(index + 1);
+            let child_revision = released_rows_digest(std::slice::from_ref(&child_row));
+            let commit = TranscriptRewriteCommit {
+                rewrite_generation: 0,
+                parent_revision: parent_revision.clone(),
+                revision: child_revision.clone(),
+                selection: TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+                original_span_digest: parent_revision.clone(),
+                replacement_digest: child_revision.clone(),
+                messages_before: 1,
+                messages_after: 1,
+                reason: TranscriptRewriteReason::new(format!(
+                    "released prompt refresh {}",
+                    index + 1
+                )),
+                actor: Some("released-homecore-fixture".to_string()),
+                committed_at: SystemTime::UNIX_EPOCH,
+            };
+            let child_strand = TranscriptStrandId::from_rewrite(&commit);
+            transaction
+                .execute(
+                    "INSERT INTO session_strand_messages (
+                         session_id, strand, seq, message_json, created_at_ms
+                     ) VALUES (?1, ?2, 0, ?3, ?4)",
+                    params![
+                        id.to_string(),
+                        child_strand.as_str(),
+                        &child_row,
+                        now_millis(),
+                    ],
+                )
+                .expect("insert released prompt child");
+            let mut commit_json =
+                serde_json::to_value(&commit).expect("serialize released prompt commit");
+            commit_json
+                .as_object_mut()
+                .expect("released prompt commit object")
+                .remove("rewrite_generation");
+            transaction
+                .execute(
+                    "INSERT INTO session_rewrites (
+                         session_id, rewrite_idx, parent_strand, parent_len,
+                         strand, strand_len, commit_json, created_at_ms
+                     ) VALUES (?1, ?2, ?3, 1, ?4, 1, ?5, ?6)",
+                    params![
+                        id.to_string(),
+                        i64::try_from(index).expect("released prompt rewrite index"),
+                        parent_strand.as_str(),
+                        child_strand.as_str(),
+                        serde_json::to_vec(&commit_json)
+                            .expect("serialize released prompt commit bytes"),
+                        now_millis(),
+                    ],
+                )
+                .expect("insert released prompt rewrite");
+            supersede_strand_in_txn(&transaction, &id, &parent_strand, &child_strand)
+                .expect("install released prompt supersession");
+            parent_row = child_row;
+            parent_revision = child_revision;
+            parent_strand = child_strand;
+        }
+
+        let final_message: Message =
+            serde_json::from_slice(&parent_row).expect("decode released prompt endpoint");
+        let mut final_session = Session::with_id(id.clone());
+        final_session.push(final_message);
+        let mut released_head =
+            SessionHead::from_session(&final_session, TranscriptStrandId::root(), 0)
+                .expect("project released prompt envelope");
+        released_head.version = 2;
+        released_head.strand = parent_strand;
+        released_head.head_revision = parent_revision;
+        released_head.rewrite_count =
+            u64::try_from(rewrite_count).expect("released prompt rewrite count");
+        released_head.message_row_prefix = None;
+        released_head.row_lineage_anchor = None;
+        released_head.rewrite_prefix = TranscriptRewritePrefixAccumulator::empty();
+        released_head.graph_prefix = None;
+        released_head.realtime_event_prefix = None;
+        released_head.metadata_identity = None;
+        let released_head_bytes =
+            serde_json::to_vec(&released_head).expect("serialize released prompt head");
+        let released_token = format!("head-sha256:{:x}", Sha256::digest(&released_head_bytes));
+        transaction
+            .execute(
+                "INSERT INTO session_heads (
+                     session_id, version, strand, head_revision, message_count,
+                     rewrite_count, total_tokens, created_at_ms, updated_at_ms,
+                     metadata_json, head_json, cas_token
+                 ) VALUES (?1, 2, ?2, ?3, 1, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    id.to_string(),
+                    released_head.strand.as_str(),
+                    released_head.head_revision,
+                    i64::try_from(rewrite_count).expect("released prompt rewrite count"),
+                    i64::try_from(released_head.usage.total_tokens())
+                        .expect("released prompt token count"),
+                    system_time_millis(released_head.created_at),
+                    system_time_millis(released_head.updated_at),
+                    serde_json::to_string(&released_head.metadata)
+                        .expect("released prompt metadata"),
+                    released_head_bytes,
+                    released_token,
+                ],
+            )
+            .expect("write released prompt head");
+        transaction
+            .commit()
+            .expect("commit released prompt-chain fixture");
+        (id, released_head)
+    }
+
+    fn replace_all_bytes(haystack: &mut Vec<u8>, needle: &[u8], replacement: &[u8]) -> usize {
+        let mut replaced = 0;
+        let mut cursor = 0;
+        while let Some(offset) = haystack[cursor..]
+            .windows(needle.len())
+            .position(|candidate| candidate == needle)
+        {
+            let start = cursor + offset;
+            haystack.splice(start..start + needle.len(), replacement.iter().copied());
+            cursor = start + replacement.len();
+            replaced += 1;
+        }
+        replaced
+    }
+
+    fn released_tool_message(name: &str, raw: &str) -> Message {
+        Message::BlockAssistant(BlockAssistantMessage::new(
+            vec![AssistantBlock::ToolUse {
+                id: "tool-1".to_string(),
+                name: name.to_string(),
+                args: serde_json::value::RawValue::from_string(raw.to_string())
+                    .expect("valid released tool arguments"),
+                meta: None,
+            }],
+            StopReason::ToolUse,
+        ))
+    }
+
+    fn released_tool_row(message: &Message, canonical_raw: &str, released_raw: &str) -> Vec<u8> {
+        let mut row = serde_json::to_vec(message).expect("serialize released tool row");
+        let replacements =
+            replace_all_bytes(&mut row, canonical_raw.as_bytes(), released_raw.as_bytes());
+        assert_eq!(replacements, 1, "fixture must replace one raw payload");
+        row
+    }
+
+    fn released_tool_digest(message: &Message, canonical_raw: &str, released_raw: &str) -> String {
+        let mut canonical = message.clone();
+        assert!(matches!(canonical, Message::BlockAssistant(_)));
+        if let Message::BlockAssistant(assistant) = &mut canonical {
+            assistant.identity = Default::default();
+            assistant.created_at = chrono::DateTime::UNIX_EPOCH;
+        }
+        let mut bytes =
+            serde_json::to_vec(&[canonical]).expect("serialize released tool digest form");
+        let replacements = replace_all_bytes(
+            &mut bytes,
+            canonical_raw.as_bytes(),
+            released_raw.as_bytes(),
+        );
+        assert_eq!(
+            replacements, 1,
+            "fixture must replace one digest raw payload"
+        );
+        format!("sha256:{:x}", Sha256::digest(bytes))
+    }
+
+    fn insert_exact_released_strand_row(
+        transaction: &Transaction<'_>,
+        id: &SessionId,
+        strand: &TranscriptStrandId,
+        row: &[u8],
+    ) {
+        transaction
+            .execute(
+                "INSERT INTO session_strand_messages (
+                     session_id, strand, seq, message_json, created_at_ms
+                 ) VALUES (?1, ?2, 0, ?3, ?4)",
+                params![id.to_string(), strand.as_str(), row, now_millis()],
+            )
+            .expect("insert exact released strand row");
+    }
+
+    fn insert_released_raw_collapse_head(
+        connection: &mut Connection,
+        retain_semantic_tail: bool,
+    ) -> (SessionId, String) {
+        let canonical_raw = r#"{"a":2,"z":1}"#;
+        let released_raw = r#"{"z":1,"a":2}"#;
+        let parent = released_tool_message("opaque", released_raw);
+        let collapsed = released_tool_message("opaque", canonical_raw);
+        let final_message = if retain_semantic_tail {
+            released_tool_message("opaque-revised", released_raw)
+        } else {
+            collapsed.clone()
+        };
+        let parent_revision = released_tool_digest(&parent, canonical_raw, released_raw);
+        let collapsed_revision = released_tool_digest(&collapsed, canonical_raw, canonical_raw);
+        let final_revision = if retain_semantic_tail {
+            released_tool_digest(&final_message, canonical_raw, released_raw)
+        } else {
+            collapsed_revision.clone()
+        };
+        assert_ne!(parent_revision, collapsed_revision);
+        assert_eq!(
+            transcript_messages_digest(std::slice::from_ref(&parent))
+                .expect("current parent digest"),
+            transcript_messages_digest(std::slice::from_ref(&collapsed))
+                .expect("current collapsed digest"),
+            "the first released occurrence differs only by RawValue spelling"
+        );
+
+        let commit = |parent_revision: String,
+                      revision: String,
+                      original_span_digest: String,
+                      replacement_digest: String,
+                      reason: &str| TranscriptRewriteCommit {
+            rewrite_generation: 0,
+            parent_revision,
+            revision,
+            selection: TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+            original_span_digest,
+            replacement_digest,
+            messages_before: 1,
+            messages_after: 1,
+            reason: TranscriptRewriteReason::new(reason),
+            actor: Some("released-fixture".to_string()),
+            committed_at: SystemTime::UNIX_EPOCH,
+        };
+        let collapsed_commit = commit(
+            parent_revision.clone(),
+            collapsed_revision.clone(),
+            parent_revision,
+            collapsed_revision.clone(),
+            "released spelling-only rewrite",
+        );
+        let mut commits = vec![collapsed_commit];
+        if retain_semantic_tail {
+            commits.push(commit(
+                collapsed_revision.clone(),
+                final_revision.clone(),
+                collapsed_revision,
+                final_revision.clone(),
+                "released semantic rewrite",
+            ));
+        }
+
+        let mut session = Session::new();
+        session.push(final_message.clone());
+        let id = session.id().clone();
+        let transaction = connection
+            .transaction()
+            .expect("released collapse transaction");
+        let root = TranscriptStrandId::root();
+        insert_exact_released_strand_row(
+            &transaction,
+            &id,
+            &root,
+            &released_tool_row(&parent, canonical_raw, released_raw),
+        );
+        let mut parent_strand = root;
+        let mut head_strand = parent_strand.clone();
+        for (index, rewrite) in commits.iter().enumerate() {
+            let child = TranscriptStrandId::from_rewrite(rewrite);
+            let (message, physical_raw) = if index == 0 {
+                (&collapsed, canonical_raw)
+            } else {
+                (&final_message, released_raw)
+            };
+            insert_exact_released_strand_row(
+                &transaction,
+                &id,
+                &child,
+                &released_tool_row(message, canonical_raw, physical_raw),
+            );
+            let mut commit_json =
+                serde_json::to_value(rewrite).expect("serialize released collapse commit");
+            commit_json
+                .as_object_mut()
+                .expect("released collapse commit object")
+                .remove("rewrite_generation");
+            transaction
+                .execute(
+                    "INSERT INTO session_rewrites (
+                         session_id, rewrite_idx, parent_strand, parent_len,
+                         strand, strand_len, commit_json, created_at_ms
+                     ) VALUES (?1, ?2, ?3, 1, ?4, 1, ?5, ?6)",
+                    params![
+                        id.to_string(),
+                        i64::try_from(index).expect("released collapse rewrite index"),
+                        parent_strand.as_str(),
+                        child.as_str(),
+                        serde_json::to_vec(&commit_json)
+                            .expect("serialize released collapse commit bytes"),
+                        now_millis(),
+                    ],
+                )
+                .expect("insert released collapse rewrite row");
+            supersede_strand_in_txn(&transaction, &id, &parent_strand, &child)
+                .expect("install released collapse supersession");
+            parent_strand = child.clone();
+            head_strand = child;
+        }
+
+        let head = SessionHead::from_session(&session, head_strand, 0)
+            .expect("project released collapse head envelope");
+        let mut head_json = serde_json::to_value(&head).expect("serialize released collapse head");
+        let head_object = head_json
+            .as_object_mut()
+            .expect("released collapse head object");
+        head_object.insert("version".to_string(), serde_json::json!(2));
+        head_object.insert(
+            "head_revision".to_string(),
+            serde_json::Value::String(final_revision.clone()),
+        );
+        head_object.insert(
+            "rewrite_count".to_string(),
+            serde_json::json!(commits.len()),
+        );
+        for current_only in [
+            "message_row_prefix",
+            "row_lineage_anchor",
+            "rewrite_prefix",
+            "graph_prefix",
+            "realtime_event_prefix",
+            "metadata_identity",
+        ] {
+            head_object.remove(current_only);
+        }
+        let released_head: SessionHead =
+            serde_json::from_value(head_json).expect("decode exact released collapse head");
+        let released_head_bytes =
+            serde_json::to_vec(&released_head).expect("serialize exact released collapse head");
+        let released_token = format!("head-sha256:{:x}", Sha256::digest(&released_head_bytes));
+        transaction
+            .execute(
+                "INSERT INTO session_heads (
+                     session_id, version, strand, head_revision, message_count,
+                     rewrite_count, total_tokens, created_at_ms, updated_at_ms,
+                     metadata_json, head_json, cas_token
+                 ) VALUES (?1, 2, ?2, ?3, 1, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    id.to_string(),
+                    released_head.strand.as_str(),
+                    released_head.head_revision,
+                    i64::try_from(released_head.rewrite_count)
+                        .expect("released collapse rewrite count"),
+                    i64::try_from(released_head.usage.total_tokens())
+                        .expect("released collapse token count"),
+                    system_time_millis(released_head.created_at),
+                    system_time_millis(released_head.updated_at),
+                    serde_json::to_string(&released_head.metadata)
+                        .expect("released collapse metadata"),
+                    released_head_bytes,
+                    released_token,
+                ],
+            )
+            .expect("write exact released collapse head");
+        transaction
+            .commit()
+            .expect("commit released collapse fixture");
+        (id, final_revision)
+    }
+
+    fn insert_released_pending_rewrite_tail(
+        connection: &mut Connection,
+        head: &SessionHead,
+        session: &Session,
+    ) -> TranscriptRewriteCommit {
+        let mut child_messages = session.messages().to_vec();
+        let start = child_messages
+            .len()
+            .checked_sub(1)
+            .expect("released pending fixture has a parent row");
+        child_messages[start] = user("unadopted pending replacement");
+        let child_revision =
+            transcript_messages_digest(&child_messages).expect("released pending child digest");
+        let commit = TranscriptRewriteCommit {
+            rewrite_generation: 0,
+            parent_revision: head.head_revision.clone(),
+            revision: child_revision,
+            selection: TranscriptRewriteSelection::MessageRange {
+                start,
+                end: start + 1,
+            },
+            original_span_digest: transcript_messages_digest(&session.messages()[start..=start])
+                .expect("released pending original span"),
+            replacement_digest: transcript_messages_digest(&child_messages[start..=start])
+                .expect("released pending replacement span"),
+            messages_before: session.messages().len(),
+            messages_after: child_messages.len(),
+            reason: TranscriptRewriteReason::new("unadopted pending rewrite"),
+            actor: Some("released-fixture".to_string()),
+            committed_at: SystemTime::UNIX_EPOCH,
+        };
+        let child_strand = TranscriptStrandId::from_rewrite(&commit);
+        let transaction = connection
+            .transaction()
+            .expect("released pending transaction");
+        insert_strand_rows_in_txn(
+            &transaction,
+            session.id(),
+            &child_strand,
+            0,
+            &child_messages,
+        )
+        .expect("insert released pending child body");
+        let mut commit_json =
+            serde_json::to_value(&commit).expect("serialize released pending commit");
+        commit_json
+            .as_object_mut()
+            .expect("released pending commit object")
+            .remove("rewrite_generation");
+        transaction
+            .execute(
+                "INSERT INTO session_rewrites (
+                     session_id, rewrite_idx, parent_strand, parent_len,
+                     strand, strand_len, commit_json, created_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    session.id().to_string(),
+                    i64::try_from(head.rewrite_count).expect("released pending rewrite index"),
+                    head.strand.as_str(),
+                    i64::try_from(session.messages().len())
+                        .expect("released pending parent length"),
+                    child_strand.as_str(),
+                    i64::try_from(child_messages.len()).expect("released pending child length"),
+                    serde_json::to_vec(&commit_json)
+                        .expect("serialize released pending commit bytes"),
+                    now_millis(),
+                ],
+            )
+            .expect("insert released pending rewrite row");
+        transaction
+            .commit()
+            .expect("commit released pending rewrite fixture");
+        commit
+    }
+
+    #[tokio::test]
+    async fn released_rewrite_head_import_preserves_audit_and_supports_new_work() {
+        let directory = TempDir::new().expect("released rewrite fixture directory");
+        let path = directory.path().join("sessions.sqlite3");
+        let mut connection = released_v2_file(&path);
+        let released_session = imported_released_exact_splice_session();
+        let released_head = insert_released_rewrite_head(&mut connection, &released_session);
+        assert_eq!(released_head.rewrite_count, 2);
+        drop(connection);
+
+        let store =
+            SqliteSessionStore::open(&path).expect("migrate exact released rewrite-bearing store");
+        let imported = store
+            .load(released_session.id())
+            .await
+            .expect("load migrated rewrite-bearing session")
+            .expect("migrated rewrite-bearing session exists");
+        assert_eq!(imported.messages(), released_session.messages());
+        let incremental = incremental(&store);
+        let imported_records = incremental
+            .load_rewrites(released_session.id())
+            .await
+            .expect("load imported rewrite audit");
+        assert_eq!(imported_records.len(), 2);
+        let released_history = released_session
+            .validated_transcript_history_state()
+            .expect("released expected history validates")
+            .expect("released expected history exists");
+        let released_suffix = released_history
+            .prove_commit_suffix_after(&TranscriptRewritePrefixAccumulator::empty())
+            .expect("released expected rewrite suffix");
+        let first_released_commit = released_suffix
+            .commits()
+            .next()
+            .expect("released expected first rewrite");
+        let first_released_parent = released_history
+            .materialize_rewrite_parent(first_released_commit)
+            .expect("materialize released expected first parent");
+        assert_eq!(
+            imported_records[0].parent_body.messages,
+            first_released_parent.messages
+        );
+        assert_eq!(
+            imported_records[1].revision_body.messages,
+            released_session.messages()
+        );
+        let imported_head = incremental
+            .load_head(released_session.id())
+            .await
+            .expect("load imported head")
+            .expect("imported head exists");
+        assert_eq!(imported_head.rewrite_count, 2);
+        assert_eq!(imported_head.version, meerkat_core::SESSION_VERSION);
+
+        let store_for_activation =
+            SqliteSessionStore::open(&path).expect("open activation store handle");
+        let id = released_session.id().clone();
+        let (runtime_head, _) = store_for_activation
+            .in_write_txn(move |transaction| {
+                ensure_head_canonical_for_runtime_in_txn(transaction, &id)?
+                    .ok_or(SessionStoreError::NotFound(id))
+            })
+            .await
+            .expect("activate imported rewrite-bearing head");
+        let materialized = incremental
+            .materialize_head(&runtime_head)
+            .await
+            .expect("materialize imported rewrite audit");
+        let mut continued = materialized.session().as_ref().clone();
+        continued.push(user("post-import append"));
+        let append = PreparedHeadCanonicalMutation::prepare(&continued, Some(runtime_head.clone()))
+            .expect("prepare post-import append");
+        incremental
+            .apply_prepared_head_canonical_mutation(&append)
+            .await
+            .expect("apply post-import append");
+        append
+            .acknowledge_physical_projection(&mut continued, append.successor_head_token())
+            .expect("acknowledge post-import append");
+
+        continued
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 1, end: 2 },
+                vec![user("post-import replacement")],
+                TranscriptRewriteReason::new("post-import rewrite"),
+                Some("migration-test".to_string()),
+                None,
+            )
+            .expect("commit post-import rewrite");
+        let rewrite = PreparedHeadCanonicalRewriteMutation::prepare_intra_turn(
+            &continued,
+            &runtime_head,
+            append.successor_head().clone(),
+        )
+        .expect("prepare post-import rewrite");
+        incremental
+            .apply_prepared_head_canonical_rewrite_mutation(&rewrite)
+            .await
+            .expect("apply post-import rewrite");
+
+        let final_records = incremental
+            .load_rewrites(released_session.id())
+            .await
+            .expect("load extended rewrite audit");
+        assert_eq!(final_records.len(), 3);
+        assert_eq!(
+            final_records[..2]
+                .iter()
+                .map(|record| record.commit.reason.clone())
+                .collect::<Vec<_>>(),
+            [
+                TranscriptRewriteReason::new("released edit one"),
+                TranscriptRewriteReason::new("released edit two"),
+            ]
+        );
+        let final_session = store
+            .load(released_session.id())
+            .await
+            .expect("load post-import rewritten session")
+            .expect("post-import rewritten session exists");
+        assert_eq!(final_session.messages(), continued.messages());
+    }
+
+    #[tokio::test]
+    async fn released_twenty_six_prompt_rewrites_import_as_exact_prefix_and_continue() {
+        const RELEASED_REWRITE_COUNT: usize = 26;
+
+        let directory = TempDir::new().expect("released prompt-chain fixture directory");
+        let path = directory.path().join("sessions.sqlite3");
+        let mut connection = released_v2_file(&path);
+        let (id, released_head) =
+            insert_released_prompt_rewrite_chain(&mut connection, RELEASED_REWRITE_COUNT);
+        assert_eq!(
+            released_head.rewrite_count,
+            u64::try_from(RELEASED_REWRITE_COUNT).expect("released rewrite count")
+        );
+        drop(connection);
+
+        let store =
+            SqliteSessionStore::open(&path).expect("migrate released 26-prompt-rewrite store");
+        let incremental = incremental(&store);
+        let imported = store
+            .load(&id)
+            .await
+            .expect("load migrated prompt chain")
+            .expect("migrated prompt chain exists");
+        let imported_history = imported
+            .validated_transcript_history_state()
+            .expect("imported prompt graph validates")
+            .expect("imported prompt graph exists");
+        assert_eq!(imported_history.commit_count(), RELEASED_REWRITE_COUNT);
+        let imported_edges = imported_history.edges().to_vec();
+        let imported_records = incremental
+            .load_rewrites(&id)
+            .await
+            .expect("load all imported prompt rewrites");
+        assert_eq!(imported_records.len(), RELEASED_REWRITE_COUNT);
+        assert_eq!(
+            imported_records
+                .iter()
+                .map(|record| record.commit.rewrite_generation)
+                .collect::<Vec<_>>(),
+            (1..=u64::try_from(RELEASED_REWRITE_COUNT).expect("released rewrite count"))
+                .collect::<Vec<_>>()
+        );
+
+        let activation_store =
+            SqliteSessionStore::open(&path).expect("open prompt-chain activation store");
+        let activation_id = id.clone();
+        let (runtime_head, _) = activation_store
+            .in_write_txn(move |transaction| {
+                ensure_head_canonical_for_runtime_in_txn(transaction, &activation_id)?
+                    .ok_or(SessionStoreError::NotFound(activation_id))
+            })
+            .await
+            .expect("activate imported prompt chain");
+        assert_eq!(
+            incremental
+                .load_rewrites(&id)
+                .await
+                .expect("bare resume leaves prompt history untouched")
+                .len(),
+            RELEASED_REWRITE_COUNT,
+            "0.8.11 activation must not mint a resume-time prompt replacement"
+        );
+
+        let materialized = incremental
+            .materialize_head(&runtime_head)
+            .await
+            .expect("materialize imported prompt chain");
+        let mut continued = materialized.session().as_ref().clone();
+        continued.push(Message::System(SystemMessage::new(
+            "post-upgrade ordered instruction",
+        )));
+        let append = PreparedHeadCanonicalMutation::prepare(&continued, Some(runtime_head.clone()))
+            .expect("prepare post-upgrade System append");
+        incremental
+            .apply_prepared_head_canonical_mutation(&append)
+            .await
+            .expect("persist post-upgrade System append");
+        append
+            .acknowledge_physical_projection(&mut continued, append.successor_head_token())
+            .expect("acknowledge post-upgrade System append");
+        assert_eq!(
+            incremental
+                .load_rewrites(&id)
+                .await
+                .expect("System append leaves rewrite history untouched")
+                .len(),
+            RELEASED_REWRITE_COUNT
+        );
+
+        continued
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+                vec![Message::System(SystemMessage::new(
+                    "first current prompt rewrite",
+                ))],
+                TranscriptRewriteReason::new("post-upgrade explicit rewrite"),
+                Some("migration-test".to_string()),
+                None,
+            )
+            .expect("commit first current prompt rewrite");
+        let rewrite = PreparedHeadCanonicalRewriteMutation::prepare_intra_turn(
+            &continued,
+            &runtime_head,
+            append.successor_head().clone(),
+        )
+        .expect("prepare first current prompt rewrite");
+        incremental
+            .apply_prepared_head_canonical_rewrite_mutation(&rewrite)
+            .await
+            .expect("persist first current prompt rewrite");
+
+        let final_records = incremental
+            .load_rewrites(&id)
+            .await
+            .expect("load extended prompt rewrite audit");
+        assert_eq!(final_records.len(), RELEASED_REWRITE_COUNT + 1);
+        assert_eq!(
+            final_records[..RELEASED_REWRITE_COUNT]
+                .iter()
+                .map(|record| &record.commit)
+                .collect::<Vec<_>>(),
+            imported_records
+                .iter()
+                .map(|record| &record.commit)
+                .collect::<Vec<_>>(),
+            "all released prompt rewrites must remain the exact ordered prefix"
+        );
+        assert_eq!(
+            final_records
+                .last()
+                .expect("current rewrite exists")
+                .commit
+                .rewrite_generation,
+            u64::try_from(RELEASED_REWRITE_COUNT + 1).expect("current rewrite generation")
+        );
+
+        let final_session = store
+            .load(&id)
+            .await
+            .expect("load continued prompt chain")
+            .expect("continued prompt chain exists");
+        let final_history = final_session
+            .validated_transcript_history_state()
+            .expect("continued prompt graph validates")
+            .expect("continued prompt graph exists");
+        assert_eq!(final_history.commit_count(), RELEASED_REWRITE_COUNT + 1);
+        assert_eq!(
+            &final_history.edges()[..RELEASED_REWRITE_COUNT],
+            imported_edges.as_slice(),
+            "current work must extend, never replace, the imported compact graph"
+        );
+    }
+
+    #[tokio::test]
+    async fn released_raw_spelling_collapse_rebuilds_only_semantic_rewrite_tail() {
+        let directory = TempDir::new().expect("released collapse fixture directory");
+        let path = directory.path().join("sessions.sqlite3");
+        let mut connection = released_v2_file(&path);
+        let (id, released_head_revision) = insert_released_raw_collapse_head(&mut connection, true);
+        let exact_rows = connection
+            .prepare(
+                "SELECT message_json FROM session_strand_messages
+                 WHERE session_id = ?1 ORDER BY strand, seq",
+            )
+            .expect("query released collapse rows")
+            .query_map(params![id.to_string()], |row| {
+                Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes())
+            })
+            .expect("read released collapse rows")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect released collapse rows");
+        assert!(
+            exact_rows.iter().any(|row| row
+                .windows(br#"{"z":1,"a":2}"#.len())
+                .any(|candidate| candidate == br#"{"z":1,"a":2}"#)),
+            "fixture must retain the exact noncanonical released RawValue spelling"
+        );
+        drop(connection);
+
+        let store =
+            SqliteSessionStore::open(&path).expect("migrate released raw-spelling collapse");
+        let incremental = incremental(&store);
+        let head = incremental
+            .load_head(&id)
+            .await
+            .expect("load rebuilt collapse head")
+            .expect("rebuilt collapse head exists");
+        assert_eq!(head.version, meerkat_core::SESSION_VERSION);
+        assert_eq!(head.rewrite_count, 1);
+        assert_ne!(head.head_revision, released_head_revision);
+        let records = incremental
+            .load_rewrites(&id)
+            .await
+            .expect("load rebuilt semantic rewrite tail");
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].commit.reason,
+            TranscriptRewriteReason::new("released semantic rewrite")
+        );
+
+        let store_for_activation =
+            SqliteSessionStore::open(&path).expect("open collapse activation store");
+        let activation_id = id.clone();
+        let (runtime_head, _) = store_for_activation
+            .in_write_txn(move |transaction| {
+                ensure_head_canonical_for_runtime_in_txn(transaction, &activation_id)?
+                    .ok_or(SessionStoreError::NotFound(activation_id))
+            })
+            .await
+            .expect("activate rebuilt collapse head");
+        let materialized = incremental
+            .materialize_head(&runtime_head)
+            .await
+            .expect("materialize rebuilt collapse head");
+        let mut continued = materialized.session().as_ref().clone();
+        continued
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+                vec![user("post-collapse replacement")],
+                TranscriptRewriteReason::new("post-collapse rewrite"),
+                Some("migration-test".to_string()),
+                None,
+            )
+            .expect("commit post-collapse rewrite");
+        let rewrite = PreparedHeadCanonicalRewriteMutation::prepare_intra_turn(
+            &continued,
+            &runtime_head,
+            runtime_head.clone(),
+        )
+        .expect("prepare post-collapse rewrite");
+        incremental
+            .apply_prepared_head_canonical_rewrite_mutation(&rewrite)
+            .await
+            .expect("persist post-collapse rewrite");
+        assert_eq!(
+            incremental
+                .load_rewrites(&id)
+                .await
+                .expect("load extended collapse history")
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn released_all_collapsed_raw_spelling_history_disappears_cleanly() {
+        let directory = TempDir::new().expect("released all-collapsed fixture directory");
+        let path = directory.path().join("sessions.sqlite3");
+        let mut connection = released_v2_file(&path);
+        let (id, released_head_revision) =
+            insert_released_raw_collapse_head(&mut connection, false);
+        drop(connection);
+
+        let store =
+            SqliteSessionStore::open(&path).expect("migrate all-collapsed released history");
+        let incremental = incremental(&store);
+        let head = incremental
+            .load_head(&id)
+            .await
+            .expect("load all-collapsed rebuilt head")
+            .expect("all-collapsed rebuilt head exists");
+        assert_eq!(head.rewrite_count, 0);
+        assert_eq!(head.head_revision, released_head_revision);
+        assert!(
+            incremental
+                .load_rewrites(&id)
+                .await
+                .expect("load all-collapsed rewrite audit")
+                .is_empty()
+        );
+
+        let store_for_activation =
+            SqliteSessionStore::open(&path).expect("open all-collapsed activation store");
+        let activation_id = id.clone();
+        let (runtime_head, _) = store_for_activation
+            .in_write_txn(move |transaction| {
+                ensure_head_canonical_for_runtime_in_txn(transaction, &activation_id)?
+                    .ok_or(SessionStoreError::NotFound(activation_id))
+            })
+            .await
+            .expect("activate all-collapsed rebuilt head");
+        let materialized = incremental
+            .materialize_head(&runtime_head)
+            .await
+            .expect("materialize all-collapsed rebuilt head");
+        let mut continued = materialized.session().as_ref().clone();
+        continued
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+                vec![user("first current rewrite")],
+                TranscriptRewriteReason::new("current rewrite"),
+                Some("migration-test".to_string()),
+                None,
+            )
+            .expect("commit first current rewrite");
+        let rewrite = PreparedHeadCanonicalRewriteMutation::prepare_intra_turn(
+            &continued,
+            &runtime_head,
+            runtime_head.clone(),
+        )
+        .expect("prepare first current rewrite");
+        incremental
+            .apply_prepared_head_canonical_rewrite_mutation(&rewrite)
+            .await
+            .expect("persist first current rewrite");
+        assert_eq!(
+            incremental
+                .load_rewrites(&id)
+                .await
+                .expect("load first current rewrite")
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn released_unadopted_pending_rewrite_is_discarded_before_current_work() {
+        let directory = TempDir::new().expect("released pending fixture directory");
+        let path = directory.path().join("sessions.sqlite3");
+        let mut connection = released_v2_file(&path);
+        let released_session = imported_released_exact_splice_session();
+        let released_head = insert_released_rewrite_head(&mut connection, &released_session);
+        let pending = insert_released_pending_rewrite_tail(
+            &mut connection,
+            &released_head,
+            &released_session,
+        );
+        assert_eq!(pending.rewrite_generation, 0);
+        assert_eq!(
+            rewrite_row_count_in_txn(
+                &connection.transaction().expect("pending count transaction"),
+                released_session.id()
+            )
+            .expect("count released pending rows"),
+            released_head.rewrite_count + 1
+        );
+        drop(connection);
+
+        let store =
+            SqliteSessionStore::open(&path).expect("migrate released head with pending rewrite");
+        let incremental = incremental(&store);
+        let imported_head = incremental
+            .load_head(released_session.id())
+            .await
+            .expect("load pending-cleaned head")
+            .expect("pending-cleaned head exists");
+        assert_eq!(imported_head.rewrite_count, 2);
+        let imported_records = incremental
+            .load_rewrites(released_session.id())
+            .await
+            .expect("load pending-cleaned audit");
+        assert_eq!(imported_records.len(), 2);
+        assert!(
+            imported_records
+                .iter()
+                .all(|record| record.commit.reason != pending.reason),
+            "the separately durable runtime candidate owns recovery; public session migration \
+             must not adopt its unadopted rewrite row"
+        );
+
+        let store_for_activation =
+            SqliteSessionStore::open(&path).expect("open pending activation store");
+        let activation_id = released_session.id().clone();
+        let (runtime_head, _) = store_for_activation
+            .in_write_txn(move |transaction| {
+                ensure_head_canonical_for_runtime_in_txn(transaction, &activation_id)?
+                    .ok_or(SessionStoreError::NotFound(activation_id))
+            })
+            .await
+            .expect("activate pending-cleaned head");
+        let materialized = incremental
+            .materialize_head(&runtime_head)
+            .await
+            .expect("materialize pending-cleaned head");
+        let mut continued = materialized.session().as_ref().clone();
+        continued
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+                vec![user("first post-pending rewrite")],
+                TranscriptRewriteReason::new("post-pending rewrite"),
+                Some("migration-test".to_string()),
+                None,
+            )
+            .expect("commit first post-pending rewrite");
+        let rewrite = PreparedHeadCanonicalRewriteMutation::prepare_intra_turn(
+            &continued,
+            &runtime_head,
+            runtime_head.clone(),
+        )
+        .expect("prepare first post-pending rewrite");
+        incremental
+            .apply_prepared_head_canonical_rewrite_mutation(&rewrite)
+            .await
+            .expect("persist first post-pending rewrite");
+        incremental
+            .apply_prepared_head_canonical_rewrite_mutation(&rewrite)
+            .await
+            .expect("retry first post-pending rewrite idempotently");
+        let records = incremental
+            .load_rewrites(released_session.id())
+            .await
+            .expect("load post-pending audit");
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[2].commit.rewrite_generation, 3);
+        assert_eq!(
+            records[2].commit.reason,
+            TranscriptRewriteReason::new("post-pending rewrite")
+        );
+    }
+
+    #[test]
+    fn corrupt_released_pending_rewrite_rolls_back_entire_migration() {
+        let directory = TempDir::new().expect("corrupt pending fixture directory");
+        let path = directory.path().join("sessions.sqlite3");
+        let mut connection = released_v2_file(&path);
+        let released_session = imported_released_exact_splice_session();
+        let released_head = insert_released_rewrite_head(&mut connection, &released_session);
+        let mut pending = insert_released_pending_rewrite_tail(
+            &mut connection,
+            &released_head,
+            &released_session,
+        );
+        pending.parent_revision = format!("sha256:{}", "0".repeat(64));
+        let mut pending_json =
+            serde_json::to_value(&pending).expect("serialize corrupt pending commit");
+        pending_json
+            .as_object_mut()
+            .expect("corrupt pending commit object")
+            .remove("rewrite_generation");
+        connection
+            .execute(
+                "UPDATE session_rewrites
+                 SET commit_json = ?1
+                 WHERE session_id = ?2 AND rewrite_idx = ?3",
+                params![
+                    serde_json::to_vec(&pending_json)
+                        .expect("serialize corrupt pending commit bytes"),
+                    released_session.id().to_string(),
+                    i64::try_from(released_head.rewrite_count)
+                        .expect("corrupt pending rewrite index"),
+                ],
+            )
+            .expect("corrupt pending rewrite row");
+        let source_head: (Vec<u8>, String) = connection
+            .query_row(
+                "SELECT head_json, cas_token FROM session_heads WHERE session_id = ?1",
+                params![released_session.id().to_string()],
+                |row| Ok((row.get::<_, JsonColumnBytes>(0)?.into_bytes(), row.get(1)?)),
+            )
+            .expect("capture released head before failed migration");
+        drop(connection);
+
+        let error = SqliteSessionStore::open(&path)
+            .err()
+            .expect("corrupt released pending rewrite must fail migration");
+        assert!(
+            error.to_string().contains("unadopted successor"),
+            "unexpected migration failure: {error}"
+        );
+        let connection = open_connection(&path).expect("reopen rolled-back pending fixture");
+        assert_eq!(
+            meerkat_sqlite::domain_version(&connection, SESSION_STORE_DOMAIN.name)
+                .expect("read rolled-back schema version"),
+            Some(2)
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM session_rewrites WHERE session_id = ?1",
+                    params![released_session.id().to_string()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("count rows after rollback"),
+            3
+        );
+        let rolled_back_head: (Vec<u8>, String) = connection
+            .query_row(
+                "SELECT head_json, cas_token FROM session_heads WHERE session_id = ?1",
+                params![released_session.id().to_string()],
+                |row| Ok((row.get::<_, JsonColumnBytes>(0)?.into_bytes(), row.get(1)?)),
+            )
+            .expect("read released head after failed migration");
+        assert_eq!(rolled_back_head, source_head);
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct ReleasedPhysicalSnapshot {
+        schema_version: Option<i64>,
+        head: (i64, Vec<u8>, String),
+        strand_rows: Vec<(String, i64, Vec<u8>)>,
+        rewrite_rows: Vec<(i64, String, i64, String, i64, Vec<u8>)>,
+        links: Vec<(String, String, i64, i64, i64, i64)>,
+    }
+
+    fn released_physical_snapshot(
+        connection: &Connection,
+        id: &SessionId,
+    ) -> ReleasedPhysicalSnapshot {
+        let head = connection
+            .query_row(
+                "SELECT version, head_json, cas_token
+                 FROM session_heads WHERE session_id = ?1",
+                params![id.to_string()],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get::<_, JsonColumnBytes>(1)?.into_bytes(),
+                        row.get(2)?,
+                    ))
+                },
+            )
+            .expect("snapshot released head");
+        let strand_rows = connection
+            .prepare(
+                "SELECT strand, seq, message_json
+                 FROM session_strand_messages
+                 WHERE session_id = ?1
+                 ORDER BY strand, seq",
+            )
+            .expect("prepare released strand snapshot")
+            .query_map(params![id.to_string()], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get::<_, JsonColumnBytes>(2)?.into_bytes(),
+                ))
+            })
+            .expect("read released strand snapshot")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect released strand snapshot");
+        let rewrite_rows = connection
+            .prepare(
+                "SELECT rewrite_idx, parent_strand, parent_len, strand, strand_len, commit_json
+                 FROM session_rewrites
+                 WHERE session_id = ?1
+                 ORDER BY rewrite_idx",
+            )
+            .expect("prepare released rewrite snapshot")
+            .query_map(params![id.to_string()], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get::<_, JsonColumnBytes>(5)?.into_bytes(),
+                ))
+            })
+            .expect("read released rewrite snapshot")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect released rewrite snapshot");
+        let links = connection
+            .prepare(
+                "SELECT strand, successor, strand_len, splice_start, splice_end, successor_end
+                 FROM session_strand_links
+                 WHERE session_id = ?1
+                 ORDER BY strand",
+            )
+            .expect("prepare released link snapshot")
+            .query_map(params![id.to_string()], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            })
+            .expect("read released link snapshot")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect released link snapshot");
+        ReleasedPhysicalSnapshot {
+            schema_version: meerkat_sqlite::domain_version(connection, SESSION_STORE_DOMAIN.name)
+                .expect("snapshot released schema version"),
+            head,
+            strand_rows,
+            rewrite_rows,
+            links,
+        }
+    }
+
+    fn assert_released_digest_migration_rolls_back(
+        connection: &mut Connection,
+        id: &SessionId,
+        expected_error: &str,
+    ) {
+        let source = released_physical_snapshot(connection, id);
+        let error = meerkat_sqlite::apply_domain_migrations(connection, &SESSION_STORE_DOMAIN)
+            .expect_err("tampered released digest evidence must fail migration");
+        assert!(
+            error.to_string().contains(expected_error),
+            "unexpected migration error: {error}"
+        );
+        assert_eq!(
+            released_physical_snapshot(connection, id),
+            source,
+            "digest refusal must roll back schema, head, rows, rewrites, and links"
+        );
+    }
+
+    fn replace_released_row_bytes(
+        connection: &Connection,
+        id: &SessionId,
+        strand: &str,
+        seq: i64,
+        needle: &[u8],
+        replacement: &[u8],
+    ) {
+        let mut row = connection
+            .query_row(
+                "SELECT message_json
+                 FROM session_strand_messages
+                 WHERE session_id = ?1 AND strand = ?2 AND seq = ?3",
+                params![id.to_string(), strand, seq],
+                |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
+            )
+            .expect("read released row to tamper");
+        assert_eq!(
+            replace_all_bytes(&mut row, needle, replacement),
+            1,
+            "tamper fixture must replace exactly one byte span"
+        );
+        connection
+            .execute(
+                "UPDATE session_strand_messages
+                 SET message_json = ?1
+                 WHERE session_id = ?2 AND strand = ?3 AND seq = ?4",
+                params![row, id.to_string(), strand, seq],
+            )
+            .expect("write tampered released row");
+    }
+
+    #[test]
+    fn released_raw_semantic_live_row_tamper_rolls_back_every_physical_owner() {
+        let directory = TempDir::new().expect("raw tamper fixture directory");
+        let path = directory.path().join("sessions.sqlite3");
+        let mut connection = released_v2_file(&path);
+        let (id, _) = insert_released_raw_collapse_head(&mut connection, true);
+        let head_strand: String = connection
+            .query_row(
+                "SELECT strand FROM session_heads WHERE session_id = ?1",
+                params![id.to_string()],
+                |row| row.get(0),
+            )
+            .expect("released live strand");
+        replace_released_row_bytes(&connection, &id, &head_strand, 0, br#""z":1"#, br#""z":9"#);
+
+        assert_released_digest_migration_rolls_back(
+            &mut connection,
+            &id,
+            "live head digest mismatch",
+        );
+    }
+
+    #[test]
+    fn released_endpoint_label_body_mismatch_rolls_back_every_physical_owner() {
+        let directory = TempDir::new().expect("endpoint tamper fixture directory");
+        let path = directory.path().join("sessions.sqlite3");
+        let mut connection = released_v2_file(&path);
+        let released = imported_released_exact_splice_session();
+        insert_released_rewrite_head(&mut connection, &released);
+        let mut commit: serde_json::Value = connection
+            .query_row(
+                "SELECT commit_json
+                 FROM session_rewrites
+                 WHERE session_id = ?1 AND rewrite_idx = 0",
+                params![released.id().to_string()],
+                |row| {
+                    let bytes = row.get::<_, JsonColumnBytes>(0)?.into_bytes();
+                    Ok(serde_json::from_slice(&bytes).expect("decode released commit"))
+                },
+            )
+            .expect("released first commit");
+        commit["parent_revision"] = serde_json::json!(format!("sha256:{}", "0".repeat(64)));
+        connection
+            .execute(
+                "UPDATE session_rewrites
+                 SET commit_json = ?1
+                 WHERE session_id = ?2 AND rewrite_idx = 0",
+                params![
+                    serde_json::to_vec(&commit).expect("serialize tampered endpoint label"),
+                    released.id().to_string(),
+                ],
+            )
+            .expect("tamper released endpoint label");
+
+        assert_released_digest_migration_rolls_back(
+            &mut connection,
+            released.id(),
+            "rewrite parent endpoint digest mismatch",
+        );
+    }
+
+    #[test]
+    fn released_non_raw_live_row_tamper_rolls_back_every_physical_owner() {
+        let directory = TempDir::new().expect("ordinary tamper fixture directory");
+        let path = directory.path().join("sessions.sqlite3");
+        let mut connection = released_v2_file(&path);
+        let (id, _) = insert_released_raw_collapse_head(&mut connection, true);
+        let head_strand: String = connection
+            .query_row(
+                "SELECT strand FROM session_heads WHERE session_id = ?1",
+                params![id.to_string()],
+                |row| row.get(0),
+            )
+            .expect("released live strand");
+        replace_released_row_bytes(
+            &connection,
+            &id,
+            &head_strand,
+            0,
+            b"opaque-revised",
+            b"opaque-tampered",
+        );
+
+        assert_released_digest_migration_rolls_back(
+            &mut connection,
+            &id,
+            "live head digest mismatch",
+        );
+    }
+
+    #[test]
+    fn released_selected_span_label_tamper_rolls_back_every_physical_owner() {
+        let directory = TempDir::new().expect("span tamper fixture directory");
+        let path = directory.path().join("sessions.sqlite3");
+        let mut connection = released_v2_file(&path);
+        let released = imported_released_exact_splice_session();
+        insert_released_rewrite_head(&mut connection, &released);
+        let mut commit: serde_json::Value = connection
+            .query_row(
+                "SELECT commit_json
+                 FROM session_rewrites
+                 WHERE session_id = ?1 AND rewrite_idx = 0",
+                params![released.id().to_string()],
+                |row| {
+                    let bytes = row.get::<_, JsonColumnBytes>(0)?.into_bytes();
+                    Ok(serde_json::from_slice(&bytes).expect("decode released commit"))
+                },
+            )
+            .expect("released first commit");
+        commit["original_span_digest"] = serde_json::json!(format!("sha256:{}", "0".repeat(64)));
+        connection
+            .execute(
+                "UPDATE session_rewrites
+                 SET commit_json = ?1
+                 WHERE session_id = ?2 AND rewrite_idx = 0",
+                params![
+                    serde_json::to_vec(&commit).expect("serialize tampered span label"),
+                    released.id().to_string(),
+                ],
+            )
+            .expect("tamper released span label");
+
+        assert_released_digest_migration_rolls_back(
+            &mut connection,
+            released.id(),
+            "rewrite original span digest mismatch",
+        );
+    }
+
+    #[tokio::test]
+    async fn released_blob_only_import_preserves_plain_save_and_head_conversion() {
+        let directory = TempDir::new().expect("released blob fixture directory");
+        let path = directory.path().join("sessions.sqlite3");
+        let connection = released_v2_file(&path);
+        let source = released_exact_splice_document();
+        let released_session = insert_released_blob_row(&connection, &source);
+        drop(connection);
+
+        let store = SqliteSessionStore::open(&path).expect("migrate exact released blob-only row");
+        let loaded = store
+            .load(released_session.id())
+            .await
+            .expect("load migrated blob-only session")
+            .expect("migrated blob-only session exists");
+        assert_eq!(loaded.messages(), released_session.messages());
+        assert_eq!(
+            loaded
+                .validated_transcript_history_state()
+                .expect("migrated blob history validates")
+                .expect("migrated blob retains history")
+                .state()
+                .commit_count(),
+            2
+        );
+        let listed = store
+            .list(SessionFilter::default())
+            .await
+            .expect("list migrated blob-only session");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, *released_session.id());
+        let metadata = store
+            .load_meta(released_session.id())
+            .await
+            .expect("load migrated blob metadata")
+            .expect("migrated blob metadata exists");
+        assert_eq!(metadata.id, *released_session.id());
+
+        let mut plain_saved = loaded.clone();
+        plain_saved.push(user("plain-save tail"));
+        store
+            .save(&plain_saved)
+            .await
+            .expect("plain-save migrated blob");
+        let incremental = incremental(&store);
+        assert!(
+            incremental
+                .load_canonical_head(released_session.id())
+                .await
+                .expect("probe blob-only canonical head")
+                .is_none(),
+            "plain save must keep the imported WholeBlob representation"
+        );
+        let synthesized = incremental
+            .load_head(released_session.id())
+            .await
+            .expect("synthesize imported blob head")
+            .expect("synthesized imported blob head exists");
+        assert_eq!(synthesized.rewrite_count, 2);
+        let synthesized_token =
+            session_head_cas_token(&synthesized).expect("synthesized imported blob CAS");
+        assert_eq!(
+            session_head_cas_token(
+                &incremental
+                    .load_head(released_session.id())
+                    .await
+                    .expect("repeat synthesized head")
+                    .expect("repeat synthesized head exists")
+            )
+            .expect("repeat synthesized CAS"),
+            synthesized_token
+        );
+
+        let store_for_activation =
+            SqliteSessionStore::open(&path).expect("open activation store handle");
+        let id = released_session.id().clone();
+        let (converted, converted_token) = store_for_activation
+            .in_write_txn(move |transaction| {
+                ensure_head_canonical_for_runtime_in_txn(transaction, &id)?
+                    .ok_or(SessionStoreError::NotFound(id))
+            })
+            .await
+            .expect("convert imported blob to current HeadCanonical");
+        assert_eq!(
+            session_head_cas_token(&converted).expect("converted canonical CAS"),
+            converted_token
+        );
+        let materialized = incremental
+            .materialize_head(&converted)
+            .await
+            .expect("materialize converted imported blob");
+        assert_eq!(materialized.session().messages(), plain_saved.messages());
+        assert_eq!(
+            incremental
+                .load_rewrites(released_session.id())
+                .await
+                .expect("load converted imported blob audit")
+                .len(),
+            2
+        );
     }
 
     #[tokio::test]

@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root="$(git rev-parse --show-toplevel)"
+cd "$root"
+exec pre-commit run --config .pre-commit-config.yaml --hook-stage pre-commit

@@ -929,6 +929,7 @@ machine! {
             on input CompleteAttempt { attempt_id, fence, completed_at_ms }
             guard {
                 self.lifecycle_phase == Phase::Running
+                && self.cancel_requested == false
                 && self.current_attempt_id == Some(attempt_id)
                 && self.current_fence == fence
                 && self.lease_expired == false
@@ -952,6 +953,7 @@ machine! {
             on input CompleteAttempt { attempt_id, fence, completed_at_ms }
             guard {
                 self.lifecycle_phase == Phase::WaitingExternal
+                && self.cancel_requested == false
                 && self.current_attempt_id == Some(attempt_id)
                 && self.current_fence == fence
                 && self.lease_expired == false
@@ -975,6 +977,7 @@ machine! {
             on input FailAttempt { attempt_id, fence, failed_at_ms }
             guard {
                 self.lifecycle_phase == Phase::Running
+                && self.cancel_requested == false
                 && self.current_attempt_id == Some(attempt_id)
                 && self.current_fence == fence
                 && self.lease_expired == false
@@ -998,6 +1001,7 @@ machine! {
             on input FailAttempt { attempt_id, fence, failed_at_ms }
             guard {
                 self.lifecycle_phase == Phase::WaitingExternal
+                && self.cancel_requested == false
                 && self.current_attempt_id == Some(attempt_id)
                 && self.current_fence == fence
                 && self.lease_expired == false

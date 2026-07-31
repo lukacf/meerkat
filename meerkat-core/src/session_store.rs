@@ -2823,6 +2823,31 @@ impl SessionHead {
         Ok(VerifiedSessionHeadMaterialization { head, session })
     }
 
+    /// Materialize a rewritten head after exact physical row-lineage replay,
+    /// before a realtime component sequence has been activated.
+    #[doc(hidden)]
+    pub fn verify_serialized_rows_with_lineage(
+        self,
+        serialized_rows: Vec<Vec<u8>>,
+        lineage: VerifiedSessionRowLineageReplay,
+    ) -> Result<VerifiedSessionHeadMaterialization, SessionStoreError> {
+        let messages = serialized_rows
+            .iter()
+            .map(|bytes| {
+                serde_json::from_slice::<Message>(bytes)
+                    .map_err(|_| SessionStoreError::Corrupted(self.id.clone()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let head = self.clone();
+        let session = Arc::new(self.into_session_with_serialized_rows(
+            messages,
+            &serialized_rows,
+            None,
+            Some(&lineage),
+        )?);
+        Ok(VerifiedSessionHeadMaterialization { head, session })
+    }
+
     /// Materialize a rewritten head only after exact physical row-lineage
     /// transitions have been replayed from its bounded anchor.
     #[doc(hidden)]

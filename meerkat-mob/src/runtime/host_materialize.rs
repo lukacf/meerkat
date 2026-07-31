@@ -2042,7 +2042,25 @@ impl HostMemberMaterializer {
             .materialize_session_for_resume(&session_id)
             .await?;
         let session = match loaded {
-            ResumeSessionLoad::Active(session) | ResumeSessionLoad::Revivable(session) => *session,
+            ResumeSessionLoad::Active(session) => *session,
+            ResumeSessionLoad::Revivable(session) => {
+                if !session
+                    .lifecycle_terminal()
+                    .is_some_and(meerkat_core::SessionLifecycleTerminal::is_archived)
+                {
+                    // A non-archived Revivable shape is the store-owned
+                    // witness for a Retired runtime whose document never
+                    // reached archive. It may be resumed by a NEW generation,
+                    // but replaying this recorded row is the same terminal
+                    // incarnation and must not reinterpret retirement as a
+                    // transient liveness failure after registry cleanup.
+                    return Err(MaterializeServeError::ResumeSessionNonRecoverable {
+                        session_id: recorded_session_id.to_string(),
+                        state: meerkat_runtime::RuntimeState::Retired.to_string(),
+                    });
+                }
+                *session
+            }
             ResumeSessionLoad::ArchivedNotRevivable { runtime_state } => {
                 return Err(MaterializeServeError::ResumeSessionNonRecoverable {
                     session_id: recorded_session_id.to_string(),

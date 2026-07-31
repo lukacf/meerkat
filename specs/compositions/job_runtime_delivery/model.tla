@@ -796,7 +796,7 @@ job_CompleteRunningAttempt(arg_attempt_id, arg_fence, arg_completed_at_ms) ==
        /\ packet.payload.completed_at_ms = arg_completed_at_ms
        /\ ~HigherPriorityReady("job_authority")
        /\ job_phase = "Running"
-       /\ ((job_current_attempt_id = Some(packet.payload.attempt_id)) /\ (job_current_fence = packet.payload.fence) /\ (job_lease_expired = FALSE) /\ (job_lease_expires_at_ms # None) /\ (packet.payload.completed_at_ms <= (IF "value" \in DOMAIN job_lease_expires_at_ms THEN job_lease_expires_at_ms["value"] ELSE None)))
+       /\ ((job_cancel_requested = FALSE) /\ (job_current_attempt_id = Some(packet.payload.attempt_id)) /\ (job_current_fence = packet.payload.fence) /\ (job_lease_expired = FALSE) /\ (job_lease_expires_at_ms # None) /\ (packet.payload.completed_at_ms <= (IF "value" \in DOMAIN job_lease_expires_at_ms THEN job_lease_expires_at_ms["value"] ELSE None)))
        /\ job_phase' = "Succeeded"
        /\ job_delivery_sequence' = (job_delivery_sequence) + 1
        /\ job_terminal_kind' = Some("Succeeded")
@@ -820,7 +820,7 @@ job_CompleteWaitingExternalAttempt(arg_attempt_id, arg_fence, arg_completed_at_m
        /\ packet.payload.completed_at_ms = arg_completed_at_ms
        /\ ~HigherPriorityReady("job_authority")
        /\ job_phase = "WaitingExternal"
-       /\ ((job_current_attempt_id = Some(packet.payload.attempt_id)) /\ (job_current_fence = packet.payload.fence) /\ (job_lease_expired = FALSE) /\ (job_lease_expires_at_ms # None) /\ (packet.payload.completed_at_ms <= (IF "value" \in DOMAIN job_lease_expires_at_ms THEN job_lease_expires_at_ms["value"] ELSE None)))
+       /\ ((job_cancel_requested = FALSE) /\ (job_current_attempt_id = Some(packet.payload.attempt_id)) /\ (job_current_fence = packet.payload.fence) /\ (job_lease_expired = FALSE) /\ (job_lease_expires_at_ms # None) /\ (packet.payload.completed_at_ms <= (IF "value" \in DOMAIN job_lease_expires_at_ms THEN job_lease_expires_at_ms["value"] ELSE None)))
        /\ job_phase' = "Succeeded"
        /\ job_delivery_sequence' = (job_delivery_sequence) + 1
        /\ job_terminal_kind' = Some("Succeeded")
@@ -844,7 +844,7 @@ job_FailRunningAttempt(arg_attempt_id, arg_fence, arg_failed_at_ms) ==
        /\ packet.payload.failed_at_ms = arg_failed_at_ms
        /\ ~HigherPriorityReady("job_authority")
        /\ job_phase = "Running"
-       /\ ((job_current_attempt_id = Some(packet.payload.attempt_id)) /\ (job_current_fence = packet.payload.fence) /\ (job_lease_expired = FALSE) /\ (job_lease_expires_at_ms # None) /\ (packet.payload.failed_at_ms <= (IF "value" \in DOMAIN job_lease_expires_at_ms THEN job_lease_expires_at_ms["value"] ELSE None)))
+       /\ ((job_cancel_requested = FALSE) /\ (job_current_attempt_id = Some(packet.payload.attempt_id)) /\ (job_current_fence = packet.payload.fence) /\ (job_lease_expired = FALSE) /\ (job_lease_expires_at_ms # None) /\ (packet.payload.failed_at_ms <= (IF "value" \in DOMAIN job_lease_expires_at_ms THEN job_lease_expires_at_ms["value"] ELSE None)))
        /\ job_phase' = "Failed"
        /\ job_delivery_sequence' = (job_delivery_sequence) + 1
        /\ job_terminal_kind' = Some("Failed")
@@ -868,7 +868,7 @@ job_FailWaitingExternalAttempt(arg_attempt_id, arg_fence, arg_failed_at_ms) ==
        /\ packet.payload.failed_at_ms = arg_failed_at_ms
        /\ ~HigherPriorityReady("job_authority")
        /\ job_phase = "WaitingExternal"
-       /\ ((job_current_attempt_id = Some(packet.payload.attempt_id)) /\ (job_current_fence = packet.payload.fence) /\ (job_lease_expired = FALSE) /\ (job_lease_expires_at_ms # None) /\ (packet.payload.failed_at_ms <= (IF "value" \in DOMAIN job_lease_expires_at_ms THEN job_lease_expires_at_ms["value"] ELSE None)))
+       /\ ((job_cancel_requested = FALSE) /\ (job_current_attempt_id = Some(packet.payload.attempt_id)) /\ (job_current_fence = packet.payload.fence) /\ (job_lease_expired = FALSE) /\ (job_lease_expires_at_ms # None) /\ (packet.payload.failed_at_ms <= (IF "value" \in DOMAIN job_lease_expires_at_ms THEN job_lease_expires_at_ms["value"] ELSE None)))
        /\ job_phase' = "Failed"
        /\ job_delivery_sequence' = (job_delivery_sequence) + 1
        /\ job_terminal_kind' = Some("Failed")
@@ -1743,10 +1743,10 @@ EntryPacketAdmissible_job(packet) ==
     \/ /\ (packet.variant = "LeaseExpired") /\ (job_phase = "WaitingExternal") /\ (((job_current_attempt_id = Some(packet.payload.attempt_id)) /\ (job_current_fence = packet.payload.fence) /\ (job_lease_expired = FALSE) /\ (job_lease_expires_at_ms # None) /\ (packet.payload.observed_at_ms > (IF "value" \in DOMAIN job_lease_expires_at_ms THEN job_lease_expires_at_ms["value"] ELSE None))))
     \/ /\ (packet.variant = "ScheduleRetry") /\ (job_phase = "LossObserved") /\ ((job_lease_expired /\ (job_restart_class # "NonResumable") /\ (IF (job_restart_class # "CheckpointResumable") THEN TRUE ELSE (job_checkpoint_ref # None)) /\ (job_lease_expires_at_ms # None) /\ (packet.payload.retry_due_at_ms > (IF "value" \in DOMAIN job_lease_expires_at_ms THEN job_lease_expires_at_ms["value"] ELSE None))))
     \/ /\ (packet.variant = "ClassifyWorkerLoss") /\ (job_phase = "LossObserved") /\ ((job_lease_expired /\ (job_restart_class = "NonResumable") /\ (job_lease_expires_at_ms # None) /\ (packet.payload.observed_at_ms > (IF "value" \in DOMAIN job_lease_expires_at_ms THEN job_lease_expires_at_ms["value"] ELSE None))))
-    \/ /\ (packet.variant = "CompleteAttempt") /\ (job_phase = "Running") /\ (((job_current_attempt_id = Some(packet.payload.attempt_id)) /\ (job_current_fence = packet.payload.fence) /\ (job_lease_expired = FALSE) /\ (job_lease_expires_at_ms # None) /\ (packet.payload.completed_at_ms <= (IF "value" \in DOMAIN job_lease_expires_at_ms THEN job_lease_expires_at_ms["value"] ELSE None))))
-    \/ /\ (packet.variant = "CompleteAttempt") /\ (job_phase = "WaitingExternal") /\ (((job_current_attempt_id = Some(packet.payload.attempt_id)) /\ (job_current_fence = packet.payload.fence) /\ (job_lease_expired = FALSE) /\ (job_lease_expires_at_ms # None) /\ (packet.payload.completed_at_ms <= (IF "value" \in DOMAIN job_lease_expires_at_ms THEN job_lease_expires_at_ms["value"] ELSE None))))
-    \/ /\ (packet.variant = "FailAttempt") /\ (job_phase = "Running") /\ (((job_current_attempt_id = Some(packet.payload.attempt_id)) /\ (job_current_fence = packet.payload.fence) /\ (job_lease_expired = FALSE) /\ (job_lease_expires_at_ms # None) /\ (packet.payload.failed_at_ms <= (IF "value" \in DOMAIN job_lease_expires_at_ms THEN job_lease_expires_at_ms["value"] ELSE None))))
-    \/ /\ (packet.variant = "FailAttempt") /\ (job_phase = "WaitingExternal") /\ (((job_current_attempt_id = Some(packet.payload.attempt_id)) /\ (job_current_fence = packet.payload.fence) /\ (job_lease_expired = FALSE) /\ (job_lease_expires_at_ms # None) /\ (packet.payload.failed_at_ms <= (IF "value" \in DOMAIN job_lease_expires_at_ms THEN job_lease_expires_at_ms["value"] ELSE None))))
+    \/ /\ (packet.variant = "CompleteAttempt") /\ (job_phase = "Running") /\ (((job_cancel_requested = FALSE) /\ (job_current_attempt_id = Some(packet.payload.attempt_id)) /\ (job_current_fence = packet.payload.fence) /\ (job_lease_expired = FALSE) /\ (job_lease_expires_at_ms # None) /\ (packet.payload.completed_at_ms <= (IF "value" \in DOMAIN job_lease_expires_at_ms THEN job_lease_expires_at_ms["value"] ELSE None))))
+    \/ /\ (packet.variant = "CompleteAttempt") /\ (job_phase = "WaitingExternal") /\ (((job_cancel_requested = FALSE) /\ (job_current_attempt_id = Some(packet.payload.attempt_id)) /\ (job_current_fence = packet.payload.fence) /\ (job_lease_expired = FALSE) /\ (job_lease_expires_at_ms # None) /\ (packet.payload.completed_at_ms <= (IF "value" \in DOMAIN job_lease_expires_at_ms THEN job_lease_expires_at_ms["value"] ELSE None))))
+    \/ /\ (packet.variant = "FailAttempt") /\ (job_phase = "Running") /\ (((job_cancel_requested = FALSE) /\ (job_current_attempt_id = Some(packet.payload.attempt_id)) /\ (job_current_fence = packet.payload.fence) /\ (job_lease_expired = FALSE) /\ (job_lease_expires_at_ms # None) /\ (packet.payload.failed_at_ms <= (IF "value" \in DOMAIN job_lease_expires_at_ms THEN job_lease_expires_at_ms["value"] ELSE None))))
+    \/ /\ (packet.variant = "FailAttempt") /\ (job_phase = "WaitingExternal") /\ (((job_cancel_requested = FALSE) /\ (job_current_attempt_id = Some(packet.payload.attempt_id)) /\ (job_current_fence = packet.payload.fence) /\ (job_lease_expired = FALSE) /\ (job_lease_expires_at_ms # None) /\ (packet.payload.failed_at_ms <= (IF "value" \in DOMAIN job_lease_expires_at_ms THEN job_lease_expires_at_ms["value"] ELSE None))))
     \/ /\ (packet.variant = "AcknowledgeCancel") /\ (job_phase = "Running") /\ ((job_cancel_requested /\ (job_current_attempt_id = Some(packet.payload.attempt_id)) /\ (job_current_fence = packet.payload.fence) /\ (job_lease_expired = FALSE) /\ (job_lease_expires_at_ms # None) /\ (packet.payload.acknowledged_at_ms <= (IF "value" \in DOMAIN job_lease_expires_at_ms THEN job_lease_expires_at_ms["value"] ELSE None))))
     \/ /\ (packet.variant = "AcknowledgeCancel") /\ (job_phase = "WaitingExternal") /\ ((job_cancel_requested /\ (job_current_attempt_id = Some(packet.payload.attempt_id)) /\ (job_current_fence = packet.payload.fence) /\ (job_lease_expired = FALSE) /\ (job_lease_expires_at_ms # None) /\ (packet.payload.acknowledged_at_ms <= (IF "value" \in DOMAIN job_lease_expires_at_ms THEN job_lease_expires_at_ms["value"] ELSE None))))
     \/ /\ (packet.variant = "MarkNeedsAttention") /\ (job_phase = "Queued") /\ ((packet.payload.observed_at_ms > 0))

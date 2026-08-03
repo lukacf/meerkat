@@ -159,7 +159,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y ripgrep
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Setup mold linker
         uses: rui314/setup-mold@v1
@@ -216,7 +216,7 @@ jobs:
         uses: ./.github/actions/setup-rust-ci
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Setup mold linker
         uses: rui314/setup-mold@v1
@@ -248,7 +248,7 @@ jobs:
         uses: ./.github/actions/setup-rust-ci
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Setup mold linker
         uses: rui314/setup-mold@v1
@@ -291,7 +291,7 @@ jobs:
         uses: ./.github/actions/setup-rust-ci
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Setup mold linker
         uses: rui314/setup-mold@v1
@@ -437,7 +437,7 @@ jobs:
         uses: ./.github/actions/setup-rust-ci
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Setup mold linker
         uses: rui314/setup-mold@v1
@@ -473,7 +473,7 @@ jobs:
         uses: ./.github/actions/setup-rust-ci
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Setup mold linker
         uses: rui314/setup-mold@v1
@@ -506,7 +506,7 @@ jobs:
         uses: ./.github/actions/setup-rust-ci
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Setup mold linker
         uses: rui314/setup-mold@v1
@@ -607,7 +607,7 @@ jobs:
           java-version: 21
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Setup mold linker
         uses: rui314/setup-mold@v1
@@ -651,7 +651,7 @@ jobs:
         run: rustup target add wasm32-unknown-unknown
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -693,7 +693,7 @@ jobs:
           wasm-pack --version
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -747,7 +747,7 @@ jobs:
           wasm-pack --version
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2

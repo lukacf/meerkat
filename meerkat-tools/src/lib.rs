@@ -59,6 +59,8 @@ pub use builtin::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use builtin::{FileTaskStore, ensure_rkat_dir, ensure_rkat_dir_async, find_project_root};
+#[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
+pub use builtin::{SqliteTaskStore, TOOLS_TASKS_DOMAIN};
 pub use control_plane::{CatalogControlDispatcher, CatalogControlVisibilityProvider};
 pub use dispatcher::EmptyToolDispatcher;
 #[cfg(not(target_arch = "wasm32"))]

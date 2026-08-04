@@ -13,6 +13,25 @@ via cargo-semver-checks against the published baselines).
 
 ## [Unreleased]
 
+### Fixed
+
+- Pre-0.8.10 durable SQLite realms now have one explicit current-binary bridge:
+  `rkat ... storage migrate --apply --bridge-pre-0-8-10`. The frozen,
+  fail-closed importer authenticates supported pre-floor schemas and rows
+  before installing current authority. JSONL and memory realms are rejected
+  without database mutation. Ordinary store opens remain strict.
+  The maintenance transaction preserves queued and nonterminal inputs without
+  scheduling or replaying them; a later session activation follows normal
+  recovery.
+- Fresh prompt-first runs and `rkat help` no longer fail only because their
+  default workspace-derived realm cannot open. No historical session from the
+  failed realm is loaded into the fresh run, and the explicit compatibility
+  bridge is not invoked automatically. The run receives a newly generated
+  durable SQLite realm under the same state root while workspace config, auth,
+  provider, and tool policy remain in force. Explicit realms, isolated runs,
+  resumes, and session commands stay fail-closed, and historical access remains
+  available only through the explicit pre-0.8.10 maintenance bridge.
+
 ## [0.8.12] - 2026-08-02
 
 ### Fixed

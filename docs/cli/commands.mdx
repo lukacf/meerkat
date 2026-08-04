@@ -50,6 +50,28 @@ stable workspace realm id from that path, and store realm state under
 derived workspace identity and the default project-local state root.
 `--state-root` changes only where realm directories are stored.
 
+Fresh prompt-first runs and `rkat help` are fail-soft only at the default
+workspace storage boundary. If the workspace-derived realm cannot be opened,
+no historical session from that realm is loaded into the fresh run, and the
+explicit compatibility bridge is never invoked automatically. The ordinary
+strict open may already have completed supported manifest initialization or an
+earlier domain migration before a later store refuses. The CLI warns and
+creates a new generated realm using durable SQLite under the same resolved
+state root. The workspace's configuration, auth policy, provider selection,
+and tool policy remain in force; only persistence-owned state is isolated in
+the generated realm. The warning names both realms and prints the explicit
+recovery command:
+
+```bash
+rkat --state-root <ROOT> --realm <ORIGINAL_REALM> storage migrate --apply --bridge-pre-0-8-10
+```
+
+An explicit `--realm`, `--isolated`, every resume form, and all `session`
+commands remain fail-closed. Historical session access therefore stays an
+explicit maintenance operation. The fresh-run fallback is never an in-memory
+session and never makes a historical session from the failed workspace realm
+part of the new run.
+
 ## Common commands
 
 | Command | Purpose |
@@ -250,9 +272,19 @@ rkat session interrupt <SESSION_ID>
 
 This is the human/operator session surface. CLI-internal control-plane session APIs are not exposed here.
 
-Meerkat 0.8.11 supports durable state from 0.8.10 onward. Migrate older state
-offline with the older binary before repinning; the current CLI does not
-adopt or rewrite pre-floor session state.
+Meerkat supports ordinary durable-state opens from 0.8.10 onward. For an older
+SQLite realm, stop every process that can access it and run the explicit
+current maintenance bridge:
+
+```bash
+rkat --state-root <ROOT> --realm <REALM> storage migrate --apply --bridge-pre-0-8-10
+```
+
+The frozen importer fails closed on unsupported pre-floor shapes. Normal realm
+opens remain strict. JSONL and memory realms are rejected before any database
+is mutated. The maintenance transaction preserves queued and
+nonterminal input rows without scheduling or replaying them. A later session
+activation follows normal recovery.
 
 ## config
 
@@ -348,7 +380,7 @@ lease/lock/backup artifacts. Exit 0
 means no error-severity findings; exit 1 means errors were found.
 
 ```bash
-rkat storage migrate [--apply] [--json] [--root PATH]... [--adopt-root PATH] [--fence-wait-secs SECS]
+rkat storage migrate [--apply] [--bridge-pre-0-8-10] [--json] [--root PATH]... [--adopt-root PATH] [--fence-wait-secs SECS]
 ```
 
 `migrate` is dry-run by default, offline, resumable, and fail-closed. It
@@ -374,6 +406,16 @@ Per-mob databases under `mobs/` are report-only, and credential stores are
 never read, moved, or reported. Exit 0 = clean; exit 1 = errors or
 fail-closed refusals (split-brain without `--adopt-root`, unacquirable
 maintenance fence).
+
+`--bridge-pre-0-8-10` is an explicit `--apply`-only maintenance lane for
+SQLite realms. JSONL and memory realms are rejected before any database is
+mutated. While the realm fence is held, it runs a frozen importer before the
+normal store constructors. The importer accepts only authenticated, supported
+pre-floor schema and row shapes; unknown, ambiguous, or inconsistent state
+refuses instead of being inferred or stamped. The maintenance transaction preserves
+queued and nonterminal runtime inputs in the current representation without
+scheduling or replaying them. A later session activation follows normal
+recovery. Ordinary store opens never enter this bridge.
 
 ```bash
 rkat storage prune [--apply] [--older-than-days N] [--json] [--root PATH]...

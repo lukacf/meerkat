@@ -15,6 +15,9 @@
 //!    predecessors. Dry-run reads recorded versions only and reports row
 //!    presence; it does not certify a missing row as fresh or promise a
 //!    future stamp.
+//!    `--bridge-pre-0-8-10` adds an explicit, fenced import before this
+//!    normal strict path. The importer authenticates exact historical schema
+//!    prefixes and refuses unknown or malformed state atomically.
 //! 2. **State-root adoption (report-only):** the dual-root resolver already
 //!    uses realms where they lie; the report states each realm's root.
 //! 3. **Split-brain reconciliation (manual, fail-closed):** a realm id under
@@ -57,6 +60,10 @@ pub(crate) struct MigrateOptions {
     pub roots: Vec<PathBuf>,
     pub realm_filter: Option<String>,
     pub apply: bool,
+    /// Opt-in, fail-closed import for authenticated durable schemas from
+    /// before the v0.8.10 compatibility floor. Ordinary migration never
+    /// enables this bridge implicitly.
+    pub bridge_pre_0_8_10: bool,
     pub adopt_root: Option<PathBuf>,
     pub fence_wait: Duration,
     /// Legacy pre-realm `<home>/.rkat/sessions` directory to probe
@@ -204,9 +211,15 @@ pub(crate) async fn run_storage_migrate(options: MigrateOptions) -> MigrateRepor
         if copies.len() > 1 {
             continue; // unresolved twin; already reported
         }
-        report
-            .realms
-            .push(migrate_realm(realm, options.apply, options.fence_wait).await);
+        report.realms.push(
+            migrate_realm(
+                realm,
+                options.apply,
+                options.bridge_pre_0_8_10,
+                options.fence_wait,
+            )
+            .await,
+        );
     }
 
     // ── Case 5: deprecated leftovers (report-only). ──────────────────────
@@ -445,6 +458,7 @@ fn mob_report_only_entries(realm_dir: &Path, entry: &mut RealmMigrateReport) {
 async fn migrate_realm(
     realm: &RealmDirEntry,
     apply: bool,
+    bridge_pre_0_8_10: bool,
     fence_wait: Duration,
 ) -> RealmMigrateReport {
     let mut entry = RealmMigrateReport::new(realm.realm_id.clone(), realm.dir.clone());
@@ -465,6 +479,19 @@ async fn migrate_realm(
         return entry;
     }
     let backend = realm.backend.clone().unwrap_or_default();
+    if bridge_pre_0_8_10 && backend != "sqlite" {
+        let selected = if backend.is_empty() {
+            "<missing>"
+        } else {
+            backend.as_str()
+        };
+        entry.errors.push(format!(
+            "--bridge-pre-0-8-10 is supported only for realms whose manifest selects backend \
+             'sqlite'; realm '{}' selects backend '{selected}'",
+            realm.realm_id
+        ));
+        return entry;
+    }
     match backend.as_str() {
         "memory" => {
             entry
@@ -503,7 +530,7 @@ async fn migrate_realm(
         return entry;
     }
 
-    apply_realm(realm, &backend, fence_wait, &mut entry).await;
+    apply_realm(realm, &backend, bridge_pre_0_8_10, fence_wait, &mut entry).await;
     mob_report_only_entries(&realm.dir, &mut entry);
     entry
 }
@@ -527,12 +554,14 @@ async fn dry_run_realm(realm: &RealmDirEntry, _backend: &str, entry: &mut RealmM
     }
 }
 
-/// Apply: fence the realm and run every store's normal constructor. The
-/// guarded ledger migrations are the structural verification.
+/// Apply: fence the realm, optionally run the explicit pre-floor importer,
+/// then run every store's normal constructor. The guarded ledger migrations
+/// are the structural verification.
 #[cfg(feature = "session-store")]
 async fn apply_realm(
     realm: &RealmDirEntry,
-    _backend: &str,
+    backend: &str,
+    bridge_pre_0_8_10: bool,
     fence_wait: Duration,
     entry: &mut RealmMigrateReport,
 ) {
@@ -579,6 +608,108 @@ async fn apply_realm(
             Vec::new()
         }
     };
+
+    let mut bridge_report = None;
+    let fence = if bridge_pre_0_8_10 {
+        let bridge_root = realm.state_root.clone();
+        let bridge_realm = realm.realm_id.clone();
+        let bridged = tokio::task::spawn_blocking(move || {
+            let result =
+                meerkat::bridge_pre_0_8_10_realm_storage_in(&bridge_root, &bridge_realm, &fence);
+            (fence, result)
+        })
+        .await;
+        match bridged {
+            Ok((fence, Ok(report))) => {
+                bridge_report = Some(report);
+                fence
+            }
+            Ok((_fence, Err(error))) => {
+                entry
+                    .errors
+                    .push(format!("pre-v0.8.10 bridge failed: {error}"));
+                return;
+            }
+            Err(join_error) => {
+                entry
+                    .errors
+                    .push(format!("pre-v0.8.10 bridge task failed: {join_error}"));
+                return;
+            }
+        }
+    } else {
+        fence
+    };
+    if let Some(bridge_report) = bridge_report {
+        for database in &bridge_report.inactive_databases {
+            entry.notes.push(format!(
+                "pre-v0.8.10 bridge: skipped inactive database {} because the realm manifest's \
+                 selected backend does not authorize it",
+                database.display()
+            ));
+        }
+        let mut changed = 0_usize;
+        for domain in bridge_report.domains.iter().filter(|domain| {
+            domain.ledger_established
+                || domain.from_version != domain.to_version
+                || domain.prepared_rows > 0
+        }) {
+            changed += 1;
+            let prepared = if domain.prepared_rows == 0 {
+                String::new()
+            } else {
+                format!(
+                    " and rewrote {} legacy durable payload row(s)",
+                    domain.prepared_rows
+                )
+            };
+            if domain.ledger_established && domain.from_version == domain.to_version {
+                entry.notes.push(format!(
+                    "pre-v0.8.10 bridge: authenticated exact current version {} for domain '{}' \
+                     in {} and established its missing ledger row{}",
+                    domain.to_version,
+                    domain.domain,
+                    domain.database.display(),
+                    prepared
+                ));
+            } else if domain.ledger_established {
+                entry.notes.push(format!(
+                    "pre-v0.8.10 bridge: authenticated and migrated domain '{}' in {} from \
+                     version {} to {}, then established its ledger row{}",
+                    domain.domain,
+                    domain.database.display(),
+                    domain.from_version,
+                    domain.to_version,
+                    prepared
+                ));
+            } else if domain.from_version != domain.to_version {
+                entry.notes.push(format!(
+                    "pre-v0.8.10 bridge: authenticated and migrated already-ledgered domain '{}' \
+                     in {} from version {} to {}{}",
+                    domain.domain,
+                    domain.database.display(),
+                    domain.from_version,
+                    domain.to_version,
+                    prepared
+                ));
+            } else {
+                entry.notes.push(format!(
+                    "pre-v0.8.10 bridge: rewrote {} legacy durable payload row(s) in \
+                     already-current domain '{}' in {}",
+                    domain.prepared_rows,
+                    domain.domain,
+                    domain.database.display()
+                ));
+            }
+        }
+        if changed == 0 {
+            entry.notes.push(
+                "pre-v0.8.10 bridge: no domain required pre-floor import; normal strict \
+                 migration continued"
+                    .to_string(),
+            );
+        }
+    }
 
     // Case 1: normal constructors via the facade bundle (sessions, schedule,
     // runtime, workgraph, blobs) — plus the stores the bundle does not own.
@@ -632,7 +763,8 @@ async fn apply_realm(
         .dir
         .join("sessions_jsonl")
         .join("session_index.sqlite3");
-    if index_db.is_file()
+    if backend == "jsonl"
+        && index_db.is_file()
         && let Err(error) = tokio::task::spawn_blocking(move || {
             meerkat_store::index::SqliteSessionIndex::open(index_db)
         })
@@ -696,6 +828,7 @@ async fn apply_realm(
 async fn apply_realm(
     _realm: &RealmDirEntry,
     _backend: &str,
+    _bridge_pre_0_8_10: bool,
     _fence_wait: Duration,
     entry: &mut RealmMigrateReport,
 ) {

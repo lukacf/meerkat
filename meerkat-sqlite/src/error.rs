@@ -73,6 +73,33 @@ pub enum SqliteStoreError {
         objects: Vec<String>,
     },
 
+    /// Explicit maintenance could not authenticate an unledgered owned
+    /// catalog as any exact migration prefix or frozen predecessor through
+    /// the requested target. No preparation, migration, or ledger mutation
+    /// has run.
+    #[error(
+        "unledgered schema domain `{domain}` does not match any authorized source catalog \
+         through version {target_version}; found owned objects {objects:?}"
+    )]
+    UnledgeredSchemaNoMatch {
+        domain: String,
+        target_version: i64,
+        objects: Vec<String>,
+    },
+
+    /// Explicit maintenance found more than one exact authorized source
+    /// version for an unledgered catalog. Inferring a version would be
+    /// ambiguous, so the file remains untouched.
+    #[error(
+        "unledgered schema domain `{domain}` ambiguously matches source versions {matches:?} \
+         through requested target version {target_version}"
+    )]
+    UnledgeredSchemaAmbiguous {
+        domain: String,
+        target_version: i64,
+        matches: Vec<i64>,
+    },
+
     /// A registered migration failed while being applied. The surrounding
     /// transaction is rolled back; the file is left at its prior version.
     #[error("migration {version} (`{name}`) for domain `{domain}` failed: {source}")]

@@ -9,6 +9,7 @@ use crate::lifecycle::run_primitive::ModelId;
 use crate::model_profile::catalog::ImageGenerationModelProfile;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
+use std::cell::Cell;
 use std::num::NonZeroU32;
 use uuid::Uuid;
 
@@ -611,8 +612,46 @@ pub enum ImageGenerationWarning {
     },
 }
 
+thread_local! {
+    static PRE_FLOOR_PROVIDER_IMAGE_METADATA_IMPORT_ACTIVE: Cell<bool> = const { Cell::new(false) };
+}
+
+struct PreFloorProviderImageMetadataImportGuard {
+    previously_active: bool,
+}
+
+impl Drop for PreFloorProviderImageMetadataImportGuard {
+    fn drop(&mut self) {
+        PRE_FLOOR_PROVIDER_IMAGE_METADATA_IMPORT_ACTIVE
+            .with(|active| active.set(self.previously_active));
+    }
+}
+
+/// Runs a synchronous, explicit pre-floor persistence import operation.
+///
+/// While the operation is active on the current thread, only
+/// [`ProviderImageMetadata`] accepts the historical `open_ai` discriminator.
+/// The decoded value is the current `OpenAi` variant, so every subsequent
+/// serialization emits canonical `openai`. Ordinary deserialization remains
+/// strict. This narrow seam exists only for realm maintenance code importing
+/// authenticated historical persistence.
+///
+/// The scope is thread-local and restored on return or unwind. Do not return
+/// deferred work from `operation`: the scope ends when this function returns.
+#[doc(hidden)]
+pub fn with_pre_floor_provider_image_metadata_import<T>(operation: impl FnOnce() -> T) -> T {
+    let previously_active =
+        PRE_FLOOR_PROVIDER_IMAGE_METADATA_IMPORT_ACTIVE.with(|active| active.replace(true));
+    let _guard = PreFloorProviderImageMetadataImportGuard { previously_active };
+    operation()
+}
+
+fn pre_floor_provider_image_metadata_import_is_active() -> bool {
+    PRE_FLOOR_PROVIDER_IMAGE_METADATA_IMPORT_ACTIVE.with(Cell::get)
+}
+
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "provider", rename_all = "snake_case")]
 pub enum ProviderImageMetadata {
     NotEmitted,
@@ -622,6 +661,50 @@ pub enum ProviderImageMetadata {
     #[serde(rename = "openai")]
     OpenAi(OpenAiImageMetadata),
     Gemini(GeminiImageMetadata),
+}
+
+impl<'de> Deserialize<'de> for ProviderImageMetadata {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PreFloorOpenAiImageMetadata {
+            target_model: String,
+            response_id: Option<String>,
+            image_generation_call_id: Option<String>,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(tag = "provider", rename_all = "snake_case")]
+        enum WireProviderImageMetadata {
+            NotEmitted,
+            #[serde(rename = "openai")]
+            OpenAi(OpenAiImageMetadata),
+            #[serde(rename = "open_ai")]
+            PreFloorOpenAi(PreFloorOpenAiImageMetadata),
+            Gemini(GeminiImageMetadata),
+        }
+
+        match WireProviderImageMetadata::deserialize(deserializer)? {
+            WireProviderImageMetadata::NotEmitted => Ok(Self::NotEmitted),
+            WireProviderImageMetadata::OpenAi(metadata) => Ok(Self::OpenAi(metadata)),
+            WireProviderImageMetadata::PreFloorOpenAi(metadata)
+                if pre_floor_provider_image_metadata_import_is_active() =>
+            {
+                Ok(Self::OpenAi(OpenAiImageMetadata {
+                    target_model: metadata.target_model,
+                    response_id: metadata.response_id,
+                    image_generation_call_id: metadata.image_generation_call_id,
+                }))
+            }
+            WireProviderImageMetadata::PreFloorOpenAi(_) => Err(serde::de::Error::custom(
+                "legacy ProviderImageMetadata discriminator `open_ai` is accepted only by the explicit pre-floor maintenance importer",
+            )),
+            WireProviderImageMetadata::Gemini(metadata) => Ok(Self::Gemini(metadata)),
+        }
+    }
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1116,6 +1199,7 @@ impl SessionModelRoutingStatus {
 mod tests {
     use super::*;
     use crate::blob::{BlobId, BlobRef};
+    use crate::types::ProviderMeta;
     use serde::de::DeserializeOwned;
     use std::fmt::Debug;
 
@@ -1130,6 +1214,123 @@ mod tests {
         let encoded = serde_json::to_string(&value).unwrap();
         let decoded: T = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, value);
+    }
+
+    #[test]
+    fn provider_image_metadata_rejects_pre_floor_discriminator_by_default() {
+        let legacy = r#"{
+            "provider": "open_ai",
+            "target_model": "gpt-image-1",
+            "response_id": "response-1",
+            "image_generation_call_id": "call-1"
+        }"#;
+
+        let error = serde_json::from_str::<ProviderImageMetadata>(legacy).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("explicit pre-floor maintenance importer"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn scoped_pre_floor_import_canonicalizes_only_image_metadata() {
+        #[derive(Debug, Serialize, Deserialize)]
+        struct PersistenceEnvelope {
+            image_metadata: ProviderImageMetadata,
+            unrelated_provider_metadata: ProviderMeta,
+        }
+
+        let legacy = r#"{
+            "image_metadata": {
+                "provider": "open_ai",
+                "target_model": "gpt-image-1",
+                "response_id": "response-1",
+                "image_generation_call_id": "call-1"
+            },
+            "unrelated_provider_metadata": {
+                "provider": "open_ai",
+                "id": "reasoning-1",
+                "encrypted_content": "opaque",
+                "phase": "reasoning"
+            }
+        }"#;
+
+        let imported = with_pre_floor_provider_image_metadata_import(|| {
+            serde_json::from_str::<PersistenceEnvelope>(legacy)
+        })
+        .unwrap();
+        assert!(matches!(
+            imported.image_metadata,
+            ProviderImageMetadata::OpenAi(_)
+        ));
+        assert!(matches!(
+            imported.unrelated_provider_metadata,
+            ProviderMeta::OpenAi { .. }
+        ));
+
+        let canonical = serde_json::to_value(imported).unwrap();
+        assert_eq!(canonical["image_metadata"]["provider"], "openai");
+        assert_eq!(
+            canonical["unrelated_provider_metadata"]["provider"],
+            "open_ai"
+        );
+
+        assert!(serde_json::from_str::<PersistenceEnvelope>(legacy).is_err());
+    }
+
+    #[test]
+    fn scoped_pre_floor_import_rejects_duplicate_provider_discriminators() {
+        for ambiguous in [
+            r#"{
+                "provider": "openai",
+                "provider": "open_ai",
+                "target_model": "gpt-image-1"
+            }"#,
+            r#"{
+                "provider": "open_ai",
+                "provider": "openai",
+                "target_model": "gpt-image-1"
+            }"#,
+        ] {
+            let error = with_pre_floor_provider_image_metadata_import(|| {
+                serde_json::from_str::<ProviderImageMetadata>(ambiguous)
+            })
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("duplicate field `provider`"),
+                "ambiguous discriminator was not rejected as a duplicate: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn scoped_pre_floor_import_rejects_unknown_legacy_image_metadata_fields() {
+        let legacy_with_unknown_field = r#"{
+            "provider": "open_ai",
+            "target_model": "gpt-image-1",
+            "response_id": "response-1",
+            "image_generation_call_id": "call-1",
+            "unrecognized_source_field": "must-not-be-dropped"
+        }"#;
+
+        let error = with_pre_floor_provider_image_metadata_import(|| {
+            serde_json::from_str::<ProviderImageMetadata>(legacy_with_unknown_field)
+        })
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown field `unrecognized_source_field`"),
+            "unexpected error: {error}"
+        );
+
+        let canonical_with_unknown_field = legacy_with_unknown_field.replace("open_ai", "openai");
+        assert!(
+            serde_json::from_str::<ProviderImageMetadata>(&canonical_with_unknown_field).is_ok(),
+            "current canonical decoding behavior must remain unchanged"
+        );
     }
 
     fn source_image() -> ImageSourceRef {

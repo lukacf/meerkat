@@ -1222,6 +1222,19 @@ impl RealmManifestPin {
     }
 }
 
+/// Read and validate an existing realm manifest without creating or updating
+/// any realm state.
+///
+/// This is the synchronous, read-only counterpart used by offline maintenance
+/// while the caller already holds the realm fence. It preserves provider pins
+/// and the future-format refusal instead of reinterpreting them as built-in
+/// disk manifests.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn read_realm_manifest_pin(path: &Path) -> Result<RealmManifestPin, StoreError> {
+    let bytes = std::fs::read(path).map_err(StoreError::Io)?;
+    parse_manifest_pin_bytes(&bytes)
+}
+
 /// Provider-aware manifest parse: external pins are returned, not refused.
 fn parse_manifest_pin_bytes(bytes: &[u8]) -> Result<RealmManifestPin, StoreError> {
     let persisted: PersistedRealmManifest =

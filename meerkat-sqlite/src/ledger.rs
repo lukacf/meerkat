@@ -310,6 +310,36 @@ impl LedgerReport {
     }
 }
 
+/// Result returned by an explicit maintenance preparation callback.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MaintenancePrepareReport {
+    /// Number of durable records rewritten by the callback.
+    pub changed: usize,
+}
+
+/// Outcome of [`bridge_unledgered_domain`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MaintenanceBridgeReport {
+    /// Authenticated schema version before maintenance.
+    pub from_version: i64,
+    /// Schema version after maintenance.
+    pub to_version: i64,
+    /// Number of records rewritten by the optional preparation callback.
+    pub prepared: usize,
+}
+
+impl MaintenanceBridgeReport {
+    /// True when this call advanced the schema ledger.
+    pub fn migrated(&self) -> bool {
+        self.to_version > self.from_version
+    }
+
+    /// True when this call advanced the schema or rewrote durable records.
+    pub fn changed(&self) -> bool {
+        self.migrated() || self.prepared > 0
+    }
+}
+
 /// Read a domain's ledger version without applying anything.
 ///
 /// `Ok(None)` means the file has no ledger table or no row for the domain.
@@ -482,12 +512,414 @@ pub fn apply_domain_migrations(
          ON CONFLICT(domain) DO UPDATE SET version = excluded.version",
         rusqlite::params![domain.name, supported],
     )?;
+    verify_ledger_stamp(&tx, domain.name, supported)?;
     tx.commit()?;
 
     Ok(LedgerReport {
         from_version: current,
         to_version: supported,
     })
+}
+
+/// Explicitly authenticate and migrate an unledgered historical domain.
+///
+/// This is an offline maintenance bridge, not an ambient-open fallback.
+/// Under one `BEGIN IMMEDIATE` transaction it identifies an owned catalog as
+/// exactly one caller-authorized, code-derived migration prefix or frozen
+/// released-predecessor catalog, runs `prepare` when supplied, applies the
+/// remaining registered migrations, verifies both the exact target prefix
+/// and the domain's ordinary target verifier, and only then creates and
+/// stamps the ledger row. The callback and every migration retain transaction
+/// custody.
+///
+/// `recoverable_source_versions` is an explicit authority boundary for
+/// unledgered inference. Catalog equality alone cannot prove whether a
+/// data-only migration ran, so prefixes absent from this list are never
+/// inferred even when their DDL fingerprint matches. A registered frozen
+/// predecessor verifier is an additional exact source oracle for its version;
+/// a version that matches both its generated prefix and frozen verifier is
+/// counted once. Existing eligible rows below the target are upgraded. A row
+/// already at the target is a verified no-op when no preparation callback is
+/// supplied; with a callback, its data preparation, target verification, and
+/// unchanged ledger stamp are committed atomically. A missing row with no
+/// owned objects is also a no-op so normal fresh-domain initialization remains
+/// the sole owner of that case. Unknown and ambiguous catalogs are refused
+/// without mutation.
+pub fn bridge_unledgered_domain(
+    conn: &mut Connection,
+    domain: &SchemaDomain,
+    target_version: i64,
+    recoverable_source_versions: &[i64],
+    prepare: Option<fn(&Transaction<'_>) -> Result<MaintenancePrepareReport, rusqlite::Error>>,
+) -> Result<MaintenanceBridgeReport, SqliteStoreError> {
+    domain.validate()?;
+    let supported = domain.supported_version();
+    if target_version > supported {
+        return Err(SqliteStoreError::SchemaFromTheFuture {
+            domain: domain.name.to_string(),
+            found: target_version,
+            supported,
+        });
+    }
+    if !domain.accepts_existing_version(target_version) {
+        return Err(unsupported_predecessor(domain, target_version));
+    }
+    validate_recoverable_source_versions(domain, target_version, recoverable_source_versions)?;
+
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let current = if ledger_table_exists(&tx)? {
+        validate_ledger_shape(&tx)?;
+        read_version(&tx, domain.name)?
+    } else {
+        None
+    };
+
+    let mut inferred_oracles = None;
+    let from_version = if let Some(found) = current {
+        if found > target_version {
+            return Err(SqliteStoreError::SchemaFromTheFuture {
+                domain: domain.name.to_string(),
+                found,
+                supported: target_version,
+            });
+        }
+        if !domain.accepts_existing_version(found) {
+            return Err(unsupported_predecessor(domain, found));
+        }
+        domain.verify_predecessor(&tx, found)?;
+        if found == target_version && prepare.is_none() {
+            return Ok(MaintenanceBridgeReport {
+                from_version: found,
+                to_version: found,
+                prepared: 0,
+            });
+        }
+        found
+    } else {
+        let objects = find_owned_objects(&tx, domain)?;
+        if objects.is_empty() {
+            return Ok(MaintenanceBridgeReport {
+                from_version: 0,
+                to_version: 0,
+                prepared: 0,
+            });
+        }
+
+        let oracles = build_migration_prefix_oracles(domain, target_version)?;
+        let actual = domain_catalog_fingerprint(&tx, domain).map_err(|detail| {
+            SqliteStoreError::UnledgeredSchemaNoMatch {
+                domain: domain.name.to_string(),
+                target_version,
+                objects: vec![detail],
+            }
+        })?;
+        let mut matches = oracles
+            .iter()
+            .filter_map(|(version, fingerprint)| {
+                (recoverable_source_versions.contains(version) && fingerprint == &actual)
+                    .then_some(*version)
+            })
+            .collect::<Vec<_>>();
+        // A frozen predecessor verifier may intentionally authenticate more
+        // than one exact released physical catalog for the same logical
+        // version. This covers pre-ledger stores whose idempotent opener grew
+        // new tables without a version marker. It remains fail-closed: only a
+        // caller-authorized version with a registered frozen verifier can add
+        // a match, and duplicate evidence for the same version is collapsed
+        // before ambiguity is judged.
+        for predecessor in domain.released_predecessors.iter().filter(|predecessor| {
+            recoverable_source_versions.contains(&predecessor.version)
+                && predecessor.version <= target_version
+        }) {
+            if (predecessor.verify)(&tx).is_ok() && !matches.contains(&predecessor.version) {
+                matches.push(predecessor.version);
+            }
+        }
+        matches.sort_unstable();
+        let matched = match matches.as_slice() {
+            [version] => *version,
+            [] => {
+                return Err(SqliteStoreError::UnledgeredSchemaNoMatch {
+                    domain: domain.name.to_string(),
+                    target_version,
+                    objects,
+                });
+            }
+            _ => {
+                return Err(SqliteStoreError::UnledgeredSchemaAmbiguous {
+                    domain: domain.name.to_string(),
+                    target_version,
+                    matches,
+                });
+            }
+        };
+        inferred_oracles = Some(oracles);
+        matched
+    };
+
+    let oracles = match inferred_oracles {
+        Some(oracles) => oracles,
+        None => build_migration_prefix_oracles(domain, target_version)?,
+    };
+    validate_domain_trigger_isolation(&tx, domain, from_version)?;
+
+    let prepared = match prepare {
+        Some(prepare) => {
+            run_with_custody(&tx, domain, from_version, "maintenance-prepare", prepare)?.changed
+        }
+        None => 0,
+    };
+    for migration in domain
+        .migrations
+        .iter()
+        .filter(|migration| migration.version > from_version && migration.version <= target_version)
+    {
+        run_with_custody(
+            &tx,
+            domain,
+            migration.version,
+            migration.name,
+            migration.apply,
+        )?;
+    }
+
+    let target = oracles
+        .iter()
+        .find_map(|(version, fingerprint)| (*version == target_version).then_some(fingerprint))
+        .ok_or_else(|| SqliteStoreError::InvalidMigrationList {
+            domain: domain.name.to_string(),
+            detail: format!(
+                "migration-prefix oracle did not produce requested target version {target_version}"
+            ),
+        })?;
+    let converged = domain_catalog_fingerprint(&tx, domain).map_err(|detail| {
+        SqliteStoreError::SchemaFingerprintMismatch {
+            domain: domain.name.to_string(),
+            version: target_version,
+            detail,
+        }
+    })?;
+    if &converged != target {
+        return Err(SqliteStoreError::SchemaFingerprintMismatch {
+            domain: domain.name.to_string(),
+            version: target_version,
+            detail: format!(
+                "migration-prefix catalog differs: expected {target:?}, found {converged:?}"
+            ),
+        });
+    }
+    domain.verify_predecessor(&tx, target_version)?;
+
+    if current != Some(target_version) {
+        if !ledger_table_exists(&tx)? {
+            tx.execute_batch(CREATE_LEDGER_SQL)?;
+            validate_ledger_shape(&tx)?;
+        }
+        tx.execute(
+            "INSERT INTO main.meerkat_schema (domain, version) VALUES (?1, ?2)
+             ON CONFLICT(domain) DO UPDATE SET version = excluded.version",
+            rusqlite::params![domain.name, target_version],
+        )?;
+    }
+    verify_ledger_stamp(&tx, domain.name, target_version)?;
+    tx.commit()?;
+
+    Ok(MaintenanceBridgeReport {
+        from_version,
+        to_version: target_version,
+        prepared,
+    })
+}
+
+fn validate_recoverable_source_versions(
+    domain: &SchemaDomain,
+    target_version: i64,
+    versions: &[i64],
+) -> Result<(), SqliteStoreError> {
+    let mut previous = None;
+    for &version in versions {
+        if version <= 0 || version > target_version {
+            return Err(SqliteStoreError::InvalidMigrationList {
+                domain: domain.name.to_string(),
+                detail: format!(
+                    "recoverable source version {version} is outside 1..={target_version}"
+                ),
+            });
+        }
+        if previous.is_some_and(|prior| prior >= version) {
+            return Err(SqliteStoreError::InvalidMigrationList {
+                domain: domain.name.to_string(),
+                detail: "recoverable source versions must be strictly increasing".to_string(),
+            });
+        }
+        previous = Some(version);
+    }
+    Ok(())
+}
+
+fn verify_ledger_stamp(
+    conn: &Connection,
+    domain: &str,
+    expected: i64,
+) -> Result<(), SqliteStoreError> {
+    let found = read_version(conn, domain)?;
+    if found != Some(expected) {
+        return Err(malformed(format!(
+            "domain `{domain}` stamp did not persist exact version {expected}; found {found:?}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_domain_trigger_isolation(
+    conn: &Connection,
+    domain: &SchemaDomain,
+    source_version: i64,
+) -> Result<(), SqliteStoreError> {
+    let all_objects = all_domain_objects(domain);
+    let allowed_triggers = all_objects
+        .iter()
+        .filter(|object| object.kind == SchemaObjectKind::Trigger)
+        .map(|object| object.name)
+        .collect::<Vec<_>>();
+    let mut statement = conn
+        .prepare(
+            "SELECT 'main', name FROM main.sqlite_schema
+             WHERE type = 'trigger' AND tbl_name = ?1 COLLATE NOCASE
+             UNION ALL
+             SELECT 'temp', name FROM temp.sqlite_schema
+             WHERE type = 'trigger' AND tbl_name = ?1 COLLATE NOCASE
+             ORDER BY 1, 2",
+        )
+        .map_err(SqliteStoreError::Sqlite)?;
+    let mut refused = Vec::new();
+    for target in all_objects.iter().filter(|object| {
+        matches!(
+            object.kind,
+            SchemaObjectKind::Table | SchemaObjectKind::View
+        )
+    }) {
+        let rows = statement
+            .query_map([target.name], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(SqliteStoreError::Sqlite)?;
+        for row in rows {
+            let (schema, trigger) = row.map_err(SqliteStoreError::Sqlite)?;
+            let declared = schema == "main"
+                && allowed_triggers
+                    .iter()
+                    .any(|allowed| allowed.eq_ignore_ascii_case(&trigger));
+            if !declared {
+                refused.push(format!("{schema}.{trigger} on {}", target.name));
+            }
+        }
+    }
+    refused.sort();
+    refused.dedup();
+    if !refused.is_empty() {
+        return Err(SqliteStoreError::SchemaFingerprintMismatch {
+            domain: domain.name.to_string(),
+            version: source_version,
+            detail: format!(
+                "undeclared or TEMP triggers can intercept maintenance writes: {refused:?}"
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn run_with_custody<T>(
+    tx: &Transaction<'_>,
+    domain: &SchemaDomain,
+    version: i64,
+    name: &str,
+    body: fn(&Transaction<'_>) -> Result<T, rusqlite::Error>,
+) -> Result<T, SqliteStoreError> {
+    tx.execute_batch(CUSTODY_SAVEPOINT_SQL)?;
+    let body_result = body(tx);
+    if tx.is_autocommit() || tx.execute_batch(CUSTODY_RELEASE_SQL).is_err() {
+        return Err(SqliteStoreError::MigrationBrokeTransaction {
+            domain: domain.name.to_string(),
+            version,
+            name: name.to_string(),
+        });
+    }
+    body_result.map_err(|source| SqliteStoreError::MigrationFailed {
+        domain: domain.name.to_string(),
+        version,
+        name: name.to_string(),
+        source,
+    })
+}
+
+fn build_migration_prefix_oracles(
+    domain: &SchemaDomain,
+    target_version: i64,
+) -> Result<Vec<(i64, DomainCatalogFingerprint)>, SqliteStoreError> {
+    let mut expected = Connection::open_in_memory().map_err(SqliteStoreError::Sqlite)?;
+    let tx = expected
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(SqliteStoreError::Sqlite)?;
+    let mut oracles = Vec::with_capacity(target_version as usize);
+    for migration in domain
+        .migrations
+        .iter()
+        .filter(|migration| migration.version <= target_version)
+    {
+        (migration.apply)(&tx).map_err(|source| SqliteStoreError::MigrationFailed {
+            domain: domain.name.to_string(),
+            version: migration.version,
+            name: format!("migration-prefix-oracle:{}", migration.name),
+            source,
+        })?;
+        let fingerprint = domain_catalog_fingerprint(&tx, domain).map_err(|detail| {
+            SqliteStoreError::InvalidMigrationList {
+                domain: domain.name.to_string(),
+                detail: format!(
+                    "migration-prefix oracle version {} is inconsistent with ownership: {detail}",
+                    migration.version
+                ),
+            }
+        })?;
+        oracles.push((migration.version, fingerprint));
+    }
+    Ok(oracles)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct DomainCatalogFingerprint {
+    names: Vec<(String, String)>,
+    objects: Vec<CatalogObjectFingerprint>,
+}
+
+fn domain_catalog_fingerprint(
+    conn: &Connection,
+    domain: &SchemaDomain,
+) -> Result<DomainCatalogFingerprint, String> {
+    let all_objects = all_domain_objects(domain);
+    let names = catalog_names(conn, &all_objects).map_err(|error| error.to_string())?;
+    let declared = all_objects
+        .iter()
+        .map(|object| (object.name, object))
+        .collect::<BTreeMap<_, _>>();
+    let mut objects = Vec::with_capacity(names.len());
+    for (kind, name) in &names {
+        let Some(object) = declared.get(name.as_str()) else {
+            return Err(format!("undeclared owned object `{name}`"));
+        };
+        if kind != object.kind.sqlite_name() {
+            return Err(format!(
+                "owned object `{name}` has kind `{kind}`, expected `{}`",
+                object.kind.sqlite_name()
+            ));
+        }
+        objects.push(
+            catalog_fingerprint(conn, object)
+                .map_err(|error| format!("fingerprint object `{name}`: {error}"))?,
+        );
+    }
+    Ok(DomainCatalogFingerprint { names, objects })
 }
 
 static EXPECTED_CURRENT_CATALOGS: OnceLock<Mutex<BTreeMap<String, Result<String, String>>>> =
@@ -899,10 +1331,168 @@ fn index_fingerprint(
 }
 
 fn normalize_schema_sql(sql: &str) -> String {
-    sql.split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .replace(" IF NOT EXISTS ", " ")
+    #[derive(Clone, Copy)]
+    enum LexState {
+        Normal,
+        SingleQuoted,
+        DoubleQuoted,
+        BacktickQuoted,
+        BracketQuoted,
+        LineComment,
+        BlockComment,
+    }
+
+    let bytes = sql.as_bytes();
+    let mut collapsed = Vec::with_capacity(bytes.len());
+    let mut state = LexState::Normal;
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        match state {
+            LexState::Normal => {
+                if byte.is_ascii_whitespace() {
+                    if collapsed.last().is_some_and(|last| *last != b' ') {
+                        collapsed.push(b' ');
+                    }
+                } else {
+                    collapsed.push(byte);
+                    state = match byte {
+                        b'\'' => LexState::SingleQuoted,
+                        b'"' => LexState::DoubleQuoted,
+                        b'`' => LexState::BacktickQuoted,
+                        b'[' => LexState::BracketQuoted,
+                        b'-' if bytes.get(index + 1) == Some(&b'-') => LexState::LineComment,
+                        b'/' if bytes.get(index + 1) == Some(&b'*') => LexState::BlockComment,
+                        _ => LexState::Normal,
+                    };
+                }
+            }
+            LexState::SingleQuoted | LexState::DoubleQuoted | LexState::BacktickQuoted => {
+                collapsed.push(byte);
+                let delimiter = match state {
+                    LexState::SingleQuoted => b'\'',
+                    LexState::DoubleQuoted => b'"',
+                    LexState::BacktickQuoted => b'`',
+                    _ => unreachable!(),
+                };
+                if byte == delimiter {
+                    if bytes.get(index + 1) == Some(&delimiter) {
+                        index += 1;
+                        collapsed.push(delimiter);
+                    } else {
+                        state = LexState::Normal;
+                    }
+                }
+            }
+            LexState::BracketQuoted => {
+                collapsed.push(byte);
+                if byte == b']' {
+                    if bytes.get(index + 1) == Some(&b']') {
+                        index += 1;
+                        collapsed.push(b']');
+                    } else {
+                        state = LexState::Normal;
+                    }
+                }
+            }
+            LexState::LineComment => {
+                collapsed.push(byte);
+                if byte == b'\n' || byte == b'\r' {
+                    state = LexState::Normal;
+                }
+            }
+            LexState::BlockComment => {
+                collapsed.push(byte);
+                if byte == b'*' && bytes.get(index + 1) == Some(&b'/') {
+                    index += 1;
+                    collapsed.push(b'/');
+                    state = LexState::Normal;
+                }
+            }
+        }
+        index += 1;
+    }
+
+    const IF_NOT_EXISTS: &[u8] = b"IF NOT EXISTS";
+    let mut normalized = Vec::with_capacity(collapsed.len());
+    let mut state = LexState::Normal;
+    let mut index = 0;
+    while index < collapsed.len() {
+        let byte = collapsed[index];
+        if matches!(state, LexState::Normal)
+            && collapsed
+                .get(index..index + IF_NOT_EXISTS.len())
+                .is_some_and(|candidate| candidate.eq_ignore_ascii_case(IF_NOT_EXISTS))
+            && (index == 0 || !is_sql_identifier_byte(collapsed[index - 1]))
+            && collapsed
+                .get(index + IF_NOT_EXISTS.len())
+                .is_none_or(|after| !is_sql_identifier_byte(*after))
+        {
+            index += IF_NOT_EXISTS.len();
+            if collapsed.get(index) == Some(&b' ') {
+                index += 1;
+            }
+            continue;
+        }
+        normalized.push(byte);
+        match state {
+            LexState::Normal => {
+                state = match byte {
+                    b'\'' => LexState::SingleQuoted,
+                    b'"' => LexState::DoubleQuoted,
+                    b'`' => LexState::BacktickQuoted,
+                    b'[' => LexState::BracketQuoted,
+                    b'-' if collapsed.get(index + 1) == Some(&b'-') => LexState::LineComment,
+                    b'/' if collapsed.get(index + 1) == Some(&b'*') => LexState::BlockComment,
+                    _ => LexState::Normal,
+                };
+            }
+            LexState::SingleQuoted | LexState::DoubleQuoted | LexState::BacktickQuoted => {
+                let delimiter = match state {
+                    LexState::SingleQuoted => b'\'',
+                    LexState::DoubleQuoted => b'"',
+                    LexState::BacktickQuoted => b'`',
+                    _ => unreachable!(),
+                };
+                if byte == delimiter {
+                    if collapsed.get(index + 1) == Some(&delimiter) {
+                        index += 1;
+                        normalized.push(delimiter);
+                    } else {
+                        state = LexState::Normal;
+                    }
+                }
+            }
+            LexState::BracketQuoted => {
+                if byte == b']' {
+                    if collapsed.get(index + 1) == Some(&b']') {
+                        index += 1;
+                        normalized.push(b']');
+                    } else {
+                        state = LexState::Normal;
+                    }
+                }
+            }
+            LexState::LineComment => {
+                if byte == b'\n' || byte == b'\r' {
+                    state = LexState::Normal;
+                }
+            }
+            LexState::BlockComment => {
+                if byte == b'*' && collapsed.get(index + 1) == Some(&b'/') {
+                    index += 1;
+                    normalized.push(b'/');
+                    state = LexState::Normal;
+                }
+            }
+        }
+        index += 1;
+    }
+    String::from_utf8(normalized).unwrap_or_else(|_| sql.to_string())
+}
+
+fn is_sql_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
 fn unsupported_predecessor(domain: &SchemaDomain, found: i64) -> SqliteStoreError {
@@ -1013,6 +1603,28 @@ fn validate_ledger_shape(conn: &Connection) -> Result<(), SqliteStoreError> {
         return Err(malformed(
             "table lacks the pinned `domain`/`version` columns".to_string(),
         ));
+    }
+    let mut trigger_stmt = conn.prepare(
+        "SELECT 'main', name FROM main.sqlite_schema
+         WHERE type = 'trigger' AND tbl_name = 'meerkat_schema' COLLATE NOCASE
+         UNION ALL
+         SELECT 'temp', name FROM temp.sqlite_schema
+         WHERE type = 'trigger' AND tbl_name = 'meerkat_schema' COLLATE NOCASE
+         ORDER BY 1, 2",
+    )?;
+    let triggers = trigger_stmt
+        .query_map([], |row| {
+            Ok(format!(
+                "{}.{}",
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    if !triggers.is_empty() {
+        return Err(malformed(format!(
+            "table has attached triggers {triggers:?}; ledger writes must be isolated"
+        )));
     }
     Ok(())
 }
@@ -1388,6 +2000,631 @@ mod tests {
             .collect::<Result<_, _>>()
             .expect("columns");
         assert_eq!(columns, vec!["x"], "refusal mutated unknown schema");
+    }
+
+    #[test]
+    fn maintenance_bridge_authenticates_exact_v1_and_migrates_to_v2() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut conn = temp_conn(&dir);
+        conn.execute_batch("CREATE TABLE t1 (x INTEGER)")
+            .expect("historical unledgered v1");
+
+        let report =
+            bridge_unledgered_domain(&mut conn, &DOMAIN_V2, 2, &[1], None).expect("bridge");
+        assert_eq!(
+            report,
+            MaintenanceBridgeReport {
+                from_version: 1,
+                to_version: 2,
+                prepared: 0,
+            }
+        );
+        assert_eq!(
+            domain_version(&conn, DOMAIN_V2.name).expect("ledger"),
+            Some(2)
+        );
+        let columns = conn
+            .prepare("PRAGMA table_info(t1)")
+            .expect("prepare")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("query")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("columns");
+        assert_eq!(columns, vec!["x", "y"]);
+
+        let second = bridge_unledgered_domain(&mut conn, &DOMAIN_V2, 2, &[1], None)
+            .expect("idempotent bridge");
+        assert_eq!(
+            second,
+            MaintenanceBridgeReport {
+                from_version: 2,
+                to_version: 2,
+                prepared: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn maintenance_bridge_prepares_and_upgrades_existing_v1_row() {
+        fn normalize_existing(
+            tx: &Transaction<'_>,
+        ) -> Result<MaintenancePrepareReport, rusqlite::Error> {
+            let changed = tx.execute("UPDATE t1 SET x = x + 1", [])?;
+            Ok(MaintenancePrepareReport { changed })
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut conn = temp_conn(&dir);
+        apply_domain_migrations(&mut conn, &DOMAIN_V1).expect("ledgered v1");
+        conn.execute("INSERT INTO t1 (x) VALUES (7)", [])
+            .expect("historical data");
+
+        let report =
+            bridge_unledgered_domain(&mut conn, &DOMAIN_V2, 2, &[1], Some(normalize_existing))
+                .expect("bridge ledgered predecessor");
+        assert_eq!(
+            report,
+            MaintenanceBridgeReport {
+                from_version: 1,
+                to_version: 2,
+                prepared: 1,
+            }
+        );
+        assert_eq!(
+            domain_version(&conn, DOMAIN_V2.name).expect("ledger"),
+            Some(2)
+        );
+        assert_eq!(
+            conn.query_row("SELECT x FROM t1", [], |row| row.get::<_, i64>(0))
+                .expect("prepared row"),
+            8
+        );
+        conn.execute("INSERT INTO t1 (x, y) VALUES (9, 'migrated')", [])
+            .expect("v2 shape");
+    }
+
+    #[test]
+    fn maintenance_bridge_prepares_existing_target_and_reports_durable_changes() {
+        fn normalize_target(
+            tx: &Transaction<'_>,
+        ) -> Result<MaintenancePrepareReport, rusqlite::Error> {
+            let changed = tx.execute("UPDATE t1 SET x = x + 1", [])?;
+            Ok(MaintenancePrepareReport { changed })
+        }
+        fn mutate_then_fail(
+            tx: &Transaction<'_>,
+        ) -> Result<MaintenancePrepareReport, rusqlite::Error> {
+            tx.execute("UPDATE t1 SET x = 99", [])?;
+            tx.execute_batch("THIS IS NOT SQL")?;
+            Ok(MaintenancePrepareReport { changed: 1 })
+        }
+        fn rolls_back_then_begins_and_fails(
+            tx: &Transaction<'_>,
+        ) -> Result<MaintenancePrepareReport, rusqlite::Error> {
+            tx.execute_batch("UPDATE t1 SET x = 99; ROLLBACK; BEGIN; THIS IS NOT SQL")?;
+            Ok(MaintenancePrepareReport { changed: 1 })
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut conn = temp_conn(&dir);
+        apply_domain_migrations(&mut conn, &DOMAIN_V2).expect("ledgered target");
+        conn.execute("INSERT INTO t1 (x, y) VALUES (7, 'target')", [])
+            .expect("target data");
+
+        let report =
+            bridge_unledgered_domain(&mut conn, &DOMAIN_V2, 2, &[1], Some(normalize_target))
+                .expect("prepare target");
+        assert_eq!(
+            report,
+            MaintenanceBridgeReport {
+                from_version: 2,
+                to_version: 2,
+                prepared: 1,
+            }
+        );
+        assert!(!report.migrated());
+        assert!(report.changed());
+        assert_eq!(
+            conn.query_row("SELECT x FROM t1", [], |row| row.get::<_, i64>(0))
+                .expect("prepared target row"),
+            8
+        );
+        assert_eq!(
+            domain_version(&conn, DOMAIN_V2.name).expect("ledger"),
+            Some(2)
+        );
+
+        let err = bridge_unledgered_domain(&mut conn, &DOMAIN_V2, 2, &[1], Some(mutate_then_fail))
+            .expect_err("target prepare failure");
+        assert!(matches!(
+            err,
+            SqliteStoreError::MigrationFailed { ref name, .. }
+                if name == "maintenance-prepare"
+        ));
+        assert_eq!(
+            conn.query_row("SELECT x FROM t1", [], |row| row.get::<_, i64>(0))
+                .expect("row after rollback"),
+            8
+        );
+
+        let err = bridge_unledgered_domain(
+            &mut conn,
+            &DOMAIN_V2,
+            2,
+            &[1],
+            Some(rolls_back_then_begins_and_fails),
+        )
+        .expect_err("target custody loss");
+        assert!(matches!(
+            err,
+            SqliteStoreError::MigrationBrokeTransaction { ref name, .. }
+                if name == "maintenance-prepare"
+        ));
+        assert_eq!(
+            conn.query_row("SELECT x FROM t1", [], |row| row.get::<_, i64>(0))
+                .expect("row after custody refusal"),
+            8
+        );
+        assert_eq!(
+            domain_version(&conn, DOMAIN_V2.name).expect("ledger"),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn maintenance_bridge_refuses_target_that_only_matches_migration_oracle() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut conn = temp_conn(&dir);
+        conn.execute_batch("CREATE TABLE t1 (x INTEGER)")
+            .expect("historical unledgered v1");
+
+        let err = bridge_unledgered_domain(&mut conn, &DOMAIN_V2_ALT_INITIALIZER, 2, &[1], None)
+            .expect_err("ordinary target verifier must reject drift");
+        assert!(matches!(
+            err,
+            SqliteStoreError::SchemaFingerprintMismatch { version: 2, .. }
+        ));
+        assert!(!ledger_table_exists(&conn).expect("ledger presence"));
+        let columns = conn
+            .prepare("PRAGMA table_info(t1)")
+            .expect("prepare")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("query")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("columns");
+        assert_eq!(
+            columns,
+            vec!["x"],
+            "target-verifier refusal did not roll back"
+        );
+    }
+
+    #[test]
+    fn maintenance_bridge_refuses_catalog_outside_source_allowlist_across_data_only_gap() {
+        fn no_op(_tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+            Ok(())
+        }
+        const DATA_ONLY_GAP: SchemaDomain = SchemaDomain {
+            name: "data-only-gap-domain",
+            migrations: &[
+                Migration {
+                    version: 1,
+                    name: "base",
+                    apply: create_t1,
+                },
+                Migration {
+                    version: 2,
+                    name: "data-only",
+                    apply: no_op,
+                },
+                Migration {
+                    version: 3,
+                    name: "add-y",
+                    apply: add_column_guarded,
+                },
+            ],
+            initialize_current: initialize_v2,
+            allowed_existing_versions: &[3],
+            released_predecessors: &[],
+            owned_objects: &[SchemaObject {
+                kind: SchemaObjectKind::Table,
+                name: "t1",
+            }],
+            retired_objects: &[],
+        };
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut conn = temp_conn(&dir);
+        conn.execute_batch("CREATE TABLE t1 (x INTEGER)")
+            .expect("v1-or-v2 catalog");
+        let err = bridge_unledgered_domain(&mut conn, &DATA_ONLY_GAP, 3, &[3], None)
+            .expect_err("excluded historical prefixes must not be inferred");
+        assert!(matches!(
+            err,
+            SqliteStoreError::UnledgeredSchemaNoMatch { .. }
+        ));
+        assert!(!ledger_table_exists(&conn).expect("ledger presence"));
+        let columns = conn
+            .prepare("PRAGMA table_info(t1)")
+            .expect("prepare")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("query")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("columns");
+        assert_eq!(columns, vec!["x"]);
+
+        let err = bridge_unledgered_domain(&mut conn, &DATA_ONLY_GAP, 3, &[2, 1], None)
+            .expect_err("unordered source authority must be refused");
+        assert!(matches!(err, SqliteStoreError::InvalidMigrationList { .. }));
+    }
+
+    #[test]
+    fn maintenance_bridge_leaves_fresh_domain_for_normal_initializer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut conn = temp_conn(&dir);
+        let report =
+            bridge_unledgered_domain(&mut conn, &DOMAIN_V2, 2, &[1], None).expect("fresh no-op");
+        assert_eq!(
+            report,
+            MaintenanceBridgeReport {
+                from_version: 0,
+                to_version: 0,
+                prepared: 0,
+            }
+        );
+        assert!(!ledger_table_exists(&conn).expect("ledger presence"));
+        assert!(
+            find_owned_objects(&conn, &DOMAIN_V2)
+                .expect("objects")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn maintenance_bridge_refuses_malformed_historical_shape_without_mutation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut conn = temp_conn(&dir);
+        conn.execute_batch("CREATE TABLE t1 (x INTEGER, candidate_only BLOB)")
+            .expect("candidate schema");
+
+        let err = bridge_unledgered_domain(&mut conn, &DOMAIN_V2, 2, &[1], None)
+            .expect_err("refuse unauthenticated shape");
+        assert!(matches!(
+            err,
+            SqliteStoreError::UnledgeredSchemaNoMatch {
+                target_version: 2,
+                ..
+            }
+        ));
+        assert!(!ledger_table_exists(&conn).expect("ledger presence"));
+        let columns = conn
+            .prepare("PRAGMA table_info(t1)")
+            .expect("prepare")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("query")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("columns");
+        assert_eq!(columns, vec!["x", "candidate_only"]);
+    }
+
+    #[test]
+    fn maintenance_bridge_fingerprint_preserves_sql_literal_whitespace() {
+        fn create_exact(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+            tx.execute_batch("CREATE TABLE literal_t (x TEXT CHECK(x <> 'a  b'))")
+        }
+        const LITERAL_DOMAIN: SchemaDomain = SchemaDomain {
+            name: "literal-fingerprint-domain",
+            migrations: &[Migration {
+                version: 1,
+                name: "base",
+                apply: create_exact,
+            }],
+            initialize_current: create_exact,
+            allowed_existing_versions: &[1],
+            released_predecessors: &[],
+            owned_objects: &[SchemaObject {
+                kind: SchemaObjectKind::Table,
+                name: "literal_t",
+            }],
+            retired_objects: &[],
+        };
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut conn = temp_conn(&dir);
+        conn.execute_batch("CREATE TABLE literal_t (x TEXT CHECK(x <> 'a b'))")
+            .expect("semantic mismatch");
+        let err = bridge_unledgered_domain(&mut conn, &LITERAL_DOMAIN, 1, &[1], None)
+            .expect_err("literal whitespace must remain fingerprint-significant");
+        assert!(matches!(
+            err,
+            SqliteStoreError::UnledgeredSchemaNoMatch { .. }
+        ));
+        assert!(!ledger_table_exists(&conn).expect("ledger presence"));
+
+        assert_eq!(
+            normalize_schema_sql("CREATE  TABLE IF NOT EXISTS t (x CHECK(x <> 'IF NOT  EXISTS'))"),
+            "CREATE TABLE t (x CHECK(x <> 'IF NOT  EXISTS'))"
+        );
+    }
+
+    #[test]
+    fn maintenance_bridge_rolls_back_prepare_failure() {
+        fn mutate_then_fail(
+            tx: &Transaction<'_>,
+        ) -> Result<MaintenancePrepareReport, rusqlite::Error> {
+            tx.execute("UPDATE t1 SET x = 99", [])?;
+            tx.execute_batch("THIS IS NOT SQL")?;
+            Ok(MaintenancePrepareReport { changed: 1 })
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut conn = temp_conn(&dir);
+        conn.execute_batch("CREATE TABLE t1 (x INTEGER); INSERT INTO t1 VALUES (7)")
+            .expect("historical unledgered v1");
+
+        let err = bridge_unledgered_domain(&mut conn, &DOMAIN_V2, 2, &[1], Some(mutate_then_fail))
+            .expect_err("prepare must fail");
+        assert!(matches!(
+            err,
+            SqliteStoreError::MigrationFailed { ref name, .. }
+                if name == "maintenance-prepare"
+        ));
+        assert_eq!(
+            conn.query_row("SELECT x FROM t1", [], |row| row.get::<_, i64>(0))
+                .expect("original row"),
+            7
+        );
+        assert!(!ledger_table_exists(&conn).expect("ledger presence"));
+        let columns = conn
+            .prepare("PRAGMA table_info(t1)")
+            .expect("prepare")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("query")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("columns");
+        assert_eq!(columns, vec!["x"]);
+    }
+
+    #[test]
+    fn maintenance_bridge_reports_custody_loss_before_callback_error() {
+        fn commits_then_fails(
+            tx: &Transaction<'_>,
+        ) -> Result<MaintenancePrepareReport, rusqlite::Error> {
+            tx.execute_batch("UPDATE t1 SET x = 99; COMMIT; THIS IS NOT SQL")?;
+            Ok(MaintenancePrepareReport { changed: 1 })
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut conn = temp_conn(&dir);
+        conn.execute_batch("CREATE TABLE t1 (x INTEGER); INSERT INTO t1 VALUES (7)")
+            .expect("historical unledgered v1");
+        let err =
+            bridge_unledgered_domain(&mut conn, &DOMAIN_V2, 2, &[1], Some(commits_then_fails))
+                .expect_err("custody must dominate callback error");
+        assert!(matches!(
+            err,
+            SqliteStoreError::MigrationBrokeTransaction { ref name, .. }
+                if name == "maintenance-prepare"
+        ));
+        assert_eq!(domain_version(&conn, DOMAIN_V2.name).expect("ledger"), None);
+    }
+
+    #[test]
+    fn maintenance_bridge_refuses_undeclared_trigger_on_owned_table_before_prepare() {
+        fn prepare_successor(
+            tx: &Transaction<'_>,
+        ) -> Result<MaintenancePrepareReport, rusqlite::Error> {
+            let changed = tx.execute("UPDATE t1 SET x = 8 WHERE x = 7", [])?;
+            Ok(MaintenancePrepareReport { changed })
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut conn = temp_conn(&dir);
+        conn.execute_batch(
+            "CREATE TABLE t1 (x INTEGER);
+             INSERT INTO t1 VALUES (7);
+             CREATE TRIGGER replace_prepared_successor
+             AFTER UPDATE ON t1
+             BEGIN
+                 UPDATE t1 SET x = 99 WHERE rowid = NEW.rowid;
+             END",
+        )
+        .expect("intercepting trigger");
+
+        let err = bridge_unledgered_domain(&mut conn, &DOMAIN_V2, 2, &[1], Some(prepare_successor))
+            .expect_err("undeclared trigger must be refused before prepare");
+        assert!(matches!(
+            err,
+            SqliteStoreError::SchemaFingerprintMismatch { version: 1, .. }
+        ));
+        assert_eq!(
+            conn.query_row("SELECT x FROM t1", [], |row| row.get::<_, i64>(0))
+                .expect("original row"),
+            7
+        );
+        assert!(!ledger_table_exists(&conn).expect("ledger presence"));
+    }
+
+    #[test]
+    fn maintenance_bridge_refuses_undeclared_instead_of_trigger_on_owned_view_before_prepare() {
+        fn create_owned_view(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+            tx.execute_batch(
+                "CREATE TABLE view_base (x INTEGER);
+                 CREATE VIEW owned_view AS SELECT x FROM view_base",
+            )
+        }
+        fn prepare_view(tx: &Transaction<'_>) -> Result<MaintenancePrepareReport, rusqlite::Error> {
+            let changed = tx.execute("UPDATE owned_view SET x = 8 WHERE x = 7", [])?;
+            Ok(MaintenancePrepareReport { changed })
+        }
+        const VIEW_DOMAIN: SchemaDomain = SchemaDomain {
+            name: "view-bridge-domain",
+            migrations: &[Migration {
+                version: 1,
+                name: "base",
+                apply: create_owned_view,
+            }],
+            initialize_current: create_owned_view,
+            allowed_existing_versions: &[1],
+            released_predecessors: &[],
+            owned_objects: &[
+                SchemaObject {
+                    kind: SchemaObjectKind::Table,
+                    name: "view_base",
+                },
+                SchemaObject {
+                    kind: SchemaObjectKind::View,
+                    name: "owned_view",
+                },
+            ],
+            retired_objects: &[],
+        };
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut conn = temp_conn(&dir);
+        conn.execute_batch(
+            "CREATE TABLE view_base (x INTEGER);
+             CREATE VIEW owned_view AS SELECT x FROM view_base;
+             INSERT INTO view_base VALUES (7);
+             CREATE TRIGGER replace_view_update
+             INSTEAD OF UPDATE ON owned_view
+             BEGIN
+                 UPDATE view_base SET x = 99 WHERE x = OLD.x;
+             END",
+        )
+        .expect("intercepting view trigger");
+
+        let err = bridge_unledgered_domain(&mut conn, &VIEW_DOMAIN, 1, &[1], Some(prepare_view))
+            .expect_err("undeclared view trigger must be refused before prepare");
+        assert!(matches!(
+            err,
+            SqliteStoreError::SchemaFingerprintMismatch { version: 1, .. }
+        ));
+        assert_eq!(
+            conn.query_row("SELECT x FROM view_base", [], |row| row.get::<_, i64>(0))
+                .expect("original row"),
+            7
+        );
+        assert!(!ledger_table_exists(&conn).expect("ledger presence"));
+    }
+
+    #[test]
+    fn maintenance_bridge_refuses_ambiguous_prefix_without_mutation() {
+        fn no_op(_tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+            Ok(())
+        }
+        const AMBIGUOUS: SchemaDomain = SchemaDomain {
+            name: "ambiguous-bridge-domain",
+            migrations: &[
+                Migration {
+                    version: 1,
+                    name: "base",
+                    apply: create_t1,
+                },
+                Migration {
+                    version: 2,
+                    name: "data-only",
+                    apply: no_op,
+                },
+            ],
+            initialize_current: create_t1,
+            allowed_existing_versions: &[2],
+            released_predecessors: &[],
+            owned_objects: &[SchemaObject {
+                kind: SchemaObjectKind::Table,
+                name: "t1",
+            }],
+            retired_objects: &[],
+        };
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut conn = temp_conn(&dir);
+        conn.execute_batch("CREATE TABLE t1 (x INTEGER)")
+            .expect("ambiguous schema");
+        let err = bridge_unledgered_domain(&mut conn, &AMBIGUOUS, 2, &[1, 2], None)
+            .expect_err("refuse ambiguity");
+        assert!(matches!(
+            err,
+            SqliteStoreError::UnledgeredSchemaAmbiguous { ref matches, .. }
+                if matches == &[1, 2]
+        ));
+        assert!(!ledger_table_exists(&conn).expect("ledger presence"));
+    }
+
+    #[test]
+    fn maintenance_bridge_refuses_malformed_ledger_before_owned_schema_contact() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut conn = temp_conn(&dir);
+        conn.execute_batch(
+            "CREATE TABLE t1 (x INTEGER);
+             CREATE TABLE meerkat_schema (domain TEXT, version INTEGER)",
+        )
+        .expect("malformed ledger");
+        let err = bridge_unledgered_domain(&mut conn, &DOMAIN_V2, 2, &[1], None)
+            .expect_err("refuse malformed ledger");
+        assert!(matches!(err, SqliteStoreError::LedgerMalformed { .. }));
+        let columns = conn
+            .prepare("PRAGMA table_info(t1)")
+            .expect("prepare")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("query")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("columns");
+        assert_eq!(columns, vec!["x"]);
+    }
+
+    #[test]
+    fn maintenance_bridge_refuses_mixed_case_trigger_that_mutates_foreign_ledger_row() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut conn = temp_conn(&dir);
+        conn.execute_batch(
+            "CREATE TABLE t1 (x INTEGER);
+             CREATE TABLE meerkat_schema (
+                 domain TEXT PRIMARY KEY,
+                 version INTEGER NOT NULL
+             );
+             INSERT INTO meerkat_schema (domain, version) VALUES ('foreign-domain', 7);
+             CREATE TRIGGER mutate_foreign_schema_row
+             AFTER INSERT ON MEERKAT_SCHEMA
+             BEGIN
+                 UPDATE MEERKAT_SCHEMA
+                 SET version = 999
+                 WHERE domain = 'foreign-domain';
+             END",
+        )
+        .expect("hostile ledger trigger");
+
+        let err = bridge_unledgered_domain(&mut conn, &DOMAIN_V2, 2, &[1], None)
+            .expect_err("mixed-case ledger trigger must be refused");
+        assert!(matches!(err, SqliteStoreError::LedgerMalformed { .. }));
+        let row_count = conn
+            .query_row(
+                "SELECT COUNT(*) FROM main.meerkat_schema WHERE domain = ?1",
+                [DOMAIN_V2.name],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("raw ledger count");
+        assert_eq!(row_count, 0);
+        let foreign_version = conn
+            .query_row(
+                "SELECT version FROM main.meerkat_schema WHERE domain = 'foreign-domain'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("foreign ledger row");
+        assert_eq!(foreign_version, 7);
+        let columns = conn
+            .prepare("PRAGMA table_info(t1)")
+            .expect("prepare")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("query")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("columns");
+        assert_eq!(
+            columns,
+            vec!["x"],
+            "failed stamp did not roll back migration"
+        );
     }
 
     #[test]

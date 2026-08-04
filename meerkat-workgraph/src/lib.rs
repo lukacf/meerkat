@@ -31,12 +31,12 @@ pub use rest_contract::{
     workgraph_rest_response_schema,
 };
 pub use service::WorkGraphService;
-#[cfg(not(target_arch = "wasm32"))]
-pub use store::SqliteWorkGraphStore;
 pub use store::{
     DisabledWorkGraphStore, MemoryWorkGraphStore, WorkGraphEventFilter, WorkGraphStore,
     WorkGraphStoreKind,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use store::{SqliteWorkGraphStore, WORKGRAPH_DOMAIN, prepare_pre_0_8_10_workgraph_attention};
 pub use surface::wire_workgraph_tools;
 pub use tool_surface::{
     WORKGRAPH_ATTENTION_DISPATCH_CONTEXT_KEY, WorkGraphToolSurface,

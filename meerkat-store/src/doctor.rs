@@ -86,7 +86,8 @@ pub const FINDING_ORPHANED_LEASE: &str = "orphaned-lease";
 pub const FINDING_ACTIVE_LEASE: &str = "active-lease";
 /// A lease file that does not parse (blocks destructive prune).
 pub const FINDING_UNPARSEABLE_LEASE: &str = "unparseable-lease";
-/// An existing database file with no migration ledger (pre-arc; expected).
+/// An existing database file with no migration ledger. Current store opens
+/// may refuse it when the domain already owns schema objects.
 pub const FINDING_NO_SCHEMA_LEDGER: &str = "no-schema-ledger";
 /// A `*.pre-<version>-<timestamp>` migration backup artifact.
 pub const FINDING_BACKUP_ARTIFACT: &str = "backup-artifact";
@@ -900,11 +901,13 @@ fn inspect_database(
         Ok(None) => {
             diagnosis.findings.push(
                 StorageFinding::new(
-                    FindingSeverity::Info,
+                    FindingSeverity::Warning,
                     FINDING_NO_SCHEMA_LEDGER,
-                    "existing database has no meerkat_schema ledger (written before the \
-                     migration-ledger arc; expected — the owning store baselines it on next \
-                     write open)",
+                    "existing database has no meerkat_schema ledger; current store opens \
+                     initialize only domains that own no existing objects and refuse \
+                     unversioned owned schemas. If this state predates the 0.8.10 durable-state \
+                     floor, run `rkat storage migrate --apply --bridge-pre-0-8-10` once before \
+                     retrying the original command",
                 )
                 .with_path(db_path.to_path_buf())
                 .with_realm(realm),
@@ -2951,6 +2954,18 @@ mod tests {
             codes(&diagnosis).contains(&FINDING_NO_SCHEMA_LEDGER),
             "{diagnosis:?}"
         );
+        let no_ledger = diagnosis
+            .findings
+            .iter()
+            .find(|finding| finding.code == FINDING_NO_SCHEMA_LEDGER)
+            .expect("missing-ledger finding");
+        assert_eq!(no_ledger.severity, FindingSeverity::Warning);
+        assert!(
+            no_ledger
+                .message
+                .contains("refuse unversioned owned schemas")
+        );
+        assert!(no_ledger.message.contains("--bridge-pre-0-8-10"));
         let future = diagnosis
             .findings
             .iter()

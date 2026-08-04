@@ -1836,6 +1836,149 @@ fn migration_0002_attention_query_columns(tx: &Transaction<'_>) -> Result<(), ru
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn pre_0_8_10_attention_import_error(
+    binding_id: &str,
+    detail: impl std::fmt::Display,
+) -> rusqlite::Error {
+    rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("pre-v0.8.10 workgraph attention row `{binding_id}`: {detail}"),
+    )))
+}
+
+/// Reconcile the exact v2 attention projection published before the schema
+/// ledger existed.
+///
+/// The explicit maintenance bridge authenticates the catalog before calling
+/// this function. A physical v1 source has no projection columns and is left
+/// for migration 0002. A physical v2 source is data-bearing: every non-NULL
+/// projection must already agree with its typed `attention_json` authority,
+/// while NULL projections written by an older mixed-version process are
+/// backfilled. Any disagreement is refused inside the bridge transaction.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn prepare_pre_0_8_10_workgraph_attention(
+    tx: &Transaction<'_>,
+) -> Result<meerkat_sqlite::MaintenancePrepareReport, rusqlite::Error> {
+    let columns = tx
+        .prepare("PRAGMA table_info(workgraph_attention)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let has_status = columns.iter().any(|name| name == "status");
+    let has_target_key = columns.iter().any(|name| name == "target_key");
+    match (has_status, has_target_key) {
+        (false, false) => {
+            return Ok(meerkat_sqlite::MaintenancePrepareReport::default());
+        }
+        (true, true) => {}
+        _ => {
+            return Err(pre_0_8_10_attention_import_error(
+                "<catalog>",
+                "status and target_key projection columns are not an exact pair",
+            ));
+        }
+    }
+
+    struct ProjectionRepair {
+        realm_id: String,
+        namespace: String,
+        binding_id: String,
+        source_status: Option<String>,
+        source_target_key: Option<String>,
+        expected_status: String,
+        expected_target_key: String,
+    }
+
+    let repairs = {
+        let mut statement = tx.prepare(
+            "SELECT realm_id, namespace, binding_id, attention_json, status, target_key
+               FROM workgraph_attention
+              ORDER BY realm_id, namespace, binding_id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+            ))
+        })?;
+        let mut repairs = Vec::new();
+        for row in rows {
+            let (realm_id, namespace, binding_id, attention_json, status, target_key) = row?;
+            let binding: WorkAttentionBinding = serde_json::from_str(&attention_json)
+                .map_err(|error| pre_0_8_10_attention_import_error(&binding_id, error))?;
+            let expected_status = binding.status.status_key().to_string();
+            let expected_target_key = binding.target.target_key();
+            if status
+                .as_deref()
+                .is_some_and(|value| value != expected_status)
+            {
+                return Err(pre_0_8_10_attention_import_error(
+                    &binding_id,
+                    format!(
+                        "status projection `{}` disagrees with typed authority `{expected_status}`",
+                        status.as_deref().unwrap_or_default()
+                    ),
+                ));
+            }
+            if target_key
+                .as_deref()
+                .is_some_and(|value| value != expected_target_key)
+            {
+                return Err(pre_0_8_10_attention_import_error(
+                    &binding_id,
+                    format!(
+                        "target_key projection `{}` disagrees with typed authority `{expected_target_key}`",
+                        target_key.as_deref().unwrap_or_default()
+                    ),
+                ));
+            }
+            if status.is_none() || target_key.is_none() {
+                repairs.push(ProjectionRepair {
+                    realm_id,
+                    namespace,
+                    binding_id,
+                    source_status: status,
+                    source_target_key: target_key,
+                    expected_status,
+                    expected_target_key,
+                });
+            }
+        }
+        repairs
+    };
+
+    let changed = repairs.len();
+    for repair in repairs {
+        let updated = tx.execute(
+            "UPDATE workgraph_attention
+                SET status = ?4, target_key = ?5
+              WHERE realm_id = ?1 AND namespace = ?2 AND binding_id = ?3
+                AND status IS ?6 AND target_key IS ?7",
+            params![
+                repair.realm_id,
+                repair.namespace,
+                repair.binding_id,
+                repair.expected_status,
+                repair.expected_target_key,
+                repair.source_status,
+                repair.source_target_key,
+            ],
+        )?;
+        if updated != 1 {
+            return Err(pre_0_8_10_attention_import_error(
+                &repair.binding_id,
+                "source projection changed inside the maintenance transaction",
+            ));
+        }
+    }
+
+    Ok(meerkat_sqlite::MaintenancePrepareReport { changed })
+}
+
 /// Occupancy probe for the active-binding-per-target invariant, run INSIDE
 /// the same immediate write transaction as the mutation it guards so the
 /// check is race-free next to the data. NULL-column rows (written by older
@@ -2879,6 +3022,205 @@ mod legacy_schema_tests {
     use super::*;
     use crate::{AttentionDelegatedAuthority, AttentionProjectionPolicy, WorkAttentionMode};
     use meerkat_core::SessionId;
+
+    fn test_attention(binding_id: &str) -> WorkAttentionBinding {
+        WorkAttentionBinding {
+            binding_id: WorkAttentionBindingId::new(binding_id).expect("binding id"),
+            work_ref: crate::WorkItemRef {
+                realm_id: "realm".to_string(),
+                namespace: WorkNamespace::default(),
+                item_id: WorkItemId::generated(),
+            },
+            target: crate::WorkAttentionTarget::Session {
+                session_id: SessionId::new(),
+            },
+            mode: WorkAttentionMode::Pursue,
+            status: WorkAttentionStatus::Active,
+            machine_state: Default::default(),
+            delegated_authority: AttentionDelegatedAuthority::AddEvidence,
+            projection_policy: AttentionProjectionPolicy::default(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    fn create_unledgered_v2_workgraph(path: &Path) -> Connection {
+        let mut conn = Connection::open(path).expect("open raw");
+        let tx = conn.transaction().expect("begin schema transaction");
+        migration_0001_workgraph_schema(&tx).expect("create v1 workgraph schema");
+        migration_0002_attention_query_columns(&tx).expect("create v2 workgraph schema");
+        tx.commit().expect("commit v2 workgraph schema");
+        conn
+    }
+
+    #[test]
+    fn explicit_bridge_authenticates_v2_and_repairs_null_attention_projections() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("workgraph.sqlite3");
+        let mut conn = create_unledgered_v2_workgraph(&path);
+        let binding = test_attention("legacy-v2-binding");
+        let expected_status = binding.status.status_key().to_string();
+        let expected_target_key = binding.target.target_key();
+        conn.execute(
+            "INSERT INTO workgraph_attention
+                (realm_id, namespace, binding_id, revision, updated_at_utc, attention_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                binding.work_ref.realm_id,
+                binding.work_ref.namespace.as_str(),
+                binding.binding_id.as_str(),
+                binding.machine_state.revision,
+                binding.updated_at.to_rfc3339(),
+                serde_json::to_string(&binding).expect("serialize binding"),
+            ],
+        )
+        .expect("insert mixed-version row");
+
+        let report = meerkat_sqlite::bridge_unledgered_domain(
+            &mut conn,
+            &WORKGRAPH_DOMAIN,
+            WORKGRAPH_DOMAIN.supported_version(),
+            &[1, 2],
+            Some(prepare_pre_0_8_10_workgraph_attention),
+        )
+        .expect("bridge exact v2 catalog");
+        assert_eq!(report.from_version, 2);
+        assert_eq!(report.to_version, 2);
+        assert_eq!(report.prepared, 1);
+        let projections = conn
+            .query_row(
+                "SELECT status, target_key FROM workgraph_attention WHERE binding_id = ?1",
+                [binding.binding_id.as_str()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .expect("read repaired projections");
+        assert_eq!(projections, (expected_status, expected_target_key));
+        assert_eq!(
+            meerkat_sqlite::domain_version(&conn, WORKGRAPH_DOMAIN.name).expect("ledger"),
+            Some(2)
+        );
+
+        let rerun = meerkat_sqlite::bridge_unledgered_domain(
+            &mut conn,
+            &WORKGRAPH_DOMAIN,
+            WORKGRAPH_DOMAIN.supported_version(),
+            &[1, 2],
+            Some(prepare_pre_0_8_10_workgraph_attention),
+        )
+        .expect("idempotent target rerun");
+        assert_eq!(rerun.from_version, 2);
+        assert_eq!(rerun.to_version, 2);
+        assert_eq!(rerun.prepared, 0);
+    }
+
+    #[test]
+    fn explicit_bridge_refuses_non_null_attention_projection_mismatch_without_mutation() {
+        for (case, wrong_status, wrong_target) in [
+            ("status", Some("stopped"), None),
+            ("target_key", None, Some("session:wrong")),
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join(format!("workgraph-{case}.sqlite3"));
+            let mut conn = create_unledgered_v2_workgraph(&path);
+            let binding = test_attention(&format!("legacy-v2-{case}"));
+            let expected_status = binding.status.status_key().to_string();
+            let expected_target_key = binding.target.target_key();
+            let source_status = wrong_status.unwrap_or(&expected_status).to_string();
+            let source_target_key = wrong_target.unwrap_or(&expected_target_key).to_string();
+            let source_json = serde_json::to_string(&binding).expect("serialize binding");
+            conn.execute(
+                "INSERT INTO workgraph_attention
+                    (realm_id, namespace, binding_id, revision, updated_at_utc, attention_json,
+                     status, target_key)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    binding.work_ref.realm_id,
+                    binding.work_ref.namespace.as_str(),
+                    binding.binding_id.as_str(),
+                    binding.machine_state.revision,
+                    binding.updated_at.to_rfc3339(),
+                    source_json,
+                    source_status,
+                    source_target_key,
+                ],
+            )
+            .expect("insert mismatched projection");
+
+            let error = meerkat_sqlite::bridge_unledgered_domain(
+                &mut conn,
+                &WORKGRAPH_DOMAIN,
+                WORKGRAPH_DOMAIN.supported_version(),
+                &[1, 2],
+                Some(prepare_pre_0_8_10_workgraph_attention),
+            )
+            .expect_err("non-null projection mismatch must be refused");
+            assert!(
+                error.to_string().contains("disagrees with typed authority"),
+                "unexpected {case} refusal: {error}"
+            );
+            let unchanged = conn
+                .query_row(
+                    "SELECT attention_json, status, target_key
+                       FROM workgraph_attention WHERE binding_id = ?1",
+                    [binding.binding_id.as_str()],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
+                )
+                .expect("read refused source");
+            assert_eq!(unchanged, (source_json, source_status, source_target_key));
+            assert_eq!(
+                meerkat_sqlite::domain_version(&conn, WORKGRAPH_DOMAIN.name).expect("ledger"),
+                None,
+                "refused {case} row must not be stamped"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_bridge_refuses_near_miss_v2_catalog_before_preparation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("workgraph.sqlite3");
+        let mut conn = create_unledgered_v2_workgraph(&path);
+        conn.execute_batch(
+            "DROP INDEX idx_workgraph_attention_scope_status;
+             CREATE INDEX idx_workgraph_attention_scope_status
+                 ON workgraph_attention (realm_id, namespace, status);",
+        )
+        .expect("install near-miss index");
+
+        let error = meerkat_sqlite::bridge_unledgered_domain(
+            &mut conn,
+            &WORKGRAPH_DOMAIN,
+            WORKGRAPH_DOMAIN.supported_version(),
+            &[1, 2],
+            Some(prepare_pre_0_8_10_workgraph_attention),
+        )
+        .expect_err("near-miss catalog must be refused");
+        assert!(
+            error
+                .to_string()
+                .contains("does not match any authorized source catalog"),
+            "unexpected near-miss refusal: {error}"
+        );
+        assert_eq!(
+            meerkat_sqlite::domain_version(&conn, WORKGRAPH_DOMAIN.name).expect("ledger"),
+            None
+        );
+        let index_sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_schema
+                  WHERE type = 'index' AND name = 'idx_workgraph_attention_scope_status'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("near-miss index remains");
+        assert!(index_sql.ends_with("(realm_id, namespace, status)"));
+    }
 
     /// The released v2 floor is exact: an unledgered v1 attention table is
     /// refused without schema/data mutation or a ledger stamp.

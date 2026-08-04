@@ -63,6 +63,19 @@ pub enum PersistenceError {
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
     #[error(transparent)]
     FirstStart(meerkat_store::realm::RealmFirstStartError),
+    /// The explicit pre-floor importer is intentionally scoped to the
+    /// co-tenanted SQLite realm layout it can authenticate end to end.
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    #[error(
+        "the explicit pre-v0.8.10 bridge supports only SQLite realms; realm '{realm_id}' uses the '{backend}' backend"
+    )]
+    PreV0810BridgeBackend { realm_id: String, backend: String },
+    /// The explicit bridge never follows realm-layout symlinks. A linked
+    /// database could otherwise redirect maintenance writes outside the
+    /// realm covered by the caller's fence.
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    #[error("the explicit pre-v0.8.10 bridge refuses symlinked realm path '{path}'")]
+    PreV0810BridgeSymlink { path: PathBuf },
     /// A `Durable` storage slot resolved to a non-persistent store without
     /// the realm manifest declaring that domain ephemeral (fail-closed
     /// durability; see `storage_provider`).
@@ -357,6 +370,360 @@ pub(crate) fn layout_for_explicit_state_root(
     };
     let resolved = meerkat_core::StorageLayout::resolve(inputs, &realm_config)?;
     Ok(resolved.layout)
+}
+
+/// One schema domain considered by the explicit pre-0.8.10 storage bridge.
+///
+/// A `0 -> 0` result means the database exists but this domain owns no
+/// objects, so the bridge left fresh-domain initialization to the ordinary
+/// store constructor. For equal non-zero versions, `ledger_established` and
+/// `prepared_rows` distinguish exact-current stamping or payload preparation
+/// from a true idempotent no-op.
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreV0810DomainBridgeReport {
+    /// Database file containing the domain.
+    pub database: PathBuf,
+    /// Stable ledger domain name.
+    pub domain: String,
+    /// Authenticated source schema version.
+    pub from_version: i64,
+    /// Schema version after the bridge.
+    pub to_version: i64,
+    /// Whether this call established the domain's previously missing ledger
+    /// row. This is false for existing-ledger upgrades and idempotent re-runs.
+    pub ledger_established: bool,
+    /// Durable records rewritten by the domain's scoped preparation callback.
+    pub prepared_rows: usize,
+}
+
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+impl PreV0810DomainBridgeReport {
+    /// True when this call established a ledger row, advanced a schema, or
+    /// rewrote a durable payload.
+    pub fn changed(&self) -> bool {
+        self.ledger_established || self.from_version != self.to_version || self.prepared_rows != 0
+    }
+}
+
+/// Result of the explicit pre-0.8.10 bridge across the SQLite files that
+/// already exist in one realm.
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PreV0810RealmBridgeReport {
+    /// Domains considered, in dependency-safe bridge order.
+    pub domains: Vec<PreV0810DomainBridgeReport>,
+    /// Existing SQLite companions skipped because the realm manifest names a
+    /// different durable authority.
+    pub inactive_databases: Vec<PathBuf>,
+}
+
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+fn record_pre_v0_8_10_domain(
+    report: &mut PreV0810RealmBridgeReport,
+    database: &Path,
+    domain: &meerkat_sqlite::SchemaDomain,
+    ledger_before: Option<i64>,
+    result: meerkat_sqlite::MaintenanceBridgeReport,
+) {
+    report.domains.push(PreV0810DomainBridgeReport {
+        database: database.to_path_buf(),
+        domain: domain.name.to_string(),
+        from_version: result.from_version,
+        to_version: result.to_version,
+        ledger_established: ledger_before.is_none() && result.to_version != 0,
+        prepared_rows: result.prepared,
+    });
+}
+
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+fn census_pre_v0_8_10_domains(
+    database: &Path,
+    domains: &[&meerkat_sqlite::SchemaDomain],
+) -> Result<(), PersistenceError> {
+    if !database.is_file() {
+        return Ok(());
+    }
+    let conn = meerkat_sqlite::open(database, meerkat_sqlite::ConnectionProfile::ReadOnly)
+        .map_err(StoreError::from)?;
+    for domain in domains {
+        if let Some(found) =
+            meerkat_sqlite::domain_version(&conn, domain.name).map_err(StoreError::from)?
+            && found > domain.supported_version()
+        {
+            return Err(PersistenceError::Store(StoreError::SchemaFromTheFuture {
+                domain: domain.name.to_string(),
+                found,
+                supported: domain.supported_version(),
+            }));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+fn refuse_pre_v0_8_10_bridge_symlink(path: &Path) -> Result<(), PersistenceError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(PersistenceError::PreV0810BridgeSymlink {
+                path: path.to_path_buf(),
+            })
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(StoreError::Io(error).into()),
+    }
+}
+
+/// Authenticate and migrate exact pre-0.8.10 SQLite schemas in one realm.
+///
+/// This is an explicit offline maintenance operation. `fence` must cover the
+/// exact requested realm; its admission lock and fixed database inventory are
+/// validated before the manifest or any database is read. Ordinary realm
+/// opens remain strict and never invoke this bridge. Only existing database
+/// files are opened, always with the maintenance-write profile, and every
+/// domain bridge is transactionally authenticated by its owning migration
+/// manifest before it is stamped.
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+pub fn bridge_pre_0_8_10_realm_storage_in(
+    realms_root: &Path,
+    realm_id: &str,
+    fence: &meerkat_store::migrate::RealmMaintenanceFence,
+) -> Result<PreV0810RealmBridgeReport, PersistenceError> {
+    // Validate the public identity before deriving its sanitized directory.
+    let requested_realm = meerkat_core::RealmId::parse(realm_id)
+        .map_err(|_| StoreError::InvalidRealmSlug(realm_id.to_string()))?;
+
+    let paths = realm_paths_in(realms_root, realm_id);
+    refuse_pre_v0_8_10_bridge_symlink(&paths.root)?;
+    refuse_pre_v0_8_10_bridge_symlink(&paths.manifest_path)?;
+    refuse_pre_v0_8_10_bridge_symlink(&paths.root.join("memory"))?;
+    let inventory = meerkat_store::migrate::enumerate_realm_sqlite_inventory(&paths.root);
+    if let Some(path) = inventory.symlinks.first() {
+        return Err(PersistenceError::PreV0810BridgeSymlink { path: path.clone() });
+    }
+    let expected_admission = meerkat_sqlite::fence_lock_path(
+        &meerkat_store::migrate::realm_write_admission_target(&paths.root),
+    );
+    let covers_fixed_inventory = meerkat_store::migrate::REALM_SQLITE_FILES
+        .iter()
+        .map(|relative| paths.root.join(relative))
+        .all(|database| fence.fenced_databases().contains(&database));
+    let contains_foreign_database = fence
+        .fenced_databases()
+        .iter()
+        .any(|database| !database.starts_with(&paths.root));
+    if fence.admission_lock_path() != expected_admission
+        || !covers_fixed_inventory
+        || contains_foreign_database
+    {
+        return Err(PersistenceError::Store(StoreError::Internal(format!(
+            "maintenance fence does not cover requested realm directory '{}'",
+            paths.root.display()
+        ))));
+    }
+
+    let manifest_pin = meerkat_store::read_realm_manifest_pin(&paths.manifest_path)?;
+    if manifest_pin.realm() != &requested_realm {
+        return Err(PersistenceError::Store(StoreError::RealmIdentityMismatch {
+            requested: requested_realm.as_str().to_string(),
+            existing: manifest_pin.realm().as_str().to_string(),
+        }));
+    }
+    let manifest = match manifest_pin {
+        meerkat_store::RealmManifestPin::Builtin(manifest) => manifest,
+        meerkat_store::RealmManifestPin::External(manifest) => {
+            return Err(PersistenceError::Store(StoreError::ExternalProviderRealm {
+                realm_id: manifest.realm.as_str().to_string(),
+                provider: manifest.provider,
+            }));
+        }
+    };
+
+    if !matches!(manifest.backend, RealmBackend::Sqlite) {
+        return Err(PersistenceError::PreV0810BridgeBackend {
+            realm_id: realm_id.to_string(),
+            backend: manifest.backend.as_str().to_string(),
+        });
+    }
+
+    // Cross-file census before the first write: malformed ledgers and any
+    // future-version active domain abort the whole explicit bridge before an
+    // earlier domain can be stamped or migrated.
+    census_pre_v0_8_10_domains(
+        &paths.sessions_sqlite_path,
+        &[
+            &meerkat_store::sqlite_store::SESSION_STORE_DOMAIN,
+            &meerkat_runtime::store::sqlite::RUNTIME_STORE_DOMAIN,
+            &meerkat_store::schedule_sqlite_store::SCHEDULE_STORE_DOMAIN,
+        ],
+    )?;
+    census_pre_v0_8_10_domains(
+        &paths.root.join("workgraph.sqlite3"),
+        &[&meerkat_workgraph::WORKGRAPH_DOMAIN],
+    )?;
+    census_pre_v0_8_10_domains(&paths.jobs_sqlite_path, &[&meerkat_jobs::JOBS_DOMAIN])?;
+    #[cfg(feature = "memory-store-session")]
+    census_pre_v0_8_10_domains(
+        &paths.root.join("memory").join("memory.sqlite3"),
+        &[&meerkat_memory::MEMORY_DOMAIN],
+    )?;
+    census_pre_v0_8_10_domains(
+        &paths.root.join("tasks.db"),
+        &[&meerkat_tools::TOOLS_TASKS_DOMAIN],
+    )?;
+
+    let mut report = PreV0810RealmBridgeReport::default();
+
+    if paths.runtime_sqlite_path.is_file() {
+        report
+            .inactive_databases
+            .push(paths.runtime_sqlite_path.clone());
+    }
+
+    // The SQLite realm backend co-tenants these three domains in the session
+    // database. Session migration runs first because runtime migration imports
+    // session snapshots; scheduling follows both runtime authorities.
+    if paths.sessions_sqlite_path.is_file() {
+        let database = &paths.sessions_sqlite_path;
+        let mut conn = meerkat_sqlite::open(
+            database,
+            meerkat_sqlite::ConnectionProfile::Maintenance { write: true },
+        )
+        .map_err(StoreError::from)?;
+
+        let domain = &meerkat_store::sqlite_store::SESSION_STORE_DOMAIN;
+        let ledger_before =
+            meerkat_sqlite::domain_version(&conn, domain.name).map_err(StoreError::from)?;
+        let result = meerkat_core::with_pre_floor_provider_image_metadata_import(|| {
+            meerkat_sqlite::bridge_unledgered_domain(
+                &mut conn,
+                domain,
+                domain.supported_version(),
+                &[1],
+                None,
+            )
+        })
+        .map_err(StoreError::from)?;
+        record_pre_v0_8_10_domain(&mut report, database, domain, ledger_before, result);
+
+        let domain = &meerkat_runtime::store::sqlite::RUNTIME_STORE_DOMAIN;
+        let ledger_before =
+            meerkat_sqlite::domain_version(&conn, domain.name).map_err(StoreError::from)?;
+        let result = meerkat_core::with_pre_floor_provider_image_metadata_import(|| {
+            meerkat_sqlite::bridge_unledgered_domain(
+                &mut conn,
+                domain,
+                domain.supported_version(),
+                &[1],
+                Some(meerkat_runtime::store::sqlite::prepare_pre_0_8_10_runtime_input_states),
+            )
+        })
+        .map_err(StoreError::from)?;
+        record_pre_v0_8_10_domain(&mut report, database, domain, ledger_before, result);
+
+        let domain = &meerkat_store::schedule_sqlite_store::SCHEDULE_STORE_DOMAIN;
+        let ledger_before =
+            meerkat_sqlite::domain_version(&conn, domain.name).map_err(StoreError::from)?;
+        let result = meerkat_sqlite::bridge_unledgered_domain(
+            &mut conn,
+            domain,
+            domain.supported_version(),
+            &[1],
+            None,
+        )
+        .map_err(StoreError::from)?;
+        record_pre_v0_8_10_domain(&mut report, database, domain, ledger_before, result);
+    }
+
+    let workgraph_db = paths.root.join("workgraph.sqlite3");
+    if workgraph_db.is_file() {
+        let mut conn = meerkat_sqlite::open(
+            &workgraph_db,
+            meerkat_sqlite::ConnectionProfile::Maintenance { write: true },
+        )
+        .map_err(StoreError::from)?;
+        let domain = &meerkat_workgraph::WORKGRAPH_DOMAIN;
+        let ledger_before =
+            meerkat_sqlite::domain_version(&conn, domain.name).map_err(StoreError::from)?;
+        let result = meerkat_sqlite::bridge_unledgered_domain(
+            &mut conn,
+            domain,
+            domain.supported_version(),
+            &[1, 2],
+            Some(meerkat_workgraph::prepare_pre_0_8_10_workgraph_attention),
+        )
+        .map_err(StoreError::from)?;
+        record_pre_v0_8_10_domain(&mut report, &workgraph_db, domain, ledger_before, result);
+    }
+
+    if paths.jobs_sqlite_path.is_file() {
+        let database = &paths.jobs_sqlite_path;
+        let mut conn = meerkat_sqlite::open(
+            database,
+            meerkat_sqlite::ConnectionProfile::Maintenance { write: true },
+        )
+        .map_err(StoreError::from)?;
+        let domain = &meerkat_jobs::JOBS_DOMAIN;
+        let ledger_before =
+            meerkat_sqlite::domain_version(&conn, domain.name).map_err(StoreError::from)?;
+        let result = meerkat_sqlite::bridge_unledgered_domain(
+            &mut conn,
+            domain,
+            domain.supported_version(),
+            &[1],
+            None,
+        )
+        .map_err(StoreError::from)?;
+        record_pre_v0_8_10_domain(&mut report, database, domain, ledger_before, result);
+    }
+
+    #[cfg(feature = "memory-store-session")]
+    {
+        let memory_db = paths.root.join("memory").join("memory.sqlite3");
+        if memory_db.is_file() {
+            let mut conn = meerkat_sqlite::open(
+                &memory_db,
+                meerkat_sqlite::ConnectionProfile::Maintenance { write: true },
+            )
+            .map_err(StoreError::from)?;
+            let domain = &meerkat_memory::MEMORY_DOMAIN;
+            let ledger_before =
+                meerkat_sqlite::domain_version(&conn, domain.name).map_err(StoreError::from)?;
+            let result = meerkat_sqlite::bridge_unledgered_domain(
+                &mut conn,
+                domain,
+                domain.supported_version(),
+                &[1],
+                None,
+            )
+            .map_err(StoreError::from)?;
+            record_pre_v0_8_10_domain(&mut report, &memory_db, domain, ledger_before, result);
+        }
+    }
+
+    let tasks_db = paths.root.join("tasks.db");
+    if tasks_db.is_file() {
+        let mut conn = meerkat_sqlite::open(
+            &tasks_db,
+            meerkat_sqlite::ConnectionProfile::Maintenance { write: true },
+        )
+        .map_err(StoreError::from)?;
+        let domain = &meerkat_tools::TOOLS_TASKS_DOMAIN;
+        let ledger_before =
+            meerkat_sqlite::domain_version(&conn, domain.name).map_err(StoreError::from)?;
+        let result = meerkat_sqlite::bridge_unledgered_domain(
+            &mut conn,
+            domain,
+            domain.supported_version(),
+            &[1],
+            None,
+        )
+        .map_err(StoreError::from)?;
+        record_pre_v0_8_10_domain(&mut report, &tasks_db, domain, ledger_before, result);
+    }
+
+    Ok(report)
 }
 
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
@@ -669,7 +1036,509 @@ mod tests {
     use meerkat_runtime::store::RuntimeStoreError;
     use meerkat_store::MemoryStore;
     use meerkat_store::{MemoryBlobStore, SessionFilter, SessionStoreError};
+    #[cfg(not(target_arch = "wasm32"))]
+    use std::time::Duration;
     use tempfile::TempDir;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn create_unledgered_prefix(
+        database: &Path,
+        domains: &[&meerkat_sqlite::SchemaDomain],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(parent) = database.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut conn = meerkat_sqlite::open(
+            database,
+            meerkat_sqlite::ConnectionProfile::Primary { create: true },
+        )?;
+        let tx = conn.transaction()?;
+        for domain in domains {
+            (domain.migrations[0].apply)(&tx)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn write_builtin_manifest(
+        paths: &meerkat_store::RealmPaths,
+        realm_id: &str,
+        backend: RealmBackend,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        std::fs::create_dir_all(&paths.root)?;
+        let manifest = RealmManifest {
+            realm: meerkat_core::RealmId::parse(realm_id).expect("test realm id is valid"),
+            backend,
+            origin: RealmOrigin::Explicit,
+            created_at: "1970-01-01T00:00:00Z".to_string(),
+            manifest_format: 1,
+            provider: None,
+            ephemeral_domains: Vec::new(),
+        };
+        std::fs::write(&paths.manifest_path, serde_json::to_vec_pretty(&manifest)?)?;
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn explicit_pre_floor_bridge_orchestrates_existing_realm_databases_in_order()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = TempDir::new()?;
+        let realm_id = "legacy-realm";
+        let paths = realm_paths_in(temp.path(), realm_id);
+        write_builtin_manifest(&paths, realm_id, RealmBackend::Sqlite)?;
+
+        create_unledgered_prefix(
+            &paths.sessions_sqlite_path,
+            &[
+                &meerkat_store::sqlite_store::SESSION_STORE_DOMAIN,
+                &meerkat_runtime::store::sqlite::RUNTIME_STORE_DOMAIN,
+                &meerkat_store::schedule_sqlite_store::SCHEDULE_STORE_DOMAIN,
+            ],
+        )?;
+        create_unledgered_prefix(
+            &paths.runtime_sqlite_path,
+            &[&meerkat_runtime::store::sqlite::RUNTIME_STORE_DOMAIN],
+        )?;
+        let conn = meerkat_sqlite::open(
+            &paths.runtime_sqlite_path,
+            meerkat_sqlite::ConnectionProfile::Primary { create: false },
+        )?;
+        conn.execute_batch(
+            "CREATE TABLE meerkat_schema (
+                 domain TEXT PRIMARY KEY,
+                 version INTEGER NOT NULL
+             );
+             INSERT INTO meerkat_schema (domain, version)
+             VALUES ('runtime-store', 1);",
+        )?;
+        drop(conn);
+        create_unledgered_prefix(
+            &paths.root.join("workgraph.sqlite3"),
+            &[&meerkat_workgraph::WORKGRAPH_DOMAIN],
+        )?;
+        create_unledgered_prefix(&paths.jobs_sqlite_path, &[&meerkat_jobs::JOBS_DOMAIN])?;
+        #[cfg(feature = "memory-store-session")]
+        create_unledgered_prefix(
+            &paths.root.join("memory").join("memory.sqlite3"),
+            &[&meerkat_memory::MEMORY_DOMAIN],
+        )?;
+        create_unledgered_prefix(
+            &paths.root.join("tasks.db"),
+            &[&meerkat_tools::TOOLS_TASKS_DOMAIN],
+        )?;
+
+        let fence = meerkat_store::migrate::RealmMaintenanceFence::acquire(
+            &paths.root,
+            Duration::from_secs(1),
+        )?;
+        let report = bridge_pre_0_8_10_realm_storage_in(temp.path(), realm_id, &fence)?;
+        drop(fence);
+
+        let mut expected = vec![
+            ("session-store", 1, 3),
+            ("runtime-store", 1, 2),
+            ("schedule-store", 1, 2),
+            ("workgraph", 1, 2),
+            ("jobs", 1, 2),
+        ];
+        #[cfg(feature = "memory-store-session")]
+        expected.push(("memory", 1, 2));
+        expected.push(("tools-tasks", 1, 1));
+
+        let actual = report
+            .domains
+            .iter()
+            .map(|entry| (entry.domain.as_str(), entry.from_version, entry.to_version))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+        assert!(report.domains.iter().all(|entry| entry.ledger_established));
+        assert_eq!(
+            report.inactive_databases,
+            vec![paths.runtime_sqlite_path.clone()],
+            "the standalone runtime is not authoritative for a SQLite realm"
+        );
+
+        for entry in &report.domains {
+            let conn =
+                meerkat_sqlite::open(&entry.database, meerkat_sqlite::ConnectionProfile::ReadOnly)?;
+            assert_eq!(
+                meerkat_sqlite::domain_version(&conn, &entry.domain)?,
+                Some(entry.to_version),
+                "{} must be stamped only after convergence",
+                entry.domain
+            );
+        }
+
+        let fence = meerkat_store::migrate::RealmMaintenanceFence::acquire(
+            &paths.root,
+            Duration::from_secs(1),
+        )?;
+        let rerun = bridge_pre_0_8_10_realm_storage_in(temp.path(), realm_id, &fence)?;
+        drop(fence);
+        assert_eq!(rerun.domains.len(), report.domains.len());
+        assert!(
+            rerun.domains.iter().all(|entry| {
+                !entry.ledger_established && entry.from_version == entry.to_version
+            }),
+            "an already bridged realm must be an idempotent no-op"
+        );
+        assert_eq!(rerun.inactive_databases, report.inactive_databases);
+
+        let conn = meerkat_sqlite::open(
+            &paths.runtime_sqlite_path,
+            meerkat_sqlite::ConnectionProfile::ReadOnly,
+        )?;
+        assert_eq!(
+            meerkat_sqlite::domain_version(&conn, "runtime-store")?,
+            Some(1),
+            "the inactive standalone runtime must remain byte-authority untouched"
+        );
+
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn explicit_pre_floor_bridge_census_refuses_future_later_domain_before_session_mutation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = TempDir::new()?;
+        let realm_id = "future-runtime-realm";
+        let paths = realm_paths_in(temp.path(), realm_id);
+        write_builtin_manifest(&paths, realm_id, RealmBackend::Sqlite)?;
+        create_unledgered_prefix(
+            &paths.sessions_sqlite_path,
+            &[
+                &meerkat_store::sqlite_store::SESSION_STORE_DOMAIN,
+                &meerkat_runtime::store::sqlite::RUNTIME_STORE_DOMAIN,
+                &meerkat_store::schedule_sqlite_store::SCHEDULE_STORE_DOMAIN,
+            ],
+        )?;
+        let conn = meerkat_sqlite::open(
+            &paths.sessions_sqlite_path,
+            meerkat_sqlite::ConnectionProfile::Primary { create: false },
+        )?;
+        conn.execute_batch(
+            "CREATE TABLE meerkat_schema (
+                 domain TEXT PRIMARY KEY,
+                 version INTEGER NOT NULL
+             );
+             INSERT INTO meerkat_schema (domain, version)
+             VALUES ('runtime-store', 99);",
+        )?;
+        drop(conn);
+
+        let fence = meerkat_store::migrate::RealmMaintenanceFence::acquire(
+            &paths.root,
+            Duration::from_secs(1),
+        )?;
+        let error = bridge_pre_0_8_10_realm_storage_in(temp.path(), realm_id, &fence)
+            .expect_err("future runtime domain must abort the pre-write census");
+        drop(fence);
+        assert!(matches!(
+            error,
+            PersistenceError::Store(StoreError::SchemaFromTheFuture {
+                ref domain,
+                found: 99,
+                supported: 2,
+            }) if domain == "runtime-store"
+        ));
+
+        let conn = meerkat_sqlite::open(
+            &paths.sessions_sqlite_path,
+            meerkat_sqlite::ConnectionProfile::ReadOnly,
+        )?;
+        assert_eq!(
+            meerkat_sqlite::domain_version(&conn, "session-store")?,
+            None,
+            "the earlier session domain must not be stamped"
+        );
+        let session_v2_object: i64 = conn.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM sqlite_schema
+                 WHERE type = 'table' AND name = 'session_strand_links'
+             )",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(
+            session_v2_object, 0,
+            "the earlier session domain must not be migrated"
+        );
+
+        Ok(())
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "jsonl-store"))]
+    #[test]
+    fn explicit_pre_floor_bridge_refuses_jsonl_before_mutating_any_database()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = TempDir::new()?;
+        let realm_id = "legacy-jsonl-realm";
+        let paths = realm_paths_in(temp.path(), realm_id);
+        write_builtin_manifest(&paths, realm_id, RealmBackend::Jsonl)?;
+        create_unledgered_prefix(
+            &paths.sessions_sqlite_path,
+            &[&meerkat_store::sqlite_store::SESSION_STORE_DOMAIN],
+        )?;
+        create_unledgered_prefix(
+            &paths.runtime_sqlite_path,
+            &[&meerkat_runtime::store::sqlite::RUNTIME_STORE_DOMAIN],
+        )?;
+
+        let fence = meerkat_store::migrate::RealmMaintenanceFence::acquire(
+            &paths.root,
+            Duration::from_secs(1),
+        )?;
+        let error = bridge_pre_0_8_10_realm_storage_in(temp.path(), realm_id, &fence)
+            .expect_err("JSONL realms are outside the explicit bridge authority");
+        drop(fence);
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "the explicit pre-v0.8.10 bridge supports only SQLite realms; realm '{realm_id}' uses the 'jsonl' backend"
+            )
+        );
+
+        for (database, domain) in [
+            (&paths.sessions_sqlite_path, "session-store"),
+            (&paths.runtime_sqlite_path, "runtime-store"),
+        ] {
+            let conn = meerkat_sqlite::open(database, meerkat_sqlite::ConnectionProfile::ReadOnly)?;
+            assert_eq!(meerkat_sqlite::domain_version(&conn, domain)?, None);
+        }
+
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn explicit_pre_floor_bridge_refuses_memory_before_mutating_any_database()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = TempDir::new()?;
+        let realm_id = "legacy-memory-realm";
+        let paths = realm_paths_in(temp.path(), realm_id);
+        write_builtin_manifest(&paths, realm_id, RealmBackend::Memory)?;
+        create_unledgered_prefix(
+            &paths.sessions_sqlite_path,
+            &[&meerkat_store::sqlite_store::SESSION_STORE_DOMAIN],
+        )?;
+        create_unledgered_prefix(
+            &paths.runtime_sqlite_path,
+            &[&meerkat_runtime::store::sqlite::RUNTIME_STORE_DOMAIN],
+        )?;
+        create_unledgered_prefix(
+            &paths.root.join("workgraph.sqlite3"),
+            &[&meerkat_workgraph::WORKGRAPH_DOMAIN],
+        )?;
+        create_unledgered_prefix(&paths.jobs_sqlite_path, &[&meerkat_jobs::JOBS_DOMAIN])?;
+        #[cfg(feature = "memory-store-session")]
+        create_unledgered_prefix(
+            &paths.root.join("memory").join("memory.sqlite3"),
+            &[&meerkat_memory::MEMORY_DOMAIN],
+        )?;
+        create_unledgered_prefix(
+            &paths.root.join("tasks.db"),
+            &[&meerkat_tools::TOOLS_TASKS_DOMAIN],
+        )?;
+
+        let fence = meerkat_store::migrate::RealmMaintenanceFence::acquire(
+            &paths.root,
+            Duration::from_secs(1),
+        )?;
+        let error = bridge_pre_0_8_10_realm_storage_in(temp.path(), realm_id, &fence)
+            .expect_err("memory realms are outside the explicit bridge authority");
+        drop(fence);
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "the explicit pre-v0.8.10 bridge supports only SQLite realms; realm '{realm_id}' uses the 'memory' backend"
+            )
+        );
+
+        let mut untouched = vec![
+            (paths.sessions_sqlite_path.clone(), "session-store"),
+            (paths.runtime_sqlite_path.clone(), "runtime-store"),
+            (paths.root.join("workgraph.sqlite3"), "workgraph"),
+            (paths.jobs_sqlite_path.clone(), "jobs"),
+            (paths.root.join("tasks.db"), "tools-tasks"),
+        ];
+        #[cfg(feature = "memory-store-session")]
+        untouched.push((paths.root.join("memory").join("memory.sqlite3"), "memory"));
+        for (database, domain) in untouched {
+            let conn =
+                meerkat_sqlite::open(&database, meerkat_sqlite::ConnectionProfile::ReadOnly)?;
+            assert_eq!(meerkat_sqlite::domain_version(&conn, domain)?, None);
+        }
+
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn explicit_pre_floor_bridge_refuses_a_fence_for_another_realm_without_mutation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = TempDir::new()?;
+        let realm_id = "target-realm";
+        let paths = realm_paths_in(temp.path(), realm_id);
+        write_builtin_manifest(&paths, realm_id, RealmBackend::Sqlite)?;
+        create_unledgered_prefix(
+            &paths.sessions_sqlite_path,
+            &[&meerkat_store::sqlite_store::SESSION_STORE_DOMAIN],
+        )?;
+
+        let other_paths = realm_paths_in(temp.path(), "other-realm");
+        std::fs::create_dir_all(&other_paths.root)?;
+        let fence = meerkat_store::migrate::RealmMaintenanceFence::acquire(
+            &other_paths.root,
+            Duration::from_secs(1),
+        )?;
+        let error = bridge_pre_0_8_10_realm_storage_in(temp.path(), realm_id, &fence)
+            .expect_err("a fence for another realm must refuse");
+        drop(fence);
+        assert!(error.to_string().contains("does not cover requested realm"));
+
+        let conn = meerkat_sqlite::open(
+            &paths.sessions_sqlite_path,
+            meerkat_sqlite::ConnectionProfile::ReadOnly,
+        )?;
+        assert_eq!(
+            meerkat_sqlite::domain_version(&conn, "session-store")?,
+            None
+        );
+
+        Ok(())
+    }
+
+    #[cfg(all(unix, not(target_arch = "wasm32")))]
+    #[test]
+    fn explicit_pre_floor_bridge_refuses_symlinked_database_without_touching_target()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = TempDir::new()?;
+        let realm_id = "linked-database-realm";
+        let paths = realm_paths_in(temp.path(), realm_id);
+        write_builtin_manifest(&paths, realm_id, RealmBackend::Sqlite)?;
+
+        let external_dir = temp.path().join("external");
+        let external_database = external_dir.join("sessions.sqlite3");
+        create_unledgered_prefix(
+            &external_database,
+            &[&meerkat_store::sqlite_store::SESSION_STORE_DOMAIN],
+        )?;
+        let external_before = std::fs::read(&external_database)?;
+        std::os::unix::fs::symlink(&external_database, &paths.sessions_sqlite_path)?;
+
+        let fence = meerkat_store::migrate::RealmMaintenanceFence::acquire(
+            &paths.root,
+            Duration::from_secs(1),
+        )?;
+        let error = bridge_pre_0_8_10_realm_storage_in(temp.path(), realm_id, &fence)
+            .expect_err("a symlinked database must refuse before any bridge write");
+        drop(fence);
+        assert!(matches!(
+            error,
+            PersistenceError::PreV0810BridgeSymlink { ref path }
+                if path == &paths.sessions_sqlite_path
+        ));
+        assert_eq!(
+            std::fs::read(&external_database)?,
+            external_before,
+            "the symlink target must remain byte-identical"
+        );
+        assert!(
+            std::fs::symlink_metadata(&paths.sessions_sqlite_path)?
+                .file_type()
+                .is_symlink()
+        );
+
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn explicit_pre_floor_bridge_refuses_manifest_identity_alias_without_mutation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = TempDir::new()?;
+        let requested_realm = "alias.realm";
+        let paths = realm_paths_in(temp.path(), requested_realm);
+        write_builtin_manifest(&paths, "alias_realm", RealmBackend::Sqlite)?;
+        create_unledgered_prefix(
+            &paths.sessions_sqlite_path,
+            &[&meerkat_store::sqlite_store::SESSION_STORE_DOMAIN],
+        )?;
+
+        let fence = meerkat_store::migrate::RealmMaintenanceFence::acquire(
+            &paths.root,
+            Duration::from_secs(1),
+        )?;
+        let error = bridge_pre_0_8_10_realm_storage_in(temp.path(), requested_realm, &fence)
+            .expect_err("a path-aliasing manifest identity must refuse");
+        drop(fence);
+        assert!(matches!(
+            error,
+            PersistenceError::Store(StoreError::RealmIdentityMismatch { .. })
+        ));
+
+        let conn = meerkat_sqlite::open(
+            &paths.sessions_sqlite_path,
+            meerkat_sqlite::ConnectionProfile::ReadOnly,
+        )?;
+        assert_eq!(
+            meerkat_sqlite::domain_version(&conn, "session-store")?,
+            None
+        );
+
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn explicit_pre_floor_bridge_refuses_external_provider_pin_without_mutation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = TempDir::new()?;
+        let realm_id = "external-realm";
+        let paths = realm_paths_in(temp.path(), realm_id);
+        std::fs::create_dir_all(&paths.root)?;
+        std::fs::write(
+            &paths.manifest_path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "realm_id": realm_id,
+                "backend": "external:test-provider",
+                "origin": "explicit",
+                "created_at": "1970-01-01T00:00:00Z",
+                "manifest_format": 2,
+                "provider": "test-provider"
+            }))?,
+        )?;
+        create_unledgered_prefix(
+            &paths.sessions_sqlite_path,
+            &[&meerkat_store::sqlite_store::SESSION_STORE_DOMAIN],
+        )?;
+
+        let fence = meerkat_store::migrate::RealmMaintenanceFence::acquire(
+            &paths.root,
+            Duration::from_secs(1),
+        )?;
+        let error = bridge_pre_0_8_10_realm_storage_in(temp.path(), realm_id, &fence)
+            .expect_err("an external-provider pin must refuse disk bridge");
+        drop(fence);
+        assert!(matches!(
+            error,
+            PersistenceError::Store(StoreError::ExternalProviderRealm { .. })
+        ));
+
+        let conn = meerkat_sqlite::open(
+            &paths.sessions_sqlite_path,
+            meerkat_sqlite::ConnectionProfile::ReadOnly,
+        )?;
+        assert_eq!(
+            meerkat_sqlite::domain_version(&conn, "session-store")?,
+            None
+        );
+
+        Ok(())
+    }
 
     struct WrappedStore {
         inner: Arc<dyn SessionStore>,

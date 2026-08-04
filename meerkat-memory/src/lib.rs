@@ -11,7 +11,7 @@ pub mod hnsw;
 pub mod simple;
 pub mod tool;
 
-pub use hnsw::{BagOfWordsEmbeddingModel, HnswMemoryStore, default_ranking_policy};
+pub use hnsw::{BagOfWordsEmbeddingModel, HnswMemoryStore, MEMORY_DOMAIN, default_ranking_policy};
 pub use simple::SimpleMemoryStore;
 pub use tool::MemorySearchDispatcher;
 

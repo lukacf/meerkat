@@ -32,7 +32,7 @@ fn migration_0001_tasks_schema(tx: &Transaction<'_>) -> Result<(), rusqlite::Err
 }
 
 /// The task store's schema domain in the per-file migration ledger.
-const TOOLS_TASKS_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::SchemaDomain {
+pub const TOOLS_TASKS_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::SchemaDomain {
     name: "tools-tasks",
     migrations: &[meerkat_sqlite::Migration {
         version: 1,

@@ -293,9 +293,12 @@ pub use persistence::PersistenceBundle;
 #[cfg(feature = "session-store")]
 pub use persistence::PersistenceError;
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
-pub use persistence::open_realm_persistence_in;
-#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 pub use persistence::open_realm_persistence_with_provider;
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+pub use persistence::{
+    PreV0810DomainBridgeReport, PreV0810RealmBridgeReport, bridge_pre_0_8_10_realm_storage_in,
+    open_realm_persistence_in,
+};
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 pub use storage_provider::{
     DiskStorageProvider, RealmOpenContext, RealmStorageProvider, RealmStoreSet,

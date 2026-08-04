@@ -50,6 +50,7 @@ chrono = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }
+meerkat-sqlite = { workspace = true }
 meerkat-providers = { workspace = true, default-features = false, features = [
     "oauth",
     "refresh-file-lock",

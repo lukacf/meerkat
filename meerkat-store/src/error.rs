@@ -110,6 +110,22 @@ pub enum StoreError {
         supported: i64,
     },
 
+    /// The file has no ledger row for a schema domain but already contains
+    /// objects owned by that domain. This is not a fresh domain and cannot be
+    /// authenticated as the released predecessor, so normal opens refuse it.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[error(
+        "schema domain '{domain}' has no ledger row but already owns objects {objects:?}; \
+         refusing to infer or stamp an unversioned schema. For a realm last written before \
+         the 0.8.10 durable-state floor, run the explicit current-binary bridge once \
+         (`rkat --state-root <ROOT> --realm <REALM> storage migrate --apply \
+         --bridge-pre-0-8-10`), then retry the original command"
+    )]
+    UnledgeredDomainObjects {
+        domain: String,
+        objects: Vec<String>,
+    },
+
     /// The exclusive maintenance fence is held for this database; storage is
     /// under offline maintenance.
     #[cfg(not(target_arch = "wasm32"))]
@@ -185,6 +201,9 @@ impl From<meerkat_sqlite::SqliteStoreError> for StoreError {
                 supported,
             },
             E::MaintenanceFenceHeld { path } => StoreError::MaintenanceFenceHeld { path },
+            E::UnledgeredDomainObjects { domain, objects } => {
+                StoreError::UnledgeredDomainObjects { domain, objects }
+            }
             // A malformed ledger IS on-disk corruption of the file's
             // migration bookkeeping.
             E::LedgerMalformed { detail } => StoreError::CorruptLedger { detail },
@@ -192,7 +211,8 @@ impl From<meerkat_sqlite::SqliteStoreError> for StoreError {
             | E::MigrationBrokeTransaction { .. }
             | E::UnsupportedSchemaPredecessor { .. }
             | E::SchemaFingerprintMismatch { .. }
-            | E::UnledgeredDomainObjects { .. }
+            | E::UnledgeredSchemaNoMatch { .. }
+            | E::UnledgeredSchemaAmbiguous { .. }
             | E::WalNotEstablished { .. }
             | E::InvalidMigrationList { .. }
             | E::OpenRefused { .. }) => StoreError::Internal(other.to_string()),
@@ -289,6 +309,27 @@ mod tests {
             StoreError::from(err),
             StoreError::CorruptLedger { detail } if detail == "domain row count"
         ));
+    }
+
+    #[test]
+    fn unledgered_owned_objects_preserve_typed_bridge_guidance() {
+        let err = meerkat_sqlite::SqliteStoreError::UnledgeredDomainObjects {
+            domain: "session-store".to_string(),
+            objects: vec!["table:sessions (expected table)".to_string()],
+        };
+        let mapped = StoreError::from(err);
+        assert!(matches!(
+            &mapped,
+            StoreError::UnledgeredDomainObjects { domain, objects }
+                if domain == "session-store"
+                    && objects == &["table:sessions (expected table)".to_string()]
+        ));
+        let message = mapped.to_string();
+        assert!(
+            message.contains("explicit current-binary bridge"),
+            "{message}"
+        );
+        assert!(message.contains("--bridge-pre-0-8-10"), "{message}");
     }
 
     #[test]

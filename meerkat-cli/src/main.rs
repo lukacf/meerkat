@@ -2133,6 +2133,11 @@ enum StorageCommands {
     /// synthesis); (4) deprecated leftovers — report-only. Per-mob databases under
     /// `mobs/` are report-only in v1.
     ///
+    /// `--bridge-pre-0-8-10` is an explicit, apply-only recovery path for
+    /// exact authenticated pre-floor schemas. It runs under the same realm
+    /// maintenance fence before normal strict migration. Unknown, ambiguous,
+    /// or malformed state is refused without a ledger stamp.
+    ///
     /// Credential stores are never read, moved, or reported by this
     /// command.
     ///
@@ -2143,6 +2148,12 @@ enum StorageCommands {
         /// Perform the fenced migration (default is a read-only dry-run)
         #[arg(long)]
         apply: bool,
+
+        /// Explicitly import authenticated durable schemas from before the
+        /// v0.8.10 compatibility floor before running normal migrations.
+        /// Requires --apply; ordinary opens and migrations remain strict.
+        #[arg(long, requires = "apply")]
+        bridge_pre_0_8_10: bool,
 
         /// Emit the migration report as pretty JSON
         #[arg(long)]
@@ -3936,7 +3947,13 @@ async fn handle_run_command(
     }
 
     let (config, config_base_dir) = load_config(scope).await?;
-    let (config, runtime_preload_skills) = resolve_runtime_skills(config, skills).await?;
+    let (mut config, runtime_preload_skills) = resolve_runtime_skills(config, skills).await?;
+    let PreparedFreshRunPersistence {
+        storage_scope,
+        manifest,
+        persistence,
+    } = prepare_fresh_run_persistence(scope).await?;
+    project_workspace_auth_chain_onto_fallback(&mut config, scope, &storage_scope);
 
     let model_was_explicit = model.is_some();
     let provider_was_explicit = provider.is_some();
@@ -4038,6 +4055,9 @@ async fn handle_run_command(
                 config_base_dir,
                 hooks_override,
                 auth_binding.clone(),
+                manifest,
+                persistence,
+                &storage_scope,
                 scope,
             )
             .await
@@ -7645,6 +7665,7 @@ async fn handle_storage_command(command: &StorageCommands, cli: &Cli) -> anyhow:
         StorageCommands::Doctor { json, roots } => handle_storage_doctor(cli, *json, roots).await,
         StorageCommands::Migrate {
             apply,
+            bridge_pre_0_8_10,
             json,
             roots,
             adopt_root,
@@ -7653,6 +7674,7 @@ async fn handle_storage_command(command: &StorageCommands, cli: &Cli) -> anyhow:
             handle_storage_migrate(
                 cli,
                 *apply,
+                *bridge_pre_0_8_10,
                 *json,
                 roots,
                 adopt_root.as_deref(),
@@ -7757,11 +7779,15 @@ async fn handle_storage_doctor(
 async fn handle_storage_migrate(
     cli: &Cli,
     apply: bool,
+    bridge_pre_0_8_10: bool,
     json: bool,
     extra_roots: &[PathBuf],
     adopt_root: Option<&Path>,
     fence_wait_secs: u64,
 ) -> anyhow::Result<()> {
+    if bridge_pre_0_8_10 && !apply {
+        anyhow::bail!("--bridge-pre-0-8-10 requires --apply");
+    }
     if adopt_root.is_some() && !apply {
         anyhow::bail!("--adopt-root requires --apply (split-brain resolution archives a copy)");
     }
@@ -7772,6 +7798,7 @@ async fn handle_storage_migrate(
         roots: storage_sweep_roots(cli, extra_roots),
         realm_filter: storage_realm_filter(cli)?,
         apply,
+        bridge_pre_0_8_10,
         adopt_root: adopt_root.map(Path::to_path_buf),
         fence_wait: Duration::from_secs(fence_wait_secs),
         // Ambient home resolution stays in this bootstrap module (the
@@ -8765,6 +8792,110 @@ async fn create_persistence_bundle(
     _scope: &RuntimeScope,
 ) -> anyhow::Result<(meerkat_store::RealmManifest, PersistenceBundle)> {
     anyhow::bail!("rkat built without session-store support")
+}
+
+struct PreparedFreshRunPersistence {
+    storage_scope: RuntimeScope,
+    manifest: meerkat_store::RealmManifest,
+    persistence: PersistenceBundle,
+}
+
+#[cfg(feature = "session-store")]
+fn workspace_fresh_run_storage_fallback_scope(
+    scope: &RuntimeScope,
+) -> anyhow::Result<Option<RuntimeScope>> {
+    if scope.origin_hint != RealmOrigin::Workspace {
+        return Ok(None);
+    }
+
+    let mut fallback = scope.clone();
+    let generated_realm = meerkat_core::connection::RealmId::parse(
+        &meerkat_core::runtime_bootstrap::generate_realm_id(),
+    )
+    .map_err(|error| anyhow::anyhow!("failed to generate fallback realm identity: {error}"))?;
+    fallback.locator.realm = generated_realm;
+    fallback.backend_hint = Some(RealmBackend::Sqlite);
+    fallback.origin_hint = RealmOrigin::Generated;
+    Ok(Some(fallback))
+}
+
+async fn prepare_fresh_run_persistence(
+    scope: &RuntimeScope,
+) -> anyhow::Result<PreparedFreshRunPersistence> {
+    match create_persistence_bundle(scope).await {
+        Ok((manifest, persistence)) => Ok(PreparedFreshRunPersistence {
+            storage_scope: scope.clone(),
+            manifest,
+            persistence,
+        }),
+        Err(original_error) => {
+            #[cfg(feature = "session-store")]
+            {
+                let Some(fallback_scope) = workspace_fresh_run_storage_fallback_scope(scope)?
+                else {
+                    return Err(original_error);
+                };
+                let original_realm = scope.locator.realm.as_str();
+                let fallback_realm = fallback_scope.locator.realm.as_str();
+                let (manifest, persistence) = create_persistence_bundle(&fallback_scope)
+                    .await
+                    .map_err(|fallback_error| {
+                        anyhow::anyhow!(
+                            "workspace realm '{original_realm}' storage failed to open ({original_error}); generated durable SQLite fallback realm '{fallback_realm}' also failed to open: {fallback_error}"
+                        )
+                })?;
+                eprintln!(
+                    "Warning: historical sessions from original workspace realm '{original_realm}' were not loaded into this fresh run because its storage could not be fully opened: {original_error}"
+                );
+                eprintln!(
+                    "Warning: fresh-run storage fell back to generated realm '{fallback_realm}' as durable SQLite under state root '{}'; workspace configuration and auth policy remain in force.",
+                    fallback_scope.locator.state_root.display()
+                );
+                eprintln!(
+                    "Warning: the compatibility bridge was not run automatically; recover historical sessions explicitly with: rkat --state-root '{}' --realm '{original_realm}' storage migrate --apply --bridge-pre-0-8-10",
+                    scope.locator.state_root.display()
+                );
+                Ok(PreparedFreshRunPersistence {
+                    storage_scope: fallback_scope,
+                    manifest,
+                    persistence,
+                })
+            }
+            #[cfg(not(feature = "session-store"))]
+            {
+                Err(original_error)
+            }
+        }
+    }
+}
+
+fn project_workspace_auth_chain_onto_fallback(
+    config: &mut Config,
+    workspace_scope: &RuntimeScope,
+    storage_scope: &RuntimeScope,
+) {
+    if workspace_scope.locator.realm == storage_scope.locator.realm {
+        return;
+    }
+
+    // The generated realm is persistence identity, not a new configuration
+    // authority. Project an empty in-memory head onto the original workspace
+    // connection chain so every implicit provider consumer (primary, model
+    // fallback, self-hosted, image generation, and web search) retains the
+    // workspace -> ancestors -> global -> env candidate order. If the
+    // workspace has no realm section, an unparented empty head preserves the
+    // existing global/env behavior instead of inventing a missing parent.
+    let parent = config
+        .realm
+        .contains_key(workspace_scope.locator.realm.as_str())
+        .then(|| workspace_scope.locator.realm.clone());
+    config.realm.insert(
+        storage_scope.locator.realm.as_str().to_string(),
+        meerkat_core::RealmConfigSection {
+            parent,
+            ..Default::default()
+        },
+    );
 }
 
 fn realm_store_path(manifest: &meerkat_store::RealmManifest, scope: &RuntimeScope) -> PathBuf {
@@ -10502,6 +10633,9 @@ async fn run_agent(
     config_base_dir: PathBuf,
     hooks_override: HookRunOverrides,
     auth_binding: Option<AuthBindingRef>,
+    manifest: meerkat_store::RealmManifest,
+    persistence: PersistenceBundle,
+    storage_scope: &RuntimeScope,
     scope: &RuntimeScope,
 ) -> anyhow::Result<()> {
     #[cfg(not(feature = "session-store"))]
@@ -10544,6 +10678,9 @@ async fn run_agent(
             config_base_dir,
             hooks_override,
             auth_binding,
+            manifest,
+            persistence,
+            storage_scope,
             scope,
         );
         anyhow::bail!("rkat built without session-store support");
@@ -10598,14 +10735,13 @@ async fn run_agent(
             find_project_root(&cwd).unwrap_or(cwd)
         });
 
-        let (manifest, persistence) = create_persistence_bundle(scope).await?;
         let session_store = persistence.session_store();
-        let mut factory = AgentFactory::new(realm_store_path(&manifest, scope))
+        let mut factory = AgentFactory::new(realm_store_path(&manifest, storage_scope))
             .session_store(session_store)
             .runtime_root(
                 meerkat_store::realm_paths_in(
-                    &scope.locator.state_root,
-                    scope.locator.realm.as_str(),
+                    &storage_scope.locator.state_root,
+                    storage_scope.locator.realm.as_str(),
                 )
                 .root,
             )
@@ -10630,7 +10766,7 @@ async fn run_agent(
             .map_or_else(|| "(none)".to_string(), |path| path.display().to_string());
         tracing::info!(
             "Using realm: {}, context root: {}, realm root: {}",
-            scope.locator.realm.as_str(),
+            storage_scope.locator.realm.as_str(),
             context_root,
             config_base_dir.display()
         );
@@ -10659,7 +10795,7 @@ async fn run_agent(
             Some(Arc::new(ScheduleToolDispatcher::new(schedule_service))
                 as Arc<dyn AgentToolDispatcher>);
         let default_workgraph_tools = Some(Arc::new(meerkat::WorkGraphToolSurface::new(
-            scoped_workgraph_service(scope, &persistence),
+            scoped_workgraph_service(storage_scope, &persistence),
         )) as Arc<dyn AgentToolDispatcher>);
         let (service, runtime_adapter) = build_cli_runtime_backed_service_with_defaults(
             factory,
@@ -10682,13 +10818,13 @@ async fn run_agent(
         #[cfg(feature = "mob")]
         let run_mob_tools = if effective_mob {
             let mob_surface = get_or_create_cli_persistent_surface_from_bundle(
-                scope,
+                storage_scope,
                 config.clone(),
                 manifest.clone(),
                 persistence.clone(),
             )
             .await?;
-            Some(prepare_run_mob_tools_from_surface(scope, mob_surface).await?)
+            Some(prepare_run_mob_tools_from_surface(storage_scope, mob_surface).await?)
         } else {
             None
         };
@@ -10774,7 +10910,7 @@ async fn run_agent(
             workgraph_tools: None,
             mob_tool_authority_context: None,
             preload_skills,
-            realm_id: Some(scope.locator.realm.clone()),
+            realm_id: Some(storage_scope.locator.realm.clone()),
             instance_id: scope.instance_id.clone(),
             backend: meerkat_core::RecoveryBackendKind::parse(manifest.backend.as_str()),
             config_generation: None,
@@ -10874,7 +11010,7 @@ async fn run_agent(
                 persistent_service: Some(service.clone()),
                 session_id: session_id.clone(),
                 runtime_adapter: runtime_adapter.clone(),
-                workgraph_service: Some(scoped_workgraph_service(scope, &persistence)),
+                workgraph_service: Some(scoped_workgraph_service(storage_scope, &persistence)),
                 event_tx: output_pipeline.event_sender(),
             });
             runtime_adapter
@@ -10949,7 +11085,7 @@ async fn run_agent(
                     completion_outcome_to_cli_runtime_turn_result(
                         completion,
                         &session_id,
-                        &scope.locator.realm,
+                        &storage_scope.locator.realm,
                         true,
                     )
                 }
@@ -11005,7 +11141,15 @@ async fn run_agent(
         // Output the result
         match result {
             CliRuntimeTurnResult::Completed(result) => {
-                print_completed_run_result(*result, &output, stream, scope, false).await?;
+                let storage_fell_back = storage_scope.locator.realm != scope.locator.realm;
+                print_completed_run_result(
+                    *result,
+                    &output,
+                    stream,
+                    storage_scope,
+                    storage_fell_back,
+                )
+                .await?;
             }
             CliRuntimeTurnResult::CallbackPending(pending) => {
                 print_cli_callback_pending(&pending, Some(output.format.as_str()))?;
@@ -17242,6 +17386,161 @@ mod tests {
         }
     }
 
+    #[test]
+    fn fresh_run_storage_fallback_is_workspace_only_and_forces_durable_sqlite() {
+        let state_root = tempfile::tempdir().expect("tempdir");
+        let mut workspace_scope = test_scope(state_root.path().to_path_buf(), "ws-original");
+        workspace_scope.origin_hint = RealmOrigin::Workspace;
+
+        let fallback = workspace_fresh_run_storage_fallback_scope(&workspace_scope)
+            .expect("fallback scope resolution")
+            .expect("workspace fresh run is eligible");
+        assert_ne!(fallback.locator.realm, workspace_scope.locator.realm);
+        assert!(fallback.locator.realm.as_str().starts_with("realm-"));
+        assert_eq!(
+            fallback.locator.state_root,
+            workspace_scope.locator.state_root
+        );
+        assert_eq!(
+            fallback.layout.state_root(),
+            workspace_scope.layout.state_root()
+        );
+        assert_eq!(fallback.backend_hint, Some(RealmBackend::Sqlite));
+        assert_eq!(fallback.origin_hint, RealmOrigin::Generated);
+
+        let explicit_scope = test_scope(state_root.path().to_path_buf(), "explicit-realm");
+        assert!(
+            workspace_fresh_run_storage_fallback_scope(&explicit_scope)
+                .expect("explicit scope check")
+                .is_none(),
+            "an explicit --realm scope must remain fail-closed"
+        );
+
+        let mut isolated_scope = test_scope(state_root.path().to_path_buf(), "isolated-realm");
+        isolated_scope.origin_hint = RealmOrigin::Generated;
+        assert!(
+            workspace_fresh_run_storage_fallback_scope(&isolated_scope)
+                .expect("isolated scope check")
+                .is_none(),
+            "an --isolated scope must remain fail-closed"
+        );
+    }
+
+    fn test_openai_env_realm_section(
+        binding_id: &str,
+        env_name: &str,
+    ) -> meerkat_core::RealmConfigSection {
+        let mut section = meerkat_core::RealmConfigSection {
+            default_binding: Some(binding_id.to_string()),
+            ..Default::default()
+        };
+        section.backend.insert(
+            "openai_api".to_string(),
+            meerkat_core::BackendProfileConfig {
+                provider: "openai".to_string(),
+                backend_kind: "openai_api".to_string(),
+                base_url: None,
+                options: serde_json::Value::Null,
+            },
+        );
+        section.auth.insert(
+            "openai_env".to_string(),
+            meerkat_core::AuthProfileConfig {
+                provider: "openai".to_string(),
+                auth_method: "api_key".to_string(),
+                source: meerkat_core::CredentialSourceSpec::Env {
+                    env: env_name.to_string(),
+                    fallback: Vec::new(),
+                },
+                constraints: Default::default(),
+                metadata_defaults: Default::default(),
+            },
+        );
+        section.binding.insert(
+            binding_id.to_string(),
+            meerkat_core::ProviderBindingConfig {
+                backend_profile: "openai_api".to_string(),
+                auth_profile: "openai_env".to_string(),
+                default_model: None,
+                policy: Default::default(),
+                provider_default: true,
+            },
+        );
+        section
+    }
+
+    #[test]
+    fn fallback_auth_projection_preserves_workspace_global_env_candidate_order() {
+        let state_root = tempfile::tempdir().expect("tempdir");
+        let mut workspace_scope = test_scope(state_root.path().to_path_buf(), "ws-original");
+        workspace_scope.origin_hint = RealmOrigin::Workspace;
+        let fallback_scope = workspace_fresh_run_storage_fallback_scope(&workspace_scope)
+            .expect("fallback scope resolution")
+            .expect("workspace fresh run is eligible");
+        let mut config = Config::default();
+        config.realm.insert(
+            workspace_scope.locator.realm.as_str().to_string(),
+            test_openai_env_realm_section("workspace_openai", "WORKSPACE_OPENAI_KEY"),
+        );
+        config.realm.insert(
+            "global".to_string(),
+            test_openai_env_realm_section("global_openai", "GLOBAL_OPENAI_KEY"),
+        );
+
+        project_workspace_auth_chain_onto_fallback(&mut config, &workspace_scope, &fallback_scope);
+        assert_eq!(
+            config.realm[fallback_scope.locator.realm.as_str()].parent,
+            Some(workspace_scope.locator.realm.clone())
+        );
+        let candidates = meerkat_core::resolve_auth_binding_candidates_for_provider(
+            &config,
+            meerkat_core::Provider::OpenAI,
+            None,
+            Some(&fallback_scope.locator.realm),
+            true,
+        )
+        .expect("fallback auth candidates resolve");
+        let owners = candidates
+            .iter()
+            .map(|candidate| candidate.auth_binding.realm.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(owners, ["ws-original", "global", "env_default"]);
+    }
+
+    #[test]
+    fn fallback_auth_projection_without_workspace_section_preserves_global_then_env() {
+        let state_root = tempfile::tempdir().expect("tempdir");
+        let mut workspace_scope = test_scope(state_root.path().to_path_buf(), "ws-absent");
+        workspace_scope.origin_hint = RealmOrigin::Workspace;
+        let fallback_scope = workspace_fresh_run_storage_fallback_scope(&workspace_scope)
+            .expect("fallback scope resolution")
+            .expect("workspace fresh run is eligible");
+        let mut config = Config::default();
+        config.realm.insert(
+            "global".to_string(),
+            test_openai_env_realm_section("global_openai", "GLOBAL_OPENAI_KEY"),
+        );
+
+        project_workspace_auth_chain_onto_fallback(&mut config, &workspace_scope, &fallback_scope);
+        assert_eq!(
+            config.realm[fallback_scope.locator.realm.as_str()].parent,
+            None
+        );
+        let candidates = meerkat_core::resolve_auth_binding_candidates_for_provider(
+            &config,
+            meerkat_core::Provider::OpenAI,
+            None,
+            Some(&fallback_scope.locator.realm),
+            true,
+        )
+        .expect("fallback auth candidates resolve");
+        let owners = candidates
+            .iter()
+            .map(|candidate| candidate.auth_binding.realm.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(owners, ["global", "env_default"]);
+    }
+
     #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
     fn test_auth_refresh_coordinator() -> Arc<dyn meerkat_providers::auth_store::RefreshCoordinator>
     {
@@ -20994,6 +21293,44 @@ default_model = "gemma"
         let run = Cli::try_parse_from(["rkat", "--isolated", "run", "hello"])
             .expect("--isolated run parses");
         assert!(storage_global_usage_conflict(&run).is_none());
+    }
+
+    #[test]
+    fn test_storage_pre_floor_bridge_requires_explicit_apply() {
+        let error = match Cli::try_parse_from(["rkat", "storage", "migrate", "--bridge-pre-0-8-10"])
+        {
+            Err(error) => error,
+            Ok(_) => panic!("the pre-floor bridge must not run during a dry-run"),
+        };
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+        let rendered = error.to_string();
+        assert!(rendered.contains("--apply"), "{rendered}");
+
+        let cli = Cli::try_parse_from([
+            "rkat",
+            "storage",
+            "migrate",
+            "--apply",
+            "--bridge-pre-0-8-10",
+        ])
+        .expect("the explicit fenced bridge invocation parses");
+        match cli.command.expect("storage command") {
+            Commands::Storage {
+                command:
+                    StorageCommands::Migrate {
+                        apply,
+                        bridge_pre_0_8_10,
+                        ..
+                    },
+            } => {
+                assert!(apply);
+                assert!(bridge_pre_0_8_10);
+            }
+            _ => unreachable!("expected storage migrate command"),
+        }
     }
 
     #[test]

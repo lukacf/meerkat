@@ -188,6 +188,16 @@ Sessions are realm-scoped.
   root before writing the manifest, so surfaces with different default
   roots racing the same realm converge on one copy instead of minting
   split-brain twins.
+- A fresh prompt-first CLI run or `rkat help` whose workspace-derived realm
+  cannot open may isolate storage into a newly generated durable SQLite realm
+  under the same resolved state root. No historical session from the failed
+  realm is loaded into the fresh run, and the compatibility bridge is never
+  invoked automatically. An ordinary supported initialization or migration
+  may have completed before a later store refused. The original workspace
+  config and auth/tool policy still govern the run. Explicit realms, isolated
+  runs, resumes, and session commands never take this fallback. Historical
+  session access requires the explicit fenced pre-0.8.10 bridge; there is no
+  in-memory compatibility fallback.
 
 ## Compaction contract
 
@@ -249,7 +259,17 @@ released document is accepted only when the same store transaction proves the
 released physical schema and exact source row or blob identity. Either path
 strips the historical proof fields and installs current store-issued authority;
 ordinary v3 reads never enter the importer, and no current write emits the old
-fields. State older than 0.8.10 must first be upgraded with an older binary.
+fields.
+
+State older than 0.8.10 in a SQLite realm is admitted only through the explicit
+offline command `rkat ... storage migrate --apply --bridge-pre-0-8-10`.
+JSONL and memory realms are rejected before any database is mutated. This is a
+frozen, fail-closed pre-floor importer: under the realm maintenance fence it
+authenticates supported historical schema and row shapes before installing
+current representation and authority. Ordinary store opens and v3 reads remain
+strict and never enter the bridge. The maintenance transaction preserves
+queued and nonterminal input rows without scheduling or replaying them. A later
+session activation follows normal recovery.
 
 ### Durable-tail recovery
 

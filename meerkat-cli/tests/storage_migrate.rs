@@ -29,13 +29,21 @@ const SESSIONS_DDL: &str = "CREATE TABLE sessions (
 )";
 
 fn write_manifest(state_root: &Path, realm_id: &str) -> meerkat_store::RealmPaths {
+    write_manifest_with_backend(state_root, realm_id, "sqlite")
+}
+
+fn write_manifest_with_backend(
+    state_root: &Path,
+    realm_id: &str,
+    backend: &str,
+) -> meerkat_store::RealmPaths {
     let paths = meerkat_store::realm_paths_in(state_root, realm_id);
     std::fs::create_dir_all(&paths.root).unwrap();
     std::fs::write(
         &paths.manifest_path,
         serde_json::to_vec_pretty(&serde_json::json!({
             "realm_id": realm_id,
-            "backend": "sqlite",
+            "backend": backend,
             "origin": "explicit",
             "created_at": "0",
         }))
@@ -64,6 +72,192 @@ fn create_unledgered_owned_fixture_realm(state_root: &Path, realm_id: &str) -> P
     )));
     insert_session(&conn, &session);
     paths.sessions_sqlite_path
+}
+
+struct ExactPreFloorFixture {
+    database: PathBuf,
+    session_id: String,
+    session_source: Vec<u8>,
+    runtime_id: String,
+    input_id: String,
+    input_source: Vec<u8>,
+}
+
+/// Exact pre-floor session-store and runtime-store v1 schemas in their
+/// shared database. The valid variant carries a frozen released-v2 Session
+/// and one unversioned queued text prompt. The malformed variant proves that
+/// the explicit bridge rolls back DDL, row conversion, and the ledger stamp.
+fn create_exact_pre_floor_session_realm(
+    state_root: &Path,
+    realm_id: &str,
+    malformed: bool,
+) -> ExactPreFloorFixture {
+    let paths = write_manifest(state_root, realm_id);
+    let mut conn = Connection::open(&paths.sessions_sqlite_path).unwrap();
+    let tx = conn.transaction().unwrap();
+    let session_v1 = meerkat_store::sqlite_store::SESSION_STORE_DOMAIN
+        .migrations
+        .first()
+        .expect("session v1 migration");
+    (session_v1.apply)(&tx).unwrap();
+    let runtime_v1 = meerkat_runtime::store::sqlite::RUNTIME_STORE_DOMAIN
+        .migrations
+        .first()
+        .expect("runtime v1 migration");
+    (runtime_v1.apply)(&tx).unwrap();
+    tx.commit().unwrap();
+
+    let mut session = Session::new();
+    session.push(Message::User(UserMessage::text(
+        "exact pre-floor session fixture",
+    )));
+    let session_id = session.id().to_string();
+    let mut document = serde_json::to_value(&session).unwrap();
+    document["version"] = serde_json::json!(2);
+    if malformed {
+        document["messages"] = serde_json::json!("not-an-array");
+    } else {
+        let _released_session =
+            meerkat_core::import_released_0810_session(&serde_json::to_vec(&document).unwrap())
+                .expect("fixture must be an exact released-v2 session document");
+    }
+    let source = serde_json::to_vec(&document).unwrap();
+    conn.execute(
+        "INSERT INTO sessions (session_id, created_at_ms, updated_at_ms, message_count, \
+         total_tokens, metadata_json, session_json) VALUES (?1, 0, 0, 1, 0, ?2, ?3)",
+        rusqlite::params![
+            &session_id,
+            serde_json::to_string(session.metadata()).unwrap(),
+            &source
+        ],
+    )
+    .unwrap();
+
+    // Frozen pre-v0.8.10 wire bytes. This fixture is deliberately authored
+    // without today's StoredInputState serializer so current defaults or
+    // field additions cannot make the historical bridge test pass by drift.
+    let input_id = "019e20e6-b011-7000-8000-000000000001".to_string();
+    let legacy = serde_json::json!({
+        "input_id": input_id,
+        "current_state": "queued",
+        "policy": {
+            "version": 1,
+            "decision": {
+                "apply_mode": "stage_run_start",
+                "wake_mode": "wake_if_idle",
+                "queue_mode": "fifo",
+                "consume_point": "on_run_complete",
+                "drain_policy": "queue_next_turn",
+                "routing_disposition": "queue",
+                "record_transcript": true,
+                "emit_operator_content": true,
+                "policy_version": 1
+            }
+        },
+        "runtime_semantics": {
+            "boundary": "run_start",
+            "execution_kind": "content_turn",
+            "peer_response_terminal_apply_intent": null
+        },
+        "durability": "durable",
+        "idempotency_key": "queued-pre-floor-idempotency",
+        "attempt_count": 0,
+        "recovery_count": 0,
+        "history": [{
+            "timestamp": "2026-05-13T10:00:00.000200Z",
+            "from": "accepted",
+            "to": "queued",
+            "reason": "QueueAccepted"
+        }],
+        "persisted_input": {
+            "input_type": "prompt",
+            "header": {
+                "id": input_id,
+                "timestamp": "2026-05-13T10:00:00.000000Z",
+                "source": { "type": "operator" },
+                "durability": "durable",
+                "visibility": {
+                    "transcript_eligible": true,
+                    "operator_eligible": true
+                },
+                "idempotency_key": "queued-pre-floor-idempotency",
+                "correlation_id": "019e20e6-b011-7000-8000-100000000001"
+            },
+            "text": "queued pre-floor prompt",
+            "turn_metadata": {}
+        },
+        "created_at": "2026-05-13T10:00:00.000100Z",
+        "updated_at": "2026-05-13T10:00:00.000200Z"
+    });
+    assert!(legacy.get("stored_input_state_version").is_none());
+    assert!(legacy.get("admission_sequence").is_none());
+    assert!(legacy.get("recovery_lane").is_none());
+    assert!(legacy["persisted_input"].get("blocks").is_none());
+    assert_eq!(
+        legacy["input_id"],
+        legacy["persisted_input"]["header"]["id"]
+    );
+    assert_eq!(
+        legacy["durability"],
+        legacy["persisted_input"]["header"]["durability"]
+    );
+    assert_eq!(
+        legacy["idempotency_key"],
+        legacy["persisted_input"]["header"]["idempotency_key"]
+    );
+    assert_eq!(
+        legacy["policy"]["version"],
+        legacy["policy"]["decision"]["policy_version"]
+    );
+    assert_eq!(legacy["policy"]["decision"]["routing_disposition"], "queue");
+    assert_eq!(legacy["runtime_semantics"]["boundary"], "run_start");
+    assert_eq!(
+        legacy["runtime_semantics"]["execution_kind"],
+        "content_turn"
+    );
+    assert_eq!(legacy["history"].as_array().unwrap().len(), 1);
+    assert_eq!(legacy["history"][0]["from"], "accepted");
+    assert_eq!(legacy["history"][0]["to"], "queued");
+    assert_eq!(legacy["history"][0]["reason"], "QueueAccepted");
+    let input_source = serde_json::to_vec(&legacy).unwrap();
+    let runtime_id =
+        meerkat_runtime::identifiers::LogicalRuntimeId::for_session(session.id()).to_string();
+    let runtime_state_source = serde_json::to_vec(&serde_json::json!({
+        "record_version": 1,
+        "runtime_state": "idle",
+        "binding": {
+            "agent_runtime_id": null,
+            "fence_token": null,
+            "runtime_generation": null,
+            "runtime_epoch_id": null
+        }
+    }))
+    .unwrap();
+    conn.execute(
+        "INSERT INTO runtime_states (runtime_id, runtime_state_json) VALUES (?1, ?2)",
+        rusqlite::params![&runtime_id, &runtime_state_source],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO runtime_session_snapshots (runtime_id, session_snapshot) VALUES (?1, ?2)",
+        rusqlite::params![&runtime_id, &source],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO runtime_input_states (runtime_id, input_id, state_json) \
+         VALUES (?1, ?2, ?3)",
+        rusqlite::params![&runtime_id, &input_id, &input_source],
+    )
+    .unwrap();
+
+    ExactPreFloorFixture {
+        database: paths.sessions_sqlite_path,
+        session_id,
+        session_source: source,
+        runtime_id,
+        input_id,
+        input_source,
+    }
 }
 
 fn insert_session(conn: &Connection, session: &Session) {
@@ -232,6 +426,546 @@ fn migrate_refuses_unledgered_owned_sessions_without_mutation() {
         .unwrap(),
         0,
         "refusal created the ledger"
+    );
+}
+
+#[test]
+fn fresh_workspace_runs_use_durable_sqlite_fallback_without_touching_legacy_realm() {
+    let temp = TempDir::new().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let state_root = temp.path().join("realms");
+    let workspace_realm = meerkat_core::derive_workspace_realm_id(&project);
+    let legacy_database = create_unledgered_owned_fixture_realm(&state_root, &workspace_realm);
+    let legacy_before = std::fs::read(&legacy_database).unwrap();
+    let state_root_arg = state_root.to_str().unwrap();
+
+    let invocations = [
+        (
+            vec![
+                "--state-root",
+                state_root_arg,
+                "fresh fallback prompt",
+                "--json",
+            ],
+            true,
+        ),
+        (
+            vec![
+                "--state-root",
+                state_root_arg,
+                "help",
+                "Give me a WorkGraph example",
+                "--json",
+            ],
+            true,
+        ),
+        (
+            vec!["--state-root", state_root_arg, "plain fallback prompt"],
+            false,
+        ),
+        (
+            vec![
+                "--state-root",
+                state_root_arg,
+                "help",
+                "Give me a plain WorkGraph example",
+            ],
+            false,
+        ),
+    ];
+    let mut fallback_realms = Vec::new();
+    for (index, (args, json_output)) in invocations.iter().enumerate() {
+        let output = run_rkat(&temp, args);
+        assert_success(&output, &format!("fresh fallback invocation {index}"));
+        let warning = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            warning.contains(&format!(
+                "historical sessions from original workspace realm '{workspace_realm}' were not loaded into this fresh run"
+            )),
+            "warning did not identify the original realm excluded from the fresh run:\n{warning}"
+        );
+        assert!(
+            warning.contains("fresh-run storage fell back to generated realm")
+                && warning.contains("durable SQLite")
+                && warning.contains("workspace configuration and auth policy remain in force"),
+            "warning did not state the fallback durability and config boundary:\n{warning}"
+        );
+        assert!(
+            warning.contains(&format!(
+                "rkat --state-root '{}' --realm '{workspace_realm}' storage migrate --apply --bridge-pre-0-8-10",
+                state_root.display()
+            )),
+            "warning did not provide the explicit recovery command:\n{warning}"
+        );
+
+        let (session_ref, reported_session_id) = if *json_output {
+            let result = parse_json(&output);
+            (
+                result["session_ref"]
+                    .as_str()
+                    .expect("fresh fallback JSON must expose a realm-qualified session ref")
+                    .to_string(),
+                result["session_id"]
+                    .as_str()
+                    .expect("fresh fallback JSON must expose a session id")
+                    .to_string(),
+            )
+        } else {
+            let summary = warning
+                .lines()
+                .find(|line| line.starts_with("[Session: ") && line.contains(" | Ref: "))
+                .expect("plain fallback output must print a full realm-qualified session ref");
+            let reported_session_id = summary
+                .strip_prefix("[Session: ")
+                .and_then(|rest| rest.split_once(" | Ref: "))
+                .map(|(session_id, _)| session_id.to_string())
+                .expect("plain fallback summary must expose the full session id");
+            let session_ref = summary
+                .split_once(" | Ref: ")
+                .and_then(|(_, rest)| rest.split_once(" | "))
+                .map(|(session_ref, _)| session_ref.to_string())
+                .expect("plain fallback summary must expose the session ref");
+            (session_ref, reported_session_id)
+        };
+        let (fallback_realm, session_id) = session_ref
+            .split_once(':')
+            .expect("session ref must contain realm and session identity");
+        assert!(fallback_realm.starts_with("realm-"), "{session_ref}");
+        assert_ne!(fallback_realm, workspace_realm, "{session_ref}");
+        assert_eq!(reported_session_id, session_id, "{session_ref}");
+
+        let fallback_paths = meerkat_store::realm_paths_in(&state_root, fallback_realm);
+        let manifest: meerkat_store::RealmManifest = serde_json::from_slice(
+            &std::fs::read(&fallback_paths.manifest_path).expect("fallback manifest"),
+        )
+        .expect("valid fallback manifest");
+        assert_eq!(manifest.backend, meerkat_store::RealmBackend::Sqlite);
+        assert_eq!(manifest.origin, meerkat_store::RealmOrigin::Generated);
+        assert_eq!(manifest.realm.as_str(), fallback_realm);
+
+        let list = run_rkat(
+            &temp,
+            &[
+                "--state-root",
+                state_root_arg,
+                "--realm",
+                fallback_realm,
+                "session",
+                "list",
+            ],
+        );
+        assert_success(&list, "list session in generated fallback realm");
+        assert!(
+            String::from_utf8_lossy(&list.stdout).contains(session_id),
+            "fallback session was not durable\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&list.stdout),
+            String::from_utf8_lossy(&list.stderr)
+        );
+        fallback_realms.push(fallback_realm.to_string());
+        assert_eq!(
+            std::fs::read(&legacy_database).unwrap(),
+            legacy_before,
+            "fresh fallback invocation mutated the failed workspace database"
+        );
+    }
+    assert_eq!(
+        fallback_realms
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        invocations.len(),
+        "each failed fresh open must mint a new isolated storage realm"
+    );
+
+    let explicit = run_rkat(
+        &temp,
+        &[
+            "--state-root",
+            state_root_arg,
+            "--realm",
+            &workspace_realm,
+            "explicit realms stay strict",
+            "--json",
+        ],
+    );
+    assert_eq!(explicit.status.code(), Some(1));
+    let explicit_stderr = String::from_utf8_lossy(&explicit.stderr);
+    assert!(
+        explicit_stderr.contains("Failed to open realm persistence backend"),
+        "explicit realm did not report its original open failure:\n{explicit_stderr}"
+    );
+    assert!(
+        !explicit_stderr.contains("fresh-run storage fell back"),
+        "explicit --realm must never fall back:\n{explicit_stderr}"
+    );
+    assert_eq!(std::fs::read(&legacy_database).unwrap(), legacy_before);
+
+    let strict_workspace_invocations = [
+        vec![
+            "--state-root",
+            state_root_arg,
+            "run",
+            "--resume",
+            "last",
+            "resume stays strict",
+            "--json",
+        ],
+        vec!["--state-root", state_root_arg, "session", "list"],
+    ];
+    for args in &strict_workspace_invocations {
+        let output = run_rkat(&temp, args);
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "resume and session commands must fail closed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !String::from_utf8_lossy(&output.stderr).contains("fresh-run storage fell back"),
+            "resume and session commands must never enter fresh-run fallback"
+        );
+        assert_eq!(std::fs::read(&legacy_database).unwrap(), legacy_before);
+    }
+}
+
+#[test]
+fn explicit_pre_floor_bridge_migrates_then_reopens_idempotently() {
+    let temp = TempDir::new().unwrap();
+    let state_root = temp.path().join("realms");
+    let fixture = create_exact_pre_floor_session_realm(&state_root, "pre-floor", false);
+
+    let apply = run_rkat(
+        &temp,
+        &[
+            "--state-root",
+            state_root.to_str().unwrap(),
+            "--realm",
+            "pre-floor",
+            "storage",
+            "migrate",
+            "--apply",
+            "--bridge-pre-0-8-10",
+            "--json",
+        ],
+    );
+    assert_success(&apply, "explicit pre-floor bridge");
+    let report = parse_json(&apply);
+    let realms = report["realms"].as_array().expect("realms array");
+    assert_eq!(realms.len(), 1, "{report:#}");
+    assert!(
+        realms[0]["notes"]
+            .as_array()
+            .expect("notes")
+            .iter()
+            .any(|note| note.as_str().is_some_and(|note| {
+                note.contains("pre-v0.8.10 bridge") && note.contains("session-store")
+            })),
+        "{report:#}"
+    );
+    assert!(
+        realms[0]["notes"]
+            .as_array()
+            .expect("notes")
+            .iter()
+            .any(|note| note.as_str().is_some_and(|note| {
+                note.contains("pre-v0.8.10 bridge")
+                    && note.contains("runtime-store")
+                    && note.contains("rewrote 1 legacy durable payload row(s)")
+            })),
+        "{report:#}"
+    );
+    let session_ledger = ledger_entries(&realms[0], "session-store", "sessions.sqlite3");
+    assert_eq!(session_ledger.len(), 1, "{report:#}");
+    assert_eq!(session_ledger[0]["action"], "stamped", "{report:#}");
+    assert_eq!(session_ledger[0]["after"], 3, "{report:#}");
+    let runtime_ledger = ledger_entries(&realms[0], "runtime-store", "sessions.sqlite3");
+    assert_eq!(runtime_ledger.len(), 1, "{report:#}");
+    assert_eq!(runtime_ledger[0]["action"], "stamped", "{report:#}");
+    assert_eq!(runtime_ledger[0]["after"], 2, "{report:#}");
+
+    let list = run_rkat(
+        &temp,
+        &[
+            "--state-root",
+            state_root.to_str().unwrap(),
+            "--realm",
+            "pre-floor",
+            "session",
+            "list",
+        ],
+    );
+    assert_success(&list, "strict session list after pre-floor bridge");
+    assert!(
+        String::from_utf8_lossy(&list.stdout).contains(&fixture.session_id),
+        "session list omitted imported session\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&list.stdout),
+        String::from_utf8_lossy(&list.stderr)
+    );
+
+    let conn = Connection::open(&fixture.database).unwrap();
+    let queued_bytes: Vec<u8> = conn
+        .query_row(
+            "SELECT state_json FROM runtime_input_states \
+             WHERE runtime_id = ?1 AND input_id = ?2",
+            rusqlite::params![&fixture.runtime_id, &fixture.input_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_ne!(
+        queued_bytes, fixture.input_source,
+        "bridge left the legacy unversioned queued payload untouched"
+    );
+    let queued: serde_json::Value = serde_json::from_slice(&queued_bytes).unwrap();
+    assert_eq!(queued["current_state"], "queued", "{queued:#}");
+    assert_eq!(queued["attempt_count"], 0, "{queued:#}");
+    assert!(
+        queued["admission_sequence"].as_u64().is_some(),
+        "{queued:#}"
+    );
+    assert_eq!(queued["recovery_lane"], "queue", "{queued:#}");
+    assert!(queued["terminal_outcome"].is_null(), "{queued:#}");
+    assert_eq!(
+        queued["persisted_input"]["content"], "queued pre-floor prompt",
+        "{queued:#}"
+    );
+    assert!(
+        queued["persisted_input"].get("text").is_none(),
+        "{queued:#}"
+    );
+    assert!(
+        queued["stored_input_state_version"].as_u64().is_some(),
+        "{queued:#}"
+    );
+    drop(conn);
+
+    let again = run_rkat(
+        &temp,
+        &[
+            "--state-root",
+            state_root.to_str().unwrap(),
+            "--realm",
+            "pre-floor",
+            "storage",
+            "migrate",
+            "--apply",
+            "--bridge-pre-0-8-10",
+            "--json",
+        ],
+    );
+    assert_success(&again, "idempotent pre-floor bridge rerun");
+    let report = parse_json(&again);
+    let realm = &report["realms"][0];
+    assert!(
+        realm["notes"]
+            .as_array()
+            .expect("notes")
+            .iter()
+            .any(|note| note
+                .as_str()
+                .is_some_and(|note| note.contains("no domain required pre-floor import"))),
+        "{report:#}"
+    );
+    assert_eq!(
+        ledger_entries(realm, "session-store", "sessions.sqlite3")[0]["action"],
+        "already-current",
+        "{report:#}"
+    );
+    let conn = Connection::open(&fixture.database).unwrap();
+    let queued_after_rerun: Vec<u8> = conn
+        .query_row(
+            "SELECT state_json FROM runtime_input_states \
+             WHERE runtime_id = ?1 AND input_id = ?2",
+            rusqlite::params![&fixture.runtime_id, &fixture.input_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        queued_after_rerun, queued_bytes,
+        "idempotent bridge rerun changed or replayed queued work"
+    );
+}
+
+#[test]
+fn explicit_pre_floor_bridge_rolls_back_malformed_session() {
+    let temp = TempDir::new().unwrap();
+    let state_root = temp.path().join("realms");
+    let fixture = create_exact_pre_floor_session_realm(&state_root, "malformed-pre-floor", true);
+
+    let apply = run_rkat(
+        &temp,
+        &[
+            "--state-root",
+            state_root.to_str().unwrap(),
+            "--realm",
+            "malformed-pre-floor",
+            "storage",
+            "migrate",
+            "--apply",
+            "--bridge-pre-0-8-10",
+            "--json",
+        ],
+    );
+    assert_eq!(
+        apply.status.code(),
+        Some(1),
+        "malformed bridge must fail\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&apply.stdout),
+        String::from_utf8_lossy(&apply.stderr)
+    );
+    let report = parse_json(&apply);
+    assert!(
+        report["realms"][0]["errors"]
+            .as_array()
+            .expect("errors")
+            .iter()
+            .any(|error| error
+                .as_str()
+                .is_some_and(|error| error.contains("pre-v0.8.10 bridge failed"))),
+        "{report:#}"
+    );
+
+    let conn = Connection::open(&fixture.database).unwrap();
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'meerkat_schema'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap(),
+        0,
+        "failed bridge stamped a schema ledger"
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master \
+             WHERE type = 'table' AND name = 'session_strand_links'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap(),
+        0,
+        "failed bridge committed migration DDL"
+    );
+    let stored: Vec<u8> = conn
+        .query_row(
+            "SELECT session_json FROM sessions WHERE session_id = ?1",
+            rusqlite::params![&fixture.session_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        stored, fixture.session_source,
+        "failed bridge changed the source row"
+    );
+    let queued: Vec<u8> = conn
+        .query_row(
+            "SELECT state_json FROM runtime_input_states \
+             WHERE runtime_id = ?1 AND input_id = ?2",
+            rusqlite::params![&fixture.runtime_id, &fixture.input_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        queued, fixture.input_source,
+        "failed bridge converted queued runtime work after an earlier domain refusal"
+    );
+}
+
+#[test]
+fn explicit_pre_floor_bridge_rejects_non_sqlite_realms() {
+    for backend in ["jsonl", "memory"] {
+        let temp = TempDir::new().unwrap();
+        let state_root = temp.path().join("realms");
+        let realm_id = format!("pre-floor-{backend}");
+        write_manifest_with_backend(&state_root, &realm_id, backend);
+
+        let apply = run_rkat(
+            &temp,
+            &[
+                "--state-root",
+                state_root.to_str().unwrap(),
+                "--realm",
+                &realm_id,
+                "storage",
+                "migrate",
+                "--apply",
+                "--bridge-pre-0-8-10",
+                "--json",
+            ],
+        );
+        assert_eq!(
+            apply.status.code(),
+            Some(1),
+            "{backend} bridge must fail\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&apply.stdout),
+            String::from_utf8_lossy(&apply.stderr)
+        );
+        let report = parse_json(&apply);
+        let realm = &report["realms"][0];
+        assert_eq!(realm["backend"], backend, "{report:#}");
+        assert!(
+            realm["errors"]
+                .as_array()
+                .expect("errors")
+                .iter()
+                .any(|error| error.as_str().is_some_and(|error| {
+                    error.contains("--bridge-pre-0-8-10")
+                        && error.contains("backend 'sqlite'")
+                        && error.contains(&format!("backend '{backend}'"))
+                })),
+            "{report:#}"
+        );
+    }
+}
+
+#[test]
+fn sqlite_apply_does_not_open_inactive_jsonl_session_index() {
+    let temp = TempDir::new().unwrap();
+    let state_root = temp.path().join("realms");
+    let paths = write_manifest(&state_root, "sqlite-with-inactive-jsonl");
+    meerkat_store::SqliteSessionStore::open(&paths.sessions_sqlite_path).unwrap();
+    let jsonl_dir = paths.root.join("sessions_jsonl");
+    std::fs::create_dir_all(&jsonl_dir).unwrap();
+    let index = jsonl_dir.join("session_index.sqlite3");
+    Connection::open(&index).unwrap();
+
+    let apply = run_rkat(
+        &temp,
+        &[
+            "--state-root",
+            state_root.to_str().unwrap(),
+            "--realm",
+            "sqlite-with-inactive-jsonl",
+            "storage",
+            "migrate",
+            "--apply",
+            "--json",
+        ],
+    );
+    assert_success(&apply, "sqlite migration with inactive JSONL index");
+
+    let conn = Connection::open(index).unwrap();
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'session_index'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap(),
+        0,
+        "SQLite migration opened the inactive JSONL session index"
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'meerkat_schema'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap(),
+        0,
+        "SQLite migration stamped the inactive JSONL session index"
     );
 }
 

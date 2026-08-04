@@ -198,7 +198,7 @@ impl EmbeddingModel for BagOfWordsEmbeddingModel {
 /// Version 2 is the released 0.8.10 floor and current shape. The historical
 /// v1 step remains only as an ingredient of the direct current initializer;
 /// a ledger-v1 or unledgered owned schema is refused.
-const MEMORY_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::SchemaDomain {
+pub const MEMORY_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::SchemaDomain {
     name: "memory",
     migrations: &[
         meerkat_sqlite::Migration {

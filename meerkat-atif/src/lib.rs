@@ -28,6 +28,10 @@ pub struct Trajectory {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub subagent_trajectories: Vec<Trajectory>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub continued_trajectory_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub extra: Option<Map<String, Value>>,
 }
 
@@ -37,6 +41,8 @@ pub struct Agent {
     pub version: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_definitions: Option<Vec<Map<String, Value>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extra: Option<Map<String, Value>>,
 }
@@ -60,6 +66,12 @@ pub struct Step {
     pub metrics: Option<Metrics>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub llm_call_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extra: Option<Map<String, Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_copied_context: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -95,6 +107,8 @@ pub struct ToolCall {
     pub tool_call_id: String,
     pub function_name: String,
     pub arguments: Map<String, Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extra: Option<Map<String, Value>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -110,6 +124,8 @@ pub struct ObservationResult {
     pub content: Option<AtifContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extra: Option<Map<String, Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subagent_trajectory_ref: Option<SubagentTrajectoryRef>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -129,6 +145,16 @@ pub struct Metrics {
     pub completion_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cached_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logprobs: Option<Vec<f64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_token_ids: Option<Vec<u64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completion_token_ids: Option<Vec<u64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extra: Option<Map<String, Value>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -140,6 +166,10 @@ pub struct FinalMetrics {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_cached_tokens: Option<u64>,
     pub total_steps: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_cost_usd: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extra: Option<Map<String, Value>>,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -179,6 +209,7 @@ pub fn trajectory_from_events(
     let mut session_id: Option<String> = None;
     let mut totals = FinalMetrics::default();
     let mut terminal_status: Option<&'static str> = None;
+    let mut failure_detail: Option<String> = None;
     for envelope in events {
         match &envelope.payload {
             AgentEvent::RunStarted {
@@ -198,6 +229,9 @@ pub fn trajectory_from_events(
                         observation: None,
                         metrics: None,
                         llm_call_count: None,
+                        extra: None,
+                        reasoning_effort: None,
+                        is_copied_context: None,
                     });
                 }
             }
@@ -235,6 +269,7 @@ pub fn trajectory_from_events(
                         tool_call_id: id.clone(),
                         function_name: name.clone(),
                         arguments,
+                        extra: None,
                     });
             }
             AgentEvent::ToolExecutionCompleted {
@@ -250,6 +285,7 @@ pub fn trajectory_from_events(
                     content: Some(atif_blocks(content)),
                     extra: (*is_error)
                         .then(|| Map::from_iter([(String::from("is_error"), Value::Bool(true))])),
+                    subagent_trajectory_ref: None,
                 }),
             AgentEvent::ToolExecutionTimedOut { id, timeout_ms, .. } => pending
                 .get_or_insert_with(|| PendingTurn::new(envelope.timestamp_ms))
@@ -263,6 +299,7 @@ pub fn trajectory_from_events(
                         String::from("timed_out"),
                         Value::Bool(true),
                     )])),
+                    subagent_trajectory_ref: None,
                 }),
             AgentEvent::ServerToolContent { id, content, kind } => pending
                 .get_or_insert_with(|| PendingTurn::new(envelope.timestamp_ms))
@@ -274,6 +311,7 @@ pub fn trajectory_from_events(
                         String::from("server_tool_kind"),
                         serde_json::to_value(kind).unwrap_or(Value::Null),
                     )])),
+                    subagent_trajectory_ref: None,
                 }),
             AgentEvent::TurnCompleted { usage, .. } => {
                 if let Some(turn) = pending.take() {
@@ -290,18 +328,34 @@ pub fn trajectory_from_events(
                     append_agent_step(&mut steps, turn, None);
                 }
             }
-            AgentEvent::RunFailed { .. } | AgentEvent::ExtractionFailed { .. } => {
+            AgentEvent::RunFailed { error_report, .. } => {
                 terminal_status = Some("failed");
+                failure_detail = Some(error_report.message.clone());
+                flush_failed_turn(&mut steps, &mut pending, error_report.message.clone());
+            }
+            AgentEvent::ExtractionFailed {
+                last_output,
+                reason,
+                ..
+            } => {
+                terminal_status = Some("failed");
+                let detail = format!("{reason}; last_output={last_output}");
+                failure_detail = Some(detail.clone());
+                flush_failed_turn(&mut steps, &mut pending, detail);
             }
             _ => {}
         }
     }
     totals.total_steps = steps.len() as u64;
     let extra = terminal_status.map(|status| {
-        Map::from_iter([(
+        let mut extra = Map::from_iter([(
             String::from("terminal_status"),
             Value::String(status.to_string()),
-        )])
+        )]);
+        if let Some(detail) = failure_detail {
+            extra.insert(String::from("failure_detail"), Value::String(detail));
+        }
+        extra
     });
     Ok(Trajectory {
         schema_version: SCHEMA_VERSION.to_string(),
@@ -311,6 +365,8 @@ pub fn trajectory_from_events(
         steps,
         final_metrics: Some(totals),
         subagent_trajectories: Vec::new(),
+        notes: None,
+        continued_trajectory_ref: None,
         extra,
     })
 }
@@ -354,9 +410,29 @@ fn append_agent_step(steps: &mut Vec<Step>, turn: PendingTurn, usage: Option<&Tu
             prompt_tokens: Some(usage.presented_tokens()),
             completion_tokens: Some(usage.output_tokens),
             cached_tokens: usage.cache_read_tokens,
+            cost_usd: None,
+            logprobs: None,
+            prompt_token_ids: None,
+            completion_token_ids: None,
+            extra: None,
         }),
         llm_call_count: Some(1),
+        extra: None,
+        reasoning_effort: None,
+        is_copied_context: None,
     });
+}
+
+fn flush_failed_turn(steps: &mut Vec<Step>, pending: &mut Option<PendingTurn>, detail: String) {
+    if let Some(turn) = pending.take() {
+        append_agent_step(steps, turn, None);
+        if let Some(step) = steps.last_mut() {
+            step.extra = Some(Map::from_iter([(
+                String::from("failure_detail"),
+                Value::String(detail),
+            )]));
+        }
+    }
 }
 
 fn add_totals(totals: &mut FinalMetrics, usage: &TurnUsage) {
@@ -423,7 +499,9 @@ fn atif_blocks(blocks: &[ContentBlock]) -> AtifContent {
                         },
                     },
                 }),
-                _ => None,
+                block => Some(ContentPart::Text {
+                    text: block.text_projection().into_owned(),
+                }),
             })
             .collect(),
     )
@@ -514,6 +592,7 @@ mod tests {
                 name: "meerkat".into(),
                 version: "0.8".into(),
                 model_name: None,
+                tool_definitions: None,
                 extra: None,
             },
         )

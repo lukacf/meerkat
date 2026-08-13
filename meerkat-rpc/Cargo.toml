@@ -26,6 +26,7 @@ path = "tests/live_rpc_regression.rs"
 
 [dependencies]
 meerkat = { workspace = true, features = ["anthropic", "openai", "gemini", "jsonl-store", "session-store", "memory-store", "memory-store-session", "skills", "schedule", "workgraph", "live"] }
+meerkat-atif = { workspace = true }
 meerkat-core = { workspace = true }
 meerkat-models = { workspace = true }
 meerkat-live = { workspace = true }

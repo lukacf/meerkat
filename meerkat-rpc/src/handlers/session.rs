@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use meerkat::AgentBuildConfig;
 use meerkat_contracts::SkillsParams;
+use meerkat_contracts::{EventReplayScope, EventsListSinceParams};
 // RPC-surface request/response types now live in meerkat-contracts (single
 // source of truth, schema-emitted); the handlers consume them directly and
 // re-export them so existing `handlers::session::*` paths keep resolving.
@@ -15,6 +16,7 @@ pub use meerkat_contracts::wire::{
 };
 use meerkat_core::EventEnvelope;
 use meerkat_core::event::AgentEvent;
+use meerkat_core::event::EventSourceIdentity;
 use meerkat_core::service::SessionQuery;
 use meerkat_core::skills::{SkillKey, SkillRef};
 use meerkat_core::{
@@ -38,6 +40,118 @@ use meerkat::surface::RequestContext;
 // ---------------------------------------------------------------------------
 // Param types
 // ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExportAtifParams {
+    pub session_id: String,
+    #[serde(default)]
+    pub agent_name: Option<String>,
+    #[serde(default)]
+    pub agent_version: Option<String>,
+    #[serde(default)]
+    pub model_name: Option<String>,
+}
+
+/// Export the complete durable event log as an ATIF trajectory.
+pub async fn handle_export_atif(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    runtime: &SessionRuntime,
+) -> RpcResponse {
+    let params: ExportAtifParams = match parse_params(params) {
+        Ok(params) => params,
+        Err(response) => return response.with_id(id),
+    };
+    let session_id = match parse_session_id_for_runtime(id.clone(), &params.session_id, runtime) {
+        Ok(session_id) => session_id,
+        Err(response) => return response,
+    };
+    let scope = EventReplayScope::Session {
+        session_id: session_id.clone(),
+    };
+    let mut cursor = None;
+    let mut events = Vec::new();
+    loop {
+        let page = match runtime
+            .event_list_since(EventsListSinceParams {
+                scope: scope.clone(),
+                cursor,
+                limit: Some(512),
+            })
+            .await
+        {
+            Ok(Some(page)) => page,
+            Ok(None) => {
+                return RpcResponse::error(
+                    id,
+                    error::SESSION_NOT_FOUND,
+                    format!("Session not found: {session_id}"),
+                );
+            }
+            Err(error) => return RpcResponse::error(id, error.code, error.message),
+        };
+        let page_events = page.events;
+        let has_more = page.has_more;
+        let next_cursor = page_events
+            .last()
+            .map(|event| event.cursor.clone())
+            .or_else(|| (!has_more).then_some(page.latest_cursor.clone()));
+        if has_more && next_cursor.is_none() {
+            return RpcResponse::error(
+                id,
+                crate::error::INTERNAL_ERROR,
+                "durable event replay made no progress",
+            );
+        }
+        cursor = next_cursor;
+        for event in page_events {
+            let mut envelope = EventEnvelope::new_with_source(
+                EventSourceIdentity::session(session_id.clone()),
+                event.cursor.sequence,
+                event.mob_id,
+                event.event,
+            );
+            envelope.timestamp_ms = event.timestamp_ms;
+            events.push(envelope);
+            if events.len() > 100_000 {
+                return RpcResponse::error(
+                    id,
+                    crate::error::INTERNAL_ERROR,
+                    "ATIF export exceeds the 100000-event limit",
+                );
+            }
+        }
+        if !has_more {
+            break;
+        }
+    }
+    let model_name = match params.model_name {
+        Some(model) => Some(model),
+        None => match runtime.read_session_rich(&session_id).await {
+            Ok(info) => info.and_then(|info| info.model),
+            Err(error) => return RpcResponse::error(id, error.code, error.message),
+        },
+    };
+    let trajectory = match meerkat_atif::trajectory_from_events(
+        &events,
+        meerkat_atif::Agent {
+            name: params.agent_name.unwrap_or_else(|| "meerkat".to_string()),
+            version: params
+                .agent_version
+                .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string()),
+            model_name,
+            tool_definitions: None,
+            extra: None,
+        },
+    ) {
+        Ok(trajectory) => trajectory,
+        Err(error) => {
+            return RpcResponse::error(id, crate::error::INTERNAL_ERROR, error.to_string());
+        }
+    };
+    RpcResponse::success(id, trajectory)
+}
 
 fn parse_provider_param(provider: &str) -> Result<Provider, String> {
     Provider::parse_strict(provider).ok_or_else(|| {

@@ -1792,6 +1792,9 @@ impl MethodRouter {
             "session/list" => handlers::session::handle_list(id, params, &self.runtime).await,
             "session/read" => self.handle_session_read(id, params).await,
             "session/history" => self.handle_session_history(id, params).await,
+            "session/export_atif" => {
+                handlers::session::handle_export_atif(id, params, &self.runtime).await
+            }
             "session/transcript_revision" => {
                 self.handle_session_transcript_revision(id, params).await
             }

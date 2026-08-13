@@ -2857,6 +2857,7 @@ dependencies = [
  "indexmap",
  "inventory",
  "meerkat-anthropic",
+ "meerkat-atif",
  "meerkat-capabilities",
  "meerkat-client",
  "meerkat-comms",
@@ -2923,6 +2924,17 @@ dependencies = [
  "tokio",
  "tokio_with_wasm",
  "tracing",
+]
+
+[[package]]
+name = "meerkat-atif"
+version = "0.8.22"
+dependencies = [
+ "chrono",
+ "meerkat-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -3401,6 +3413,7 @@ dependencies = [
  "indexmap",
  "jsonschema",
  "meerkat",
+ "meerkat-atif",
  "meerkat-client",
  "meerkat-comms",
  "meerkat-contracts",
@@ -3590,6 +3603,7 @@ dependencies = [
  "futures",
  "meerkat",
  "meerkat-anthropic",
+ "meerkat-atif",
  "meerkat-client",
  "meerkat-comms",
  "meerkat-contracts",
@@ -4970,6 +4984,7 @@ dependencies = [
  "jsonschema",
  "meerkat",
  "meerkat-anthropic",
+ "meerkat-atif",
  "meerkat-auth-core",
  "meerkat-client",
  "meerkat-comms",

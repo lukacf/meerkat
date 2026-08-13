@@ -48,6 +48,7 @@ required-features = ["integration-real-tests", "mob", "comms"]
 
 [dependencies]
 meerkat = { workspace = true }
+meerkat-atif = { workspace = true }
 meerkat-auth-core = { workspace = true }
 meerkat-core = { workspace = true }
 meerkat-models = { workspace = true }

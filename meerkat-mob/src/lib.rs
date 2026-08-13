@@ -14,6 +14,7 @@
 //! - [`MobEvent`] / [`MobEventKind`] - Structural state changes
 //! - [`MobEventStore`] - Persistence trait for mob events
 //! - [`MobStorage`] - Storage bundle for a mob
+
 #![allow(
     dead_code,
     unused_imports,
@@ -37,6 +38,8 @@
         clippy::await_holding_lock
     )
 )]
+
+pub use meerkat_atif as atif;
 
 // On wasm32, use tokio_with_wasm as a drop-in replacement for tokio.
 #[cfg(target_arch = "wasm32")]

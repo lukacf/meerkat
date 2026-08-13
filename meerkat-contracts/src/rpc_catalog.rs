@@ -228,6 +228,12 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
             "WireSessionHistory",
         ),
         RpcMethodDescriptor::typed(
+            "session/export_atif",
+            "Export the complete durable session event log as an ATIF trajectory",
+            "ExportAtifParams",
+            "Trajectory",
+        ),
+        RpcMethodDescriptor::typed(
             "session/fork_at",
             "Fork an idle session at a transcript message index",
             "ForkSessionAtParams",

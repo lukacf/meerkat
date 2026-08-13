@@ -14,6 +14,7 @@ categories.workspace = true
 
 [dependencies]
 meerkat-capabilities = { workspace = true }
+meerkat-atif = { workspace = true }
 meerkat-core = { workspace = true, features = [
     "jsonschema",
     "__meerkat-facade-agent-factory-build",

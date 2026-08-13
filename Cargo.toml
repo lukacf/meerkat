@@ -5,6 +5,7 @@ members = [
     "meerkat-agent-build-authority",
     "meerkat-sqlite",
     "meerkat-core",
+    "meerkat-atif",
     "meerkat-models",
     "meerkat-capabilities",
     "meerkat-llm-core",
@@ -140,6 +141,7 @@ tempfile = "3.14"
 meerkat-agent-build-authority = { version = "0.8.22", path = "meerkat-agent-build-authority" }
 meerkat-sqlite = { version = "0.8.22", path = "meerkat-sqlite" }
 meerkat-core = { version = "0.8.22", path = "meerkat-core" }
+meerkat-atif = { version = "0.8.22", path = "meerkat-atif" }
 meerkat-models = { version = "0.8.22", path = "meerkat-models" }
 meerkat-capabilities = { version = "0.8.22", path = "meerkat-capabilities" }
 meerkat-llm-core = { version = "0.8.22", path = "meerkat-llm-core" }

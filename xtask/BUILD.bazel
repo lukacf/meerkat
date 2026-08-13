@@ -558,6 +558,7 @@ rust_test(
         "//:workspace_metadata",
         "//meerkat-agent-build-authority:package_runfiles",
         "//meerkat-anthropic:package_runfiles",
+        "//meerkat-atif:package_runfiles",
         "//meerkat-auth-core:package_runfiles",
         "//meerkat-capabilities:package_runfiles",
         "//meerkat-cli:package_runfiles",

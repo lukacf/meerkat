@@ -398,6 +398,20 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '' && github.event.inputs.release_tag || github.ref }}
 
+      # rustup-init refuses to run when $HOME (/github/home inside job
+      # containers) differs from the euid's passwd home (/root) and assumes
+      # sudo. Point the passwd entry at the runner-provided HOME so the
+      # Bullseye container lane passes rustup's guard. No-op on hosted
+      # runners, where the two already agree.
+      - name: Align container passwd home with runner HOME
+        if: contains(matrix.target, 'unknown-linux-gnu')
+        run: |
+          set -euo pipefail
+          euid_home="$(getent passwd "$(id -u)" | cut -d: -f6)"
+          if [ -n "${HOME:-}" ] && [ "${euid_home}" != "${HOME}" ]; then
+            usermod -d "${HOME}" "$(id -un)"
+          fi
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 

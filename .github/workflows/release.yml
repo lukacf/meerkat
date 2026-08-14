@@ -400,18 +400,18 @@ jobs:
 
       # rustup-init refuses to run when $HOME (/github/home inside job
       # containers) differs from the euid's passwd home (/root) and assumes
-      # sudo. Point the passwd entry at the runner-provided HOME so the
-      # Bullseye container lane passes rustup's guard. No-op on hosted
-      # runners, where the two already agree.
-      - name: Align container passwd home with runner HOME
+      # sudo. Adopt the passwd home for the remaining steps so rustup sees
+      # agreement; editing passwd instead is not an option (usermod refuses
+      # while PID 1 runs as root). No-op on hosted runners, where the two
+      # already agree. POSIX sh on purpose: the container's default step
+      # shell is dash, which rejects `set -o pipefail`.
+      - name: Align HOME with the container passwd entry
         if: contains(matrix.target, 'unknown-linux-gnu')
-        # POSIX sh on purpose: the Bullseye container's default step shell is
-        # dash, which rejects `set -o pipefail`.
         run: |
           set -eu
           euid_home="$(getent passwd "$(id -u)" | cut -d: -f6)"
-          if [ -n "${HOME:-}" ] && [ "${euid_home}" != "${HOME}" ]; then
-            usermod -d "${HOME}" "$(id -un)"
+          if [ -n "${euid_home}" ] && [ "${euid_home}" != "${HOME:-}" ]; then
+            echo "HOME=${euid_home}" >> "$GITHUB_ENV"
           fi
 
       - name: Install Rust

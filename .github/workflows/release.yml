@@ -398,6 +398,16 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '' && github.event.inputs.release_tag || github.ref }}
 
+      # actions/checkout marks the workspace safe in a TEMPORARY git config
+      # that dies with the checkout step. On hosted runners that is moot
+      # (workspace uid == step uid), but in the Bullseye container the
+      # workspace stays owned by the host uid while steps run as root, so
+      # every later git call (rust-cache, version stamping) dies on
+      # "dubious ownership". Persist the exception for the whole job.
+      - name: Mark workspace safe for container git
+        if: contains(matrix.target, 'unknown-linux-gnu')
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         env:
@@ -405,9 +415,9 @@ jobs:
           # containers) differs from the euid's passwd home (/root) and
           # assumes sudo. Skip that guard rather than reconciling the two:
           # usermod cannot edit root while PID 1 runs as it, and flipping
-          # HOME orphans the safe.directory config the checkout action wrote
-          # under the original HOME (git then dies on "dubious ownership").
-          # Verified in buildpack-deps:bullseye. Harmless outside containers.
+          # HOME orphans checkout's safe.directory config. Verified in
+          # buildpack-deps:bullseye; proven on run 31796295103 (toolchain
+          # installed, target added). Harmless outside containers.
           RUSTUP_INIT_SKIP_PATH_CHECK: "yes"
 
       - name: Add release target

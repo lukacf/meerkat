@@ -493,8 +493,17 @@ jobs:
           fi
           # Package names (for cargo build -p) — binary names differ via [[bin]]
           PACKAGES=("rkat" "meerkat-rpc" "meerkat-rest" "meerkat-mcp-server")
+          # The repo-cargo wrapper needs git >= 2.31 (--path-format); the
+          # Bullseye container ships 2.30, where rev-parse echoes the unknown
+          # flag into the wrapper's path variables. With CARGO_TARGET_DIR
+          # pinned above the wrapper is a pass-through to cargo anyway, so
+          # call cargo directly inside the container.
+          CARGO_CMD=(./scripts/repo-cargo)
+          if [[ "${{ contains(matrix.target, 'unknown-linux-gnu') }}" == "true" ]]; then
+            CARGO_CMD=(cargo)
+          fi
           for pkg in "${PACKAGES[@]}"; do
-            ./scripts/repo-cargo build -p "$pkg" --release --target "${{ matrix.target }}"
+            "${CARGO_CMD[@]}" build -p "$pkg" --release --target "${{ matrix.target }}"
           done
 
       - name: Ad-hoc codesign macOS binaries

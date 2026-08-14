@@ -398,24 +398,17 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '' && github.event.inputs.release_tag || github.ref }}
 
-      # rustup-init refuses to run when $HOME (/github/home inside job
-      # containers) differs from the euid's passwd home (/root) and assumes
-      # sudo. Adopt the passwd home for the remaining steps so rustup sees
-      # agreement; editing passwd instead is not an option (usermod refuses
-      # while PID 1 runs as root). No-op on hosted runners, where the two
-      # already agree. POSIX sh on purpose: the container's default step
-      # shell is dash, which rejects `set -o pipefail`.
-      - name: Align HOME with the container passwd entry
-        if: contains(matrix.target, 'unknown-linux-gnu')
-        run: |
-          set -eu
-          euid_home="$(getent passwd "$(id -u)" | cut -d: -f6)"
-          if [ -n "${euid_home}" ] && [ "${euid_home}" != "${HOME:-}" ]; then
-            echo "HOME=${euid_home}" >> "$GITHUB_ENV"
-          fi
-
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        env:
+          # rustup-init refuses to run when $HOME (/github/home inside job
+          # containers) differs from the euid's passwd home (/root) and
+          # assumes sudo. Skip that guard rather than reconciling the two:
+          # usermod cannot edit root while PID 1 runs as it, and flipping
+          # HOME orphans the safe.directory config the checkout action wrote
+          # under the original HOME (git then dies on "dubious ownership").
+          # Verified in buildpack-deps:bullseye. Harmless outside containers.
+          RUSTUP_INIT_SKIP_PATH_CHECK: "yes"
 
       - name: Add release target
         run: rustup target add ${{ matrix.target }}

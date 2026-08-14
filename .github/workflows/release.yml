@@ -405,8 +405,10 @@ jobs:
       # runners, where the two already agree.
       - name: Align container passwd home with runner HOME
         if: contains(matrix.target, 'unknown-linux-gnu')
+        # POSIX sh on purpose: the Bullseye container's default step shell is
+        # dash, which rejects `set -o pipefail`.
         run: |
-          set -euo pipefail
+          set -eu
           euid_home="$(getent passwd "$(id -u)" | cut -d: -f6)"
           if [ -n "${HOME:-}" ] && [ "${euid_home}" != "${HOME}" ]; then
             usermod -d "${HOME}" "$(id -un)"

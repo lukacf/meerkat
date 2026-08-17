@@ -390,9 +390,15 @@ jobs:
   release_semver_gate:
     name: Breaks declared and notes stamped
     needs: [require_ci_green]
+    # Must run on tag push, which is the primary release path. Guard the
+    # workflow_dispatch inputs behind the event check the way every sibling job
+    # in this file does: reading `github.event.inputs.*` unguarded on a push
+    # event relies on null-property semantics, and if that ever evaluated
+    # false this job would skip and hard-block every tag release below.
     if: >-
-      github.event.inputs.publish_web_sdk_only != 'true' &&
-      github.event.inputs.publish_release_assets_only != 'true'
+      github.event_name != 'workflow_dispatch' ||
+      (github.event.inputs.publish_web_sdk_only != 'true' &&
+       github.event.inputs.publish_release_assets_only != 'true')
     runs-on: ubuntu-latest
     # cargo-semver-checks builds rustdoc JSON for the current and the published
     # baseline of all 39 publishable library crates. Measured cold on an M-series
@@ -410,6 +416,13 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+
+      # The analyser needs tomllib (python >= 3.11). ubuntu-latest ships 3.12,
+      # but pin it rather than depend on the runner image default.
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2

@@ -295,10 +295,17 @@ class StampingTests(unittest.TestCase):
         self.assertEqual(len(errors), 1, "\n".join(errors))
         self.assertIn("release date", errors[0])
 
-    def test_repo_changelog_is_stamped_for_the_repo_version(self) -> None:
-        root = Path(__file__).resolve().parent.parent
-        version = gate.workspace_version(root)
-        self.assertEqual(gate.check_stamped(gate.parse_changelog(REPO_CHANGELOG), version), [])
+    # There is deliberately NO test here asserting that the live CHANGELOG is
+    # stamped for the live workspace version. This suite is the guard that
+    # `check-semver-breaks.sh` runs BEFORE trusting the analyser, and a live
+    # repo-state assertion inside it turns the one state the gate exists to
+    # catch - version bumped, notes still under `## [Unreleased]` - into
+    # "the analyser failed its own unit tests", which is a red for a reason
+    # other than the one it names. Verified by simulating that state: with the
+    # workspace version at 0.8.24 and the notes unstamped, this suite went red
+    # on that test and the gate never reached its own actionable message.
+    # The gate itself asserts the live fact, against the real changelog, with
+    # the message that says what to do about it.
 
 
 class MeasuredTests(unittest.TestCase):

@@ -378,7 +378,7 @@
     {
       "description": "Queue a runtime-backed external event",
       "name": "session/external_event",
-      "params_type": "SessionExternalEventEnvelope",
+      "params_type": "SessionExternalEventParams",
       "result_type": "RuntimeAcceptResult"
     },
     {

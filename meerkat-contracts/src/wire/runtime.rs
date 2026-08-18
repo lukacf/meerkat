@@ -83,6 +83,20 @@ pub enum SessionExternalEventEnvelope {
     },
 }
 
+/// Complete request payload for `session/external_event`.
+///
+/// The event envelope is flattened on the wire, but the session selector is
+/// part of the RPC method contract and must therefore be present in the
+/// catalogued params type rather than supplied by an undocumented wrapper
+/// extension.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct SessionExternalEventParams {
+    pub session_id: String,
+    #[serde(flatten)]
+    pub event: SessionExternalEventEnvelope,
+}
+
 /// Public runtime state projection used by RPC surfaces.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

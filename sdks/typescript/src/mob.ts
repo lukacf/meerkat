@@ -37,6 +37,8 @@ import type {
   WireHostRef,
   WireMemberLifecycleCapabilities,
   WireMobMemberStatus,
+  WireMobBackendKind,
+  WireMobRuntimeMode,
   WireMemberProgressSnapshot,
   WireNonPortableResourceKind,
   WireReachability,
@@ -206,8 +208,8 @@ export interface MobHelperOptions {
   profileName?: string;
   modelOverride?: string;
   authBinding?: WireAuthBindingRef;
-  runtimeMode?: string;
-  backend?: string;
+  runtimeMode?: WireMobRuntimeMode;
+  backend?: WireMobBackendKind;
 }
 
 export interface MobForkHelperOptions extends MobHelperOptions {

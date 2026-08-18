@@ -46,6 +46,10 @@ import {
   meerkatErrorFromJsonRpcCode,
 } from "./generated/errors.js";
 import { isCompatibleWith } from "./generated/version_compat.js";
+import type {
+  RpcMethodContracts,
+  RpcMethodName,
+} from "./generated/rpc_contracts.js";
 import {
   CONTRACT_VERSION,
   type CallbackToolDefinition,
@@ -221,7 +225,7 @@ import type {
   Schedule as RpcSchedule,
   ScheduleToolCallParams as RpcScheduleToolCallParams,
   ScheduleToolsResult as RpcScheduleToolsResult,
-  SessionExternalEventEnvelope as RpcSessionExternalEventEnvelope,
+  SessionExternalEventParams as RpcSessionExternalEventParams,
   SessionForkResult as RpcSessionForkResult,
   SessionPeerResponseTerminalParams as RpcSessionPeerResponseTerminalParams,
   SessionTranscriptRewriteResult as RpcSessionTranscriptRewriteResult,
@@ -232,6 +236,104 @@ import type {
   WireRunResult as RpcWireRunResult,
   WireSessionTranscriptRevision as RpcWireSessionTranscriptRevision,
   WireSessionTranscriptRevisionList as RpcWireSessionTranscriptRevisionList,
+  CommsPeersParams as RpcCommsPeersParams,
+  CommsSendParams as RpcCommsSendParams,
+  ListSchedulesParams as RpcListSchedulesParams,
+  MobAppendSystemContextParams as RpcMobAppendSystemContextParams,
+  MobAppendSystemContextResult as RpcMobAppendSystemContextResult,
+  MobCancelAllWorkParams as RpcMobCancelAllWorkParams,
+  MobCancelAllWorkResult as RpcMobCancelAllWorkResult,
+  MobCancelWorkParams as RpcMobCancelWorkParams,
+  MobCancelWorkResult as RpcMobCancelWorkResult,
+  MobCreateParams as RpcMobCreateParams,
+  MobCreateResult as RpcMobCreateResult,
+  MobDestroyResult as RpcMobDestroyResult,
+  MobEnsureMemberParams as RpcMobEnsureMemberParams,
+  MobEnsureMemberResult as RpcMobEnsureMemberResult,
+  MobEventsParams as RpcMobEventsParams,
+  MobEventsResult as RpcMobEventsResult,
+  MobFlowCancelParams as RpcMobFlowCancelParams,
+  MobFlowCancelResult as RpcMobFlowCancelResult,
+  MobFlowRunParams as RpcMobFlowRunParams,
+  MobFlowStatusParams as RpcMobFlowStatusParams,
+  MobFlowsResult as RpcMobFlowsResult,
+  MobForceCancelResult as RpcMobForceCancelResult,
+  MobForkHelperParams as RpcMobForkHelperParams,
+  MobHelperResult as RpcMobHelperResult,
+  MobIngressInteractionParams as RpcMobIngressInteractionParams,
+  MobIngressInteractionResult as RpcMobIngressInteractionResult,
+  MobLifecycleParams as RpcMobLifecycleParams,
+  MobLifecycleResult as RpcMobLifecycleResult,
+  MobListMembersMatchingParams as RpcMobListMembersMatchingParams,
+  MobListMembersMatchingResult as RpcMobListMembersMatchingResult,
+  MobListResult as RpcMobListResult,
+  MobMemberSendParams as RpcMobMemberSendParams,
+  MobMemberSendResult as RpcMobMemberSendResult,
+  MobMembersResult as RpcMobMembersResult,
+  MobProfileCreateParams as RpcMobProfileCreateParams,
+  MobProfileDeleteParams as RpcMobProfileDeleteParams,
+  MobProfileDeleteResult as RpcMobProfileDeleteResult,
+  MobProfileListResult as RpcMobProfileListResult,
+  MobProfileLookupResult as RpcMobProfileLookupResult,
+  MobProfileNameParams as RpcMobProfileNameParams,
+  MobProfileUpdateParams as RpcMobProfileUpdateParams,
+  MobReconcileParams as RpcMobReconcileParams,
+  MobReconcileResult as RpcMobReconcileResult,
+  MobRespawnParams as RpcMobRespawnParams,
+  MobRespawnResult as RpcMobRespawnResult,
+  MobRetireResult as RpcMobRetireResult,
+  MobSnapshotResult as RpcMobSnapshotResult,
+  MobSpawnHelperParams as RpcMobSpawnHelperParams,
+  MobSpawnParams as RpcMobSpawnParams,
+  MobSpawnResult as RpcMobSpawnResult,
+  MobStatusResult as RpcMobStatusResult,
+  MobStreamCloseParams as RpcMobStreamCloseParams,
+  MobStreamCloseResult as RpcMobStreamCloseResult,
+  MobStreamOpenParams as RpcMobStreamOpenParams,
+  MobStreamOpenResult as RpcMobStreamOpenResult,
+  MobSubmitWorkParams as RpcMobSubmitWorkParams,
+  MobSubmitWorkResult as RpcMobSubmitWorkResult,
+  MobUnwireParams as RpcMobUnwireParams,
+  MobUnwireResult as RpcMobUnwireResult,
+  MobWaitMembersResult as RpcMobWaitMembersResult,
+  MobWaitParams as RpcMobWaitParams,
+  MobWireMembersBatchParams as RpcMobWireMembersBatchParams,
+  MobWireMembersBatchResult as RpcMobWireMembersBatchResult,
+  MobWireParams as RpcMobWireParams,
+  MobWireResult as RpcMobWireResult,
+  ModelsCatalogResponse as RpcModelsCatalogResponse,
+  RuntimeAcceptResult as RpcRuntimeAcceptResult,
+  ScheduleIdParams as RpcScheduleIdParams,
+  ScheduleListResult as RpcScheduleListResult,
+  ScheduleOccurrencesParams as RpcScheduleOccurrencesParams,
+  ScheduleOccurrencesResult as RpcScheduleOccurrencesResult,
+  SessionStreamCloseParams as RpcSessionStreamCloseParams,
+  SessionStreamCloseResult as RpcSessionStreamCloseResult,
+  SessionStreamOpenParams as RpcSessionStreamOpenParams,
+  SessionStreamOpenResult as RpcSessionStreamOpenResult,
+  UpdateScheduleParams as RpcUpdateScheduleParams,
+  WireAuthProfileCleared as RpcWireAuthProfileCleared,
+  WireAuthProfileCreated as RpcWireAuthProfileCreated,
+  WireAuthProfileDetail as RpcWireAuthProfileDetail,
+  WireAuthProfilesList as RpcWireAuthProfilesList,
+  WireAuthStatusDetail as RpcWireAuthStatusDetail,
+  WireDeviceStart as RpcWireDeviceStart,
+  WireLoginReady as RpcWireLoginReady,
+  WireLoginStart as RpcWireLoginStart,
+  WireRealmConnectionSet as RpcWireRealmConnectionSet,
+  WireRealmList as RpcWireRealmList,
+  WireSessionHistory as RpcWireSessionHistory,
+  WireSessionInfo as RpcWireSessionInfo,
+  WireContentBlock as RpcWireContentBlock,
+  WireContentInput as RpcWireContentInput,
+  WireTranscriptReplacement as RpcWireTranscriptReplacement,
+  TranscriptRewriteMessage as RpcTranscriptRewriteMessage,
+  MobProfileInput as RpcMobProfileInput,
+  MobDefinitionInput as RpcMobDefinitionInput,
+  MobMemberSpecWire as RpcMobMemberSpecWire,
+  MobReconcileOptionsWire as RpcMobReconcileOptionsWire,
+  ContentBlock as RpcCommsContentBlock,
+  CommsPeerRequestParams as RpcCommsPeerRequestParams,
 } from "./generated/types.js";
 import { DeferredSession, Session } from "./session.js";
 import {
@@ -502,8 +604,123 @@ function setIfDefined<T extends object, K extends keyof T>(
   }
 }
 
-function mobSpawnPayload(mobId: string, spec: SpawnSpec): Record<string, unknown> {
-  const payload: Record<string, unknown> = {
+function toWireContentBlock(
+  block: ContentBlock,
+): RpcWireContentBlock & RpcCommsContentBlock {
+  if (block.type === "text") return block;
+  if (block.type === "image") {
+    return block.source === "blob"
+      ? block
+      : { ...block, source: "inline" };
+  }
+  return block.source === "uri"
+    ? block
+    : { ...block, source: "inline" };
+}
+
+function toWireContentInput(
+  content: string | readonly ContentBlock[],
+): RpcWireContentInput {
+  return typeof content === "string"
+    ? content
+    : content.map(toWireContentBlock);
+}
+
+type DeepMutable<T> = T extends readonly (infer Item)[]
+  ? DeepMutable<Item>[]
+  : T extends object
+    ? { -readonly [Key in keyof T]: DeepMutable<T[Key]> }
+    : T;
+
+function toMutableWire<T>(value: T): DeepMutable<T> {
+  if (Array.isArray(value)) {
+    return value.map((item) => toMutableWire(item)) as DeepMutable<T>;
+  }
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, toMutableWire(item)]),
+    ) as DeepMutable<T>;
+  }
+  return value as DeepMutable<T>;
+}
+
+function toWirePeerRequestParams(
+  params: Extract<CommsCommand, { kind: "peer_request" }>["params"],
+): RpcCommsPeerRequestParams {
+  const mutable = toMutableWire(params);
+  if (
+    !("command" in params) ||
+    params.command !== "deliver_member_input"
+  ) {
+    return mutable as RpcCommsPeerRequestParams;
+  }
+  return {
+    ...mutable,
+    content: toWireContentInput(params.content),
+    injected_context: params.injected_context?.map(toWireContentInput),
+  } as RpcCommsPeerRequestParams;
+}
+
+function toWireCommsSendParams(
+  sessionId: string,
+  command: CommsCommand,
+): RpcCommsSendParams {
+  switch (command.kind) {
+    case "input":
+    case "peer_message":
+      return {
+        ...command,
+        session_id: sessionId,
+        blocks: command.blocks?.map(toWireContentBlock),
+      };
+    case "peer_request":
+      return {
+        ...command,
+        session_id: sessionId,
+        params: toWirePeerRequestParams(command.params),
+        blocks: command.blocks?.map(toWireContentBlock),
+      };
+    case "peer_lifecycle":
+    case "peer_response":
+      return { ...command, session_id: sessionId };
+  }
+}
+
+function toWireMobProfile(profile: MobProfile): RpcMobProfileInput {
+  const { resume_overrides, skills, ...rest } = profile;
+  const payload: RpcMobProfileInput = { ...rest };
+  setIfDefined(
+    payload,
+    "resume_overrides",
+    resume_overrides ? [...resume_overrides] : undefined,
+  );
+  setIfDefined(payload, "skills", skills ? [...skills] : undefined);
+  return payload;
+}
+
+function toWireMobDefinition(
+  definition: MobCreateOptions["definition"],
+): RpcMobDefinitionInput {
+  const { models, flows, skills, ...rest } = definition;
+  const payload: RpcMobDefinitionInput = {
+    ...rest,
+    profiles: Object.fromEntries(
+      Object.entries(definition.profiles).map(([name, binding]) => [
+        name,
+        "realm_profile" in binding
+          ? { realm_profile: binding.realm_profile }
+          : toWireMobProfile(binding),
+      ]),
+    ),
+  };
+  setIfDefined(payload, "models", models ? { ...models } : undefined);
+  setIfDefined(payload, "flows", flows ? { ...flows } : undefined);
+  setIfDefined(payload, "skills", skills ? { ...skills } : undefined);
+  return payload;
+}
+
+function mobSpawnPayload(mobId: string, spec: SpawnSpec): RpcMobSpawnParams {
+  const payload: RpcMobSpawnParams = {
     mob_id: mobId,
     profile: spec.profile,
     agent_identity: spec.agentIdentity,
@@ -516,7 +733,7 @@ function mobSpawnPayload(mobId: string, spec: SpawnSpec): Record<string, unknown
   setIfDefined(payload, "additional_instructions", spec.additionalInstructions);
   setIfDefined(payload, "placement", spec.placement);
   setIfDefined(payload, "binding", spec.binding);
-  setIfDefined(payload, "shell_env", spec.shellEnv);
+  setIfDefined(payload, "shell_env", spec.shellEnv ? { ...spec.shellEnv } : undefined);
   setIfDefined(payload, "auto_wire_parent", spec.autoWireParent);
   setIfDefined(payload, "launch_mode", spec.launchMode);
   setIfDefined(payload, "tool_access_policy", spec.toolAccessPolicy);
@@ -704,7 +921,7 @@ export class MeerkatClient {
       const params: ToolsRegisterParams = {
         tools: [{ name, description, input_schema: inputSchema }],
       };
-      const result = await this.request<ToolsRegisterResult>(
+      const result = await this.request(
         "tools/register",
         params,
       );
@@ -861,7 +1078,7 @@ export class MeerkatClient {
         }),
       );
       const params: ToolsRegisterParams = { tools };
-      const result = await this.request<ToolsRegisterResult>(
+      const result = await this.request(
         "tools/register",
         params,
       );
@@ -969,7 +1186,6 @@ export class MeerkatClient {
     prompt: string | ContentBlock[],
     options?: SessionOptions,
   ): Promise<Session> {
-    type _RpcSignature = [RpcDeferredCreateResult, RpcWireRunResult];
     const params = MeerkatClient.buildCreateParams(prompt, options);
     const raw = await this.request("session/create", params);
     const result = MeerkatClient.parseRunResult(raw);
@@ -985,7 +1201,6 @@ export class MeerkatClient {
     prompt: string | ContentBlock[],
     options?: SessionOptions,
   ): EventStream {
-    type _RpcSignature = [RpcDeferredCreateResult, RpcWireRunResult];
     if (!this.process?.stdin) {
       throw new MeerkatError("NOT_CONNECTED", "Client not connected");
     }
@@ -1047,7 +1262,6 @@ export class MeerkatClient {
     prompt: string | ContentBlock[],
     options?: SessionOptions,
   ): Promise<DeferredSession> {
-    type _RpcSignature = [RpcDeferredCreateResult, RpcWireRunResult];
     const params = MeerkatClient.buildCreateParams(prompt, options);
     params.initial_turn = "deferred";
     const raw = await this.request("session/create", params);
@@ -1060,8 +1274,7 @@ export class MeerkatClient {
   }
 
   async askHelp(question: string, options?: HelpOptions): Promise<RunResult> {
-    type _RpcSignature = [RpcHelpRequest, RpcHelpResponse];
-    const params: Record<string, unknown> = { question };
+    const params: RpcHelpRequest = { question };
     if (options?.prompt !== undefined) params.prompt = options.prompt;
     if (options?.executionMode !== undefined) {
       params.execution_mode = options.executionMode;
@@ -1076,7 +1289,6 @@ export class MeerkatClient {
   // -- Session queries ----------------------------------------------------
 
   async listSessions(options?: SessionListOptions): Promise<SessionInfo[]> {
-    type _RpcSignature = [RpcListSessionsParams, RpcListSessionsResult];
     const params: Record<string, unknown> = {};
     if (options?.labels) params.labels = options.labels;
     if (options?.limit !== undefined) params.limit = options.limit;
@@ -1090,7 +1302,6 @@ export class MeerkatClient {
   }
 
   async readSession(sessionId: string): Promise<SessionInfo> {
-    type _RpcSignature = [RpcReadSessionParams];
     const raw = await this.request("session/read", { session_id: sessionId });
     return MeerkatClient.parseSessionInfo(raw);
   }
@@ -1101,15 +1312,14 @@ export class MeerkatClient {
     payload: unknown,
     options?: { blocks?: ContentBlock[] },
   ): Promise<Record<string, unknown>> {
-    type _RpcSignature = [RpcSessionExternalEventEnvelope];
-    const params: Record<string, unknown> = {
+    const params: RpcSessionExternalEventParams = {
       session_id: sessionId,
       kind: "generic_json",
       event_type: eventType,
       payload,
     };
     if (options?.blocks !== undefined) {
-      params.blocks = options.blocks;
+      params.blocks = options.blocks.map(toWireContentBlock);
     }
     return this.request("session/external_event", params);
   }
@@ -1122,8 +1332,7 @@ export class MeerkatClient {
     result: unknown,
     options?: PeerResponseTerminalOptions,
   ): Promise<Record<string, unknown>> {
-    type _RpcSignature = [RpcSessionPeerResponseTerminalParams];
-    const params: Record<string, unknown> = {
+    const params: RpcSessionPeerResponseTerminalParams = {
       session_id: sessionId,
       peer_id: peerId,
       request_id: requestId,
@@ -1141,8 +1350,7 @@ export class MeerkatClient {
     text: string,
     options?: SessionIngressOptions,
   ): Promise<RpcInjectSystemContextResult> {
-    type _RpcSignature = [RpcInjectSystemContextParams, RpcInjectSystemContextResult];
-    const params: Record<string, unknown> = {
+    const params: RpcInjectSystemContextParams = {
       session_id: sessionId,
       content: { type: "text", text },
     };
@@ -1172,8 +1380,7 @@ export class MeerkatClient {
     sessionId: string,
     selector: { inputId: string } | { idempotencyKey: string },
   ): Promise<Record<string, unknown> | null> {
-    type _RpcSignature = [RpcSessionInputStateParams, RpcSessionInputStateResult];
-    const params: Record<string, unknown> = {
+    const params: RpcSessionInputStateParams = {
       session_id: sessionId,
       selector:
         "inputId" in selector
@@ -1188,8 +1395,7 @@ export class MeerkatClient {
     sessionId: string,
     options?: { offset?: number; limit?: number },
   ): Promise<SessionHistory> {
-    type _RpcSignature = [RpcReadSessionHistoryParams];
-    const params: Record<string, unknown> = {
+    const params: RpcReadSessionHistoryParams = {
       session_id: sessionId,
       offset: options?.offset ?? 0,
     };
@@ -1205,8 +1411,7 @@ export class MeerkatClient {
     sessionId: string,
     options?: { agentName?: string; agentVersion?: string; modelName?: string },
   ): Promise<Record<string, unknown>> {
-    type _RpcSignature = [RpcExportAtifParams];
-    const params: Record<string, unknown> = { session_id: sessionId };
+    const params: RpcExportAtifParams = { session_id: sessionId };
     if (options?.agentName !== undefined) {
       params.agent_name = options.agentName;
     }
@@ -1216,7 +1421,12 @@ export class MeerkatClient {
     if (options?.modelName !== undefined) {
       params.model_name = options.modelName;
     }
-    return await this.request("session/export_atif", params);
+    const result = await this.request("session/export_atif", params);
+    return MeerkatClient.requireRecord(
+      result,
+      "result",
+      "Invalid session/export_atif response",
+    );
   }
 
   async readSessionTranscriptRevision(
@@ -1224,8 +1434,7 @@ export class MeerkatClient {
     revision: string,
     options?: { offset?: number; limit?: number },
   ): Promise<SessionTranscriptRevision> {
-    type _RpcSignature = [RpcReadSessionTranscriptRevisionParams, RpcWireSessionTranscriptRevision];
-    const params: Record<string, unknown> = {
+    const params: RpcReadSessionTranscriptRevisionParams = {
       session_id: sessionId,
       revision,
       offset: options?.offset ?? 0,
@@ -1241,8 +1450,7 @@ export class MeerkatClient {
     sessionId: string,
     options?: { offset?: number; limit?: number },
   ): Promise<SessionTranscriptRevisionList> {
-    type _RpcSignature = [RpcListSessionTranscriptRevisionsParams, RpcWireSessionTranscriptRevisionList];
-    const params: Record<string, unknown> = {
+    const params: RpcListSessionTranscriptRevisionsParams = {
       session_id: sessionId,
     };
     if (options?.offset !== undefined) {
@@ -1260,8 +1468,7 @@ export class MeerkatClient {
     messageIndex: number,
     options?: TranscriptForkOptions,
   ): Promise<SessionForkResult> {
-    type _RpcSignature = [RpcForkSessionAtParams, RpcSessionForkResult];
-    const params: Record<string, unknown> = {
+    const params: RpcForkSessionAtParams = {
       session_id: sessionId,
       message_index: messageIndex,
     };
@@ -1271,7 +1478,7 @@ export class MeerkatClient {
     if (options?.toolAccessPolicy !== undefined) {
       params.tool_access_policy = options.toolAccessPolicy;
     }
-    const raw = await this.request<RpcSessionForkResult>("session/fork_at", params);
+    const raw = await this.request("session/fork_at", params);
     return MeerkatClient.parseSessionForkResult(raw);
   }
 
@@ -1281,8 +1488,7 @@ export class MeerkatClient {
     replacement: TranscriptReplacement,
     options?: TranscriptForkOptions,
   ): Promise<SessionForkResult> {
-    type _RpcSignature = [RpcForkSessionReplaceParams, RpcSessionForkResult];
-    const params: Record<string, unknown> = {
+    const params: RpcForkSessionReplaceParams = {
       session_id: sessionId,
       message_index: messageIndex,
       replacement: MeerkatClient.serializeTranscriptReplacement(replacement),
@@ -1293,7 +1499,7 @@ export class MeerkatClient {
     if (options?.toolAccessPolicy !== undefined) {
       params.tool_access_policy = options.toolAccessPolicy;
     }
-    const raw = await this.request<RpcSessionForkResult>("session/fork_replace", params);
+    const raw = await this.request("session/fork_replace", params);
     return MeerkatClient.parseSessionForkResult(raw);
   }
 
@@ -1304,8 +1510,7 @@ export class MeerkatClient {
     reason: TranscriptRewriteReason,
     options?: TranscriptRewriteOptions,
   ): Promise<SessionTranscriptRewriteResult> {
-    type _RpcSignature = [RpcRewriteSessionTranscriptParams, RpcSessionTranscriptRewriteResult];
-    const params: Record<string, unknown> = {
+    const params: RpcRewriteSessionTranscriptParams = {
       session_id: sessionId,
       selection,
       replacement: replacement.map((message) =>
@@ -1349,7 +1554,7 @@ export class MeerkatClient {
     if (options?.expectedParentRevision !== undefined) {
       params.expected_parent_revision = options.expectedParentRevision;
     }
-    const raw = await this.request<RpcSystemPromptUpdateResult>(
+    const raw = await this.request(
       "session/update_system_prompt",
       params,
     );
@@ -1362,8 +1567,7 @@ export class MeerkatClient {
     reason: TranscriptRewriteReason,
     options?: TranscriptRewriteOptions,
   ): Promise<SessionTranscriptRewriteResult> {
-    type _RpcSignature = [RpcRestoreSessionTranscriptRevisionParams, RpcSessionTranscriptRewriteResult];
-    const params: Record<string, unknown> = {
+    const params: RpcRestoreSessionTranscriptRevisionParams = {
       session_id: sessionId,
       revision,
       reason,
@@ -1440,19 +1644,19 @@ export class MeerkatClient {
   }
 
   async mcpAdd(params: McpAddParams): Promise<McpLiveOpResponse> {
-    const raw = await this.request("mcp/add", params as unknown as Record<string, unknown>);
+    const raw = await this.request("mcp/add", params);
     return MeerkatClient.parseMcpLiveOpResponse(raw);
   }
 
   async mcpRemove(params: McpRemoveParams): Promise<McpLiveOpResponse> {
-    const raw = await this.request("mcp/remove", params as unknown as Record<string, unknown>);
+    const raw = await this.request("mcp/remove", params);
     return MeerkatClient.parseMcpLiveOpResponse(raw);
   }
 
   async mcpReload(params: McpReloadParams): Promise<McpLiveOpResponse> {
     const raw = await this.request(
       "mcp/reload",
-      params as unknown as Record<string, unknown>,
+      params,
     );
     return MeerkatClient.parseMcpLiveOpResponse(raw);
   }
@@ -1480,7 +1684,6 @@ export class MeerkatClient {
   }
 
   async getBlob(blobId: string): Promise<BlobPayload> {
-    type _RpcSignature = [RpcBlobGetParams, RpcBlobPayload];
     const result = await this.request("blob/get", { blob_id: blobId });
     const context = "Invalid blob/get response";
     return {
@@ -1491,17 +1694,14 @@ export class MeerkatClient {
   }
 
   async getRuntimeHostInfo(): Promise<Record<string, unknown>> {
-    type _RpcSignature = [RpcRuntimeHostInfo];
     return this.request("runtime/host_info", {});
   }
 
   async getRuntimeHostCapabilities(): Promise<Record<string, unknown>> {
-    type _RpcSignature = [RpcRuntimeHostCapabilities];
     return this.request("runtime/capabilities", {});
   }
 
   async getRuntimeHostHealth(): Promise<Record<string, unknown>> {
-    type _RpcSignature = [RpcRuntimeHostHealth];
     return this.request("runtime/health", {});
   }
 
@@ -1586,72 +1786,62 @@ export class MeerkatClient {
   }
 
   async requestApproval(
-    params: Record<string, unknown>,
-  ): Promise<Record<string, unknown>> {
-    type _RpcSignature = [RpcApprovalRecord, RpcApprovalRequestParams];
+    params: RpcApprovalRequestParams,
+  ): Promise<RpcApprovalRecord> {
     return this.request("approval/request", params);
   }
 
   async listApprovals(
-    params: Record<string, unknown> = {},
-  ): Promise<Record<string, unknown>> {
-    type _RpcSignature = [RpcApprovalListParams, RpcApprovalListResult];
+    params: RpcApprovalListParams = {},
+  ): Promise<RpcApprovalListResult> {
     return this.request("approval/list", params);
   }
 
   async getApproval(
-    params: Record<string, unknown>,
-  ): Promise<Record<string, unknown>> {
-    type _RpcSignature = [RpcApprovalGetParams, RpcApprovalRecord];
+    params: RpcApprovalGetParams,
+  ): Promise<RpcApprovalRecord> {
     return this.request("approval/get", params);
   }
 
   async decideApproval(
-    params: Record<string, unknown>,
-  ): Promise<Record<string, unknown>> {
-    type _RpcSignature = [RpcApprovalDecideParams, RpcApprovalRecord];
+    params: RpcApprovalDecideParams,
+  ): Promise<RpcApprovalRecord> {
     return this.request("approval/decide", params);
   }
 
   async listArtifacts(
-    params: Record<string, unknown> = {},
-  ): Promise<Record<string, unknown>> {
-    type _RpcSignature = [RpcArtifactListParams, RpcArtifactListResult];
+    params: RpcArtifactListParams = {},
+  ): Promise<RpcArtifactListResult> {
     return this.request("artifact/list", params);
   }
 
   async getArtifact(
-    params: Record<string, unknown>,
-  ): Promise<Record<string, unknown>> {
-    type _RpcSignature = [RpcArtifactIdParams, RpcArtifactRecord];
+    params: RpcArtifactIdParams,
+  ): Promise<RpcArtifactRecord> {
     return this.request("artifact/get", params);
   }
 
   async downloadArtifact(
-    params: Record<string, unknown>,
-  ): Promise<Record<string, unknown>> {
-    type _RpcSignature = [RpcArtifactDownloadParams, RpcArtifactDownloadResult];
+    params: RpcArtifactDownloadParams,
+  ): Promise<RpcArtifactDownloadResult> {
     return this.request("artifact/download", params);
   }
 
   async latestEventCursor(
-    params: Record<string, unknown>,
-  ): Promise<Record<string, unknown>> {
-    type _RpcSignature = [RpcEventsLatestCursorParams, RpcEventsLatestCursorResult];
+    params: RpcEventsLatestCursorParams,
+  ): Promise<RpcEventsLatestCursorResult> {
     return this.request("events/latest_cursor", params);
   }
 
   async listEventsSince(
-    params: Record<string, unknown>,
-  ): Promise<Record<string, unknown>> {
-    type _RpcSignature = [RpcEventsListSinceParams, RpcEventsListSinceResult];
+    params: RpcEventsListSinceParams,
+  ): Promise<RpcEventsListSinceResult> {
     return this.request("events/list_since", params);
   }
 
   async eventSnapshot(
-    params: Record<string, unknown>,
-  ): Promise<Record<string, unknown>> {
-    type _RpcSignature = [RpcEventsSnapshotParams, RpcEventsSnapshotResult];
+    params: RpcEventsSnapshotParams,
+  ): Promise<RpcEventsSnapshotResult> {
     return this.request("events/snapshot", params);
   }
 
@@ -1661,13 +1851,11 @@ export class MeerkatClient {
   }
 
   async createSchedule(request: CreateScheduleRequest): Promise<Schedule> {
-    type _RpcSignature = [RpcCreateScheduleRequest, RpcSchedule];
     const result = await this.request("schedule/create", MeerkatClient.toWireCreateScheduleRequest(request));
     return MeerkatClient.parseSchedule(result);
   }
 
   async getSchedule(scheduleId: string): Promise<Schedule> {
-    type _RpcSignature = [RpcSchedule];
     const result = await this.request("schedule/get", { schedule_id: scheduleId });
     return MeerkatClient.parseSchedule(result);
   }
@@ -1691,7 +1879,6 @@ export class MeerkatClient {
   }
 
   async updateSchedule(request: UpdateScheduleRequest): Promise<Schedule> {
-    type _RpcSignature = [RpcSchedule];
     const params = {
       schedule_id: request.scheduleId,
       ...MeerkatClient.toWireUpdateSchedulePatch(request.update),
@@ -1701,19 +1888,16 @@ export class MeerkatClient {
   }
 
   async pauseSchedule(scheduleId: string): Promise<Schedule> {
-    type _RpcSignature = [RpcSchedule];
     const result = await this.request("schedule/pause", { schedule_id: scheduleId });
     return MeerkatClient.parseSchedule(result);
   }
 
   async resumeSchedule(scheduleId: string): Promise<Schedule> {
-    type _RpcSignature = [RpcSchedule];
     const result = await this.request("schedule/resume", { schedule_id: scheduleId });
     return MeerkatClient.parseSchedule(result);
   }
 
   async deleteSchedule(scheduleId: string): Promise<Schedule> {
-    type _RpcSignature = [RpcSchedule];
     const result = await this.request("schedule/delete", { schedule_id: scheduleId });
     return MeerkatClient.parseSchedule(result);
   }
@@ -1722,7 +1906,7 @@ export class MeerkatClient {
     scheduleId: string,
     options?: ScheduleOccurrencesOptions,
   ): Promise<ScheduleOccurrencesResult> {
-    const params: Record<string, unknown> = { schedule_id: scheduleId };
+    const params: RpcScheduleOccurrencesParams = { schedule_id: scheduleId };
     if (options?.includeTerminal !== undefined) {
       params.include_terminal = options.includeTerminal;
     }
@@ -1740,7 +1924,6 @@ export class MeerkatClient {
   }
 
   async listScheduleTools(): Promise<ScheduleToolsResult> {
-    type _RpcSignature = [RpcScheduleToolsResult];
     const result = await this.request("schedule/tools", {});
     const data = MeerkatClient.requireRecord(
       result,
@@ -1755,11 +1938,15 @@ export class MeerkatClient {
   }
 
   async callScheduleTool(request: ScheduleToolCallRequest): Promise<Record<string, unknown>> {
-    type _RpcSignature = [RpcScheduleToolCallParams];
-    return this.request("schedule/call", {
+    const result = await this.request("schedule/call", {
       name: request.name,
       arguments: request.arguments ?? {},
     });
+    return MeerkatClient.requireRecord(
+      result,
+      "result",
+      "Invalid schedule/call response",
+    );
   }
 
   async getWorkGraphItem(
@@ -1834,7 +2021,9 @@ export class MeerkatClient {
 
   async createMob(options: MobCreateOptions): Promise<Mob> {
     this.requireCapability("mob");
-    const result = await this.request("mob/create", options);
+    const result = await this.request("mob/create", {
+      definition: toWireMobDefinition(options.definition),
+    });
     return new Mob(
       this,
       MeerkatClient.requireStringField(
@@ -1939,7 +2128,7 @@ export class MeerkatClient {
     const result = await this.request("mob/member_send", {
       mob_id: mobId,
       agent_identity: agentIdentity,
-      content,
+      content: toWireContentInput(content),
       handling_mode: options?.handlingMode,
       render_metadata: options?.renderMetadata,
     });
@@ -2013,7 +2202,7 @@ export class MeerkatClient {
       mob_id: mobId,
       specs: specs.map(mobSpawnManySpecPayload),
     };
-    const result = await this.request<MobSpawnManyResult>(
+    const result = await this.request(
       "mob/spawn_many",
       params,
     );
@@ -2141,7 +2330,6 @@ export class MeerkatClient {
     scopes: MobControlScope[],
     expiresAtMs?: number,
   ): Promise<MobGrantRecord> {
-    type _RpcSignature = [RpcMobGrantScopesParams, RpcMobGrantScopesResult];
     const result = await this.request("mob/grant_scopes", {
       mob_id: mobId,
       principal,
@@ -2164,7 +2352,6 @@ export class MeerkatClient {
     principal: string,
     scopes?: MobControlScope[],
   ): Promise<boolean> {
-    type _RpcSignature = [RpcMobRevokeScopesParams, RpcMobRevokeScopesResult];
     const result = await this.request("mob/revoke_scopes", {
       mob_id: mobId,
       principal,
@@ -2184,7 +2371,6 @@ export class MeerkatClient {
    * preserve the generated `expires_at_ms` wire field verbatim.
    */
   async listMobGrants(mobId: string): Promise<MobGrantRecord[]> {
-    type _RpcSignature = [RpcMobIdParams, RpcMobGrantsResult];
     const result = await this.request("mob/grants", { mob_id: mobId });
     const context = "Invalid mob/grants response";
     const grants = result.grants;
@@ -2262,7 +2448,6 @@ export class MeerkatClient {
     agentIdentity: string,
     opts?: { fromIndex?: number; limit?: number },
   ): Promise<RpcMobMemberHistoryResult> {
-    type _RpcSignature = [RpcMobMemberHistoryParams, RpcMobMemberHistoryResult];
     const result = await this.request("mob/member_history", {
       mob_id: mobId,
       agent_identity: agentIdentity,
@@ -2354,7 +2539,6 @@ export class MeerkatClient {
 
   /** List tracked member hosts with bind phase and declared capabilities. */
   async mobHosts(mobId: string): Promise<RpcMobHostStatus[]> {
-    type _RpcSignature = [RpcMobIdParams, RpcMobHostsResult];
     const result = await this.request("mob/hosts", { mob_id: mobId });
     const hosts = result.hosts;
     if (!Array.isArray(hosts)) {
@@ -2373,7 +2557,6 @@ export class MeerkatClient {
 
   /** Outstanding cross-host route-install obligations. */
   async mobRouteInstalls(mobId: string): Promise<RpcMobRouteInstallsResult> {
-    type _RpcSignature = [RpcMobIdParams, RpcMobRouteInstallsResult];
     const result = await this.request("mob/route_installs", { mob_id: mobId });
     const context = "Invalid mob/route_installs response";
     const outstanding = MeerkatClient.requireRecordArray(
@@ -2395,7 +2578,6 @@ export class MeerkatClient {
     mobId: string,
     descriptor: RpcWireHostBindingDescriptor,
   ): Promise<RpcMobBindHostResult> {
-    type _RpcSignature = [RpcMobBindHostParams, RpcMobBindHostResult];
     const result = await this.request("mob/bind_host", {
       mob_id: mobId,
       descriptor,
@@ -2415,7 +2597,6 @@ export class MeerkatClient {
     mobId: string,
     hostId: string,
   ): Promise<RpcMobRevokeHostResult> {
-    type _RpcSignature = [RpcMobRevokeHostParams, RpcMobRevokeHostResult];
     const result = await this.request("mob/revoke_host", {
       mob_id: mobId,
       host_id: hostId,
@@ -2432,7 +2613,6 @@ export class MeerkatClient {
     agentIdentity: string,
     reason: string,
   ): Promise<boolean> {
-    type _RpcSignature = [RpcMobHardCancelParams, RpcMobHardCancelResult];
     const result = await this.request("mob/hard_cancel_member", {
       mob_id: mobId,
       agent_identity: agentIdentity,
@@ -2453,7 +2633,6 @@ export class MeerkatClient {
     agentIdentity: string,
     opts?: MobMemberLiveOpenOptions,
   ): Promise<RpcLiveOpenResult> {
-    type _RpcSignature = [RpcMobMemberLiveOpenParams, RpcLiveOpenResult];
     const result = await this.request("mob/member_live_open", {
       mob_id: mobId,
       agent_identity: agentIdentity,
@@ -2472,7 +2651,6 @@ export class MeerkatClient {
     agentIdentity: string,
     channelId: string,
   ): Promise<RpcLiveCloseResult> {
-    type _RpcSignature = [RpcMobMemberLiveChannelParams, RpcLiveCloseResult];
     const result = await this.request("mob/member_live_close", {
       mob_id: mobId,
       agent_identity: agentIdentity,
@@ -2487,7 +2665,6 @@ export class MeerkatClient {
     agentIdentity: string,
     channelId?: string,
   ): Promise<RpcLiveStatusResult> {
-    type _RpcSignature = [RpcMobMemberLiveStatusParams, RpcLiveStatusResult];
     const result = await this.request("mob/member_live_status", {
       mob_id: mobId,
       agent_identity: agentIdentity,
@@ -2506,7 +2683,6 @@ export class MeerkatClient {
     channelId: string,
     verb: RpcBridgeLiveControlVerb,
   ): Promise<RpcBridgeLiveControlOutcome> {
-    type _RpcSignature = [RpcMobMemberLiveControlParams, RpcBridgeLiveControlOutcome];
     const result = await this.request("mob/member_live_control", {
       mob_id: mobId,
       agent_identity: agentIdentity,
@@ -2546,7 +2722,8 @@ export class MeerkatClient {
     const result = await this.request("mob/respawn", {
       mob_id: mobId,
       agent_identity: agentIdentity,
-      initial_message: initialMessage,
+      initial_message:
+        initialMessage === undefined ? undefined : toWireContentInput(initialMessage),
     });
     const respawnContext = "Invalid mob/respawn response";
     const respawnRecord = MeerkatClient.requireRecord(result, "result", respawnContext);
@@ -2621,9 +2798,7 @@ export class MeerkatClient {
       mob_id: mobId,
       agent_identity: agentIdentity,
     };
-    const result = await this.request<
-      Partial<MobMemberStatusResult> & Record<string, unknown>
-    >("mob/member_status", params);
+    const result = await this.request("mob/member_status", params);
     const snapshot: MobMemberSnapshot = {
       status: MeerkatClient.parseWireMobMemberStatus(
         result.status,
@@ -2799,23 +2974,23 @@ export class MeerkatClient {
    */
   async mobSubmitWork(args: {
     memberRef: string;
-    content: unknown;
+    content: ContentInput;
     workRef?: string;
     origin?: "external" | "internal";
     injectedContext?: ContentInput[];
     transientTurnContext?: string;
     objectiveId?: string;
   }): Promise<{ mobId: string; workRef: string; memberRef: string; objectiveId?: string }> {
-    const params: Record<string, unknown> = {
+    const params: RpcMobSubmitWorkParams = {
       member_ref: args.memberRef,
-      content: args.content,
+      content: toWireContentInput(args.content),
       origin: args.origin ?? "external",
     };
     if (args.workRef !== undefined) {
       params.work_ref = args.workRef;
     }
     if (args.injectedContext !== undefined && args.injectedContext.length > 0) {
-      params.injected_context = args.injectedContext;
+      params.injected_context = args.injectedContext.map(toWireContentInput);
     }
     if (args.transientTurnContext !== undefined) {
       params.transient_turn_context = args.transientTurnContext;
@@ -2900,7 +3075,7 @@ export class MeerkatClient {
     mobId: string,
     options?: MobKickoffWaitOptions,
   ): Promise<MobKickoffMemberSnapshot[]> {
-    const params: Record<string, unknown> = { mob_id: mobId };
+    const params: RpcMobWaitParams = { mob_id: mobId };
     if (options?.memberIds !== undefined) {
       params.member_ids = options.memberIds;
     }
@@ -2955,7 +3130,7 @@ export class MeerkatClient {
     mobId: string,
     options?: MobReadyWaitOptions,
   ): Promise<MobReadyMemberSnapshot[]> {
-    const params: Record<string, unknown> = { mob_id: mobId };
+    const params: RpcMobWaitParams = { mob_id: mobId };
     if (options?.memberIds !== undefined) {
       params.member_ids = options.memberIds;
     }
@@ -3121,7 +3296,7 @@ export class MeerkatClient {
     mobId: string,
     options?: MobEventsOptions,
   ): Promise<MobEventsResult> {
-    const params: Record<string, unknown> = { mob_id: mobId };
+    const params: RpcMobEventsParams = { mob_id: mobId };
     if (options?.afterCursor !== undefined) {
       params.after_cursor = options.afterCursor;
     }
@@ -3147,15 +3322,15 @@ export class MeerkatClient {
   }
 
   async mobIngressInteraction(
-    params: Record<string, unknown>,
-  ): Promise<Record<string, unknown>> {
+    params: RpcMobIngressInteractionParams,
+  ): Promise<RpcMobIngressInteractionResult> {
     return this.request("mob/ingress_interaction", params);
   }
 
   async createMobProfile(name: string, profile: MobProfile): Promise<MobProfileLookupResult> {
     const raw = await this.request("mob/profile/create", {
       name,
-      profile,
+      profile: toWireMobProfile(profile),
     });
     return MeerkatClient.parseMobProfileLookup(raw);
   }
@@ -3181,7 +3356,7 @@ export class MeerkatClient {
   ): Promise<MobProfileLookupResult> {
     const raw = await this.request("mob/profile/update", {
       name,
-      profile,
+      profile: toWireMobProfile(profile),
       expected_revision: expectedRevision,
     });
     return MeerkatClient.parseMobProfileLookup(raw);
@@ -3281,21 +3456,37 @@ export class MeerkatClient {
   }
 
   private async openEventSubscription<T>(
-    openMethod: string,
-    params: Record<string, unknown>,
-    closeMethod: string,
+    openMethod: "session/stream_open",
+    params: RpcSessionStreamOpenParams,
+    closeMethod: "session/stream_close",
+    parse: (raw: Record<string, unknown>) => T,
+  ): Promise<EventSubscription<T>>;
+  private async openEventSubscription<T>(
+    openMethod: "mob/stream_open",
+    params: RpcMobStreamOpenParams,
+    closeMethod: "mob/stream_close",
+    parse: (raw: Record<string, unknown>) => T,
+  ): Promise<EventSubscription<T>>;
+  private async openEventSubscription<T>(
+    openMethod: "session/stream_open" | "mob/stream_open",
+    params: RpcSessionStreamOpenParams | RpcMobStreamOpenParams,
+    closeMethod: "session/stream_close" | "mob/stream_close",
     parse: (raw: Record<string, unknown>) => T,
   ): Promise<EventSubscription<T>> {
     const result = this.process?.stdin
       ? await (async () => {
           this.requestId++;
           const requestId = this.requestId;
-          const responsePromise = this.registerRequest(requestId);
+          const responsePromise = this.registerRequest<
+            RpcSessionStreamOpenResult | RpcMobStreamOpenResult
+          >(requestId);
           const rpcRequest = { jsonrpc: "2.0", id: requestId, method: openMethod, params };
           this.process!.stdin!.write(JSON.stringify(rpcRequest) + "\n");
           return responsePromise;
         })()
-      : await this.request(openMethod, params);
+      : openMethod === "session/stream_open"
+        ? await this.request("session/stream_open", params as RpcSessionStreamOpenParams)
+        : await this.request("mob/stream_open", params as RpcMobStreamOpenParams);
     const streamId = String(result.stream_id ?? "");
     if (!streamId) {
       throw new MeerkatError("INVALID_RESPONSE", `${openMethod} did not return stream_id`);
@@ -3316,7 +3507,11 @@ export class MeerkatClient {
       closeRemote: async (id: string) => {
         // Await stream-close authority before tearing down local dispatch:
         // a rejected close must leave the subscription delivering events.
-        await this.request(closeMethod, { stream_id: id });
+        if (closeMethod === "session/stream_close") {
+          await this.request("session/stream_close", { stream_id: id });
+        } else {
+          await this.request("mob/stream_close", { stream_id: id });
+        }
         this.streamQueues.delete(id);
       },
       parseEvent: parse,
@@ -3587,9 +3782,9 @@ export class MeerkatClient {
     });
   }
 
+
   /** @internal */
   async _interrupt(sessionId: string): Promise<InterruptResult> {
-    type _RpcSignature = [RpcInterruptParams];
     return (await this.request("turn/interrupt", {
       session_id: sessionId,
     })) as unknown as InterruptResult;
@@ -3597,7 +3792,6 @@ export class MeerkatClient {
 
   /** @internal */
   async _archive(sessionId: string): Promise<void> {
-    type _RpcSignature = [RpcArchiveSessionParams];
     await this.request("session/archive", { session_id: sessionId });
   }
 
@@ -3674,7 +3868,10 @@ export class MeerkatClient {
    * boundary.
    */
   async send(sessionId: string, command: CommsCommand): Promise<CommsSendResult> {
-    const result = await this.request("comms/send", { session_id: sessionId, ...command });
+    const result = await this.request(
+      "comms/send",
+      toWireCommsSendParams(sessionId, command),
+    );
     return MeerkatClient.parseCommsSendReceipt(result);
   }
 
@@ -3694,8 +3891,8 @@ export class MeerkatClient {
   /** Idempotent spawn: spawns or returns the existing member entry. */
   async mobEnsureMember(
     mobId: string,
-    spec: Record<string, unknown>,
-  ): Promise<Record<string, unknown>> {
+    spec: RpcMobMemberSpecWire,
+  ): Promise<RpcMobEnsureMemberResult> {
     return await this.request("mob/ensure_member", {
       mob_id: mobId,
       spec,
@@ -3705,10 +3902,10 @@ export class MeerkatClient {
   /** Declarative reconcile: converge roster to the desired spec list. */
   async mobReconcile(
     mobId: string,
-    desired: Record<string, unknown>[],
-    options?: Record<string, unknown>,
-  ): Promise<Record<string, unknown>> {
-    const params: Record<string, unknown> = { mob_id: mobId, desired };
+    desired: RpcMobMemberSpecWire[],
+    options?: RpcMobReconcileOptionsWire,
+  ): Promise<RpcMobReconcileResult> {
+    const params: RpcMobReconcileParams = { mob_id: mobId, desired };
     if (options !== undefined) params.options = options;
     return await this.request("mob/reconcile", params);
   }
@@ -3731,7 +3928,7 @@ export class MeerkatClient {
   // schemas regenerated into `./generated/types.ts`. See I52/I53.
 
   async liveOpen(params: LiveOpenParams): Promise<LiveOpenResult> {
-    const result = await this.request("live/open", params as unknown as Record<string, unknown>);
+    const result = await this.request("live/open", params);
     return MeerkatClient.parseLiveOpenResult(result, "Invalid live/open response");
   }
 
@@ -3740,7 +3937,7 @@ export class MeerkatClient {
   ): Promise<LiveWebrtcAnswerResult> {
     const result = await this.request(
       "live/webrtc/answer",
-      params as unknown as Record<string, unknown>,
+      params,
     );
     return result as unknown as LiveWebrtcAnswerResult;
   }
@@ -3748,19 +3945,18 @@ export class MeerkatClient {
   async liveStatus(params: LiveChannelParams): Promise<LiveStatusResult> {
     const result = await this.request(
       "live/status",
-      params as unknown as Record<string, unknown>,
+      params,
     );
     return MeerkatClient.parseLiveStatusResult(result, "Invalid live/status response");
   }
 
   async liveClose(params: LiveChannelParams): Promise<LiveCloseResult> {
-    const result = await this.request("live/close", params as unknown as Record<string, unknown>);
+    const result = await this.request("live/close", params);
     return MeerkatClient.parseLiveCloseResult(result);
   }
 
   async liveSendInput(params: LiveSendInputParams): Promise<void> {
-    type _RpcSignature = [RpcLiveSendInputResult];
-    await this.request("live/send_input", params as unknown as Record<string, unknown>);
+    await this.request("live/send_input", params);
   }
 
   /**
@@ -3784,7 +3980,6 @@ export class MeerkatClient {
     mime: string,
     dataBase64: string,
   ): Promise<void> {
-    type _RpcSignature = [RpcLiveSendInputResult];
     await this.request("live/send_input", {
       channel_id: channelId,
       chunk: {
@@ -3813,7 +4008,6 @@ export class MeerkatClient {
     dataBase64: string,
     timestampMs: number,
   ): Promise<void> {
-    type _RpcSignature = [RpcLiveSendInputResult];
     await this.request("live/send_input", {
       channel_id: channelId,
       chunk: {
@@ -3826,19 +4020,17 @@ export class MeerkatClient {
   }
 
   async liveCommitInput(params: LiveCommitInputParams): Promise<void> {
-    type _RpcSignature = [RpcLiveCommitInputResult];
-    await this.request("live/commit_input", params as unknown as Record<string, unknown>);
+    await this.request("live/commit_input", params);
   }
 
   async liveInterrupt(params: LiveChannelParams): Promise<void> {
-    type _RpcSignature = [RpcLiveInterruptResult];
-    await this.request("live/interrupt", params as unknown as Record<string, unknown>);
+    await this.request("live/interrupt", params);
   }
 
   async liveTruncate(params: LiveTruncateParams): Promise<void> {
-    type _RpcSignature = [RpcLiveTruncateResult];
-    await this.request("live/truncate", params as unknown as Record<string, unknown>);
+    await this.request("live/truncate", params);
   }
+
 
   /**
    * Apply mutable session config (instructions / tools / audio) to an open
@@ -3867,7 +4059,7 @@ export class MeerkatClient {
   async liveRefresh(params: LiveChannelParams): Promise<LiveRefreshResult> {
     const result = await this.request(
       "live/refresh",
-      params as unknown as Record<string, unknown>,
+      params,
     );
     return MeerkatClient.parseLiveRefreshResult(result);
   }
@@ -3931,12 +4123,10 @@ export class MeerkatClient {
   }
 
   async realmGet(realmId: string): Promise<unknown> {
-    type _RpcSignature = [RpcRealmIdParams];
     return this.request("realm/get", { realm_id: realmId });
   }
 
   async authProfileList(realmId: string): Promise<unknown> {
-    type _RpcSignature = [RpcRealmIdParams];
     return this.request("auth/profile/list", { realm_id: realmId });
   }
 
@@ -3945,8 +4135,7 @@ export class MeerkatClient {
     bindingId: string,
     profileId?: string,
   ): Promise<unknown> {
-    type _RpcSignature = [RpcBindingIdParams];
-    const params: Record<string, unknown> = {
+    const params: RpcBindingIdParams = {
       realm_id: realmId,
       binding_id: bindingId,
     };
@@ -3954,8 +4143,7 @@ export class MeerkatClient {
     return this.request("auth/profile/get", params);
   }
 
-  async authProfileCreate(params: Record<string, unknown>): Promise<unknown> {
-    type _RpcSignature = [RpcCreateProfileParams];
+  async authProfileCreate(params: RpcCreateProfileParams): Promise<RpcWireAuthProfileCreated> {
     return this.request("auth/profile/create", params);
   }
 
@@ -3964,8 +4152,7 @@ export class MeerkatClient {
     bindingId: string,
     profileId?: string,
   ): Promise<unknown> {
-    type _RpcSignature = [RpcBindingIdParams];
-    const params: Record<string, unknown> = {
+    const params: RpcBindingIdParams = {
       realm_id: realmId,
       binding_id: bindingId,
     };
@@ -3973,34 +4160,29 @@ export class MeerkatClient {
     return this.request("auth/profile/delete", params);
   }
 
-  async authLoginStart(params: Record<string, unknown>): Promise<unknown> {
-    type _RpcSignature = [RpcLoginStartParams];
+  async authLoginStart(params: RpcLoginStartParams): Promise<RpcWireLoginStart> {
     return this.request("auth/login/start", params);
   }
 
-  async authLoginComplete(params: Record<string, unknown>): Promise<unknown> {
-    type _RpcSignature = [RpcLoginCompleteParams];
+  async authLoginComplete(params: RpcLoginCompleteParams): Promise<RpcWireLoginReady> {
     return this.request("auth/login/complete", params);
   }
 
   async authLoginDeviceStart(
-    params: Record<string, unknown>,
-  ): Promise<unknown> {
-    type _RpcSignature = [RpcDeviceStartParams];
+    params: RpcDeviceStartParams,
+  ): Promise<RpcWireDeviceStart> {
     return this.request("auth/login/device_start", params);
   }
 
   async authLoginDeviceComplete(
-    params: Record<string, unknown>,
-  ): Promise<unknown> {
-    type _RpcSignature = [RpcDeviceCompleteParams, RpcWireDeviceCompleteResult];
+    params: RpcDeviceCompleteParams,
+  ): Promise<RpcWireDeviceCompleteResult> {
     return this.request("auth/login/device_complete", params);
   }
 
   async authLoginProvisionApiKey(
-    params: Record<string, unknown>,
-  ): Promise<unknown> {
-    type _RpcSignature = [RpcProvisionApiKeyParams, RpcWireProvisionApiKeyResult];
+    params: RpcProvisionApiKeyParams,
+  ): Promise<RpcWireProvisionApiKeyResult> {
     return this.request("auth/login/provision_api_key", params);
   }
 
@@ -4009,8 +4191,7 @@ export class MeerkatClient {
     bindingId: string,
     profileId?: string,
   ): Promise<unknown> {
-    type _RpcSignature = [RpcBindingIdParams];
-    const params: Record<string, unknown> = {
+    const params: RpcBindingIdParams = {
       realm_id: realmId,
       binding_id: bindingId,
     };
@@ -4023,8 +4204,7 @@ export class MeerkatClient {
     bindingId: string,
     profileId?: string,
   ): Promise<unknown> {
-    type _RpcSignature = [RpcBindingIdParams];
-    const params: Record<string, unknown> = {
+    const params: RpcBindingIdParams = {
       realm_id: realmId,
       binding_id: bindingId,
     };
@@ -4172,7 +4352,10 @@ export class MeerkatClient {
     };
   }
 
-  private request<T = Record<string, unknown>>(method: string, params: unknown): Promise<T> {
+  private request<M extends RpcMethodName>(
+    method: M,
+    params: RpcMethodContracts[M]["params"],
+  ): Promise<RpcMethodContracts[M]["result"]> {
     if (this.transportFault) {
       throw this.transportFault;
     }
@@ -4183,7 +4366,7 @@ export class MeerkatClient {
     this.requestId++;
     const id = this.requestId;
     const rpcRequest = { jsonrpc: "2.0", id, method, params };
-    const promise = this.registerRequest<T>(id);
+    const promise = this.registerRequest<RpcMethodContracts[M]["result"]>(id);
     this.process.stdin!.write(JSON.stringify(rpcRequest) + "\n");
     return promise;
   }
@@ -6323,7 +6506,9 @@ export class MeerkatClient {
     };
   }
 
-  private static toWireCreateScheduleRequest(request: CreateScheduleRequest): Record<string, unknown> {
+  private static toWireCreateScheduleRequest(
+    request: CreateScheduleRequest,
+  ): RpcCreateScheduleRequest {
     return {
       name: request.name,
       description: request.description,
@@ -6680,18 +6865,18 @@ export class MeerkatClient {
 
   static serializeTranscriptReplacement(
     replacement: TranscriptReplacement,
-  ): Record<string, unknown> {
+  ): RpcWireTranscriptReplacement {
     switch (replacement.type) {
       case "message":
         return {
           type: "message",
-          message: replacement.message,
+          message: MeerkatClient.serializeTranscriptRewriteMessage(replacement.message),
         };
       case "user_content_block":
         return {
           type: "user_content_block",
           block_index: replacement.blockIndex,
-          block: replacement.block,
+          block: toWireContentBlock(replacement.block),
         };
       case "assistant_block":
         return {
@@ -6704,7 +6889,7 @@ export class MeerkatClient {
           type: "tool_result_content_block",
           result_index: replacement.resultIndex,
           block_index: replacement.blockIndex,
-          block: replacement.block,
+          block: toWireContentBlock(replacement.block),
         };
     }
     throw new Error(
@@ -6815,7 +7000,7 @@ export class MeerkatClient {
 
   static serializeTranscriptRewriteMessage(
     message: TranscriptRewriteInputMessage,
-  ): Record<string, unknown> {
+  ): RpcTranscriptRewriteMessage {
     const camel = message as SessionMessage;
     if (camel.createdAt !== undefined) {
       const payload: Record<string, unknown> = {
@@ -6857,7 +7042,9 @@ export class MeerkatClient {
           is_error: result.isError,
         }));
       }
-      return payload;
+      // SessionMessage.raw was accepted by the fail-closed transcript parser
+      // above; this branch only restores the exact snake_case wire spelling.
+      return payload as unknown as RpcTranscriptRewriteMessage;
     }
     return { ...(message as TranscriptRewriteMessage) };
   }

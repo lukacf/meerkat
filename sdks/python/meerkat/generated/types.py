@@ -518,6 +518,30 @@ class SessionExternalEventEnvelopePeerResponseTerminal(TypedDict, total=False):
 
 SessionExternalEventEnvelope = SessionExternalEventEnvelopeGenericJson | SessionExternalEventEnvelopePeerResponseTerminal
 
+# Complete request payload for `session/external_event`.
+#
+# The event envelope is flattened on the wire, but the session selector is
+# part of the RPC method contract and must therefore be present in the
+# catalogued params type rather than supplied by an undocumented wrapper
+# extension.
+class SessionExternalEventParamsGenericJson(TypedDict, total=False):
+    session_id: Required[str]
+    blocks: NotRequired[Optional[list[WireContentBlock]]]
+    event_type: Required[str]
+    kind: Required[Literal['generic_json']]
+    payload: Required[Any]
+
+class SessionExternalEventParamsPeerResponseTerminal(TypedDict, total=False):
+    session_id: Required[str]
+    display_name: NotRequired[Optional[PeerName]]
+    kind: Required[Literal['peer_response_terminal']]
+    peer_id: Required[PeerId]
+    request_id: Required[str]
+    result: Required[Any]
+    status: Required[Literal['completed', 'failed', 'cancelled']]
+
+SessionExternalEventParams = SessionExternalEventParamsGenericJson | SessionExternalEventParamsPeerResponseTerminal
+
 # `auth/login/device_complete` success body.
 class WireDeviceCompleteResultPending(TypedDict, total=False):
     state: Required[Literal['pending']]

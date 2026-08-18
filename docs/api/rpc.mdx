@@ -125,7 +125,7 @@ subset.
 | `events/list_since` | Events | `EventsListSinceParams` | `EventsListSinceResult` | List replayable events after a typed cursor |
 | `events/snapshot` | Events | `EventsSnapshotParams` | `EventsSnapshotResult` | Read a point-in-time snapshot with its replay cursor |
 | `session/archive` | Session | `ArchiveSessionParams` | `Value` | Remove session from runtime |
-| `session/external_event` | Session | `SessionExternalEventEnvelope` | `RuntimeAcceptResult` | Queue a runtime-backed external event |
+| `session/external_event` | Session | `SessionExternalEventParams` | `RuntimeAcceptResult` | Queue a runtime-backed external event |
 | `session/peer_response_terminal` | Session | `SessionPeerResponseTerminalParams` | `RuntimeAcceptResult` | Admit a correlated terminal peer response through the typed runtime ingress |
 | `session/inject_context` | Session | `InjectSystemContextParams` | `InjectSystemContextResult` | Append one ordinary durable ordered System message at the admitted transcript boundary |
 | `session/input_status` | Session | `SessionInputStateParams` | `SessionInputStateResult` | Read an input's stored runtime state (terminal outcome, run association) by input id or idempotency key |

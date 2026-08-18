@@ -369,6 +369,7 @@ pub use wire::{
     ServerCapabilities,
     ServerInfo,
     SessionExternalEventEnvelope,
+    SessionExternalEventParams,
     SessionInputStateParams,
     SessionInputStateResult,
     SessionInputStateSelector,

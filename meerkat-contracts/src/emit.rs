@@ -183,6 +183,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "RuntimeStateResult": schema_for!(crate::wire::RuntimeStateResult),
         "PeerResponseTerminalStatusWire": schema_for!(crate::wire::PeerResponseTerminalStatusWire),
         "SessionExternalEventEnvelope": schema_for!(crate::wire::SessionExternalEventEnvelope),
+        "SessionExternalEventParams": schema_for!(crate::wire::SessionExternalEventParams),
         "RealtimeTurningMode": schema_for!(crate::wire::RealtimeTurningMode),
         "RealtimeInputKind": schema_for!(crate::wire::RealtimeInputKind),
         "RealtimeOutputKind": schema_for!(crate::wire::RealtimeOutputKind),

@@ -211,6 +211,7 @@ pub use runtime::{
     RuntimeAcceptResult,
     RuntimeStateResult,
     SessionExternalEventEnvelope,
+    SessionExternalEventParams,
     SessionPeerResponseTerminalParams,
     // Re-export of the `StructuredProviderExtension` core relocation
     // from C-1 — external callers can still import via the wire path.

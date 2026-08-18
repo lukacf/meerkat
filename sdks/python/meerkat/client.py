@@ -20,7 +20,6 @@ Example::
 from __future__ import annotations
 
 import asyncio
-from dataclasses import fields, is_dataclass
 import json
 import logging
 import os
@@ -28,48 +27,49 @@ import platform
 import shutil
 import tarfile
 import tempfile
+import urllib.request
 import warnings
 import zipfile
+from dataclasses import fields, is_dataclass
 from pathlib import Path
 from typing import Any, Literal, NotRequired, TypedDict, cast
 from urllib.error import URLError
-import urllib.request
 
 from .errors import CapabilityUnavailableError, MeerkatError
 from .event_envelope import parse_agent_event_envelope
 from .events import Usage
-from .generated.types import CONTRACT_VERSION
-from .generated.version_compat import (
-    is_compatible_with as _generated_is_compatible_with,
-)
+from .generated.rpc_contracts import RpcRequest
 from .generated.types import (
+    CONTRACT_VERSION,
+    ApprovalDecideParams,
+    ApprovalGetParams,
+    ApprovalRequestParams,
+    ArtifactDownloadParams,
+    ArtifactIdParams,
+    AttentionListRequest,
+    AttentionListResult,
     BridgeLiveControlOutcome,
     BridgeLiveControlVerb,
     CallbackToolDefinition,
-    SkillListResponse,
-    AttentionListRequest,
-    AttentionListResult,
     CapabilitiesResponse,
+    CommsSendResult,
     ConfigPatchParams,
     ConfigSetParams,
     ConfigWriteResult,
-    CommsSendResult,
-    InterruptResult,
-    ServerCapabilities,
-    SkillEntry,
-    SkillKey as WireSkillKey,
-    SkillSourceProvenance,
-    WorkEventsResult,
-    WorkItemsResult,
+    CreateProfileParams,
+    CreateScheduleRequest,
+    DeviceStartParams,
+    EventsLatestCursorParams,
+    EventsListSinceParams,
+    EventsSnapshotParams,
     GoalStatusRequest,
     GoalStatusResult,
+    InterruptResult,
     JobArtifactRef,
     JobHealthCoverage,
     JobHealthSummary,
     JobProgress,
     JobRunner,
-    JobSummary,
-    JobTerminalResult,
     JobsArtifactsParams,
     JobsArtifactsResult,
     JobsCancelParams,
@@ -87,35 +87,29 @@ from .generated.types import (
     JobsRetryResult,
     JobsSubscribeParams,
     JobsSubscribeResult,
+    JobSummary,
     JobsUnsubscribeParams,
     JobsUnsubscribeResult,
+    JobTerminalResult,
     LiveCloseResult,
     LiveCloseStatus,
     LiveOpenResult,
     LiveRefreshResult,
     LiveRefreshStatus,
     LiveStatusResult,
+    LoginStartParams,
     McpServerConfig,
     MobBindHostParams,
     MobBindHostResult,
+    MobConcludeObjectiveParams,
+    MobConcludeObjectiveResult,
     MobDefinitionInput,
     MobFlowRunResult,
     MobGrantScopesParams,
-    MobGrantScopesResult,
-    MobGrantsResult,
     MobHardCancelParams,
-    MobHardCancelResult,
     MobHostStatus,
-    MobHostsResult,
     MobIdParams,
-    MobMemberParams,
-    MobMemberHistoryParams,
-    MobMemberHistoryResult,
-    MobMemberLiveChannelParams,
-    MobMemberLiveControlParams,
-    MobMemberLiveOpenParams,
-    MobMemberLiveStatusParams,
-    MobMemberStatusResult,
+    MobIngressInteractionParams,
     MobkitJobCancelAckParams,
     MobkitJobCheckpointParams,
     MobkitJobCompleteParams,
@@ -123,119 +117,80 @@ from .generated.types import (
     MobkitJobHeartbeatParams,
     MobkitJobMutationResult,
     MobkitJobProgressParams,
+    MobMemberHistoryParams,
+    MobMemberHistoryResult,
+    MobMemberLiveChannelParams,
+    MobMemberLiveControlParams,
+    MobMemberLiveOpenParams,
+    MobMemberLiveStatusParams,
+    MobMemberParams,
     MobRevokeHostParams,
     MobRevokeHostResult,
     MobRevokeScopesParams,
-    MobRevokeScopesResult,
+    MobRotateSupervisorResult,
     MobRouteInstallsResult,
     MobRunParams,
     MobRunResult,
     MobRunResultParams,
-    MobSpawnManyParams,
     MobSpawnManyFailedResult,
+    MobSpawnManyParams,
     MobSpawnManyResult,
     MobSpawnManyResultEntry,
     MobSpawnManySpawnedResult,
     MobSpawnSpecParams,
-    MobRotateSupervisorResult,
-    MobConcludeObjectiveParams,
-    MobConcludeObjectiveResult,
     MobTurnStartParams,
+    MobUnwireParams,
+    MobWireParams,
     MobWireMembersBatchEdge,
     MobWireMembersBatchResult,
     MonitorsStartParams,
     MonitorsStartResult,
     PublicTurnToolOverlay,
     RealtimeTurningMode,
+    ScheduleToolCallParams,
+    ServerCapabilities,
+    SkillEntry,
+    SkillListResponse,
+    SkillSourceProvenance,
+    ToolsRegisterParams,
+    ToolsRegisterResult,
+    UpdateScheduleParams,
     WireAuthBindingRef,
     WireContentInput,
     WireHistoryRow,
-    WireHostBindPhase,
     WireHostBindingDescriptor,
+    WireHostBindPhase,
     WireHostCapabilityFlags,
     WireLiveChannelCapabilities,
+    WireMemberHistoryPageBody,
     WireMemberLaunchMode,
+    WireMemberProgressSnapshot,
     WireMobBackendKind,
     WireMobProfile,
     WireMobRuntimeMode,
-    WireRuntimeBinding,
-    WireToolAccessPolicy,
-    WireToolFilter,
-    WireMemberProgressSnapshot,
-    WireMemberHistoryPageBody,
     WireProjectionProvenance,
     WireReachability,
     WireRouteInstallObligation,
-    ToolsRegisterParams,
-    ToolsRegisterResult,
+    WireRuntimeBinding,
+    WireToolAccessPolicy,
+    WireToolFilter,
+    WorkEventsResult,
+    WorkItemsResult,
 )
 from .generated.types import (
-    ApprovalDecideParams as RpcApprovalDecideParams,
-    ApprovalGetParams as RpcApprovalGetParams,
-    ApprovalListParams as RpcApprovalListParams,
-    ApprovalListResult as RpcApprovalListResult,
-    ApprovalRecord as RpcApprovalRecord,
-    ApprovalRequestParams as RpcApprovalRequestParams,
-    ArchiveSessionParams as RpcArchiveSessionParams,
-    ArtifactDownloadParams as RpcArtifactDownloadParams,
-    ArtifactDownloadResult as RpcArtifactDownloadResult,
-    ArtifactIdParams as RpcArtifactIdParams,
-    ArtifactListParams as RpcArtifactListParams,
-    ArtifactListResult as RpcArtifactListResult,
-    ArtifactRecord as RpcArtifactRecord,
-    BindingIdParams as RpcBindingIdParams,
-    BlobGetParams as RpcBlobGetParams,
-    BlobPayload as RpcBlobPayload,
-    CreateProfileParams as RpcCreateProfileParams,
-    CreateScheduleRequest as RpcCreateScheduleRequest,
-    DeferredCreateResult as RpcDeferredCreateResult,
-    DeviceCompleteParams as RpcDeviceCompleteParams,
-    DeviceStartParams as RpcDeviceStartParams,
-    EventsLatestCursorParams as RpcEventsLatestCursorParams,
-    EventsLatestCursorResult as RpcEventsLatestCursorResult,
-    EventsListSinceParams as RpcEventsListSinceParams,
-    EventsListSinceResult as RpcEventsListSinceResult,
-    EventsSnapshotParams as RpcEventsSnapshotParams,
-    EventsSnapshotResult as RpcEventsSnapshotResult,
-    ForkSessionAtParams as RpcForkSessionAtParams,
-    ForkSessionReplaceParams as RpcForkSessionReplaceParams,
-    HelpRequest as RpcHelpRequest,
-    HelpResponse as RpcHelpResponse,
-    InjectSystemContextParams as RpcInjectSystemContextParams,
-    InjectSystemContextResult as RpcInjectSystemContextResult,
-    InterruptParams as RpcInterruptParams,
-    ListSessionTranscriptRevisionsParams as RpcListSessionTranscriptRevisionsParams,
-    SessionInputStateParams as RpcSessionInputStateParams,
-    SessionInputStateResult as RpcSessionInputStateResult,
-    ListSessionsParams as RpcListSessionsParams,
-    ListSessionsResult as RpcListSessionsResult,
-    LoginCompleteParams as RpcLoginCompleteParams,
-    LoginStartParams as RpcLoginStartParams,
-    ExportAtifParams as RpcExportAtifParams,
-    ProvisionApiKeyParams as RpcProvisionApiKeyParams,
-    ReadSessionHistoryParams as RpcReadSessionHistoryParams,
-    ReadSessionParams as RpcReadSessionParams,
-    ReadSessionTranscriptRevisionParams as RpcReadSessionTranscriptRevisionParams,
-    RealmIdParams as RpcRealmIdParams,
-    RestoreSessionTranscriptRevisionParams as RpcRestoreSessionTranscriptRevisionParams,
-    RewriteSessionTranscriptParams as RpcRewriteSessionTranscriptParams,
-    RuntimeHostCapabilities as RpcRuntimeHostCapabilities,
-    RuntimeHostHealth as RpcRuntimeHostHealth,
-    RuntimeHostInfo as RpcRuntimeHostInfo,
-    Schedule as RpcSchedule,
-    ScheduleToolCallParams as RpcScheduleToolCallParams,
-    ScheduleToolsResult as RpcScheduleToolsResult,
-    SessionExternalEventEnvelope as RpcSessionExternalEventEnvelope,
     SessionForkResult as RpcSessionForkResult,
-    SessionPeerResponseTerminalParams as RpcSessionPeerResponseTerminalParams,
-    SessionTranscriptRewriteResult as RpcSessionTranscriptRewriteResult,
+)
+from .generated.types import (
+    SkillKey as WireSkillKey,
+)
+from .generated.types import (
     SystemPromptUpdateResult as RpcSystemPromptUpdateResult,
+)
+from .generated.types import (
     UpdateSystemPromptParams as RpcUpdateSystemPromptParams,
-    WireDeviceCompleteResult as RpcWireDeviceCompleteResult,
-    WireProvisionApiKeyResult as RpcWireProvisionApiKeyResult,
-    WireRunResult as RpcWireRunResult,
-    WireSessionTranscriptRevision as RpcWireSessionTranscriptRevision,
-    WireSessionTranscriptRevisionList as RpcWireSessionTranscriptRevisionList,
+)
+from .generated.version_compat import (
+    is_compatible_with as _generated_is_compatible_with,
 )
 from .mob import (
     Mob,
@@ -269,28 +224,12 @@ from .types import (
     BlobPayload,
     Capability,
     ConfigEnvelope,
-    DeletedMobProfile,
-    ExtractionError,
-    ExternalEventOutcome,
     ContentBlock,
     ContentInput,
-    ModelsCatalogResponse,
-    MobControlScope,
-    MobEventsResult,
-    MobGrantRecord,
-    MobMemberLiveTransport,
-    MobProfile,
-    HelpExecutionMode,
-    PeerCorrelationId,
-    PeerId,
-    ScheduleListResult,
-    ScheduleOccurrenceRecord,
-    ScheduleOccurrencesResult,
-    ScheduleRecord,
-    ScheduleToolsResult,
-    ScheduleToolCall,
+    DeletedMobProfile,
     EventEnvelope,
-    McpLiveOpResponse,
+    ExternalEventOutcome,
+    ExtractionError,
     ForkAuthoredCacheBreakpoint,
     ForkCacheBreakpointBoundary,
     ForkCacheInheritance,
@@ -302,43 +241,55 @@ from .types import (
     ForkCacheProvider,
     ForkCacheTtl,
     ForkPoint,
+    HelpExecutionMode,
+    McpLiveOpResponse,
+    MobControlScope,
+    MobEventsResult,
+    MobGrantRecord,
+    MobMemberLiveTransport,
+    MobProfile,
+    ModelsCatalogResponse,
+    PeerCorrelationId,
+    PeerId,
+    ReadyWorkFilter,
     ResolvedModelCapabilities,
     RunResult,
+    ScheduleListResult,
+    ScheduleOccurrenceRecord,
+    ScheduleOccurrencesResult,
+    ScheduleRecord,
+    ScheduleToolsResult,
     SchemaWarning,
-    SessionDetails,
     SessionAssistantBlock,
     SessionContentBlock,
     SessionContentInput,
+    SessionDetails,
     SessionForkResult,
     SessionHistory,
+    SessionMessage,
+    SessionSummary,
+    SessionToolResult,
     SessionTranscriptRevision,
     SessionTranscriptRevisionEntry,
     SessionTranscriptRevisionList,
     SessionTranscriptRewriteResult,
-    SystemPromptUpdateResult,
-    SystemPromptVersionIdentity,
-    SessionSummary,
-    SessionMessage,
-    SessionToolResult,
-    SkillKey,
     SkillQuarantineDiagnostic,
     SkillRef,
     SkillRuntimeDiagnostics,
     SourceHealthSnapshot,
     StoredMobProfile,
     SystemPromptOverride,
+    SystemPromptUpdateResult,
+    SystemPromptVersionIdentity,
     TranscriptEditRunningBehavior,
     TranscriptReplacement,
     TranscriptRewriteInputMessage,
     TranscriptRewriteReason,
     TranscriptRewriteSelection,
     TranscriptUserRole,
-    ReadyWorkFilter,
     WorkGraphEvent,
     WorkGraphEventFilter,
-    WorkGraphEventsResponse,
     WorkGraphIdParams,
-    WorkGraphItemsResponse,
     WorkGraphSnapshot,
     WorkGraphSnapshotFilter,
     WorkItem,
@@ -553,6 +504,8 @@ class MeerkatClient:
         await client.close()
     """
 
+    _request: RpcRequest
+
     def __init__(self, rkat_path: str = "rkat-rpc"):
         self._rkat_path = rkat_path
         self._legacy_rpc_subcommand = False
@@ -563,6 +516,7 @@ class MeerkatClient:
         self._dispatcher: _StdoutDispatcher | None = None
         self._tool_registry = ToolRegistry()
         self._tool_registration_errors: dict[str, MeerkatError] = {}
+        self._request = cast(RpcRequest, self._request_impl)
 
     # -- Tool registration -------------------------------------------------
 
@@ -848,53 +802,57 @@ class MeerkatClient:
     async def get_realm(self, realm_id: str) -> dict[str, Any]:
         """Fetch one realm's full WireRealmConnectionSet. Delegates to
         `realm/get`."""
-        _rpc_signature: RpcRealmIdParams
         return await self._request("realm/get", {"realm_id": realm_id})
 
     async def list_auth_profiles(self, realm_id: str) -> dict[str, Any]:
         """List auth profiles / backend profiles / bindings for one
         realm. Delegates to `auth/profile/list`."""
-        _rpc_signature: RpcRealmIdParams
         return await self._request("auth/profile/list", {"realm_id": realm_id})
 
     async def get_auth_profile(
         self, realm_id: str, binding_id: str, profile_id: str | None = None
     ) -> dict[str, Any]:
         """Fetch a binding-scoped auth profile via `auth/profile/get`."""
-        _rpc_signature: RpcBindingIdParams
         params: dict[str, Any] = {"realm_id": realm_id, "binding_id": binding_id}
         if profile_id is not None:
             params["profile_id"] = profile_id
         return await self._request("auth/profile/get", params)
 
-    async def create_auth_profile(self, params: dict[str, Any]) -> dict[str, Any]:
+    async def create_auth_profile(self, params: CreateProfileParams) -> dict[str, Any]:
         """Create binding-scoped credentials via `auth/profile/create`."""
-        _rpc_signature: RpcCreateProfileParams
-        return await self._request("auth/profile/create", params)
+        return await self._request("auth/profile/create", _wire_params(params))
 
     async def delete_auth_profile(
         self, realm_id: str, binding_id: str, profile_id: str | None = None
     ) -> None:
         """Clear a profile's persisted credentials via
         `auth/profile/delete`."""
-        _rpc_signature: RpcBindingIdParams
         params: dict[str, Any] = {"realm_id": realm_id, "binding_id": binding_id}
         if profile_id is not None:
             params["profile_id"] = profile_id
         await self._request("auth/profile/delete", params)
 
     async def auth_login_start(
-        self, provider: str, redirect_uri: str = "http://127.0.0.1:0/callback"
+        self,
+        provider: str,
+        redirect_uri: str = "http://127.0.0.1:0/callback",
+        *,
+        realm_id: str,
+        binding_id: str,
+        profile_id: str | None = None,
     ) -> dict[str, Any]:
         """Start an OAuth authorization-code login via
         `auth/login/start`. Returns `{authorize_url, state}`; client directs
         user to the URL then calls `auth_login_complete` once the redirect
         carries a code."""
-        _rpc_signature: RpcLoginStartParams
-        return await self._request(
-            "auth/login/start",
-            {"provider": provider, "redirect_uri": redirect_uri},
+        params = LoginStartParams(
+            binding_id=binding_id,
+            provider=provider,
+            realm_id=realm_id,
+            redirect_uri=redirect_uri,
+            profile_id=profile_id,
         )
+        return await self._request("auth/login/start", _wire_params(params))
 
     async def auth_login_complete(
         self,
@@ -910,7 +868,6 @@ class MeerkatClient:
         """Exchange an authorization code for tokens via
         `auth/login/complete`. Tokens land in the server-side credential
         source for the resolved binding."""
-        _rpc_signature: RpcLoginCompleteParams
         params: dict[str, Any] = {
             "provider": provider,
             "code": code,
@@ -923,12 +880,24 @@ class MeerkatClient:
             params["profile_id"] = profile_id
         return await self._request("auth/login/complete", params)
 
-    async def auth_login_device_start(self, provider: str) -> dict[str, Any]:
+    async def auth_login_device_start(
+        self,
+        provider: str,
+        *,
+        realm_id: str,
+        binding_id: str,
+        profile_id: str | None = None,
+    ) -> dict[str, Any]:
         """Start an OAuth device-code flow via
         `auth/login/device_start`. Returns the user_code to display +
         verification_uri + interval."""
-        _rpc_signature: RpcDeviceStartParams
-        return await self._request("auth/login/device_start", {"provider": provider})
+        params = DeviceStartParams(
+            binding_id=binding_id,
+            provider=provider,
+            realm_id=realm_id,
+            profile_id=profile_id,
+        )
+        return await self._request("auth/login/device_start", _wire_params(params))
 
     async def auth_login_device_complete(
         self,
@@ -942,7 +911,6 @@ class MeerkatClient:
         """Poll once for device-code completion via
         `auth/login/device_complete`. Returns `{state: "pending" |
         "slow_down" | "access_denied" | "expired" | "ready", ...}`."""
-        _rpc_signature: RpcDeviceCompleteParams | RpcWireDeviceCompleteResult
         params: dict[str, Any] = {
             "provider": provider,
             "device_code": device_code,
@@ -966,7 +934,6 @@ class MeerkatClient:
         the Console-scope OAuth flow first; hands the resulting
         access_token here; the server POSTs to Anthropic's
         create_api_key endpoint and persists the returned key."""
-        _rpc_signature: RpcProvisionApiKeyParams | RpcWireProvisionApiKeyResult
         params: dict[str, Any] = {
             "access_token": access_token,
             "realm_id": realm_id,
@@ -981,7 +948,6 @@ class MeerkatClient:
     ) -> dict[str, Any]:
         """Report persisted-credential status for a binding via
         `auth/status/get`."""
-        _rpc_signature: RpcBindingIdParams
         params: dict[str, Any] = {"realm_id": realm_id, "binding_id": binding_id}
         if profile_id is not None:
             params["profile_id"] = profile_id
@@ -992,7 +958,6 @@ class MeerkatClient:
     ) -> dict[str, Any]:
         """Revoke + delete a binding's persisted credentials via
         `auth/logout`."""
-        _rpc_signature: RpcBindingIdParams
         params: dict[str, Any] = {"realm_id": realm_id, "binding_id": binding_id}
         if profile_id is not None:
             params["profile_id"] = profile_id
@@ -1044,7 +1009,6 @@ class MeerkatClient:
             )
             print(session.text)
         """
-        _rpc_signature: RpcDeferredCreateResult | RpcWireRunResult
         params = self._build_create_params(
             prompt,
             injected_context=injected_context,
@@ -1127,7 +1091,6 @@ class MeerkatClient:
                 session_id = stream.session_id
                 result = stream.result
         """
-        _rpc_signature: RpcDeferredCreateResult | RpcWireRunResult
         if not self._dispatcher or not self._process or not self._process.stdin:
             raise MeerkatError("NOT_CONNECTED", "Client not connected")
         params = self._build_create_params(
@@ -1230,7 +1193,6 @@ class MeerkatClient:
             )
             result = await deferred.start_turn("Begin")
         """
-        _rpc_signature: RpcDeferredCreateResult | RpcWireRunResult
         params = self._build_create_params(
             prompt,
             injected_context=injected_context,
@@ -1282,7 +1244,6 @@ class MeerkatClient:
         max_tokens: int | None = None,
     ) -> RunResult:
         """Ask Meerkat usage help through the dedicated ``help/ask`` RPC."""
-        _rpc_signature: RpcHelpRequest | RpcHelpResponse
         params: dict[str, Any] = {
             "question": question,
             "execution_mode": execution_mode,
@@ -1308,7 +1269,6 @@ class MeerkatClient:
         offset: int | None = None,
     ) -> list[SessionSummary]:
         """List active sessions."""
-        _rpc_signature: RpcListSessionsParams | RpcListSessionsResult
         params: dict[str, Any] = {}
         if labels is not None:
             params["labels"] = labels
@@ -1331,7 +1291,6 @@ class MeerkatClient:
 
     async def read_session(self, session_id: str) -> SessionDetails:
         """Read detailed session state."""
-        _rpc_signature: RpcReadSessionParams
         result = await self._request("session/read", {"session_id": session_id})
         return self._parse_session_details(result)
 
@@ -1344,7 +1303,6 @@ class MeerkatClient:
         blocks: list[ContentBlock] | None = None,
     ) -> ExternalEventOutcome:
         """Append a durable external event input to a session runtime."""
-        _rpc_signature: RpcSessionExternalEventEnvelope
         params: dict[str, Any] = {
             "session_id": session_id,
             "kind": "generic_json",
@@ -1366,7 +1324,6 @@ class MeerkatClient:
         display_name: str | None = None,
     ) -> ExternalEventOutcome:
         """Admit a correlated terminal peer response through the typed ingress."""
-        _rpc_signature: RpcSessionPeerResponseTerminalParams
         params: dict[str, Any] = {
             "session_id": session_id,
             "peer_id": str(peer_id),
@@ -1387,7 +1344,6 @@ class MeerkatClient:
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Append one ordinary durable System message to a session."""
-        _rpc_signature: RpcInjectSystemContextParams | RpcInjectSystemContextResult
         params = {
             "session_id": session_id,
             "content": {"type": "text", "text": text},
@@ -1411,7 +1367,6 @@ class MeerkatClient:
         reconciliation query for interrupted work after a host restart
         (terminal outcome, resolving run id, boundary sequence).
         """
-        _rpc_signature: RpcSessionInputStateParams | RpcSessionInputStateResult
         if (input_id is None) == (idempotency_key is None):
             raise ValueError(
                 "exactly one of input_id or idempotency_key must be provided"
@@ -1433,7 +1388,6 @@ class MeerkatClient:
         limit: int | None = None,
     ) -> SessionHistory:
         """Read paginated session transcript history."""
-        _rpc_signature: RpcReadSessionHistoryParams
         params: dict[str, Any] = {"session_id": session_id, "offset": offset}
         if limit is not None:
             params["limit"] = limit
@@ -1449,7 +1403,6 @@ class MeerkatClient:
         model_name: str | None = None,
     ) -> dict[str, Any]:
         """Export the session's durable event log as an ATIF trajectory."""
-        _rpc_signature: RpcExportAtifParams
         params: dict[str, Any] = {"session_id": session_id}
         if agent_name is not None:
             params["agent_name"] = agent_name
@@ -1468,9 +1421,6 @@ class MeerkatClient:
         limit: int | None = None,
     ) -> SessionTranscriptRevision:
         """Read paginated transcript history for a retained revision."""
-        _rpc_signature: (
-            RpcReadSessionTranscriptRevisionParams | RpcWireSessionTranscriptRevision
-        )
         params: dict[str, Any] = {
             "session_id": session_id,
             "revision": revision,
@@ -1489,10 +1439,6 @@ class MeerkatClient:
         limit: int | None = None,
     ) -> SessionTranscriptRevisionList:
         """List retained transcript revision commits with the current head."""
-        _rpc_signature: (
-            RpcListSessionTranscriptRevisionsParams
-            | RpcWireSessionTranscriptRevisionList
-        )
         params: dict[str, Any] = {"session_id": session_id}
         if offset is not None:
             params["offset"] = offset
@@ -1510,7 +1456,6 @@ class MeerkatClient:
         tool_access_policy: WireToolAccessPolicy | dict[str, Any] | None = None,
     ) -> SessionForkResult:
         """Fork an idle session at a transcript message index."""
-        _rpc_signature: RpcForkSessionAtParams | RpcSessionForkResult
         params: dict[str, Any] = {
             "session_id": session_id,
             "message_index": message_index,
@@ -1534,7 +1479,6 @@ class MeerkatClient:
         tool_access_policy: WireToolAccessPolicy | dict[str, Any] | None = None,
     ) -> SessionForkResult:
         """Fork an idle session and apply a typed transcript replacement."""
-        _rpc_signature: RpcForkSessionReplaceParams | RpcSessionForkResult
         params: dict[str, Any] = {
             "session_id": session_id,
             "message_index": message_index,
@@ -1561,9 +1505,6 @@ class MeerkatClient:
         running_behavior: TranscriptEditRunningBehavior | None = None,
     ) -> SessionTranscriptRewriteResult:
         """Commit a typed same-session transcript rewrite."""
-        _rpc_signature: (
-            RpcRewriteSessionTranscriptParams | RpcSessionTranscriptRewriteResult
-        )
         params: dict[str, Any] = {
             "session_id": session_id,
             "selection": selection,
@@ -1594,7 +1535,6 @@ class MeerkatClient:
         expected_parent_revision: str | None = None,
     ) -> SystemPromptUpdateResult:
         """Explicitly replace one durable versioned system-prompt key."""
-        _rpc_signature: RpcUpdateSystemPromptParams | RpcSystemPromptUpdateResult
         params = RpcUpdateSystemPromptParams(
             session_id=session_id,
             key=key,
@@ -1621,10 +1561,6 @@ class MeerkatClient:
         running_behavior: TranscriptEditRunningBehavior | None = None,
     ) -> SessionTranscriptRewriteResult:
         """Commit a typed rewrite that restores a retained transcript revision."""
-        _rpc_signature: (
-            RpcRestoreSessionTranscriptRevisionParams
-            | RpcSessionTranscriptRewriteResult
-        )
         params: dict[str, Any] = {
             "session_id": session_id,
             "revision": revision,
@@ -1640,7 +1576,6 @@ class MeerkatClient:
         return self._parse_session_transcript_rewrite_result(raw)
 
     async def get_blob(self, blob_id: str) -> BlobPayload:
-        _rpc_signature: RpcBlobGetParams | RpcBlobPayload
         raw = await self._request("blob/get", {"blob_id": blob_id})
         context = "Invalid blob/get response"
         return BlobPayload(
@@ -1650,15 +1585,12 @@ class MeerkatClient:
         )
 
     async def get_runtime_host_info(self) -> dict[str, Any]:
-        _rpc_signature: RpcRuntimeHostInfo
         return await self._request("runtime/host_info", {})
 
     async def get_runtime_host_capabilities(self) -> dict[str, Any]:
-        _rpc_signature: RpcRuntimeHostCapabilities
         return await self._request("runtime/capabilities", {})
 
     async def get_runtime_host_health(self) -> dict[str, Any]:
-        _rpc_signature: RpcRuntimeHostHealth
         return await self._request("runtime/health", {})
 
     @staticmethod
@@ -1748,10 +1680,14 @@ class MeerkatClient:
 
     async def jobs_list(self, params: JobsListParams) -> JobsListResult:
         raw = await self._request("jobs/list", _wire_params(params))
-        jobs = self._require_present_list_field(raw, "jobs", "Invalid jobs/list response")
+        jobs = self._require_present_list_field(
+            raw, "jobs", "Invalid jobs/list response"
+        )
         return JobsListResult(
             jobs=[
-                self._parse_job_summary(job, f"Invalid jobs/list response jobs[{index}]")
+                self._parse_job_summary(
+                    job, f"Invalid jobs/list response jobs[{index}]"
+                )
                 for index, job in enumerate(jobs)
             ]
         )
@@ -1771,28 +1707,46 @@ class MeerkatClient:
             if progress_raw is None
             else JobProgress(
                 cursor=self._require_non_negative_integer_field(
-                    self._require_dict(progress_raw, "progress", "Invalid jobs/progress response"),
+                    self._require_dict(
+                        progress_raw, "progress", "Invalid jobs/progress response"
+                    ),
                     "cursor",
                     "Invalid jobs/progress response",
                 ),
                 detail=self._require_present_string_field(
-                    self._require_dict(progress_raw, "progress", "Invalid jobs/progress response"),
+                    self._require_dict(
+                        progress_raw, "progress", "Invalid jobs/progress response"
+                    ),
                     "detail",
                     "Invalid jobs/progress response",
                 ),
             )
         )
         return JobsProgressResult(
-            job_id=self._require_string_field(raw, "job_id", "Invalid jobs/progress response"),
-            phase=cast(Any, self._require_string_field(raw, "phase", "Invalid jobs/progress response")),
+            job_id=self._require_string_field(
+                raw, "job_id", "Invalid jobs/progress response"
+            ),
+            phase=cast(
+                Any,
+                self._require_string_field(
+                    raw, "phase", "Invalid jobs/progress response"
+                ),
+            ),
             progress=progress,
         )
 
     async def jobs_result(self, params: JobsResultParams) -> JobsResultResult:
         raw = await self._request("jobs/result", _wire_params(params))
         return JobsResultResult(
-            job_id=self._require_string_field(raw, "job_id", "Invalid jobs/result response"),
-            phase=cast(Any, self._require_string_field(raw, "phase", "Invalid jobs/result response")),
+            job_id=self._require_string_field(
+                raw, "job_id", "Invalid jobs/result response"
+            ),
+            phase=cast(
+                Any,
+                self._require_string_field(
+                    raw, "phase", "Invalid jobs/result response"
+                ),
+            ),
             result=cast(JobTerminalResult | None, raw.get("result")),
         )
 
@@ -1802,11 +1756,15 @@ class MeerkatClient:
             raw, "artifacts", "Invalid jobs/artifacts response"
         )
         return JobsArtifactsResult(
-            job_id=self._require_string_field(raw, "job_id", "Invalid jobs/artifacts response"),
+            job_id=self._require_string_field(
+                raw, "job_id", "Invalid jobs/artifacts response"
+            ),
             artifacts=[
                 JobArtifactRef(
                     reference=self._require_string_field(
-                        self._require_dict(item, "artifact", "Invalid jobs/artifacts response"),
+                        self._require_dict(
+                            item, "artifact", "Invalid jobs/artifacts response"
+                        ),
                         "reference",
                         "Invalid jobs/artifacts response",
                     )
@@ -1862,9 +1820,7 @@ class MeerkatClient:
             )
         )
 
-    async def jobs_subscribe(
-        self, params: JobsSubscribeParams
-    ) -> JobsSubscribeResult:
+    async def jobs_subscribe(self, params: JobsSubscribeParams) -> JobsSubscribeResult:
         result = self._parse_job_get_result(
             await self._request("jobs/subscribe", _wire_params(params)),
             "Invalid jobs/subscribe response",
@@ -1947,49 +1903,41 @@ class MeerkatClient:
             ).job
         )
 
-    async def request_approval(self, params: dict[str, Any]) -> dict[str, Any]:
-        _rpc_signature: RpcApprovalRecord | RpcApprovalRequestParams
-        return await self._request("approval/request", params)
+    async def request_approval(self, params: ApprovalRequestParams) -> dict[str, Any]:
+        return await self._request("approval/request", _wire_params(params))
 
     async def list_approvals(
         self, params: dict[str, Any] | None = None
     ) -> dict[str, Any]:
-        _rpc_signature: RpcApprovalListParams | RpcApprovalListResult
         return await self._request("approval/list", params or {})
 
-    async def get_approval(self, params: dict[str, Any]) -> dict[str, Any]:
-        _rpc_signature: RpcApprovalGetParams | RpcApprovalRecord
-        return await self._request("approval/get", params)
+    async def get_approval(self, params: ApprovalGetParams) -> dict[str, Any]:
+        return await self._request("approval/get", _wire_params(params))
 
-    async def decide_approval(self, params: dict[str, Any]) -> dict[str, Any]:
-        _rpc_signature: RpcApprovalDecideParams | RpcApprovalRecord
-        return await self._request("approval/decide", params)
+    async def decide_approval(self, params: ApprovalDecideParams) -> dict[str, Any]:
+        return await self._request("approval/decide", _wire_params(params))
 
     async def list_artifacts(
         self, params: dict[str, Any] | None = None
     ) -> dict[str, Any]:
-        _rpc_signature: RpcArtifactListParams | RpcArtifactListResult
         return await self._request("artifact/list", params or {})
 
-    async def get_artifact(self, params: dict[str, Any]) -> dict[str, Any]:
-        _rpc_signature: RpcArtifactIdParams | RpcArtifactRecord
-        return await self._request("artifact/get", params)
+    async def get_artifact(self, params: ArtifactIdParams) -> dict[str, Any]:
+        return await self._request("artifact/get", _wire_params(params))
 
-    async def download_artifact(self, params: dict[str, Any]) -> dict[str, Any]:
-        _rpc_signature: RpcArtifactDownloadParams | RpcArtifactDownloadResult
-        return await self._request("artifact/download", params)
+    async def download_artifact(self, params: ArtifactDownloadParams) -> dict[str, Any]:
+        return await self._request("artifact/download", _wire_params(params))
 
-    async def latest_event_cursor(self, params: dict[str, Any]) -> dict[str, Any]:
-        _rpc_signature: RpcEventsLatestCursorParams | RpcEventsLatestCursorResult
-        return await self._request("events/latest_cursor", params)
+    async def latest_event_cursor(
+        self, params: EventsLatestCursorParams
+    ) -> dict[str, Any]:
+        return await self._request("events/latest_cursor", _wire_params(params))
 
-    async def list_events_since(self, params: dict[str, Any]) -> dict[str, Any]:
-        _rpc_signature: RpcEventsListSinceParams | RpcEventsListSinceResult
-        return await self._request("events/list_since", params)
+    async def list_events_since(self, params: EventsListSinceParams) -> dict[str, Any]:
+        return await self._request("events/list_since", _wire_params(params))
 
-    async def event_snapshot(self, params: dict[str, Any]) -> dict[str, Any]:
-        _rpc_signature: RpcEventsSnapshotParams | RpcEventsSnapshotResult
-        return await self._request("events/snapshot", params)
+    async def event_snapshot(self, params: EventsSnapshotParams) -> dict[str, Any]:
+        return await self._request("events/snapshot", _wire_params(params))
 
     # -- Capabilities ------------------------------------------------------
 
@@ -2043,13 +1991,11 @@ class MeerkatClient:
         raw = await self._request("models/catalog", {})
         return self._parse_models_catalog(raw)
 
-    async def create_schedule(self, request: dict[str, Any]) -> ScheduleRecord:
-        _rpc_signature: RpcCreateScheduleRequest | RpcSchedule
-        raw = await self._request("schedule/create", request)
+    async def create_schedule(self, request: CreateScheduleRequest) -> ScheduleRecord:
+        raw = await self._request("schedule/create", _wire_params(request))
         return self._parse_schedule_record(raw, "Invalid schedule/create response")
 
     async def get_schedule(self, schedule_id: str) -> ScheduleRecord:
-        _rpc_signature: RpcSchedule
         raw = await self._request("schedule/get", {"schedule_id": schedule_id})
         return self._parse_schedule_record(raw, "Invalid schedule/get response")
 
@@ -2087,23 +2033,19 @@ class MeerkatClient:
             ],
         }
 
-    async def update_schedule(self, request: dict[str, Any]) -> ScheduleRecord:
-        _rpc_signature: RpcSchedule
-        raw = await self._request("schedule/update", request)
+    async def update_schedule(self, request: UpdateScheduleParams) -> ScheduleRecord:
+        raw = await self._request("schedule/update", _wire_params(request))
         return self._parse_schedule_record(raw, "Invalid schedule/update response")
 
     async def pause_schedule(self, schedule_id: str) -> ScheduleRecord:
-        _rpc_signature: RpcSchedule
         raw = await self._request("schedule/pause", {"schedule_id": schedule_id})
         return self._parse_schedule_record(raw, "Invalid schedule/pause response")
 
     async def resume_schedule(self, schedule_id: str) -> ScheduleRecord:
-        _rpc_signature: RpcSchedule
         raw = await self._request("schedule/resume", {"schedule_id": schedule_id})
         return self._parse_schedule_record(raw, "Invalid schedule/resume response")
 
     async def delete_schedule(self, schedule_id: str) -> ScheduleRecord:
-        _rpc_signature: RpcSchedule
         raw = await self._request("schedule/delete", {"schedule_id": schedule_id})
         return self._parse_schedule_record(raw, "Invalid schedule/delete response")
 
@@ -2139,7 +2081,6 @@ class MeerkatClient:
         }
 
     async def list_schedule_tools(self) -> ScheduleToolsResult:
-        _rpc_signature: RpcScheduleToolsResult
         raw = await self._request("schedule/tools", {})
         raw = self._require_dict(raw, "response", "Invalid schedule/tools response")
         return {
@@ -2155,9 +2096,10 @@ class MeerkatClient:
             ]
         }
 
-    async def call_schedule_tool(self, request: ScheduleToolCall) -> dict[str, Any]:
-        _rpc_signature: RpcScheduleToolCallParams
-        return await self._request("schedule/call", dict(request))
+    async def call_schedule_tool(
+        self, request: ScheduleToolCallParams
+    ) -> dict[str, Any]:
+        return await self._request("schedule/call", _wire_params(request))
 
     async def get_workgraph_item(
         self,
@@ -2815,8 +2757,10 @@ class MeerkatClient:
             )
         }
 
-    async def mob_ingress_interaction(self, params: dict[str, Any]) -> dict[str, Any]:
-        return await self._request("mob/ingress_interaction", params)
+    async def mob_ingress_interaction(
+        self, params: MobIngressInteractionParams
+    ) -> dict[str, Any]:
+        return await self._request("mob/ingress_interaction", _wire_params(params))
 
     async def retire_mob_member(self, mob_id: str, agent_identity: str) -> None:
         await self._request(
@@ -2894,7 +2838,6 @@ class MeerkatClient:
             scopes=scopes,
             expires_at_ms=expires_at_ms,
         )
-        _rpc_signature: MobGrantScopesParams | MobGrantScopesResult
         result = await self._request("mob/grant_scopes", _wire_params(params))
         context = "Invalid mob/grant_scopes response"
         record = self._require_dict(result.get("record"), "record", context)
@@ -2912,7 +2855,6 @@ class MeerkatClient:
             principal=principal,
             scopes=scopes,
         )
-        _rpc_signature: MobRevokeScopesParams | MobRevokeScopesResult
         result = await self._request("mob/revoke_scopes", _wire_params(params))
         return self._require_bool_field(
             result,
@@ -2923,7 +2865,6 @@ class MeerkatClient:
     async def list_mob_grants(self, mob_id: str) -> list[MobGrantRecord]:
         """List typed control-scope grants, including optional expiry metadata."""
         params = MobIdParams(mob_id=mob_id)
-        _rpc_signature: MobIdParams | MobGrantsResult
         result = await self._request("mob/grants", _wire_params(params))
         context = "Invalid mob/grants response"
         grants = self._require_present_list_field(result, "grants", context)
@@ -2956,7 +2897,6 @@ class MeerkatClient:
     async def mob_hosts(self, mob_id: str) -> list[MobHostStatus]:
         """List tracked member hosts with committed authority facts."""
         params = MobIdParams(mob_id=mob_id)
-        _rpc_signature: MobIdParams | MobHostsResult
         result = await self._request("mob/hosts", _wire_params(params))
         context = "Invalid mob/hosts response"
         hosts = self._require_present_list_field(result, "hosts", context)
@@ -3041,7 +2981,6 @@ class MeerkatClient:
             agent_identity=agent_identity,
             reason=reason,
         )
-        _rpc_signature: MobHardCancelParams | MobHardCancelResult
         result = await self._request("mob/hard_cancel_member", _wire_params(params))
         return self._require_bool_field(
             result,
@@ -3200,7 +3139,6 @@ class MeerkatClient:
     async def mob_member_status(
         self, mob_id: str, agent_identity: str
     ) -> MobMemberSnapshot:
-        _rpc_signature: MobMemberStatusResult
         params = MobMemberParams(mob_id=mob_id, agent_identity=agent_identity)
         result = await self._request("mob/member_status", _wire_value(params))
         resolved_capabilities = self._parse_resolved_model_capabilities(
@@ -3562,12 +3500,12 @@ class MeerkatClient:
     async def wire_mob_members(
         self, mob_id: str, member: str, peer: str | dict[str, Any]
     ) -> None:
-        payload = (
-            {"mob_id": mob_id, "member": member, "peer": {"local": peer}}
-            if isinstance(peer, str)
-            else {"mob_id": mob_id, "member": member, "peer": peer}
+        payload = MobWireParams(
+            mob_id=mob_id,
+            member=member,
+            peer={"local": peer} if isinstance(peer, str) else peer,
         )
-        await self._request("mob/wire", payload)
+        await self._request("mob/wire", _wire_params(payload))
 
     async def mob_wire_members_batch(
         self,
@@ -3584,12 +3522,12 @@ class MeerkatClient:
     async def unwire_mob_members(
         self, mob_id: str, member: str, peer: str | dict[str, Any]
     ) -> None:
-        payload = (
-            {"mob_id": mob_id, "member": member, "peer": {"local": peer}}
-            if isinstance(peer, str)
-            else {"mob_id": mob_id, "member": member, "peer": peer}
+        payload = MobUnwireParams(
+            mob_id=mob_id,
+            member=member,
+            peer={"local": peer} if isinstance(peer, str) else peer,
         )
-        await self._request("mob/unwire", payload)
+        await self._request("mob/unwire", _wire_params(payload))
 
     async def mob_lifecycle(self, mob_id: str, action: MobLifecycleAction) -> None:
         """Drive a mob through a typed lifecycle transition.
@@ -4044,11 +3982,9 @@ class MeerkatClient:
         )
 
     async def _interrupt(self, session_id: str) -> InterruptResult:
-        _rpc_signature: RpcInterruptParams
         return await self._request("turn/interrupt", {"session_id": session_id})
 
     async def _archive(self, session_id: str) -> None:
-        _rpc_signature: RpcArchiveSessionParams
         await self._request("session/archive", {"session_id": session_id})
 
     async def _send(self, session_id: str, **kwargs: Any) -> CommsSendResult:
@@ -4566,7 +4502,7 @@ class MeerkatClient:
 
     # -- Transport ---------------------------------------------------------
 
-    async def _request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+    async def _request_impl(self, method: str, params: dict[str, Any]) -> Any:
         if not self._process or not self._process.stdin or not self._dispatcher:
             raise MeerkatError("NOT_CONNECTED", "Client not connected")
         fault = self._dispatcher.transport_fault
@@ -6619,27 +6555,19 @@ class MeerkatClient:
         result: dict[str, Any],
         context: str,
     ) -> MobHelperResult:
-        output = MeerkatClient._require_present_string_field(
-            result, "output", context
-        )
+        output = MeerkatClient._require_present_string_field(result, "output", context)
         tokens_used = MeerkatClient._require_non_negative_integer_field(
             result, "tokens_used", context
         )
         agent_identity = MeerkatClient._require_string_field(
             result, "agent_identity", context
         )
-        member_ref = MeerkatClient._require_string_field(
-            result, "member_ref", context
-        )
+        member_ref = MeerkatClient._require_string_field(result, "member_ref", context)
         bounded_result = MeerkatClient._parse_bounded_helper_result(
             result.get("bounded_result"), context
         )
-        session_id = MeerkatClient._require_string_field(
-            result, "session_id", context
-        )
-        usage_raw = MeerkatClient._require_dict(
-            result.get("usage"), "usage", context
-        )
+        session_id = MeerkatClient._require_string_field(result, "session_id", context)
+        usage_raw = MeerkatClient._require_dict(result.get("usage"), "usage", context)
         usage = Usage(
             input_tokens=MeerkatClient._require_non_negative_integer_field(
                 usage_raw,
@@ -7924,9 +7852,7 @@ class MeerkatClient:
             return {}
         value = raw[field]
         if not isinstance(value, dict):
-            raise MeerkatError(
-                "INVALID_RESPONSE", f"{context}: {field} must be object"
-            )
+            raise MeerkatError("INVALID_RESPONSE", f"{context}: {field} must be object")
         if not all(
             isinstance(key, str) and isinstance(item, str)
             for key, item in value.items()
@@ -7955,9 +7881,7 @@ class MeerkatClient:
             total_tokens=MeerkatClient._require_non_negative_integer_field(
                 s, "total_tokens", context
             ),
-            labels=MeerkatClient._parse_optional_string_map_field(
-                s, "labels", context
-            ),
+            labels=MeerkatClient._parse_optional_string_map_field(s, "labels", context),
             is_active=MeerkatClient._require_bool_field(s, "is_active", context),
         )
 
@@ -7966,9 +7890,7 @@ class MeerkatClient:
         context = "Invalid session/read response"
         data = MeerkatClient._require_dict(s, "result", context)
         return SessionDetails(
-            session_id=MeerkatClient._require_string_field(
-                data, "session_id", context
-            ),
+            session_id=MeerkatClient._require_string_field(data, "session_id", context),
             session_ref=MeerkatClient._optional_string_field(
                 data, "session_ref", context
             ),

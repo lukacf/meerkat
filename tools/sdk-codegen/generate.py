@@ -15,7 +15,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-
 # K20: catalog-named contract types adopted by the totalized RPC method
 # catalog (config/get|set|patch, turn/interrupt, workgraph list/ready/events,
 # initialize, skills/list). Schema-driven; the inventory-coverage ratchet
@@ -396,6 +395,7 @@ PUBLIC_RPC_CATALOG_OBJECT_TYPES = [
 
 PUBLIC_RPC_CATALOG_ALIAS_TYPES = [
     "SessionExternalEventEnvelope",
+    "SessionExternalEventParams",
     "WireDeviceCompleteResult",
 ]
 
@@ -1083,9 +1083,18 @@ def _one_of_typed_dict_variants(
         return None
 
     expanded_variants: list[dict[str, Any]] = []
+    outer_object = {
+        key: value for key, value in schema.items() if key not in {"oneOf", "$defs"}
+    }
+    merge_outer = (
+        outer_object.get("type") == "object"
+        and isinstance(outer_object.get("properties"), dict)
+    )
     for variant in schema["oneOf"]:
         if not isinstance(variant, dict):
             return None
+        if merge_outer:
+            variant = _merge_object_variant_schemas(outer_object, variant)
         expanded_variants.extend(_expand_flattened_object_variants(root, variant))
 
     const_fields_by_variant: list[dict[str, str]] = []
@@ -4511,6 +4520,159 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     (output_dir / "index.ts").write_text(index_content)
 
 
+def generate_typescript_rpc_contracts(schemas: dict, output_dir: Path) -> None:
+    """Emit the catalog-owned method-to-params/result type map.
+
+    The client transport is generic over this map, so every literal RPC send
+    site is checked against the generated wire contract at the actual request
+    boundary. This is deliberately stronger than requiring a generated type
+    name to appear somewhere inside the enclosing wrapper.
+    """
+    methods = schemas.get("rpc-methods", {}).get("methods")
+    if not isinstance(methods, list):
+        raise KeyError("rpc-methods.json must contain a methods array")
+
+    generated_text = (output_dir / "types.ts").read_text()
+    generated_names = set(
+        re.findall(
+            r"\bexport (?:interface|type|enum|class) ([A-Za-z_$][\w$]*)\b",
+            generated_text,
+        )
+    )
+    referenced: set[str] = set()
+
+    def render_type(type_ref: Any, *, params: bool) -> str:
+        if not type_ref:
+            return "Record<string, never>" if params else "Record<string, unknown>"
+        rendered: list[str] = []
+        for part in str(type_ref).split("|"):
+            name = part.strip()
+            if not name or name == "Value" or name not in generated_names:
+                rendered.append("Record<string, unknown>" if params else "unknown")
+            else:
+                referenced.add(name)
+                rendered.append(name)
+        joined = " | ".join(rendered)
+        if not params and joined != "unknown":
+            return f"({joined}) & Record<string, unknown>"
+        return joined
+
+    entries: list[tuple[str, str, str]] = []
+    for method in methods:
+        if not isinstance(method, dict) or not isinstance(method.get("name"), str):
+            raise KeyError("rpc-methods.json contains an invalid method entry")
+        entries.append(
+            (
+                method["name"],
+                render_type(method.get("params_type"), params=True),
+                render_type(method.get("result_type"), params=False),
+            )
+        )
+
+    lines = [
+        "// Generated RPC method contracts for @rkat/sdk.",
+        "// Source: artifacts/schemas/rpc-methods.json",
+    ]
+    if referenced:
+        lines.append("import type {")
+        lines.extend(f"  {name}," for name in sorted(referenced))
+        lines.extend(["} from \"./types.js\";", ""])
+    lines.append("export interface RpcMethodContracts {")
+    for method, params_type, result_type in entries:
+        lines.append(f"  {json.dumps(method)}: {{")
+        lines.append(f"    params: {params_type};")
+        lines.append(f"    result: {result_type};")
+        lines.append("  };")
+    lines.extend(
+        [
+            "}",
+            "",
+            "export type RpcMethodName = keyof RpcMethodContracts;",
+            "export type RpcMethodParams<M extends RpcMethodName> =",
+            "  RpcMethodContracts[M][\"params\"];",
+            "export type RpcMethodResult<M extends RpcMethodName> =",
+            "  RpcMethodContracts[M][\"result\"];",
+            "",
+        ]
+    )
+    (output_dir / "rpc_contracts.ts").write_text("\n".join(lines))
+
+
+def generate_python_rpc_contracts(schemas: dict, output_dir: Path) -> None:
+    """Emit catalog-owned overloads for the Python transport boundary."""
+    methods = schemas.get("rpc-methods", {}).get("methods")
+    if not isinstance(methods, list):
+        raise KeyError("rpc-methods.json must contain a methods array")
+
+    generated_text = (output_dir / "types.py").read_text()
+    generated_names = set(
+        re.findall(r"^class ([A-Za-z_][A-Za-z0-9_]*)", generated_text, re.MULTILINE)
+    )
+    generated_names.update(
+        re.findall(
+            r"^([A-Za-z_][A-Za-z0-9_]*)\s*(?::\s*[^=\n]+)?=",
+            generated_text,
+            re.MULTILINE,
+        )
+    )
+    referenced: set[str] = set()
+
+    def render_type(type_ref: Any, *, params: bool) -> str:
+        if not type_ref:
+            return "dict[str, Any]"
+        rendered: list[str] = []
+        for part in str(type_ref).split("|"):
+            name = part.strip()
+            if not name or name == "Value" or name not in generated_names:
+                rendered.append("dict[str, Any]" if params else "Any")
+            else:
+                referenced.add(name)
+                rendered.append(name)
+        return " | ".join(rendered)
+
+    entries: list[tuple[str, str, str]] = []
+    for method in methods:
+        if not isinstance(method, dict) or not isinstance(method.get("name"), str):
+            raise KeyError("rpc-methods.json contains an invalid method entry")
+        entries.append(
+            (
+                method["name"],
+                render_type(method.get("params_type"), params=True),
+                render_type(method.get("result_type"), params=False),
+            )
+        )
+
+    lines = [
+        '\"\"\"Generated RPC method contracts for meerkat-sdk.',
+        "",
+        "Source: artifacts/schemas/rpc-methods.json",
+        '\"\"\"',
+        "",
+        "from __future__ import annotations",
+        "",
+        "from collections.abc import Awaitable",
+        "from typing import Any, Literal, Protocol, overload",
+    ]
+    if referenced:
+        lines.extend(["", "from .types import ("])
+        lines.extend(f"    {name}," for name in sorted(referenced))
+        lines.append(")")
+    lines.extend(["", "", "class RpcRequest(Protocol):"])
+    for method, params_type, result_type in entries:
+        lines.extend(
+            [
+                "    @overload",
+                "    def __call__(",
+                "        self,",
+                f"        method: Literal[{json.dumps(method)}],",
+                f"        params: {params_type},",
+                "        /,",
+                f"    ) -> Awaitable[{result_type}]: ...",
+                "",
+            ]
+        )
+    (output_dir / "rpc_contracts.py").write_text("\n".join(lines))
+
 def _web_events_ts_type(root: dict[str, Any], schema: Any) -> str:
     if schema is True:
         return "unknown"
@@ -6493,6 +6655,8 @@ def main():
     py_output = output_root / "sdks" / "python" / "meerkat" / "generated"
     generate_python_types(schemas, py_output, has_comms=has_comms, has_skills=has_skills)
     print(f"Generated Python types in {py_output}")
+    generate_python_rpc_contracts(schemas, py_output)
+    print(f"Generated Python RPC contracts in {py_output}")
     generate_python_event_inventory(schemas, py_output)
     print(f"Generated Python event inventory in {py_output}")
     # Must follow generate_python_types: the event payload module emits only the
@@ -6507,6 +6671,8 @@ def main():
     ts_output = output_root / "sdks" / "typescript" / "src" / "generated"
     generate_typescript_types(schemas, ts_output, has_comms=has_comms, has_skills=has_skills)
     print(f"Generated TypeScript types in {ts_output}")
+    generate_typescript_rpc_contracts(schemas, ts_output)
+    print(f"Generated TypeScript RPC contracts in {ts_output}")
     generate_typescript_event_inventory(schemas, ts_output)
     print(f"Generated TypeScript event inventory in {ts_output}")
     # Must follow generate_typescript_types, for the same reason as the Python

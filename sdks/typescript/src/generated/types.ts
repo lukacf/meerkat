@@ -397,6 +397,26 @@ export interface SessionExternalEventEnvelopePeerResponseTerminal {
 
 export type SessionExternalEventEnvelope = SessionExternalEventEnvelopeGenericJson | SessionExternalEventEnvelopePeerResponseTerminal;
 
+export interface SessionExternalEventParamsGenericJson {
+  session_id: string;
+  blocks?: WireContentBlock[] | null;
+  event_type: string;
+  kind: "generic_json";
+  payload: unknown;
+}
+
+export interface SessionExternalEventParamsPeerResponseTerminal {
+  session_id: string;
+  display_name?: PeerName | null;
+  kind: "peer_response_terminal";
+  peer_id: PeerId;
+  request_id: string;
+  result: unknown;
+  status: "completed" | "failed" | "cancelled";
+}
+
+export type SessionExternalEventParams = SessionExternalEventParamsGenericJson | SessionExternalEventParamsPeerResponseTerminal;
+
 export interface WireDeviceCompleteResultPending {
   state: "pending";
 }

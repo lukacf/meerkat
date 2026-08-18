@@ -482,7 +482,7 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
             RpcMethodDescriptor::typed(
                 "session/external_event",
                 "Queue a runtime-backed external event",
-                "SessionExternalEventEnvelope",
+                "SessionExternalEventParams",
                 "RuntimeAcceptResult",
             ),
             RpcMethodDescriptor::typed(
@@ -1391,6 +1391,18 @@ mod tests {
         assert!(
             schema_light.is_empty(),
             "RPC methods without a typed result contract: {schema_light:?}"
+        );
+    }
+
+    #[test]
+    fn external_event_catalog_owns_the_complete_request_payload() {
+        let methods = rpc_method_catalog(RpcMethodCatalogOptions::documented_surface());
+        assert!(
+            methods.iter().any(|method| {
+                method.name == "session/external_event"
+                    && method.params_type == Some("SessionExternalEventParams")
+            }),
+            "session/external_event must advertise the complete params contract"
         );
     }
 

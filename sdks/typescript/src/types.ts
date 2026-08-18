@@ -337,7 +337,7 @@ export interface TranscriptForkOptions extends TranscriptEditOptions {
 /** Canonical message-shaped replacement payload for `session/fork_replace`. */
 export interface TranscriptMessageReplacement {
   readonly type: "message";
-  readonly message: Record<string, unknown>;
+  readonly message: TranscriptRewriteMessage;
 }
 
 /** Replace one content block in a user message. */
@@ -351,7 +351,7 @@ export interface TranscriptUserContentBlockReplacement {
 export interface TranscriptAssistantBlockReplacement {
   readonly type: "assistant_block";
   readonly blockIndex: number;
-  readonly block: Record<string, unknown>;
+  readonly block: Generated.WireAssistantBlock;
 }
 
 /** Replace one content block inside one tool-result payload. */
@@ -384,37 +384,8 @@ export interface TranscriptRewriteReason {
   readonly note?: string;
 }
 
-/** Public transcript message accepted by same-session rewrite APIs. */
-export type TranscriptRewriteMessage =
-  | {
-      readonly role: "system";
-      readonly content: string;
-      readonly created_at?: string;
-    }
-  | {
-      readonly role: "system_notice";
-      readonly kind: string;
-      readonly body?: string;
-      readonly content?: string;
-      readonly blocks?: readonly Record<string, unknown>[];
-      readonly created_at?: string;
-    }
-  | {
-      readonly role: "user";
-      readonly content: ContentInput;
-      readonly created_at?: string;
-    }
-  | {
-      readonly role: "block_assistant";
-      readonly blocks: readonly Record<string, unknown>[];
-      readonly stop_reason?: string;
-      readonly created_at?: string;
-    }
-  | {
-      readonly role: "tool_results";
-      readonly results: readonly Record<string, unknown>[];
-      readonly created_at?: string;
-    };
+/** Generated wire message accepted by same-session rewrite APIs. */
+export type TranscriptRewriteMessage = Generated.TranscriptRewriteMessage;
 
 export type TranscriptRewriteInputMessage = TranscriptRewriteMessage | SessionMessage;
 
@@ -867,7 +838,7 @@ export interface CommsPeerLifecycleCommand {
   kind: "peer_lifecycle";
   to: string;
   lifecycle_kind: "mob.peer_added" | "mob.peer_retired" | "mob.peer_unwired";
-  params?: unknown;
+  params: Generated.CommsPeerLifecycleParams;
 }
 
 // The supervisor bridge is a generated wire contract. The package-root
@@ -1064,7 +1035,7 @@ export interface CommsPeerResponseCommand {
   to: string;
   in_reply_to: string;
   status: CommsResponseStatus;
-  result?: unknown;
+  result?: Generated.CommsPeerResponseResult;
   handling_mode?: CommsHandlingMode;
 }
 
@@ -1193,9 +1164,9 @@ export interface CreateScheduleRequest {
   readonly description?: string;
   readonly trigger: Record<string, unknown>;
   readonly target: Record<string, unknown>;
-  readonly misfirePolicy?: Record<string, unknown> | string;
-  readonly overlapPolicy?: string;
-  readonly missingTargetPolicy?: string;
+  readonly misfirePolicy?: Record<string, unknown>;
+  readonly overlapPolicy?: "allow_concurrent" | "skip_if_running";
+  readonly missingTargetPolicy?: "skip" | "mark_misfired";
   readonly labels?: Readonly<Record<string, string>>;
   readonly planningHorizonDays?: number;
   readonly planningHorizonOccurrences?: number;
@@ -1207,9 +1178,9 @@ export interface UpdateSchedulePatch {
   readonly description?: string;
   readonly trigger?: Record<string, unknown>;
   readonly target?: Record<string, unknown>;
-  readonly misfirePolicy?: Record<string, unknown> | string;
-  readonly overlapPolicy?: string;
-  readonly missingTargetPolicy?: string;
+  readonly misfirePolicy?: Record<string, unknown>;
+  readonly overlapPolicy?: "allow_concurrent" | "skip_if_running";
+  readonly missingTargetPolicy?: "skip" | "mark_misfired";
   readonly planningHorizonDays?: number;
   readonly planningHorizonOccurrences?: number;
   readonly labels?: Readonly<Record<string, string>>;

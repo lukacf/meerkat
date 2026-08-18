@@ -10,17 +10,10 @@ use crate::session_runtime::SessionRuntime;
 use meerkat_contracts::{
     EventsLatestCursorParams, EventsLatestCursorResult, EventsListSinceParams,
     EventsSnapshotParams, PeerResponseTerminalStatusWire, SessionExternalEventEnvelope,
+    SessionExternalEventParams,
 };
 
 use super::{RpcResponseExt, parse_params, parse_session_id_for_runtime};
-
-/// Parameters for `session/external_event`.
-#[derive(Debug, Deserialize)]
-pub struct ExternalEventParams {
-    pub session_id: String,
-    #[serde(flatten)]
-    pub event: SessionExternalEventEnvelope,
-}
 
 /// Parameters for `session/peer_response_terminal`.
 #[derive(Debug, Deserialize)]
@@ -42,7 +35,7 @@ pub async fn handle_external_event(
     params: Option<&RawValue>,
     runtime: Arc<SessionRuntime>,
 ) -> RpcResponse {
-    let params: ExternalEventParams = match parse_params(params) {
+    let params: SessionExternalEventParams = match parse_params(params) {
         Ok(p) => p,
         Err(resp) => return resp,
     };
@@ -211,7 +204,7 @@ mod tests {
     #[test]
     fn test_external_event_params_deserialization() {
         let json = r#"{"session_id":"sid_123","kind":"generic_json","event_type":"github","payload":{"event":"email","from":"john"}}"#;
-        let params: ExternalEventParams = serde_json::from_str(json).unwrap();
+        let params: SessionExternalEventParams = serde_json::from_str(json).unwrap();
         assert_eq!(params.session_id, "sid_123");
         assert!(matches!(
             params.event,
@@ -233,7 +226,7 @@ mod tests {
     #[test]
     fn test_external_event_params_reject_variant_deserialization() {
         let json = r#"{"session_id":"sid_123","kind":"peer_response_terminal","peer_id":"00000000-0000-4000-8000-000000000161","display_name":"analyst","request_id":"00000000-0000-4000-8000-000000000162","status":"completed","result":{"token":"amber"}}"#;
-        let params: ExternalEventParams = serde_json::from_str(json).unwrap();
+        let params: SessionExternalEventParams = serde_json::from_str(json).unwrap();
         assert!(matches!(
             params.event,
             SessionExternalEventEnvelope::PeerResponseTerminal { .. }

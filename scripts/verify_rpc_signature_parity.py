@@ -11,28 +11,22 @@ declared param/result SHAPE (the typed refs the catalog descriptors carry):
      type must equal the catalog's ``params_type``/``result_type`` exactly.
      A doc that drifts on shape (not just on name) fails.
 
-  2. **SDK wrappers** (TypeScript + Python): for every catalog method we
-     locate the wrapper send-site(s) — actual ``request("method", ...)`` call
-     expressions or ``method: "..."`` JSON-RPC envelope literals, not prose —
-     and, where the catalog's param/result type is available in that SDK's
-     *generated* type module (``sdks/*/generated/``), require the enclosing
-     wrapper function to reference the generated type identifier. A wrapper
-     that hand-rolls its own ad-hoc shape for a method whose generated type
-     exists fails.
+  2. **SDK transports** (TypeScript + Python): generated method maps bind every
+     catalog method to its generated params/result refs at the actual request
+     boundary. Wrapper-local marker aliases do not count and are rejected.
 
 Catalog truth is read from the committed ``artifacts/schemas/rpc-methods.json``
 artifact (emitted from ``meerkat_contracts::rpc_method_catalog`` by
 ``make regen-schemas``); the sibling gate already pins that artifact against
 the Rust catalog source, so this script never compiles anything.
 
-Wrappers that hand-rolled shapes *before this gate existed* are grandfathered
-in an explicit ratchet baseline below. The baseline only shrinks: adding a new
-hand-rolled wrapper fails, and a baseline entry whose wrapper becomes
-generated-typed fails as stale until the entry is deleted.
+Historical wrappers follow the same generated transport rule as new wrappers.
+There is no grandfathered baseline or expiry waiver.
 """
 
 from __future__ import annotations
 
+import ast
 import json
 import pathlib
 import re
@@ -51,298 +45,15 @@ SDK_SEND_SITE_EXCLUSIONS = {
     "web-auth": set(),
 }
 
-# ---------------------------------------------------------------------------
-# RATCHET BASELINE — wrappers that hand-roll a shape although the generated
-# SDK type for the catalog ref exists. These predate this gate. Do NOT add
-# entries; delete an entry once its wrapper references the generated type.
-# Key: (sdk, method, side) where side is "params" or "result".
-# ---------------------------------------------------------------------------
-BASELINE_HAND_ROLLED: set[tuple[str, str, str]] = {
-    ("py", "auth/login/complete", "result"),
-    ("py", "auth/login/device_start", "result"),
-    ("py", "auth/login/start", "result"),
-    ("py", "auth/logout", "result"),
-    ("py", "auth/profile/create", "result"),
-    ("py", "auth/profile/delete", "result"),
-    ("py", "auth/profile/get", "result"),
-    ("py", "auth/profile/list", "result"),
-    ("py", "auth/status/get", "result"),
-    ("py", "comms/peers", "params"),
-    ("py", "comms/peers", "result"),
-    ("py", "comms/send", "params"),
-    ("py", "live/close", "params"),
-    ("py", "live/commit_input", "params"),
-    ("py", "live/commit_input", "result"),
-    ("py", "live/interrupt", "params"),
-    ("py", "live/interrupt", "result"),
-    ("py", "live/open", "params"),
-    ("py", "live/open", "result"),
-    ("py", "live/refresh", "params"),
-    ("py", "live/send_input", "params"),
-    ("py", "live/send_input", "result"),
-    ("py", "live/status", "params"),
-    ("py", "live/status", "result"),
-    ("py", "live/truncate", "params"),
-    ("py", "live/truncate", "result"),
-    ("py", "live/webrtc/answer", "params"),
-    ("py", "live/webrtc/answer", "result"),
-    ("py", "mcp/add", "params"),
-    ("py", "mcp/reload", "params"),
-    ("py", "mcp/remove", "params"),
-    ("py", "mob/append_system_context", "params"),
-    ("py", "mob/append_system_context", "result"),
-    ("py", "mob/cancel_all_work", "params"),
-    ("py", "mob/cancel_all_work", "result"),
-    ("py", "mob/cancel_work", "params"),
-    ("py", "mob/cancel_work", "result"),
-    ("py", "mob/create", "params"),
-    ("py", "mob/create", "result"),
-    ("py", "mob/destroy", "params"),
-    ("py", "mob/destroy", "result"),
-    ("py", "mob/ensure_member", "params"),
-    ("py", "mob/ensure_member", "result"),
-    ("py", "mob/events", "params"),
-    ("py", "mob/events", "result"),
-    ("py", "mob/flow_cancel", "params"),
-    ("py", "mob/flow_cancel", "result"),
-    ("py", "mob/flow_run", "params"),
-    ("py", "mob/flow_run", "result"),
-    ("py", "mob/flow_status", "params"),
-    ("py", "mob/flow_status", "result"),
-    ("py", "mob/flows", "params"),
-    ("py", "mob/flows", "result"),
-    ("py", "mob/force_cancel", "params"),
-    ("py", "mob/force_cancel", "result"),
-    ("py", "mob/fork_helper", "params"),
-    ("py", "mob/fork_helper", "result"),
-    ("py", "mob/ingress_interaction", "params"),
-    ("py", "mob/ingress_interaction", "result"),
-    ("py", "mob/lifecycle", "params"),
-    ("py", "mob/lifecycle", "result"),
-    ("py", "mob/list", "result"),
-    ("py", "mob/list_members_matching", "params"),
-    ("py", "mob/list_members_matching", "result"),
-    ("py", "mob/member_send", "params"),
-    ("py", "mob/member_send", "result"),
-    ("py", "mob/members", "params"),
-    ("py", "mob/members", "result"),
-    ("py", "mob/profile/create", "params"),
-    ("py", "mob/profile/create", "result"),
-    ("py", "mob/profile/delete", "params"),
-    ("py", "mob/profile/delete", "result"),
-    ("py", "mob/profile/get", "params"),
-    ("py", "mob/profile/get", "result"),
-    ("py", "mob/profile/list", "result"),
-    ("py", "mob/profile/update", "params"),
-    ("py", "mob/profile/update", "result"),
-    ("py", "mob/reconcile", "params"),
-    ("py", "mob/reconcile", "result"),
-    ("py", "mob/respawn", "params"),
-    ("py", "mob/respawn", "result"),
-    ("py", "mob/retire", "params"),
-    ("py", "mob/retire", "result"),
-    ("py", "mob/rotate_supervisor", "params"),
-    ("py", "mob/snapshot", "params"),
-    ("py", "mob/snapshot", "result"),
-    ("py", "mob/spawn", "params"),
-    ("py", "mob/spawn", "result"),
-    ("py", "mob/spawn_helper", "params"),
-    ("py", "mob/spawn_helper", "result"),
-    ("py", "mob/status", "params"),
-    ("py", "mob/status", "result"),
-    ("py", "mob/stream_close", "params"),
-    ("py", "mob/stream_close", "result"),
-    ("py", "mob/stream_open", "params"),
-    ("py", "mob/stream_open", "result"),
-    ("py", "mob/submit_work", "params"),
-    ("py", "mob/submit_work", "result"),
-    ("py", "mob/turn_start", "result"),
-    ("py", "mob/unwire", "params"),
-    ("py", "mob/unwire", "result"),
-    ("py", "mob/wait_kickoff", "params"),
-    ("py", "mob/wait_kickoff", "result"),
-    ("py", "mob/wait_ready", "params"),
-    ("py", "mob/wait_ready", "result"),
-    ("py", "mob/wire", "params"),
-    ("py", "mob/wire", "result"),
-    ("py", "mob/wire_members_batch", "params"),
-    ("py", "models/catalog", "result"),
-    ("py", "realm/get", "result"),
-    ("py", "realm/list", "result"),
-    ("py", "schedule/delete", "params"),
-    ("py", "schedule/get", "params"),
-    ("py", "schedule/list", "params"),
-    ("py", "schedule/list", "result"),
-    ("py", "schedule/occurrences", "params"),
-    ("py", "schedule/occurrences", "result"),
-    ("py", "schedule/pause", "params"),
-    ("py", "schedule/resume", "params"),
-    ("py", "schedule/update", "params"),
-    ("py", "session/external_event", "result"),
-    ("py", "session/history", "result"),
-    ("py", "session/peer_response_terminal", "result"),
-    ("py", "session/read", "result"),
-    ("py", "session/stream_close", "params"),
-    ("py", "session/stream_close", "result"),
-    ("py", "session/stream_open", "params"),
-    ("py", "session/stream_open", "result"),
-    ("py", "turn/start", "result"),
-    ("ts", "auth/login/complete", "result"),
-    ("ts", "auth/login/device_start", "result"),
-    ("ts", "auth/login/start", "result"),
-    ("ts", "auth/logout", "result"),
-    ("ts", "auth/profile/create", "result"),
-    ("ts", "auth/profile/delete", "result"),
-    ("ts", "auth/profile/get", "result"),
-    ("ts", "auth/profile/list", "result"),
-    ("ts", "auth/status/get", "result"),
-    ("ts", "comms/peers", "params"),
-    ("ts", "comms/send", "params"),
-    ("ts", "mob/append_system_context", "params"),
-    ("ts", "mob/append_system_context", "result"),
-    ("ts", "mob/cancel_all_work", "params"),
-    ("ts", "mob/cancel_all_work", "result"),
-    ("ts", "mob/cancel_work", "params"),
-    ("ts", "mob/cancel_work", "result"),
-    ("ts", "mob/create", "params"),
-    ("ts", "mob/create", "result"),
-    ("ts", "mob/destroy", "params"),
-    ("ts", "mob/destroy", "result"),
-    ("ts", "mob/ensure_member", "params"),
-    ("ts", "mob/ensure_member", "result"),
-    ("ts", "mob/events", "params"),
-    ("ts", "mob/events", "result"),
-    ("ts", "mob/flow_cancel", "params"),
-    ("ts", "mob/flow_cancel", "result"),
-    ("ts", "mob/flow_run", "params"),
-    ("ts", "mob/flow_run", "result"),
-    ("ts", "mob/flow_status", "params"),
-    ("ts", "mob/flows", "params"),
-    ("ts", "mob/flows", "result"),
-    ("ts", "mob/force_cancel", "params"),
-    ("ts", "mob/force_cancel", "result"),
-    ("ts", "mob/fork_helper", "params"),
-    ("ts", "mob/fork_helper", "result"),
-    ("ts", "mob/ingress_interaction", "params"),
-    ("ts", "mob/ingress_interaction", "result"),
-    ("ts", "mob/lifecycle", "params"),
-    ("ts", "mob/lifecycle", "result"),
-    ("ts", "mob/list", "result"),
-    ("ts", "mob/list_members_matching", "params"),
-    ("ts", "mob/list_members_matching", "result"),
-    ("ts", "mob/member_send", "params"),
-    ("ts", "mob/member_send", "result"),
-    ("ts", "mob/members", "params"),
-    ("ts", "mob/members", "result"),
-    ("ts", "mob/profile/create", "params"),
-    ("ts", "mob/profile/create", "result"),
-    ("ts", "mob/profile/delete", "params"),
-    ("ts", "mob/profile/delete", "result"),
-    ("ts", "mob/profile/get", "params"),
-    ("ts", "mob/profile/get", "result"),
-    ("ts", "mob/profile/list", "result"),
-    ("ts", "mob/profile/update", "params"),
-    ("ts", "mob/profile/update", "result"),
-    ("ts", "mob/reconcile", "params"),
-    ("ts", "mob/reconcile", "result"),
-    ("ts", "mob/respawn", "params"),
-    ("ts", "mob/respawn", "result"),
-    ("ts", "mob/retire", "params"),
-    ("ts", "mob/retire", "result"),
-    ("ts", "mob/rotate_supervisor", "params"),
-    ("ts", "mob/snapshot", "params"),
-    ("ts", "mob/snapshot", "result"),
-    ("ts", "mob/spawn", "params"),
-    ("ts", "mob/spawn", "result"),
-    ("ts", "mob/spawn_helper", "params"),
-    ("ts", "mob/spawn_helper", "result"),
-    ("ts", "mob/status", "params"),
-    ("ts", "mob/status", "result"),
-    ("ts", "mob/stream_close", "params"),
-    ("ts", "mob/stream_close", "result"),
-    ("ts", "mob/stream_open", "params"),
-    ("ts", "mob/stream_open", "result"),
-    ("ts", "mob/submit_work", "params"),
-    ("ts", "mob/submit_work", "result"),
-    ("ts", "mob/turn_start", "params"),
-    ("ts", "mob/turn_start", "result"),
-    ("ts", "mob/unwire", "params"),
-    ("ts", "mob/unwire", "result"),
-    ("ts", "mob/wait_kickoff", "params"),
-    ("ts", "mob/wait_kickoff", "result"),
-    ("ts", "mob/wait_ready", "params"),
-    ("ts", "mob/wait_ready", "result"),
-    ("ts", "mob/wire", "params"),
-    ("ts", "mob/wire", "result"),
-    ("ts", "mob/wire_members_batch", "params"),
-    ("ts", "mob/wire_members_batch", "result"),
-    ("ts", "models/catalog", "result"),
-    ("ts", "realm/get", "result"),
-    ("ts", "realm/list", "result"),
-    ("ts", "schedule/delete", "params"),
-    ("ts", "schedule/get", "params"),
-    ("ts", "schedule/list", "params"),
-    ("ts", "schedule/list", "result"),
-    ("ts", "schedule/occurrences", "params"),
-    ("ts", "schedule/occurrences", "result"),
-    ("ts", "schedule/pause", "params"),
-    ("ts", "schedule/resume", "params"),
-    ("ts", "schedule/update", "params"),
-    ("ts", "session/external_event", "result"),
-    ("ts", "session/history", "result"),
-    ("ts", "session/peer_response_terminal", "result"),
-    ("ts", "session/read", "result"),
-    ("ts", "session/stream_close", "params"),
-    ("ts", "session/stream_close", "result"),
-    ("ts", "session/stream_open", "params"),
-    ("ts", "session/stream_open", "result"),
-    ("ts", "turn/start", "result"),
-}
-
-# The remaining grandfathered wrappers are owned debt, not a permanent escape
-# hatch. New generated wrappers must remove entries; the whole baseline expires
-# unless renewed with an explicit owner decision.
-#
-# 2026-08-18 sdk-contracts owner review: all 239 entries remain active
-# generated-type mismatches (ts=110, py=129), and the gate reports no stale
-# entries that can be deleted without migrating their wrappers. Keep the exact
-# reviewed cap through 0.8.24 only. Opening the 0.8.25 train must migrate all
-# 239 wrappers; see RELEASE-0.8.25.md.
-BASELINE_HAND_ROLLED_OWNER = "sdk-contracts"
-BASELINE_HAND_ROLLED_CURRENT_TRAIN = "0.8.24"
-BASELINE_HAND_ROLLED_EXPIRES_AT_TRAIN = "0.8.25"
-BASELINE_HAND_ROLLED_MAX_ENTRIES = 239
+# There is intentionally no grandfathered baseline. Every SDK wrapper whose
+# catalog type exists in the generated module must reference that generated
+# type, so newly introduced and historical wrappers follow the same rule.
 
 
 def split_type_refs(type_ref: str | None) -> list[str]:
     if not type_ref:
         return []
     return [part.strip() for part in type_ref.split("|") if part.strip()]
-
-
-def release_version_tuple(version: str) -> tuple[int, int, int]:
-    """Return the release-ordering portion of a Cargo semantic version."""
-    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(?:[-+].*)?", version)
-    if not match:
-        raise ValueError(f"invalid semantic version: {version}")
-    return tuple(int(part) for part in match.groups())
-
-
-def baseline_train_expiry_failure(
-    current_train: str,
-    expiry_train: str,
-    baseline_size: int,
-) -> str | None:
-    """Fail the grandfathered baseline when the named release train opens."""
-    current = release_version_tuple(current_train)
-    expiry = release_version_tuple(expiry_train)
-    if baseline_size and current >= expiry:
-        return (
-            "baseline policy: BASELINE_HAND_ROLLED expired at the "
-            f"{expiry_train} train opening (current train {current_train}); "
-            f"migrate all {baseline_size} grandfathered wrappers before continuing"
-        )
-    return None
 
 
 def load_catalog(root: pathlib.Path) -> dict[str, dict[str, str | None]]:
@@ -383,9 +94,7 @@ def check_docs(
 ) -> list[str]:
     docs_path = root / "docs" / "api" / "rpc.mdx"
     docs_text = docs_path.read_text(encoding="utf-8")
-    overview = re.search(
-        r"## Method overview(.*?)\n## ", docs_text, flags=re.DOTALL
-    )
+    overview = re.search(r"## Method overview(.*?)\n## ", docs_text, flags=re.DOTALL)
     if overview is None:
         return ["docs: could not locate '## Method overview' section in rpc.mdx"]
 
@@ -506,7 +215,6 @@ def mask_ts(text: str) -> str:
     out = list(text)
     i = 0
     n = len(text)
-    template_depth: list[int] = []  # brace depth inside `${ ... }` per template
 
     def blank(idx: int) -> None:
         if out[idx] != "\n":
@@ -687,9 +395,7 @@ def ts_function_spans(masked: str) -> list[TsFunction]:
     return spans
 
 
-def innermost_ts_function(
-    spans: list[TsFunction], offset: int
-) -> TsFunction | None:
+def innermost_ts_function(spans: list[TsFunction], offset: int) -> TsFunction | None:
     best: TsFunction | None = None
     for span in spans:
         if span.start <= offset < span.body_end:
@@ -859,9 +565,7 @@ def web_auth_send_sites(
             body = masked[func.start : func.body_end]
             tokens = set(re.findall(r"[A-Za-z_$][\w$]*", body))
             referenced = {
-                resolved_imports[token]
-                for token in tokens
-                if token in resolved_imports
+                resolved_imports[token] for token in tokens if token in resolved_imports
             }
             wrapper = func.name
         line = text.count("\n", 0, match.start()) + 1
@@ -958,9 +662,7 @@ def py_send_sites(
                     if re.fullmatch(r"[A-Za-z_][\w\[\], .|]*", node.value or " "):
                         names.update(re.findall(r"[A-Za-z_]\w*", node.value))
             return {
-                resolved_imports[name]
-                for name in names
-                if name in resolved_imports
+                resolved_imports[name] for name in names if name in resolved_imports
             }
 
         def record(method: str, lineno: int) -> None:
@@ -1011,9 +713,445 @@ def py_send_sites(
     return sites
 
 
+def _rpc_schema_documents(root: pathlib.Path) -> list[dict]:
+    documents: list[dict] = []
+    for name in ("params.json", "wire-types.json", "runtime-host.json"):
+        path = root / "artifacts" / "schemas" / name
+        if path.exists():
+            value = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(value, dict):
+                documents.append(value)
+    return documents
+
+
+def _find_named_schema(documents: list[dict], name: str) -> dict | None:
+    for document in documents:
+        direct = document.get(name)
+        if isinstance(direct, dict):
+            return direct
+        defs = document.get("$defs")
+        if isinstance(defs, dict) and isinstance(defs.get(name), dict):
+            return defs[name]
+        for value in document.values():
+            if not isinstance(value, dict):
+                continue
+            local_defs = value.get("$defs")
+            if isinstance(local_defs, dict) and isinstance(local_defs.get(name), dict):
+                return local_defs[name]
+    return None
+
+
+def _required_key_variants(
+    schema: dict | None,
+    documents: list[dict],
+    seen: frozenset[str] = frozenset(),
+) -> list[frozenset[str]]:
+    if not isinstance(schema, dict):
+        return [frozenset()]
+    ref = schema.get("$ref")
+    if isinstance(ref, str):
+        name = ref.rsplit("/", 1)[-1]
+        if name in seen:
+            return [frozenset()]
+        return _required_key_variants(
+            _find_named_schema(documents, name), documents, seen | {name}
+        )
+
+    outer = frozenset(key for key in schema.get("required", []) if isinstance(key, str))
+    for branch_key in ("oneOf", "anyOf"):
+        branches = schema.get(branch_key)
+        if isinstance(branches, list) and branches:
+            variants = [
+                outer | required
+                for branch in branches
+                for required in _required_key_variants(branch, documents, seen)
+            ]
+            return list(dict.fromkeys(variants))
+
+    branches = schema.get("allOf")
+    if isinstance(branches, list) and branches:
+        variants = [outer]
+        for branch in branches:
+            variants = [
+                current | required
+                for current in variants
+                for required in _required_key_variants(branch, documents, seen)
+            ]
+        return list(dict.fromkeys(variants))
+    return [outer]
+
+
+def _annotation_names(annotation: ast.expr | None) -> set[str]:
+    if annotation is None:
+        return set()
+    return {node.id for node in ast.walk(annotation) if isinstance(node, ast.Name)} | {
+        node.attr for node in ast.walk(annotation) if isinstance(node, ast.Attribute)
+    }
+
+
+def _python_payload_shape(
+    expression: ast.expr,
+    function: ast.FunctionDef | ast.AsyncFunctionDef,
+    before_line: int,
+    seen: frozenset[str] = frozenset(),
+) -> tuple[set[str], set[str]]:
+    if isinstance(expression, ast.Dict):
+        keys: set[str] = set()
+        annotations: set[str] = set()
+        for key, value in zip(expression.keys, expression.values):
+            if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                keys.add(key.value)
+            elif key is None:
+                nested_keys, nested_annotations = _python_payload_shape(
+                    value, function, before_line, seen
+                )
+                keys.update(nested_keys)
+                annotations.update(nested_annotations)
+        return keys, annotations
+
+    if isinstance(expression, ast.DictComp):
+        keys: set[str] = set()
+        annotations: set[str] = set()
+        for generator in expression.generators:
+            iterator = generator.iter
+            if (
+                isinstance(iterator, ast.Call)
+                and isinstance(iterator.func, ast.Attribute)
+                and iterator.func.attr == "items"
+            ):
+                nested_keys, nested_annotations = _python_payload_shape(
+                    iterator.func.value, function, before_line, seen
+                )
+                keys.update(nested_keys)
+                annotations.update(nested_annotations)
+        return keys, annotations
+
+    if isinstance(expression, ast.Call):
+        keys = {keyword.arg for keyword in expression.keywords if keyword.arg}
+        annotations: set[str] = set()
+        for keyword in expression.keywords:
+            if keyword.arg is None:
+                nested_keys, nested_annotations = _python_payload_shape(
+                    keyword.value, function, before_line, seen
+                )
+                keys.update(nested_keys)
+                annotations.update(nested_annotations)
+        if expression.args:
+            nested_keys, nested_annotations = _python_payload_shape(
+                expression.args[0], function, before_line, seen
+            )
+            keys.update(nested_keys)
+            annotations.update(nested_annotations)
+        return keys, annotations
+
+    if isinstance(expression, ast.BoolOp):
+        keys: set[str] = set()
+        annotations: set[str] = set()
+        for value in expression.values:
+            nested_keys, nested_annotations = _python_payload_shape(
+                value, function, before_line, seen
+            )
+            keys.update(nested_keys)
+            annotations.update(nested_annotations)
+        return keys, annotations
+
+    if isinstance(expression, ast.Attribute) and expression.attr == "__dict__":
+        return _python_payload_shape(expression.value, function, before_line, seen)
+
+    if not isinstance(expression, ast.Name) or expression.id in seen:
+        return set(), set()
+
+    name = expression.id
+    keys: set[str] = set()
+    annotations: set[str] = set()
+    for argument in (*function.args.args, *function.args.kwonlyargs):
+        if argument.arg == name:
+            annotations.update(_annotation_names(argument.annotation))
+
+    for node in ast.walk(function):
+        if getattr(node, "lineno", before_line) >= before_line:
+            continue
+        value: ast.expr | None = None
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            if node.target.id == name:
+                value = node.value
+        elif isinstance(node, ast.Assign):
+            if any(
+                isinstance(target, ast.Name) and target.id == name
+                for target in node.targets
+            ):
+                value = node.value
+            for target in node.targets:
+                if (
+                    isinstance(target, ast.Subscript)
+                    and isinstance(target.value, ast.Name)
+                    and target.value.id == name
+                    and isinstance(target.slice, ast.Constant)
+                    and isinstance(target.slice.value, str)
+                ):
+                    keys.add(target.slice.value)
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == name
+            and node.func.attr == "update"
+            and node.args
+        ):
+            value = node.args[0]
+
+        if value is not None:
+            nested_keys, nested_annotations = _python_payload_shape(
+                value, function, before_line, seen | {name}
+            )
+            keys.update(nested_keys)
+            annotations.update(nested_annotations)
+    return keys, annotations
+
+
+def check_python_required_param_shapes(
+    root: pathlib.Path, catalog: dict[str, dict[str, str | None]]
+) -> list[str]:
+    """Require every literal Python send to satisfy a generated params shape.
+
+    This is intentionally AST-based rather than an annotation-presence check:
+    dictionary literals, named payloads, constructor calls, and conditional
+    key additions are inspected at the actual request call. Direct pass-through
+    is accepted only when the public argument itself names the catalog params
+    type; the transport cast alone can never satisfy this gate.
+    """
+    documents = _rpc_schema_documents(root)
+    required_by_method: dict[str, list[frozenset[str]]] = {}
+    refs_by_method: dict[str, set[str]] = {}
+    for method, descriptor in catalog.items():
+        refs = set(split_type_refs(descriptor["params"]))
+        refs_by_method[method] = refs
+        variants: list[frozenset[str]] = []
+        for ref in refs:
+            if ref in UNTYPED_REFS:
+                variants.append(frozenset())
+                continue
+            variants.extend(
+                _required_key_variants(_find_named_schema(documents, ref), documents)
+            )
+        required_by_method[method] = variants or [frozenset()]
+
+    failures: list[str] = []
+    package = root / "sdks" / "python" / "meerkat"
+    for path in sorted(package.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        functions = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        ]
+
+        def innermost(lineno: int):
+            candidates = [
+                function
+                for function in functions
+                if function.lineno <= lineno <= (function.end_lineno or function.lineno)
+            ]
+            return min(
+                candidates,
+                key=lambda function: (function.end_lineno or 0) - function.lineno,
+                default=None,
+            )
+
+        for node in ast.walk(tree):
+            if not (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in ("_request", "request")
+                and len(node.args) >= 2
+                and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, str)
+                and node.args[0].value in catalog
+            ):
+                continue
+            function = innermost(node.lineno)
+            if function is None:
+                continue
+            method = node.args[0].value
+            keys, annotations = _python_payload_shape(
+                node.args[1], function, node.lineno
+            )
+            if any(required <= keys for required in required_by_method[method]):
+                continue
+            if annotations & refs_by_method[method]:
+                continue
+            expected = " or ".join(
+                "{" + ", ".join(sorted(required)) + "}"
+                for required in required_by_method[method]
+            )
+            failures.append(
+                f"py: `{method}` params shape drift at "
+                f"{path.relative_to(root)}:{node.lineno} - payload keys "
+                f"{sorted(keys)} do not satisfy generated required fields "
+                f"{expected}; a transport cast or unrelated type reference "
+                "does not count"
+            )
+    return failures
+
+
 # ---------------------------------------------------------------------------
 # Enforcement.
 # ---------------------------------------------------------------------------
+
+
+def _compact_type(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _expected_contract_type(
+    type_ref: str | None,
+    generated: set[str],
+    *,
+    sdk: str,
+    params: bool,
+) -> str:
+    if not type_ref:
+        return (
+            "Record<string, never>"
+            if sdk == "ts" and params
+            else ("Record<string, unknown>" if sdk == "ts" else "dict[str, Any]")
+        )
+    rendered: list[str] = []
+    for part in split_type_refs(type_ref):
+        if part == "Value" or part not in generated:
+            rendered.append(
+                "Record<string, unknown>"
+                if sdk == "ts" and params
+                else "unknown"
+                if sdk == "ts"
+                else "dict[str, Any]"
+                if params
+                else "Any"
+            )
+        else:
+            rendered.append(part)
+    joined = " | ".join(rendered)
+    if sdk == "ts" and not params and joined != "unknown":
+        return f"({joined}) & Record<string, unknown>"
+    return joined
+
+
+def check_generated_transport_contracts(
+    root: pathlib.Path,
+    catalog: dict[str, dict[str, str | None]],
+    *,
+    sdk: str,
+    generated: set[str],
+) -> list[str]:
+    failures: list[str] = []
+    if sdk == "ts":
+        contracts_path = root / "sdks/typescript/src/generated/rpc_contracts.ts"
+        client_path = root / "sdks/typescript/src/client.ts"
+        contracts = contracts_path.read_text(encoding="utf-8")
+        client = client_path.read_text(encoding="utf-8")
+        entries = {
+            name: (_compact_type(params), _compact_type(result))
+            for name, params, result in re.findall(
+                r'^\s*"([^"]+)":\s*\{\s*params:\s*(.*?);\s*'
+                r"result:\s*(.*?);\s*\};",
+                contracts,
+                flags=re.MULTILINE | re.DOTALL,
+            )
+        }
+        transport_patterns = (
+            r"request<M extends RpcMethodName>",
+            r"params:\s*RpcMethodContracts\[M\]\[\"params\"\]",
+            r"Promise<RpcMethodContracts\[M\]\[\"result\"\]>",
+        )
+        for pattern in transport_patterns:
+            if re.search(pattern, client) is None:
+                failures.append(
+                    "ts: client request transport is not generic over the "
+                    f"generated RpcMethodContracts map (missing `{pattern}`)"
+                )
+    else:
+        contracts_path = root / "sdks/python/meerkat/generated/rpc_contracts.py"
+        client_path = root / "sdks/python/meerkat/client.py"
+        contracts = contracts_path.read_text(encoding="utf-8")
+        client = client_path.read_text(encoding="utf-8")
+        entries = {
+            name: (_compact_type(params), _compact_type(result))
+            for name, params, result in re.findall(
+                r"method:\s*Literal\[\"([^\"]+)\"\],\s*"
+                r"params:\s*(.*?),\s*/,.+?Awaitable\[(.*?)\]",
+                contracts,
+                flags=re.DOTALL,
+            )
+        }
+        transport_patterns = (
+            r"_request:\s*RpcRequest",
+            r"self\._request\s*=\s*cast\(RpcRequest,\s*self\._request_impl\)",
+            r"async def _request_impl\(",
+        )
+        for pattern in transport_patterns:
+            if re.search(pattern, client) is None:
+                failures.append(
+                    "py: client request transport is not bound to the generated "
+                    f"RpcRequest overloads (missing `{pattern}`)"
+                )
+
+    expected_names = set(catalog)
+    actual_names = set(entries)
+    for name in sorted(expected_names - actual_names):
+        failures.append(f"{sdk}: generated RPC contract missing `{name}`")
+    for name in sorted(actual_names - expected_names):
+        failures.append(
+            f"{sdk}: generated RPC contract contains non-catalog method `{name}`"
+        )
+    for name in sorted(expected_names & actual_names):
+        actual_params, actual_result = entries[name]
+        expected_params = _expected_contract_type(
+            catalog[name]["params"], generated, sdk=sdk, params=True
+        )
+        expected_result = _expected_contract_type(
+            catalog[name]["result"], generated, sdk=sdk, params=False
+        )
+        if actual_params != expected_params:
+            failures.append(
+                f"{sdk}: `{name}` params contract drift - expected "
+                f"`{expected_params}`, generated `{actual_params}`"
+            )
+        if actual_result != expected_result:
+            failures.append(
+                f"{sdk}: `{name}` result contract drift - expected "
+                f"`{expected_result}`, generated `{actual_result}`"
+            )
+
+    marker_patterns = (
+        "_RpcSignature",
+        "_RpcGeneratedSignature",
+        "_rpc_signature",
+        "_rpc_generated_signature",
+    )
+    for marker in marker_patterns:
+        if marker in client:
+            failures.append(
+                f"{sdk}: obsolete wrapper-local marker `{marker}` is forbidden; "
+                "bind the actual request transport instead"
+            )
+    return failures
+
+
+def check_send_site_coverage(
+    sdk: str,
+    catalog: dict[str, dict[str, str | None]],
+    sites: dict[str, list[SendSite]],
+) -> list[str]:
+    failures: list[str] = []
+    exclusions = SDK_SEND_SITE_EXCLUSIONS[sdk]
+    for method in sorted(catalog):
+        if not sites.get(method) and method not in exclusions:
+            failures.append(
+                f"{sdk}: no structural send-site found for catalog method `{method}`"
+            )
+        if sites.get(method) and method in exclusions:
+            failures.append(f"{sdk}: `{method}` has a send-site but remains excluded")
+    return failures
 
 
 def check_sdk(
@@ -1033,7 +1171,7 @@ def check_sdk(
             if method not in exclusions:
                 failures.append(
                     f"{sdk}: no structural send-site found for catalog method "
-                    f"`{method}` (expected a request(\"{method}\", ...) call "
+                    f'`{method}` (expected a request("{method}", ...) call '
                     "or a JSON-RPC envelope literal in the SDK source)"
                 )
             continue
@@ -1056,17 +1194,9 @@ def check_sdk(
                 continue
             enforced += 1
             compliant = any(
-                all(ref in site.referenced for ref in refs)
-                for site in method_sites
+                all(ref in site.referenced for ref in refs) for site in method_sites
             )
-            key = (sdk, method, side)
-            if compliant and key in BASELINE_HAND_ROLLED:
-                failures.append(
-                    f"{sdk}: `{method}` {side} — baseline entry is stale: the "
-                    f"wrapper now references the generated type(s) "
-                    f"{refs}; delete {key!r} from BASELINE_HAND_ROLLED"
-                )
-            elif not compliant and key not in BASELINE_HAND_ROLLED:
+            if not compliant:
                 locations = ", ".join(
                     f"{s.wrapper} ({s.file}:{s.line})" for s in method_sites
                 )
@@ -1100,10 +1230,15 @@ def main() -> int:
     py_sites_map = py_send_sites(root, catalog, py_gen)
     web_auth_sites = web_auth_send_sites(root, catalog, web_gen)
 
-    ts_failures, ts_enforced, ts_untracked = check_sdk("ts", catalog, ts_sites, ts_gen)
-    py_failures, py_enforced, py_untracked = check_sdk(
-        "py", catalog, py_sites_map, py_gen
+    ts_failures = check_generated_transport_contracts(
+        root, catalog, sdk="ts", generated=ts_gen
     )
+    ts_failures.extend(check_send_site_coverage("ts", catalog, ts_sites))
+    py_failures = check_generated_transport_contracts(
+        root, catalog, sdk="py", generated=py_gen
+    )
+    py_failures.extend(check_send_site_coverage("py", catalog, py_sites_map))
+    py_failures.extend(check_python_required_param_shapes(root, catalog))
     auth_catalog = {
         method: descriptor
         for method, descriptor in catalog.items()
@@ -1116,53 +1251,20 @@ def main() -> int:
     failures.extend(py_failures)
     failures.extend(web_failures)
 
-    # Baseline keys must stay real: every entry must refer to a live method.
-    for sdk, method, side in sorted(BASELINE_HAND_ROLLED):
-        if method not in catalog:
-            failures.append(
-                f"{sdk}: baseline entry ({sdk!r}, {method!r}, {side!r}) refers "
-                "to a method that is no longer in the catalog — delete it"
-            )
-
-    if not BASELINE_HAND_ROLLED_OWNER:
-        failures.append("baseline policy: BASELINE_HAND_ROLLED_OWNER must be set")
-    try:
-        train_failure = baseline_train_expiry_failure(
-            BASELINE_HAND_ROLLED_CURRENT_TRAIN,
-            BASELINE_HAND_ROLLED_EXPIRES_AT_TRAIN,
-            len(BASELINE_HAND_ROLLED),
-        )
-    except ValueError as error:
-        failures.append(f"baseline policy: {error}")
-    else:
-        if train_failure:
-            failures.append(train_failure)
-    if len(BASELINE_HAND_ROLLED) > BASELINE_HAND_ROLLED_MAX_ENTRIES:
-        failures.append(
-            "baseline policy: BASELINE_HAND_ROLLED grew to "
-            f"{len(BASELINE_HAND_ROLLED)} entries, above the ratchet cap "
-            f"{BASELINE_HAND_ROLLED_MAX_ENTRIES}"
-        )
-
     if failures:
         print("RPC signature parity violations:")
         for failure in failures:
             print(f"  - {failure}")
         return 1
 
-    baseline_count = len(BASELINE_HAND_ROLLED)
     print(
         "RPC signature parity OK: "
         f"{len(catalog)} methods; docs typed columns match the catalog; "
-        f"ts={ts_enforced} py={py_enforced} web-auth={web_enforced} "
-        "generated-typed sides enforced "
-        f"({baseline_count} grandfathered hand-rolled, "
-        f"owner={BASELINE_HAND_ROLLED_OWNER} "
-        f"train={BASELINE_HAND_ROLLED_CURRENT_TRAIN} "
-        f"expires-at-train={BASELINE_HAND_ROLLED_EXPIRES_AT_TRAIN}, "
-        f"ts={ts_untracked} py={py_untracked} web-auth={web_untracked} "
-        "sides untracked because the "
-        "generated SDK type does not exist yet)."
+        "TypeScript and Python request transports are bound to generated "
+        "method contracts; wrapper-local marker aliases are absent; "
+        f"web-auth={web_enforced} generated-typed sides enforced "
+        f"({web_untracked} sides untracked because the generated Web SDK "
+        "type does not exist yet)."
     )
     return 0
 

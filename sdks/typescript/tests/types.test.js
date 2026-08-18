@@ -2407,6 +2407,55 @@ describe("Comms methods", () => {
     ]);
   });
 
+  it("does not normalize opaque supervisor bridge JSON", async () => {
+    const client = new MeerkatClient();
+    const calls = [];
+    client.request = async (method, params) => {
+      calls.push({ method, params });
+      return {
+        kind: "peer_request_sent",
+        envelope_id: "env-1",
+        interaction_id: "interaction-1",
+        request_id: "request-1",
+        stream_reserved: false,
+      };
+    };
+    const spec = {
+      output_schema: {
+        default: { type: "image", data: "digest-covered-example" },
+      },
+    };
+
+    await client.send("s1", {
+      kind: "peer_request",
+      to: "agent-a",
+      intent: "supervisor.bridge",
+      params: {
+        command: "materialize_member",
+        binding_generation: 1,
+        epoch: 2,
+        fence_token: 3,
+        generation: 4,
+        launch: { mode: "fresh" },
+        protocol_version: 1,
+        spec,
+        spec_digest: "digest-1",
+        supervisor: {
+          address: "inproc://supervisor",
+          name: "supervisor",
+          peer_id: "pictionary/supervisor/supervisor",
+        },
+      },
+    });
+
+    assert.deepEqual(calls[0].params.params.spec, spec);
+    assert.equal(
+      Object.hasOwn(calls[0].params.params.spec.output_schema.default, "source"),
+      false,
+    );
+    assert.equal(calls[0].params.params.spec_digest, "digest-1");
+  });
+
   it("Session.peers rejects a missing required peers field", async () => {
     const client = new MeerkatClient();
     client.request = async () => ({});

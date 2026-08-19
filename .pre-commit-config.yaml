@@ -118,7 +118,8 @@ repos:
         types: [rust]
         pass_filenames: false
         # Cargo.lock has no Rust file type, but lock-only pushes must still
-        # compile the resolved dependency graph before source tests are reused.
+        # compile the resolved dependency graph before prior-graph source-test
+        # evidence is reused. CI re-tests the current lock graph.
         always_run: true
         stages: [pre-push]
 

@@ -45,7 +45,8 @@ source_test_fingerprint() {
   # Excluding only these two generated lock artifacts lets that narrow
   # dependency evidence reuse source-test results; every other tracked byte
   # remains fail-closed because tests may read fixtures or configuration with
-  # arbitrary extensions.
+  # arbitrary extensions. The current lock graph is compiled, not re-tested:
+  # reused test evidence was executed against the prior root lock graph.
   "$GIT_BIN" ls-tree -rz --full-tree HEAD |
     while IFS= read -r -d '' tree_record; do
       tree_path="${tree_record#*$'\t'}"
@@ -198,7 +199,8 @@ stamp_key="${CACHE_VERSION}-cargo-source-${source_fingerprint}"
 stamp_path="${HOOK_CACHE_DIR}/${stamp_key}.ok"
 
 if [[ "${MEERKAT_SKIP_PRE_PUSH_UNIT_CACHE:-0}" != "1" && -f "$stamp_path" ]]; then
-  echo "deterministic pre-push source tests already validated for fingerprint ${source_fingerprint}; skipping."
+  echo "reusing deterministic source-test evidence for fingerprint ${source_fingerprint}."
+  echo "Current root lock graph was compiled by pre-push Clippy but is not re-tested locally; CI is authoritative."
   exit 0
 fi
 
@@ -256,6 +258,6 @@ if [[ "$final_source_fingerprint" != "$source_fingerprint" ]]; then
   exit 1
 fi
 stamp_tmp="${stamp_path}.tmp.$$"
-printf 'tree=%s\nsource_fingerprint=%s\nexcluded=Cargo.lock,MODULE.bazel.lock\nbackend=cargo\nrunners=unit,integration-fast,headcanonical-process-death,e2e-fast\n' \
+printf 'tree=%s\nsource_fingerprint=%s\nexcluded=Cargo.lock,MODULE.bazel.lock\nreuse_boundary=current-lock-graph-compiled-not-retested\nbackend=cargo\nrunners=unit,integration-fast,headcanonical-process-death,e2e-fast\n' \
   "$tree" "$source_fingerprint" > "$stamp_tmp"
 mv "$stamp_tmp" "$stamp_path"

@@ -18016,7 +18016,9 @@ async fn apply_input_intermediate_peer_input_during_running_turn_wakes_without_b
         );
     }
 
-    allow_first_finish.notify_waiters();
+    // Store a permit if the executor has signalled start but has not yet
+    // polled its release future. notify_waiters would lose that release.
+    allow_first_finish.notify_one();
 
     let settled = tokio::time::timeout(Duration::from_secs(1), async {
         loop {

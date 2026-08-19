@@ -4372,11 +4372,14 @@ async fn degraded_registration_cold_reloads_through_the_ordinary_registration_pa
     // fail roughly one run in three, always with `left: None`, which reads as
     // "the successor cannot execute" when it actually means "nobody looked".
     //
-    // Await a real reading, then assert on it. A genuine nonzero still fails.
+    // Await real readings from both nonblocking accessors, then assert on them.
+    // A genuine nonzero still fails.
     let mut reload_required = None;
+    let mut dead_runtime_loops = None;
     for _ in 0..200 {
-        if let Some(count) = adapter.reload_required_session_count() {
-            reload_required = Some(count);
+        reload_required = adapter.reload_required_session_count();
+        dead_runtime_loops = adapter.dead_runtime_loop_session_count();
+        if reload_required.is_some() && dead_runtime_loops.is_some() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
@@ -4387,7 +4390,7 @@ async fn degraded_registration_cold_reloads_through_the_ordinary_registration_pa
         "the successor must be able to execute against durable state"
     );
     assert_eq!(
-        adapter.dead_runtime_loop_session_count(),
+        dead_runtime_loops,
         Some(0),
         "and it must carry a live runtime loop rather than inherit the corpse"
     );

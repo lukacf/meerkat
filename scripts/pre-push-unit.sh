@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Pre-push deterministic test gate:
 # - validates the exact detached pushed tree selected by pre-push-dispatch.sh
-# - skips reruns for the same committed tree
+# - reuses source-test evidence across root lockfile-only commits
 # - serializes runs so repeated pushes don't fight each other
 # - retries nextest once if discovery hangs
 set -euo pipefail
@@ -10,7 +10,7 @@ ROOT="${ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 CARGO="${CARGO:-$ROOT/scripts/repo-cargo}"
 GIT_BIN="${GIT_BIN:-git}"
 
-CACHE_VERSION="v8"
+CACHE_VERSION="v9"
 NEXTEST_TIMEOUT_SECS="${MEERKAT_PRE_PUSH_NEXTEST_TIMEOUT_SECS:-300}"
 BUILD_TIMEOUT_SECS="${MEERKAT_PRE_PUSH_BUILD_TIMEOUT_SECS:-${MEERKAT_PRE_PUSH_NARROW_BUILD_TIMEOUT_SECS:-900}}"
 # The unit lane includes a dense-topology stress test with its own 300-second
@@ -35,6 +35,28 @@ tree_key() {
   else
     "$GIT_BIN" write-tree
   fi
+}
+
+source_test_fingerprint() {
+  local tree_record tree_path
+  # Root dependency locks are validated by the preceding Cargo and Bazel lock
+  # gates, while CI remains authoritative for advisories. The always-run
+  # changed-crate Clippy gate also compiles their resolved workspace graph.
+  # Excluding only these two generated lock artifacts lets that narrow
+  # dependency evidence reuse source-test results; every other tracked byte
+  # remains fail-closed because tests may read fixtures or configuration with
+  # arbitrary extensions.
+  "$GIT_BIN" ls-tree -rz --full-tree HEAD |
+    while IFS= read -r -d '' tree_record; do
+      tree_path="${tree_record#*$'\t'}"
+      case "$tree_path" in
+        Cargo.lock | MODULE.bazel.lock)
+          continue
+          ;;
+      esac
+      printf '%s\0' "$tree_record"
+    done |
+    "$GIT_BIN" hash-object --stdin
 }
 
 require_exact_clean_head() {
@@ -171,11 +193,12 @@ trap release_lock EXIT
 
 require_exact_clean_head
 tree="$(tree_key)"
-stamp_key="${CACHE_VERSION}-cargo-${tree}"
+source_fingerprint="$(source_test_fingerprint)"
+stamp_key="${CACHE_VERSION}-cargo-source-${source_fingerprint}"
 stamp_path="${HOOK_CACHE_DIR}/${stamp_key}.ok"
 
 if [[ "${MEERKAT_SKIP_PRE_PUSH_UNIT_CACHE:-0}" != "1" && -f "$stamp_path" ]]; then
-  echo "deterministic pre-push gate already validated for tree ${tree}; skipping."
+  echo "deterministic pre-push source tests already validated for fingerprint ${source_fingerprint}; skipping."
   exit 0
 fi
 
@@ -227,7 +250,12 @@ if [[ "$final_tree" != "$tree" ]]; then
   echo "Checked-out HEAD changed during pre-push validation; refusing a stale success stamp." >&2
   exit 1
 fi
+final_source_fingerprint="$(source_test_fingerprint)"
+if [[ "$final_source_fingerprint" != "$source_fingerprint" ]]; then
+  echo "Source-test inputs changed during pre-push validation; refusing a stale success stamp." >&2
+  exit 1
+fi
 stamp_tmp="${stamp_path}.tmp.$$"
-printf 'tree=%s\nbackend=cargo\nrunners=unit,integration-fast,headcanonical-process-death,e2e-fast\n' \
-  "$tree" > "$stamp_tmp"
+printf 'tree=%s\nsource_fingerprint=%s\nexcluded=Cargo.lock,MODULE.bazel.lock\nbackend=cargo\nrunners=unit,integration-fast,headcanonical-process-death,e2e-fast\n' \
+  "$tree" "$source_fingerprint" > "$stamp_tmp"
 mv "$stamp_tmp" "$stamp_path"

@@ -117,6 +117,9 @@ repos:
         language: script
         types: [rust]
         pass_filenames: false
+        # Cargo.lock has no Rust file type, but lock-only pushes must still
+        # compile the resolved dependency graph before source tests are reused.
+        always_run: true
         stages: [pre-push]
 
   # On push: machine file codegen + verify

@@ -224,6 +224,17 @@ else
   printf '%s\n' "${agent_gate_probe}" >&2
 fi
 
+lock_clippy_probe="$(./scripts/agent-gate --dry-run --working-tree --clippy-only Cargo.lock 2>&1 || true)"
+clippy_hook_contract="$(grep -A 10 -F -- '- id: cargo-clippy' .pre-commit-config.yaml || true)"
+if [[ "${lock_clippy_probe}" == *"Global Rust build/test configuration changed"* ]] &&
+  [[ "${lock_clippy_probe}" == *"clippy --workspace --all-targets --all-features"* ]] &&
+  [[ "${clippy_hook_contract}" == *"always_run: true"* ]]; then
+  pass "lock-only pushes compile the resolved workspace graph before source-test reuse"
+else
+  bad "lock-only pushes can reuse source tests without compiling resolved dependencies"
+  printf '%s\n%s\n' "${lock_clippy_probe}" "${clippy_hook_contract}" >&2
+fi
+
 package_clippy_probe_dir="$(mktemp -d "${TMPDIR:-/tmp}/meerkat-clippy-scope.XXXXXX")"
 trap 'rm -rf -- "${package_clippy_probe_dir}"' EXIT
 package_clippy_probe_metadata="${package_clippy_probe_dir}/metadata.json"

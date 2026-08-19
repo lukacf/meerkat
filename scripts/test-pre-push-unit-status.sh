@@ -7,8 +7,11 @@ HARNESS_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/meerkat-pre-push-harness.XXXXXX")"
 trap 'rm -rf "$TEST_ROOT" "$HARNESS_ROOT"' EXIT
 
 git -C "$TEST_ROOT" init -q
+printf 'lock revision 0\n' > "$TEST_ROOT/Cargo.lock"
+printf 'module lock revision 0\n' > "$TEST_ROOT/MODULE.bazel.lock"
+git -C "$TEST_ROOT" add Cargo.lock MODULE.bazel.lock
 git -C "$TEST_ROOT" -c user.name=Meerkat -c user.email=meerkat@example.invalid \
-  commit --allow-empty -qm "test fixture"
+  commit -qm "test fixture"
 test_head="$(git -C "$TEST_ROOT" rev-parse HEAD)"
 
 FAKE_CARGO="$HARNESS_ROOT/fake-cargo"
@@ -262,3 +265,64 @@ if ! find "$TEST_ROOT/.git/meerkat-hook-cache" -name '*.ok' -print -quit | grep 
   echo "successful pre-push run did not create a cache stamp" >&2
   exit 1
 fi
+
+initial_stamp_count="$(find "$TEST_ROOT/.git/meerkat-hook-cache" -name '*.ok' | wc -l | tr -d ' ')"
+printf 'lock revision 1\n' > "$TEST_ROOT/Cargo.lock"
+printf 'module lock revision 1\n' > "$TEST_ROOT/MODULE.bazel.lock"
+git -C "$TEST_ROOT" add Cargo.lock MODULE.bazel.lock
+git -C "$TEST_ROOT" -c user.name=Meerkat -c user.email=meerkat@example.invalid \
+  commit -qm "lock-only repair"
+test_head="$(git -C "$TEST_ROOT" rev-parse HEAD)"
+: > "$LANE_LOG"
+(
+  cd "$TEST_ROOT"
+  ROOT="$REPO_ROOT" \
+    CARGO="$FAKE_CARGO" \
+    MEERKAT_PRE_PUSH_TEST_LANE_LOG="$LANE_LOG" \
+    MEERKAT_PRE_PUSH_TEST_FAIL_LANE="" \
+    MEERKAT_PRE_PUSH_TEST_FAIL_STATUS=99 \
+    PRE_COMMIT_TO_REF="$test_head" \
+    "$REPO_ROOT/scripts/pre-push-unit.sh"
+)
+if [[ -s "$LANE_LOG" ]]; then
+  echo "root lockfile-only repair reran source-test lanes: $(paste -sd ' ' "$LANE_LOG")" >&2
+  exit 1
+fi
+lock_stamp_count="$(find "$TEST_ROOT/.git/meerkat-hook-cache" -name '*.ok' | wc -l | tr -d ' ')"
+if [[ "$lock_stamp_count" != "$initial_stamp_count" ]]; then
+  echo "root lockfile-only repair created a different source-test fingerprint" >&2
+  exit 1
+fi
+
+printf 'pub fn changed_source() {}\n' > "$TEST_ROOT/source.rs"
+git -C "$TEST_ROOT" add source.rs
+git -C "$TEST_ROOT" -c user.name=Meerkat -c user.email=meerkat@example.invalid \
+  commit -qm "source repair"
+test_head="$(git -C "$TEST_ROOT" rev-parse HEAD)"
+: > "$LANE_LOG"
+(
+  cd "$TEST_ROOT"
+  ROOT="$REPO_ROOT" \
+    CARGO="$FAKE_CARGO" \
+    MEERKAT_PRE_PUSH_NEXTEST_TIMEOUT_SECS=10 \
+    MEERKAT_PRE_PUSH_UNIT_NEXTEST_TIMEOUT_SECS=10 \
+    MEERKAT_PRE_PUSH_INTEGRATION_NEXTEST_TIMEOUT_SECS=10 \
+    MEERKAT_PRE_PUSH_BUILD_TIMEOUT_SECS=10 \
+    MEERKAT_PRE_PUSH_TEST_LANE_LOG="$LANE_LOG" \
+    MEERKAT_PRE_PUSH_TEST_FAIL_LANE="" \
+    MEERKAT_PRE_PUSH_TEST_FAIL_STATUS=99 \
+    PRE_COMMIT_TO_REF="$test_head" \
+    "$REPO_ROOT/scripts/pre-push-unit.sh"
+)
+expected_source_lanes="unit-build unit integration-build integration headcanonical-build headcanonical-process-death e2e-fast-build e2e-fast"
+if [[ "$(paste -sd ' ' "$LANE_LOG")" != "$expected_source_lanes" ]]; then
+  echo "source change lane order was '$(paste -sd ' ' "$LANE_LOG")'; expected '${expected_source_lanes}'" >&2
+  exit 1
+fi
+source_stamp_count="$(find "$TEST_ROOT/.git/meerkat-hook-cache" -name '*.ok' | wc -l | tr -d ' ')"
+if [[ "$source_stamp_count" -ne $((initial_stamp_count + 1)) ]]; then
+  echo "source change did not create a distinct source-test evidence stamp" >&2
+  exit 1
+fi
+
+echo "pre-push deterministic gate status and source-fingerprint contracts hold"

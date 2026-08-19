@@ -102,6 +102,8 @@ pushed_tree="$(git -C "$SOURCE_ROOT" rev-parse "${pushed_commit}^{tree}")"
 git_common_dir="$(git -C "$SOURCE_ROOT" rev-parse --path-format=absolute --git-common-dir)"
 hook_cache_root="${git_common_dir}/meerkat-hook-cache"
 hook_cache_dir="${hook_cache_root}/exact-tree"
+# This accelerates identical tracked trees only. CI remains authoritative for
+# toolchain, environment, credential, and other inputs outside the Git tree.
 hook_stamp="${hook_cache_dir}/${CACHE_VERSION}-${pushed_tree}.ok"
 dispatcher_lock_dir="${hook_cache_root}/dispatcher.lock"
 dispatcher_lock_pid="${dispatcher_lock_dir}/pid"

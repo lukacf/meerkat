@@ -41,7 +41,10 @@ them.
   backoff waits totaling about 3.5 seconds plus up to four provider round trips
   before terminalizing. These attempts consume the aggregate turn budget, so
   operators should check turn deadlines, stall alerts, and console read
-  timeouts against their provider latency.
+  timeouts against their provider latency. As an intentional REST wire-contract
+  consequence, such exhausted unknown failures now report error kind
+  `retry_exhausted` rather than `llm_failure`; clients branching on that code
+  must handle the new value.
 
 ## [0.8.24] - 2026-08-18
 

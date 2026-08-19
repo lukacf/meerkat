@@ -14252,7 +14252,9 @@ mod tests {
         assert!(payload["details"]["session_id"].is_string());
         assert!(payload["details"]["session_ref"].is_string());
         assert_eq!(payload["details"]["turn_error_code"], "TURN_ABANDONED");
-        assert_eq!(payload["details"]["error"]["kind"], "llm_failure");
+        // ErrorLlmClient returns an unclassified provider failure. Unknown
+        // failures now exhaust the bounded retry policy before terminalizing.
+        assert_eq!(payload["details"]["error"]["kind"], "retry_exhausted");
         assert_eq!(payload["details"]["error"]["terminal"], true);
     }
 

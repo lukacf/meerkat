@@ -22633,9 +22633,11 @@ impl MobActor {
         #[cfg(any(test, feature = "test-support"))]
         let crash_stop_reply_tx = self.crash_stop_reply_tx.take();
         // Process death releases actor-owned runtime adapters and their inproc
-        // routes. Make that destruction happen before a crash-stop caller can
-        // construct a same-process cold replacement.
+        // routes as well as the separately-owned command receiver. Make both
+        // destructions happen before a crash-stop caller can construct a
+        // same-process cold replacement.
         drop(self);
+        drop(command_rx);
         #[cfg(any(test, feature = "test-support"))]
         if let Some(reply_tx) = crash_stop_reply_tx {
             let _ = reply_tx.send(Ok(()));

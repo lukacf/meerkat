@@ -216,6 +216,47 @@ else
   printf '%s\n' "${agent_gate_probe}" >&2
 fi
 
+package_clippy_probe_dir="$(mktemp -d "${TMPDIR:-/tmp}/meerkat-clippy-scope.XXXXXX")"
+trap 'rm -rf -- "${package_clippy_probe_dir}"' EXIT
+package_clippy_probe_metadata="${package_clippy_probe_dir}/metadata.json"
+package_clippy_probe_args="${package_clippy_probe_dir}/args"
+package_clippy_probe_cargo="${package_clippy_probe_dir}/cargo"
+./scripts/repo-cargo metadata --format-version=1 --no-deps >"${package_clippy_probe_metadata}"
+cat >"${package_clippy_probe_cargo}" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+case "${1:-}" in
+  metadata)
+    cat "${CARGO_AGENT_GATE_TEST_METADATA}"
+    ;;
+  clippy)
+    shift
+    printf '%s\n' "$@" >"${CARGO_AGENT_GATE_TEST_ARGS}"
+    ;;
+  *)
+    printf 'unexpected cargo-agent-gate command: %s\n' "${1:-<none>}" >&2
+    exit 64
+    ;;
+esac
+EOF
+chmod +x "${package_clippy_probe_cargo}"
+package_clippy_probe="$({
+  CARGO="${package_clippy_probe_cargo}" \
+    CARGO_AGENT_GATE_TEST_METADATA="${package_clippy_probe_metadata}" \
+    CARGO_AGENT_GATE_TEST_ARGS="${package_clippy_probe_args}" \
+    ./scripts/cargo-agent-gate --clippy-only --working-tree meerkat-openai/src/client.rs
+} 2>&1 || true)"
+expected_package_clippy_args=$'-p\nmeerkat-openai\n--no-deps\n--all-targets\n--all-features\n--\n-D\nwarnings'
+actual_package_clippy_args="$(cat "${package_clippy_probe_args}" 2>/dev/null || true)"
+if [[ "${actual_package_clippy_args}" == "${expected_package_clippy_args}" ]]; then
+  pass "cargo-agent-gate executes changed-crate Clippy with package-only dependencies"
+else
+  bad "cargo-agent-gate package Clippy can lint unrelated path dependencies"
+  printf '%s\n' "${package_clippy_probe}" >&2
+  printf 'actual Clippy args:\n%s\n' "${actual_package_clippy_args}" >&2
+fi
+
 buildbuddy_agent_gate_probe="$(MEERKAT_BUILDBUDDY=1 ./scripts/agent-gate --dry-run --working-tree meerkat-runtime/src/input_ledger.rs 2>&1 || true)"
 if [[ "${buildbuddy_agent_gate_probe}" == *"BuildBuddy agent gate paths:"* &&
   "${buildbuddy_agent_gate_probe}" == *"BuildBuddy changed gate dry-run"* ]]; then

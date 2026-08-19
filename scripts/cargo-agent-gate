@@ -403,6 +403,7 @@ else
 fi
 
 clippy_flags=("${pkg_flags[@]}")
+clippy_scope_args=("--no-deps")
 clippy_target_args=("--all-targets" "--all-features")
 if [[ "${#sorted_exact_tests[@]}" -gt 0 ]]; then
   clippy_flags=("${test_flags[@]}")
@@ -424,6 +425,7 @@ if [[ "${dry_run}" -eq 1 ]]; then
   if [[ "${run_clippy}" -eq 1 ]]; then
     printf 'DRY-RUN %s clippy' "$CARGO"
     printf ' %q' "${clippy_flags[@]}"
+    printf ' %q' "${clippy_scope_args[@]}"
     if [[ "${#clippy_target_args[@]}" -gt 0 ]]; then
       printf ' %q' "${clippy_target_args[@]}"
     fi
@@ -438,7 +440,7 @@ if [[ "${dry_run}" -eq 1 ]]; then
 fi
 
 if [[ "${run_clippy}" -eq 1 ]]; then
-  "$CARGO" clippy "${clippy_flags[@]}" ${clippy_target_args[@]+"${clippy_target_args[@]}"} -- -D warnings
+  "$CARGO" clippy "${clippy_flags[@]}" "${clippy_scope_args[@]}" ${clippy_target_args[@]+"${clippy_target_args[@]}"} -- -D warnings
 fi
 if [[ "${run_tests}" -eq 1 ]]; then
   "$CARGO" nextest run "${test_flags[@]}" --profile fast --no-tests=pass \

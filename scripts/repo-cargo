@@ -24,7 +24,13 @@ sanitize_cache_key() {
   printf '%s' "${key:-default}"
 }
 
-repo_slug="$(basename "${repo_root}")"
+git_common_name="$(basename "${git_common_dir}")"
+if [[ "${git_common_name}" == ".git" ]]; then
+  repo_slug="$(basename "$(dirname "${git_common_dir}")")"
+else
+  repo_slug="${git_common_name}"
+fi
+repo_slug="$(sanitize_cache_key "${repo_slug}")"
 repo_key="${repo_slug}-$(hash_path "${git_common_dir}")"
 target_cache_schema="v4"
 toolchain_spec=""

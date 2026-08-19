@@ -121,7 +121,15 @@ elif [[ -z "${bb_bin}" ]]; then
     "${YELLOW}" "${NC}"
 else
   lock_log="${TMPDIR:-/tmp}/meerkat-pre-push-bazel-lock.$$"
-  if "${bb_bin}" mod deps --lockfile_mode=error >"${lock_log}" 2>&1; then
+  bb_startup_args=()
+  if [[ -n "${MEERKAT_PRE_PUSH_BAZEL_OUTPUT_BASE:-}" ]]; then
+    mkdir -p "$(dirname "${MEERKAT_PRE_PUSH_BAZEL_OUTPUT_BASE}")"
+    bb_startup_args+=(
+      "--output_base=${MEERKAT_PRE_PUSH_BAZEL_OUTPUT_BASE}"
+      "--max_idle_secs=${MEERKAT_PRE_PUSH_BAZEL_MAX_IDLE_SECS:-600}"
+    )
+  fi
+  if "${bb_bin}" "${bb_startup_args[@]}" mod deps --lockfile_mode=error >"${lock_log}" 2>&1; then
     printf '%bBazel module lockfile is up to date%b\n' "${GREEN}" "${NC}"
   else
     printf '%bMODULE.bazel.lock is stale.%b\n' "${RED}" "${NC}"

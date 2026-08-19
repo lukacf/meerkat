@@ -98,6 +98,14 @@ else
   bad "Cargo home changes across same-repo lanes"
 fi
 
+repo_cache_identity_probe="$(./scripts/test-repo-cargo-cache-identity.sh 2>&1 || true)"
+if contains_line "repo-cargo linked-worktree cache identity selftest passed" "${repo_cache_identity_probe}"; then
+  pass "linked worktrees share repository cache identity while default lanes stay isolated"
+else
+  bad "linked worktrees split repository caches or collapse default lanes"
+  printf '%s\n' "${repo_cache_identity_probe}" >&2
+fi
+
 fast_profile_output="$(./scripts/repo-cargo nextest show-config version --profile fast --color never --no-pager 2>&1 || true)"
 if grep -q '\[profile.fast\]' .config/nextest.toml &&
   grep -q 'default-filter' .config/nextest.toml &&

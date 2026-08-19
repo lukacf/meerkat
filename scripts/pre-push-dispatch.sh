@@ -32,6 +32,24 @@ REMOTE_URL="$2"
 SOURCE_ROOT="$(git rev-parse --show-toplevel)"
 ZERO_SHA="0000000000000000000000000000000000000000"
 CACHE_VERSION="v1"
+LOCK_WAIT_SECS="${MEERKAT_PRE_PUSH_DISPATCH_LOCK_WAIT_SECS:-3600}"
+
+hash_path() {
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$1" | shasum -a 256 | cut -c1-16
+  elif command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$1" | sha256sum | cut -c1-16
+  else
+    printf '%s' "$1" | cksum | cut -d' ' -f1
+  fi
+}
+
+sanitize_cache_key() {
+  local raw="${1:-}"
+  local key
+  key="$(printf '%s' "${raw}" | LC_ALL=C tr -c 'A-Za-z0-9._-' '-')"
+  printf '%s' "${key:-default}"
+}
 
 # Git exports repository-local variables to hooks. They must not cross into the
 # detached validation worktree: nested git commands would otherwise continue
@@ -81,33 +99,40 @@ fi
 
 dispatch_step="resolving the exact-tree evidence cache"
 pushed_tree="$(git -C "$SOURCE_ROOT" rev-parse "${pushed_commit}^{tree}")"
-git_common_dir="$(git -C "$SOURCE_ROOT" rev-parse --git-common-dir)"
-if [[ "$git_common_dir" != /* ]]; then
-  git_common_dir="${SOURCE_ROOT}/${git_common_dir}"
-fi
-hook_cache_dir="${git_common_dir}/meerkat-hook-cache/exact-tree"
+git_common_dir="$(git -C "$SOURCE_ROOT" rev-parse --path-format=absolute --git-common-dir)"
+hook_cache_root="${git_common_dir}/meerkat-hook-cache"
+hook_cache_dir="${hook_cache_root}/exact-tree"
 hook_stamp="${hook_cache_dir}/${CACHE_VERSION}-${pushed_tree}.ok"
-mkdir -p "$hook_cache_dir"
+dispatcher_lock_dir="${hook_cache_root}/dispatcher.lock"
+dispatcher_lock_pid="${dispatcher_lock_dir}/pid"
+validation_lane="$(sanitize_cache_key "${RUST_LANE_ID:-pre-push}")"
+validation_tree="${hook_cache_root}/worktrees/${validation_lane}"
+validation_run_root=""
+validation_tree_owned=0
+dispatcher_lock_held=0
+export RUST_LANE_ID="${RUST_LANE_ID:-pre-push}"
 
-if [[ "${MEERKAT_SKIP_PRE_PUSH_TREE_CACHE:-0}" != "1" && -f "$hook_stamp" ]]; then
-  echo "complete pre-push gate already validated for tree ${pushed_tree}; reusing exact-tree evidence."
-  exit 0
-fi
+release_dispatcher_lock() {
+  if [[ "${dispatcher_lock_held}" -eq 1 ]]; then
+    rm -rf -- "${dispatcher_lock_dir}"
+    dispatcher_lock_held=0
+  fi
+}
 
-dispatch_step="creating the detached validation worktree"
-validation_root="$(mktemp -d "${TMPDIR:-/tmp}/meerkat-pre-push-exact.XXXXXX")"
-validation_tree="${validation_root}/tree"
 cleanup() {
   local pending_status=$?
-  if [[ -d "$validation_tree" ]]; then
+  if [[ "${validation_tree_owned}" -eq 1 && -n "${validation_tree}" && -d "${validation_tree}" ]]; then
     if ! git -C "$SOURCE_ROOT" worktree remove --force "$validation_tree" >/dev/null 2>&1; then
       echo "note: validation worktree left behind: ${validation_tree}" >&2
       echo "      prune it with: git -C ${SOURCE_ROOT} worktree prune" >&2
     fi
   fi
-  if ! rm -rf "$validation_root" 2>/dev/null; then
-    echo "note: validation scratch directory left behind: ${validation_root}" >&2
+  if [[ -n "${validation_run_root}" && -d "${validation_run_root}" ]]; then
+    if ! rm -rf -- "${validation_run_root}" 2>/dev/null; then
+      echo "note: validation scratch directory left behind: ${validation_run_root}" >&2
+    fi
   fi
+  release_dispatcher_lock
   # Residue must never decide the push. A failing command inside an EXIT trap
   # under `set -e` otherwise rewrites a fully passing gate into a bare exit 1
   # with nothing but hook successes on screen, which is exactly the
@@ -116,6 +141,80 @@ cleanup() {
 }
 trap cleanup EXIT
 
+acquire_dispatcher_lock() {
+  local start_ts now_ts owner_pid last_notice_ts stale_lock_dir lock_mtime
+  start_ts="$(date +%s)"
+  last_notice_ts="${start_ts}"
+  while ! mkdir "${dispatcher_lock_dir}" 2>/dev/null; do
+    owner_pid=""
+    if [[ -f "${dispatcher_lock_pid}" ]]; then
+      owner_pid="$(cat "${dispatcher_lock_pid}" 2>/dev/null || true)"
+    fi
+    if [[ ! "${owner_pid}" =~ ^[0-9]+$ ]]; then
+      owner_pid=""
+    fi
+    lock_mtime=""
+    if stat -f %m "${dispatcher_lock_dir}" >/dev/null 2>&1; then
+      lock_mtime="$(stat -f %m "${dispatcher_lock_dir}")"
+    elif stat -c %Y "${dispatcher_lock_dir}" >/dev/null 2>&1; then
+      lock_mtime="$(stat -c %Y "${dispatcher_lock_dir}")"
+    fi
+    now_ts="$(date +%s)"
+    if { [[ -n "${owner_pid}" ]] && ! kill -0 "${owner_pid}" 2>/dev/null; } ||
+      { [[ -z "${owner_pid}" ]] && [[ "${lock_mtime:-0}" =~ ^[0-9]+$ ]] &&
+        (( now_ts - lock_mtime >= 5 )); }; then
+      stale_lock_dir="${dispatcher_lock_dir}.stale.$$"
+      if mv "${dispatcher_lock_dir}" "${stale_lock_dir}" 2>/dev/null; then
+        rm -rf -- "${stale_lock_dir}"
+      fi
+      continue
+    fi
+    if (( now_ts - start_ts >= LOCK_WAIT_SECS )); then
+      echo "Timed out waiting ${LOCK_WAIT_SECS}s for the repository pre-push dispatcher lock." >&2
+      return 1
+    fi
+    if (( now_ts - last_notice_ts >= 30 )); then
+      echo "Waiting for repository pre-push validation already owned by pid ${owner_pid:-unknown}..." >&2
+      last_notice_ts="${now_ts}"
+    fi
+    sleep 1
+  done
+  dispatcher_lock_held=1
+  printf '%s\n' "$$" >"${dispatcher_lock_pid}"
+}
+
+mkdir -p "$hook_cache_dir" "$(dirname "${validation_tree}")"
+
+if [[ "${MEERKAT_SKIP_PRE_PUSH_TREE_CACHE:-0}" != "1" && -f "$hook_stamp" ]]; then
+  echo "complete pre-push gate already validated for tree ${pushed_tree}; reusing exact-tree evidence."
+  exit 0
+fi
+
+dispatch_step="waiting for the repository pre-push validation lane"
+acquire_dispatcher_lock
+
+# Another push may have validated this exact tree while this process waited.
+if [[ "${MEERKAT_SKIP_PRE_PUSH_TREE_CACHE:-0}" != "1" && -f "$hook_stamp" ]]; then
+  echo "complete pre-push gate already validated for tree ${pushed_tree}; reusing exact-tree evidence."
+  exit 0
+fi
+
+dispatch_step="creating the stable detached validation worktree"
+git -C "$SOURCE_ROOT" worktree remove --force "$validation_tree" >/dev/null 2>&1 || true
+if [[ -e "${validation_tree}" || -L "${validation_tree}" ]]; then
+  case "${validation_tree}" in
+    "${hook_cache_root}"/worktrees/*)
+      rm -rf -- "${validation_tree}"
+      ;;
+    *)
+      echo "Refusing to remove unexpected validation path: ${validation_tree}" >&2
+      exit 1
+      ;;
+  esac
+fi
+validation_run_root="$(mktemp -d "${TMPDIR:-/tmp}/meerkat-pre-push-exact.XXXXXX")"
+
+validation_tree_owned=1
 git -C "$SOURCE_ROOT" worktree add --detach --quiet "$validation_tree" "$pushed_commit"
 
 export PRE_COMMIT_REMOTE_NAME="$REMOTE_NAME"
@@ -127,16 +226,21 @@ else
   PRE_COMMIT_FROM_REF="$remote_sha"
 fi
 export PRE_COMMIT_FROM_REF
-# repo-cargo already includes the common Git directory in its cache key. A
-# stable lane keeps the detached validation worktree hot across pushes.
-export RUST_LANE_ID="${RUST_LANE_ID:-pre-push}"
+# Keep Bazel's disk state stable across the same detached validation lane. The
+# workspace path above is stable too, so Bazel can retain both the output base
+# and its server instead of starting a new pair for every pushed tree.
+if [[ -z "${MEERKAT_PRE_PUSH_BAZEL_OUTPUT_BASE:-}" ]]; then
+  bazel_output_root="${MEERKAT_PRE_PUSH_BAZEL_OUTPUT_ROOT:-${XDG_CACHE_HOME:-${HOME}/.cache}/meerkat/pre-push-bazel}"
+  common_dir_hash="$(hash_path "${git_common_dir}")"
+  export MEERKAT_PRE_PUSH_BAZEL_OUTPUT_BASE="${bazel_output_root}/repo-${common_dir_hash}-${validation_lane}"
+fi
 
 cd "$validation_tree"
 
 # The hook transcript is captured so a failure can name the hook that caused
 # it. Python buffers block-wise when its stdout is a pipe; unbuffering keeps
 # the operator's terminal live through the long deterministic lanes.
-gate_log="${validation_root}/push-stage-hooks.log"
+gate_log="${validation_run_root}/push-stage-hooks.log"
 dispatch_step="running push-stage validation hooks"
 # Hook failure is a reported outcome, not a dispatcher fault: the ERR trap fires
 # even with errexit disabled, so it is lifted for exactly this pipeline. Capture

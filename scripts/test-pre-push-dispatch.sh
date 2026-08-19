@@ -6,12 +6,25 @@ TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/meerkat-pre-push-dispatch.XXXXXX")"
 HARNESS_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/meerkat-pre-push-dispatch-harness.XXXXXX")"
 CACHE_REPO="${TEST_ROOT}-cache"
 ATTRIBUTION_ROOT="${TEST_ROOT}-attribution"
+LOCK_ROOT="${TEST_ROOT}-lock"
+LOCK_FIRST_PID=""
+LOCK_SECOND_PID=""
 cleanup_harness() {
   local residue_status=$?
+  if [[ -n "${LOCK_FIRST_PID}" ]]; then
+    kill "${LOCK_FIRST_PID}" 2>/dev/null || true
+    wait "${LOCK_FIRST_PID}" 2>/dev/null || true
+  fi
+  if [[ -n "${LOCK_SECOND_PID}" ]]; then
+    kill "${LOCK_SECOND_PID}" 2>/dev/null || true
+    wait "${LOCK_SECOND_PID}" 2>/dev/null || true
+  fi
   # Attribution scenarios deliberately create paths the dispatcher cannot
   # remove; make them removable again before tearing the harness down.
-  chmod -R u+rwx "$TEST_ROOT" "$HARNESS_ROOT" "$CACHE_REPO" "$ATTRIBUTION_ROOT" 2>/dev/null || true
-  rm -rf "$TEST_ROOT" "$HARNESS_ROOT" "$CACHE_REPO" "$ATTRIBUTION_ROOT" 2>/dev/null || true
+  chmod -R u+rwx "$TEST_ROOT" "$HARNESS_ROOT" "$CACHE_REPO" "$ATTRIBUTION_ROOT" \
+    "$LOCK_ROOT" 2>/dev/null || true
+  rm -rf "$TEST_ROOT" "$HARNESS_ROOT" "$CACHE_REPO" "$ATTRIBUTION_ROOT" \
+    "$LOCK_ROOT" 2>/dev/null || true
   exit "$residue_status"
 }
 trap cleanup_harness EXIT
@@ -43,6 +56,7 @@ git -C "$MEERKAT_DISPATCH_NESTED_INIT_ROOT" init -q
   printf 'remote_name=%s\n' "${PRE_COMMIT_REMOTE_NAME:-}"
   printf 'remote_url=%s\n' "${PRE_COMMIT_REMOTE_URL:-}"
   printf 'lane=%s\n' "${RUST_LANE_ID:-}"
+  printf 'bazel_output_base=%s\n' "${MEERKAT_PRE_PUSH_BAZEL_OUTPUT_BASE:-}"
   if [[ -e dirty-source-only ]]; then
     printf 'dirty_source_visible=yes\n'
   fi
@@ -60,6 +74,7 @@ run_dispatch() {
       MEERKAT_DISPATCH_INVOCATION_LOG="$INVOCATION_LOG" \
       MEERKAT_DISPATCH_NESTED_INIT_ROOT="$NESTED_INIT_ROOT" \
       MEERKAT_SKIP_PRE_PUSH_TREE_CACHE=1 \
+      MEERKAT_PRE_PUSH_BAZEL_OUTPUT_ROOT="${HARNESS_ROOT}/bazel-output" \
       RUST_LANE_ID="" \
       "$REPO_ROOT/scripts/pre-push-dispatch.sh" origin example.invalid \
       <<<"$stdin_payload"
@@ -92,6 +107,11 @@ if grep -Fq "dirty_source_visible=yes" "$INVOCATION_LOG"; then
   exit 1
 fi
 validated_cwd="$(sed -n 's/^cwd=//p' "$INVOCATION_LOG")"
+validated_bazel_output_base="$(sed -n 's/^bazel_output_base=//p' "$INVOCATION_LOG")"
+if [[ -z "${validated_bazel_output_base}" ]]; then
+  echo "dispatcher did not export a stable Bazel output base" >&2
+  exit 1
+fi
 if [[ -e "$validated_cwd" ]]; then
   echo "dispatcher leaked its detached validation worktree: ${validated_cwd}" >&2
   exit 1
@@ -105,6 +125,19 @@ fi
 run_dispatch "refs/heads/new ${head_sha} refs/heads/new ${ZERO_SHA:-0000000000000000000000000000000000000000}"
 assert_log_line "args=run --config .pre-commit-config.yaml --hook-stage pre-push --all-files"
 assert_log_line "from=4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+second_validated_cwd="$(sed -n 's/^cwd=//p' "$INVOCATION_LOG")"
+second_bazel_output_base="$(sed -n 's/^bazel_output_base=//p' "$INVOCATION_LOG")"
+if [[ "${second_validated_cwd}" != "${validated_cwd}" ]]; then
+  echo "dispatcher changed detached validation paths across pushed trees" >&2
+  printf 'first: %s\nsecond: %s\n' "${validated_cwd}" "${second_validated_cwd}" >&2
+  exit 1
+fi
+if [[ "${second_bazel_output_base}" != "${validated_bazel_output_base}" ]]; then
+  echo "dispatcher changed Bazel output bases across pushed trees" >&2
+  printf 'first: %s\nsecond: %s\n' \
+    "${validated_bazel_output_base}" "${second_bazel_output_base}" >&2
+  exit 1
+fi
 
 tag_object="$(git -C "$TEST_ROOT" -c user.name=Meerkat -c user.email=meerkat@example.invalid \
   tag -a dispatch-test -m dispatch-test && git -C "$TEST_ROOT" rev-parse dispatch-test)"
@@ -150,6 +183,118 @@ run_cached_dispatch \
   "refs/tags/dispatch-cache-test ${cache_tag_object} refs/tags/dispatch-cache-test 0000000000000000000000000000000000000000"
 if [[ -s "$INVOCATION_LOG" ]]; then
   echo "dispatcher recomputed a previously validated exact tree for a tag push" >&2
+  exit 1
+fi
+
+# A cache-hit process does not own the stable validation worktree. It must not
+# remove a path that an in-flight dispatcher may be using for another tree.
+cache_common_dir="$(git -C "$CACHE_REPO" rev-parse --path-format=absolute --git-common-dir)"
+active_validation_tree="${cache_common_dir}/meerkat-hook-cache/worktrees/pre-push"
+git -C "$CACHE_REPO" worktree add --detach --quiet "$active_validation_tree" "$cache_head_sha"
+run_cached_dispatch \
+  "refs/tags/dispatch-cache-test ${cache_tag_object} refs/tags/dispatch-cache-test 0000000000000000000000000000000000000000"
+if [[ ! -d "$active_validation_tree" ]]; then
+  echo "cached dispatcher removed a stable validation worktree it did not own" >&2
+  exit 1
+fi
+git -C "$CACHE_REPO" worktree remove --force "$active_validation_tree"
+
+# Concurrent pushes share one stable worktree. The later process waits for the
+# repository dispatcher lock, then reuses the exact-tree stamp written by the
+# first process instead of invoking the broad gate twice.
+LOCK_REPO="${LOCK_ROOT}/repo"
+LOCK_BIN="${LOCK_ROOT}/bin"
+LOCK_ENTERED="${LOCK_ROOT}/entered"
+LOCK_RELEASE="${LOCK_ROOT}/release"
+LOCK_INVOCATIONS="${LOCK_ROOT}/invocations"
+mkdir -p "$LOCK_REPO" "$LOCK_BIN"
+git -C "$LOCK_REPO" init -q
+git -C "$LOCK_REPO" -c user.name=Meerkat -c user.email=meerkat@example.invalid \
+  commit --allow-empty -qm "lock base"
+lock_base_sha="$(git -C "$LOCK_REPO" rev-parse HEAD)"
+git -C "$LOCK_REPO" -c user.name=Meerkat -c user.email=meerkat@example.invalid \
+  commit --allow-empty -qm "lock candidate"
+lock_head_sha="$(git -C "$LOCK_REPO" rev-parse HEAD)"
+cat > "${LOCK_BIN}/pre-commit" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$$" >> "$MEERKAT_DISPATCH_LOCK_INVOCATIONS"
+: > "$MEERKAT_DISPATCH_LOCK_ENTERED"
+while [[ ! -f "$MEERKAT_DISPATCH_LOCK_RELEASE" ]]; do
+  sleep 0.05
+done
+EOF
+chmod +x "${LOCK_BIN}/pre-commit"
+
+run_lock_dispatch() {
+  local local_ref="$1"
+  (
+    cd "$LOCK_REPO"
+    PATH="${LOCK_BIN}:$PATH" \
+      GIT_DIR="${LOCK_REPO}/.git" \
+      GIT_WORK_TREE="$LOCK_REPO" \
+      MEERKAT_DISPATCH_LOCK_INVOCATIONS="$LOCK_INVOCATIONS" \
+      MEERKAT_DISPATCH_LOCK_ENTERED="$LOCK_ENTERED" \
+      MEERKAT_DISPATCH_LOCK_RELEASE="$LOCK_RELEASE" \
+      RUST_LANE_ID="" \
+      "$REPO_ROOT/scripts/pre-push-dispatch.sh" origin example.invalid \
+      <<<"${local_ref} ${lock_head_sha} ${local_ref} ${lock_base_sha}"
+  )
+}
+
+run_lock_dispatch refs/heads/first >"${LOCK_ROOT}/first.log" 2>&1 &
+LOCK_FIRST_PID=$!
+for _ in $(seq 1 100); do
+  [[ -f "$LOCK_ENTERED" ]] && break
+  sleep 0.05
+done
+if [[ ! -f "$LOCK_ENTERED" ]]; then
+  echo "first dispatcher did not enter the validation gate" >&2
+  exit 1
+fi
+run_lock_dispatch refs/heads/second >"${LOCK_ROOT}/second.log" 2>&1 &
+LOCK_SECOND_PID=$!
+sleep 0.3
+if [[ "$(wc -l < "$LOCK_INVOCATIONS" | tr -d ' ')" != "1" ]]; then
+  echo "repository dispatcher lock allowed overlapping validation gates" >&2
+  exit 1
+fi
+: > "$LOCK_RELEASE"
+wait "$LOCK_FIRST_PID"
+LOCK_FIRST_PID=""
+wait "$LOCK_SECOND_PID"
+LOCK_SECOND_PID=""
+if [[ "$(wc -l < "$LOCK_INVOCATIONS" | tr -d ' ')" != "1" ]]; then
+  echo "waiting dispatcher ignored exact-tree evidence from the lock owner" >&2
+  exit 1
+fi
+
+# The dispatcher-exported output base is useful only if the authoritative
+# Bazel lock gate passes it to bb as a startup option.
+FAKE_BB="${HARNESS_ROOT}/bb"
+BB_ARG_LOG="${HARNESS_ROOT}/bb-args"
+cat > "$FAKE_BB" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$@" > "$MEERKAT_DISPATCH_BB_ARG_LOG"
+EOF
+chmod +x "$FAKE_BB"
+expected_bazel_output_base="${HARNESS_ROOT}/bazel-output/consumption-proof"
+BUILDBUDDY_BB="$FAKE_BB" \
+  MEERKAT_DISPATCH_BB_ARG_LOG="$BB_ARG_LOG" \
+  MEERKAT_PRE_PUSH_BAZEL_OUTPUT_BASE="$expected_bazel_output_base" \
+  "$REPO_ROOT/scripts/pre-push-bazel-locks.sh" --require-bb >/dev/null
+expected_bb_args="${HARNESS_ROOT}/expected-bb-args"
+cat > "$expected_bb_args" <<EOF
+--output_base=${expected_bazel_output_base}
+--max_idle_secs=600
+mod
+deps
+--lockfile_mode=error
+EOF
+if ! cmp -s "$expected_bb_args" "$BB_ARG_LOG"; then
+  echo "Bazel lock gate did not consume the dispatcher output-base contract" >&2
+  diff -u "$expected_bb_args" "$BB_ARG_LOG" >&2 || true
   exit 1
 fi
 
@@ -234,6 +379,7 @@ attribution_status=0
 run_attribution_dispatch() {
   local mode="$1"
   local output_path="$2"
+  local attribution_common_dir attribution_validation_tree
   install_scripted_pre_commit "$mode"
   set +e
   (
@@ -250,6 +396,12 @@ run_attribution_dispatch() {
   )
   attribution_status=$?
   set -e
+  attribution_common_dir="$(git -C "$ATTRIBUTION_REPO" rev-parse --path-format=absolute --git-common-dir)"
+  attribution_validation_tree="${attribution_common_dir}/meerkat-hook-cache/worktrees/pre-push"
+  chmod -R u+rwx "$attribution_validation_tree" 2>/dev/null || true
+  git -C "$ATTRIBUTION_REPO" worktree remove --force "$attribution_validation_tree" \
+    >/dev/null 2>&1 || true
+  rm -rf -- "$attribution_validation_tree" 2>/dev/null || true
   chmod -R u+rwx "$ATTRIBUTION_TMP" 2>/dev/null || true
   rm -rf "${ATTRIBUTION_TMP:?}"/* 2>/dev/null || true
   git -C "$ATTRIBUTION_REPO" worktree prune 2>/dev/null || true

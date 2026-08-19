@@ -626,6 +626,48 @@ where
     }
 }
 
+const CLI_RUNTIME_UNREGISTER_TIMEOUT: Duration = Duration::from_secs(30);
+
+async fn await_cli_runtime_unregister<F>(
+    registration: &meerkat_runtime::RuntimeSessionRegistrationWitness,
+    timeout: Duration,
+    unregister: F,
+) -> anyhow::Result<()>
+where
+    F: std::future::Future<Output = Result<bool, meerkat_runtime::RuntimeDriverError>>,
+{
+    match tokio::time::timeout(timeout, unregister).await {
+        Ok(result) => {
+            let _removed = result?;
+            Ok(())
+        }
+        Err(_elapsed) => Err(anyhow::anyhow!(
+            "CLI shutdown timed out after {timeout:?} waiting for exact unregister of session {} at runtime epoch {}; cleanup remains process-owned",
+            registration.session_id(),
+            registration.epoch_id()
+        )),
+    }
+}
+
+#[cfg(any(feature = "session-store", test))]
+async fn unregister_cli_runtime_session(
+    runtime_adapter: &meerkat_runtime::MeerkatMachine,
+    session_id: &SessionId,
+) -> anyhow::Result<()> {
+    let Some(registration) = runtime_adapter
+        .current_session_registration_witness(session_id)
+        .await
+    else {
+        return Ok(());
+    };
+    await_cli_runtime_unregister(
+        &registration,
+        CLI_RUNTIME_UNREGISTER_TIMEOUT,
+        runtime_adapter.unregister_session_registration_until_terminal_if_current(&registration),
+    )
+    .await
+}
+
 fn validate_stream_render_summary(
     summary: &stream_renderer::StreamRenderSummary,
 ) -> anyhow::Result<()> {
@@ -11256,7 +11298,7 @@ async fn run_agent(
                 // Unregister the runtime-backed executor before awaiting stream tasks.
                 // The adapter owns the boxed executor, and the executor now holds the
                 // caller stream sender for runtime-backed turns.
-                runtime_adapter.unregister_session(&session_id).await?;
+                unregister_cli_runtime_session(&runtime_adapter, &session_id).await?;
                 service.shutdown().await;
                 shutdown_mcp(&mcp_adapter).await;
                 Ok(())
@@ -11947,7 +11989,7 @@ async fn resume_session_with_llm_override(
                 log_stage("service.create_session(done)");
 
                 // Shutdown the session service and MCP connections gracefully.
-                resume_adapter.unregister_session(&session_id).await?;
+                unregister_cli_runtime_session(&resume_adapter, &session_id).await?;
                 log_stage("service.shutdown");
                 service.shutdown().await;
                 log_stage("shutdown_mcp");
@@ -19737,13 +19779,47 @@ default_model = "gemma"
         Box::pin(tokio::time::timeout(
             Duration::from_secs(2),
             pipeline.shutdown_after(async {
-                runtime_adapter.unregister_session(&session_id).await?;
+                unregister_cli_runtime_session(&runtime_adapter, &session_id).await?;
                 Ok(())
             }),
         ))
         .await
         .expect("shutdown should finish once runtime executor is unregistered")
         .expect("shutdown should succeed");
+    }
+
+    #[tokio::test]
+    async fn cli_runtime_unregister_backstop_reports_exact_identity() {
+        let runtime_adapter = meerkat_runtime::MeerkatMachine::ephemeral();
+        let session_id = SessionId::new();
+        runtime_adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("test runtime registration should succeed");
+        let registration = runtime_adapter
+            .current_session_registration_witness(&session_id)
+            .await
+            .expect("test runtime registration must expose exact identity");
+
+        let error = await_cli_runtime_unregister(
+            &registration,
+            Duration::ZERO,
+            std::future::pending::<Result<bool, meerkat_runtime::RuntimeDriverError>>(),
+        )
+        .await
+        .expect_err("pending exact unregister must hit the CLI liveness backstop");
+        let message = error.to_string();
+        assert!(message.contains("timed out after 0ns"), "{message}");
+        assert!(message.contains(&session_id.to_string()), "{message}");
+        assert!(
+            message.contains(&registration.epoch_id().to_string()),
+            "{message}"
+        );
+
+        runtime_adapter
+            .unregister_session(&session_id)
+            .await
+            .expect("test runtime cleanup should succeed");
     }
 
     #[tokio::test]
@@ -19809,7 +19885,7 @@ default_model = "gemma"
                 pipeline,
                 Err::<(), _>(anyhow::anyhow!("turn abandoned: synthetic failure")),
                 async {
-                    runtime_adapter.unregister_session(&session_id).await?;
+                    unregister_cli_runtime_session(&runtime_adapter, &session_id).await?;
                     Ok(())
                 },
             ),

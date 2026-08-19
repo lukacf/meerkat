@@ -153,6 +153,7 @@ skills = ["meerkat/skills"]
 integration-real-tests = []
 
 [dev-dependencies]
+meerkat-mob = { workspace = true, features = ["test-support"] }
 meerkat-runtime = { workspace = true, features = ["test-support"] }
 parking_lot = { workspace = true }
 rusqlite = { workspace = true }

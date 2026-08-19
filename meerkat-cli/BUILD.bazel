@@ -3210,6 +3210,7 @@ rust_binary(
         proc_macro = True,
     ),
     deps = [
+        "//meerkat-mob:meerkat_mob",
         "//meerkat:meerkat",
         "//meerkat:meerkat_anthropic_agent_factory_build",
         "//meerkat:meerkat_atif_agent_factory_build",
@@ -3264,6 +3265,7 @@ rust_binary(
         proc_macro = True,
     ),
     deps = [
+        "//meerkat-mob:meerkat_mob",
         "//meerkat:meerkat",
         "//meerkat:meerkat_anthropic_agent_factory_build",
         "//meerkat:meerkat_atif_agent_factory_build",
@@ -3321,6 +3323,7 @@ rust_binary(
         proc_macro = True,
     ),
     deps = [
+        "//meerkat-mob:meerkat_mob",
         "//meerkat:meerkat",
         "//meerkat:meerkat_anthropic_agent_factory_build",
         "//meerkat:meerkat_atif_agent_factory_build",

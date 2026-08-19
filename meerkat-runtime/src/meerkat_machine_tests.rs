@@ -15048,6 +15048,78 @@ mod stop_teardown_coordinator_class {
     }
 
     #[tokio::test]
+    async fn exact_lifecycle_unregister_joins_owned_saga_after_caller_grace_expires() {
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        let cleanup_started = Arc::new(Notify::new());
+        let release_cleanup = Arc::new(Notify::new());
+        machine
+            .register_session_with_executor(
+                session_id.clone(),
+                Box::new(GatedCleanupExecutor {
+                    machine: Arc::clone(&machine),
+                    session_id: session_id.clone(),
+                    cleanup_started: Arc::clone(&cleanup_started),
+                    release_cleanup: Arc::clone(&release_cleanup),
+                    unregister_during_cleanup: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    fail_cleanup_attempts: Arc::new(AtomicUsize::new(0)),
+                    cleanup_calls: Arc::new(AtomicUsize::new(0)),
+                    loop_task_id: Arc::new(std::sync::Mutex::new(None)),
+                    cleanup_task_id: Arc::new(std::sync::Mutex::new(None)),
+                }),
+            )
+            .await
+            .expect("runtime executor registration should succeed");
+        let registration = machine
+            .current_session_registration_witness(&session_id)
+            .await
+            .expect("registered runtime must expose exact lifecycle identity");
+
+        let bounded_caller = {
+            let machine = Arc::clone(&machine);
+            let session_id = session_id.clone();
+            tokio::spawn(async move { machine.unregister_session(&session_id).await })
+        };
+        tokio::time::timeout(Duration::from_secs(1), cleanup_started.notified())
+            .await
+            .expect("owned teardown must reach the deterministic cleanup gate");
+        let bounded_error = tokio::time::timeout(Duration::from_secs(3), bounded_caller)
+            .await
+            .expect("ordinary caller grace must remain bounded")
+            .expect("bounded unregister task should not panic")
+            .expect_err("blocked cleanup must surface typed in-progress truth");
+        assert!(matches!(
+            bounded_error,
+            RuntimeDriverError::UnregisterInProgress { .. }
+        ));
+
+        let terminal_waiter = {
+            let machine = Arc::clone(&machine);
+            let registration = registration.clone();
+            tokio::spawn(async move {
+                machine
+                    .unregister_session_registration_until_terminal_if_current(&registration)
+                    .await
+            })
+        };
+        tokio::task::yield_now().await;
+        assert!(
+            !terminal_waiter.is_finished(),
+            "process-lifecycle owner must join the exact saga past ordinary caller grace"
+        );
+        release_cleanup.notify_one();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), terminal_waiter)
+                .await
+                .expect("terminal waiter must finish after cleanup release")
+                .expect("terminal waiter task should not panic")
+                .expect("exact unregister should succeed"),
+            "exact registration must be the one removed"
+        );
+        assert!(!machine.contains_session(&session_id).await);
+    }
+
+    #[tokio::test]
     async fn noncooperative_interrupt_and_executor_return_in_progress_then_converge() {
         let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
         let machine = Arc::new(MeerkatMachine::persistent(

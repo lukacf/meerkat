@@ -12,6 +12,9 @@ enum UnregisterTeardownCaller {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum UnregisterTeardownAdmission {
+    /// Admits an ordinary current registration. This mode is not itself an
+    /// exactness fence: callers that require incarnation safety must also pass
+    /// the expected epoch and `RuntimeSessionRegistrationWitness` arguments.
     AnyCurrentRegistration,
     ExactTerminalUnattachedRegistration,
 }
@@ -5977,6 +5980,29 @@ impl MeerkatMachine {
             UnregisterTeardownAdmission::AnyCurrentRegistration,
             Some(registration),
             UnregisterTeardownWait::CallerGrace,
+        )
+        .await?
+        .require_completed()
+    }
+
+    /// Unregister one exact current registration and await its owned teardown
+    /// saga to terminal completion. This is for process-lifecycle owners that
+    /// must not exit while cleanup remains in flight. The exact witness keeps
+    /// a later same-SessionId registration outside this teardown authority.
+    pub async fn unregister_session_registration_until_terminal_if_current(
+        &self,
+        registration: &RuntimeSessionRegistrationWitness,
+    ) -> Result<bool, RuntimeDriverError> {
+        if !registration.belongs_to(self) {
+            return Ok(false);
+        }
+        self.join_or_start_unregister_teardown_with_admission(
+            registration.session_id(),
+            Some(registration.epoch_id()),
+            UnregisterTeardownCaller::Explicit,
+            UnregisterTeardownAdmission::AnyCurrentRegistration,
+            Some(registration),
+            UnregisterTeardownWait::UntilTerminal,
         )
         .await?
         .require_completed()

@@ -78,6 +78,11 @@ pub enum LlmError {
     InvalidApiKey,
 
     // === Unknown ===
+    /// The provider returned a failure class this client does not yet know.
+    /// This is deliberately retryable: absence of a known terminal class is
+    /// not evidence that the turn should terminalize.
+    /// [`RetryPolicy`](meerkat_core::retry::RetryPolicy) still bounds attempts
+    /// and backoff.
     #[error("Unknown error: {message}")]
     Unknown { message: String },
 
@@ -186,7 +191,8 @@ impl LlmError {
             Self::RateLimited { .. }
             | Self::ServerOverloaded
             | Self::NetworkTimeout { .. }
-            | Self::ConnectionReset => true,
+            | Self::ConnectionReset
+            | Self::Unknown { .. } => true,
             Self::ServerError { status, .. } => *status >= 500,
             _ => false,
         }
@@ -329,7 +335,7 @@ impl LlmError {
                 }),
             )),
             Self::Unknown { message } => {
-                LlmFailureReason::ProviderError(LlmProviderError::non_retryable(
+                LlmFailureReason::ProviderError(LlmProviderError::retryable(
                     LlmProviderErrorKind::Unknown,
                     json!({
                         "message": message,
@@ -414,6 +420,23 @@ mod tests {
                 model: "gpt-5".to_string()
             }
             .is_retryable()
+        );
+    }
+
+    #[test]
+    fn unknown_provider_errors_default_to_retryable() {
+        let err = LlmError::Unknown {
+            message: "provider returned an unrecognized transient class".to_string(),
+        };
+
+        assert!(err.is_retryable());
+        let LlmFailureReason::ProviderError(provider_error) = err.failure_reason() else {
+            panic!("unknown provider failures must retain the provider-error carrier");
+        };
+        assert_eq!(provider_error.kind, LlmProviderErrorKind::Unknown);
+        assert_eq!(
+            provider_error.retryability,
+            meerkat_core::error::LlmProviderErrorRetryability::Retryable
         );
     }
 

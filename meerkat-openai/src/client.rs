@@ -2779,27 +2779,7 @@ impl LlmClient for OpenAiClient {
                                 "OpenAI response failed"
                             );
 
-                            let error = match error_code {
-                                "rate_limit_exceeded" => LlmError::RateLimited { retry_after_ms: None },
-                                "server_error" => LlmError::ServerError {
-                                    status: 500,
-                                    message: error_msg.to_string(),
-                                },
-                                "context_length_exceeded" | "context_window_exceeded" => {
-                                    LlmError::ContextLengthExceeded {
-                                        max: 0,
-                                        requested: 1,
-                                    }
-                                }
-                                "invalid_request_error" => LlmError::from_http_status(
-                                    400,
-                                    error_msg.to_string(),
-                                    None,
-                                ),
-                                _ => LlmError::Unknown {
-                                    message: format!("{error_code}: {error_msg}"),
-                                },
-                            };
+                            let error = map_responses_stream_error(error_code, error_msg);
 
                             done_emitted = true;
                             chunk_yielded.set(true);
@@ -2826,27 +2806,7 @@ impl LlmClient for OpenAiClient {
                                 "OpenAI streaming error"
                             );
 
-                            let error = match error_code {
-                                "rate_limit_exceeded" => LlmError::RateLimited { retry_after_ms: None },
-                                "server_error" => LlmError::ServerError {
-                                    status: 500,
-                                    message: error_msg.to_string(),
-                                },
-                                "context_length_exceeded" | "context_window_exceeded" => {
-                                    LlmError::ContextLengthExceeded {
-                                        max: 0,
-                                        requested: 1,
-                                    }
-                                }
-                                "invalid_request_error" => LlmError::from_http_status(
-                                    400,
-                                    error_msg.to_string(),
-                                    None,
-                                ),
-                                _ => LlmError::Unknown {
-                                    message: format!("{error_code}: {error_msg}"),
-                                },
-                            };
+                            let error = map_responses_stream_error(error_code, error_msg);
 
                             done_emitted = true;
                             chunk_yielded.set(true);
@@ -2919,6 +2879,27 @@ struct ResponsesStreamEvent {
     output_index: Option<u64>,
     /// Sequence number for built-in tool streaming events.
     sequence_number: Option<u64>,
+}
+
+fn map_responses_stream_error(error_code: &str, error_message: &str) -> LlmError {
+    match error_code {
+        "rate_limit_exceeded" => LlmError::RateLimited {
+            retry_after_ms: None,
+        },
+        "server_error" => LlmError::ServerError {
+            status: 500,
+            message: error_message.to_string(),
+        },
+        "server_is_overloaded" => LlmError::ServerOverloaded,
+        "context_length_exceeded" | "context_window_exceeded" => LlmError::ContextLengthExceeded {
+            max: 0,
+            requested: 1,
+        },
+        "invalid_request_error" => LlmError::from_http_status(400, error_message.to_string(), None),
+        _ => LlmError::Unknown {
+            message: format!("{error_code}: {error_message}"),
+        },
+    }
 }
 
 fn validate_responses_terminal_status(event_type: &str, response: &Value) -> Result<(), LlmError> {
@@ -7455,6 +7436,68 @@ mod tests {
             saw_error_done,
             "Expected Done with error outcome from response.failed"
         );
+    }
+
+    #[tokio::test]
+    async fn response_failed_server_is_overloaded_is_typed_retryable() {
+        let payload = [
+            r#"data: {"type":"response.failed","response":{"id":"resp_overloaded","status":"failed","error":{"code":"server_is_overloaded","message":"The server is overloaded. Please retry later."}}}"#,
+            "",
+        ]
+        .join("\n");
+        let (base_url, server) = spawn_openai_stub_server(payload).await;
+        let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
+        let request = LlmRequest::new(
+            "gpt-5-mini",
+            vec![Message::User(UserMessage::text("hello".to_string()))],
+        );
+
+        let mut stream = client.stream(&request);
+        let mut observed = None;
+        while let Some(event) = stream.next().await {
+            if let LlmEvent::Done {
+                outcome: LlmDoneOutcome::Error { error },
+            } = event.expect("stream event")
+            {
+                observed = Some(error);
+                break;
+            }
+        }
+        server.abort();
+
+        let error = observed.expect("response.failed must yield a terminal error event");
+        assert!(matches!(&error, LlmError::ServerOverloaded));
+        let meerkat_core::error::LlmFailureReason::ProviderError(provider_error) =
+            error.failure_reason()
+        else {
+            panic!("overload must retain a typed provider failure");
+        };
+        assert_eq!(
+            provider_error.kind,
+            meerkat_core::error::LlmProviderErrorKind::ServerOverloaded
+        );
+        assert!(provider_error.is_retryable());
+    }
+
+    #[test]
+    fn unrecognized_stream_error_code_defaults_to_retryable_unknown() {
+        let error = map_responses_stream_error(
+            "future_transient_provider_error",
+            "provider asks the caller to try again later",
+        );
+
+        assert!(matches!(&error, LlmError::Unknown { .. }));
+        assert!(error.is_retryable());
+        let meerkat_core::error::LlmFailureReason::ProviderError(provider_error) =
+            error.failure_reason()
+        else {
+            panic!("unknown provider failure must retain a typed provider carrier");
+        };
+        assert_eq!(
+            provider_error.kind,
+            meerkat_core::error::LlmProviderErrorKind::Unknown
+        );
+        assert!(provider_error.is_retryable());
     }
 
     // =========================================================================

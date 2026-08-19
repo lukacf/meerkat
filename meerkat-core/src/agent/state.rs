@@ -17149,6 +17149,66 @@ mod tests {
         }
     }
 
+    struct UnknownThenSucceedClient {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl UnknownThenSucceedClient {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentLlmClient for UnknownThenSucceedClient {
+        async fn stream_response(
+            &self,
+            _messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+        ) -> Result<super::LlmStreamResult, AgentError> {
+            let attempt = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if attempt == 0 {
+                return Err(AgentError::llm(
+                    "mock",
+                    crate::error::LlmFailureReason::ProviderError(
+                        crate::error::LlmProviderError::retryable(
+                            crate::error::LlmProviderErrorKind::Unknown,
+                            serde_json::json!({"message": "unrecognized provider failure"}),
+                        ),
+                    ),
+                    "unrecognized provider failure",
+                ));
+            }
+
+            Ok(super::LlmStreamResult::new(
+                vec![AssistantBlock::Text {
+                    text: "ok after unknown retry".to_string(),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+                normalized_test_usage(self, Usage::default()),
+            ))
+        }
+
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
+        }
+
+        fn model(&self) -> &'static str {
+            "mock-model"
+        }
+    }
+
     /// First call reports one stream event then hangs forever; second call
     /// succeeds. Exercises the stream-inactivity watchdog retry path.
     struct StallThenSucceedClient {
@@ -18461,6 +18521,38 @@ mod tests {
         assert!(
             actual_delay >= hint,
             "retry delay ({actual_delay:?}) must be at least the server hint ({hint:?})",
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_provider_failure_retries_instead_of_killing_agent() {
+        use crate::retry::RetryPolicy;
+
+        let client = Arc::new(UnknownThenSucceedClient::new());
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .retry_policy(RetryPolicy {
+                max_retries: 1,
+                initial_delay: Duration::from_millis(1),
+                max_delay: Duration::from_millis(1),
+                multiplier: 1.0,
+                call_timeout: None,
+                stream_inactivity_timeout: None,
+            })
+            .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        let result = agent
+            .run("retry unknown once".to_string().into())
+            .await
+            .expect(
+                "an unknown provider failure must consume retry authority before terminalizing",
+            );
+
+        assert_eq!(result.text, "ok after unknown retry");
+        assert_eq!(
+            client.calls(),
+            2,
+            "one unknown failure, one successful retry"
         );
     }
 

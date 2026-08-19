@@ -481,6 +481,26 @@ mod tests {
     }
 
     #[test]
+    fn retry_schedule_bounds_unknown_provider_failures() {
+        let policy = RetryPolicy::default().with_max_retries(2);
+        let error = AgentError::Llm {
+            provider: "test",
+            reason: LlmFailureReason::ProviderError(LlmProviderError::retryable(
+                LlmProviderErrorKind::Unknown,
+                serde_json::json!({"message": "unrecognized provider failure"}),
+            )),
+            message: "unrecognized provider failure".to_string(),
+        };
+
+        assert!(policy.schedule_retry(&error, 0, None).is_some());
+        assert!(policy.schedule_retry(&error, 1, None).is_some());
+        assert!(
+            policy.schedule_retry(&error, 2, None).is_none(),
+            "unknown failures must exhaust the configured retry budget"
+        );
+    }
+
+    #[test]
     fn retry_schedule_ignores_json_only_provider_retryability() {
         let policy = RetryPolicy::default().with_max_retries(3);
         let error = AgentError::Llm {

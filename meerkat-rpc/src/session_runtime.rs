@@ -11999,8 +11999,43 @@ mod tests {
         }
     }
 
+    const TEST_ASYNC_WITNESS_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(10);
+
+    #[derive(Default)]
+    struct BlockingLlmCallWitness {
+        calls: AtomicUsize,
+        entered: Notify,
+    }
+
+    impl BlockingLlmCallWitness {
+        fn load(&self, ordering: AtomicOrdering) -> usize {
+            self.calls.load(ordering)
+        }
+
+        fn record(&self) -> usize {
+            let previous = self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+            // `notify_one` retains a permit when the observer has not reached
+            // `notified()` yet, so the test cannot lose the exact stream-entry
+            // witness between its count check and await.
+            self.entered.notify_one();
+            previous
+        }
+
+        async fn wait_for(&self, expected: usize, description: &str) {
+            tokio::time::timeout(TEST_ASYNC_WITNESS_TIMEOUT, async {
+                while self.load(AtomicOrdering::SeqCst) < expected {
+                    self.entered.notified().await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| {
+                panic!("{description} did not enter the LLM stream before deadline")
+            });
+        }
+    }
+
     struct BlockingMockLlmClient {
-        calls: Arc<AtomicUsize>,
+        calls: Arc<BlockingLlmCallWitness>,
         release: Arc<Notify>,
     }
 
@@ -12977,7 +13012,7 @@ mod tests {
             let calls = Arc::clone(&self.calls);
             let release = Arc::clone(&self.release);
             Box::pin(async_stream::stream! {
-                calls.fetch_add(1, AtomicOrdering::SeqCst);
+                calls.record();
                 release.notified().await;
                 yield Ok(meerkat_client::LlmEvent::TextDelta {
                     delta: "Blocked response".to_string(),
@@ -13008,7 +13043,7 @@ mod tests {
     }
 
     struct BlockAfterFirstMockLlmClient {
-        calls: Arc<AtomicUsize>,
+        calls: Arc<BlockingLlmCallWitness>,
         release: Arc<Notify>,
     }
 
@@ -13027,7 +13062,7 @@ mod tests {
         ) -> Pin<
             Box<dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>> + Send + 'a>,
         > {
-            let call = self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+            let call = self.calls.record();
             let release = Arc::clone(&self.release);
             Box::pin(async_stream::stream! {
                 if call > 0 {
@@ -13298,8 +13333,8 @@ mod tests {
         }
     }
 
-    fn blocking_build_config() -> (AgentBuildConfig, Arc<AtomicUsize>, Arc<Notify>) {
-        let calls = Arc::new(AtomicUsize::new(0));
+    fn blocking_build_config() -> (AgentBuildConfig, Arc<BlockingLlmCallWitness>, Arc<Notify>) {
+        let calls = Arc::new(BlockingLlmCallWitness::default());
         let release = Arc::new(Notify::new());
         let client = BlockingMockLlmClient {
             calls: Arc::clone(&calls),
@@ -13315,8 +13350,9 @@ mod tests {
         )
     }
 
-    fn block_after_first_build_config() -> (AgentBuildConfig, Arc<AtomicUsize>, Arc<Notify>) {
-        let calls = Arc::new(AtomicUsize::new(0));
+    fn block_after_first_build_config()
+    -> (AgentBuildConfig, Arc<BlockingLlmCallWitness>, Arc<Notify>) {
+        let calls = Arc::new(BlockingLlmCallWitness::default());
         let release = Arc::new(Notify::new());
         let client = BlockAfterFirstMockLlmClient {
             calls: Arc::clone(&calls),
@@ -13437,18 +13473,12 @@ mod tests {
         })
     }
 
-    async fn wait_for_llm_calls(calls: &AtomicUsize, expected: usize, description: &str) {
-        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
-        loop {
-            if calls.load(AtomicOrdering::SeqCst) >= expected {
-                break;
-            }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "{description} did not enter the LLM stream before deadline"
-            );
-            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-        }
+    async fn wait_for_llm_calls(
+        calls: &BlockingLlmCallWitness,
+        expected: usize,
+        description: &str,
+    ) {
+        calls.wait_for(expected, description).await;
     }
 
     async fn wait_for_runtime_unregistered(
@@ -18266,7 +18296,7 @@ mod tests {
     #[tokio::test]
     async fn new_runtime_cleanup_preserves_active_input() {
         let temp = tempfile::tempdir().unwrap();
-        let calls = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::new(BlockingLlmCallWitness::default());
         let release = Arc::new(Notify::new());
         let runtime = make_runtime(temp_factory(&temp), 2);
         runtime.set_default_llm_client(Some(Arc::new(BlockingMockLlmClient {
@@ -20501,7 +20531,7 @@ mod tests {
         assert_eq!(err.code, error::SESSION_BUSY);
         hook.release.notify_waiters();
 
-        tokio::time::timeout(tokio::time::Duration::from_secs(1), running_turn)
+        tokio::time::timeout(TEST_ASYNC_WITNESS_TIMEOUT, running_turn)
             .await
             .expect("pending first turn should finish")
             .expect("turn task should not panic")
@@ -20574,7 +20604,7 @@ mod tests {
         assert_eq!(err.code, error::SESSION_BUSY);
         hook.release.notify_waiters();
 
-        tokio::time::timeout(tokio::time::Duration::from_secs(1), running_turn)
+        tokio::time::timeout(TEST_ASYNC_WITNESS_TIMEOUT, running_turn)
             .await
             .expect("pending first turn should finish")
             .expect("turn task should not panic")
@@ -20662,7 +20692,7 @@ mod tests {
         assert_eq!(err.code, error::SESSION_BUSY);
         hook.release.notify_waiters();
 
-        tokio::time::timeout(tokio::time::Duration::from_secs(1), running_turn)
+        tokio::time::timeout(TEST_ASYNC_WITNESS_TIMEOUT, running_turn)
             .await
             .expect("runtime-routed first turn should finish")
             .expect("turn task should not panic")
@@ -20728,7 +20758,7 @@ mod tests {
         assert_eq!(err.code, error::SESSION_BUSY);
         hook.release.notify_waiters();
 
-        tokio::time::timeout(tokio::time::Duration::from_secs(1), running_turn)
+        tokio::time::timeout(TEST_ASYNC_WITNESS_TIMEOUT, running_turn)
             .await
             .expect("runtime-routed first turn should finish")
             .expect("turn task should not panic")

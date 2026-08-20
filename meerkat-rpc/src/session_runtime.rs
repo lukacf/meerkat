@@ -13528,17 +13528,7 @@ mod tests {
                 .await
         });
 
-        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
-        loop {
-            if calls.load(AtomicOrdering::SeqCst) >= 1 {
-                break;
-            }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "blocking turn did not enter the LLM stream before deadline"
-            );
-            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-        }
+        wait_for_llm_calls(&calls, 1, "blocking turn").await;
 
         (session_id, turn, release)
     }
@@ -16610,17 +16600,7 @@ mod tests {
                 .await
         });
 
-        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
-        loop {
-            if calls.load(AtomicOrdering::SeqCst) > 0 {
-                break;
-            }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "session did not start the service-side turn before deadline"
-            );
-            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-        }
+        wait_for_llm_calls(&calls, 1, "service-side session turn").await;
 
         let append_req = AppendSystemContextRequest {
             content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
@@ -16975,17 +16955,7 @@ mod tests {
         });
 
         // Wait until the first turn is definitely running.
-        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
-        loop {
-            if calls.load(AtomicOrdering::SeqCst) > 0 {
-                break;
-            }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "session did not start the service-side turn before deadline"
-            );
-            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-        }
+        wait_for_llm_calls(&calls, 1, "service-side session turn").await;
 
         // Try to start a second turn
         let (event_tx2, _rx2) = mpsc::channel(100);
@@ -17010,7 +16980,7 @@ mod tests {
             err.code
         );
 
-        release.notify_waiters();
+        release.notify_one();
         turn_handle
             .await
             .unwrap()
@@ -18381,8 +18351,8 @@ mod tests {
             "new-runtime cleanup must not unregister a session with active runtime input"
         );
 
-        release.notify_waiters();
-        let result = tokio::time::timeout(tokio::time::Duration::from_secs(1), active_turn)
+        release.notify_one();
+        let result = tokio::time::timeout(TEST_ASYNC_WITNESS_TIMEOUT, active_turn)
             .await
             .expect("active input should complete after release");
         result
@@ -20004,18 +19974,8 @@ mod tests {
                 .await
         });
 
-        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
-        loop {
-            if calls.load(AtomicOrdering::SeqCst) >= 1 {
-                break;
-            }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "initial turn did not enter the LLM stream before deadline"
-            );
-            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-        }
-        release.notify_waiters();
+        wait_for_llm_calls(&calls, 1, "initial turn").await;
+        release.notify_one();
         initial_turn
             .await
             .expect("initial turn task")
@@ -20023,7 +19983,7 @@ mod tests {
 
         let service = runtime.session_service();
         let session_for_turn = session_id.clone();
-        let direct_turn = tokio::spawn(async move {
+        let mut direct_turn = tokio::spawn(async move {
             service
                 .start_turn(
                     &session_for_turn,
@@ -20032,20 +19992,12 @@ mod tests {
                 .await
         });
 
-        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
-        loop {
-            if calls.load(AtomicOrdering::SeqCst) >= 2 {
-                break;
-            }
-            if direct_turn.is_finished() {
-                let result = direct_turn.await.expect("direct turn task");
+        tokio::select! {
+            () = calls.wait_for(2, "direct service turn") => {}
+            result = &mut direct_turn => {
+                let result = result.expect("direct turn task");
                 panic!("direct service turn finished before reaching LLM stream: {result:?}");
             }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "direct service turn did not enter the LLM stream before deadline"
-            );
-            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
         }
 
         let blocked = runtime
@@ -20059,7 +20011,7 @@ mod tests {
             "rpc create should be blocked by mob/direct running turn: {blocked:?}"
         );
 
-        release.notify_waiters();
+        release.notify_one();
         direct_turn
             .await
             .expect("direct turn task")
@@ -20124,7 +20076,7 @@ mod tests {
             "RPC create should remain blocked while first turn is running: {blocked:?}"
         );
 
-        release.notify_waiters();
+        release.notify_one();
         pending_first_turn
             .await
             .expect("pending first turn task")
@@ -20468,7 +20420,7 @@ mod tests {
             .interrupt(&session_id)
             .await
             .expect("interrupt should reach promoting live turn");
-        let interrupted = tokio::time::timeout(tokio::time::Duration::from_secs(1), running_turn)
+        let interrupted = tokio::time::timeout(TEST_ASYNC_WITNESS_TIMEOUT, running_turn)
             .await
             .expect("promoting first turn should finish after interrupt")
             .expect("turn task should not panic")
@@ -20817,7 +20769,7 @@ mod tests {
         assert_eq!(err.code, error::SESSION_BUSY);
         hook.release.notify_waiters();
 
-        tokio::time::timeout(tokio::time::Duration::from_secs(1), running_turn)
+        tokio::time::timeout(TEST_ASYNC_WITNESS_TIMEOUT, running_turn)
             .await
             .expect("pending apply should finish")
             .expect("apply task should not panic")
@@ -22760,7 +22712,7 @@ mod tests {
             "cancelled caller must not release capacity while service turn is still running: {blocked:?}"
         );
 
-        release.notify_waiters();
+        release.notify_one();
         let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(2);
         loop {
             match runtime
@@ -22851,7 +22803,7 @@ mod tests {
             .expect("stored candidate metadata after rejected start");
         assert_eq!(meta.model, "claude-sonnet-4-5");
         assert_eq!(meta.provider, meerkat_core::Provider::Anthropic);
-        release.notify_waiters();
+        release.notify_one();
         blocking_turn
             .await
             .expect("blocking turn task")
@@ -22893,7 +22845,7 @@ mod tests {
             .expect("stored candidate metadata after rejected apply");
         assert_eq!(meta.model, "claude-sonnet-4-5");
         assert_eq!(meta.provider, meerkat_core::Provider::Anthropic);
-        release.notify_waiters();
+        release.notify_one();
         blocking_turn
             .await
             .expect("blocking turn task")

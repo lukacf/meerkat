@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ -z "${NODE_AUTH_TOKEN:-}" ]]; then
+  echo "NODE_AUTH_TOKEN is required for npm publication preflight" >&2
+  exit 1
+fi
+
+for command_name in npm node; do
+  if ! command -v "${command_name}" >/dev/null 2>&1; then
+    echo "${command_name} is required for npm publication preflight" >&2
+    exit 1
+  fi
+done
+
+registry="${NPM_REGISTRY_URL:-https://registry.npmjs.org/}"
+auth_config_key="$(
+  # The JavaScript template literals are intentionally protected from Bash.
+  # shellcheck disable=SC2016
+  node -e '
+    const registry = new URL(process.argv[1]);
+    const path = registry.pathname.replace(/^\/+|\/+$/g, "");
+    process.stdout.write(`//${registry.host}/${path ? `${path}/` : ""}`);
+  ' "${registry}"
+)"
+
+umask 077
+preflight_dir="$(mktemp -d "${TMPDIR:-/tmp}/meerkat-npm-preflight.XXXXXX")"
+trap 'rm -rf "${preflight_dir}"' EXIT
+
+npm_config="${preflight_dir}/npmrc"
+permissions_json="${preflight_dir}/permissions.json"
+printf 'registry=%s\n%s:_authToken=%s\n' \
+  "${registry}" \
+  "${auth_config_key}" \
+  "${NODE_AUTH_TOKEN}" >"${npm_config}"
+export NPM_CONFIG_USERCONFIG="${npm_config}"
+
+actor="$(npm whoami --registry="${registry}")"
+if [[ -z "${actor}" ]]; then
+  echo "npm authentication succeeded without returning an account identity" >&2
+  exit 1
+fi
+
+npm access list packages "${actor}" --json --registry="${registry}" >"${permissions_json}"
+
+node - "${permissions_json}" '@rkat/sdk' '@rkat/web' <<'NODE'
+const fs = require('node:fs');
+
+const [permissionsPath, ...requiredPackages] = process.argv.slice(2);
+let permissions;
+try {
+  permissions = JSON.parse(fs.readFileSync(permissionsPath, 'utf8'));
+} catch (error) {
+  console.error(`npm package-access response was not valid JSON: ${error.message}`);
+  process.exit(1);
+}
+
+if (permissions === null || Array.isArray(permissions) || typeof permissions !== 'object') {
+  console.error('npm package-access response must be a package-to-permission object');
+  process.exit(1);
+}
+
+let failed = false;
+for (const packageName of requiredPackages) {
+  const permission = permissions[packageName];
+  if (permission !== 'read-write') {
+    console.error(`${packageName} npm permission is ${permission ?? 'missing'}; read-write is required`);
+    failed = true;
+  }
+}
+
+if (failed) {
+  process.exit(1);
+}
+NODE
+
+printf 'npm publication preflight passed for %s: @rkat/sdk and @rkat/web are read-write\n' "${actor}"

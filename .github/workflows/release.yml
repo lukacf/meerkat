@@ -381,6 +381,41 @@ jobs:
           echo "BuildBuddy release validation skipped: ${buildbuddy_result}"
           [[ "${cargo_result}" == "success" && "${buildbuddy_result}" == "skipped" ]]
 
+  # Authenticate before any registry job can make an irreversible write. The
+  # same token publishes both npm SDKs, so require live write access to both
+  # package names before Rust crates or the Python SDK begin publishing.
+  registry_credentials_preflight:
+    name: Verify registry publication credentials
+    needs: [require_ci_green]
+    if: >-
+      always() &&
+      needs.require_ci_green.result == 'success' &&
+      (startsWith(github.ref, 'refs/tags/v') ||
+       (github.event_name == 'workflow_dispatch' &&
+        github.event.inputs.publish_release_packages == 'true'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout release helpers
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '' && github.event.inputs.release_tag || github.ref }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Skip npm credentials for the Rust-only alpha lane
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.alpha_crates_only == 'true' }}
+        run: echo "Rust-only alpha publication does not use npm"
+
+      - name: Verify npm identity and package write access
+        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.alpha_crates_only != 'true' }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: scripts/release-npm-publish-preflight
+
   # Public-API breaks are allowed in 0.x patch releases and must be DECLARED.
   # This is its own job rather than a step in release_validate_cargo because
   # that job only runs on workflow_dispatch: on a tag push (the primary release
@@ -1111,6 +1146,7 @@ jobs:
       always() &&
       needs.require_ci_green.result == 'success' &&
       needs.release_validate_gate.result == 'success' &&
+      needs.registry_credentials_preflight.result == 'success' &&
       (needs.release_semver_gate.result == 'success' ||
        (github.event_name == 'workflow_dispatch' &&
         github.event.inputs.publish_release_assets_only == 'true' &&
@@ -1119,7 +1155,7 @@ jobs:
       (github.event_name == 'workflow_dispatch' &&
        github.event.inputs.publish_release_packages == 'true' &&
        github.event.inputs.publish_web_sdk_only != 'true'))
-    needs: [require_ci_green, release_validate_gate, release_semver_gate]
+    needs: [require_ci_green, release_validate_gate, release_semver_gate, registry_credentials_preflight]
     runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:
@@ -1204,7 +1240,7 @@ jobs:
             exit 0
           fi
           npm install --ignore-scripts
-          npm config set //registry.npmjs.org/:_authToken ${NODE_AUTH_TOKEN}
+          npm config set //registry.npmjs.org/:_authToken "${NODE_AUTH_TOKEN}"
           npm run build
           PACKFILE="$(npm pack | tail -n 1)"
           SMOKE_DIR="$(mktemp -d)"
@@ -1225,6 +1261,7 @@ jobs:
     if: >-
       always() &&
       needs.require_ci_green.result == 'success' &&
+      needs.registry_credentials_preflight.result == 'success' &&
       (needs.build_web_sdk_package.result == 'success' ||
        (github.event_name == 'workflow_dispatch' &&
         github.event.inputs.web_sdk_artifact_run_id != '')) &&
@@ -1232,7 +1269,7 @@ jobs:
        (github.event_name == 'workflow_dispatch' &&
         github.event.inputs.publish_release_packages == 'true' &&
         github.event.inputs.alpha_crates_only != 'true'))
-    needs: [require_ci_green, build_web_sdk_package]
+    needs: [require_ci_green, build_web_sdk_package, registry_credentials_preflight]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

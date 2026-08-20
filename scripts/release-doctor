@@ -34,6 +34,15 @@ bool_enabled() {
   esac
 }
 
+workflow_job() {
+  local job_name="$1"
+  awk -v header="  ${job_name}:" '
+    $0 == header { in_job = 1 }
+    in_job && $0 != header && /^  [[:alnum:]_-]+:/ { exit }
+    in_job { print }
+  ' .github/workflows/release.yml
+}
+
 if command -v gh >/dev/null 2>&1; then
   pass "GitHub CLI is installed"
   if gh auth status --hostname github.com >/dev/null 2>&1; then
@@ -128,6 +137,20 @@ if grep -Fq 'build_web_sdk_package:' .github/workflows/release.yml &&
   pass "Release workflow builds @rkat/web once as an artifact before npm publishing"
 else
   bad "Release workflow does not publish @rkat/web from a prebuilt package artifact"
+fi
+
+npm_preflight_job="$(workflow_job registry_credentials_preflight)"
+npm_registry_publish_job="$(workflow_job publish_registries)"
+npm_web_publish_job="$(workflow_job publish_web_sdk)"
+if grep -Fq 'scripts/release-npm-publish-preflight' <<<"${npm_preflight_job}" &&
+  grep -Fq 'alpha_crates_only' <<<"${npm_preflight_job}" &&
+  grep -Eq '^    needs: \[.*registry_credentials_preflight.*\]$' <<<"${npm_registry_publish_job}" &&
+  grep -Fq "needs.registry_credentials_preflight.result == 'success'" <<<"${npm_registry_publish_job}" &&
+  grep -Eq '^    needs: \[.*registry_credentials_preflight.*\]$' <<<"${npm_web_publish_job}" &&
+  grep -Fq "needs.registry_credentials_preflight.result == 'success'" <<<"${npm_web_publish_job}"; then
+  pass "Release workflow verifies npm authentication and package write access before registry publication"
+else
+  bad "Release workflow must gate both npm publication jobs on the live npm credential preflight"
 fi
 
 web_release_ref_jobs="$(

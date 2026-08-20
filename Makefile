@@ -665,6 +665,7 @@ regen-schemas:
 
 release-doctor:
 	@echo "$(GREEN)Checking release environment...$(NC)"
+	@scripts/test-release-npm-publish-preflight.sh
 	@scripts/release-doctor
 
 # Semver-break detection (M3 policy: exact-pin + break detection). 0.x patch

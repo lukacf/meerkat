@@ -44386,6 +44386,48 @@ impl CoreExecutor for HealthProbeNoopExecutor {
     }
 }
 
+/// Executor whose first apply stays live until the test releases it.
+///
+/// Health-census tests that inspect an accepted input's ledger row need a
+/// witnessed in-flight turn. A noop executor can finish and remove the row
+/// before the test reacquires the driver, making scheduler speed decide
+/// whether the fixture ever represented the claimed state.
+struct HealthProbeBlockingExecutor {
+    apply_started: Arc<Notify>,
+    apply_release: Arc<Notify>,
+}
+
+#[async_trait::async_trait]
+impl CoreExecutor for HealthProbeBlockingExecutor {
+    async fn apply(
+        &mut self,
+        run_id: RunId,
+        primitive: RunPrimitive,
+    ) -> Result<CoreApplyOutput, CoreExecutorError> {
+        self.apply_started.notify_one();
+        self.apply_release.notified().await;
+        Ok(CoreApplyOutput::with_untyped_snapshot(
+            RunBoundaryReceiptDraft {
+                run_id,
+                boundary: RunApplyBoundary::RunStart,
+                contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                conversation_digest: None,
+                message_count: 0,
+            },
+            None,
+            None,
+        ))
+    }
+
+    async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
+        Ok(())
+    }
+
+    async fn stop_runtime_executor(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
+        Ok(())
+    }
+}
+
 fn persistent_health_probe_machine() -> Arc<MeerkatMachine> {
     let store: Arc<dyn crate::store::RuntimeStore> =
         Arc::new(crate::store::InMemoryRuntimeStore::new());
@@ -44998,12 +45040,20 @@ async fn parked_queued_input_session_count_sees_the_five_day_wedge_shape() {
     }
     let machine = persistent_health_probe_machine();
     let session_id = SessionId::new();
+    let apply_started = Arc::new(Notify::new());
+    let apply_release = Arc::new(Notify::new());
     machine
         .prepare_bindings(session_id.clone())
         .await
         .expect("bindings should prepare");
     machine
-        .ensure_session_with_executor(session_id.clone(), Box::new(HealthProbeNoopExecutor))
+        .ensure_session_with_executor(
+            session_id.clone(),
+            Box::new(HealthProbeBlockingExecutor {
+                apply_started: Arc::clone(&apply_started),
+                apply_release: Arc::clone(&apply_release),
+            }),
+        )
         .await
         .expect("runtime executor registration should succeed");
 
@@ -45021,6 +45071,9 @@ async fn parked_queued_input_session_count_sees_the_five_day_wedge_shape() {
         .await
         .expect("input should be accepted");
     assert!(matches!(accept_outcome, AcceptOutcome::Accepted { .. }));
+    tokio::time::timeout(Duration::from_secs(5), apply_started.notified())
+        .await
+        .expect("the accepted input should reach executor apply");
     {
         let sessions = machine.sessions.read().await;
         let entry = sessions.get(&session_id).expect("registered session entry");
@@ -45049,6 +45102,7 @@ async fn parked_queued_input_session_count_sees_the_five_day_wedge_shape() {
             );
         }
     }
+    apply_release.notify_one();
     tokio::time::timeout(
         Duration::from_secs(5),
         completion_handle

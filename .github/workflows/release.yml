@@ -489,8 +489,27 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '' && github.event.inputs.release_tag || github.ref }}
 
+      # actions/checkout marks the workspace safe in a TEMPORARY git config
+      # that dies with the checkout step. On hosted runners that is moot
+      # (workspace uid == step uid), but in the Bullseye container the
+      # workspace stays owned by the host uid while steps run as root, so
+      # every later git call (rust-cache, version stamping) dies on
+      # "dubious ownership". Persist the exception for the whole job.
+      - name: Mark workspace safe for container git
+        if: contains(matrix.target, 'unknown-linux-gnu')
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        env:
+          # rustup-init refuses to run when $HOME (/github/home inside job
+          # containers) differs from the euid's passwd home (/root) and
+          # assumes sudo. Skip that guard rather than reconciling the two:
+          # usermod cannot edit root while PID 1 runs as it, and flipping
+          # HOME orphans checkout's safe.directory config. Verified in
+          # buildpack-deps:bullseye; proven on run 31796295103 (toolchain
+          # installed, target added). Harmless outside containers.
+          RUSTUP_INIT_SKIP_PATH_CHECK: "yes"
 
       - name: Add release target
         run: rustup target add ${{ matrix.target }}
@@ -565,8 +584,17 @@ jobs:
           fi
           # Package names (for cargo build -p) — binary names differ via [[bin]]
           PACKAGES=("rkat" "meerkat-rpc" "meerkat-rest" "meerkat-mcp-server")
+          # The repo-cargo wrapper needs git >= 2.31 (--path-format); the
+          # Bullseye container ships 2.30, where rev-parse echoes the unknown
+          # flag into the wrapper's path variables. With CARGO_TARGET_DIR
+          # pinned above the wrapper is a pass-through to cargo anyway, so
+          # call cargo directly inside the container.
+          CARGO_CMD=(./scripts/repo-cargo)
+          if [[ "${{ contains(matrix.target, 'unknown-linux-gnu') }}" == "true" ]]; then
+            CARGO_CMD=(cargo)
+          fi
           for pkg in "${PACKAGES[@]}"; do
-            ./scripts/repo-cargo build -p "$pkg" --release --target "${{ matrix.target }}"
+            "${CARGO_CMD[@]}" build -p "$pkg" --release --target "${{ matrix.target }}"
           done
 
       - name: Ad-hoc codesign macOS binaries

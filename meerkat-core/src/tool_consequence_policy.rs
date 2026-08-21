@@ -111,7 +111,7 @@ pub struct PolicyEvaluationProvenance {
     pub digest: PolicyDigest,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ApplicationToolPolicyBinding {
@@ -122,6 +122,39 @@ pub enum ApplicationToolPolicyBinding {
         provider_id: PolicyProviderId,
         policy_id: PolicyId,
     },
+}
+
+impl<'de> Deserialize<'de> for ApplicationToolPolicyBinding {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // Serde's internally tagged unit variants accept and discard extra
+        // map fields even with enum-level `deny_unknown_fields`. Parse the
+        // units as empty struct variants so every binding shape stays strict.
+        #[derive(Deserialize)]
+        #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+        enum StrictBinding {
+            Unmanaged {},
+            Inherit {},
+            Provider {
+                provider_id: PolicyProviderId,
+                policy_id: PolicyId,
+            },
+        }
+
+        Ok(match StrictBinding::deserialize(deserializer)? {
+            StrictBinding::Unmanaged {} => Self::Unmanaged,
+            StrictBinding::Inherit {} => Self::Inherit,
+            StrictBinding::Provider {
+                provider_id,
+                policy_id,
+            } => Self::Provider {
+                provider_id,
+                policy_id,
+            },
+        })
+    }
 }
 
 pub const COMPILED_APPLICATION_TOOL_POLICY_SCHEMA_VERSION: u32 = 1;

@@ -49,11 +49,29 @@ fn absent_default_deny_fails_before_installation() {
 
 #[test]
 fn application_policy_binding_rejects_unknown_fields() {
-    let error = serde_json::from_str::<ApplicationToolPolicyBinding>(
-        r#"{"kind":"provider","provider_id":"homecore","policy_id":"household-tools","risk_tier":"r9"}"#,
-    )
-    .expect_err("application policy bindings must reject unknown fields");
-    assert!(error.to_string().contains("unknown field `risk_tier`"));
+    for (binding, unknown_field) in [
+        (
+            r#"{"kind":"provider","provider_id":"homecore","policy_id":"household-tools","risk_tier":"r9"}"#,
+            "risk_tier",
+        ),
+        (
+            r#"{"kind":"unmanaged","provider_id":"homecore"}"#,
+            "provider_id",
+        ),
+        (
+            r#"{"kind":"inherit","policy_id":"household-tools"}"#,
+            "policy_id",
+        ),
+    ] {
+        let error = serde_json::from_str::<ApplicationToolPolicyBinding>(binding)
+            .expect_err("every application policy binding variant must reject unknown fields");
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("unknown field `{unknown_field}`")),
+            "unexpected error for {binding}: {error}"
+        );
+    }
 }
 
 #[test]

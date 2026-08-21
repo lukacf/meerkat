@@ -1371,7 +1371,7 @@ export interface WireMobProfile {
   output_schema?: unknown;
   peer_description?: string;
   provider?: Provider | null;
-  provider_params?: unknown | null;
+  provider_params?: WireProviderParamsOverride | null;
   resume_overrides?: WireMobResumeOverrideField[];
   runtime_mode?: WireMobRuntimeMode;
   self_hosted_server_id?: string | null;
@@ -1523,6 +1523,66 @@ export interface MobUnwireResult {
 export interface MobMembersResult {
   members: MobMemberListEntryWire[];
   mob_id: string;
+}
+
+export interface MobMemberToolDeclarationParams {
+  agent_identity: string;
+  mob_id: string;
+}
+
+export interface MobMemberToolDeclarationResult {
+  agent_identity: string;
+  convergence: WireIdentityConvergenceStatus;
+  declaration: WireMemberToolDeclaration;
+  desired_intent_revision: number;
+  mob_id: string;
+}
+
+export interface MobApplyMemberToolDeclarationParams {
+  agent_identity: string;
+  convergence: WireIdentityConvergenceMode;
+  declaration: WireMemberToolDeclaration;
+  expected_intent_revision: number;
+  mob_id: string;
+  request_id: string;
+}
+
+export interface MobApplyMemberToolDeclarationResult {
+  commit: WireMemberToolCommitOutcome;
+  convergence: WireIdentityConvergenceStatus;
+}
+
+export interface MobAdoptMemberIdentityDeclarationParams {
+  agent_identity: string;
+  convergence: WireIdentityConvergenceMode;
+  declaration_revision: number;
+  declaration_scope: string;
+  member: WireIdentityProfileMemberDeclaration;
+  mob_id: string;
+  owned_wiring: WireDesiredIdentityEdge[];
+  precondition: WireIdentityAdoptionPrecondition;
+  request_id: string;
+  session: WireDesiredSessionTarget;
+  wiring_custody?: "external_managed" | "identity_owned";
+}
+
+export interface MobAdoptMemberIdentityDeclarationResult {
+  adoption: WireIdentityAdoptionOutcome;
+  convergence: WireIdentityConvergenceStatus;
+}
+
+export interface MobResolveIdentityConvergenceBlockParams {
+  agent_identity: string;
+  convergence: WireIdentityConvergenceMode;
+  expected_desired_revision: number;
+  mob_id: string;
+  observed_active_revision: number;
+  request_id: string;
+}
+
+export interface MobResolveIdentityConvergenceBlockResult {
+  convergence: WireIdentityConvergenceStatus;
+  outcome: WireIdentityConvergenceResolutionOutcome;
 }
 
 export interface MobEventsParams {
@@ -2095,10 +2155,10 @@ export interface MobProfileInput {
   image_generation_provider?: Provider | null;
   max_inline_peer_notifications?: number | null;
   model: string;
-  output_schema?: unknown | null;
+  output_schema?: OutputSchema | null;
   peer_description?: string;
   provider?: Provider | null;
-  provider_params?: unknown | null;
+  provider_params?: WireProviderParamsOverride | null;
   resume_overrides?: WireMobResumeOverrideField[];
   runtime_mode?: WireMobRuntimeMode;
   self_hosted_server_id?: string | null;
@@ -2206,6 +2266,148 @@ export interface WireMemberLifecycleCapabilities {
   resume_after_restart: boolean;
   revisions: boolean;
   transcript_edits: boolean;
+}
+
+export interface ToolCategoryOverrides {
+  builtins?: ToolCategoryOverride;
+  comms?: ToolCategoryOverride;
+  image_generation?: ToolCategoryOverride;
+  memory?: ToolCategoryOverride;
+  mob?: ToolCategoryOverride;
+  schedule?: ToolCategoryOverride;
+  shell?: ToolCategoryOverride;
+  web_search?: ToolCategoryOverride;
+  workgraph?: ToolCategoryOverride;
+}
+
+export interface WireDesiredLocalCallbackTool {
+  description: string;
+  input_schema: unknown;
+  name: string;
+}
+
+export interface WireMemberToolDeclaration {
+  application_policy: ApplicationToolPolicyBinding;
+  callback_tools: WireCallbackToolSetDeclaration;
+  category_overrides: ToolCategoryOverrides;
+  execution: WireMemberToolAccessDeclaration;
+}
+
+export interface WireDesiredSessionTarget {
+  authority_policy: WireDesiredSessionAuthorityPolicy;
+  lineage_generation: number;
+  lineage_id: string;
+  session_id: string;
+}
+
+export interface WireIdentityProfileMemberDeclaration {
+  additional_instructions?: string[] | null;
+  auth_binding?: WireAuthBindingRef | null;
+  budget_limits?: BudgetLimits | null;
+  context?: WireOpaqueJson | null;
+  execution: WireDesiredExecution;
+  external_addressable_override?: boolean | null;
+  labels?: Record<string, string> | null;
+  model_override?: string | null;
+  profile_name: string;
+  profile_override?: PortableProfile | null;
+  required_env_keys?: string[];
+  required_local_callback_tools?: WireDesiredLocalCallbackTool[];
+  runtime_mode?: WireMobRuntimeMode | null;
+  system_prompt_override?: PortableSystemPrompt | null;
+  tool_access_policy?: WireResolvedToolAccessPolicy | null;
+}
+
+export interface WireDesiredIdentityEdge {
+  a: string;
+  b: string;
+}
+
+export interface WireIdentityConvergenceStatus {
+  active_intent_revision?: number | null;
+  agent_identity: string;
+  condition: WireIdentityConvergenceCondition;
+  decision?: WireIdentityReconcileDecision | null;
+  desired_intent_revision?: number | null;
+  detail?: string | null;
+  observed_at_ms: number;
+}
+
+export interface BudgetLimits {
+  max_duration?: Duration | null;
+  max_tokens?: number | null;
+  max_tool_calls?: number | null;
+  max_turn_duration?: Duration | null;
+}
+
+export interface Duration {
+  nanos: number;
+  secs: number;
+}
+
+export interface OutputSchema {
+  compat?: SchemaCompat;
+  format?: SchemaFormat;
+  name?: string | null;
+  schema: MeerkatSchema;
+  strict?: boolean;
+}
+
+export interface PortableProfile {
+  auto_compact_threshold?: number | null;
+  external_addressable?: boolean;
+  image_generation_provider?: Provider | null;
+  max_inline_peer_notifications?: number | null;
+  model: string;
+  output_schema?: WireOpaqueJson | null;
+  peer_description?: string;
+  provider: Provider;
+  provider_params?: WireProviderParamsOverride | null;
+  resume_overrides?: WireMobResumeOverrideField[];
+  runtime_mode?: WireMobRuntimeMode;
+  self_hosted_server_id?: string | null;
+  skills?: string[];
+  tools?: PortableToolConfig;
+}
+
+export interface PortableToolConfig {
+  builtins?: boolean;
+  comms?: boolean;
+  image_generation?: boolean;
+  mcp_servers?: Record<string, PortableMcpDecl>;
+  memory?: boolean;
+  mob?: boolean;
+  non_portable_disabled?: WireNonPortableResourceKind[];
+  read_only?: boolean;
+  schedule?: boolean;
+  shell?: boolean;
+  workgraph?: boolean;
+}
+
+export interface StructuredProviderExtension {
+  body?: string;
+  key: string;
+  namespace: string;
+}
+
+export interface WireGeminiThinkingConfig {
+  include_thoughts?: boolean | null;
+  thinking_budget?: number | null;
+  thinking_level?: WireGeminiThinkingLevel | null;
+}
+
+export interface WireOpenAiPromptCacheOptions {
+  mode?: WireOpenAiPromptCacheMode | null;
+  ttl?: WireOpenAiPromptCacheTtl | null;
+}
+
+export interface WireProviderParamsOverride {
+  max_output_tokens?: number | null;
+  provider_tag?: WireProviderTag | null;
+  reasoning?: WireReasoningMode | null;
+  temperature?: number | null;
+  thinking_budget_tokens?: number | null;
+  top_p?: number | null;
 }
 
 export interface AttentionBindingRequest {
@@ -2722,10 +2924,10 @@ export interface MemberBuildRejectionBindingUnresolvable {
 }
 
 export interface MemberBuildRejectionProviderAuthPayload {
-  binding_id?: string | null;
+  binding_id?: BindingId | null;
   kind: AuthErrorKind;
   provider?: Provider | null;
-  realm_id?: string | null;
+  realm_id?: RealmId | null;
 }
 
 export interface MemberBuildRejectionProviderAuth {
@@ -3147,6 +3349,390 @@ export interface BridgeLiveControlOutcomeRefresh {
 }
 
 export type BridgeLiveControlOutcome = BridgeLiveControlOutcomeCommitInput | BridgeLiveControlOutcomeInterrupt | BridgeLiveControlOutcomeTruncate | BridgeLiveControlOutcomeRefresh;
+
+export interface ApplicationToolPolicyBindingUnmanaged {
+  kind: "unmanaged";
+}
+
+export interface ApplicationToolPolicyBindingInherit {
+  kind: "inherit";
+}
+
+export interface ApplicationToolPolicyBindingProvider {
+  kind: "provider";
+  policy_id: string;
+  provider_id: string;
+}
+
+export type ApplicationToolPolicyBinding = ApplicationToolPolicyBindingUnmanaged | ApplicationToolPolicyBindingInherit | ApplicationToolPolicyBindingProvider;
+
+export type ToolCategoryOverride = "inherit" | "enable" | "disable";
+
+export interface WireCallbackToolSetDeclarationInherit {
+  kind: "inherit";
+}
+
+export interface WireCallbackToolSetDeclarationSet {
+  kind: "set";
+  tools: WireDesiredLocalCallbackTool[];
+}
+
+export type WireCallbackToolSetDeclaration = WireCallbackToolSetDeclarationInherit | WireCallbackToolSetDeclarationSet;
+
+export interface WireMemberToolAccessConstraintAllowNames {
+  kind: "allow_names";
+  names: string[];
+}
+
+export interface WireMemberToolAccessConstraintDenyNames {
+  kind: "deny_names";
+  names: string[];
+}
+
+export interface WireMemberToolAccessConstraintReadOnly {
+  kind: "read_only";
+}
+
+export type WireMemberToolAccessConstraint = WireMemberToolAccessConstraintAllowNames | WireMemberToolAccessConstraintDenyNames | WireMemberToolAccessConstraintReadOnly;
+
+export interface WireMemberToolAccessDeclarationInherit {
+  kind: "inherit";
+}
+
+export interface WireMemberToolAccessDeclarationUnrestricted {
+  kind: "unrestricted";
+}
+
+export interface WireMemberToolAccessDeclarationConstraints {
+  constraints: WireMemberToolAccessConstraint[];
+  kind: "constraints";
+}
+
+export type WireMemberToolAccessDeclaration = WireMemberToolAccessDeclarationInherit | WireMemberToolAccessDeclarationUnrestricted | WireMemberToolAccessDeclarationConstraints;
+
+export interface WireIdentityConvergenceModeDrain {
+  kind: "drain";
+  max_wait_ms: number;
+}
+
+export interface WireIdentityConvergenceModeCancelActive {
+  kind: "cancel_active";
+}
+
+export type WireIdentityConvergenceMode = WireIdentityConvergenceModeDrain | WireIdentityConvergenceModeCancelActive;
+
+export type WireIdentityAdoptionPrecondition = "expected_absent";
+
+export type WireDesiredSessionAuthorityPolicy = "require_existing";
+
+export interface WireDesiredExecutionControllingSession {
+  execution: "controlling_session";
+}
+
+export interface WireDesiredExecutionAnyBoundHostSession {
+  execution: "any_bound_host_session";
+}
+
+export interface WireDesiredExecutionPlacedSession {
+  execution: "placed_session";
+  host_id: string;
+}
+
+export interface WireDesiredExecutionExternal {
+  address: string;
+  execution: "external";
+  identity: WireTrustedPeerIdentity;
+}
+
+export type WireDesiredExecution = WireDesiredExecutionControllingSession | WireDesiredExecutionAnyBoundHostSession | WireDesiredExecutionPlacedSession | WireDesiredExecutionExternal;
+
+export interface WireIdentityAdoptionOutcomeAdopted {
+  desired_revision: number;
+  outcome: "adopted";
+}
+
+export interface WireIdentityAdoptionOutcomePreconditionConflict {
+  actual_revision: number;
+  outcome: "precondition_conflict";
+}
+
+export interface WireIdentityAdoptionOutcomeRequestConflict {
+  outcome: "request_conflict";
+  request_id: string;
+}
+
+export type WireIdentityAdoptionOutcome = WireIdentityAdoptionOutcomeAdopted | WireIdentityAdoptionOutcomePreconditionConflict | WireIdentityAdoptionOutcomeRequestConflict;
+
+export type WireIdentityConvergenceCondition = "pending" | "reconciling" | "converged" | "backoff" | "repair_blocked" | "quarantined" | "tombstoned" | "suspended" | "drain_blocked";
+
+export type WireIdentityReconcileDecision = "backoff" | "repair_blocked" | "acquire_lease" | "await_lease" | "close_member_admission" | "await_member_drain" | "drain_blocked" | "cancel_active_member" | "seal_retirement_proven" | "seal_session_creation_consumed" | "ensure_session_authority" | "ensure_runtime_registration" | "await_external_binding_ceremony" | "ensure_external_binding_receipt" | "ensure_external_binding" | "ensure_member_materialization" | "ensure_initial_delivery_receipt" | "ensure_initial_delivery" | "await_initial_delivery" | "reconcile_wiring" | "retire_member_materialization" | "retire_runtime_registration" | "release_session_authority" | "converged" | "tombstoned" | "quarantined";
+
+export interface WireMemberToolCommitOutcomeCommitted {
+  desired_revision: number;
+  outcome: "committed";
+}
+
+export interface WireMemberToolCommitOutcomeNoChange {
+  desired_revision: number;
+  outcome: "no_change";
+}
+
+export interface WireMemberToolCommitOutcomeRevisionConflict {
+  actual: number;
+  expected: number;
+  outcome: "revision_conflict";
+}
+
+export interface WireMemberToolCommitOutcomeRequestConflict {
+  outcome: "request_conflict";
+  request_id: string;
+}
+
+export interface WireMemberToolCommitOutcomeMemberAbsent {
+  outcome: "member_absent";
+}
+
+export interface WireMemberToolCommitOutcomeInvalidDeclaration {
+  outcome: "invalid_declaration";
+  reason: string;
+}
+
+export type WireMemberToolCommitOutcome = WireMemberToolCommitOutcomeCommitted | WireMemberToolCommitOutcomeNoChange | WireMemberToolCommitOutcomeRevisionConflict | WireMemberToolCommitOutcomeRequestConflict | WireMemberToolCommitOutcomeMemberAbsent | WireMemberToolCommitOutcomeInvalidDeclaration;
+
+export interface WireIdentityConvergenceResolutionOutcomeResolved {
+  active_revision: number;
+  desired_revision: number;
+  outcome: "resolved";
+}
+
+export interface WireIdentityConvergenceResolutionOutcomeDesiredRevisionConflict {
+  actual: number;
+  expected: number;
+  outcome: "desired_revision_conflict";
+}
+
+export interface WireIdentityConvergenceResolutionOutcomeActiveRevisionConflict {
+  actual: number;
+  expected: number;
+  outcome: "active_revision_conflict";
+}
+
+export interface WireIdentityConvergenceResolutionOutcomeNotBlocked {
+  outcome: "not_blocked";
+}
+
+export interface WireIdentityConvergenceResolutionOutcomeMemberAbsent {
+  outcome: "member_absent";
+}
+
+export interface WireIdentityConvergenceResolutionOutcomeRequestConflict {
+  outcome: "request_conflict";
+  request_id: string;
+}
+
+export type WireIdentityConvergenceResolutionOutcome = WireIdentityConvergenceResolutionOutcomeResolved | WireIdentityConvergenceResolutionOutcomeDesiredRevisionConflict | WireIdentityConvergenceResolutionOutcomeActiveRevisionConflict | WireIdentityConvergenceResolutionOutcomeNotBlocked | WireIdentityConvergenceResolutionOutcomeMemberAbsent | WireIdentityConvergenceResolutionOutcomeRequestConflict;
+
+export type BindingId = string;
+
+export type MeerkatSchema = unknown;
+
+export interface PortableMcpDeclStdio {
+  args?: string[];
+  command: string;
+  connect_timeout_secs?: number | null;
+  required_env_keys?: string[];
+  transport: "stdio";
+}
+
+export interface PortableMcpDeclHttp {
+  connect_timeout_secs?: number | null;
+  http_transport?: McpHttpTransport | null;
+  required_header_names?: string[];
+  transport: "http";
+  url: string;
+}
+
+export type PortableMcpDecl = PortableMcpDeclStdio | PortableMcpDeclHttp;
+
+export interface PortableSystemPromptSet {
+  prompt: "set";
+  text: string;
+}
+
+export interface PortableSystemPromptDisable {
+  prompt: "disable";
+}
+
+export type PortableSystemPrompt = PortableSystemPromptSet | PortableSystemPromptDisable;
+
+export type ProfileId = string;
+
+export type RealmId = string;
+
+export type SchemaCompat = "lossy" | "strict";
+
+export type SchemaFormat = "meerkat_v1";
+
+export type WireAnthropicCacheControlPolicy = "disabled" | "automatic" | "system_prefix" | "system_and_conversation";
+
+export type WireAnthropicCacheTtl = "5m" | "1h";
+
+export interface WireAnthropicCompactionConfigAuto {
+  kind: "auto";
+}
+
+export interface WireAnthropicCompactionConfigCustom {
+  edit: unknown;
+  kind: "custom";
+}
+
+export type WireAnthropicCompactionConfig = WireAnthropicCompactionConfigAuto | WireAnthropicCompactionConfigCustom;
+
+export type WireAnthropicContextWindow = "one_megabyte";
+
+export type WireAnthropicEffort = "low" | "medium" | "high" | "max" | "xhigh";
+
+export interface WireAnthropicInferenceGeoUs {
+  kind: "us";
+}
+
+export interface WireAnthropicInferenceGeoGlobal {
+  kind: "global";
+}
+
+export interface WireAnthropicInferenceGeoOther {
+  kind: "other";
+  region: string;
+}
+
+export type WireAnthropicInferenceGeo = WireAnthropicInferenceGeoUs | WireAnthropicInferenceGeoGlobal | WireAnthropicInferenceGeoOther;
+
+export interface WireAnthropicThinkingConfigAdaptive {
+  type: "adaptive";
+}
+
+export interface WireAnthropicThinkingConfigEnabled {
+  budget_tokens: number;
+  type: "enabled";
+}
+
+export type WireAnthropicThinkingConfig = WireAnthropicThinkingConfigAdaptive | WireAnthropicThinkingConfigEnabled;
+
+export type WireGeminiThinkingLevel = "minimal" | "low" | "medium" | "high";
+
+export type WireOpaqueJson = string;
+
+export type WireOpenAiPromptCacheMode = "implicit" | "explicit";
+
+export type WireOpenAiPromptCacheRetention = "in_memory" | "24h";
+
+export type WireOpenAiPromptCacheTtl = "30m";
+
+export type WireOpenAiReasoningContext = "auto" | "current_turn" | "all_turns";
+
+export type WireOpenAiReasoningMode = "standard" | "pro";
+
+export type WireOpenAiTextVerbosity = "low" | "medium" | "high";
+
+export interface WireProviderTagAnthropic {
+  cache_control?: WireAnthropicCacheControlPolicy | null;
+  cache_ttl?: WireAnthropicCacheTtl | null;
+  compaction?: WireAnthropicCompactionConfig | null;
+  context?: WireAnthropicContextWindow | null;
+  effort?: WireAnthropicEffort | null;
+  inference_geo?: WireAnthropicInferenceGeo | null;
+  provider: "anthropic";
+  structured_output?: OutputSchema | null;
+  supports_temperature_override?: boolean | null;
+  thinking?: WireAnthropicThinkingConfig | null;
+  thinking_budget_tokens?: number | null;
+  top_k?: number | null;
+  web_search?: unknown;
+}
+
+export interface WireProviderTagOpenAi {
+  chat_template_kwargs?: unknown;
+  frequency_penalty?: number | null;
+  presence_penalty?: number | null;
+  prompt_cache_enabled?: boolean | null;
+  prompt_cache_key?: string | null;
+  prompt_cache_options?: WireOpenAiPromptCacheOptions | null;
+  prompt_cache_retention?: WireOpenAiPromptCacheRetention | null;
+  provider: "open_ai";
+  reasoning?: unknown;
+  reasoning_context?: WireOpenAiReasoningContext | null;
+  reasoning_effort?: WireReasoningEffort | null;
+  reasoning_mode?: WireOpenAiReasoningMode | null;
+  seed?: number | null;
+  store?: boolean | null;
+  structured_output?: OutputSchema | null;
+  supports_reasoning_override?: boolean | null;
+  supports_temperature_override?: boolean | null;
+  text_verbosity?: WireOpenAiTextVerbosity | null;
+  thinking?: unknown;
+  web_search?: unknown;
+}
+
+export interface WireProviderTagGemini {
+  cached_content_name?: string | null;
+  candidate_count?: number | null;
+  google_search?: unknown;
+  provider: "gemini";
+  structured_output?: OutputSchema | null;
+  thinking?: WireGeminiThinkingConfig | null;
+  thinking_budget?: number | null;
+  thinking_level?: WireGeminiThinkingLevel | null;
+  top_k?: number | null;
+  top_p?: number | null;
+}
+
+export interface WireProviderTagUnknown {
+  bag: StructuredProviderExtension;
+  provider: "unknown";
+}
+
+export type WireProviderTag = WireProviderTagAnthropic | WireProviderTagOpenAi | WireProviderTagGemini | WireProviderTagUnknown;
+
+export type WireReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh" | "max";
+
+export type WireReasoningMode = "emit" | "silent" | "off";
+
+export interface WireResolvedToolAccessPolicyAllowList {
+  type: "allow_list";
+  value: string[];
+}
+
+export interface WireResolvedToolAccessPolicyDenyList {
+  type: "deny_list";
+  value: string[];
+}
+
+export interface WireResolvedToolAccessPolicyReadOnly {
+  type: "read_only";
+}
+
+export interface WireResolvedToolAccessPolicyConstraints {
+  type: "constraints";
+  value: WireToolAccessConstraint[];
+}
+
+export type WireResolvedToolAccessPolicy = WireResolvedToolAccessPolicyAllowList | WireResolvedToolAccessPolicyDenyList | WireResolvedToolAccessPolicyReadOnly | WireResolvedToolAccessPolicyConstraints;
+
+export interface WireToolAccessConstraintAllowNames {
+  type: "allow_names";
+  value: string[];
+}
+
+export interface WireToolAccessConstraintDenyNames {
+  type: "deny_names";
+  value: string[];
+}
+
+export interface WireToolAccessConstraintReadOnly {
+  type: "read_only";
+}
+
+export type WireToolAccessConstraint = WireToolAccessConstraintAllowNames | WireToolAccessConstraintDenyNames | WireToolAccessConstraintReadOnly;
 
 export type AttentionDelegatedAuthority = "add_evidence" | "close_own_review_item" | "request_closure" | "close_if_policy_allows";
 
@@ -5000,9 +5586,9 @@ export interface WireImageGenerationToolResult {
 }
 
 export interface WireAuthBindingRef {
-  binding: string;
-  profile?: string | null;
-  realm: string;
+  binding: BindingId;
+  profile?: ProfileId | null;
+  realm: RealmId;
 }
 
 export interface WireBackendProfile {

@@ -10,7 +10,8 @@
 pub use crate::identity::{
     IdentityAuthorityCondition, IdentityExternalCeremonyCondition, IdentityExternalTrustCondition,
     IdentityInitialDeliveryCondition, IdentityLeaseCondition, IdentityReceiptCondition,
-    IdentityReconcileDecision, IdentityResourceCondition, IdentitySessionCondition,
+    IdentityReconcileDecision, IdentityReplacementCondition, IdentityResourceCondition,
+    IdentitySessionCondition,
 };
 use meerkat_machine_schema::catalog::dsl::OptionValueExt;
 pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
@@ -2081,6 +2082,7 @@ pub(crate) fn identity_reconciliation_input(
     MobMachineInput::ClassifyIdentityReconciliation {
         intent: facts.intent,
         lease: facts.lease,
+        replacement: facts.replacement,
         external_binding_required: facts.external_binding_required,
         initial_delivery_required: facts.initial_delivery_required,
         session_creation_receipt: facts.session_creation_receipt,
@@ -2107,6 +2109,7 @@ pub(crate) fn generated_identity_reconcile_decision(
     MobMachineAuthority::identity_reconcile_decision(
         &facts.intent,
         &facts.lease,
+        &facts.replacement,
         &facts.external_binding_required,
         &facts.initial_delivery_required,
         &facts.session_creation_receipt,

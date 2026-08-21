@@ -758,6 +758,10 @@ where
     /// Apply the live LLM request policy paired with an identity hot-swap.
     pub fn apply_llm_request_policy(&mut self, policy: crate::SessionLlmRequestPolicy) {
         self.config.model = policy.model;
+        self.config.provider_native_tools = self
+            .config
+            .provider_native_tools
+            .narrow(policy.provider_native_tools);
         self.config.provider_params = crate::lifecycle::run_primitive::ProviderParamsCarrier {
             params: policy.provider_params.unwrap_or_default(),
             tool_defaults: policy.provider_tool_defaults,
@@ -850,6 +854,10 @@ where
             params: request_policy.provider_params.unwrap_or_default(),
             tool_defaults: request_policy.provider_tool_defaults,
         };
+        let next_provider_native_tools = self
+            .config
+            .provider_native_tools
+            .narrow(request_policy.provider_native_tools);
 
         let _auth_rotation = self.stage_auth_lease_auth_binding(
             previous_identity.auth_binding.as_ref(),
@@ -862,6 +870,7 @@ where
         self.client = client;
         self.config.model = next_model;
         self.config.provider_params = next_provider_params;
+        self.config.provider_native_tools = next_provider_native_tools;
         self.session = next_session;
         self.active_model_profile = Some(target_profile);
         Ok(())

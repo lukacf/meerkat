@@ -3658,6 +3658,7 @@ where
         // finalization can consume it only through the matching run-id filter.
         self.latest_run_checkpoint_receipt = None;
         self.runtime_started_run_id = Some(run_id.clone());
+        self.tool_dispatch_context.bind_run_id(run_id.clone());
         // Open the first actor-local boundary generation before the first
         // suspension point, and retain a run-scope guard so normal errors,
         // natural completion, hard-interrupt future drops, and task abort all
@@ -4590,6 +4591,12 @@ where
             // Strip the provider-native web-search/grounding body via the typed
             // ProviderTag owner — extraction is deterministic and tool-free.
             effective_provider_params.clear_web_search();
+        }
+        if matches!(
+            self.config.provider_native_tools,
+            crate::ProviderNativeToolPolicy::DisableAll
+        ) {
+            effective_provider_params.clear_provider_native_tools();
         }
         let typed_provider_params =
             Some(effective_provider_params).filter(|params| !params.is_empty());
@@ -5649,6 +5656,20 @@ where
         tool_defs: &Arc<[Arc<ToolDef>]>,
         dispatch_results: Vec<ToolDispatchResult>,
     ) -> Result<CallingLlmToolBatch, AgentError> {
+        if let Some(failure) = dispatch_results
+            .iter()
+            .find_map(|(_, _, result, _)| match result {
+                Err(crate::error::ToolError::PolicyIndeterminate { failure }) => {
+                    Some(failure.clone())
+                }
+                _ => None,
+            })
+        {
+            let error = AgentError::PolicyIndeterminate { failure };
+            self.terminalize_fatal_error(ctx.run_id, ctx.turn_count, ctx.event_tx, &error)
+                .await?;
+            return Err(error);
+        }
         let mut tool_results = Vec::with_capacity(dispatch_results.len());
         // Typed provenance projection from the active tool
         // catalog: hook payloads carry the `ToolDef.provenance`
@@ -12706,6 +12727,7 @@ mod tests {
                 client.clone(),
                 crate::SessionLlmRequestPolicy {
                     model: "new-model".to_string(),
+                    provider_native_tools: crate::ProviderNativeToolPolicy::Inherit,
                     provider_params: Some(ProviderParamsOverride {
                         temperature: Some(0.2),
                         ..Default::default()
@@ -12749,6 +12771,63 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn provider_native_tool_policy_is_a_final_narrow_only_request_gate() {
+        use crate::lifecycle::run_primitive::{OpaqueProviderBody, OpenAiProviderTag, ProviderTag};
+
+        let client = Arc::new(RecordingLlmClient::new());
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .provider_native_tool_policy(crate::ProviderNativeToolPolicy::DisableAll)
+            .provider_tool_defaults(ProviderTag::OpenAi(OpenAiProviderTag {
+                web_search: Some(OpaqueProviderBody::from_value(
+                    &serde_json::json!({"type": "web_search"}),
+                )),
+                ..Default::default()
+            }))
+            .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+        agent.config.max_turns = Some(1);
+
+        agent
+            .run("native tools disabled".to_string().into())
+            .await
+            .expect("restricted request should still reach the LLM");
+
+        agent
+            .replace_client_with_request_policy(
+                client.clone(),
+                crate::SessionLlmRequestPolicy {
+                    model: "new-model".to_string(),
+                    provider_native_tools: crate::ProviderNativeToolPolicy::Inherit,
+                    provider_params: None,
+                    provider_tool_defaults: Some(ProviderTag::OpenAi(OpenAiProviderTag {
+                        web_search: Some(OpaqueProviderBody::from_value(
+                            &serde_json::json!({"type": "web_search"}),
+                        )),
+                        ..Default::default()
+                    })),
+                },
+            )
+            .expect("compatible replacement client should be admitted");
+        agent
+            .run("hot swap cannot widen".to_string().into())
+            .await
+            .expect("hot-swapped restricted request should reach the LLM");
+
+        let seen_params = client.seen_params();
+        assert_eq!(seen_params.len(), 2);
+        for params in seen_params {
+            let Some(ProviderTag::OpenAi(openai)) = params.and_then(|params| params.provider_tag)
+            else {
+                panic!("expected typed OpenAI provider parameters");
+            };
+            assert!(
+                openai.web_search.is_none(),
+                "the final narrow-only sanitizer must remove provider-native search"
+            );
+        }
+    }
+
     fn explicit_hot_swap_identity(model: &str) -> crate::SessionLlmIdentity {
         crate::SessionLlmIdentity {
             model: model.to_string(),
@@ -12762,6 +12841,7 @@ mod tests {
     fn explicit_hot_swap_policy(model: &str) -> crate::SessionLlmRequestPolicy {
         crate::SessionLlmRequestPolicy {
             model: model.to_string(),
+            provider_native_tools: crate::ProviderNativeToolPolicy::Inherit,
             provider_params: None,
             provider_tool_defaults: None,
         }
@@ -17931,6 +18011,7 @@ mod tests {
                     .expect("registered backup profile"),
                 request_policy: crate::SessionLlmRequestPolicy {
                     model: "backup".to_string(),
+                    provider_native_tools: crate::ProviderNativeToolPolicy::Inherit,
                     provider_params: None,
                     provider_tool_defaults: None,
                 },
@@ -18194,6 +18275,7 @@ mod tests {
                     .expect("registered backup profile"),
                 request_policy: crate::SessionLlmRequestPolicy {
                     model: "backup".to_string(),
+                    provider_native_tools: crate::ProviderNativeToolPolicy::Inherit,
                     provider_params: Some(
                         crate::lifecycle::run_primitive::ProviderParamsOverride {
                             temperature: Some(0.37),
@@ -18403,6 +18485,7 @@ mod tests {
                     .expect("registered backup profile"),
                 request_policy: crate::SessionLlmRequestPolicy {
                     model: "backup".to_string(),
+                    provider_native_tools: crate::ProviderNativeToolPolicy::Inherit,
                     provider_params: None,
                     provider_tool_defaults: None,
                 },
@@ -20263,6 +20346,7 @@ mod tests {
                 target_profile: self.target_profile.clone(),
                 request_policy: crate::SessionLlmRequestPolicy {
                     model: "claude-backup".to_string(),
+                    provider_native_tools: crate::ProviderNativeToolPolicy::Inherit,
                     provider_params: Some(ProviderParamsOverride {
                         provider_tag: Some(if self.mismatched_fallback_tag {
                             ProviderTag::OpenAi(OpenAiProviderTag::default())

@@ -357,6 +357,7 @@ mod tests {
                 model: model.to_string(),
                 provider_params: None,
                 provider_tool_defaults: None,
+                provider_native_tools: meerkat_core::ProviderNativeToolPolicy::Inherit,
             },
             identity,
             client: Arc::new(ScriptedClient {

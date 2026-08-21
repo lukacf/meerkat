@@ -1081,6 +1081,7 @@ macro_rules! mob_catalog_machine_dsl {
             ClassifyIdentityReconciliation {
                 intent: Enum<IdentityAuthorityCondition>,
                 lease: Enum<IdentityLeaseCondition>,
+                replacement: Enum<IdentityReplacementCondition>,
                 external_binding_required: bool,
                 initial_delivery_required: bool,
                 session_creation_receipt: Enum<IdentityReceiptCondition>,
@@ -2040,6 +2041,7 @@ macro_rules! mob_catalog_machine_dsl {
         helper identity_reconcile_decision(
             intent: Enum<IdentityAuthorityCondition>,
             lease: Enum<IdentityLeaseCondition>,
+            replacement: Enum<IdentityReplacementCondition>,
             external_binding_required: bool,
             initial_delivery_required: bool,
             session_creation_receipt: Enum<IdentityReceiptCondition>,
@@ -2054,6 +2056,21 @@ macro_rules! mob_catalog_machine_dsl {
             initial_delivery: Enum<IdentityInitialDeliveryCondition>,
             wiring: Enum<IdentityResourceCondition>
         ) -> Enum<IdentityReconcileDecision> {
+            if replacement == IdentityReplacementCondition::AdmissionOpen {
+                IdentityReconcileDecision::CloseMemberAdmission
+            } else {
+            if replacement == IdentityReplacementCondition::Draining {
+                IdentityReconcileDecision::AwaitMemberDrain
+            } else {
+            if replacement == IdentityReplacementCondition::DrainBlocked {
+                IdentityReconcileDecision::DrainBlocked
+            } else {
+            if replacement == IdentityReplacementCondition::CancelActive {
+                IdentityReconcileDecision::CancelActiveMember
+            } else {
+            if replacement == IdentityReplacementCondition::Ready {
+                IdentityReconcileDecision::RetireMemberMaterialization
+            } else {
             if intent == IdentityAuthorityCondition::Unavailable {
                 IdentityReconcileDecision::Backoff
             } else {
@@ -2544,7 +2561,7 @@ macro_rules! mob_catalog_machine_dsl {
                         }
                     }
                 }
-            }
+            }}}}}}
         }
 
         disposition RequestRuntimeBinding => routed [MeerkatMachine] seam NoOwnerRealization,
@@ -5547,6 +5564,7 @@ macro_rules! mob_catalog_machine_dsl {
             on input ClassifyIdentityReconciliation {
                 intent,
                 lease,
+                replacement,
                 external_binding_required,
                 initial_delivery_required,
                 session_creation_receipt,
@@ -5567,6 +5585,7 @@ macro_rules! mob_catalog_machine_dsl {
                 decision: identity_reconcile_decision(
                     intent,
                     lease,
+                    replacement,
                     external_binding_required,
                     initial_delivery_required,
                     session_creation_receipt,
@@ -21953,6 +21972,10 @@ pub enum IdentityReconcileDecision {
     RepairBlocked,
     AcquireLease,
     AwaitLease,
+    CloseMemberAdmission,
+    AwaitMemberDrain,
+    DrainBlocked,
+    CancelActiveMember,
     SealRetirementProven,
     SealSessionCreationConsumed,
     EnsureSessionAuthority,
@@ -21971,6 +21994,17 @@ pub enum IdentityReconcileDecision {
     Converged,
     Tombstoned,
     Quarantined,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentityReplacementCondition {
+    NotRequired,
+    AdmissionOpen,
+    Draining,
+    DrainBlocked,
+    CancelActive,
+    Ready,
 }
 
 /// Row #14: machine-owned duplicate-member admission verdict for

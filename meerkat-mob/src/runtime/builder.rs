@@ -492,6 +492,7 @@ pub struct MobBuilder {
     notify_orchestrator_on_resume: bool,
     tool_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
     default_llm_client: Option<Arc<dyn LlmClient>>,
+    tool_consequence_policy_registry: Option<Arc<meerkat_core::ToolConsequencePolicyRegistry>>,
     default_external_tools_provider: Option<crate::ExternalToolsProvider>,
     identity_local_external_tools_provider:
         Option<Arc<dyn super::IdentityLocalExternalToolsProvider>>,
@@ -7194,6 +7195,7 @@ impl MobBuilder {
             notify_orchestrator_on_resume: true,
             tool_bundles: BTreeMap::new(),
             default_llm_client: None,
+            tool_consequence_policy_registry: None,
             default_external_tools_provider: None,
             identity_local_external_tools_provider: None,
             spawn_base_prompt_source: None,
@@ -7253,6 +7255,7 @@ impl MobBuilder {
             notify_orchestrator_on_resume: true,
             tool_bundles: BTreeMap::new(),
             default_llm_client: None,
+            tool_consequence_policy_registry: None,
             default_external_tools_provider: None,
             identity_local_external_tools_provider: None,
             spawn_base_prompt_source: None,
@@ -7340,6 +7343,16 @@ impl MobBuilder {
     /// Set a default LLM client override (primarily for testing).
     pub fn with_default_llm_client(mut self, client: Arc<dyn LlmClient>) -> Self {
         self.default_llm_client = Some(client);
+        self
+    }
+
+    /// Bind the process-local registry used to resolve exact application
+    /// consequence-policy identities for member builds.
+    pub fn with_tool_consequence_policy_registry(
+        mut self,
+        registry: Arc<meerkat_core::ToolConsequencePolicyRegistry>,
+    ) -> Self {
+        self.tool_consequence_policy_registry = Some(registry);
         self
     }
 
@@ -7454,6 +7467,7 @@ impl MobBuilder {
                 notify_orchestrator_on_resume,
                 tool_bundles,
                 default_llm_client,
+                tool_consequence_policy_registry,
                 default_external_tools_provider,
                 identity_local_external_tools_provider,
                 spawn_base_prompt_source,
@@ -7629,6 +7643,7 @@ impl MobBuilder {
                 workgraph_service,
                 tool_bundles,
                 default_llm_client,
+                tool_consequence_policy_registry,
                 default_external_tools_provider,
                 identity_local_external_tools_provider,
                 spawn_base_prompt_source,
@@ -7679,6 +7694,7 @@ impl MobBuilder {
             notify_orchestrator_on_resume,
             tool_bundles,
             default_llm_client,
+            tool_consequence_policy_registry,
             default_external_tools_provider,
             identity_local_external_tools_provider,
             spawn_base_prompt_source,
@@ -8283,6 +8299,7 @@ impl MobBuilder {
                 runtime_provisioner.session_ops_adapter(),
                 tool_bundles,
                 default_llm_client,
+                tool_consequence_policy_registry,
                 default_external_tools_provider,
                 identity_local_external_tools_provider,
                 spawn_base_prompt_source,
@@ -9712,6 +9729,7 @@ impl MobBuilder {
         workgraph_service: Option<meerkat::WorkGraphService>,
         tool_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
         default_llm_client: Option<Arc<dyn LlmClient>>,
+        tool_consequence_policy_registry: Option<Arc<meerkat_core::ToolConsequencePolicyRegistry>>,
         default_external_tools_provider: Option<crate::ExternalToolsProvider>,
         identity_local_external_tools_provider: Option<
             Arc<dyn super::IdentityLocalExternalToolsProvider>,
@@ -9788,6 +9806,7 @@ impl MobBuilder {
                 session_ops_adapter,
                 tool_bundles,
                 default_llm_client,
+                tool_consequence_policy_registry,
                 default_external_tools_provider,
                 identity_local_external_tools_provider,
                 spawn_base_prompt_source,
@@ -9828,6 +9847,7 @@ impl MobBuilder {
         session_ops_adapter: Arc<super::ops_adapter::MobOpsAdapter>,
         tool_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
         default_llm_client: Option<Arc<dyn LlmClient>>,
+        tool_consequence_policy_registry: Option<Arc<meerkat_core::ToolConsequencePolicyRegistry>>,
         default_external_tools_provider: Option<crate::ExternalToolsProvider>,
         identity_local_external_tools_provider: Option<
             Arc<dyn super::IdentityLocalExternalToolsProvider>,
@@ -10062,6 +10082,7 @@ impl MobBuilder {
                 explicit_resume_operations,
                 tool_bundles,
                 default_llm_client,
+                tool_consequence_policy_registry,
                 retired_event_index: Arc::new(RwLock::new(retired_event_index)),
                 retirement_started_event_index: Arc::new(RwLock::new(
                     retirement_started_event_index,
@@ -10118,6 +10139,8 @@ impl MobBuilder {
                 identity_status,
                 identity_reconcile_queue: VecDeque::new(),
                 identity_reconcile_enqueued: BTreeSet::new(),
+                identity_admission_closed: BTreeSet::new(),
+                identity_active_intent_revisions: BTreeMap::new(),
                 identity_reconcile_safety_cursor: None,
                 identity_reconcile_failures: Arc::new(RwLock::new(BTreeMap::new())),
                 identity_reconcile_backoff: BTreeMap::new(),
@@ -11180,6 +11203,8 @@ mod tests {
                 additional_instructions: None,
                 system_prompt: PortableSystemPrompt::Disable,
                 tool_access_policy: None,
+                tool_category_overrides: meerkat_core::ToolCategoryOverrides::default(),
+                application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
                 mob_tool_authority_context: None,
                 auth_binding: None,
                 budget_limits: None,

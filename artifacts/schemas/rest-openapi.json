@@ -6,6 +6,7 @@
           "llm",
           "store",
           "tool",
+          "policy_indeterminate",
           "mcp",
           "session_not_found",
           "budget",
@@ -1617,6 +1618,54 @@
             "required": [
               "type",
               "budget_tokens"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ApplicationToolPolicyBinding": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "unmanaged",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "inherit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "provider",
+                "type": "string"
+              },
+              "policy_id": {
+                "type": "string"
+              },
+              "provider_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "provider_id",
+              "policy_id"
             ],
             "type": "object"
           }
@@ -10059,6 +10108,40 @@
         ],
         "type": "string"
       },
+      "MobAdoptMemberIdentityDeclarationResult": {
+        "additionalProperties": false,
+        "properties": {
+          "adoption": {
+            "$ref": "#/components/schemas/WireIdentityAdoptionOutcome"
+          },
+          "convergence": {
+            "$ref": "#/components/schemas/WireIdentityConvergenceStatus"
+          }
+        },
+        "required": [
+          "adoption",
+          "convergence"
+        ],
+        "title": "MobAdoptMemberIdentityDeclarationResult",
+        "type": "object"
+      },
+      "MobApplyMemberToolDeclarationResult": {
+        "additionalProperties": false,
+        "properties": {
+          "commit": {
+            "$ref": "#/components/schemas/WireMemberToolCommitOutcome"
+          },
+          "convergence": {
+            "$ref": "#/components/schemas/WireIdentityConvergenceStatus"
+          }
+        },
+        "required": [
+          "commit",
+          "convergence"
+        ],
+        "title": "MobApplyMemberToolDeclarationResult",
+        "type": "object"
+      },
       "MobBoundedHelperResult": {
         "description": "Receiver-bounded helper payload with explicit truncation state.",
         "properties": {
@@ -10212,6 +10295,54 @@
           "provenance"
         ],
         "title": "MobMemberHistoryResult",
+        "type": "object"
+      },
+      "MobMemberToolDeclarationResult": {
+        "additionalProperties": false,
+        "properties": {
+          "agent_identity": {
+            "type": "string"
+          },
+          "convergence": {
+            "$ref": "#/components/schemas/WireIdentityConvergenceStatus"
+          },
+          "declaration": {
+            "$ref": "#/components/schemas/WireMemberToolDeclaration"
+          },
+          "desired_intent_revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "mob_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "mob_id",
+          "agent_identity",
+          "desired_intent_revision",
+          "declaration",
+          "convergence"
+        ],
+        "title": "MobMemberToolDeclarationResult",
+        "type": "object"
+      },
+      "MobResolveIdentityConvergenceBlockResult": {
+        "additionalProperties": false,
+        "properties": {
+          "convergence": {
+            "$ref": "#/components/schemas/WireIdentityConvergenceStatus"
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/WireIdentityConvergenceResolutionOutcome"
+          }
+        },
+        "required": [
+          "outcome",
+          "convergence"
+        ],
+        "title": "MobResolveIdentityConvergenceBlockResult",
         "type": "object"
       },
       "MobRouteInstallsResult": {
@@ -11313,6 +11444,13 @@
               "null"
             ]
           },
+          "application_tool_policy": {
+            "$ref": "#/components/schemas/ApplicationToolPolicyBinding",
+            "default": {
+              "kind": "unmanaged"
+            },
+            "description": "Stable application policy identity. Snapshot content remains owned by\nthe host-injected provider and is never copied into this member spec."
+          },
           "auth_binding": {
             "anyOf": [
               {
@@ -11387,6 +11525,21 @@
               }
             ],
             "description": "Resolved policy only — `Inherit` is unrepresentable (O3); `None`\nmeans no per-member policy, not \"inherit something ambient\"."
+          },
+          "tool_category_overrides": {
+            "$ref": "#/components/schemas/ToolCategoryOverrides",
+            "default": {
+              "builtins": "inherit",
+              "comms": "inherit",
+              "image_generation": "inherit",
+              "memory": "inherit",
+              "mob": "inherit",
+              "schedule": "inherit",
+              "shell": "inherit",
+              "web_search": "inherit",
+              "workgraph": "inherit"
+            },
+            "description": "Administrative per-category intent. The receiving host resolves each\nfield through the same category owner used for local materialization."
           }
         },
         "required": [
@@ -12296,6 +12449,57 @@
         ],
         "type": "string"
       },
+      "RestAdoptMemberIdentityDeclarationRequest": {
+        "additionalProperties": false,
+        "description": "`POST /mob/{id}/members/{agent_identity}/identity-adoption` - adopt one\nalready-realized member under an explicit expected-absent precondition.",
+        "properties": {
+          "convergence": {
+            "$ref": "#/components/schemas/WireIdentityConvergenceMode"
+          },
+          "declaration_revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "declaration_scope": {
+            "type": "string"
+          },
+          "member": {
+            "$ref": "#/components/schemas/WireIdentityProfileMemberDeclaration"
+          },
+          "owned_wiring": {
+            "items": {
+              "$ref": "#/components/schemas/WireDesiredIdentityEdge"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "precondition": {
+            "$ref": "#/components/schemas/WireIdentityAdoptionPrecondition"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "session": {
+            "$ref": "#/components/schemas/WireDesiredSessionTarget"
+          },
+          "wiring_custody": {
+            "$ref": "#/components/schemas/WireIdentityWiringCustody"
+          }
+        },
+        "required": [
+          "request_id",
+          "precondition",
+          "declaration_scope",
+          "declaration_revision",
+          "session",
+          "member",
+          "owned_wiring",
+          "convergence"
+        ],
+        "title": "RestAdoptMemberIdentityDeclarationRequest",
+        "type": "object"
+      },
       "RestAppendSystemContextRequest": {
         "description": "`POST /sessions/{id}/system_context` — append one ordinary durable ordered\nSystem message at the admitted transcript boundary.\n\nThe body is the typed [`CoreRenderable`] owner rather than a bare `text`\nstring; a plain-text client payload still deserializes via\n`CoreRenderable`'s tagged `text` variant. The rendered string is preserved\nexactly, including empty and whitespace-only content.",
         "properties": {
@@ -12319,6 +12523,34 @@
           "content"
         ],
         "title": "RestAppendSystemContextRequest",
+        "type": "object"
+      },
+      "RestApplyMemberToolDeclarationRequest": {
+        "additionalProperties": false,
+        "description": "`PUT /mob/{id}/members/{agent_identity}/tool-declaration` - update the\ndurable member-tool declaration against an exact desired revision.",
+        "properties": {
+          "convergence": {
+            "$ref": "#/components/schemas/WireIdentityConvergenceMode"
+          },
+          "declaration": {
+            "$ref": "#/components/schemas/WireMemberToolDeclaration"
+          },
+          "expected_intent_revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "request_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "expected_intent_revision",
+          "declaration",
+          "convergence"
+        ],
+        "title": "RestApplyMemberToolDeclarationRequest",
         "type": "object"
       },
       "RestAuthBindingTestRequest": {
@@ -13071,6 +13303,36 @@
           "result"
         ],
         "title": "RestPeerResponseTerminalRequest",
+        "type": "object"
+      },
+      "RestResolveIdentityConvergenceBlockRequest": {
+        "additionalProperties": false,
+        "description": "`POST /mob/{id}/members/{agent_identity}/tool-convergence/resolve` -\ncontinue a blocked identity replacement against exact desired and active\nrevisions.",
+        "properties": {
+          "convergence": {
+            "$ref": "#/components/schemas/WireIdentityConvergenceMode"
+          },
+          "expected_desired_revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "observed_active_revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "request_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "expected_desired_revision",
+          "observed_active_revision",
+          "convergence"
+        ],
+        "title": "RestResolveIdentityConvergenceBlockRequest",
         "type": "object"
       },
       "RestSessionDetailsResponse": {
@@ -15546,8 +15808,56 @@
           }
         ]
       },
-      "ToolAccessPolicy": {
+      "ToolAccessConstraint": {
         "description": "Tool access control for delegated branches",
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "const": "allow_names",
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/components/schemas/ToolNameSet"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "deny_names",
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/components/schemas/ToolNameSet"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "read_only",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ToolAccessPolicy": {
         "oneOf": [
           {
             "description": "Inherit all tools from parent",
@@ -15608,11 +15918,94 @@
               "type"
             ],
             "type": "object"
+          },
+          {
+            "description": "Every contained constraint must admit the call.",
+            "properties": {
+              "type": {
+                "const": "constraints",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "$ref": "#/components/schemas/ToolAccessConstraint"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
           }
         ]
       },
       "ToolCallArguments": {
         "additionalProperties": true,
+        "type": "object"
+      },
+      "ToolCategoryOverride": {
+        "description": "Caller intent for a tool category.\n\nDistinguishes \"no opinion / didn't exist\" (`Inherit`) from explicit\n`Enable` / `Disable` so that resumed sessions don't freeze tool\navailability at the capabilities of the Meerkat version that created them.\n\n**Dogma §10:** Inherit, disable, and set are different facts.",
+        "oneOf": [
+          {
+            "const": "inherit",
+            "description": "No explicit intent — inherit runtime/factory default.",
+            "type": "string"
+          },
+          {
+            "const": "enable",
+            "description": "Explicitly enabled by caller.",
+            "type": "string"
+          },
+          {
+            "const": "disable",
+            "description": "Explicitly disabled by caller.",
+            "type": "string"
+          }
+        ]
+      },
+      "ToolCategoryOverrides": {
+        "additionalProperties": false,
+        "description": "Administrative per-category member-tool intent.\n\nThis carrier deliberately keeps `Inherit`, `Enable`, and `Disable`\ndistinct. Materialization resolves each field through its existing\ncategory owner; carrying the aggregate does not merge those owners.",
+        "properties": {
+          "builtins": {
+            "$ref": "#/components/schemas/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "comms": {
+            "$ref": "#/components/schemas/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "image_generation": {
+            "$ref": "#/components/schemas/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "memory": {
+            "$ref": "#/components/schemas/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "mob": {
+            "$ref": "#/components/schemas/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "schedule": {
+            "$ref": "#/components/schemas/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "shell": {
+            "$ref": "#/components/schemas/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "web_search": {
+            "$ref": "#/components/schemas/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "workgraph": {
+            "$ref": "#/components/schemas/ToolCategoryOverride",
+            "default": "inherit"
+          }
+        },
         "type": "object"
       },
       "ToolConfigChangeDomain": {
@@ -17043,6 +17436,43 @@
         ],
         "type": "object"
       },
+      "WireCallbackToolSetDeclaration": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "inherit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "set",
+                "type": "string"
+              },
+              "tools": {
+                "items": {
+                  "$ref": "#/components/schemas/WireDesiredLocalCallbackTool"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "kind",
+              "tools"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "WireContentBlock": {
         "description": "Wire-safe content block (no `source_path` — internal only).",
         "oneOf": [
@@ -17227,6 +17657,140 @@
           "admin_grants"
         ],
         "type": "string"
+      },
+      "WireDesiredExecution": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "execution": {
+                "const": "controlling_session",
+                "type": "string"
+              }
+            },
+            "required": [
+              "execution"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "execution": {
+                "const": "any_bound_host_session",
+                "type": "string"
+              }
+            },
+            "required": [
+              "execution"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "execution": {
+                "const": "placed_session",
+                "type": "string"
+              },
+              "host_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "execution",
+              "host_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "address": {
+                "type": "string"
+              },
+              "execution": {
+                "const": "external",
+                "type": "string"
+              },
+              "identity": {
+                "$ref": "#/components/schemas/WireTrustedPeerIdentity"
+              }
+            },
+            "required": [
+              "execution",
+              "address",
+              "identity"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireDesiredIdentityEdge": {
+        "additionalProperties": false,
+        "properties": {
+          "a": {
+            "type": "string"
+          },
+          "b": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "a",
+          "b"
+        ],
+        "type": "object"
+      },
+      "WireDesiredLocalCallbackTool": {
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "input_schema": true,
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "description",
+          "input_schema"
+        ],
+        "type": "object"
+      },
+      "WireDesiredSessionAuthorityPolicy": {
+        "enum": [
+          "require_existing"
+        ],
+        "type": "string"
+      },
+      "WireDesiredSessionTarget": {
+        "additionalProperties": false,
+        "properties": {
+          "authority_policy": {
+            "$ref": "#/components/schemas/WireDesiredSessionAuthorityPolicy"
+          },
+          "lineage_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "lineage_id": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "lineage_id",
+          "lineage_generation",
+          "authority_policy"
+        ],
+        "type": "object"
       },
       "WireDeviceCompleteResult": {
         "description": "`auth/login/device_complete` success body.",
@@ -17677,6 +18241,463 @@
       },
       "WireHostRef": {
         "description": "Opaque host reference: the host's canonical comms `PeerId` string.",
+        "type": "string"
+      },
+      "WireIdentityAdoptionOutcome": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "desired_revision": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "outcome": {
+                "const": "adopted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "desired_revision"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "actual_revision": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "outcome": {
+                "const": "precondition_conflict",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "actual_revision"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "outcome": {
+                "const": "request_conflict",
+                "type": "string"
+              },
+              "request_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "request_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireIdentityAdoptionPrecondition": {
+        "enum": [
+          "expected_absent"
+        ],
+        "type": "string"
+      },
+      "WireIdentityConvergenceCondition": {
+        "enum": [
+          "pending",
+          "reconciling",
+          "converged",
+          "backoff",
+          "repair_blocked",
+          "quarantined",
+          "tombstoned",
+          "suspended",
+          "drain_blocked"
+        ],
+        "type": "string"
+      },
+      "WireIdentityConvergenceMode": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "drain",
+                "type": "string"
+              },
+              "max_wait_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "max_wait_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "cancel_active",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireIdentityConvergenceResolutionOutcome": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "active_revision": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "desired_revision": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "outcome": {
+                "const": "resolved",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "desired_revision",
+              "active_revision"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "actual": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "expected": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "outcome": {
+                "const": "desired_revision_conflict",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "expected",
+              "actual"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "actual": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "expected": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "outcome": {
+                "const": "active_revision_conflict",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "expected",
+              "actual"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "outcome": {
+                "const": "not_blocked",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "outcome": {
+                "const": "member_absent",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "outcome": {
+                "const": "request_conflict",
+                "type": "string"
+              },
+              "request_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "request_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireIdentityConvergenceStatus": {
+        "additionalProperties": false,
+        "properties": {
+          "active_intent_revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "agent_identity": {
+            "type": "string"
+          },
+          "condition": {
+            "$ref": "#/components/schemas/WireIdentityConvergenceCondition"
+          },
+          "decision": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireIdentityReconcileDecision"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "desired_intent_revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "observed_at_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "agent_identity",
+          "condition",
+          "observed_at_ms"
+        ],
+        "type": "object"
+      },
+      "WireIdentityProfileMemberDeclaration": {
+        "additionalProperties": false,
+        "properties": {
+          "additional_instructions": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "auth_binding": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireAuthBindingRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "budget_limits": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BudgetLimits"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "context": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireOpaqueJson"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "execution": {
+            "$ref": "#/components/schemas/WireDesiredExecution"
+          },
+          "external_addressable_override": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "model_override": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "profile_name": {
+            "type": "string"
+          },
+          "profile_override": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PortableProfile"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "required_env_keys": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "required_local_callback_tools": {
+            "items": {
+              "$ref": "#/components/schemas/WireDesiredLocalCallbackTool"
+            },
+            "type": "array"
+          },
+          "runtime_mode": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireMobRuntimeMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "system_prompt_override": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PortableSystemPrompt"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tool_access_policy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireResolvedToolAccessPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "profile_name",
+          "execution"
+        ],
+        "type": "object"
+      },
+      "WireIdentityReconcileDecision": {
+        "enum": [
+          "backoff",
+          "repair_blocked",
+          "acquire_lease",
+          "await_lease",
+          "close_member_admission",
+          "await_member_drain",
+          "drain_blocked",
+          "cancel_active_member",
+          "seal_retirement_proven",
+          "seal_session_creation_consumed",
+          "ensure_session_authority",
+          "ensure_runtime_registration",
+          "await_external_binding_ceremony",
+          "ensure_external_binding_receipt",
+          "ensure_external_binding",
+          "ensure_member_materialization",
+          "ensure_initial_delivery_receipt",
+          "ensure_initial_delivery",
+          "await_initial_delivery",
+          "reconcile_wiring",
+          "retire_member_materialization",
+          "retire_runtime_registration",
+          "release_session_authority",
+          "converged",
+          "tombstoned",
+          "quarantined"
+        ],
+        "type": "string"
+      },
+      "WireIdentityWiringCustody": {
+        "enum": [
+          "external_managed",
+          "identity_owned"
+        ],
         "type": "string"
       },
       "WireLiveAdapterStatus": {
@@ -18223,6 +19244,251 @@
             "type": "object"
           }
         ]
+      },
+      "WireMemberToolAccessConstraint": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "allow_names",
+                "type": "string"
+              },
+              "names": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "kind",
+              "names"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "deny_names",
+                "type": "string"
+              },
+              "names": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "kind",
+              "names"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "read_only",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireMemberToolAccessDeclaration": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "inherit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "unrestricted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "constraints": {
+                "items": {
+                  "$ref": "#/components/schemas/WireMemberToolAccessConstraint"
+                },
+                "type": "array"
+              },
+              "kind": {
+                "const": "constraints",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "constraints"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireMemberToolCommitOutcome": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "desired_revision": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "outcome": {
+                "const": "committed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "desired_revision"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "desired_revision": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "outcome": {
+                "const": "no_change",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "desired_revision"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "actual": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "expected": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "outcome": {
+                "const": "revision_conflict",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "expected",
+              "actual"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "outcome": {
+                "const": "request_conflict",
+                "type": "string"
+              },
+              "request_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "request_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "outcome": {
+                "const": "member_absent",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "outcome": {
+                "const": "invalid_declaration",
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "reason"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireMemberToolDeclaration": {
+        "additionalProperties": false,
+        "properties": {
+          "application_policy": {
+            "$ref": "#/components/schemas/ApplicationToolPolicyBinding"
+          },
+          "callback_tools": {
+            "$ref": "#/components/schemas/WireCallbackToolSetDeclaration"
+          },
+          "category_overrides": {
+            "$ref": "#/components/schemas/ToolCategoryOverrides"
+          },
+          "execution": {
+            "$ref": "#/components/schemas/WireMemberToolAccessDeclaration"
+          }
+        },
+        "required": [
+          "category_overrides",
+          "callback_tools",
+          "execution",
+          "application_policy"
+        ],
+        "type": "object"
       },
       "WireMobBackendKind": {
         "enum": [
@@ -19237,7 +20503,6 @@
         "type": "string"
       },
       "WireResolvedToolAccessPolicy": {
-        "description": "Resolved tool access policy — mirrors `WireToolAccessPolicy`'s\nallow/deny shape exactly, with `Inherit` structurally absent (O3).",
         "oneOf": [
           {
             "properties": {
@@ -19287,6 +20552,26 @@
             },
             "required": [
               "type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Every contained constraint must admit the call.",
+            "properties": {
+              "type": {
+                "const": "constraints",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "$ref": "#/components/schemas/WireToolAccessConstraint"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
             ],
             "type": "object"
           }
@@ -19823,6 +21108,61 @@
         },
         "type": "object"
       },
+      "WireToolAccessConstraint": {
+        "description": "Resolved tool access policy — mirrors `WireToolAccessPolicy`'s\nallow/deny shape exactly, with `Inherit` structurally absent (O3).",
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "const": "allow_names",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "deny_names",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "read_only",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "WireToolResult": {
         "description": "Tool result payload in a transcript.",
         "properties": {
@@ -19886,6 +21226,29 @@
             "required": [
               "kind",
               "debug"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireTrustedPeerIdentity": {
+        "description": "Typed external peer identity for public mob wiring surfaces.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Recoverable Ed25519 public key string in `ed25519:<base64>` form.",
+            "properties": {
+              "kind": {
+                "const": "ed25519_public_key",
+                "type": "string"
+              },
+              "public_key": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "public_key"
             ],
             "type": "object"
           }
@@ -21832,6 +23195,62 @@
         "summary": "Read a mob member transcript page by identity"
       }
     },
+    "/mob/{id}/members/{agent_identity}/identity-adoption": {
+      "post": {
+        "operationId": "post_mob_id_members_agent_identity_identity_adoption",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "agent_identity",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RestAdoptMemberIdentityDeclarationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MobAdoptMemberIdentityDeclarationResult"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WireError"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Adopt an existing member into durable identity intent"
+      }
+    },
     "/mob/{id}/members/{agent_identity}/respawn": {
       "post": {
         "operationId": "post_mob_id_members_agent_identity_respawn",
@@ -21923,6 +23342,162 @@
           }
         },
         "summary": "Get a mob member execution status snapshot"
+      }
+    },
+    "/mob/{id}/members/{agent_identity}/tool-convergence/resolve": {
+      "post": {
+        "operationId": "post_mob_id_members_agent_identity_tool_convergence_resolve",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "agent_identity",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RestResolveIdentityConvergenceBlockRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MobResolveIdentityConvergenceBlockResult"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WireError"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Resolve blocked member identity convergence"
+      }
+    },
+    "/mob/{id}/members/{agent_identity}/tool-declaration": {
+      "get": {
+        "operationId": "get_mob_id_members_agent_identity_tool_declaration",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "agent_identity",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MobMemberToolDeclarationResult"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WireError"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Read a durable member-tool declaration and convergence status"
+      },
+      "put": {
+        "operationId": "put_mob_id_members_agent_identity_tool_declaration",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "agent_identity",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RestApplyMemberToolDeclarationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MobApplyMemberToolDeclarationResult"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WireError"
+                }
+              }
+            },
+            "description": "Error response"
+          }
+        },
+        "summary": "Apply a durable member-tool declaration"
       }
     },
     "/mob/{id}/route-installs": {

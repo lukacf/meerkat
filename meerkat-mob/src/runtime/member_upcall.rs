@@ -171,6 +171,8 @@ pub(crate) enum UpcallToolErrorClass {
     Timeout,
     InactivityTimeout,
     AccessDenied,
+    PolicyDenied,
+    PolicyIndeterminate,
     Other,
 }
 
@@ -269,6 +271,22 @@ impl UpcallToolOutcome {
                 timeout_ms: None,
                 unavailable_reason: None,
                 data: None,
+            },
+            ToolError::PolicyDenied { denial } => UpcallToolError {
+                class: UpcallToolErrorClass::PolicyDenied,
+                message: error.to_string(),
+                name: None,
+                timeout_ms: None,
+                unavailable_reason: None,
+                data: serde_json::to_value(denial).ok(),
+            },
+            ToolError::PolicyIndeterminate { failure } => UpcallToolError {
+                class: UpcallToolErrorClass::PolicyIndeterminate,
+                message: error.to_string(),
+                name: None,
+                timeout_ms: None,
+                unavailable_reason: None,
+                data: serde_json::to_value(failure).ok(),
             },
             ToolError::Other(message) => UpcallToolError {
                 class: UpcallToolErrorClass::Other,
@@ -375,6 +393,24 @@ impl UpcallToolError {
                 ToolError::inactivity_timeout(name, self.timeout_ms.unwrap_or_default())
             }
             UpcallToolErrorClass::AccessDenied => ToolError::access_denied(name),
+            UpcallToolErrorClass::PolicyDenied => self
+                .data
+                .and_then(|data| serde_json::from_value(data).ok())
+                .map(ToolError::policy_denied)
+                .unwrap_or_else(|| {
+                    ToolError::execution_failed(
+                        "member upcall carried malformed policy_denied data",
+                    )
+                }),
+            UpcallToolErrorClass::PolicyIndeterminate => self
+                .data
+                .and_then(|data| serde_json::from_value(data).ok())
+                .map(ToolError::policy_indeterminate)
+                .unwrap_or_else(|| {
+                    ToolError::execution_failed(
+                        "member upcall carried malformed policy_indeterminate data",
+                    )
+                }),
             UpcallToolErrorClass::Other => ToolError::other(self.message),
         }
     }
@@ -865,20 +901,26 @@ impl MemberUpcallToolDispatcher {
         args: RemoteSpawnMemberArgs,
     ) -> Result<MemberOperatorSpawnSpec, ToolError> {
         let requested_tool_access_policy_present = args.tool_access_policy.is_some();
-        let resolved_tool_access_policy = match args.tool_access_policy {
-            Some(ToolAccessPolicy::AllowList(names)) => Some(
-                WireResolvedToolAccessPolicy::AllowList(sorted_tool_names(&names)),
-            ),
-            Some(ToolAccessPolicy::DenyList(names)) => Some(
-                WireResolvedToolAccessPolicy::DenyList(sorted_tool_names(&names)),
-            ),
-            Some(ToolAccessPolicy::ReadOnly) => Some(WireResolvedToolAccessPolicy::ReadOnly),
+        let parent_policy = self
+            .requester_resolved_policy
+            .clone()
+            .map(domain_resolved_tool_access_policy);
+        let resolved_domain_policy = match args.tool_access_policy {
             // Inherit (explicit or absent) resolves against THIS member's
             // own sealed policy — the parent-realm resolution happened on
             // the controlling host at spec-mint (F-C.4 containment: no host
             // pair yields an Inherit-derived unrestricted child).
-            Some(ToolAccessPolicy::Inherit) | None => self.requester_resolved_policy.clone(),
+            Some(ToolAccessPolicy::Inherit) | None => parent_policy,
+            Some(explicit) => Some(match parent_policy {
+                Some(parent) => explicit.conjoin(parent).map_err(|error| {
+                    ToolError::invalid_arguments("tool_access_policy", error.to_string())
+                })?,
+                None => explicit,
+            }),
         };
+        let resolved_tool_access_policy = resolved_domain_policy
+            .as_ref()
+            .map(wire_resolved_tool_access_policy);
         // Launch precedence (tools.rs parity): explicit launch_mode wins,
         // then the resume_bridge_session_id compatibility field.
         let launch_mode = match args.launch_mode {
@@ -907,6 +949,71 @@ fn sorted_tool_names(names: &meerkat_core::types::ToolNameSet) -> Vec<String> {
     let mut out: Vec<String> = names.iter().map(|name| name.as_str().to_string()).collect();
     out.sort_unstable();
     out
+}
+
+fn wire_resolved_tool_access_policy(policy: &ToolAccessPolicy) -> WireResolvedToolAccessPolicy {
+    match policy {
+        ToolAccessPolicy::Inherit => unreachable!("resolved policy cannot contain inherit"),
+        ToolAccessPolicy::AllowList(names) => {
+            WireResolvedToolAccessPolicy::AllowList(sorted_tool_names(names))
+        }
+        ToolAccessPolicy::DenyList(names) => {
+            WireResolvedToolAccessPolicy::DenyList(sorted_tool_names(names))
+        }
+        ToolAccessPolicy::ReadOnly => WireResolvedToolAccessPolicy::ReadOnly,
+        ToolAccessPolicy::Constraints(constraints) => WireResolvedToolAccessPolicy::Constraints(
+            constraints
+                .iter()
+                .map(|constraint| match constraint {
+                    meerkat_core::ops::ToolAccessConstraint::AllowNames(names) => {
+                        meerkat_contracts::wire::WireToolAccessConstraint::AllowNames(
+                            sorted_tool_names(names),
+                        )
+                    }
+                    meerkat_core::ops::ToolAccessConstraint::DenyNames(names) => {
+                        meerkat_contracts::wire::WireToolAccessConstraint::DenyNames(
+                            sorted_tool_names(names),
+                        )
+                    }
+                    meerkat_core::ops::ToolAccessConstraint::ReadOnly => {
+                        meerkat_contracts::wire::WireToolAccessConstraint::ReadOnly
+                    }
+                })
+                .collect(),
+        ),
+    }
+}
+
+fn domain_resolved_tool_access_policy(policy: WireResolvedToolAccessPolicy) -> ToolAccessPolicy {
+    match policy {
+        WireResolvedToolAccessPolicy::AllowList(names) => {
+            ToolAccessPolicy::AllowList(names.into_iter().collect())
+        }
+        WireResolvedToolAccessPolicy::DenyList(names) => {
+            ToolAccessPolicy::DenyList(names.into_iter().collect())
+        }
+        WireResolvedToolAccessPolicy::ReadOnly => ToolAccessPolicy::ReadOnly,
+        WireResolvedToolAccessPolicy::Constraints(constraints) => ToolAccessPolicy::Constraints(
+            constraints
+                .into_iter()
+                .map(|constraint| match constraint {
+                    meerkat_contracts::wire::WireToolAccessConstraint::AllowNames(names) => {
+                        meerkat_core::ops::ToolAccessConstraint::AllowNames(
+                            names.into_iter().collect(),
+                        )
+                    }
+                    meerkat_contracts::wire::WireToolAccessConstraint::DenyNames(names) => {
+                        meerkat_core::ops::ToolAccessConstraint::DenyNames(
+                            names.into_iter().collect(),
+                        )
+                    }
+                    meerkat_contracts::wire::WireToolAccessConstraint::ReadOnly => {
+                        meerkat_core::ops::ToolAccessConstraint::ReadOnly
+                    }
+                })
+                .collect(),
+        ),
+    }
 }
 
 fn wire_runtime_mode(mode: crate::MobRuntimeMode) -> WireMobRuntimeMode {
@@ -1204,7 +1311,9 @@ mod tests {
         assert!(spec.requested_tool_access_policy_present);
         assert_eq!(spec.resolved_tool_access_policy, Some(deny.clone()));
 
-        // Explicit AllowList ships verbatim (sorted), presence=true.
+        // An explicit allow-list remains conjunctive with the requester's
+        // deny-list. Both name constraints ship in canonical order and the
+        // request-presence fact remains independent.
         let args = raw(json!({
             "profile": "worker", "member_id": "b21",
             "tool_access_policy": {"type": "allow_list", "value": ["b_tool", "a_tool"]},
@@ -1217,9 +1326,14 @@ mod tests {
         assert!(spec.requested_tool_access_policy_present);
         assert_eq!(
             spec.resolved_tool_access_policy,
-            Some(WireResolvedToolAccessPolicy::AllowList(vec![
-                "a_tool".into(),
-                "b_tool".into()
+            Some(WireResolvedToolAccessPolicy::Constraints(vec![
+                meerkat_contracts::wire::WireToolAccessConstraint::AllowNames(vec![
+                    "a_tool".into(),
+                    "b_tool".into(),
+                ]),
+                meerkat_contracts::wire::WireToolAccessConstraint::DenyNames(vec![
+                    "shell_execute".into(),
+                ]),
             ]))
         );
 

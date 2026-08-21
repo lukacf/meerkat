@@ -175,6 +175,18 @@ pub enum ToolError {
     #[error("Tool '{name}' is not allowed by policy")]
     AccessDenied { name: String },
 
+    /// Application consequence policy denied an otherwise statically admitted call.
+    #[error("Tool call denied by application policy: {denial:?}")]
+    PolicyDenied {
+        denial: crate::ToolConsequenceDenial,
+    },
+
+    /// Application consequence policy could not produce an authoritative verdict.
+    #[error("Tool consequence policy is indeterminate: {failure}")]
+    PolicyIndeterminate {
+        failure: crate::ToolConsequenceFailure,
+    },
+
     /// A generic tool error with a message
     #[error("{0}")]
     Other(String),
@@ -203,6 +215,8 @@ impl ToolError {
             Self::Timeout { .. } => "timeout",
             Self::InactivityTimeout { .. } => "inactivity_timeout",
             Self::AccessDenied { .. } => "access_denied",
+            Self::PolicyDenied { .. } => "policy_denied",
+            Self::PolicyIndeterminate { .. } => "policy_indeterminate",
             Self::Other(_) => "tool_error",
             Self::CallbackPending { .. } => "callback_pending",
         }
@@ -260,6 +274,8 @@ impl ToolError {
     pub fn structured_data(&self) -> Option<serde_json::Value> {
         match self {
             Self::ExecutionFailedWithData { data, .. } => Some(data.clone()),
+            Self::PolicyDenied { denial } => serde_json::to_value(denial).ok(),
+            Self::PolicyIndeterminate { failure } => serde_json::to_value(failure).ok(),
             _ => None,
         }
     }
@@ -277,6 +293,12 @@ impl ToolError {
     }
     pub fn access_denied(name: impl Into<String>) -> Self {
         Self::AccessDenied { name: name.into() }
+    }
+    pub fn policy_denied(denial: crate::ToolConsequenceDenial) -> Self {
+        Self::PolicyDenied { denial }
+    }
+    pub fn policy_indeterminate(failure: crate::ToolConsequenceFailure) -> Self {
+        Self::PolicyIndeterminate { failure }
     }
     pub fn other(message: impl Into<String>) -> Self {
         Self::Other(message.into())
@@ -334,6 +356,10 @@ pub enum AgentError {
     /// [`ToolError::error_code`] and the wire surface.
     #[error("Tool error: {error}")]
     Tool { error: ToolError },
+    #[error("Tool consequence policy is indeterminate: {failure}")]
+    PolicyIndeterminate {
+        failure: crate::ToolConsequenceFailure,
+    },
     #[error("MCP error: {0}")]
     McpError(String),
     #[error("Session not found: {0}")]

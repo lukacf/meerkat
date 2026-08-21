@@ -102,6 +102,11 @@ import {
   type MobRunResultParams,
   type MobMemberParams,
   type MobMemberStatusResult,
+  type MobMemberToolDeclarationResult,
+  type MobApplyMemberToolDeclarationResult,
+  type MobAdoptMemberIdentityDeclarationParams,
+  type MobAdoptMemberIdentityDeclarationResult,
+  type MobResolveIdentityConvergenceBlockResult,
   type MobkitJobCancelAckParams,
   type MobkitJobCheckpointParams,
   type MobkitJobCompleteParams,
@@ -129,6 +134,8 @@ import {
   type MobSpawnManyResultEntry,
   type WireMobMemberStatus,
   type WireMemberProgressSnapshot,
+  type WireIdentityConvergenceMode,
+  type WireMemberToolDeclaration,
   type WireMemberLifecycleCapabilities,
   type WireNonPortableResourceKind,
   type WireReachability,
@@ -2437,6 +2444,62 @@ export class MeerkatClient {
   }
 
   // ─── Multi-host console verbs (phase 7, DEC-P7A-9) ────────────────────
+
+  /** Read one member's durable tool declaration and fresh convergence. */
+  async mobMemberToolDeclaration(
+    mobId: string,
+    agentIdentity: string,
+  ): Promise<MobMemberToolDeclarationResult> {
+    return this.request("mob/member_tool_declaration", {
+      mob_id: mobId,
+      agent_identity: agentIdentity,
+    });
+  }
+
+  /** Apply one revision-fenced durable member-tool declaration. */
+  async applyMobMemberToolDeclaration(
+    mobId: string,
+    agentIdentity: string,
+    requestId: string,
+    expectedIntentRevision: number,
+    declaration: WireMemberToolDeclaration,
+    convergence: WireIdentityConvergenceMode,
+  ): Promise<MobApplyMemberToolDeclarationResult> {
+    return this.request("mob/apply_member_tool_declaration", {
+      mob_id: mobId,
+      agent_identity: agentIdentity,
+      request_id: requestId,
+      expected_intent_revision: expectedIntentRevision,
+      declaration,
+      convergence,
+    });
+  }
+
+  /** Adopt one already-realized member under an explicit expected-absent declaration. */
+  async adoptMobMemberIdentityDeclaration(
+    params: MobAdoptMemberIdentityDeclarationParams,
+  ): Promise<MobAdoptMemberIdentityDeclarationResult> {
+    return this.request("mob/adopt_member_identity_declaration", params);
+  }
+
+  /** Continue blocked identity convergence under exact revision fences. */
+  async resolveMobIdentityConvergenceBlock(
+    mobId: string,
+    agentIdentity: string,
+    requestId: string,
+    expectedDesiredRevision: number,
+    observedActiveRevision: number,
+    convergence: WireIdentityConvergenceMode,
+  ): Promise<MobResolveIdentityConvergenceBlockResult> {
+    return this.request("mob/resolve_identity_convergence_block", {
+      mob_id: mobId,
+      agent_identity: agentIdentity,
+      request_id: requestId,
+      expected_desired_revision: expectedDesiredRevision,
+      observed_active_revision: observedActiveRevision,
+      convergence,
+    });
+  }
 
   /**
    * Read a mob member transcript page by identity (`mob/member_history`).

@@ -155,10 +155,16 @@ export interface MobRunResult {
   run?: Record<string, unknown> | null;
 }
 
+export type BindingId = string;
+
+export type ProfileId = string;
+
+export type RealmId = string;
+
 export interface WireAuthBindingRef {
-  binding: string;
-  profile?: string | null;
-  realm: string;
+  binding: BindingId;
+  profile?: ProfileId | null;
+  realm: RealmId;
 }
 
 export type WireMobBackendKind = "session" | "external";
@@ -267,4 +273,318 @@ export interface MobLifecycleResult {
   destroy_report?: unknown;
   mob_id: string;
   ok: boolean;
+}
+
+export interface ApplicationToolPolicyBindingUnmanaged {
+  kind: "unmanaged";
+}
+
+export interface ApplicationToolPolicyBindingInherit {
+  kind: "inherit";
+}
+
+export interface ApplicationToolPolicyBindingProvider {
+  kind: "provider";
+  policy_id: string;
+  provider_id: string;
+}
+
+export type ApplicationToolPolicyBinding = ApplicationToolPolicyBindingUnmanaged | ApplicationToolPolicyBindingInherit | ApplicationToolPolicyBindingProvider;
+
+export type ToolCategoryOverride = "inherit" | "enable" | "disable";
+
+export interface ToolCategoryOverrides {
+  builtins?: ToolCategoryOverride;
+  comms?: ToolCategoryOverride;
+  image_generation?: ToolCategoryOverride;
+  memory?: ToolCategoryOverride;
+  mob?: ToolCategoryOverride;
+  schedule?: ToolCategoryOverride;
+  shell?: ToolCategoryOverride;
+  web_search?: ToolCategoryOverride;
+  workgraph?: ToolCategoryOverride;
+}
+
+export interface WireDesiredLocalCallbackTool {
+  description: string;
+  input_schema: unknown;
+  name: string;
+}
+
+export interface WireCallbackToolSetDeclarationInherit {
+  kind: "inherit";
+}
+
+export interface WireCallbackToolSetDeclarationSet {
+  kind: "set";
+  tools: WireDesiredLocalCallbackTool[];
+}
+
+export type WireCallbackToolSetDeclaration = WireCallbackToolSetDeclarationInherit | WireCallbackToolSetDeclarationSet;
+
+export interface WireMemberToolAccessConstraintAllowNames {
+  kind: "allow_names";
+  names: string[];
+}
+
+export interface WireMemberToolAccessConstraintDenyNames {
+  kind: "deny_names";
+  names: string[];
+}
+
+export interface WireMemberToolAccessConstraintReadOnly {
+  kind: "read_only";
+}
+
+export type WireMemberToolAccessConstraint = WireMemberToolAccessConstraintAllowNames | WireMemberToolAccessConstraintDenyNames | WireMemberToolAccessConstraintReadOnly;
+
+export interface WireMemberToolAccessDeclarationInherit {
+  kind: "inherit";
+}
+
+export interface WireMemberToolAccessDeclarationUnrestricted {
+  kind: "unrestricted";
+}
+
+export interface WireMemberToolAccessDeclarationConstraints {
+  constraints: WireMemberToolAccessConstraint[];
+  kind: "constraints";
+}
+
+export type WireMemberToolAccessDeclaration = WireMemberToolAccessDeclarationInherit | WireMemberToolAccessDeclarationUnrestricted | WireMemberToolAccessDeclarationConstraints;
+
+export interface WireMemberToolDeclaration {
+  application_policy: ApplicationToolPolicyBinding;
+  callback_tools: WireCallbackToolSetDeclaration;
+  category_overrides: ToolCategoryOverrides;
+  execution: WireMemberToolAccessDeclaration;
+}
+
+export type WireIdentityAdoptionPrecondition = "expected_absent";
+
+export type WireDesiredSessionAuthorityPolicy = "require_existing";
+
+export interface WireDesiredSessionTarget {
+  authority_policy: WireDesiredSessionAuthorityPolicy;
+  lineage_generation: number;
+  lineage_id: string;
+  session_id: string;
+}
+
+export interface WireTrustedPeerIdentityEd25519PublicKey {
+  kind: "ed25519_public_key";
+  public_key: string;
+}
+
+export type WireTrustedPeerIdentity = WireTrustedPeerIdentityEd25519PublicKey;
+
+export interface WireDesiredExecutionControllingSession {
+  execution: "controlling_session";
+}
+
+export interface WireDesiredExecutionAnyBoundHostSession {
+  execution: "any_bound_host_session";
+}
+
+export interface WireDesiredExecutionPlacedSession {
+  execution: "placed_session";
+  host_id: string;
+}
+
+export interface WireDesiredExecutionExternal {
+  address: string;
+  execution: "external";
+  identity: WireTrustedPeerIdentity;
+}
+
+export type WireDesiredExecution = WireDesiredExecutionControllingSession | WireDesiredExecutionAnyBoundHostSession | WireDesiredExecutionPlacedSession | WireDesiredExecutionExternal;
+
+export interface WireIdentityProfileMemberDeclaration {
+  profile_name: string;
+  profile_override?: Record<string, unknown> | null;
+  model_override?: string | null;
+  external_addressable_override?: boolean | null;
+  context?: string | null;
+  labels?: Record<string, string> | null;
+  additional_instructions?: string[] | null;
+  system_prompt_override?: Record<string, unknown> | null;
+  tool_access_policy?: Record<string, unknown> | null;
+  auth_binding?: WireAuthBindingRef | null;
+  budget_limits?: Record<string, unknown> | null;
+  runtime_mode?: WireMobRuntimeMode | null;
+  required_env_keys?: string[];
+  required_local_callback_tools?: WireDesiredLocalCallbackTool[];
+  execution: WireDesiredExecution;
+}
+
+export interface WireDesiredIdentityEdge {
+  a: string;
+  b: string;
+}
+
+export interface WireIdentityAdoptionOutcomeAdopted {
+  desired_revision: number;
+  outcome: "adopted";
+}
+
+export interface WireIdentityAdoptionOutcomePreconditionConflict {
+  actual_revision: number;
+  outcome: "precondition_conflict";
+}
+
+export interface WireIdentityAdoptionOutcomeRequestConflict {
+  outcome: "request_conflict";
+  request_id: string;
+}
+
+export type WireIdentityAdoptionOutcome = WireIdentityAdoptionOutcomeAdopted | WireIdentityAdoptionOutcomePreconditionConflict | WireIdentityAdoptionOutcomeRequestConflict;
+
+export interface WireIdentityConvergenceModeDrain {
+  kind: "drain";
+  max_wait_ms: number;
+}
+
+export interface WireIdentityConvergenceModeCancelActive {
+  kind: "cancel_active";
+}
+
+export type WireIdentityConvergenceMode = WireIdentityConvergenceModeDrain | WireIdentityConvergenceModeCancelActive;
+
+export type WireIdentityConvergenceCondition = "pending" | "reconciling" | "converged" | "backoff" | "repair_blocked" | "quarantined" | "tombstoned" | "suspended" | "drain_blocked";
+
+export type WireIdentityReconcileDecision = "backoff" | "repair_blocked" | "acquire_lease" | "await_lease" | "close_member_admission" | "await_member_drain" | "drain_blocked" | "cancel_active_member" | "seal_retirement_proven" | "seal_session_creation_consumed" | "ensure_session_authority" | "ensure_runtime_registration" | "await_external_binding_ceremony" | "ensure_external_binding_receipt" | "ensure_external_binding" | "ensure_member_materialization" | "ensure_initial_delivery_receipt" | "ensure_initial_delivery" | "await_initial_delivery" | "reconcile_wiring" | "retire_member_materialization" | "retire_runtime_registration" | "release_session_authority" | "converged" | "tombstoned" | "quarantined";
+
+export interface WireIdentityConvergenceStatus {
+  active_intent_revision?: number | null;
+  agent_identity: string;
+  condition: WireIdentityConvergenceCondition;
+  decision?: WireIdentityReconcileDecision | null;
+  desired_intent_revision?: number | null;
+  detail?: string | null;
+  observed_at_ms: number;
+}
+
+export interface WireMemberToolCommitOutcomeCommitted {
+  desired_revision: number;
+  outcome: "committed";
+}
+
+export interface WireMemberToolCommitOutcomeNoChange {
+  desired_revision: number;
+  outcome: "no_change";
+}
+
+export interface WireMemberToolCommitOutcomeRevisionConflict {
+  actual: number;
+  expected: number;
+  outcome: "revision_conflict";
+}
+
+export interface WireMemberToolCommitOutcomeRequestConflict {
+  outcome: "request_conflict";
+  request_id: string;
+}
+
+export interface WireMemberToolCommitOutcomeMemberAbsent {
+  outcome: "member_absent";
+}
+
+export interface WireMemberToolCommitOutcomeInvalidDeclaration {
+  outcome: "invalid_declaration";
+  reason: string;
+}
+
+export type WireMemberToolCommitOutcome = WireMemberToolCommitOutcomeCommitted | WireMemberToolCommitOutcomeNoChange | WireMemberToolCommitOutcomeRevisionConflict | WireMemberToolCommitOutcomeRequestConflict | WireMemberToolCommitOutcomeMemberAbsent | WireMemberToolCommitOutcomeInvalidDeclaration;
+
+export interface WireIdentityConvergenceResolutionOutcomeResolved {
+  active_revision: number;
+  desired_revision: number;
+  outcome: "resolved";
+}
+
+export interface WireIdentityConvergenceResolutionOutcomeDesiredRevisionConflict {
+  actual: number;
+  expected: number;
+  outcome: "desired_revision_conflict";
+}
+
+export interface WireIdentityConvergenceResolutionOutcomeActiveRevisionConflict {
+  actual: number;
+  expected: number;
+  outcome: "active_revision_conflict";
+}
+
+export interface WireIdentityConvergenceResolutionOutcomeNotBlocked {
+  outcome: "not_blocked";
+}
+
+export interface WireIdentityConvergenceResolutionOutcomeMemberAbsent {
+  outcome: "member_absent";
+}
+
+export interface WireIdentityConvergenceResolutionOutcomeRequestConflict {
+  outcome: "request_conflict";
+  request_id: string;
+}
+
+export type WireIdentityConvergenceResolutionOutcome = WireIdentityConvergenceResolutionOutcomeResolved | WireIdentityConvergenceResolutionOutcomeDesiredRevisionConflict | WireIdentityConvergenceResolutionOutcomeActiveRevisionConflict | WireIdentityConvergenceResolutionOutcomeNotBlocked | WireIdentityConvergenceResolutionOutcomeMemberAbsent | WireIdentityConvergenceResolutionOutcomeRequestConflict;
+
+export interface MobMemberToolDeclarationParams {
+  agent_identity: string;
+  mob_id: string;
+}
+
+export interface MobMemberToolDeclarationResult {
+  agent_identity: string;
+  convergence: WireIdentityConvergenceStatus;
+  declaration: WireMemberToolDeclaration;
+  desired_intent_revision: number;
+  mob_id: string;
+}
+
+export interface MobApplyMemberToolDeclarationParams {
+  agent_identity: string;
+  convergence: WireIdentityConvergenceMode;
+  declaration: WireMemberToolDeclaration;
+  expected_intent_revision: number;
+  mob_id: string;
+  request_id: string;
+}
+
+export interface MobApplyMemberToolDeclarationResult {
+  commit: WireMemberToolCommitOutcome;
+  convergence: WireIdentityConvergenceStatus;
+}
+
+export interface MobAdoptMemberIdentityDeclarationParams {
+  agent_identity: string;
+  convergence: WireIdentityConvergenceMode;
+  declaration_revision: number;
+  declaration_scope: string;
+  member: WireIdentityProfileMemberDeclaration;
+  mob_id: string;
+  owned_wiring: WireDesiredIdentityEdge[];
+  precondition: WireIdentityAdoptionPrecondition;
+  request_id: string;
+  session: WireDesiredSessionTarget;
+  wiring_custody?: "external_managed" | "identity_owned";
+}
+
+export interface MobAdoptMemberIdentityDeclarationResult {
+  adoption: WireIdentityAdoptionOutcome;
+  convergence: WireIdentityConvergenceStatus;
+}
+
+export interface MobResolveIdentityConvergenceBlockParams {
+  agent_identity: string;
+  convergence: WireIdentityConvergenceMode;
+  expected_desired_revision: number;
+  mob_id: string;
+  observed_active_revision: number;
+  request_id: string;
+}
+
+export interface MobResolveIdentityConvergenceBlockResult {
+  convergence: WireIdentityConvergenceStatus;
+  outcome: WireIdentityConvergenceResolutionOutcome;
 }

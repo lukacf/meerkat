@@ -6,6 +6,7 @@
           "llm",
           "store",
           "tool",
+          "policy_indeterminate",
           "mcp",
           "session_not_found",
           "budget",
@@ -8293,6 +8294,54 @@
   },
   "BridgeCommand": {
     "$defs": {
+      "ApplicationToolPolicyBinding": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "unmanaged",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "inherit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "provider",
+                "type": "string"
+              },
+              "policy_id": {
+                "type": "string"
+              },
+              "provider_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "provider_id",
+              "policy_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "BindingId": {
         "description": "Opaque slug identifying a binding inside a realm.",
         "type": "string"
@@ -9875,6 +9924,13 @@
               "null"
             ]
           },
+          "application_tool_policy": {
+            "$ref": "#/$defs/ApplicationToolPolicyBinding",
+            "default": {
+              "kind": "unmanaged"
+            },
+            "description": "Stable application policy identity. Snapshot content remains owned by\nthe host-injected provider and is never copied into this member spec."
+          },
           "auth_binding": {
             "anyOf": [
               {
@@ -9949,6 +10005,21 @@
               }
             ],
             "description": "Resolved policy only — `Inherit` is unrepresentable (O3); `None`\nmeans no per-member policy, not \"inherit something ambient\"."
+          },
+          "tool_category_overrides": {
+            "$ref": "#/$defs/ToolCategoryOverrides",
+            "default": {
+              "builtins": "inherit",
+              "comms": "inherit",
+              "image_generation": "inherit",
+              "memory": "inherit",
+              "mob": "inherit",
+              "schedule": "inherit",
+              "shell": "inherit",
+              "web_search": "inherit",
+              "workgraph": "inherit"
+            },
+            "description": "Administrative per-category intent. The receiving host resolves each\nfield through the same category owner used for local materialization."
           }
         },
         "required": [
@@ -10189,6 +10260,69 @@
       "SupervisorRotationOperationId": {
         "description": "Stable identifier for one supervisor-rotation operation.\n\nThe UUID is validated at every string/serde ingress boundary. Keeping the\ninner value private prevents callers from constructing an unchecked raw\nstring identifier that could diverge between submission, observation, and\ndurable receipts.",
         "type": "string"
+      },
+      "ToolCategoryOverride": {
+        "description": "Caller intent for a tool category.\n\nDistinguishes \"no opinion / didn't exist\" (`Inherit`) from explicit\n`Enable` / `Disable` so that resumed sessions don't freeze tool\navailability at the capabilities of the Meerkat version that created them.\n\n**Dogma §10:** Inherit, disable, and set are different facts.",
+        "oneOf": [
+          {
+            "const": "inherit",
+            "description": "No explicit intent — inherit runtime/factory default.",
+            "type": "string"
+          },
+          {
+            "const": "enable",
+            "description": "Explicitly enabled by caller.",
+            "type": "string"
+          },
+          {
+            "const": "disable",
+            "description": "Explicitly disabled by caller.",
+            "type": "string"
+          }
+        ]
+      },
+      "ToolCategoryOverrides": {
+        "additionalProperties": false,
+        "description": "Administrative per-category member-tool intent.\n\nThis carrier deliberately keeps `Inherit`, `Enable`, and `Disable`\ndistinct. Materialization resolves each field through its existing\ncategory owner; carrying the aggregate does not merge those owners.",
+        "properties": {
+          "builtins": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "comms": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "image_generation": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "memory": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "mob": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "schedule": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "shell": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "web_search": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "workgraph": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          }
+        },
+        "type": "object"
       },
       "ToolName": {
         "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
@@ -11110,7 +11244,6 @@
         "type": "string"
       },
       "WireResolvedToolAccessPolicy": {
-        "description": "Resolved tool access policy — mirrors `WireToolAccessPolicy`'s\nallow/deny shape exactly, with `Inherit` structurally absent (O3).",
         "oneOf": [
           {
             "properties": {
@@ -11162,6 +11295,26 @@
               "type"
             ],
             "type": "object"
+          },
+          {
+            "description": "Every contained constraint must admit the call.",
+            "properties": {
+              "type": {
+                "const": "constraints",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "$ref": "#/$defs/WireToolAccessConstraint"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -11193,6 +11346,61 @@
             "required": [
               "type",
               "continuity_key"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireToolAccessConstraint": {
+        "description": "Resolved tool access policy — mirrors `WireToolAccessPolicy`'s\nallow/deny shape exactly, with `Inherit` structurally absent (O3).",
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "const": "allow_names",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "deny_names",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "read_only",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
             ],
             "type": "object"
           }
@@ -16517,6 +16725,54 @@
   },
   "BridgeMaterializePayload": {
     "$defs": {
+      "ApplicationToolPolicyBinding": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "unmanaged",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "inherit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "provider",
+                "type": "string"
+              },
+              "policy_id": {
+                "type": "string"
+              },
+              "provider_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "provider_id",
+              "policy_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "BindingId": {
         "description": "Opaque slug identifying a binding inside a realm.",
         "type": "string"
@@ -17114,6 +17370,13 @@
               "null"
             ]
           },
+          "application_tool_policy": {
+            "$ref": "#/$defs/ApplicationToolPolicyBinding",
+            "default": {
+              "kind": "unmanaged"
+            },
+            "description": "Stable application policy identity. Snapshot content remains owned by\nthe host-injected provider and is never copied into this member spec."
+          },
           "auth_binding": {
             "anyOf": [
               {
@@ -17188,6 +17451,21 @@
               }
             ],
             "description": "Resolved policy only — `Inherit` is unrepresentable (O3); `None`\nmeans no per-member policy, not \"inherit something ambient\"."
+          },
+          "tool_category_overrides": {
+            "$ref": "#/$defs/ToolCategoryOverrides",
+            "default": {
+              "builtins": "inherit",
+              "comms": "inherit",
+              "image_generation": "inherit",
+              "memory": "inherit",
+              "mob": "inherit",
+              "schedule": "inherit",
+              "shell": "inherit",
+              "web_search": "inherit",
+              "workgraph": "inherit"
+            },
+            "description": "Administrative per-category intent. The receiving host resolves each\nfield through the same category owner used for local materialization."
           }
         },
         "required": [
@@ -17343,6 +17621,69 @@
           "namespace",
           "key"
         ],
+        "type": "object"
+      },
+      "ToolCategoryOverride": {
+        "description": "Caller intent for a tool category.\n\nDistinguishes \"no opinion / didn't exist\" (`Inherit`) from explicit\n`Enable` / `Disable` so that resumed sessions don't freeze tool\navailability at the capabilities of the Meerkat version that created them.\n\n**Dogma §10:** Inherit, disable, and set are different facts.",
+        "oneOf": [
+          {
+            "const": "inherit",
+            "description": "No explicit intent — inherit runtime/factory default.",
+            "type": "string"
+          },
+          {
+            "const": "enable",
+            "description": "Explicitly enabled by caller.",
+            "type": "string"
+          },
+          {
+            "const": "disable",
+            "description": "Explicitly disabled by caller.",
+            "type": "string"
+          }
+        ]
+      },
+      "ToolCategoryOverrides": {
+        "additionalProperties": false,
+        "description": "Administrative per-category member-tool intent.\n\nThis carrier deliberately keeps `Inherit`, `Enable`, and `Disable`\ndistinct. Materialization resolves each field through its existing\ncategory owner; carrying the aggregate does not merge those owners.",
+        "properties": {
+          "builtins": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "comms": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "image_generation": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "memory": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "mob": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "schedule": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "shell": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "web_search": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "workgraph": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          }
+        },
         "type": "object"
       },
       "WireAnthropicCacheControlPolicy": {
@@ -18166,7 +18507,6 @@
         "type": "string"
       },
       "WireResolvedToolAccessPolicy": {
-        "description": "Resolved tool access policy — mirrors `WireToolAccessPolicy`'s\nallow/deny shape exactly, with `Inherit` structurally absent (O3).",
         "oneOf": [
           {
             "properties": {
@@ -18218,6 +18558,26 @@
               "type"
             ],
             "type": "object"
+          },
+          {
+            "description": "Every contained constraint must admit the call.",
+            "properties": {
+              "type": {
+                "const": "constraints",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "$ref": "#/$defs/WireToolAccessConstraint"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -18249,6 +18609,61 @@
             "required": [
               "type",
               "continuity_key"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireToolAccessConstraint": {
+        "description": "Resolved tool access policy — mirrors `WireToolAccessPolicy`'s\nallow/deny shape exactly, with `Inherit` structurally absent (O3).",
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "const": "allow_names",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "deny_names",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "read_only",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
             ],
             "type": "object"
           }
@@ -18417,6 +18832,7 @@
           "llm",
           "store",
           "tool",
+          "policy_indeterminate",
           "mcp",
           "session_not_found",
           "budget",
@@ -25528,7 +25944,6 @@
         "type": "string"
       },
       "WireResolvedToolAccessPolicy": {
-        "description": "Resolved tool access policy — mirrors `WireToolAccessPolicy`'s\nallow/deny shape exactly, with `Inherit` structurally absent (O3).",
         "oneOf": [
           {
             "properties": {
@@ -25570,6 +25985,81 @@
           },
           {
             "description": "Read-only intent, carried across the host boundary so a remotely\nmaterialized member keeps the declaration instead of silently\ndowngrading to unrestricted.",
+            "properties": {
+              "type": {
+                "const": "read_only",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Every contained constraint must admit the call.",
+            "properties": {
+              "type": {
+                "const": "constraints",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "$ref": "#/$defs/WireToolAccessConstraint"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireToolAccessConstraint": {
+        "description": "Resolved tool access policy — mirrors `WireToolAccessPolicy`'s\nallow/deny shape exactly, with `Inherit` structurally absent (O3).",
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "const": "allow_names",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "deny_names",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "type": {
                 "const": "read_only",
@@ -27522,6 +28012,7 @@
           "llm",
           "store",
           "tool",
+          "policy_indeterminate",
           "mcp",
           "session_not_found",
           "budget",
@@ -38629,6 +39120,7 @@
           "llm",
           "store",
           "tool",
+          "policy_indeterminate",
           "mcp",
           "session_not_found",
           "budget",
@@ -40061,6 +40553,54 @@
               "type",
               "session_id",
               "dispute"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ApplicationToolPolicyBinding": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "unmanaged",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "inherit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "provider",
+                "type": "string"
+              },
+              "policy_id": {
+                "type": "string"
+              },
+              "provider_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "provider_id",
+              "policy_id"
             ],
             "type": "object"
           }
@@ -46655,6 +47195,13 @@
               "null"
             ]
           },
+          "application_tool_policy": {
+            "$ref": "#/$defs/ApplicationToolPolicyBinding",
+            "default": {
+              "kind": "unmanaged"
+            },
+            "description": "Stable application policy identity. Snapshot content remains owned by\nthe host-injected provider and is never copied into this member spec."
+          },
           "auth_binding": {
             "anyOf": [
               {
@@ -46729,6 +47276,21 @@
               }
             ],
             "description": "Resolved policy only — `Inherit` is unrepresentable (O3); `None`\nmeans no per-member policy, not \"inherit something ambient\"."
+          },
+          "tool_category_overrides": {
+            "$ref": "#/$defs/ToolCategoryOverrides",
+            "default": {
+              "builtins": "inherit",
+              "comms": "inherit",
+              "image_generation": "inherit",
+              "memory": "inherit",
+              "mob": "inherit",
+              "schedule": "inherit",
+              "shell": "inherit",
+              "web_search": "inherit",
+              "workgraph": "inherit"
+            },
+            "description": "Administrative per-category intent. The receiving host resolves each\nfield through the same category owner used for local materialization."
           }
         },
         "required": [
@@ -48070,6 +48632,69 @@
       },
       "ToolCallArguments": {
         "additionalProperties": true,
+        "type": "object"
+      },
+      "ToolCategoryOverride": {
+        "description": "Caller intent for a tool category.\n\nDistinguishes \"no opinion / didn't exist\" (`Inherit`) from explicit\n`Enable` / `Disable` so that resumed sessions don't freeze tool\navailability at the capabilities of the Meerkat version that created them.\n\n**Dogma §10:** Inherit, disable, and set are different facts.",
+        "oneOf": [
+          {
+            "const": "inherit",
+            "description": "No explicit intent — inherit runtime/factory default.",
+            "type": "string"
+          },
+          {
+            "const": "enable",
+            "description": "Explicitly enabled by caller.",
+            "type": "string"
+          },
+          {
+            "const": "disable",
+            "description": "Explicitly disabled by caller.",
+            "type": "string"
+          }
+        ]
+      },
+      "ToolCategoryOverrides": {
+        "additionalProperties": false,
+        "description": "Administrative per-category member-tool intent.\n\nThis carrier deliberately keeps `Inherit`, `Enable`, and `Disable`\ndistinct. Materialization resolves each field through its existing\ncategory owner; carrying the aggregate does not merge those owners.",
+        "properties": {
+          "builtins": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "comms": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "image_generation": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "memory": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "mob": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "schedule": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "shell": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "web_search": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "workgraph": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          }
+        },
         "type": "object"
       },
       "ToolConfigChangeDomain": {
@@ -50701,7 +51326,6 @@
         "type": "string"
       },
       "WireResolvedToolAccessPolicy": {
-        "description": "Resolved tool access policy — mirrors `WireToolAccessPolicy`'s\nallow/deny shape exactly, with `Inherit` structurally absent (O3).",
         "oneOf": [
           {
             "properties": {
@@ -50751,6 +51375,26 @@
             },
             "required": [
               "type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Every contained constraint must admit the call.",
+            "properties": {
+              "type": {
+                "const": "constraints",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "$ref": "#/$defs/WireToolAccessConstraint"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
             ],
             "type": "object"
           }
@@ -51072,6 +51716,61 @@
           }
         },
         "type": "object"
+      },
+      "WireToolAccessConstraint": {
+        "description": "Resolved tool access policy — mirrors `WireToolAccessPolicy`'s\nallow/deny shape exactly, with `Inherit` structurally absent (O3).",
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "const": "allow_names",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "deny_names",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "read_only",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "WireToolResult": {
         "description": "Tool result payload in a transcript.",
@@ -51534,6 +52233,54 @@
   },
   "CommsPeerRequestParams": {
     "$defs": {
+      "ApplicationToolPolicyBinding": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "unmanaged",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "inherit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "provider",
+                "type": "string"
+              },
+              "policy_id": {
+                "type": "string"
+              },
+              "provider_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "provider_id",
+              "policy_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "BindingId": {
         "description": "Opaque slug identifying a binding inside a realm.",
         "type": "string"
@@ -54466,6 +55213,13 @@
               "null"
             ]
           },
+          "application_tool_policy": {
+            "$ref": "#/$defs/ApplicationToolPolicyBinding",
+            "default": {
+              "kind": "unmanaged"
+            },
+            "description": "Stable application policy identity. Snapshot content remains owned by\nthe host-injected provider and is never copied into this member spec."
+          },
           "auth_binding": {
             "anyOf": [
               {
@@ -54540,6 +55294,21 @@
               }
             ],
             "description": "Resolved policy only — `Inherit` is unrepresentable (O3); `None`\nmeans no per-member policy, not \"inherit something ambient\"."
+          },
+          "tool_category_overrides": {
+            "$ref": "#/$defs/ToolCategoryOverrides",
+            "default": {
+              "builtins": "inherit",
+              "comms": "inherit",
+              "image_generation": "inherit",
+              "memory": "inherit",
+              "mob": "inherit",
+              "schedule": "inherit",
+              "shell": "inherit",
+              "web_search": "inherit",
+              "workgraph": "inherit"
+            },
+            "description": "Administrative per-category intent. The receiving host resolves each\nfield through the same category owner used for local materialization."
           }
         },
         "required": [
@@ -54780,6 +55549,69 @@
       "SupervisorRotationOperationId": {
         "description": "Stable identifier for one supervisor-rotation operation.\n\nThe UUID is validated at every string/serde ingress boundary. Keeping the\ninner value private prevents callers from constructing an unchecked raw\nstring identifier that could diverge between submission, observation, and\ndurable receipts.",
         "type": "string"
+      },
+      "ToolCategoryOverride": {
+        "description": "Caller intent for a tool category.\n\nDistinguishes \"no opinion / didn't exist\" (`Inherit`) from explicit\n`Enable` / `Disable` so that resumed sessions don't freeze tool\navailability at the capabilities of the Meerkat version that created them.\n\n**Dogma §10:** Inherit, disable, and set are different facts.",
+        "oneOf": [
+          {
+            "const": "inherit",
+            "description": "No explicit intent — inherit runtime/factory default.",
+            "type": "string"
+          },
+          {
+            "const": "enable",
+            "description": "Explicitly enabled by caller.",
+            "type": "string"
+          },
+          {
+            "const": "disable",
+            "description": "Explicitly disabled by caller.",
+            "type": "string"
+          }
+        ]
+      },
+      "ToolCategoryOverrides": {
+        "additionalProperties": false,
+        "description": "Administrative per-category member-tool intent.\n\nThis carrier deliberately keeps `Inherit`, `Enable`, and `Disable`\ndistinct. Materialization resolves each field through its existing\ncategory owner; carrying the aggregate does not merge those owners.",
+        "properties": {
+          "builtins": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "comms": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "image_generation": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "memory": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "mob": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "schedule": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "shell": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "web_search": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "workgraph": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          }
+        },
+        "type": "object"
       },
       "ToolName": {
         "description": "Canonical typed name for an LLM-callable tool.\n\nThe model-facing wire shape is still the provider's string tool name, but\ninternal policy, routing, and registry surfaces carry this handle so raw\nstrings do not become the tool identity owner.",
@@ -55701,7 +56533,6 @@
         "type": "string"
       },
       "WireResolvedToolAccessPolicy": {
-        "description": "Resolved tool access policy — mirrors `WireToolAccessPolicy`'s\nallow/deny shape exactly, with `Inherit` structurally absent (O3).",
         "oneOf": [
           {
             "properties": {
@@ -55753,6 +56584,26 @@
               "type"
             ],
             "type": "object"
+          },
+          {
+            "description": "Every contained constraint must admit the call.",
+            "properties": {
+              "type": {
+                "const": "constraints",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "$ref": "#/$defs/WireToolAccessConstraint"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -55788,6 +56639,61 @@
             "type": "object"
           }
         ]
+      },
+      "WireToolAccessConstraint": {
+        "description": "Resolved tool access policy — mirrors `WireToolAccessPolicy`'s\nallow/deny shape exactly, with `Inherit` structurally absent (O3).",
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "const": "allow_names",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "deny_names",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "read_only",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          }
+        ]
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -55809,6 +56715,7 @@
           "llm",
           "store",
           "tool",
+          "policy_indeterminate",
           "mcp",
           "session_not_found",
           "budget",
@@ -65640,6 +66547,7 @@
           "llm",
           "store",
           "tool",
+          "policy_indeterminate",
           "mcp",
           "session_not_found",
           "budget",
@@ -79378,7 +80286,6 @@
         "type": "string"
       },
       "WireResolvedToolAccessPolicy": {
-        "description": "Resolved tool access policy — mirrors `WireToolAccessPolicy`'s\nallow/deny shape exactly, with `Inherit` structurally absent (O3).",
         "oneOf": [
           {
             "properties": {
@@ -79420,6 +80327,81 @@
           },
           {
             "description": "Read-only intent, carried across the host boundary so a remotely\nmaterialized member keeps the declaration instead of silently\ndowngrading to unrestricted.",
+            "properties": {
+              "type": {
+                "const": "read_only",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Every contained constraint must admit the call.",
+            "properties": {
+              "type": {
+                "const": "constraints",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "$ref": "#/$defs/WireToolAccessConstraint"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireToolAccessConstraint": {
+        "description": "Resolved tool access policy — mirrors `WireToolAccessPolicy`'s\nallow/deny shape exactly, with `Inherit` structurally absent (O3).",
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "const": "allow_names",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "deny_names",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "type": {
                 "const": "read_only",
@@ -81586,7 +82568,6 @@
         "type": "string"
       },
       "WireResolvedToolAccessPolicy": {
-        "description": "Resolved tool access policy — mirrors `WireToolAccessPolicy`'s\nallow/deny shape exactly, with `Inherit` structurally absent (O3).",
         "oneOf": [
           {
             "properties": {
@@ -81628,6 +82609,81 @@
           },
           {
             "description": "Read-only intent, carried across the host boundary so a remotely\nmaterialized member keeps the declaration instead of silently\ndowngrading to unrestricted.",
+            "properties": {
+              "type": {
+                "const": "read_only",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Every contained constraint must admit the call.",
+            "properties": {
+              "type": {
+                "const": "constraints",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "$ref": "#/$defs/WireToolAccessConstraint"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireToolAccessConstraint": {
+        "description": "Resolved tool access policy — mirrors `WireToolAccessPolicy`'s\nallow/deny shape exactly, with `Inherit` structurally absent (O3).",
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "const": "allow_names",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "deny_names",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "type": {
                 "const": "read_only",
@@ -81785,6 +82841,1900 @@
     ],
     "title": "MemberSessionDisposal"
   },
+  "MobAdoptMemberIdentityDeclarationParams": {
+    "$defs": {
+      "BindingId": {
+        "description": "Opaque slug identifying a binding inside a realm.",
+        "type": "string"
+      },
+      "BudgetLimits": {
+        "description": "Resource limits for an agent run\n\n# Two time horizons, one owner\n\n[`Budget`] is the single owner of \"may this run continue in time\". It\ncarries two independent horizons because they answer different questions\nand are measured from different epochs:\n\n- [`BudgetLimits::max_duration`] is the **agent-lifetime** horizon. Its\n  epoch is [`Budget::new`], which service-backed surfaces call once when the\n  session's agent is built, not once per turn. It therefore spans every turn\n  of that agent, including the idle wall-clock between turns.\n- [`BudgetLimits::max_turn_duration`] is the **per-turn aggregate** horizon.\n  Its epoch is re-armed by [`Budget::begin_turn`] at each run entry, so it\n  bounds one turn end-to-end regardless of how many LLM calls, retries, and\n  tool batches that turn contains.\n\nEvery segment of a turn already carries its own bound (per-call LLM timeout,\nstream-inactivity watchdog, per-tool-call timeout). Before\n`max_turn_duration` existed, the *sum* of those segments was unbounded: a\nturn could legally spend an hour without any owner asking whether it was\nallowed to. `max_turn_duration` is that owner.",
+        "properties": {
+          "max_duration": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Duration"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Maximum agent-lifetime duration, measured from [`Budget::new`].\n\nThis is NOT a per-turn deadline: the epoch is agent construction, which\nfor `SessionService`-backed surfaces is session creation, and it is\nnever re-armed. Use [`BudgetLimits::max_turn_duration`] to bound one\nturn."
+          },
+          "max_tokens": {
+            "description": "Maximum tokens to consume",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_tool_calls": {
+            "description": "Maximum tool calls",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_turn_duration": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Duration"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Maximum aggregate wall-clock for a single turn, re-armed at each run\nentry by [`Budget::begin_turn`].\n\n`None` (the default) means turns are unbounded in aggregate: every\nsegment still carries its own timeout, but their sum has no ceiling.\nAbsence is representable and never substituted with an invented\ndefault; a deployment that leaves this unset has chosen unbounded\nturns.\n\n`skip_serializing_if` is load-bearing, not style: a spec carrying no\nturn ceiling must keep its historical canonical bytes so the frozen\n`spec_digest` pin (`meerkat_contracts::wire::spec_digest`) and every\ndigest already recorded in host stores still match. Same reasoning as\n`PortableToolConfig.read_only` in 0.8.23."
+          }
+        },
+        "type": "object"
+      },
+      "Duration": {
+        "properties": {
+          "nanos": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "secs": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "secs",
+          "nanos"
+        ],
+        "type": "object"
+      },
+      "McpHttpTransport": {
+        "description": "HTTP transport selection for URL-based servers",
+        "enum": [
+          "streamable-http",
+          "sse"
+        ],
+        "type": "string"
+      },
+      "MeerkatSchema": {
+        "description": "A Meerkat-native JSON schema."
+      },
+      "OutputSchema": {
+        "description": "Configuration for structured output extraction.\n\nWhen provided to an agent, the agent will perform an extraction turn after\ncompleting the agentic work, forcing the LLM to output validated JSON that\nconforms to the provided schema. [`RunResult::text`] remains the committed\nmain-turn output; extraction populates [`RunResult::structured_output`] on\nsuccess or [`RunResult::extraction_error`] on failure.",
+        "properties": {
+          "compat": {
+            "$ref": "#/$defs/SchemaCompat",
+            "default": "lossy",
+            "description": "Compatibility mode for provider lowering (lossy or strict)"
+          },
+          "format": {
+            "$ref": "#/$defs/SchemaFormat",
+            "default": "meerkat_v1",
+            "description": "Schema format version"
+          },
+          "name": {
+            "description": "Optional name for the schema (used by some providers)",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "schema": {
+            "$ref": "#/$defs/MeerkatSchema",
+            "description": "The JSON schema that the output must conform to"
+          },
+          "strict": {
+            "default": false,
+            "description": "Whether to enforce strict schema validation (provider-specific)",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "schema"
+        ],
+        "type": "object"
+      },
+      "PortableMcpDecl": {
+        "description": "Portable MCP server declaration (A10).\n\nMirrors `meerkat_core::mcp_config` transports MINUS the secret-bearing\nvalue maps: stdio `env` and HTTP `headers` are structurally absent; only\nthe required key/header NAMES travel, satisfied member-host-side.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "args": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "command": {
+                "type": "string"
+              },
+              "connect_timeout_secs": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "required_env_keys": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "transport": {
+                "const": "stdio",
+                "type": "string"
+              }
+            },
+            "required": [
+              "transport",
+              "command"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "connect_timeout_secs": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "http_transport": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/McpHttpTransport"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "URL transport subtype. An absent value preserves the historical\ndefault of streamable HTTP; explicit SSE must survive placement."
+              },
+              "required_header_names": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "transport": {
+                "const": "http",
+                "type": "string"
+              },
+              "url": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "transport",
+              "url"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "PortableProfile": {
+        "additionalProperties": false,
+        "description": "Portable projection of `meerkat_mob::Profile`.\n\n`provider` is REQUIRED (R4): the member host never re-infers a provider\nfor the model id. There is no `backend` field — placement is not profile\nvocabulary; `RuntimeBinding` is machine-owned.",
+        "properties": {
+          "auto_compact_threshold": {
+            "format": "uint64",
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "external_addressable": {
+            "default": false,
+            "type": "boolean"
+          },
+          "image_generation_provider": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Provider"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "max_inline_peer_notifications": {
+            "format": "int32",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "model": {
+            "type": "string"
+          },
+          "output_schema": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireOpaqueJson"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Validated `MeerkatSchema`, string-enveloped (unlike\n`WireMobProfile`'s bare-`Value` carrier) so the spec keeps the\nbridge `Eq` chain; the member host parses + re-validates at build."
+          },
+          "peer_description": {
+            "default": "",
+            "type": "string"
+          },
+          "provider": {
+            "$ref": "#/$defs/Provider"
+          },
+          "provider_params": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireProviderParamsOverride"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "resume_overrides": {
+            "items": {
+              "$ref": "#/$defs/WireMobResumeOverrideField"
+            },
+            "type": "array"
+          },
+          "runtime_mode": {
+            "$ref": "#/$defs/WireMobRuntimeMode",
+            "default": "autonomous_host"
+          },
+          "self_hosted_server_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "skills": {
+            "description": "Skill NAMES; the content travels in\n[`PortableDefinitionExtract::skills`] as inline sources.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "tools": {
+            "$ref": "#/$defs/PortableToolConfig",
+            "default": {
+              "builtins": false,
+              "comms": false,
+              "image_generation": false,
+              "memory": false,
+              "mob": false,
+              "schedule": false,
+              "shell": false,
+              "workgraph": false
+            }
+          }
+        },
+        "required": [
+          "model",
+          "provider"
+        ],
+        "type": "object"
+      },
+      "PortableSystemPrompt": {
+        "description": "Resolved system prompt for the member build. `Inherit` is\nunrepresentable (R3): the controlling host resolves inheritance before\nthe spec is minted, so the member host never guesses.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "prompt": {
+                "const": "set",
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "prompt",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "prompt": {
+                "const": "disable",
+                "type": "string"
+              }
+            },
+            "required": [
+              "prompt"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "PortableToolConfig": {
+        "additionalProperties": false,
+        "description": "Portable projection of `meerkat_mob::ToolConfig` category toggles.\n\nStructural exclusions vs the domain type: no `rust_bundles` carrier\n(in-process `Arc` dispatchers cannot travel) and no `mcp` name allowlist\n(it gates the HOST-surface external-tools provider, which is\nnon-portable). `non_portable_disabled` is a reserved typed projection;\nv1 rejects every non-portable category instead of silently disabling it,\nso production v1 specs carry an empty list.",
+        "properties": {
+          "builtins": {
+            "default": false,
+            "type": "boolean"
+          },
+          "comms": {
+            "default": false,
+            "type": "boolean"
+          },
+          "image_generation": {
+            "default": false,
+            "type": "boolean"
+          },
+          "mcp_servers": {
+            "additionalProperties": {
+              "$ref": "#/$defs/PortableMcpDecl"
+            },
+            "description": "Declarative MCP servers keyed by server name.",
+            "type": "object"
+          },
+          "memory": {
+            "default": false,
+            "type": "boolean"
+          },
+          "mob": {
+            "default": false,
+            "type": "boolean"
+          },
+          "non_portable_disabled": {
+            "description": "Reserved typed record; production v1 always emits an empty list (A4).",
+            "items": {
+              "$ref": "#/$defs/WireNonPortableResourceKind"
+            },
+            "type": "array"
+          },
+          "read_only": {
+            "description": "Profile-declared read-only intent, carried so a member materialized on\nanother host enforces the same execution gate.\n\nUnlike its sibling category toggles this field is omitted when false,\nwhich is load-bearing twice over: a spec that carries no read-only\nintent keeps the exact digest-covered bytes it had before the field\nexisted, and a read-only spec sent to a host too old to know the field\nis rejected by `deny_unknown_fields` instead of silently materializing\nan ungated member.",
+            "type": "boolean"
+          },
+          "schedule": {
+            "default": false,
+            "type": "boolean"
+          },
+          "shell": {
+            "default": false,
+            "type": "boolean"
+          },
+          "workgraph": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "ProfileId": {
+        "description": "Opaque slug identifying an auth profile override on a connection.",
+        "type": "string"
+      },
+      "Provider": {
+        "description": "Supported LLM providers.\n\n`JsonSchema` is derived unconditionally (schemars is a non-optional\nmeerkat-core dependency): config-owned types such as\n[`crate::config::CustomModelConfig`] embed the typed provider directly and\nderive their schemas without the `schema` feature.",
+        "enum": [
+          "anthropic",
+          "openai",
+          "gemini",
+          "self_hosted",
+          "other"
+        ],
+        "type": "string"
+      },
+      "RealmId": {
+        "description": "Opaque slug identifying a realm.",
+        "type": "string"
+      },
+      "SchemaCompat": {
+        "description": "Compatibility mode for provider lowering.",
+        "enum": [
+          "lossy",
+          "strict"
+        ],
+        "type": "string"
+      },
+      "SchemaFormat": {
+        "description": "Schema format versions supported by Meerkat.",
+        "enum": [
+          "meerkat_v1"
+        ],
+        "type": "string"
+      },
+      "StructuredProviderExtension": {
+        "description": "Typed non-semantic opaque bag for per-turn provider knobs that cannot be\nfully typed without blocking a wave boundary. Explicitly marked\nnon-semantic and RMAT-exempt.\n\nUse of this type is a deliberate boundary marker: content is passed\nthrough without interpretation. Any consumer that needs to interpret the\ncontent must promote the relevant structure into a proper typed variant\nin its own wave.\n\nRelocated from `meerkat_contracts::wire::runtime` into core so\n`ProviderTag::Unknown { bag }` can name the bag without a cross-crate\ncycle (adversarial review flaw 5). `meerkat-contracts` re-exports this\ntype so the wire path is preserved.",
+        "properties": {
+          "body": {
+            "default": "",
+            "description": "Opaque body. Non-semantic — never pattern matched across the wire.",
+            "type": "string"
+          },
+          "key": {
+            "description": "Opaque key identifying the extension within the namespace.",
+            "type": "string"
+          },
+          "namespace": {
+            "description": "Free-form provider namespace discriminator (e.g. `\"anthropic\"`).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "namespace",
+          "key"
+        ],
+        "type": "object"
+      },
+      "WireAnthropicCacheControlPolicy": {
+        "enum": [
+          "disabled",
+          "automatic",
+          "system_prefix",
+          "system_and_conversation"
+        ],
+        "type": "string"
+      },
+      "WireAnthropicCacheTtl": {
+        "enum": [
+          "5m",
+          "1h"
+        ],
+        "type": "string"
+      },
+      "WireAnthropicCompactionConfig": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "auto",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "edit": true,
+              "kind": {
+                "const": "custom",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "edit"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireAnthropicContextWindow": {
+        "enum": [
+          "one_megabyte"
+        ],
+        "type": "string"
+      },
+      "WireAnthropicEffort": {
+        "enum": [
+          "low",
+          "medium",
+          "high",
+          "max",
+          "xhigh"
+        ],
+        "type": "string"
+      },
+      "WireAnthropicInferenceGeo": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "us",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "global",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "other",
+                "type": "string"
+              },
+              "region": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "region"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireAnthropicThinkingConfig": {
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "const": "adaptive",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "budget_tokens": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "enabled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "budget_tokens"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireAuthBindingRef": {
+        "description": "Wire projection of [`meerkat_core::AuthBindingRef`].\n\nPure structural shape — no `\"realm:binding\"` string form. Wave-b deleted\n`parse` and `Display` on both the core type and the wire projection so\nthe colon-joined form cannot travel across wire boundaries.",
+        "properties": {
+          "binding": {
+            "$ref": "#/$defs/BindingId"
+          },
+          "profile": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ProfileId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "realm": {
+            "$ref": "#/$defs/RealmId"
+          }
+        },
+        "required": [
+          "realm",
+          "binding"
+        ],
+        "type": "object"
+      },
+      "WireDesiredExecution": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "execution": {
+                "const": "controlling_session",
+                "type": "string"
+              }
+            },
+            "required": [
+              "execution"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "execution": {
+                "const": "any_bound_host_session",
+                "type": "string"
+              }
+            },
+            "required": [
+              "execution"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "execution": {
+                "const": "placed_session",
+                "type": "string"
+              },
+              "host_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "execution",
+              "host_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "address": {
+                "type": "string"
+              },
+              "execution": {
+                "const": "external",
+                "type": "string"
+              },
+              "identity": {
+                "$ref": "#/$defs/WireTrustedPeerIdentity"
+              }
+            },
+            "required": [
+              "execution",
+              "address",
+              "identity"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireDesiredIdentityEdge": {
+        "additionalProperties": false,
+        "properties": {
+          "a": {
+            "type": "string"
+          },
+          "b": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "a",
+          "b"
+        ],
+        "type": "object"
+      },
+      "WireDesiredLocalCallbackTool": {
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "input_schema": true,
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "description",
+          "input_schema"
+        ],
+        "type": "object"
+      },
+      "WireDesiredSessionAuthorityPolicy": {
+        "enum": [
+          "require_existing"
+        ],
+        "type": "string"
+      },
+      "WireDesiredSessionTarget": {
+        "additionalProperties": false,
+        "properties": {
+          "authority_policy": {
+            "$ref": "#/$defs/WireDesiredSessionAuthorityPolicy"
+          },
+          "lineage_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "lineage_id": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "lineage_id",
+          "lineage_generation",
+          "authority_policy"
+        ],
+        "type": "object"
+      },
+      "WireGeminiThinkingConfig": {
+        "properties": {
+          "include_thoughts": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "thinking_budget": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "thinking_level": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireGeminiThinkingLevel"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "WireGeminiThinkingLevel": {
+        "enum": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ],
+        "type": "string"
+      },
+      "WireIdentityAdoptionPrecondition": {
+        "enum": [
+          "expected_absent"
+        ],
+        "type": "string"
+      },
+      "WireIdentityConvergenceMode": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "drain",
+                "type": "string"
+              },
+              "max_wait_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "max_wait_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "cancel_active",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireIdentityProfileMemberDeclaration": {
+        "additionalProperties": false,
+        "properties": {
+          "additional_instructions": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "auth_binding": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireAuthBindingRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "budget_limits": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/BudgetLimits"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "context": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireOpaqueJson"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "execution": {
+            "$ref": "#/$defs/WireDesiredExecution"
+          },
+          "external_addressable_override": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "model_override": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "profile_name": {
+            "type": "string"
+          },
+          "profile_override": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/PortableProfile"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "required_env_keys": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "required_local_callback_tools": {
+            "items": {
+              "$ref": "#/$defs/WireDesiredLocalCallbackTool"
+            },
+            "type": "array"
+          },
+          "runtime_mode": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireMobRuntimeMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "system_prompt_override": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/PortableSystemPrompt"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tool_access_policy": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireResolvedToolAccessPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "profile_name",
+          "execution"
+        ],
+        "type": "object"
+      },
+      "WireIdentityWiringCustody": {
+        "enum": [
+          "external_managed",
+          "identity_owned"
+        ],
+        "type": "string"
+      },
+      "WireMobResumeOverrideField": {
+        "description": "Profile fields that win over durable session metadata on resume.\n\nWire twin of `meerkat_mob::ResumeOverrideField`; closed snake_case\nvocabulary, parsed fail-closed at the wire boundary.",
+        "enum": [
+          "model",
+          "provider",
+          "provider_params"
+        ],
+        "type": "string"
+      },
+      "WireMobRuntimeMode": {
+        "enum": [
+          "autonomous_host",
+          "turn_driven"
+        ],
+        "type": "string"
+      },
+      "WireNonPortableResourceKind": {
+        "description": "Merged vocabulary of resources that cannot cross hosts (A4).\n\nNo `ScheduleTools` kind (DEC-6): A3-final permits schedule tools on\nremote members, so no producer for that kind can exist — the wire and\nmachine vocabularies agree on these six.",
+        "enum": [
+          "rust_bundles",
+          "per_spawn_external_tools",
+          "mob_default_external_tools",
+          "default_llm_client_override",
+          "host_surface_mcp_allowlist",
+          "workgraph_tools"
+        ],
+        "type": "string"
+      },
+      "WireOpaqueJson": {
+        "description": "Opaque JSON carried as its serialized string form (the\n`OpaqueProviderBody` precedent, transparent flavor).\n\nUsed where the wire must ferry surface JSON through the bridge `Eq`\nchain: `serde_json::Value` is not `Eq`, and `RawValue` cannot decode\nthrough `serde_json::from_value` (which [`decode_bridge_command`] and\nevery Value-based consumer rely on). Equality is byte equality of the\nstored string — producers serialize exactly once via\n[`WireOpaqueJson::from_value`].",
+        "type": "string"
+      },
+      "WireOpenAiPromptCacheMode": {
+        "enum": [
+          "implicit",
+          "explicit"
+        ],
+        "type": "string"
+      },
+      "WireOpenAiPromptCacheOptions": {
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireOpenAiPromptCacheMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "ttl": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireOpenAiPromptCacheTtl"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "WireOpenAiPromptCacheRetention": {
+        "enum": [
+          "in_memory",
+          "24h"
+        ],
+        "type": "string"
+      },
+      "WireOpenAiPromptCacheTtl": {
+        "enum": [
+          "30m"
+        ],
+        "type": "string"
+      },
+      "WireOpenAiReasoningContext": {
+        "enum": [
+          "auto",
+          "current_turn",
+          "all_turns"
+        ],
+        "type": "string"
+      },
+      "WireOpenAiReasoningMode": {
+        "enum": [
+          "standard",
+          "pro"
+        ],
+        "type": "string"
+      },
+      "WireOpenAiTextVerbosity": {
+        "enum": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "type": "string"
+      },
+      "WireProviderParamsOverride": {
+        "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ProviderParamsOverride`].",
+        "properties": {
+          "max_output_tokens": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "provider_tag": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireProviderTag"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reasoning": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireReasoningMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "temperature": {
+            "format": "float",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "thinking_budget_tokens": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "top_p": {
+            "format": "float",
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "WireProviderTag": {
+        "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ProviderTag`].",
+        "oneOf": [
+          {
+            "properties": {
+              "cache_control": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireAnthropicCacheControlPolicy"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "cache_ttl": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireAnthropicCacheTtl"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "compaction": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireAnthropicCompactionConfig"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "context": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireAnthropicContextWindow"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireAnthropicEffort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "inference_geo": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireAnthropicInferenceGeo"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "provider": {
+                "const": "anthropic",
+                "type": "string"
+              },
+              "structured_output": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OutputSchema"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "supports_temperature_override": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "thinking": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireAnthropicThinkingConfig"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "thinking_budget_tokens": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "top_k": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "web_search": true
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "chat_template_kwargs": true,
+              "frequency_penalty": {
+                "format": "float",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "presence_penalty": {
+                "format": "float",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "prompt_cache_enabled": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "prompt_cache_key": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "prompt_cache_options": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireOpenAiPromptCacheOptions"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "prompt_cache_retention": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireOpenAiPromptCacheRetention"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "provider": {
+                "const": "open_ai",
+                "type": "string"
+              },
+              "reasoning": true,
+              "reasoning_context": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireOpenAiReasoningContext"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "reasoning_effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireReasoningEffort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "reasoning_mode": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireOpenAiReasoningMode"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "seed": {
+                "format": "int64",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "store": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "structured_output": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OutputSchema"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "supports_reasoning_override": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "supports_temperature_override": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "text_verbosity": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireOpenAiTextVerbosity"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "thinking": true,
+              "web_search": true
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "cached_content_name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "candidate_count": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "google_search": true,
+              "provider": {
+                "const": "gemini",
+                "type": "string"
+              },
+              "structured_output": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OutputSchema"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "thinking": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireGeminiThinkingConfig"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "thinking_budget": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "thinking_level": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireGeminiThinkingLevel"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "top_k": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "top_p": {
+                "format": "float",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Wire projection of `ProviderTag::Unknown { bag }` — the typed\nescape hatch for V3 legacy-row provider knobs that don't (yet) map\nto a typed variant.",
+            "properties": {
+              "bag": {
+                "$ref": "#/$defs/StructuredProviderExtension"
+              },
+              "provider": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider",
+              "bag"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireReasoningEffort": {
+        "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ReasoningEffort`].",
+        "enum": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "type": "string"
+      },
+      "WireReasoningMode": {
+        "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ReasoningMode`].",
+        "enum": [
+          "emit",
+          "silent",
+          "off"
+        ],
+        "type": "string"
+      },
+      "WireResolvedToolAccessPolicy": {
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "const": "allow_list",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "deny_list",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Read-only intent, carried across the host boundary so a remotely\nmaterialized member keeps the declaration instead of silently\ndowngrading to unrestricted.",
+            "properties": {
+              "type": {
+                "const": "read_only",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Every contained constraint must admit the call.",
+            "properties": {
+              "type": {
+                "const": "constraints",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "$ref": "#/$defs/WireToolAccessConstraint"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireToolAccessConstraint": {
+        "description": "Resolved tool access policy — mirrors `WireToolAccessPolicy`'s\nallow/deny shape exactly, with `Inherit` structurally absent (O3).",
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "const": "allow_names",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "deny_names",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "read_only",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireTrustedPeerIdentity": {
+        "description": "Typed external peer identity for public mob wiring surfaces.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Recoverable Ed25519 public key string in `ed25519:<base64>` form.",
+            "properties": {
+              "kind": {
+                "const": "ed25519_public_key",
+                "type": "string"
+              },
+              "public_key": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "public_key"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "agent_identity": {
+        "type": "string"
+      },
+      "convergence": {
+        "$ref": "#/$defs/WireIdentityConvergenceMode"
+      },
+      "declaration_revision": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "declaration_scope": {
+        "type": "string"
+      },
+      "member": {
+        "$ref": "#/$defs/WireIdentityProfileMemberDeclaration"
+      },
+      "mob_id": {
+        "type": "string"
+      },
+      "owned_wiring": {
+        "items": {
+          "$ref": "#/$defs/WireDesiredIdentityEdge"
+        },
+        "type": "array",
+        "uniqueItems": true
+      },
+      "precondition": {
+        "$ref": "#/$defs/WireIdentityAdoptionPrecondition"
+      },
+      "request_id": {
+        "type": "string"
+      },
+      "session": {
+        "$ref": "#/$defs/WireDesiredSessionTarget"
+      },
+      "wiring_custody": {
+        "$ref": "#/$defs/WireIdentityWiringCustody"
+      }
+    },
+    "required": [
+      "mob_id",
+      "agent_identity",
+      "request_id",
+      "precondition",
+      "declaration_scope",
+      "declaration_revision",
+      "session",
+      "member",
+      "owned_wiring",
+      "convergence"
+    ],
+    "title": "MobAdoptMemberIdentityDeclarationParams",
+    "type": "object"
+  },
+  "MobAdoptMemberIdentityDeclarationResult": {
+    "$defs": {
+      "WireIdentityAdoptionOutcome": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "desired_revision": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "outcome": {
+                "const": "adopted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "desired_revision"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "actual_revision": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "outcome": {
+                "const": "precondition_conflict",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "actual_revision"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "outcome": {
+                "const": "request_conflict",
+                "type": "string"
+              },
+              "request_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "request_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireIdentityConvergenceCondition": {
+        "enum": [
+          "pending",
+          "reconciling",
+          "converged",
+          "backoff",
+          "repair_blocked",
+          "quarantined",
+          "tombstoned",
+          "suspended",
+          "drain_blocked"
+        ],
+        "type": "string"
+      },
+      "WireIdentityConvergenceStatus": {
+        "additionalProperties": false,
+        "properties": {
+          "active_intent_revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "agent_identity": {
+            "type": "string"
+          },
+          "condition": {
+            "$ref": "#/$defs/WireIdentityConvergenceCondition"
+          },
+          "decision": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireIdentityReconcileDecision"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "desired_intent_revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "observed_at_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "agent_identity",
+          "condition",
+          "observed_at_ms"
+        ],
+        "type": "object"
+      },
+      "WireIdentityReconcileDecision": {
+        "enum": [
+          "backoff",
+          "repair_blocked",
+          "acquire_lease",
+          "await_lease",
+          "close_member_admission",
+          "await_member_drain",
+          "drain_blocked",
+          "cancel_active_member",
+          "seal_retirement_proven",
+          "seal_session_creation_consumed",
+          "ensure_session_authority",
+          "ensure_runtime_registration",
+          "await_external_binding_ceremony",
+          "ensure_external_binding_receipt",
+          "ensure_external_binding",
+          "ensure_member_materialization",
+          "ensure_initial_delivery_receipt",
+          "ensure_initial_delivery",
+          "await_initial_delivery",
+          "reconcile_wiring",
+          "retire_member_materialization",
+          "retire_runtime_registration",
+          "release_session_authority",
+          "converged",
+          "tombstoned",
+          "quarantined"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "adoption": {
+        "$ref": "#/$defs/WireIdentityAdoptionOutcome"
+      },
+      "convergence": {
+        "$ref": "#/$defs/WireIdentityConvergenceStatus"
+      }
+    },
+    "required": [
+      "adoption",
+      "convergence"
+    ],
+    "title": "MobAdoptMemberIdentityDeclarationResult",
+    "type": "object"
+  },
   "MobAppendSystemContextResult": {
     "$defs": {
       "WireAppendSystemContextStatus": {
@@ -81815,6 +84765,610 @@
       "status"
     ],
     "title": "MobAppendSystemContextResult",
+    "type": "object"
+  },
+  "MobApplyMemberToolDeclarationParams": {
+    "$defs": {
+      "ApplicationToolPolicyBinding": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "unmanaged",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "inherit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "provider",
+                "type": "string"
+              },
+              "policy_id": {
+                "type": "string"
+              },
+              "provider_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "provider_id",
+              "policy_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ToolCategoryOverride": {
+        "description": "Caller intent for a tool category.\n\nDistinguishes \"no opinion / didn't exist\" (`Inherit`) from explicit\n`Enable` / `Disable` so that resumed sessions don't freeze tool\navailability at the capabilities of the Meerkat version that created them.\n\n**Dogma §10:** Inherit, disable, and set are different facts.",
+        "oneOf": [
+          {
+            "const": "inherit",
+            "description": "No explicit intent — inherit runtime/factory default.",
+            "type": "string"
+          },
+          {
+            "const": "enable",
+            "description": "Explicitly enabled by caller.",
+            "type": "string"
+          },
+          {
+            "const": "disable",
+            "description": "Explicitly disabled by caller.",
+            "type": "string"
+          }
+        ]
+      },
+      "ToolCategoryOverrides": {
+        "additionalProperties": false,
+        "description": "Administrative per-category member-tool intent.\n\nThis carrier deliberately keeps `Inherit`, `Enable`, and `Disable`\ndistinct. Materialization resolves each field through its existing\ncategory owner; carrying the aggregate does not merge those owners.",
+        "properties": {
+          "builtins": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "comms": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "image_generation": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "memory": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "mob": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "schedule": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "shell": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "web_search": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "workgraph": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          }
+        },
+        "type": "object"
+      },
+      "WireCallbackToolSetDeclaration": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "inherit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "set",
+                "type": "string"
+              },
+              "tools": {
+                "items": {
+                  "$ref": "#/$defs/WireDesiredLocalCallbackTool"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "kind",
+              "tools"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireDesiredLocalCallbackTool": {
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "input_schema": true,
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "description",
+          "input_schema"
+        ],
+        "type": "object"
+      },
+      "WireIdentityConvergenceMode": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "drain",
+                "type": "string"
+              },
+              "max_wait_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "max_wait_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "cancel_active",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireMemberToolAccessConstraint": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "allow_names",
+                "type": "string"
+              },
+              "names": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "kind",
+              "names"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "deny_names",
+                "type": "string"
+              },
+              "names": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "kind",
+              "names"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "read_only",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireMemberToolAccessDeclaration": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "inherit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "unrestricted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "constraints": {
+                "items": {
+                  "$ref": "#/$defs/WireMemberToolAccessConstraint"
+                },
+                "type": "array"
+              },
+              "kind": {
+                "const": "constraints",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "constraints"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireMemberToolDeclaration": {
+        "additionalProperties": false,
+        "properties": {
+          "application_policy": {
+            "$ref": "#/$defs/ApplicationToolPolicyBinding"
+          },
+          "callback_tools": {
+            "$ref": "#/$defs/WireCallbackToolSetDeclaration"
+          },
+          "category_overrides": {
+            "$ref": "#/$defs/ToolCategoryOverrides"
+          },
+          "execution": {
+            "$ref": "#/$defs/WireMemberToolAccessDeclaration"
+          }
+        },
+        "required": [
+          "category_overrides",
+          "callback_tools",
+          "execution",
+          "application_policy"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "agent_identity": {
+        "type": "string"
+      },
+      "convergence": {
+        "$ref": "#/$defs/WireIdentityConvergenceMode"
+      },
+      "declaration": {
+        "$ref": "#/$defs/WireMemberToolDeclaration"
+      },
+      "expected_intent_revision": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "mob_id": {
+        "type": "string"
+      },
+      "request_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "mob_id",
+      "agent_identity",
+      "request_id",
+      "expected_intent_revision",
+      "declaration",
+      "convergence"
+    ],
+    "title": "MobApplyMemberToolDeclarationParams",
+    "type": "object"
+  },
+  "MobApplyMemberToolDeclarationResult": {
+    "$defs": {
+      "WireIdentityConvergenceCondition": {
+        "enum": [
+          "pending",
+          "reconciling",
+          "converged",
+          "backoff",
+          "repair_blocked",
+          "quarantined",
+          "tombstoned",
+          "suspended",
+          "drain_blocked"
+        ],
+        "type": "string"
+      },
+      "WireIdentityConvergenceStatus": {
+        "additionalProperties": false,
+        "properties": {
+          "active_intent_revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "agent_identity": {
+            "type": "string"
+          },
+          "condition": {
+            "$ref": "#/$defs/WireIdentityConvergenceCondition"
+          },
+          "decision": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireIdentityReconcileDecision"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "desired_intent_revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "observed_at_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "agent_identity",
+          "condition",
+          "observed_at_ms"
+        ],
+        "type": "object"
+      },
+      "WireIdentityReconcileDecision": {
+        "enum": [
+          "backoff",
+          "repair_blocked",
+          "acquire_lease",
+          "await_lease",
+          "close_member_admission",
+          "await_member_drain",
+          "drain_blocked",
+          "cancel_active_member",
+          "seal_retirement_proven",
+          "seal_session_creation_consumed",
+          "ensure_session_authority",
+          "ensure_runtime_registration",
+          "await_external_binding_ceremony",
+          "ensure_external_binding_receipt",
+          "ensure_external_binding",
+          "ensure_member_materialization",
+          "ensure_initial_delivery_receipt",
+          "ensure_initial_delivery",
+          "await_initial_delivery",
+          "reconcile_wiring",
+          "retire_member_materialization",
+          "retire_runtime_registration",
+          "release_session_authority",
+          "converged",
+          "tombstoned",
+          "quarantined"
+        ],
+        "type": "string"
+      },
+      "WireMemberToolCommitOutcome": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "desired_revision": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "outcome": {
+                "const": "committed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "desired_revision"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "desired_revision": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "outcome": {
+                "const": "no_change",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "desired_revision"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "actual": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "expected": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "outcome": {
+                "const": "revision_conflict",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "expected",
+              "actual"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "outcome": {
+                "const": "request_conflict",
+                "type": "string"
+              },
+              "request_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "request_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "outcome": {
+                "const": "member_absent",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "outcome": {
+                "const": "invalid_declaration",
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "reason"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "commit": {
+        "$ref": "#/$defs/WireMemberToolCommitOutcome"
+      },
+      "convergence": {
+        "$ref": "#/$defs/WireIdentityConvergenceStatus"
+      }
+    },
+    "required": [
+      "commit",
+      "convergence"
+    ],
+    "title": "MobApplyMemberToolDeclarationResult",
     "type": "object"
   },
   "MobBindHostResult": {
@@ -88836,6 +92390,454 @@
     "title": "MobMemberStatusResult",
     "type": "object"
   },
+  "MobMemberToolDeclarationParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "agent_identity": {
+        "type": "string"
+      },
+      "mob_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "mob_id",
+      "agent_identity"
+    ],
+    "title": "MobMemberToolDeclarationParams",
+    "type": "object"
+  },
+  "MobMemberToolDeclarationResult": {
+    "$defs": {
+      "ApplicationToolPolicyBinding": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "unmanaged",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "inherit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "provider",
+                "type": "string"
+              },
+              "policy_id": {
+                "type": "string"
+              },
+              "provider_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "provider_id",
+              "policy_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ToolCategoryOverride": {
+        "description": "Caller intent for a tool category.\n\nDistinguishes \"no opinion / didn't exist\" (`Inherit`) from explicit\n`Enable` / `Disable` so that resumed sessions don't freeze tool\navailability at the capabilities of the Meerkat version that created them.\n\n**Dogma §10:** Inherit, disable, and set are different facts.",
+        "oneOf": [
+          {
+            "const": "inherit",
+            "description": "No explicit intent — inherit runtime/factory default.",
+            "type": "string"
+          },
+          {
+            "const": "enable",
+            "description": "Explicitly enabled by caller.",
+            "type": "string"
+          },
+          {
+            "const": "disable",
+            "description": "Explicitly disabled by caller.",
+            "type": "string"
+          }
+        ]
+      },
+      "ToolCategoryOverrides": {
+        "additionalProperties": false,
+        "description": "Administrative per-category member-tool intent.\n\nThis carrier deliberately keeps `Inherit`, `Enable`, and `Disable`\ndistinct. Materialization resolves each field through its existing\ncategory owner; carrying the aggregate does not merge those owners.",
+        "properties": {
+          "builtins": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "comms": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "image_generation": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "memory": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "mob": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "schedule": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "shell": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "web_search": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "workgraph": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          }
+        },
+        "type": "object"
+      },
+      "WireCallbackToolSetDeclaration": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "inherit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "set",
+                "type": "string"
+              },
+              "tools": {
+                "items": {
+                  "$ref": "#/$defs/WireDesiredLocalCallbackTool"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "kind",
+              "tools"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireDesiredLocalCallbackTool": {
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "input_schema": true,
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "description",
+          "input_schema"
+        ],
+        "type": "object"
+      },
+      "WireIdentityConvergenceCondition": {
+        "enum": [
+          "pending",
+          "reconciling",
+          "converged",
+          "backoff",
+          "repair_blocked",
+          "quarantined",
+          "tombstoned",
+          "suspended",
+          "drain_blocked"
+        ],
+        "type": "string"
+      },
+      "WireIdentityConvergenceStatus": {
+        "additionalProperties": false,
+        "properties": {
+          "active_intent_revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "agent_identity": {
+            "type": "string"
+          },
+          "condition": {
+            "$ref": "#/$defs/WireIdentityConvergenceCondition"
+          },
+          "decision": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireIdentityReconcileDecision"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "desired_intent_revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "observed_at_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "agent_identity",
+          "condition",
+          "observed_at_ms"
+        ],
+        "type": "object"
+      },
+      "WireIdentityReconcileDecision": {
+        "enum": [
+          "backoff",
+          "repair_blocked",
+          "acquire_lease",
+          "await_lease",
+          "close_member_admission",
+          "await_member_drain",
+          "drain_blocked",
+          "cancel_active_member",
+          "seal_retirement_proven",
+          "seal_session_creation_consumed",
+          "ensure_session_authority",
+          "ensure_runtime_registration",
+          "await_external_binding_ceremony",
+          "ensure_external_binding_receipt",
+          "ensure_external_binding",
+          "ensure_member_materialization",
+          "ensure_initial_delivery_receipt",
+          "ensure_initial_delivery",
+          "await_initial_delivery",
+          "reconcile_wiring",
+          "retire_member_materialization",
+          "retire_runtime_registration",
+          "release_session_authority",
+          "converged",
+          "tombstoned",
+          "quarantined"
+        ],
+        "type": "string"
+      },
+      "WireMemberToolAccessConstraint": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "allow_names",
+                "type": "string"
+              },
+              "names": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "kind",
+              "names"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "deny_names",
+                "type": "string"
+              },
+              "names": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "kind",
+              "names"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "read_only",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireMemberToolAccessDeclaration": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "inherit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "unrestricted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "constraints": {
+                "items": {
+                  "$ref": "#/$defs/WireMemberToolAccessConstraint"
+                },
+                "type": "array"
+              },
+              "kind": {
+                "const": "constraints",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "constraints"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireMemberToolDeclaration": {
+        "additionalProperties": false,
+        "properties": {
+          "application_policy": {
+            "$ref": "#/$defs/ApplicationToolPolicyBinding"
+          },
+          "callback_tools": {
+            "$ref": "#/$defs/WireCallbackToolSetDeclaration"
+          },
+          "category_overrides": {
+            "$ref": "#/$defs/ToolCategoryOverrides"
+          },
+          "execution": {
+            "$ref": "#/$defs/WireMemberToolAccessDeclaration"
+          }
+        },
+        "required": [
+          "category_overrides",
+          "callback_tools",
+          "execution",
+          "application_policy"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "agent_identity": {
+        "type": "string"
+      },
+      "convergence": {
+        "$ref": "#/$defs/WireIdentityConvergenceStatus"
+      },
+      "declaration": {
+        "$ref": "#/$defs/WireMemberToolDeclaration"
+      },
+      "desired_intent_revision": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "mob_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "mob_id",
+      "agent_identity",
+      "desired_intent_revision",
+      "declaration",
+      "convergence"
+    ],
+    "title": "MobMemberToolDeclarationResult",
+    "type": "object"
+  },
   "MobMembersResult": {
     "$defs": {
       "MobMemberListEntryWire": {
@@ -91214,6 +95216,323 @@
       "report"
     ],
     "title": "MobReconcileResult",
+    "type": "object"
+  },
+  "MobResolveIdentityConvergenceBlockParams": {
+    "$defs": {
+      "WireIdentityConvergenceMode": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "drain",
+                "type": "string"
+              },
+              "max_wait_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "max_wait_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "cancel_active",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "agent_identity": {
+        "type": "string"
+      },
+      "convergence": {
+        "$ref": "#/$defs/WireIdentityConvergenceMode"
+      },
+      "expected_desired_revision": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "mob_id": {
+        "type": "string"
+      },
+      "observed_active_revision": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "request_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "mob_id",
+      "agent_identity",
+      "request_id",
+      "expected_desired_revision",
+      "observed_active_revision",
+      "convergence"
+    ],
+    "title": "MobResolveIdentityConvergenceBlockParams",
+    "type": "object"
+  },
+  "MobResolveIdentityConvergenceBlockResult": {
+    "$defs": {
+      "WireIdentityConvergenceCondition": {
+        "enum": [
+          "pending",
+          "reconciling",
+          "converged",
+          "backoff",
+          "repair_blocked",
+          "quarantined",
+          "tombstoned",
+          "suspended",
+          "drain_blocked"
+        ],
+        "type": "string"
+      },
+      "WireIdentityConvergenceResolutionOutcome": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "active_revision": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "desired_revision": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "outcome": {
+                "const": "resolved",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "desired_revision",
+              "active_revision"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "actual": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "expected": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "outcome": {
+                "const": "desired_revision_conflict",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "expected",
+              "actual"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "actual": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "expected": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "outcome": {
+                "const": "active_revision_conflict",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "expected",
+              "actual"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "outcome": {
+                "const": "not_blocked",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "outcome": {
+                "const": "member_absent",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "outcome": {
+                "const": "request_conflict",
+                "type": "string"
+              },
+              "request_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "request_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireIdentityConvergenceStatus": {
+        "additionalProperties": false,
+        "properties": {
+          "active_intent_revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "agent_identity": {
+            "type": "string"
+          },
+          "condition": {
+            "$ref": "#/$defs/WireIdentityConvergenceCondition"
+          },
+          "decision": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireIdentityReconcileDecision"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "desired_intent_revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "observed_at_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "agent_identity",
+          "condition",
+          "observed_at_ms"
+        ],
+        "type": "object"
+      },
+      "WireIdentityReconcileDecision": {
+        "enum": [
+          "backoff",
+          "repair_blocked",
+          "acquire_lease",
+          "await_lease",
+          "close_member_admission",
+          "await_member_drain",
+          "drain_blocked",
+          "cancel_active_member",
+          "seal_retirement_proven",
+          "seal_session_creation_consumed",
+          "ensure_session_authority",
+          "ensure_runtime_registration",
+          "await_external_binding_ceremony",
+          "ensure_external_binding_receipt",
+          "ensure_external_binding",
+          "ensure_member_materialization",
+          "ensure_initial_delivery_receipt",
+          "ensure_initial_delivery",
+          "await_initial_delivery",
+          "reconcile_wiring",
+          "retire_member_materialization",
+          "retire_runtime_registration",
+          "release_session_authority",
+          "converged",
+          "tombstoned",
+          "quarantined"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "convergence": {
+        "$ref": "#/$defs/WireIdentityConvergenceStatus"
+      },
+      "outcome": {
+        "$ref": "#/$defs/WireIdentityConvergenceResolutionOutcome"
+      }
+    },
+    "required": [
+      "outcome",
+      "convergence"
+    ],
+    "title": "MobResolveIdentityConvergenceBlockResult",
     "type": "object"
   },
   "MobRespawnResult": {
@@ -94177,6 +98496,54 @@
   },
   "PortableMemberSpec": {
     "$defs": {
+      "ApplicationToolPolicyBinding": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "unmanaged",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "inherit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "provider",
+                "type": "string"
+              },
+              "policy_id": {
+                "type": "string"
+              },
+              "provider_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "provider_id",
+              "policy_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "BindingId": {
         "description": "Opaque slug identifying a binding inside a realm.",
         "type": "string"
@@ -94618,6 +98985,13 @@
               "null"
             ]
           },
+          "application_tool_policy": {
+            "$ref": "#/$defs/ApplicationToolPolicyBinding",
+            "default": {
+              "kind": "unmanaged"
+            },
+            "description": "Stable application policy identity. Snapshot content remains owned by\nthe host-injected provider and is never copied into this member spec."
+          },
           "auth_binding": {
             "anyOf": [
               {
@@ -94692,6 +99066,21 @@
               }
             ],
             "description": "Resolved policy only — `Inherit` is unrepresentable (O3); `None`\nmeans no per-member policy, not \"inherit something ambient\"."
+          },
+          "tool_category_overrides": {
+            "$ref": "#/$defs/ToolCategoryOverrides",
+            "default": {
+              "builtins": "inherit",
+              "comms": "inherit",
+              "image_generation": "inherit",
+              "memory": "inherit",
+              "mob": "inherit",
+              "schedule": "inherit",
+              "shell": "inherit",
+              "web_search": "inherit",
+              "workgraph": "inherit"
+            },
+            "description": "Administrative per-category intent. The receiving host resolves each\nfield through the same category owner used for local materialization."
           }
         },
         "required": [
@@ -94847,6 +99236,69 @@
           "namespace",
           "key"
         ],
+        "type": "object"
+      },
+      "ToolCategoryOverride": {
+        "description": "Caller intent for a tool category.\n\nDistinguishes \"no opinion / didn't exist\" (`Inherit`) from explicit\n`Enable` / `Disable` so that resumed sessions don't freeze tool\navailability at the capabilities of the Meerkat version that created them.\n\n**Dogma §10:** Inherit, disable, and set are different facts.",
+        "oneOf": [
+          {
+            "const": "inherit",
+            "description": "No explicit intent — inherit runtime/factory default.",
+            "type": "string"
+          },
+          {
+            "const": "enable",
+            "description": "Explicitly enabled by caller.",
+            "type": "string"
+          },
+          {
+            "const": "disable",
+            "description": "Explicitly disabled by caller.",
+            "type": "string"
+          }
+        ]
+      },
+      "ToolCategoryOverrides": {
+        "additionalProperties": false,
+        "description": "Administrative per-category member-tool intent.\n\nThis carrier deliberately keeps `Inherit`, `Enable`, and `Disable`\ndistinct. Materialization resolves each field through its existing\ncategory owner; carrying the aggregate does not merge those owners.",
+        "properties": {
+          "builtins": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "comms": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "image_generation": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "memory": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "mob": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "schedule": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "shell": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "web_search": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "workgraph": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          }
+        },
         "type": "object"
       },
       "WireAnthropicCacheControlPolicy": {
@@ -95670,7 +100122,6 @@
         "type": "string"
       },
       "WireResolvedToolAccessPolicy": {
-        "description": "Resolved tool access policy — mirrors `WireToolAccessPolicy`'s\nallow/deny shape exactly, with `Inherit` structurally absent (O3).",
         "oneOf": [
           {
             "properties": {
@@ -95722,6 +100173,26 @@
               "type"
             ],
             "type": "object"
+          },
+          {
+            "description": "Every contained constraint must admit the call.",
+            "properties": {
+              "type": {
+                "const": "constraints",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "$ref": "#/$defs/WireToolAccessConstraint"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -95753,6 +100224,61 @@
             "required": [
               "type",
               "continuity_key"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireToolAccessConstraint": {
+        "description": "Resolved tool access policy — mirrors `WireToolAccessPolicy`'s\nallow/deny shape exactly, with `Inherit` structurally absent (O3).",
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "const": "allow_names",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "deny_names",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "read_only",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
             ],
             "type": "object"
           }
@@ -96884,6 +101410,54 @@
   },
   "PortableSpawnOverlay": {
     "$defs": {
+      "ApplicationToolPolicyBinding": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "unmanaged",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "inherit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "provider",
+                "type": "string"
+              },
+              "policy_id": {
+                "type": "string"
+              },
+              "provider_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "provider_id",
+              "policy_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "BindingId": {
         "description": "Opaque slug identifying a binding inside a realm.",
         "type": "string"
@@ -96995,6 +101569,69 @@
       "RealmId": {
         "description": "Opaque slug identifying a realm.",
         "type": "string"
+      },
+      "ToolCategoryOverride": {
+        "description": "Caller intent for a tool category.\n\nDistinguishes \"no opinion / didn't exist\" (`Inherit`) from explicit\n`Enable` / `Disable` so that resumed sessions don't freeze tool\navailability at the capabilities of the Meerkat version that created them.\n\n**Dogma §10:** Inherit, disable, and set are different facts.",
+        "oneOf": [
+          {
+            "const": "inherit",
+            "description": "No explicit intent — inherit runtime/factory default.",
+            "type": "string"
+          },
+          {
+            "const": "enable",
+            "description": "Explicitly enabled by caller.",
+            "type": "string"
+          },
+          {
+            "const": "disable",
+            "description": "Explicitly disabled by caller.",
+            "type": "string"
+          }
+        ]
+      },
+      "ToolCategoryOverrides": {
+        "additionalProperties": false,
+        "description": "Administrative per-category member-tool intent.\n\nThis carrier deliberately keeps `Inherit`, `Enable`, and `Disable`\ndistinct. Materialization resolves each field through its existing\ncategory owner; carrying the aggregate does not merge those owners.",
+        "properties": {
+          "builtins": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "comms": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "image_generation": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "memory": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "mob": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "schedule": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "shell": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "web_search": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "workgraph": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          }
+        },
+        "type": "object"
       },
       "WireAuthBindingRef": {
         "description": "Wire projection of [`meerkat_core::AuthBindingRef`].\n\nPure structural shape — no `\"realm:binding\"` string form. Wave-b deleted\n`parse` and `Display` on both the core type and the wire projection so\nthe colon-joined form cannot travel across wire boundaries.",
@@ -97118,7 +101755,6 @@
         "type": "string"
       },
       "WireResolvedToolAccessPolicy": {
-        "description": "Resolved tool access policy — mirrors `WireToolAccessPolicy`'s\nallow/deny shape exactly, with `Inherit` structurally absent (O3).",
         "oneOf": [
           {
             "properties": {
@@ -97170,6 +101806,26 @@
               "type"
             ],
             "type": "object"
+          },
+          {
+            "description": "Every contained constraint must admit the call.",
+            "properties": {
+              "type": {
+                "const": "constraints",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "$ref": "#/$defs/WireToolAccessConstraint"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -97205,6 +101861,61 @@
             "type": "object"
           }
         ]
+      },
+      "WireToolAccessConstraint": {
+        "description": "Resolved tool access policy — mirrors `WireToolAccessPolicy`'s\nallow/deny shape exactly, with `Inherit` structurally absent (O3).",
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "const": "allow_names",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "deny_names",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "read_only",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          }
+        ]
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -97219,6 +101930,13 @@
           "array",
           "null"
         ]
+      },
+      "application_tool_policy": {
+        "$ref": "#/$defs/ApplicationToolPolicyBinding",
+        "default": {
+          "kind": "unmanaged"
+        },
+        "description": "Stable application policy identity. Snapshot content remains owned by\nthe host-injected provider and is never copied into this member spec."
       },
       "auth_binding": {
         "anyOf": [
@@ -97294,6 +102012,21 @@
           }
         ],
         "description": "Resolved policy only — `Inherit` is unrepresentable (O3); `None`\nmeans no per-member policy, not \"inherit something ambient\"."
+      },
+      "tool_category_overrides": {
+        "$ref": "#/$defs/ToolCategoryOverrides",
+        "default": {
+          "builtins": "inherit",
+          "comms": "inherit",
+          "image_generation": "inherit",
+          "memory": "inherit",
+          "mob": "inherit",
+          "schedule": "inherit",
+          "shell": "inherit",
+          "web_search": "inherit",
+          "workgraph": "inherit"
+        },
+        "description": "Administrative per-category intent. The receiving host resolves each\nfield through the same category owner used for local materialization."
       }
     },
     "required": [
@@ -101308,8 +106041,56 @@
           }
         ]
       },
-      "ToolAccessPolicy": {
+      "ToolAccessConstraint": {
         "description": "Tool access control for delegated branches",
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "const": "allow_names",
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/$defs/ToolNameSet"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "deny_names",
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/$defs/ToolNameSet"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "read_only",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ToolAccessPolicy": {
         "oneOf": [
           {
             "description": "Inherit all tools from parent",
@@ -101368,6 +106149,26 @@
             },
             "required": [
               "type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Every contained constraint must admit the call.",
+            "properties": {
+              "type": {
+                "const": "constraints",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "$ref": "#/$defs/ToolAccessConstraint"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
             ],
             "type": "object"
           }
@@ -103712,8 +108513,56 @@
           }
         ]
       },
-      "ToolAccessPolicy": {
+      "ToolAccessConstraint": {
         "description": "Tool access control for delegated branches",
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "const": "allow_names",
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/$defs/ToolNameSet"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "deny_names",
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/$defs/ToolNameSet"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "read_only",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ToolAccessPolicy": {
         "oneOf": [
           {
             "description": "Inherit all tools from parent",
@@ -103772,6 +108621,26 @@
             },
             "required": [
               "type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Every contained constraint must admit the call.",
+            "properties": {
+              "type": {
+                "const": "constraints",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "$ref": "#/$defs/ToolAccessConstraint"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
             ],
             "type": "object"
           }
@@ -106266,8 +111135,56 @@
           }
         ]
       },
-      "ToolAccessPolicy": {
+      "ToolAccessConstraint": {
         "description": "Tool access control for delegated branches",
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "const": "allow_names",
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/$defs/ToolNameSet"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "deny_names",
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/$defs/ToolNameSet"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "read_only",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ToolAccessPolicy": {
         "oneOf": [
           {
             "description": "Inherit all tools from parent",
@@ -106326,6 +111243,26 @@
             },
             "required": [
               "type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Every contained constraint must admit the call.",
+            "properties": {
+              "type": {
+                "const": "constraints",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "$ref": "#/$defs/ToolAccessConstraint"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
             ],
             "type": "object"
           }
@@ -112746,6 +117683,7 @@
           "llm",
           "store",
           "tool",
+          "policy_indeterminate",
           "mcp",
           "session_not_found",
           "budget",
@@ -119752,6 +124690,147 @@
       }
     },
     "title": "WireHostUnavailableDetail",
+    "type": "object"
+  },
+  "WireIdentityConvergenceMode": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "drain",
+            "type": "string"
+          },
+          "max_wait_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "max_wait_ms"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "cancel_active",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WireIdentityConvergenceMode"
+  },
+  "WireIdentityConvergenceStatus": {
+    "$defs": {
+      "WireIdentityConvergenceCondition": {
+        "enum": [
+          "pending",
+          "reconciling",
+          "converged",
+          "backoff",
+          "repair_blocked",
+          "quarantined",
+          "tombstoned",
+          "suspended",
+          "drain_blocked"
+        ],
+        "type": "string"
+      },
+      "WireIdentityReconcileDecision": {
+        "enum": [
+          "backoff",
+          "repair_blocked",
+          "acquire_lease",
+          "await_lease",
+          "close_member_admission",
+          "await_member_drain",
+          "drain_blocked",
+          "cancel_active_member",
+          "seal_retirement_proven",
+          "seal_session_creation_consumed",
+          "ensure_session_authority",
+          "ensure_runtime_registration",
+          "await_external_binding_ceremony",
+          "ensure_external_binding_receipt",
+          "ensure_external_binding",
+          "ensure_member_materialization",
+          "ensure_initial_delivery_receipt",
+          "ensure_initial_delivery",
+          "await_initial_delivery",
+          "reconcile_wiring",
+          "retire_member_materialization",
+          "retire_runtime_registration",
+          "release_session_authority",
+          "converged",
+          "tombstoned",
+          "quarantined"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "active_intent_revision": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "agent_identity": {
+        "type": "string"
+      },
+      "condition": {
+        "$ref": "#/$defs/WireIdentityConvergenceCondition"
+      },
+      "decision": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireIdentityReconcileDecision"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "desired_intent_revision": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "detail": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "observed_at_ms": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "agent_identity",
+      "condition",
+      "observed_at_ms"
+    ],
+    "title": "WireIdentityConvergenceStatus",
     "type": "object"
   },
   "WireImageGenerationToolResult": {
@@ -126812,6 +131891,307 @@
     "title": "WireMemberRunState",
     "type": "string"
   },
+  "WireMemberToolDeclaration": {
+    "$defs": {
+      "ApplicationToolPolicyBinding": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "unmanaged",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "inherit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "provider",
+                "type": "string"
+              },
+              "policy_id": {
+                "type": "string"
+              },
+              "provider_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "provider_id",
+              "policy_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ToolCategoryOverride": {
+        "description": "Caller intent for a tool category.\n\nDistinguishes \"no opinion / didn't exist\" (`Inherit`) from explicit\n`Enable` / `Disable` so that resumed sessions don't freeze tool\navailability at the capabilities of the Meerkat version that created them.\n\n**Dogma §10:** Inherit, disable, and set are different facts.",
+        "oneOf": [
+          {
+            "const": "inherit",
+            "description": "No explicit intent — inherit runtime/factory default.",
+            "type": "string"
+          },
+          {
+            "const": "enable",
+            "description": "Explicitly enabled by caller.",
+            "type": "string"
+          },
+          {
+            "const": "disable",
+            "description": "Explicitly disabled by caller.",
+            "type": "string"
+          }
+        ]
+      },
+      "ToolCategoryOverrides": {
+        "additionalProperties": false,
+        "description": "Administrative per-category member-tool intent.\n\nThis carrier deliberately keeps `Inherit`, `Enable`, and `Disable`\ndistinct. Materialization resolves each field through its existing\ncategory owner; carrying the aggregate does not merge those owners.",
+        "properties": {
+          "builtins": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "comms": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "image_generation": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "memory": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "mob": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "schedule": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "shell": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "web_search": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "workgraph": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          }
+        },
+        "type": "object"
+      },
+      "WireCallbackToolSetDeclaration": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "inherit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "set",
+                "type": "string"
+              },
+              "tools": {
+                "items": {
+                  "$ref": "#/$defs/WireDesiredLocalCallbackTool"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "kind",
+              "tools"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireDesiredLocalCallbackTool": {
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "input_schema": true,
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "description",
+          "input_schema"
+        ],
+        "type": "object"
+      },
+      "WireMemberToolAccessConstraint": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "allow_names",
+                "type": "string"
+              },
+              "names": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "kind",
+              "names"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "deny_names",
+                "type": "string"
+              },
+              "names": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "kind",
+              "names"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "read_only",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireMemberToolAccessDeclaration": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "inherit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "unrestricted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "constraints": {
+                "items": {
+                  "$ref": "#/$defs/WireMemberToolAccessConstraint"
+                },
+                "type": "array"
+              },
+              "kind": {
+                "const": "constraints",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "constraints"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "application_policy": {
+        "$ref": "#/$defs/ApplicationToolPolicyBinding"
+      },
+      "callback_tools": {
+        "$ref": "#/$defs/WireCallbackToolSetDeclaration"
+      },
+      "category_overrides": {
+        "$ref": "#/$defs/ToolCategoryOverrides"
+      },
+      "execution": {
+        "$ref": "#/$defs/WireMemberToolAccessDeclaration"
+      }
+    },
+    "required": [
+      "category_overrides",
+      "callback_tools",
+      "execution",
+      "application_policy"
+    ],
+    "title": "WireMemberToolDeclaration",
+    "type": "object"
+  },
   "WireMobBackendKind": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "enum": [
@@ -129639,8 +135019,64 @@
     "type": "string"
   },
   "WireResolvedToolAccessPolicy": {
+    "$defs": {
+      "WireToolAccessConstraint": {
+        "description": "Resolved tool access policy — mirrors `WireToolAccessPolicy`'s\nallow/deny shape exactly, with `Inherit` structurally absent (O3).",
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "const": "allow_names",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "deny_names",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "read_only",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Resolved tool access policy — mirrors `WireToolAccessPolicy`'s\nallow/deny shape exactly, with `Inherit` structurally absent (O3).",
     "oneOf": [
       {
         "properties": {
@@ -129690,6 +135126,26 @@
         },
         "required": [
           "type"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Every contained constraint must admit the call.",
+        "properties": {
+          "type": {
+            "const": "constraints",
+            "type": "string"
+          },
+          "value": {
+            "items": {
+              "$ref": "#/$defs/WireToolAccessConstraint"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "type",
+          "value"
         ],
         "type": "object"
       }

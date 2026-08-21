@@ -701,6 +701,10 @@ pub struct SessionBuildOptions {
     /// `Inherit` must be resolved by the spawn chain before build; an
     /// unresolved `Inherit` fails the build closed.
     pub tool_access_policy: Option<crate::ops::ToolAccessPolicy>,
+    /// Stable application consequence-policy identity for this session.
+    pub application_tool_policy: crate::ApplicationToolPolicyBinding,
+    /// Host-scoped in-process registry. Executable policy is never serialized.
+    pub tool_consequence_policy_registry: Option<Arc<crate::ToolConsequencePolicyRegistry>>,
     /// Environment variables injected into shell tool subprocesses for this agent.
     /// Set by the application's `SessionAgentBuilder` — never by the LLM.
     /// Values are not included in the agent's context window.
@@ -1364,6 +1368,8 @@ pub struct ResumeOverrideMask {
     pub peer_meta: bool,
     /// Explicit per-launch tool access policy supplied by the caller.
     pub tool_access_policy: bool,
+    /// Explicit application policy binding supplied by the caller.
+    pub application_tool_policy: bool,
 }
 
 impl SessionBuildOptions {
@@ -1465,6 +1471,8 @@ impl Default for SessionBuildOptions {
             initial_metadata_entries: BTreeMap::new(),
             initial_tool_filter: None,
             tool_access_policy: None,
+            application_tool_policy: crate::ApplicationToolPolicyBinding::Unmanaged,
+            tool_consequence_policy_registry: None,
             shell_env: None,
             call_timeout_override: crate::CallTimeoutOverride::Inherit,
             resume_override_mask: ResumeOverrideMask::default(),

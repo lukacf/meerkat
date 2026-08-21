@@ -12,7 +12,7 @@ use meerkat_core::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use meerkat_core::{SurfaceMetadata, SurfaceMetadataError};
 
@@ -119,6 +119,362 @@ impl WireToolAccessPolicy {
             Self::ReadOnly => meerkat_core::ops::ToolAccessPolicy::ReadOnly,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct WireDesiredLocalCallbackTool {
+    pub name: String,
+    pub description: String,
+    pub input_schema: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(
+    tag = "kind",
+    content = "tools",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum WireCallbackToolSetDeclaration {
+    Inherit,
+    Set(Vec<WireDesiredLocalCallbackTool>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(
+    tag = "kind",
+    content = "names",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum WireMemberToolAccessConstraint {
+    AllowNames(Vec<String>),
+    DenyNames(Vec<String>),
+    ReadOnly,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(
+    tag = "kind",
+    content = "constraints",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum WireMemberToolAccessDeclaration {
+    Inherit,
+    Unrestricted,
+    Constraints(Vec<WireMemberToolAccessConstraint>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct WireMemberToolDeclaration {
+    pub category_overrides: meerkat_core::ToolCategoryOverrides,
+    pub callback_tools: WireCallbackToolSetDeclaration,
+    pub execution: WireMemberToolAccessDeclaration,
+    pub application_policy: meerkat_core::ApplicationToolPolicyBinding,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireIdentityAdoptionPrecondition {
+    ExpectedAbsent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireDesiredSessionAuthorityPolicy {
+    RequireExisting,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct WireDesiredSessionTarget {
+    pub session_id: String,
+    pub lineage_id: String,
+    pub lineage_generation: u64,
+    pub authority_policy: WireDesiredSessionAuthorityPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "execution", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WireDesiredExecution {
+    ControllingSession,
+    AnyBoundHostSession,
+    PlacedSession {
+        host_id: String,
+    },
+    External {
+        address: String,
+        identity: WireTrustedPeerIdentity,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct WireIdentityProfileMemberDeclaration {
+    pub profile_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_override: Option<super::portable_spec::PortableProfile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_override: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_addressable_override: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<super::supervisor_bridge::WireOpaqueJson>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub labels: Option<BTreeMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additional_instructions: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt_override: Option<super::portable_spec::PortableSystemPrompt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_access_policy: Option<super::portable_spec::WireResolvedToolAccessPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_binding: Option<WireAuthBindingRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_limits: Option<meerkat_core::BudgetLimits>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_mode: Option<WireMobRuntimeMode>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_env_keys: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_local_callback_tools: Vec<WireDesiredLocalCallbackTool>,
+    pub execution: WireDesiredExecution,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct WireDesiredIdentityEdge {
+    pub a: String,
+    pub b: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireIdentityWiringCustody {
+    #[default]
+    ExternalManaged,
+    IdentityOwned,
+}
+
+impl WireIdentityWiringCustody {
+    pub const fn is_external_managed(&self) -> bool {
+        matches!(self, Self::ExternalManaged)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MobAdoptMemberIdentityDeclarationParams {
+    pub mob_id: String,
+    pub agent_identity: String,
+    pub request_id: String,
+    pub precondition: WireIdentityAdoptionPrecondition,
+    pub declaration_scope: String,
+    pub declaration_revision: u64,
+    pub session: WireDesiredSessionTarget,
+    pub member: WireIdentityProfileMemberDeclaration,
+    #[serde(
+        default,
+        skip_serializing_if = "WireIdentityWiringCustody::is_external_managed"
+    )]
+    pub wiring_custody: WireIdentityWiringCustody,
+    pub owned_wiring: BTreeSet<WireDesiredIdentityEdge>,
+    pub convergence: WireIdentityConvergenceMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WireIdentityAdoptionOutcome {
+    Adopted { desired_revision: u64 },
+    PreconditionConflict { actual_revision: u64 },
+    RequestConflict { request_id: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MobAdoptMemberIdentityDeclarationResult {
+    pub adoption: WireIdentityAdoptionOutcome,
+    pub convergence: WireIdentityConvergenceStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WireIdentityConvergenceMode {
+    Drain { max_wait_ms: u64 },
+    CancelActive,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MobMemberToolDeclarationParams {
+    pub mob_id: String,
+    pub agent_identity: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MobApplyMemberToolDeclarationParams {
+    pub mob_id: String,
+    pub agent_identity: String,
+    pub request_id: String,
+    pub expected_intent_revision: u64,
+    pub declaration: WireMemberToolDeclaration,
+    pub convergence: WireIdentityConvergenceMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MobResolveIdentityConvergenceBlockParams {
+    pub mob_id: String,
+    pub agent_identity: String,
+    pub request_id: String,
+    pub expected_desired_revision: u64,
+    pub observed_active_revision: u64,
+    pub convergence: WireIdentityConvergenceMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireIdentityConvergenceCondition {
+    Pending,
+    Reconciling,
+    Converged,
+    Backoff,
+    RepairBlocked,
+    Quarantined,
+    Tombstoned,
+    Suspended,
+    DrainBlocked,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireIdentityReconcileDecision {
+    Backoff,
+    RepairBlocked,
+    AcquireLease,
+    AwaitLease,
+    CloseMemberAdmission,
+    AwaitMemberDrain,
+    DrainBlocked,
+    CancelActiveMember,
+    SealRetirementProven,
+    SealSessionCreationConsumed,
+    EnsureSessionAuthority,
+    EnsureRuntimeRegistration,
+    AwaitExternalBindingCeremony,
+    EnsureExternalBindingReceipt,
+    EnsureExternalBinding,
+    EnsureMemberMaterialization,
+    EnsureInitialDeliveryReceipt,
+    EnsureInitialDelivery,
+    AwaitInitialDelivery,
+    ReconcileWiring,
+    RetireMemberMaterialization,
+    RetireRuntimeRegistration,
+    ReleaseSessionAuthority,
+    Converged,
+    Tombstoned,
+    Quarantined,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct WireIdentityConvergenceStatus {
+    pub agent_identity: String,
+    pub desired_intent_revision: Option<u64>,
+    pub active_intent_revision: Option<u64>,
+    pub decision: Option<WireIdentityReconcileDecision>,
+    pub condition: WireIdentityConvergenceCondition,
+    pub observed_at_ms: u64,
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WireMemberToolCommitOutcome {
+    Committed { desired_revision: u64 },
+    NoChange { desired_revision: u64 },
+    RevisionConflict { expected: u64, actual: u64 },
+    RequestConflict { request_id: String },
+    MemberAbsent,
+    InvalidDeclaration { reason: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WireIdentityConvergenceResolutionOutcome {
+    Resolved {
+        desired_revision: u64,
+        active_revision: u64,
+    },
+    DesiredRevisionConflict {
+        expected: u64,
+        actual: u64,
+    },
+    ActiveRevisionConflict {
+        expected: u64,
+        actual: u64,
+    },
+    NotBlocked,
+    MemberAbsent,
+    RequestConflict {
+        request_id: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MobMemberToolDeclarationResult {
+    pub mob_id: String,
+    pub agent_identity: String,
+    pub desired_intent_revision: u64,
+    pub declaration: WireMemberToolDeclaration,
+    pub convergence: WireIdentityConvergenceStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MobApplyMemberToolDeclarationResult {
+    pub commit: WireMemberToolCommitOutcome,
+    pub convergence: WireIdentityConvergenceStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MobResolveIdentityConvergenceBlockResult {
+    pub outcome: WireIdentityConvergenceResolutionOutcome,
+    pub convergence: WireIdentityConvergenceStatus,
 }
 
 /// Pre-resolved tool filter inherited by a spawned mob member.

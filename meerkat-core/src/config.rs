@@ -1039,6 +1039,9 @@ pub struct AgentConfig {
         skip_serializing_if = "crate::lifecycle::run_primitive::ProviderParamsCarrier::serializes_empty"
     )]
     pub provider_params: crate::lifecycle::run_primitive::ProviderParamsCarrier,
+    /// Build-derived narrow-only provider-native tool policy.
+    #[serde(skip)]
+    pub provider_native_tools: crate::ProviderNativeToolPolicy,
     /// Output schema for structured output extraction.
     ///
     /// When set, the agent will perform an extraction turn after completing
@@ -1068,6 +1071,7 @@ impl Default for AgentConfig {
             system_prompt_file: None,
             tool_instructions: None,
             model: agent.and_then(|cfg| cfg.model.clone()).unwrap_or_default(),
+            provider_native_tools: crate::ProviderNativeToolPolicy::Inherit,
             // `None` = inherit / resolve the template default at point-of-use
             // (see [`AgentConfig::resolved_max_tokens_per_turn`]); never
             // materialize a concrete default into the field (presence semantics).

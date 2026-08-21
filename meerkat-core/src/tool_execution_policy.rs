@@ -75,6 +75,8 @@ pub enum ToolExecutionPolicyError {
          before the dispatch gate is built"
     )]
     UnresolvedInherit,
+    #[error("tool access constraints must not be empty")]
+    EmptyConstraints,
 }
 
 impl ToolExecutionPolicyError {
@@ -82,6 +84,7 @@ impl ToolExecutionPolicyError {
     pub fn error_code(&self) -> &'static str {
         match self {
             Self::UnresolvedInherit => "tool_execution_policy_unresolved_inherit",
+            Self::EmptyConstraints => "tool_execution_policy_empty_constraints",
         }
     }
 }
@@ -121,20 +124,7 @@ impl ToolMutationClass {
 /// caller can mint a policy that skipped `Inherit` resolution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolExecutionPolicy {
-    kind: ToolExecutionPolicyKind,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ToolExecutionPolicyKind {
-    /// Every tool call is permitted (host authority; no gating applied).
-    Unrestricted,
-    /// Only the named tools may execute.
-    AllowList(ToolNameSet),
-    /// The named tools may not execute.
-    DenyList(ToolNameSet),
-    /// Only tools declared [`ToolMutationClass::ReadOnly`] by their owning
-    /// dispatcher may execute.
-    ReadOnly,
+    constraints: Vec<crate::ops::ToolAccessConstraint>,
 }
 
 impl ToolExecutionPolicy {
@@ -142,7 +132,7 @@ impl ToolExecutionPolicy {
     #[must_use]
     pub fn unrestricted() -> Self {
         Self {
-            kind: ToolExecutionPolicyKind::Unrestricted,
+            constraints: Vec::new(),
         }
     }
 
@@ -153,30 +143,46 @@ impl ToolExecutionPolicy {
     /// [`ToolExecutionPolicyError::UnresolvedInherit`] — the spawn chain must
     /// have replaced it with the parent's effective policy before this point.
     pub fn resolve(policy: ToolAccessPolicy) -> Result<Self, ToolExecutionPolicyError> {
-        match policy {
+        let constraints = match policy {
             ToolAccessPolicy::Inherit => Err(ToolExecutionPolicyError::UnresolvedInherit),
-            ToolAccessPolicy::AllowList(names) => Ok(Self {
-                kind: ToolExecutionPolicyKind::AllowList(names),
-            }),
-            ToolAccessPolicy::DenyList(names) => Ok(Self {
-                kind: ToolExecutionPolicyKind::DenyList(names),
-            }),
-            ToolAccessPolicy::ReadOnly => Ok(Self {
-                kind: ToolExecutionPolicyKind::ReadOnly,
-            }),
-        }
+            ToolAccessPolicy::AllowList(names) => {
+                Ok(vec![crate::ops::ToolAccessConstraint::AllowNames(names)])
+            }
+            ToolAccessPolicy::DenyList(names) => {
+                Ok(vec![crate::ops::ToolAccessConstraint::DenyNames(names)])
+            }
+            ToolAccessPolicy::ReadOnly => Ok(vec![crate::ops::ToolAccessConstraint::ReadOnly]),
+            ToolAccessPolicy::Constraints(constraints) if constraints.is_empty() => {
+                Err(ToolExecutionPolicyError::EmptyConstraints)
+            }
+            ToolAccessPolicy::Constraints(constraints) => Ok(constraints),
+        }?;
+        Ok(Self {
+            constraints: normalize_constraints(constraints),
+        })
     }
 
     /// Whether this policy permits every tool call.
     #[must_use]
     pub fn is_unrestricted(&self) -> bool {
-        matches!(self.kind, ToolExecutionPolicyKind::Unrestricted)
+        self.constraints.is_empty()
     }
 
     /// Whether this policy admits calls solely on a read-only declaration.
     #[must_use]
     pub fn is_read_only_intent(&self) -> bool {
-        matches!(self.kind, ToolExecutionPolicyKind::ReadOnly)
+        self.constraints.len() == 1
+            && matches!(
+                self.constraints[0],
+                crate::ops::ToolAccessConstraint::ReadOnly
+            )
+    }
+
+    #[must_use]
+    fn requires_mutation_declaration(&self) -> bool {
+        self.constraints
+            .iter()
+            .any(|constraint| matches!(constraint, crate::ops::ToolAccessConstraint::ReadOnly))
     }
 
     /// Whether a call to the named tool is permitted, given the mutation class
@@ -187,12 +193,11 @@ impl ToolExecutionPolicy {
     /// [`ToolMutationClass::ReadOnly`] declaration.
     #[must_use]
     pub fn permits_call(&self, name: &str, declared: ToolMutationClass) -> bool {
-        match &self.kind {
-            ToolExecutionPolicyKind::Unrestricted => true,
-            ToolExecutionPolicyKind::AllowList(names) => names.contains(name),
-            ToolExecutionPolicyKind::DenyList(names) => !names.contains(name),
-            ToolExecutionPolicyKind::ReadOnly => declared.is_declared_read_only(),
-        }
+        self.constraints.iter().all(|constraint| match constraint {
+            crate::ops::ToolAccessConstraint::AllowNames(names) => names.contains(name),
+            crate::ops::ToolAccessConstraint::DenyNames(names) => !names.contains(name),
+            crate::ops::ToolAccessConstraint::ReadOnly => declared.is_declared_read_only(),
+        })
     }
 
     /// Whether a call to the named tool is permitted without a declaration in
@@ -206,6 +211,45 @@ impl ToolExecutionPolicy {
     pub fn permits(&self, name: &str) -> bool {
         self.permits_call(name, ToolMutationClass::Unknown)
     }
+}
+
+fn normalize_constraints(
+    constraints: Vec<crate::ops::ToolAccessConstraint>,
+) -> Vec<crate::ops::ToolAccessConstraint> {
+    use crate::ops::ToolAccessConstraint;
+    let mut allow: Option<ToolNameSet> = None;
+    let mut deny = ToolNameSet::default();
+    let mut read_only = false;
+    for constraint in constraints {
+        match constraint {
+            ToolAccessConstraint::AllowNames(names) => {
+                allow = Some(match allow {
+                    None => names,
+                    Some(mut existing) => {
+                        existing.retain(|name| names.contains(name.as_str()));
+                        existing
+                    }
+                });
+            }
+            ToolAccessConstraint::DenyNames(names) => {
+                for name in names.into_inner() {
+                    deny.insert(name);
+                }
+            }
+            ToolAccessConstraint::ReadOnly => read_only = true,
+        }
+    }
+    let mut normalized = Vec::new();
+    if let Some(names) = allow {
+        normalized.push(ToolAccessConstraint::AllowNames(names));
+    }
+    if !deny.is_empty() {
+        normalized.push(ToolAccessConstraint::DenyNames(deny));
+    }
+    if read_only {
+        normalized.push(ToolAccessConstraint::ReadOnly);
+    }
+    normalized
 }
 
 /// A tool dispatcher that gates execution behind a [`ToolExecutionPolicy`]
@@ -222,12 +266,27 @@ impl ToolExecutionPolicy {
 pub struct ExecutionPolicyGatedDispatcher<T: AgentToolDispatcher + ?Sized> {
     inner: Arc<T>,
     policy: ToolExecutionPolicy,
+    consequence_policy: Option<crate::BoundToolConsequencePolicy>,
 }
 
 impl<T: AgentToolDispatcher + ?Sized> ExecutionPolicyGatedDispatcher<T> {
     /// Wrap `inner` with the resolved execution policy.
     pub fn new(inner: Arc<T>, policy: ToolExecutionPolicy) -> Self {
-        Self { inner, policy }
+        Self {
+            inner,
+            policy,
+            consequence_policy: None,
+        }
+    }
+
+    /// Attach the already validated host policy binding to the same outermost gate.
+    #[must_use]
+    pub fn with_consequence_policy(
+        mut self,
+        consequence_policy: crate::BoundToolConsequencePolicy,
+    ) -> Self {
+        self.consequence_policy = Some(consequence_policy);
+        self
     }
 
     /// Whether the policy admits this call, consulting the inner dispatcher's
@@ -236,7 +295,7 @@ impl<T: AgentToolDispatcher + ?Sized> ExecutionPolicyGatedDispatcher<T> {
     /// The declaration is only read for read-only intent; name-list policies
     /// must not pay for a forwarded lookup on every dispatch.
     fn permits_inner_call(&self, name: &str) -> bool {
-        if self.policy.is_read_only_intent() {
+        if self.policy.requires_mutation_declaration() {
             return self
                 .policy
                 .permits_call(name, self.inner.tool_mutation_class(name));
@@ -263,6 +322,19 @@ impl<T: AgentToolDispatcher + ?Sized> ExecutionPolicyGatedDispatcher<T> {
         } else {
             ToolError::not_found(name)
         }
+    }
+
+    async fn evaluate_consequence_policy(
+        &self,
+        call: ToolCallView<'_>,
+        context: Option<&ToolDispatchContext>,
+    ) -> Result<(), ToolError> {
+        let Some(policy) = self.consequence_policy.as_ref() else {
+            return Ok(());
+        };
+        policy
+            .evaluate(call, context.and_then(ToolDispatchContext::run_id).cloned())
+            .await
     }
 }
 
@@ -344,6 +416,7 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher
         if !self.permits_inner_call(call.name) {
             return Err(self.denial_error(call.name));
         }
+        self.evaluate_consequence_policy(call, None).await?;
         self.inner.dispatch(call).await
     }
 
@@ -355,6 +428,8 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher
         if !self.permits_inner_call(call.name) {
             return Err(self.denial_error(call.name));
         }
+        self.evaluate_consequence_policy(call, Some(context))
+            .await?;
         self.inner.dispatch_with_context(call, context).await
     }
 
@@ -367,6 +442,8 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher
         if !self.permits_inner_call(call.name) {
             return Err(self.denial_error(call.name));
         }
+        self.evaluate_consequence_policy(call, Some(context))
+            .await?;
         self.inner
             .dispatch_resolved_with_context(call, context, plan)
             .await
@@ -396,7 +473,11 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher
                 .bind_ops_lifecycle(registry, owner_bridge_session_id)?;
             let bound = outcome.was_bound();
             let inner = outcome.into_dispatcher();
-            let gated = Arc::new(ExecutionPolicyGatedDispatcher::new(inner, owned.policy));
+            let gated = Arc::new(ExecutionPolicyGatedDispatcher {
+                inner,
+                policy: owned.policy,
+                consequence_policy: owned.consequence_policy,
+            });
             Ok(if bound {
                 BindOutcome::Bound(gated)
             } else {
@@ -407,6 +488,7 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher
                 ExecutionPolicyGatedDispatcher {
                     inner: owned.inner,
                     policy: owned.policy,
+                    consequence_policy: owned.consequence_policy,
                 },
             )))
         }
@@ -448,6 +530,13 @@ mod tests {
     };
     use crate::tool_scope::ExternalToolSurfaceGlobalPhase;
     use crate::types::ToolResult;
+    use crate::{
+        BoundToolConsequencePolicy, MobMemberBinding, PolicyDigest, PolicyEvaluationProvenance,
+        PolicyEvaluationSupervisorConfig, PolicyId, PolicyProviderGeneration, PolicyProviderId,
+        PolicyRevision, ToolConsequenceDenial, ToolConsequenceFailure,
+        ToolConsequenceNarrowingPolicy, ToolConsequencePolicyRegistry,
+        ToolConsequencePolicySnapshot, ToolConsequenceRequest, ToolConsequenceVerdict,
+    };
     use std::collections::BTreeSet;
     use std::sync::Mutex;
 
@@ -1179,6 +1268,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn conjunctive_constraints_never_widen_each_other() {
+        let policy = ToolAccessPolicy::AllowList(["a"].into_iter().collect())
+            .conjoin(ToolAccessPolicy::ReadOnly)
+            .expect("concrete policies conjoin");
+        let resolved = ToolExecutionPolicy::resolve(policy).expect("constraints resolve");
+        assert!(resolved.permits_call("a", ToolMutationClass::ReadOnly));
+        assert!(!resolved.permits_call("a", ToolMutationClass::Mutating));
+        assert!(!resolved.permits_call("b", ToolMutationClass::ReadOnly));
+
+        let denied = ToolAccessPolicy::AllowList(["a"].into_iter().collect())
+            .conjoin(ToolAccessPolicy::DenyList(["a"].into_iter().collect()))
+            .expect("concrete policies conjoin");
+        assert!(
+            !ToolExecutionPolicy::resolve(denied)
+                .expect("constraints resolve")
+                .permits_call("a", ToolMutationClass::ReadOnly)
+        );
+    }
+
+    #[test]
+    fn empty_constraint_set_is_rejected() {
+        assert_eq!(
+            ToolExecutionPolicy::resolve(ToolAccessPolicy::Constraints(Vec::new()))
+                .expect_err("empty constraints are not unrestricted"),
+            ToolExecutionPolicyError::EmptyConstraints
+        );
+    }
+
     #[tokio::test]
     async fn read_only_gate_keeps_the_llm_visible_tool_list_unchanged() {
         let inner = Arc::new(DeclaringDispatcher::new(
@@ -1281,5 +1399,194 @@ mod tests {
             1,
             "bind_external_tool_surface_handle must forward to inner"
         );
+    }
+
+    struct FixedConsequenceSnapshot {
+        verdict: ToolConsequenceVerdict,
+    }
+
+    impl ToolConsequencePolicySnapshot for FixedConsequenceSnapshot {
+        fn provenance(&self) -> PolicyEvaluationProvenance {
+            PolicyEvaluationProvenance {
+                revision: PolicyRevision(7),
+                digest: PolicyDigest::from_canonical_bytes(b"fixed-test-policy"),
+            }
+        }
+
+        fn evaluate(&self, _request: &ToolConsequenceRequest) -> ToolConsequenceVerdict {
+            self.verdict.clone()
+        }
+    }
+
+    struct FixedConsequenceProvider {
+        provider_id: PolicyProviderId,
+        snapshot: Arc<dyn ToolConsequencePolicySnapshot>,
+    }
+
+    impl ToolConsequenceNarrowingPolicy for FixedConsequenceProvider {
+        fn provider_id(&self) -> &PolicyProviderId {
+            &self.provider_id
+        }
+
+        fn generation(&self) -> PolicyProviderGeneration {
+            PolicyProviderGeneration(1)
+        }
+
+        fn snapshot(
+            &self,
+            _policy_id: &PolicyId,
+        ) -> Result<Arc<dyn ToolConsequencePolicySnapshot>, ToolConsequenceFailure> {
+            Ok(Arc::clone(&self.snapshot))
+        }
+    }
+
+    fn bound_consequence_policy(
+        verdict: ToolConsequenceVerdict,
+        deadline: std::time::Duration,
+    ) -> BoundToolConsequencePolicy {
+        let provider_id = PolicyProviderId::new("test-provider").expect("provider id");
+        let policy_id = PolicyId::new("test-policy").expect("policy id");
+        let provider: Arc<dyn ToolConsequenceNarrowingPolicy> =
+            Arc::new(FixedConsequenceProvider {
+                provider_id: provider_id.clone(),
+                snapshot: Arc::new(FixedConsequenceSnapshot { verdict }),
+            });
+        let registry = Arc::new(
+            ToolConsequencePolicyRegistry::new(
+                vec![provider],
+                PolicyEvaluationSupervisorConfig {
+                    workers_per_provider: 1,
+                    queue_capacity_per_provider: 1,
+                    evaluation_deadline: deadline,
+                },
+                None,
+            )
+            .expect("registry"),
+        );
+        registry
+            .bind(
+                MobMemberBinding {
+                    mob_id: "mob".to_string(),
+                    role: "worker".to_string(),
+                    member: "member".to_string(),
+                },
+                provider_id,
+                policy_id,
+            )
+            .expect("binding")
+    }
+
+    #[tokio::test]
+    async fn application_denial_is_narrow_only_and_never_enters_inner_dispatcher() {
+        let inner = Arc::new(SpyDispatcher::new(&["alpha"]));
+        let gated = ExecutionPolicyGatedDispatcher::new(
+            Arc::clone(&inner),
+            ToolExecutionPolicy::unrestricted(),
+        )
+        .with_consequence_policy(bound_consequence_policy(
+            ToolConsequenceVerdict::Deny(ToolConsequenceDenial::new(
+                "test_denied",
+                "denied by test policy",
+            )),
+            std::time::Duration::from_millis(100),
+        ));
+
+        let error = dispatch_named_with_context(&gated, "alpha")
+            .await
+            .expect_err("application policy must deny");
+        assert!(matches!(error, ToolError::PolicyDenied { .. }));
+        assert!(inner.dispatched().is_empty());
+    }
+
+    #[tokio::test]
+    async fn static_denial_precedes_application_policy() {
+        let inner = Arc::new(SpyDispatcher::new(&["alpha", "beta"]));
+        let gated = ExecutionPolicyGatedDispatcher::new(Arc::clone(&inner), allow_list(&["alpha"]))
+            .with_consequence_policy(bound_consequence_policy(
+                ToolConsequenceVerdict::Allow,
+                std::time::Duration::from_millis(100),
+            ));
+
+        let error = dispatch_named_with_context(&gated, "beta")
+            .await
+            .expect_err("static policy must remain authoritative");
+        assert_eq!(error, ToolError::access_denied("beta"));
+        assert!(inner.dispatched().is_empty());
+    }
+
+    struct WedgedConsequenceSnapshot;
+
+    impl ToolConsequencePolicySnapshot for WedgedConsequenceSnapshot {
+        fn provenance(&self) -> PolicyEvaluationProvenance {
+            PolicyEvaluationProvenance {
+                revision: PolicyRevision(1),
+                digest: PolicyDigest::from_canonical_bytes(b"wedged"),
+            }
+        }
+
+        fn evaluate(&self, _request: &ToolConsequenceRequest) -> ToolConsequenceVerdict {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            ToolConsequenceVerdict::Allow
+        }
+    }
+
+    #[tokio::test]
+    async fn wedged_evaluator_deadlines_and_partition_then_fails_fast() {
+        let provider_id = PolicyProviderId::new("wedged-provider").expect("provider id");
+        let policy_id = PolicyId::new("policy").expect("policy id");
+        let provider: Arc<dyn ToolConsequenceNarrowingPolicy> =
+            Arc::new(FixedConsequenceProvider {
+                provider_id: provider_id.clone(),
+                snapshot: Arc::new(WedgedConsequenceSnapshot),
+            });
+        let registry = Arc::new(
+            ToolConsequencePolicyRegistry::new(
+                vec![provider],
+                PolicyEvaluationSupervisorConfig {
+                    workers_per_provider: 1,
+                    queue_capacity_per_provider: 1,
+                    evaluation_deadline: std::time::Duration::from_millis(5),
+                },
+                None,
+            )
+            .expect("registry"),
+        );
+        let policy = registry
+            .bind(
+                MobMemberBinding {
+                    mob_id: "mob".to_string(),
+                    role: "worker".to_string(),
+                    member: "member".to_string(),
+                },
+                provider_id,
+                policy_id,
+            )
+            .expect("binding");
+        let inner = Arc::new(SpyDispatcher::new(&["alpha"]));
+        let gated = ExecutionPolicyGatedDispatcher::new(
+            Arc::clone(&inner),
+            ToolExecutionPolicy::unrestricted(),
+        )
+        .with_consequence_policy(policy);
+
+        let first = dispatch_named_with_context(&gated, "alpha")
+            .await
+            .expect_err("wedged policy must deadline");
+        assert!(matches!(
+            first,
+            ToolError::PolicyIndeterminate {
+                failure: ToolConsequenceFailure::DeadlineExceeded { .. }
+            }
+        ));
+        let second = dispatch_named_with_context(&gated, "alpha")
+            .await
+            .expect_err("unhealthy partition must fail fast");
+        assert!(matches!(
+            second,
+            ToolError::PolicyIndeterminate {
+                failure: ToolConsequenceFailure::MechanicallyUnhealthy { .. }
+            }
+        ));
+        assert!(inner.dispatched().is_empty());
     }
 }

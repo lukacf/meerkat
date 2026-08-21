@@ -1065,6 +1065,28 @@ fn domain_tool_access_policy(
             meerkat_core::ops::ToolAccessPolicy::DenyList(names.into_iter().collect())
         }
         WireResolvedToolAccessPolicy::ReadOnly => meerkat_core::ops::ToolAccessPolicy::ReadOnly,
+        WireResolvedToolAccessPolicy::Constraints(constraints) => {
+            meerkat_core::ops::ToolAccessPolicy::Constraints(
+                constraints
+                    .into_iter()
+                    .map(|constraint| match constraint {
+                        meerkat_contracts::wire::WireToolAccessConstraint::AllowNames(names) => {
+                            meerkat_core::ops::ToolAccessConstraint::AllowNames(
+                                names.into_iter().collect(),
+                            )
+                        }
+                        meerkat_contracts::wire::WireToolAccessConstraint::DenyNames(names) => {
+                            meerkat_core::ops::ToolAccessConstraint::DenyNames(
+                                names.into_iter().collect(),
+                            )
+                        }
+                        meerkat_contracts::wire::WireToolAccessConstraint::ReadOnly => {
+                            meerkat_core::ops::ToolAccessConstraint::ReadOnly
+                        }
+                    })
+                    .collect(),
+            )
+        }
     }
 }
 

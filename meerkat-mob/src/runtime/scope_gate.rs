@@ -107,7 +107,10 @@ impl MobCommand {
             | Self::ResumeLifecycle { .. }
             | Self::Complete { .. }
             | Self::Destroy { .. }
-            | Self::Reset { .. } => Some(ControlScope::Retire),
+            | Self::Reset { .. }
+            | Self::AdoptMemberIdentityDeclaration { .. }
+            | Self::ApplyMemberToolDeclaration { .. }
+            | Self::ResolveIdentityConvergenceBlock { .. } => Some(ControlScope::Retire),
 
             // ── WireTopology: trust/topology configuration ──
             Self::Wire { .. }
@@ -282,6 +285,15 @@ impl MobCommand {
                 let _ = reply_tx.send(Err(error));
             }
             Self::GetIdentityConvergenceStatus { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::AdoptMemberIdentityDeclaration { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::ApplyMemberToolDeclaration { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::ResolveIdentityConvergenceBlock { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
             Self::AdmitControlScope { reply_tx, .. } => {

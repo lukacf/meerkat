@@ -810,6 +810,30 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "MobMembersResult",
             ),
             RpcMethodDescriptor::typed(
+                "mob/member_tool_declaration",
+                "Read the desired tool declaration and live convergence for one member",
+                "MobMemberToolDeclarationParams",
+                "MobMemberToolDeclarationResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "mob/apply_member_tool_declaration",
+                "Atomically update one member's desired tool declaration",
+                "MobApplyMemberToolDeclarationParams",
+                "MobApplyMemberToolDeclarationResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "mob/adopt_member_identity_declaration",
+                "Adopt an existing member into durable identity intent under an expected-absent precondition",
+                "MobAdoptMemberIdentityDeclarationParams",
+                "MobAdoptMemberIdentityDeclarationResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "mob/resolve_identity_convergence_block",
+                "Resume a blocked identity replacement under exact revision fences",
+                "MobResolveIdentityConvergenceBlockParams",
+                "MobResolveIdentityConvergenceBlockResult",
+            ),
+            RpcMethodDescriptor::typed(
                 "mob/events",
                 "Read mob event history",
                 "MobEventsParams",

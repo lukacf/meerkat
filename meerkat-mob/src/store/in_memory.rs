@@ -39,13 +39,18 @@ use crate::event::{MobEvent, MobEventKind, NewMobEvent};
 #[cfg(feature = "runtime-adapter")]
 use crate::identity::DesiredSessionTarget;
 use crate::identity::{
-    IDENTITY_INTENT_SCHEMA_VERSION, IDENTITY_LEASE_MAX_TTL_MS, IDENTITY_LEASE_SCHEMA_VERSION,
+    AdoptMemberIdentityDeclaration, ApplyMemberToolDeclaration, IDENTITY_INTENT_SCHEMA_VERSION,
+    IDENTITY_LEASE_MAX_TTL_MS, IDENTITY_LEASE_SCHEMA_VERSION,
     IDENTITY_OPERATION_RECEIPT_SCHEMA_VERSION, IdentityActuationPermit, IdentityActuatorTarget,
-    IdentityConvergenceStatus, IdentityIntent, IdentityIntentRecord, IdentityLeaseClaim,
+    IdentityAdoptionOutcome, IdentityAdoptionReceipt, IdentityConvergenceResolutionOutcome,
+    IdentityConvergenceResolutionReceipt, IdentityConvergenceStatus, IdentityIntent,
+    IdentityIntentMutationReceipt, IdentityIntentRecord, IdentityLeaseClaim,
     IdentityLeaseClaimOutcome, IdentityLeaseRecord, IdentityOperationKind,
     IdentityOperationReceipt, IdentityOperationReceiptInsertOutcome,
     IdentityOperationReceiptPayload, IdentityOperationSlot, IdentityOperationSubject,
-    IdentityStoredObservation,
+    IdentityRetirementPlan, IdentityStoredObservation, MemberToolCommitOutcome,
+    ResolveIdentityConvergenceBlock, prepare_identity_convergence_resolution,
+    prepare_member_tool_intent_mutation,
 };
 use crate::ids::{
     AgentIdentity, FlowId, FrameId, Generation, LoopId, LoopInstanceId, MobId, RunId, StepId,
@@ -65,7 +70,7 @@ use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 #[cfg(any(test, feature = "test-support"))]
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -269,11 +274,19 @@ type ExternalBindingOverlayMap = BTreeMap<
 type MemberOperatorRequestMap =
     BTreeMap<(MobId, MobMemberOperatorRequestKey), MobMemberOperatorRequestRecord>;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub(super) struct IdentityAuthorityState {
     pub(super) intents: BTreeMap<(MobId, AgentIdentity), IdentityIntentRecord>,
     pub(super) leases: BTreeMap<(MobId, AgentIdentity), IdentityLeaseRecord>,
     pub(super) receipts: BTreeMap<(MobId, String, String), IdentityOperationReceipt>,
+    pub(super) mutation_receipts:
+        BTreeMap<(MobId, crate::identity::MemberToolMutationId), IdentityIntentMutationReceipt>,
+    pub(super) adoption_receipts:
+        BTreeMap<(MobId, crate::identity::IdentityAdoptionId), IdentityAdoptionReceipt>,
+    pub(super) convergence_resolution_receipts: BTreeMap<
+        (MobId, crate::identity::IdentityConvergenceResolutionId),
+        IdentityConvergenceResolutionReceipt,
+    >,
 }
 
 /// One in-memory lock for the narrow identity slice's cross-resource atomic
@@ -500,6 +513,61 @@ fn seal_identity_intent_record(
     Ok(record)
 }
 
+fn recompute_present_incident_wiring(
+    state: &mut IdentityAuthorityState,
+    mob_id: &MobId,
+) -> Result<(), MobStoreError> {
+    let all_owned = state
+        .intents
+        .iter()
+        .filter(|((stored_mob_id, _), _)| stored_mob_id == mob_id)
+        .filter_map(|(_, record)| match &record.intent {
+            IdentityIntent::Present { owned_wiring, .. } => Some(owned_wiring.iter()),
+            IdentityIntent::Absent { .. } => None,
+        })
+        .flatten()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let keys = state
+        .intents
+        .keys()
+        .filter(|(stored_mob_id, _)| stored_mob_id == mob_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    for key in keys {
+        let Some(current) = state.intents.get(&key).cloned() else {
+            continue;
+        };
+        let IdentityIntent::Present {
+            identity,
+            session,
+            member,
+            ..
+        } = &current.intent
+        else {
+            continue;
+        };
+        let incident_wiring = all_owned
+            .iter()
+            .filter(|edge| edge.a == *identity || edge.b == *identity)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let expected = IdentityRetirementPlan::Targets {
+            session: session.clone(),
+            execution: member.execution().clone(),
+            incident_wiring,
+        };
+        if current.retirement_plan != expected {
+            let mut next = current;
+            next.retirement_plan = expected;
+            state
+                .intents
+                .insert(key, seal_identity_intent_record(mob_id, next)?);
+        }
+    }
+    Ok(())
+}
+
 fn has_matching_retirement_proof(
     state: &IdentityAuthorityState,
     mob_id: &MobId,
@@ -709,6 +777,168 @@ impl MobIdentityStore for InMemoryMobIdentityStore {
             );
         }
         classify_identity_record(record, IdentityIntentRecord::validate)
+    }
+
+    async fn adopt_member_identity_declaration(
+        &self,
+        request: &AdoptMemberIdentityDeclaration,
+        compiled: &IdentityIntentRecord,
+    ) -> Result<IdentityAdoptionOutcome, MobStoreError> {
+        request.validate().map_err(identity_contract_error)?;
+        compiled.validate().map_err(identity_contract_error)?;
+        let IdentityIntent::Present {
+            identity,
+            session,
+            member,
+            wiring_custody,
+            owned_wiring,
+        } = &compiled.intent
+        else {
+            return Err(identity_authority_blocked(
+                "identity adoption compiled an absent desired intent",
+            ));
+        };
+        if compiled.mob_id != request.mob_id
+            || identity != &request.agent_identity
+            || compiled.intent_revision != 1
+            || compiled.declaration_scope.as_ref() != Some(&request.declaration_scope)
+            || compiled.declaration_revision != Some(request.declaration_revision)
+            || session != &request.session
+            || member.material.profile_name != request.member.profile_name
+            || member.material.execution != request.member.execution
+            || wiring_custody != &request.wiring_custody
+            || owned_wiring != &request.owned_wiring
+        {
+            return Err(identity_authority_blocked(
+                "compiled identity adoption record does not match the explicit request",
+            ));
+        }
+        let request_digest = request
+            .canonical_digest()
+            .map_err(identity_contract_error)?;
+        let receipt_key = (request.mob_id.clone(), request.request_id.clone());
+        let intent_key = (request.mob_id.clone(), request.agent_identity.clone());
+        let mut aggregate = self.aggregate.write().await;
+        if let Some(existing) = aggregate.identity.adoption_receipts.get(&receipt_key) {
+            existing.validate().map_err(identity_authority_error)?;
+            return if existing.request_digest == request_digest {
+                Ok(existing.outcome.clone())
+            } else {
+                Ok(IdentityAdoptionOutcome::RequestConflict {
+                    request_id: request.request_id.clone(),
+                })
+            };
+        }
+        let mut next_identity = aggregate.identity.clone();
+        let outcome = match next_identity.intents.get(&intent_key) {
+            Some(current) => {
+                current.validate().map_err(identity_authority_error)?;
+                IdentityAdoptionOutcome::PreconditionConflict {
+                    actual_revision: current.intent_revision,
+                }
+            }
+            None => {
+                next_identity.intents.insert(intent_key, compiled.clone());
+                recompute_present_incident_wiring(&mut next_identity, &request.mob_id)?;
+                IdentityAdoptionOutcome::Adopted {
+                    desired_revision: 1,
+                }
+            }
+        };
+        let receipt = IdentityAdoptionReceipt::new(request, outcome.clone())
+            .map_err(identity_contract_error)?;
+        next_identity.adoption_receipts.insert(receipt_key, receipt);
+        aggregate.identity = next_identity;
+        Ok(outcome)
+    }
+
+    async fn apply_member_tool_declaration(
+        &self,
+        request: &ApplyMemberToolDeclaration,
+    ) -> Result<MemberToolCommitOutcome, MobStoreError> {
+        request.validate().map_err(identity_contract_error)?;
+        let request_digest = request
+            .canonical_digest()
+            .map_err(identity_contract_error)?;
+        let receipt_key = (request.mob_id.clone(), request.request_id.clone());
+        let intent_key = (request.mob_id.clone(), request.agent_identity.clone());
+        let committed_at_ms = self.clock.now_ms()?;
+        let mut aggregate = self.aggregate.write().await;
+        if let Some(existing) = aggregate.identity.mutation_receipts.get(&receipt_key) {
+            existing.validate().map_err(identity_authority_error)?;
+            return if existing.request_digest == request_digest {
+                Ok(existing.outcome.clone())
+            } else {
+                Ok(MemberToolCommitOutcome::RequestConflict {
+                    request_id: request.request_id.clone(),
+                })
+            };
+        }
+
+        let (outcome, next) = match aggregate.identity.intents.get(&intent_key) {
+            Some(current) => prepare_member_tool_intent_mutation(current, request, committed_at_ms)
+                .map_err(identity_contract_error)?,
+            None => (MemberToolCommitOutcome::MemberAbsent, None),
+        };
+        let receipt = IdentityIntentMutationReceipt::new(request, outcome.clone())
+            .map_err(identity_contract_error)?;
+        if let Some(next) = next {
+            aggregate.identity.intents.insert(intent_key, next);
+        }
+        aggregate
+            .identity
+            .mutation_receipts
+            .insert(receipt_key, receipt);
+        Ok(outcome)
+    }
+
+    async fn resolve_identity_convergence_block(
+        &self,
+        request: &ResolveIdentityConvergenceBlock,
+        actual_active_revision: u64,
+    ) -> Result<IdentityConvergenceResolutionOutcome, MobStoreError> {
+        request.validate().map_err(identity_contract_error)?;
+        let request_digest = request
+            .canonical_digest()
+            .map_err(identity_contract_error)?;
+        let receipt_key = (request.mob_id.clone(), request.request_id.clone());
+        let intent_key = (request.mob_id.clone(), request.agent_identity.clone());
+        let committed_at_ms = self.clock.now_ms()?;
+        let mut aggregate = self.aggregate.write().await;
+        if let Some(existing) = aggregate
+            .identity
+            .convergence_resolution_receipts
+            .get(&receipt_key)
+        {
+            existing.validate().map_err(identity_authority_error)?;
+            return if existing.request_digest == request_digest {
+                Ok(existing.outcome.clone())
+            } else {
+                Ok(IdentityConvergenceResolutionOutcome::RequestConflict {
+                    request_id: request.request_id.clone(),
+                })
+            };
+        }
+        let (outcome, next) = match aggregate.identity.intents.get(&intent_key) {
+            Some(current) => prepare_identity_convergence_resolution(
+                current,
+                request,
+                actual_active_revision,
+                committed_at_ms,
+            )
+            .map_err(identity_contract_error)?,
+            None => (IdentityConvergenceResolutionOutcome::MemberAbsent, None),
+        };
+        let receipt = IdentityConvergenceResolutionReceipt::new(request, outcome.clone())
+            .map_err(identity_contract_error)?;
+        if let Some(next) = next {
+            aggregate.identity.intents.insert(intent_key, next);
+        }
+        aggregate
+            .identity
+            .convergence_resolution_receipts
+            .insert(receipt_key, receipt);
+        Ok(outcome)
     }
 
     async fn list_identity_intents(
@@ -3636,6 +3866,84 @@ mod tests {
         fn now_ms(&self) -> Result<u64, MobStoreError> {
             Ok(self.now_ms.load(Ordering::SeqCst))
         }
+    }
+
+    #[tokio::test]
+    async fn identity_adoption_is_atomic_idempotent_and_expected_absent() {
+        let store = InMemoryMobIdentityStore::new();
+        let mob_id = MobId::from("adoption-mob");
+        let identity = AgentIdentity::from("worker-1");
+        let session_id = SessionId::new();
+        let (request, compiled) = crate::identity::identity_adoption_fixture(
+            mob_id.clone(),
+            identity.clone(),
+            "adopt-1",
+            session_id.clone(),
+        );
+
+        assert_eq!(
+            store
+                .adopt_member_identity_declaration(&request, &compiled)
+                .await
+                .expect("initial adoption"),
+            IdentityAdoptionOutcome::Adopted {
+                desired_revision: 1
+            }
+        );
+        assert_eq!(
+            store
+                .adopt_member_identity_declaration(&request, &compiled)
+                .await
+                .expect("idempotent adoption replay"),
+            IdentityAdoptionOutcome::Adopted {
+                desired_revision: 1
+            }
+        );
+
+        let (mut conflicting_request, _) = crate::identity::identity_adoption_fixture(
+            mob_id.clone(),
+            identity.clone(),
+            "adopt-1",
+            session_id.clone(),
+        );
+        conflicting_request.declaration_revision = 2;
+        let conflicting_compiled = crate::identity::prepare_identity_adoption_record(
+            &conflicting_request,
+            match compiled.intent.clone() {
+                IdentityIntent::Present { member, .. } => member.material,
+                IdentityIntent::Absent { .. } => unreachable!("fixture is present"),
+            },
+            10,
+        )
+        .expect("conflicting compiled record");
+        assert_eq!(
+            store
+                .adopt_member_identity_declaration(&conflicting_request, &conflicting_compiled)
+                .await
+                .expect("request conflict outcome"),
+            IdentityAdoptionOutcome::RequestConflict {
+                request_id: request.request_id.clone()
+            }
+        );
+
+        let (second_request, second_compiled) = crate::identity::identity_adoption_fixture(
+            mob_id.clone(),
+            identity.clone(),
+            "adopt-2",
+            session_id,
+        );
+        assert_eq!(
+            store
+                .adopt_member_identity_declaration(&second_request, &second_compiled)
+                .await
+                .expect("expected-absent conflict"),
+            IdentityAdoptionOutcome::PreconditionConflict { actual_revision: 1 }
+        );
+        let observed = store
+            .observe_identity_intent(&mob_id, &identity)
+            .await
+            .expect("observe adopted intent");
+        assert_eq!(observed, IdentityStoredObservation::Valid(compiled));
     }
 
     fn external_delivery_intent(key: &str, action: &str) -> MobExternalDeliveryIntent {

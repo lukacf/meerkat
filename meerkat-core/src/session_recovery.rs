@@ -499,6 +499,7 @@ pub fn resolve_effective_turn_config(
         // Recovery carries the persisted policy forward verbatim below;
         // there is no per-recovery override surface for it.
         tool_access_policy: false,
+        application_tool_policy: false,
     };
 
     let model = overrides
@@ -660,6 +661,10 @@ pub fn resolve_effective_turn_config(
         // carry it forward verbatim so a restricted session cannot escape its
         // gate by being recovered.
         tool_access_policy: metadata.tooling.tool_access_policy.clone(),
+        application_tool_policy: metadata.tooling.application_tool_policy.clone(),
+        // Executable provider instances are host authority and must be
+        // re-injected by the owning runtime after generic recovery lowering.
+        tool_consequence_policy_registry: None,
         shell_env: overrides
             .shell_env
             .clone()
@@ -746,6 +751,7 @@ mod tests {
                     image_generation: ToolCategoryOverride::Inherit,
                     web_search: ToolCategoryOverride::Inherit,
                     tool_access_policy: None,
+                    application_tool_policy: crate::ApplicationToolPolicyBinding::Unmanaged,
                     active_skills: Some(vec![skill_key("persisted-skill")]),
                 },
                 keep_alive: false,

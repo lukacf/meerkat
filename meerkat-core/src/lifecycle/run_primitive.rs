@@ -846,6 +846,13 @@ impl ProviderParamsOverride {
         }
     }
 
+    /// Remove every provider-native server tool represented by the typed
+    /// provider parameter vocabulary. New native tool fields must be added to
+    /// this owner before they can cross a restrictive final-request gate.
+    pub fn clear_provider_native_tools(&mut self) {
+        self.clear_web_search();
+    }
+
     /// Inject the structured-output schema for an extraction turn into the
     /// provider tag slot owned by `provider`.
     ///

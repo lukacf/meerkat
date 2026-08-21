@@ -567,6 +567,7 @@
           "llm",
           "store",
           "tool",
+          "policy_indeterminate",
           "mcp",
           "session_not_found",
           "budget",
@@ -1999,6 +2000,54 @@
               "type",
               "session_id",
               "dispute"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ApplicationToolPolicyBinding": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "unmanaged",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "inherit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "provider",
+                "type": "string"
+              },
+              "policy_id": {
+                "type": "string"
+              },
+              "provider_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "provider_id",
+              "policy_id"
             ],
             "type": "object"
           }
@@ -8593,6 +8642,13 @@
               "null"
             ]
           },
+          "application_tool_policy": {
+            "$ref": "#/$defs/ApplicationToolPolicyBinding",
+            "default": {
+              "kind": "unmanaged"
+            },
+            "description": "Stable application policy identity. Snapshot content remains owned by\nthe host-injected provider and is never copied into this member spec."
+          },
           "auth_binding": {
             "anyOf": [
               {
@@ -8667,6 +8723,21 @@
               }
             ],
             "description": "Resolved policy only — `Inherit` is unrepresentable (O3); `None`\nmeans no per-member policy, not \"inherit something ambient\"."
+          },
+          "tool_category_overrides": {
+            "$ref": "#/$defs/ToolCategoryOverrides",
+            "default": {
+              "builtins": "inherit",
+              "comms": "inherit",
+              "image_generation": "inherit",
+              "memory": "inherit",
+              "mob": "inherit",
+              "schedule": "inherit",
+              "shell": "inherit",
+              "web_search": "inherit",
+              "workgraph": "inherit"
+            },
+            "description": "Administrative per-category intent. The receiving host resolves each\nfield through the same category owner used for local materialization."
           }
         },
         "required": [
@@ -10008,6 +10079,69 @@
       },
       "ToolCallArguments": {
         "additionalProperties": true,
+        "type": "object"
+      },
+      "ToolCategoryOverride": {
+        "description": "Caller intent for a tool category.\n\nDistinguishes \"no opinion / didn't exist\" (`Inherit`) from explicit\n`Enable` / `Disable` so that resumed sessions don't freeze tool\navailability at the capabilities of the Meerkat version that created them.\n\n**Dogma §10:** Inherit, disable, and set are different facts.",
+        "oneOf": [
+          {
+            "const": "inherit",
+            "description": "No explicit intent — inherit runtime/factory default.",
+            "type": "string"
+          },
+          {
+            "const": "enable",
+            "description": "Explicitly enabled by caller.",
+            "type": "string"
+          },
+          {
+            "const": "disable",
+            "description": "Explicitly disabled by caller.",
+            "type": "string"
+          }
+        ]
+      },
+      "ToolCategoryOverrides": {
+        "additionalProperties": false,
+        "description": "Administrative per-category member-tool intent.\n\nThis carrier deliberately keeps `Inherit`, `Enable`, and `Disable`\ndistinct. Materialization resolves each field through its existing\ncategory owner; carrying the aggregate does not merge those owners.",
+        "properties": {
+          "builtins": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "comms": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "image_generation": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "memory": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "mob": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "schedule": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "shell": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "web_search": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          },
+          "workgraph": {
+            "$ref": "#/$defs/ToolCategoryOverride",
+            "default": "inherit"
+          }
+        },
         "type": "object"
       },
       "ToolConfigChangeDomain": {
@@ -12639,7 +12773,6 @@
         "type": "string"
       },
       "WireResolvedToolAccessPolicy": {
-        "description": "Resolved tool access policy — mirrors `WireToolAccessPolicy`'s\nallow/deny shape exactly, with `Inherit` structurally absent (O3).",
         "oneOf": [
           {
             "properties": {
@@ -12689,6 +12822,26 @@
             },
             "required": [
               "type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Every contained constraint must admit the call.",
+            "properties": {
+              "type": {
+                "const": "constraints",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "$ref": "#/$defs/WireToolAccessConstraint"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
             ],
             "type": "object"
           }
@@ -13010,6 +13163,61 @@
           }
         },
         "type": "object"
+      },
+      "WireToolAccessConstraint": {
+        "description": "Resolved tool access policy — mirrors `WireToolAccessPolicy`'s\nallow/deny shape exactly, with `Inherit` structurally absent (O3).",
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "const": "allow_names",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "deny_names",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "read_only",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "WireToolResult": {
         "description": "Tool result payload in a transcript.",
@@ -15609,8 +15817,56 @@
           }
         ]
       },
-      "ToolAccessPolicy": {
+      "ToolAccessConstraint": {
         "description": "Tool access control for delegated branches",
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "const": "allow_names",
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/$defs/ToolNameSet"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "deny_names",
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/$defs/ToolNameSet"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "read_only",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ToolAccessPolicy": {
         "oneOf": [
           {
             "description": "Inherit all tools from parent",
@@ -15669,6 +15925,26 @@
             },
             "required": [
               "type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Every contained constraint must admit the call.",
+            "properties": {
+              "type": {
+                "const": "constraints",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "$ref": "#/$defs/ToolAccessConstraint"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
             ],
             "type": "object"
           }
@@ -35586,8 +35862,56 @@
           }
         ]
       },
-      "ToolAccessPolicy": {
+      "ToolAccessConstraint": {
         "description": "Tool access control for delegated branches",
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "const": "allow_names",
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/$defs/ToolNameSet"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "deny_names",
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/$defs/ToolNameSet"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "read_only",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ToolAccessPolicy": {
         "oneOf": [
           {
             "description": "Inherit all tools from parent",
@@ -35646,6 +35970,26 @@
             },
             "required": [
               "type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Every contained constraint must admit the call.",
+            "properties": {
+              "type": {
+                "const": "constraints",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "$ref": "#/$defs/ToolAccessConstraint"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
             ],
             "type": "object"
           }
@@ -37862,8 +38206,56 @@
           }
         ]
       },
-      "ToolAccessPolicy": {
+      "ToolAccessConstraint": {
         "description": "Tool access control for delegated branches",
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "const": "allow_names",
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/$defs/ToolNameSet"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "deny_names",
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/$defs/ToolNameSet"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "read_only",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ToolAccessPolicy": {
         "oneOf": [
           {
             "description": "Inherit all tools from parent",
@@ -37922,6 +38314,26 @@
             },
             "required": [
               "type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Every contained constraint must admit the call.",
+            "properties": {
+              "type": {
+                "const": "constraints",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "$ref": "#/$defs/ToolAccessConstraint"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
             ],
             "type": "object"
           }

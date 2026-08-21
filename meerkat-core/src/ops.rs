@@ -111,6 +111,8 @@ pub enum ToolDispatchTerminalErrorKind {
     ExecutionFailed,
     Timeout,
     AccessDenied,
+    PolicyDenied,
+    PolicyIndeterminate,
     Other,
     CallbackPending,
 }
@@ -126,6 +128,8 @@ impl From<&ToolError> for ToolDispatchTerminalErrorKind {
             }
             ToolError::Timeout { .. } | ToolError::InactivityTimeout { .. } => Self::Timeout,
             ToolError::AccessDenied { .. } => Self::AccessDenied,
+            ToolError::PolicyDenied { .. } => Self::PolicyDenied,
+            ToolError::PolicyIndeterminate { .. } => Self::PolicyIndeterminate,
             ToolError::Other(_) => Self::Other,
             ToolError::CallbackPending { .. } => Self::CallbackPending,
         }
@@ -386,6 +390,15 @@ pub enum ForkBudgetPolicy {
 
 /// Tool access control for delegated branches
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
+pub enum ToolAccessConstraint {
+    AllowNames(ToolNameSet),
+    DenyNames(ToolNameSet),
+    ReadOnly,
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum ToolAccessPolicy {
@@ -414,6 +427,48 @@ pub enum ToolAccessPolicy {
     /// drop the enforcement), but the session is unresumable on that binary
     /// until it is upgraded.
     ReadOnly,
+    /// Every contained constraint must admit the call.
+    Constraints(Vec<ToolAccessConstraint>),
+}
+
+impl ToolAccessPolicy {
+    /// Conjoin two already resolved policies without discarding either ceiling.
+    pub fn conjoin(self, other: Self) -> Result<Self, crate::ToolExecutionPolicyError> {
+        fn append(
+            policy: ToolAccessPolicy,
+            constraints: &mut Vec<ToolAccessConstraint>,
+        ) -> Result<(), crate::ToolExecutionPolicyError> {
+            match policy {
+                ToolAccessPolicy::Inherit => {
+                    Err(crate::ToolExecutionPolicyError::UnresolvedInherit)
+                }
+                ToolAccessPolicy::AllowList(names) => {
+                    constraints.push(ToolAccessConstraint::AllowNames(names));
+                    Ok(())
+                }
+                ToolAccessPolicy::DenyList(names) => {
+                    constraints.push(ToolAccessConstraint::DenyNames(names));
+                    Ok(())
+                }
+                ToolAccessPolicy::ReadOnly => {
+                    constraints.push(ToolAccessConstraint::ReadOnly);
+                    Ok(())
+                }
+                ToolAccessPolicy::Constraints(nested) => {
+                    if nested.is_empty() {
+                        return Err(crate::ToolExecutionPolicyError::EmptyConstraints);
+                    }
+                    constraints.extend(nested);
+                    Ok(())
+                }
+            }
+        }
+
+        let mut constraints = Vec::new();
+        append(self, &mut constraints)?;
+        append(other, &mut constraints)?;
+        Ok(Self::Constraints(constraints))
+    }
 }
 
 /// Policy for operation execution

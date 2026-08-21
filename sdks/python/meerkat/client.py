@@ -119,6 +119,10 @@ from .generated.types import (
     MobkitJobProgressParams,
     MobMemberHistoryParams,
     MobMemberHistoryResult,
+    MobMemberToolDeclarationParams,
+    MobApplyMemberToolDeclarationParams,
+    MobAdoptMemberIdentityDeclarationParams,
+    MobResolveIdentityConvergenceBlockParams,
     MobMemberLiveChannelParams,
     MobMemberLiveControlParams,
     MobMemberLiveOpenParams,
@@ -174,6 +178,8 @@ from .generated.types import (
     WireRuntimeBinding,
     WireToolAccessPolicy,
     WireToolFilter,
+    WireIdentityConvergenceMode,
+    WireMemberToolDeclaration,
     WorkEventsResult,
     WorkItemsResult,
 )
@@ -2875,6 +2881,97 @@ class MeerkatClient:
             )
             for index, record in enumerate(grants)
         ]
+
+    async def mob_member_tool_declaration(
+        self,
+        mob_id: str,
+        agent_identity: str,
+    ) -> dict[str, Any]:
+        """Read the durable member-tool declaration and fresh convergence."""
+        params = MobMemberToolDeclarationParams(
+            mob_id=mob_id,
+            agent_identity=agent_identity,
+        )
+        result = await self._request(
+            "mob/member_tool_declaration",
+            _wire_params(params),
+        )
+        return self._require_dict(
+            result,
+            "result",
+            "Invalid mob/member_tool_declaration response",
+        )
+
+    async def apply_mob_member_tool_declaration(
+        self,
+        mob_id: str,
+        agent_identity: str,
+        request_id: str,
+        expected_intent_revision: int,
+        declaration: WireMemberToolDeclaration | dict[str, Any],
+        convergence: WireIdentityConvergenceMode,
+    ) -> dict[str, Any]:
+        """Apply one revision-fenced durable member-tool declaration."""
+        params = MobApplyMemberToolDeclarationParams(
+            mob_id=mob_id,
+            agent_identity=agent_identity,
+            request_id=request_id,
+            expected_intent_revision=expected_intent_revision,
+            declaration=cast(WireMemberToolDeclaration, declaration),
+            convergence=convergence,
+        )
+        result = await self._request(
+            "mob/apply_member_tool_declaration",
+            _wire_params(params),
+        )
+        return self._require_dict(
+            result,
+            "result",
+            "Invalid mob/apply_member_tool_declaration response",
+        )
+
+    async def adopt_mob_member_identity_declaration(
+        self,
+        params: MobAdoptMemberIdentityDeclarationParams | dict[str, Any],
+    ) -> dict[str, Any]:
+        """Adopt one realized member under an explicit expected-absent declaration."""
+        result = await self._request(
+            "mob/adopt_member_identity_declaration",
+            _wire_params(params),
+        )
+        return self._require_dict(
+            result,
+            "result",
+            "Invalid mob/adopt_member_identity_declaration response",
+        )
+
+    async def resolve_mob_identity_convergence_block(
+        self,
+        mob_id: str,
+        agent_identity: str,
+        request_id: str,
+        expected_desired_revision: int,
+        observed_active_revision: int,
+        convergence: WireIdentityConvergenceMode,
+    ) -> dict[str, Any]:
+        """Continue blocked identity convergence under exact revision fences."""
+        params = MobResolveIdentityConvergenceBlockParams(
+            mob_id=mob_id,
+            agent_identity=agent_identity,
+            request_id=request_id,
+            expected_desired_revision=expected_desired_revision,
+            observed_active_revision=observed_active_revision,
+            convergence=convergence,
+        )
+        result = await self._request(
+            "mob/resolve_identity_convergence_block",
+            _wire_params(params),
+        )
+        return self._require_dict(
+            result,
+            "result",
+            "Invalid mob/resolve_identity_convergence_block response",
+        )
 
     async def mob_member_history(
         self,

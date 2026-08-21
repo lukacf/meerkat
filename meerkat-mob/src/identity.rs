@@ -17,7 +17,8 @@ use meerkat_contracts::wire::{
 use meerkat_core::lifecycle::InputId;
 use meerkat_core::ops::OperationId;
 use meerkat_core::{
-    BudgetLimits, ContentInput, Session, SessionGeneration, SessionId, SessionLineageId, ToolName,
+    ApplicationToolPolicyBinding, BudgetLimits, ContentInput, Session, SessionGeneration,
+    SessionId, SessionLineageId, ToolCategoryOverrides, ToolName,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -27,8 +28,12 @@ use crate::ids::{AgentIdentity, MobId, ProfileName};
 pub const IDENTITY_INTENT_SCHEMA_VERSION: u32 = 1;
 pub const IDENTITY_LEASE_SCHEMA_VERSION: u32 = 1;
 pub const IDENTITY_OPERATION_RECEIPT_SCHEMA_VERSION: u32 = 1;
+pub const IDENTITY_INTENT_MUTATION_RECEIPT_SCHEMA_VERSION: u32 = 1;
+pub const IDENTITY_CONVERGENCE_RESOLUTION_RECEIPT_SCHEMA_VERSION: u32 = 1;
+pub const IDENTITY_ADOPTION_RECEIPT_SCHEMA_VERSION: u32 = 1;
 pub const IDENTITY_INTENT_MAX_ENCODED_BYTES: usize = 4 * 1024 * 1024;
 pub const IDENTITY_LEASE_MAX_TTL_MS: u64 = 30_000;
+pub const IDENTITY_CONVERGENCE_MAX_DRAIN_MS: u64 = 5 * 60 * 1000;
 
 /// Provider namespace retained as provenance in already-sealed intent rows.
 ///
@@ -289,6 +294,10 @@ pub struct DesiredMemberOverlay {
     pub system_prompt: PortableSystemPrompt,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_access_policy: Option<WireResolvedToolAccessPolicy>,
+    #[serde(default)]
+    pub tool_category_overrides: ToolCategoryOverrides,
+    #[serde(default)]
+    pub application_tool_policy: ApplicationToolPolicyBinding,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_binding: Option<WireAuthBindingRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -300,6 +309,7 @@ pub struct DesiredMemberOverlay {
 /// The exact name, description, and JSON input schema are durable desired
 /// material; callback scopes, handlers, and dispatch authority are not.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct DesiredLocalCallbackTool {
     pub name: ToolName,
@@ -338,6 +348,202 @@ impl DesiredLocalCallbackTool {
             ))
         })?;
         Ok(())
+    }
+}
+
+/// Administrative declaration for the exact callback definition set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(
+    tag = "kind",
+    content = "tools",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum CallbackToolSetDeclaration {
+    Inherit,
+    Set(Vec<DesiredLocalCallbackTool>),
+}
+
+/// One static execution constraint in the public member declaration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(
+    tag = "kind",
+    content = "names",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum MemberToolAccessConstraint {
+    AllowNames(Vec<String>),
+    DenyNames(Vec<String>),
+    ReadOnly,
+}
+
+/// Explicit execution-policy declaration. Empty constraints are invalid and
+/// unrestricted access has exactly one spelling.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(
+    tag = "kind",
+    content = "constraints",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum MemberToolAccessDeclaration {
+    Inherit,
+    Unrestricted,
+    Constraints(Vec<MemberToolAccessConstraint>),
+}
+
+/// Durable administrative tool intent for one stable member identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MemberToolDeclaration {
+    #[serde(default)]
+    pub category_overrides: ToolCategoryOverrides,
+    pub callback_tools: CallbackToolSetDeclaration,
+    pub execution: MemberToolAccessDeclaration,
+    pub application_policy: ApplicationToolPolicyBinding,
+}
+
+impl MemberToolDeclaration {
+    pub fn validate(&self) -> Result<(), IdentityIntentError> {
+        if let CallbackToolSetDeclaration::Set(callbacks) = &self.callback_tools {
+            validate_required_local_callback_tools(callbacks, true)?;
+        }
+        if let MemberToolAccessDeclaration::Constraints(constraints) = &self.execution {
+            if constraints.is_empty() {
+                return Err(IdentityIntentError::InvalidMemberToolDeclaration(
+                    "tool access constraints must not be empty".to_string(),
+                ));
+            }
+            for constraint in constraints {
+                match constraint {
+                    MemberToolAccessConstraint::AllowNames(names) => {
+                        validate_string_set("member_tool_allow_name", names)?;
+                    }
+                    MemberToolAccessConstraint::DenyNames(names) => {
+                        validate_string_set("member_tool_deny_name", names)?;
+                    }
+                    MemberToolAccessConstraint::ReadOnly => {}
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn to_wire(&self) -> meerkat_contracts::wire::WireMemberToolDeclaration {
+        use meerkat_contracts::wire::{
+            WireCallbackToolSetDeclaration, WireDesiredLocalCallbackTool,
+            WireMemberToolAccessConstraint, WireMemberToolAccessDeclaration,
+            WireMemberToolDeclaration,
+        };
+        let callback_tools = match &self.callback_tools {
+            CallbackToolSetDeclaration::Inherit => WireCallbackToolSetDeclaration::Inherit,
+            CallbackToolSetDeclaration::Set(tools) => WireCallbackToolSetDeclaration::Set(
+                tools
+                    .iter()
+                    .map(|tool| WireDesiredLocalCallbackTool {
+                        name: tool.name.to_string(),
+                        description: tool.description.clone(),
+                        input_schema: tool.input_schema.clone(),
+                    })
+                    .collect(),
+            ),
+        };
+        let execution = match &self.execution {
+            MemberToolAccessDeclaration::Inherit => WireMemberToolAccessDeclaration::Inherit,
+            MemberToolAccessDeclaration::Unrestricted => {
+                WireMemberToolAccessDeclaration::Unrestricted
+            }
+            MemberToolAccessDeclaration::Constraints(constraints) => {
+                WireMemberToolAccessDeclaration::Constraints(
+                    constraints
+                        .iter()
+                        .map(|constraint| match constraint {
+                            MemberToolAccessConstraint::AllowNames(names) => {
+                                WireMemberToolAccessConstraint::AllowNames(names.clone())
+                            }
+                            MemberToolAccessConstraint::DenyNames(names) => {
+                                WireMemberToolAccessConstraint::DenyNames(names.clone())
+                            }
+                            MemberToolAccessConstraint::ReadOnly => {
+                                WireMemberToolAccessConstraint::ReadOnly
+                            }
+                        })
+                        .collect(),
+                )
+            }
+        };
+        WireMemberToolDeclaration {
+            category_overrides: self.category_overrides,
+            callback_tools,
+            execution,
+            application_policy: self.application_policy.clone(),
+        }
+    }
+}
+
+impl TryFrom<meerkat_contracts::wire::WireMemberToolDeclaration> for MemberToolDeclaration {
+    type Error = IdentityIntentError;
+
+    fn try_from(
+        value: meerkat_contracts::wire::WireMemberToolDeclaration,
+    ) -> Result<Self, Self::Error> {
+        use meerkat_contracts::wire::{
+            WireCallbackToolSetDeclaration, WireMemberToolAccessConstraint,
+            WireMemberToolAccessDeclaration,
+        };
+        let callback_tools = match value.callback_tools {
+            WireCallbackToolSetDeclaration::Inherit => CallbackToolSetDeclaration::Inherit,
+            WireCallbackToolSetDeclaration::Set(tools) => CallbackToolSetDeclaration::Set(
+                tools
+                    .into_iter()
+                    .map(|tool| {
+                        DesiredLocalCallbackTool::new(
+                            tool.name,
+                            tool.description,
+                            tool.input_schema,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+        };
+        let execution = match value.execution {
+            WireMemberToolAccessDeclaration::Inherit => MemberToolAccessDeclaration::Inherit,
+            WireMemberToolAccessDeclaration::Unrestricted => {
+                MemberToolAccessDeclaration::Unrestricted
+            }
+            WireMemberToolAccessDeclaration::Constraints(constraints) => {
+                MemberToolAccessDeclaration::Constraints(
+                    constraints
+                        .into_iter()
+                        .map(|constraint| match constraint {
+                            WireMemberToolAccessConstraint::AllowNames(names) => {
+                                MemberToolAccessConstraint::AllowNames(names)
+                            }
+                            WireMemberToolAccessConstraint::DenyNames(names) => {
+                                MemberToolAccessConstraint::DenyNames(names)
+                            }
+                            WireMemberToolAccessConstraint::ReadOnly => {
+                                MemberToolAccessConstraint::ReadOnly
+                            }
+                        })
+                        .collect(),
+                )
+            }
+        };
+        let declaration = Self {
+            category_overrides: value.category_overrides,
+            callback_tools,
+            execution,
+            application_policy: value.application_policy,
+        };
+        declaration.validate()?;
+        Ok(declaration)
     }
 }
 
@@ -425,6 +631,26 @@ impl DesiredMemberMaterial {
                 }
                 // Name-independent: there is no name set to validate.
                 WireResolvedToolAccessPolicy::ReadOnly => {}
+                WireResolvedToolAccessPolicy::Constraints(constraints) => {
+                    if constraints.is_empty() {
+                        return Err(IdentityIntentError::InvalidMemberMaterial(
+                            "tool access constraints must not be empty".to_string(),
+                        ));
+                    }
+                    for constraint in constraints {
+                        match constraint {
+                            meerkat_contracts::wire::WireToolAccessConstraint::AllowNames(
+                                names,
+                            ) => {
+                                validate_string_set("tool_access_allow_name", names)?;
+                            }
+                            meerkat_contracts::wire::WireToolAccessConstraint::DenyNames(names) => {
+                                validate_string_set("tool_access_deny_name", names)?;
+                            }
+                            meerkat_contracts::wire::WireToolAccessConstraint::ReadOnly => {}
+                        }
+                    }
+                }
             }
         }
 
@@ -445,6 +671,115 @@ impl DesiredMemberMaterial {
             ));
         }
         Ok(())
+    }
+
+    /// Project the current durable tool portion as one explicit declaration.
+    /// Callback and execution inheritance are resolved before persistence, so
+    /// reads never have to guess which earlier request supplied them.
+    #[must_use]
+    pub fn member_tool_declaration(&self) -> MemberToolDeclaration {
+        let execution = match &self.overlay.tool_access_policy {
+            None => MemberToolAccessDeclaration::Unrestricted,
+            Some(WireResolvedToolAccessPolicy::AllowList(names)) => {
+                MemberToolAccessDeclaration::Constraints(vec![
+                    MemberToolAccessConstraint::AllowNames(names.clone()),
+                ])
+            }
+            Some(WireResolvedToolAccessPolicy::DenyList(names)) => {
+                MemberToolAccessDeclaration::Constraints(vec![
+                    MemberToolAccessConstraint::DenyNames(names.clone()),
+                ])
+            }
+            Some(WireResolvedToolAccessPolicy::ReadOnly) => {
+                MemberToolAccessDeclaration::Constraints(vec![MemberToolAccessConstraint::ReadOnly])
+            }
+            Some(WireResolvedToolAccessPolicy::Constraints(constraints)) => {
+                MemberToolAccessDeclaration::Constraints(
+                    constraints
+                        .iter()
+                        .map(|constraint| match constraint {
+                            meerkat_contracts::wire::WireToolAccessConstraint::AllowNames(
+                                names,
+                            ) => MemberToolAccessConstraint::AllowNames(names.clone()),
+                            meerkat_contracts::wire::WireToolAccessConstraint::DenyNames(names) => {
+                                MemberToolAccessConstraint::DenyNames(names.clone())
+                            }
+                            meerkat_contracts::wire::WireToolAccessConstraint::ReadOnly => {
+                                MemberToolAccessConstraint::ReadOnly
+                            }
+                        })
+                        .collect(),
+                )
+            }
+        };
+        MemberToolDeclaration {
+            category_overrides: self.overlay.tool_category_overrides,
+            callback_tools: CallbackToolSetDeclaration::Set(
+                self.required_local_callback_tools.clone(),
+            ),
+            execution,
+            application_policy: self.overlay.application_tool_policy.clone(),
+        }
+    }
+
+    /// Compile a public declaration into a replacement of only this
+    /// material's tool portion. Non-tool profile, prompt, identity, session,
+    /// execution placement, and wiring facts are copied byte-for-byte.
+    pub fn with_member_tool_declaration(
+        &self,
+        declaration: &MemberToolDeclaration,
+    ) -> Result<Self, IdentityIntentError> {
+        declaration.validate()?;
+        let current = self.member_tool_declaration();
+        let callback_tools = match &declaration.callback_tools {
+            CallbackToolSetDeclaration::Inherit => match current.callback_tools {
+                CallbackToolSetDeclaration::Set(tools) => tools,
+                CallbackToolSetDeclaration::Inherit => {
+                    unreachable!("durable member tool projection resolves callback inheritance")
+                }
+            },
+            CallbackToolSetDeclaration::Set(tools) => tools.clone(),
+        };
+        let execution = match &declaration.execution {
+            MemberToolAccessDeclaration::Inherit => current.execution,
+            explicit => explicit.clone(),
+        };
+        let tool_access_policy = match execution {
+            MemberToolAccessDeclaration::Inherit => {
+                unreachable!("durable member tool projection resolves execution inheritance")
+            }
+            MemberToolAccessDeclaration::Unrestricted => None,
+            MemberToolAccessDeclaration::Constraints(constraints) => {
+                Some(WireResolvedToolAccessPolicy::Constraints(
+                    constraints
+                        .into_iter()
+                        .map(|constraint| match constraint {
+                            MemberToolAccessConstraint::AllowNames(names) => {
+                                meerkat_contracts::wire::WireToolAccessConstraint::AllowNames(names)
+                            }
+                            MemberToolAccessConstraint::DenyNames(names) => {
+                                meerkat_contracts::wire::WireToolAccessConstraint::DenyNames(names)
+                            }
+                            MemberToolAccessConstraint::ReadOnly => {
+                                meerkat_contracts::wire::WireToolAccessConstraint::ReadOnly
+                            }
+                        })
+                        .collect(),
+                ))
+            }
+        };
+        let application_policy = match &declaration.application_policy {
+            ApplicationToolPolicyBinding::Inherit => current.application_policy,
+            explicit => explicit.clone(),
+        };
+
+        let mut next = self.clone();
+        next.overlay.tool_category_overrides = declaration.category_overrides;
+        next.overlay.tool_access_policy = tool_access_policy;
+        next.overlay.application_tool_policy = application_policy;
+        next.required_local_callback_tools = callback_tools;
+        next.validate()?;
+        Ok(next)
     }
 }
 
@@ -571,6 +906,430 @@ impl IdentityProfileMemberDeclaration {
     }
 }
 
+/// Caller-chosen idempotency identity for one explicit expected-absent
+/// adoption of an existing member into durable identity intent.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct IdentityAdoptionId(String);
+
+impl IdentityAdoptionId {
+    pub fn new(value: impl Into<String>) -> Result<Self, IdentityIntentError> {
+        let value = value.into();
+        validate_text("identity_adoption_id", &value)?;
+        Ok(Self(value))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Explicit initial-intent precondition. V1 deliberately has no upsert arm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentityAdoptionPrecondition {
+    ExpectedAbsent,
+}
+
+/// Names the authority that owns local member topology after adoption.
+///
+/// `ExternalManaged` means the identity reconciler must abstain completely:
+/// the mob-level topology provider remains the sole desired-state owner.
+/// `IdentityOwned` enables exact comparison of the canonical `owned_wiring`
+/// set and fail-closed repair classification.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentityWiringCustody {
+    #[default]
+    ExternalManaged,
+    IdentityOwned,
+}
+
+impl IdentityWiringCustody {
+    fn is_external_managed(&self) -> bool {
+        matches!(self, Self::ExternalManaged)
+    }
+}
+
+/// Full caller-authored declaration for adopting one already-realized member.
+///
+/// The actor compiles `member` against its canonical `MobDefinition`, verifies
+/// the exact current identity/session/role realization, and asks the store to
+/// insert revision 1 only when no intent row exists. No roster inference can
+/// supply omitted desired material.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdoptMemberIdentityDeclaration {
+    pub mob_id: MobId,
+    pub agent_identity: AgentIdentity,
+    pub request_id: IdentityAdoptionId,
+    pub precondition: IdentityAdoptionPrecondition,
+    pub declaration_scope: IdentityDeclarationScopeId,
+    pub declaration_revision: u64,
+    pub session: DesiredSessionTarget,
+    pub member: IdentityProfileMemberDeclaration,
+    #[serde(
+        default,
+        skip_serializing_if = "IdentityWiringCustody::is_external_managed"
+    )]
+    pub wiring_custody: IdentityWiringCustody,
+    pub owned_wiring: BTreeSet<DesiredIdentityEdge>,
+    pub convergence: IdentityConvergenceMode,
+}
+
+impl AdoptMemberIdentityDeclaration {
+    pub fn validate(&self) -> Result<(), IdentityIntentError> {
+        validate_text("mob_id", self.mob_id.as_str())?;
+        validate_identity(&self.agent_identity)?;
+        validate_text("identity_adoption_id", self.request_id.as_str())?;
+        validate_text(
+            "identity_declaration_scope",
+            self.declaration_scope.as_str(),
+        )?;
+        if self.declaration_revision == 0 {
+            return Err(IdentityIntentError::InvalidDeclarationRevision);
+        }
+        self.member.validate()?;
+        self.convergence.validate()?;
+        if self.session.session_id.0.is_nil() {
+            return Err(IdentityIntentError::NilSessionId);
+        }
+        if !matches!(
+            self.session.authority_policy,
+            DesiredSessionAuthorityPolicy::RequireExisting
+        ) {
+            return Err(IdentityIntentError::InvalidMutationTarget);
+        }
+        SessionLineageId::new(self.session.lineage_id.as_str().to_string()).map_err(|_| {
+            IdentityIntentError::InvalidText {
+                field: "session_lineage_id",
+            }
+        })?;
+        if matches!(self.wiring_custody, IdentityWiringCustody::ExternalManaged)
+            && !self.owned_wiring.is_empty()
+        {
+            return Err(IdentityIntentError::InvalidMutationTarget);
+        }
+        for edge in &self.owned_wiring {
+            validate_identity(&edge.a)?;
+            validate_identity(&edge.b)?;
+            if edge.a >= edge.b {
+                return Err(IdentityIntentError::NonCanonicalEdge(edge.clone()));
+            }
+            if edge.owner() != &self.agent_identity {
+                return Err(IdentityIntentError::EdgeOwnedByDifferentIdentity {
+                    identity: self.agent_identity.clone(),
+                    edge: edge.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    pub fn canonical_digest(&self) -> Result<String, IdentityIntentError> {
+        self.validate()?;
+        #[derive(Serialize)]
+        struct DigestMaterial<'a> {
+            domain: &'static str,
+            request: &'a AdoptMemberIdentityDeclaration,
+        }
+        let bytes = serde_json::to_vec(&DigestMaterial {
+            domain: "meerkat.identity.adoption.v1",
+            request: self,
+        })
+        .map_err(|error| IdentityIntentError::Serialization(error.to_string()))?;
+        Ok(sha256_digest(&bytes))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+pub enum IdentityAdoptionOutcome {
+    Adopted { desired_revision: u64 },
+    PreconditionConflict { actual_revision: u64 },
+    RequestConflict { request_id: IdentityAdoptionId },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdoptMemberIdentityDeclarationResult {
+    pub adoption: IdentityAdoptionOutcome,
+    pub convergence: IdentityConvergenceStatus,
+}
+
+impl IdentityAdoptionOutcome {
+    #[must_use]
+    pub fn to_wire(&self) -> meerkat_contracts::wire::WireIdentityAdoptionOutcome {
+        use meerkat_contracts::wire::WireIdentityAdoptionOutcome as Wire;
+        match self {
+            Self::Adopted { desired_revision } => Wire::Adopted {
+                desired_revision: *desired_revision,
+            },
+            Self::PreconditionConflict { actual_revision } => Wire::PreconditionConflict {
+                actual_revision: *actual_revision,
+            },
+            Self::RequestConflict { request_id } => Wire::RequestConflict {
+                request_id: request_id.as_str().to_string(),
+            },
+        }
+    }
+}
+
+impl AdoptMemberIdentityDeclarationResult {
+    #[must_use]
+    pub fn to_wire(&self) -> meerkat_contracts::wire::MobAdoptMemberIdentityDeclarationResult {
+        meerkat_contracts::wire::MobAdoptMemberIdentityDeclarationResult {
+            adoption: self.adoption.to_wire(),
+            convergence: self.convergence.to_wire(),
+        }
+    }
+}
+
+impl TryFrom<meerkat_contracts::wire::MobAdoptMemberIdentityDeclarationParams>
+    for AdoptMemberIdentityDeclaration
+{
+    type Error = IdentityIntentError;
+
+    fn try_from(
+        value: meerkat_contracts::wire::MobAdoptMemberIdentityDeclarationParams,
+    ) -> Result<Self, Self::Error> {
+        use meerkat_contracts::wire::{
+            WireDesiredExecution, WireDesiredSessionAuthorityPolicy,
+            WireIdentityAdoptionPrecondition, WireIdentityWiringCustody,
+        };
+
+        let session_id = uuid::Uuid::parse_str(&value.session.session_id)
+            .map(SessionId)
+            .map_err(|error| IdentityIntentError::InvalidMemberMaterial(error.to_string()))?;
+        let execution = match value.member.execution {
+            WireDesiredExecution::ControllingSession => DesiredExecution::ControllingSession,
+            WireDesiredExecution::AnyBoundHostSession => DesiredExecution::AnyBoundHostSession,
+            WireDesiredExecution::PlacedSession { host_id } => {
+                DesiredExecution::PlacedSession { host_id }
+            }
+            WireDesiredExecution::External { address, identity } => DesiredExecution::External {
+                address: DesiredExternalAddress::parse(address)?,
+                identity,
+            },
+        };
+        let member = IdentityProfileMemberDeclaration {
+            profile_name: ProfileName::from(value.member.profile_name),
+            profile_override: value.member.profile_override,
+            model_override: value.member.model_override,
+            external_addressable_override: value.member.external_addressable_override,
+            context: value.member.context,
+            labels: value.member.labels,
+            additional_instructions: value.member.additional_instructions,
+            system_prompt_override: value.member.system_prompt_override,
+            tool_access_policy: value.member.tool_access_policy,
+            auth_binding: value.member.auth_binding,
+            budget_limits: value.member.budget_limits,
+            runtime_mode: value.member.runtime_mode,
+            required_env_keys: value.member.required_env_keys,
+            required_local_callback_tools: value
+                .member
+                .required_local_callback_tools
+                .into_iter()
+                .map(|tool| {
+                    DesiredLocalCallbackTool::new(tool.name, tool.description, tool.input_schema)
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            execution,
+        };
+        let request = Self {
+            mob_id: MobId::from(value.mob_id),
+            agent_identity: AgentIdentity::from(value.agent_identity),
+            request_id: IdentityAdoptionId::new(value.request_id)?,
+            precondition: match value.precondition {
+                WireIdentityAdoptionPrecondition::ExpectedAbsent => {
+                    IdentityAdoptionPrecondition::ExpectedAbsent
+                }
+            },
+            declaration_scope: IdentityDeclarationScopeId::new(value.declaration_scope)?,
+            declaration_revision: value.declaration_revision,
+            session: DesiredSessionTarget {
+                session_id,
+                lineage_id: SessionLineageId::new(value.session.lineage_id).map_err(|_| {
+                    IdentityIntentError::InvalidText {
+                        field: "session_lineage_id",
+                    }
+                })?,
+                lineage_generation: SessionGeneration::new(value.session.lineage_generation),
+                authority_policy: match value.session.authority_policy {
+                    WireDesiredSessionAuthorityPolicy::RequireExisting => {
+                        DesiredSessionAuthorityPolicy::RequireExisting
+                    }
+                },
+            },
+            member,
+            wiring_custody: match value.wiring_custody {
+                WireIdentityWiringCustody::ExternalManaged => {
+                    IdentityWiringCustody::ExternalManaged
+                }
+                WireIdentityWiringCustody::IdentityOwned => IdentityWiringCustody::IdentityOwned,
+            },
+            owned_wiring: value
+                .owned_wiring
+                .into_iter()
+                .map(|edge| DesiredIdentityEdge {
+                    a: AgentIdentity::from(edge.a),
+                    b: AgentIdentity::from(edge.b),
+                })
+                .collect(),
+            convergence: value.convergence.into(),
+        };
+        request.validate()?;
+        Ok(request)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityAdoptionReceipt {
+    pub schema_version: u32,
+    pub mob_id: MobId,
+    pub agent_identity: AgentIdentity,
+    pub request_id: IdentityAdoptionId,
+    pub request_digest: String,
+    pub outcome: IdentityAdoptionOutcome,
+    pub receipt_digest: String,
+}
+
+impl IdentityAdoptionReceipt {
+    pub fn new(
+        request: &AdoptMemberIdentityDeclaration,
+        outcome: IdentityAdoptionOutcome,
+    ) -> Result<Self, IdentityIntentError> {
+        let mut receipt = Self {
+            schema_version: IDENTITY_ADOPTION_RECEIPT_SCHEMA_VERSION,
+            mob_id: request.mob_id.clone(),
+            agent_identity: request.agent_identity.clone(),
+            request_id: request.request_id.clone(),
+            request_digest: request.canonical_digest()?,
+            outcome,
+            receipt_digest: String::new(),
+        };
+        receipt.receipt_digest = receipt.canonical_digest()?;
+        receipt.validate()?;
+        Ok(receipt)
+    }
+
+    fn canonical_digest(&self) -> Result<String, IdentityIntentError> {
+        #[derive(Serialize)]
+        struct DigestMaterial<'a> {
+            domain: &'static str,
+            schema_version: u32,
+            mob_id: &'a MobId,
+            agent_identity: &'a AgentIdentity,
+            request_id: &'a IdentityAdoptionId,
+            request_digest: &'a str,
+            outcome: &'a IdentityAdoptionOutcome,
+        }
+        let bytes = serde_json::to_vec(&DigestMaterial {
+            domain: "meerkat.identity.adoption_receipt.v1",
+            schema_version: self.schema_version,
+            mob_id: &self.mob_id,
+            agent_identity: &self.agent_identity,
+            request_id: &self.request_id,
+            request_digest: &self.request_digest,
+            outcome: &self.outcome,
+        })
+        .map_err(|error| IdentityIntentError::Serialization(error.to_string()))?;
+        Ok(sha256_digest(&bytes))
+    }
+
+    pub fn validate(&self) -> Result<(), IdentityIntentError> {
+        if self.schema_version != IDENTITY_ADOPTION_RECEIPT_SCHEMA_VERSION {
+            return Err(IdentityIntentError::UnsupportedSchemaVersion {
+                record: "identity_adoption_receipt",
+                version: self.schema_version,
+            });
+        }
+        validate_text("mob_id", self.mob_id.as_str())?;
+        validate_identity(&self.agent_identity)?;
+        validate_text("identity_adoption_id", self.request_id.as_str())?;
+        validate_sha256_digest(&self.request_digest)?;
+        if self.receipt_digest != self.canonical_digest()? {
+            return Err(IdentityIntentError::DigestMismatch);
+        }
+        match &self.outcome {
+            IdentityAdoptionOutcome::Adopted { desired_revision }
+            | IdentityAdoptionOutcome::PreconditionConflict {
+                actual_revision: desired_revision,
+            } if *desired_revision == 0 => Err(IdentityIntentError::ZeroIntentRevision),
+            IdentityAdoptionOutcome::RequestConflict { request_id }
+                if request_id != &self.request_id =>
+            {
+                Err(IdentityIntentError::InvalidMutationTarget)
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+/// Seal revision 1 from the actor-compiled member material. Store backends
+/// recompute incident-wiring cleanup evidence transactionally at insertion.
+pub(crate) fn prepare_identity_adoption_record(
+    request: &AdoptMemberIdentityDeclaration,
+    material: DesiredMemberMaterial,
+    committed_at_ms: u64,
+) -> Result<IdentityIntentRecord, IdentityIntentError> {
+    request.validate()?;
+    material.validate()?;
+    if material.profile_name != request.member.profile_name
+        || material.execution != request.member.execution
+    {
+        return Err(IdentityIntentError::InvalidMutationTarget);
+    }
+    let member = DesiredMemberSpec {
+        material,
+        initial_delivery: None,
+    };
+    let intent = IdentityIntent::Present {
+        identity: request.agent_identity.clone(),
+        session: request.session.clone(),
+        member: Box::new(member),
+        wiring_custody: request.wiring_custody,
+        owned_wiring: request.owned_wiring.clone(),
+    };
+    let mut record = IdentityIntentRecord {
+        schema_version: IDENTITY_INTENT_SCHEMA_VERSION,
+        mob_id: request.mob_id.clone(),
+        intent_revision: 1,
+        declaration_scope: Some(request.declaration_scope.clone()),
+        declaration_revision: Some(request.declaration_revision),
+        tombstone_generation: None,
+        initial_delivery_generation_highwater: 0,
+        retirement_plan: IdentityRetirementPlan::Targets {
+            session: request.session.clone(),
+            execution: request.member.execution.clone(),
+            incident_wiring: request.owned_wiring.clone(),
+        },
+        convergence_directive: Some(IdentityConvergenceDirective {
+            desired_revision: 1,
+            expected_active_revision: 1,
+            mode: request.convergence,
+            drain_deadline_ms: match request.convergence {
+                IdentityConvergenceMode::Drain { max_wait_ms } => {
+                    Some(committed_at_ms.checked_add(max_wait_ms).ok_or(
+                        IdentityIntentError::CounterExhausted {
+                            counter: "identity_convergence_deadline_ms",
+                        },
+                    )?)
+                }
+                IdentityConvergenceMode::CancelActive => None,
+            },
+        }),
+        intent_digest: intent.digest()?,
+        authority_digest: String::new(),
+        intent,
+    };
+    record.authority_digest = record.canonical_authority_digest()?;
+    record.validate()?;
+    Ok(record)
+}
+
 /// Canonical undirected desired edge.  The lexicographically smaller endpoint
 /// is its sole intent owner, avoiding two independently mutable desired facts
 /// for one physical edge.
@@ -612,6 +1371,11 @@ pub enum IdentityIntent {
         identity: AgentIdentity,
         session: DesiredSessionTarget,
         member: Box<DesiredMemberSpec>,
+        #[serde(
+            default,
+            skip_serializing_if = "IdentityWiringCustody::is_external_managed"
+        )]
+        wiring_custody: IdentityWiringCustody,
         #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
         owned_wiring: BTreeSet<DesiredIdentityEdge>,
     },
@@ -634,6 +1398,7 @@ impl IdentityIntent {
             identity,
             session,
             member,
+            wiring_custody,
             owned_wiring,
         } = self
         {
@@ -653,6 +1418,11 @@ impl IdentityIntent {
                 }
             })?;
             member.validate()?;
+            if matches!(wiring_custody, IdentityWiringCustody::ExternalManaged)
+                && !owned_wiring.is_empty()
+            {
+                return Err(IdentityIntentError::InvalidMutationTarget);
+            }
             for edge in owned_wiring {
                 validate_identity(&edge.a)?;
                 validate_identity(&edge.b)?;
@@ -731,6 +1501,10 @@ pub struct IdentityIntentRecord {
     #[serde(default)]
     pub initial_delivery_generation_highwater: u64,
     pub retirement_plan: IdentityRetirementPlan,
+    /// Durable convergence authority for replacing a realized member after an
+    /// administrative desired-material update.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub convergence_directive: Option<IdentityConvergenceDirective>,
     /// Digest of caller-authored desired content only, used for idempotent
     /// public apply comparisons.
     pub intent_digest: String,
@@ -765,12 +1539,25 @@ impl IdentityIntentRecord {
         {
             return Err(IdentityIntentError::InvalidTombstoneGeneration);
         }
+        if let Some(directive) = &self.convergence_directive {
+            directive.mode.validate()?;
+            if directive.desired_revision != self.intent_revision
+                || directive.expected_active_revision == 0
+                || match directive.mode {
+                    IdentityConvergenceMode::Drain { .. } => directive.drain_deadline_ms.is_none(),
+                    IdentityConvergenceMode::CancelActive => directive.drain_deadline_ms.is_some(),
+                }
+            {
+                return Err(IdentityIntentError::InvalidConvergenceMode);
+            }
+        }
         match &self.intent {
             IdentityIntent::Present {
                 member,
                 session: _,
                 identity: _,
                 owned_wiring: _,
+                wiring_custody: _,
             } => {
                 if let Some(delivery) = &member.initial_delivery {
                     if delivery.delivery_generation != self.initial_delivery_generation_highwater {
@@ -812,7 +1599,7 @@ impl IdentityIntentRecord {
             intent_digest: &'a str,
             intent: &'a IdentityIntent,
         }
-        let bytes = serde_json::to_vec(&AuthorityMaterial {
+        let legacy = AuthorityMaterial {
             domain: "meerkat.identity.intent_authority.v1",
             schema_version: self.schema_version,
             mob_id: &self.mob_id,
@@ -824,10 +1611,555 @@ impl IdentityIntentRecord {
             retirement_plan: &self.retirement_plan,
             intent_digest: &self.intent_digest,
             intent: &self.intent,
+        };
+        let bytes = if let Some(directive) = &self.convergence_directive {
+            #[derive(Serialize)]
+            struct ExtendedAuthorityMaterial<'a> {
+                #[serde(flatten)]
+                legacy: AuthorityMaterial<'a>,
+                convergence_directive: &'a IdentityConvergenceDirective,
+            }
+            serde_json::to_vec(&ExtendedAuthorityMaterial {
+                legacy,
+                convergence_directive: directive,
+            })
+        } else {
+            serde_json::to_vec(&legacy)
+        }
+        .map_err(|error| IdentityIntentError::Serialization(error.to_string()))?;
+        Ok(sha256_digest(&bytes))
+    }
+}
+
+/// Caller-chosen idempotency identity for one desired-member mutation.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct MemberToolMutationId(String);
+
+impl MemberToolMutationId {
+    pub fn new(value: impl Into<String>) -> Result<Self, IdentityIntentError> {
+        let value = value.into();
+        validate_text("member_tool_mutation_id", &value)?;
+        Ok(Self(value))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for MemberToolMutationId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Requested treatment of already-admitted member work while desired
+/// material converges. A finite drain never silently becomes cancellation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum IdentityConvergenceMode {
+    Drain { max_wait_ms: u64 },
+    CancelActive,
+}
+
+/// Store-sealed replacement instruction surviving process restart.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityConvergenceDirective {
+    pub desired_revision: u64,
+    pub expected_active_revision: u64,
+    pub mode: IdentityConvergenceMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drain_deadline_ms: Option<u64>,
+}
+
+impl IdentityConvergenceMode {
+    pub fn validate(self) -> Result<(), IdentityIntentError> {
+        if let Self::Drain { max_wait_ms } = self
+            && (max_wait_ms == 0 || max_wait_ms > IDENTITY_CONVERGENCE_MAX_DRAIN_MS)
+        {
+            return Err(IdentityIntentError::InvalidConvergenceMode);
+        }
+        Ok(())
+    }
+}
+
+impl From<meerkat_contracts::wire::WireIdentityConvergenceMode> for IdentityConvergenceMode {
+    fn from(value: meerkat_contracts::wire::WireIdentityConvergenceMode) -> Self {
+        match value {
+            meerkat_contracts::wire::WireIdentityConvergenceMode::Drain { max_wait_ms } => {
+                Self::Drain { max_wait_ms }
+            }
+            meerkat_contracts::wire::WireIdentityConvergenceMode::CancelActive => {
+                Self::CancelActive
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApplyMemberToolDeclaration {
+    pub mob_id: MobId,
+    pub agent_identity: AgentIdentity,
+    pub request_id: MemberToolMutationId,
+    pub expected_intent_revision: u64,
+    pub declaration: MemberToolDeclaration,
+    pub convergence: IdentityConvergenceMode,
+}
+
+impl ApplyMemberToolDeclaration {
+    pub fn validate(&self) -> Result<(), IdentityIntentError> {
+        validate_text("mob_id", self.mob_id.as_str())?;
+        validate_identity(&self.agent_identity)?;
+        validate_text("member_tool_mutation_id", self.request_id.as_str())?;
+        if self.expected_intent_revision == 0 {
+            return Err(IdentityIntentError::ZeroIntentRevision);
+        }
+        self.declaration.validate()?;
+        self.convergence.validate()
+    }
+
+    pub fn canonical_digest(&self) -> Result<String, IdentityIntentError> {
+        self.validate()?;
+        #[derive(Serialize)]
+        struct DigestMaterial<'a> {
+            domain: &'static str,
+            mob_id: &'a MobId,
+            agent_identity: &'a AgentIdentity,
+            request_id: &'a MemberToolMutationId,
+            expected_intent_revision: u64,
+            declaration: &'a MemberToolDeclaration,
+            convergence: IdentityConvergenceMode,
+        }
+        let bytes = serde_json::to_vec(&DigestMaterial {
+            domain: "meerkat.identity.member_tool_mutation.v1",
+            mob_id: &self.mob_id,
+            agent_identity: &self.agent_identity,
+            request_id: &self.request_id,
+            expected_intent_revision: self.expected_intent_revision,
+            declaration: &self.declaration,
+            convergence: self.convergence,
         })
         .map_err(|error| IdentityIntentError::Serialization(error.to_string()))?;
         Ok(sha256_digest(&bytes))
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+pub enum MemberToolCommitOutcome {
+    Committed { desired_revision: u64 },
+    NoChange { desired_revision: u64 },
+    RevisionConflict { expected: u64, actual: u64 },
+    RequestConflict { request_id: MemberToolMutationId },
+    MemberAbsent,
+    InvalidDeclaration { reason: String },
+}
+
+/// Immutable idempotency receipt for the desired-state commit only. Live
+/// convergence is deliberately read fresh and never frozen into this row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityIntentMutationReceipt {
+    pub schema_version: u32,
+    pub mob_id: MobId,
+    pub agent_identity: AgentIdentity,
+    pub request_id: MemberToolMutationId,
+    pub request_digest: String,
+    pub outcome: MemberToolCommitOutcome,
+    pub receipt_digest: String,
+}
+
+/// Caller-chosen idempotency identity for one blocked-convergence resolution.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct IdentityConvergenceResolutionId(String);
+
+impl IdentityConvergenceResolutionId {
+    pub fn new(value: impl Into<String>) -> Result<Self, IdentityIntentError> {
+        let value = value.into();
+        validate_text("identity_convergence_resolution_id", &value)?;
+        Ok(Self(value))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResolveIdentityConvergenceBlock {
+    pub mob_id: MobId,
+    pub agent_identity: AgentIdentity,
+    pub request_id: IdentityConvergenceResolutionId,
+    pub expected_desired_revision: u64,
+    pub observed_active_revision: u64,
+    pub convergence: IdentityConvergenceMode,
+}
+
+impl ResolveIdentityConvergenceBlock {
+    pub fn validate(&self) -> Result<(), IdentityIntentError> {
+        validate_text("mob_id", self.mob_id.as_str())?;
+        validate_identity(&self.agent_identity)?;
+        validate_text(
+            "identity_convergence_resolution_id",
+            self.request_id.as_str(),
+        )?;
+        if self.expected_desired_revision == 0 || self.observed_active_revision == 0 {
+            return Err(IdentityIntentError::ZeroIntentRevision);
+        }
+        self.convergence.validate()
+    }
+
+    pub fn canonical_digest(&self) -> Result<String, IdentityIntentError> {
+        self.validate()?;
+        #[derive(Serialize)]
+        struct DigestMaterial<'a> {
+            domain: &'static str,
+            mob_id: &'a MobId,
+            agent_identity: &'a AgentIdentity,
+            request_id: &'a IdentityConvergenceResolutionId,
+            expected_desired_revision: u64,
+            observed_active_revision: u64,
+            convergence: IdentityConvergenceMode,
+        }
+        let bytes = serde_json::to_vec(&DigestMaterial {
+            domain: "meerkat.identity.convergence_resolution.v1",
+            mob_id: &self.mob_id,
+            agent_identity: &self.agent_identity,
+            request_id: &self.request_id,
+            expected_desired_revision: self.expected_desired_revision,
+            observed_active_revision: self.observed_active_revision,
+            convergence: self.convergence,
+        })
+        .map_err(|error| IdentityIntentError::Serialization(error.to_string()))?;
+        Ok(sha256_digest(&bytes))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+pub enum IdentityConvergenceResolutionOutcome {
+    Resolved {
+        desired_revision: u64,
+        active_revision: u64,
+    },
+    DesiredRevisionConflict {
+        expected: u64,
+        actual: u64,
+    },
+    ActiveRevisionConflict {
+        expected: u64,
+        actual: u64,
+    },
+    NotBlocked,
+    MemberAbsent,
+    RequestConflict {
+        request_id: IdentityConvergenceResolutionId,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityConvergenceResolutionReceipt {
+    pub schema_version: u32,
+    pub mob_id: MobId,
+    pub agent_identity: AgentIdentity,
+    pub request_id: IdentityConvergenceResolutionId,
+    pub request_digest: String,
+    pub outcome: IdentityConvergenceResolutionOutcome,
+    pub receipt_digest: String,
+}
+
+impl IdentityConvergenceResolutionReceipt {
+    pub fn new(
+        request: &ResolveIdentityConvergenceBlock,
+        outcome: IdentityConvergenceResolutionOutcome,
+    ) -> Result<Self, IdentityIntentError> {
+        let mut receipt = Self {
+            schema_version: IDENTITY_CONVERGENCE_RESOLUTION_RECEIPT_SCHEMA_VERSION,
+            mob_id: request.mob_id.clone(),
+            agent_identity: request.agent_identity.clone(),
+            request_id: request.request_id.clone(),
+            request_digest: request.canonical_digest()?,
+            outcome,
+            receipt_digest: String::new(),
+        };
+        receipt.receipt_digest = receipt.canonical_digest()?;
+        receipt.validate()?;
+        Ok(receipt)
+    }
+
+    fn canonical_digest(&self) -> Result<String, IdentityIntentError> {
+        #[derive(Serialize)]
+        struct DigestMaterial<'a> {
+            domain: &'static str,
+            schema_version: u32,
+            mob_id: &'a MobId,
+            agent_identity: &'a AgentIdentity,
+            request_id: &'a IdentityConvergenceResolutionId,
+            request_digest: &'a str,
+            outcome: &'a IdentityConvergenceResolutionOutcome,
+        }
+        let bytes = serde_json::to_vec(&DigestMaterial {
+            domain: "meerkat.identity.convergence_resolution_receipt.v1",
+            schema_version: self.schema_version,
+            mob_id: &self.mob_id,
+            agent_identity: &self.agent_identity,
+            request_id: &self.request_id,
+            request_digest: &self.request_digest,
+            outcome: &self.outcome,
+        })
+        .map_err(|error| IdentityIntentError::Serialization(error.to_string()))?;
+        Ok(sha256_digest(&bytes))
+    }
+
+    pub fn validate(&self) -> Result<(), IdentityIntentError> {
+        if self.schema_version != IDENTITY_CONVERGENCE_RESOLUTION_RECEIPT_SCHEMA_VERSION {
+            return Err(IdentityIntentError::UnsupportedSchemaVersion {
+                record: "identity_convergence_resolution_receipt",
+                version: self.schema_version,
+            });
+        }
+        validate_text("mob_id", self.mob_id.as_str())?;
+        validate_identity(&self.agent_identity)?;
+        validate_text(
+            "identity_convergence_resolution_id",
+            self.request_id.as_str(),
+        )?;
+        validate_sha256_digest(&self.request_digest)?;
+        validate_sha256_digest(&self.receipt_digest)?;
+        if self.canonical_digest()? != self.receipt_digest {
+            return Err(IdentityIntentError::DigestMismatch);
+        }
+        Ok(())
+    }
+}
+
+/// Pure store-side update preparation after the actor has supplied its exact
+/// active-revision observation. This changes only convergence authority, not
+/// desired member material or its intent revision.
+pub fn prepare_identity_convergence_resolution(
+    current: &IdentityIntentRecord,
+    request: &ResolveIdentityConvergenceBlock,
+    actual_active_revision: u64,
+    committed_at_ms: u64,
+) -> Result<
+    (
+        IdentityConvergenceResolutionOutcome,
+        Option<IdentityIntentRecord>,
+    ),
+    IdentityIntentError,
+> {
+    current.validate()?;
+    request.validate()?;
+    if current.mob_id != request.mob_id || current.intent.identity() != &request.agent_identity {
+        return Err(IdentityIntentError::InvalidMutationTarget);
+    }
+    if current.intent_revision != request.expected_desired_revision {
+        return Ok((
+            IdentityConvergenceResolutionOutcome::DesiredRevisionConflict {
+                expected: request.expected_desired_revision,
+                actual: current.intent_revision,
+            },
+            None,
+        ));
+    }
+    if actual_active_revision != request.observed_active_revision {
+        return Ok((
+            IdentityConvergenceResolutionOutcome::ActiveRevisionConflict {
+                expected: request.observed_active_revision,
+                actual: actual_active_revision,
+            },
+            None,
+        ));
+    }
+    if !matches!(current.intent, IdentityIntent::Present { .. }) {
+        return Ok((IdentityConvergenceResolutionOutcome::MemberAbsent, None));
+    }
+    if current.convergence_directive.is_none() {
+        return Ok((IdentityConvergenceResolutionOutcome::NotBlocked, None));
+    }
+    let drain_deadline_ms = match request.convergence {
+        IdentityConvergenceMode::Drain { max_wait_ms } => {
+            Some(committed_at_ms.checked_add(max_wait_ms).ok_or(
+                IdentityIntentError::CounterExhausted {
+                    counter: "identity_convergence_deadline_ms",
+                },
+            )?)
+        }
+        IdentityConvergenceMode::CancelActive => None,
+    };
+    let mut next = current.clone();
+    next.convergence_directive = Some(IdentityConvergenceDirective {
+        desired_revision: current.intent_revision,
+        expected_active_revision: actual_active_revision,
+        mode: request.convergence,
+        drain_deadline_ms,
+    });
+    next.authority_digest = next.canonical_authority_digest()?;
+    next.validate()?;
+    Ok((
+        IdentityConvergenceResolutionOutcome::Resolved {
+            desired_revision: current.intent_revision,
+            active_revision: actual_active_revision,
+        },
+        Some(next),
+    ))
+}
+
+impl IdentityIntentMutationReceipt {
+    pub fn new(
+        request: &ApplyMemberToolDeclaration,
+        outcome: MemberToolCommitOutcome,
+    ) -> Result<Self, IdentityIntentError> {
+        let mut receipt = Self {
+            schema_version: IDENTITY_INTENT_MUTATION_RECEIPT_SCHEMA_VERSION,
+            mob_id: request.mob_id.clone(),
+            agent_identity: request.agent_identity.clone(),
+            request_id: request.request_id.clone(),
+            request_digest: request.canonical_digest()?,
+            outcome,
+            receipt_digest: String::new(),
+        };
+        receipt.receipt_digest = receipt.canonical_digest()?;
+        receipt.validate()?;
+        Ok(receipt)
+    }
+
+    fn canonical_digest(&self) -> Result<String, IdentityIntentError> {
+        #[derive(Serialize)]
+        struct DigestMaterial<'a> {
+            domain: &'static str,
+            schema_version: u32,
+            mob_id: &'a MobId,
+            agent_identity: &'a AgentIdentity,
+            request_id: &'a MemberToolMutationId,
+            request_digest: &'a str,
+            outcome: &'a MemberToolCommitOutcome,
+        }
+        let bytes = serde_json::to_vec(&DigestMaterial {
+            domain: "meerkat.identity.intent_mutation_receipt.v1",
+            schema_version: self.schema_version,
+            mob_id: &self.mob_id,
+            agent_identity: &self.agent_identity,
+            request_id: &self.request_id,
+            request_digest: &self.request_digest,
+            outcome: &self.outcome,
+        })
+        .map_err(|error| IdentityIntentError::Serialization(error.to_string()))?;
+        Ok(sha256_digest(&bytes))
+    }
+
+    pub fn validate(&self) -> Result<(), IdentityIntentError> {
+        if self.schema_version != IDENTITY_INTENT_MUTATION_RECEIPT_SCHEMA_VERSION {
+            return Err(IdentityIntentError::UnsupportedSchemaVersion {
+                record: "identity_intent_mutation_receipt",
+                version: self.schema_version,
+            });
+        }
+        validate_text("mob_id", self.mob_id.as_str())?;
+        validate_identity(&self.agent_identity)?;
+        validate_text("member_tool_mutation_id", self.request_id.as_str())?;
+        validate_sha256_digest(&self.request_digest)?;
+        validate_sha256_digest(&self.receipt_digest)?;
+        if self.canonical_digest()? != self.receipt_digest {
+            return Err(IdentityIntentError::DigestMismatch);
+        }
+        Ok(())
+    }
+}
+
+/// Store-side pure preparation for the atomic intent plus receipt write.
+pub fn prepare_member_tool_intent_mutation(
+    current: &IdentityIntentRecord,
+    request: &ApplyMemberToolDeclaration,
+    committed_at_ms: u64,
+) -> Result<(MemberToolCommitOutcome, Option<IdentityIntentRecord>), IdentityIntentError> {
+    current.validate()?;
+    request.validate()?;
+    if current.mob_id != request.mob_id || current.intent.identity() != &request.agent_identity {
+        return Err(IdentityIntentError::InvalidMutationTarget);
+    }
+    if current.intent_revision != request.expected_intent_revision {
+        return Ok((
+            MemberToolCommitOutcome::RevisionConflict {
+                expected: request.expected_intent_revision,
+                actual: current.intent_revision,
+            },
+            None,
+        ));
+    }
+    let IdentityIntent::Present {
+        identity,
+        session,
+        member,
+        wiring_custody,
+        owned_wiring,
+    } = &current.intent
+    else {
+        return Ok((MemberToolCommitOutcome::MemberAbsent, None));
+    };
+    let next_material = member
+        .material
+        .with_member_tool_declaration(&request.declaration)?;
+    if next_material == member.material {
+        return Ok((
+            MemberToolCommitOutcome::NoChange {
+                desired_revision: current.intent_revision,
+            },
+            None,
+        ));
+    }
+    let next_revision =
+        current
+            .intent_revision
+            .checked_add(1)
+            .ok_or(IdentityIntentError::CounterExhausted {
+                counter: "intent_revision",
+            })?;
+    let mut next = current.clone();
+    next.intent_revision = next_revision;
+    let drain_deadline_ms = match request.convergence {
+        IdentityConvergenceMode::Drain { max_wait_ms } => {
+            Some(committed_at_ms.checked_add(max_wait_ms).ok_or(
+                IdentityIntentError::CounterExhausted {
+                    counter: "identity_convergence_deadline_ms",
+                },
+            )?)
+        }
+        IdentityConvergenceMode::CancelActive => None,
+    };
+    next.convergence_directive = Some(IdentityConvergenceDirective {
+        desired_revision: next_revision,
+        expected_active_revision: current.intent_revision,
+        mode: request.convergence,
+        drain_deadline_ms,
+    });
+    next.intent = IdentityIntent::Present {
+        identity: identity.clone(),
+        session: session.clone(),
+        member: Box::new(DesiredMemberSpec {
+            material: next_material,
+            initial_delivery: member.initial_delivery.clone(),
+        }),
+        wiring_custody: *wiring_custody,
+        owned_wiring: owned_wiring.clone(),
+    };
+    next.intent_digest = next.intent.digest()?;
+    next.authority_digest = next.canonical_authority_digest()?;
+    next.validate()?;
+    Ok((
+        MemberToolCommitOutcome::Committed {
+            desired_revision: next_revision,
+        },
+        Some(next),
+    ))
 }
 
 /// Current exclusive reconcile claim.  `holder_id` names the logical
@@ -1402,6 +2734,7 @@ pub enum IdentityInitialDeliveryCondition {
 pub struct IdentityReconcileFacts {
     pub intent: IdentityAuthorityCondition,
     pub lease: IdentityLeaseCondition,
+    pub replacement: IdentityReplacementCondition,
     pub external_binding_required: bool,
     pub initial_delivery_required: bool,
     pub session_creation_receipt: IdentityReceiptCondition,
@@ -1424,6 +2757,10 @@ pub enum IdentityReconcileDecision {
     RepairBlocked,
     AcquireLease,
     AwaitLease,
+    CloseMemberAdmission,
+    AwaitMemberDrain,
+    DrainBlocked,
+    CancelActiveMember,
     SealRetirementProven,
     SealSessionCreationConsumed,
     EnsureSessionAuthority,
@@ -1442,6 +2779,17 @@ pub enum IdentityReconcileDecision {
     Converged,
     Tombstoned,
     Quarantined,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentityReplacementCondition {
+    NotRequired,
+    AdmissionOpen,
+    Draining,
+    DrainBlocked,
+    CancelActive,
+    Ready,
 }
 
 /// Total, level-triggered classifier generated from the canonical MobMachine
@@ -1859,6 +3207,7 @@ pub enum IdentityConvergenceCondition {
     Quarantined,
     Tombstoned,
     Suspended,
+    DrainBlocked,
 }
 
 /// Replaceable, output-only diagnostic.  It is never read by the classifier
@@ -1868,6 +3217,8 @@ pub enum IdentityConvergenceCondition {
 pub struct IdentityConvergenceStatus {
     pub identity: AgentIdentity,
     pub intent_revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_intent_revision: Option<u64>,
     pub lease_epoch: Option<u64>,
     pub decision: Option<IdentityReconcileDecision>,
     pub observed_at_ms: u64,
@@ -1887,9 +3238,13 @@ impl IdentityConvergenceStatus {
             }
             Some(
                 IdentityReconcileDecision::AwaitLease
+                | IdentityReconcileDecision::AwaitMemberDrain
                 | IdentityReconcileDecision::AwaitExternalBindingCeremony
                 | IdentityReconcileDecision::AwaitInitialDelivery,
             ) => IdentityConvergenceCondition::Suspended,
+            Some(IdentityReconcileDecision::DrainBlocked) => {
+                IdentityConvergenceCondition::DrainBlocked
+            }
             Some(IdentityReconcileDecision::Converged) => IdentityConvergenceCondition::Converged,
             Some(IdentityReconcileDecision::Tombstoned) => IdentityConvergenceCondition::Tombstoned,
             Some(IdentityReconcileDecision::Quarantined) => {
@@ -1897,6 +3252,8 @@ impl IdentityConvergenceStatus {
             }
             Some(
                 IdentityReconcileDecision::AcquireLease
+                | IdentityReconcileDecision::CloseMemberAdmission
+                | IdentityReconcileDecision::CancelActiveMember
                 | IdentityReconcileDecision::SealRetirementProven
                 | IdentityReconcileDecision::SealSessionCreationConsumed
                 | IdentityReconcileDecision::EnsureSessionAuthority
@@ -1913,6 +3270,147 @@ impl IdentityConvergenceStatus {
             ) => IdentityConvergenceCondition::Reconciling,
         }
     }
+
+    #[must_use]
+    pub fn to_wire(&self) -> meerkat_contracts::wire::WireIdentityConvergenceStatus {
+        use meerkat_contracts::wire::{
+            WireIdentityConvergenceCondition as Condition, WireIdentityConvergenceStatus as Status,
+            WireIdentityReconcileDecision as Decision,
+        };
+        let decision = self.decision.map(|decision| match decision {
+            IdentityReconcileDecision::Backoff => Decision::Backoff,
+            IdentityReconcileDecision::RepairBlocked => Decision::RepairBlocked,
+            IdentityReconcileDecision::AcquireLease => Decision::AcquireLease,
+            IdentityReconcileDecision::AwaitLease => Decision::AwaitLease,
+            IdentityReconcileDecision::CloseMemberAdmission => Decision::CloseMemberAdmission,
+            IdentityReconcileDecision::AwaitMemberDrain => Decision::AwaitMemberDrain,
+            IdentityReconcileDecision::DrainBlocked => Decision::DrainBlocked,
+            IdentityReconcileDecision::CancelActiveMember => Decision::CancelActiveMember,
+            IdentityReconcileDecision::SealRetirementProven => Decision::SealRetirementProven,
+            IdentityReconcileDecision::SealSessionCreationConsumed => {
+                Decision::SealSessionCreationConsumed
+            }
+            IdentityReconcileDecision::EnsureSessionAuthority => Decision::EnsureSessionAuthority,
+            IdentityReconcileDecision::EnsureRuntimeRegistration => {
+                Decision::EnsureRuntimeRegistration
+            }
+            IdentityReconcileDecision::AwaitExternalBindingCeremony => {
+                Decision::AwaitExternalBindingCeremony
+            }
+            IdentityReconcileDecision::EnsureExternalBindingReceipt => {
+                Decision::EnsureExternalBindingReceipt
+            }
+            IdentityReconcileDecision::EnsureExternalBinding => Decision::EnsureExternalBinding,
+            IdentityReconcileDecision::EnsureMemberMaterialization => {
+                Decision::EnsureMemberMaterialization
+            }
+            IdentityReconcileDecision::EnsureInitialDeliveryReceipt => {
+                Decision::EnsureInitialDeliveryReceipt
+            }
+            IdentityReconcileDecision::EnsureInitialDelivery => Decision::EnsureInitialDelivery,
+            IdentityReconcileDecision::AwaitInitialDelivery => Decision::AwaitInitialDelivery,
+            IdentityReconcileDecision::ReconcileWiring => Decision::ReconcileWiring,
+            IdentityReconcileDecision::RetireMemberMaterialization => {
+                Decision::RetireMemberMaterialization
+            }
+            IdentityReconcileDecision::RetireRuntimeRegistration => {
+                Decision::RetireRuntimeRegistration
+            }
+            IdentityReconcileDecision::ReleaseSessionAuthority => Decision::ReleaseSessionAuthority,
+            IdentityReconcileDecision::Converged => Decision::Converged,
+            IdentityReconcileDecision::Tombstoned => Decision::Tombstoned,
+            IdentityReconcileDecision::Quarantined => Decision::Quarantined,
+        });
+        let condition = match self.condition() {
+            IdentityConvergenceCondition::Pending => Condition::Pending,
+            IdentityConvergenceCondition::Reconciling => Condition::Reconciling,
+            IdentityConvergenceCondition::Converged => Condition::Converged,
+            IdentityConvergenceCondition::Backoff => Condition::Backoff,
+            IdentityConvergenceCondition::RepairBlocked => Condition::RepairBlocked,
+            IdentityConvergenceCondition::Quarantined => Condition::Quarantined,
+            IdentityConvergenceCondition::Tombstoned => Condition::Tombstoned,
+            IdentityConvergenceCondition::Suspended => Condition::Suspended,
+            IdentityConvergenceCondition::DrainBlocked => Condition::DrainBlocked,
+        };
+        Status {
+            agent_identity: self.identity.to_string(),
+            desired_intent_revision: self.intent_revision,
+            active_intent_revision: self.active_intent_revision,
+            decision,
+            condition,
+            observed_at_ms: self.observed_at_ms,
+            detail: self.detail.clone(),
+        }
+    }
+}
+
+impl MemberToolCommitOutcome {
+    #[must_use]
+    pub fn to_wire(&self) -> meerkat_contracts::wire::WireMemberToolCommitOutcome {
+        use meerkat_contracts::wire::WireMemberToolCommitOutcome as Wire;
+        match self {
+            Self::Committed { desired_revision } => Wire::Committed {
+                desired_revision: *desired_revision,
+            },
+            Self::NoChange { desired_revision } => Wire::NoChange {
+                desired_revision: *desired_revision,
+            },
+            Self::RevisionConflict { expected, actual } => Wire::RevisionConflict {
+                expected: *expected,
+                actual: *actual,
+            },
+            Self::RequestConflict { request_id } => Wire::RequestConflict {
+                request_id: request_id.to_string(),
+            },
+            Self::MemberAbsent => Wire::MemberAbsent,
+            Self::InvalidDeclaration { reason } => Wire::InvalidDeclaration {
+                reason: reason.clone(),
+            },
+        }
+    }
+}
+
+impl IdentityConvergenceResolutionOutcome {
+    #[must_use]
+    pub fn to_wire(&self) -> meerkat_contracts::wire::WireIdentityConvergenceResolutionOutcome {
+        use meerkat_contracts::wire::WireIdentityConvergenceResolutionOutcome as Wire;
+        match self {
+            Self::Resolved {
+                desired_revision,
+                active_revision,
+            } => Wire::Resolved {
+                desired_revision: *desired_revision,
+                active_revision: *active_revision,
+            },
+            Self::DesiredRevisionConflict { expected, actual } => Wire::DesiredRevisionConflict {
+                expected: *expected,
+                actual: *actual,
+            },
+            Self::ActiveRevisionConflict { expected, actual } => Wire::ActiveRevisionConflict {
+                expected: *expected,
+                actual: *actual,
+            },
+            Self::NotBlocked => Wire::NotBlocked,
+            Self::MemberAbsent => Wire::MemberAbsent,
+            Self::RequestConflict { request_id } => Wire::RequestConflict {
+                request_id: request_id.as_str().to_string(),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApplyMemberToolDeclarationResult {
+    pub commit: MemberToolCommitOutcome,
+    pub convergence: IdentityConvergenceStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResolveIdentityConvergenceBlockResult {
+    pub outcome: IdentityConvergenceResolutionOutcome,
+    pub convergence: IdentityConvergenceStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1943,6 +3441,9 @@ pub enum IdentityIntentError {
     ZeroIntentRevision,
     InvalidDeclarationRevision,
     InvalidMemberMaterial(String),
+    InvalidMemberToolDeclaration(String),
+    InvalidConvergenceMode,
+    InvalidMutationTarget,
     DigestMismatch,
     InvalidLeaseEpoch,
     InvalidLeaseLifetime,
@@ -2008,6 +3509,15 @@ impl fmt::Display for IdentityIntentError {
             Self::InvalidMemberMaterial(detail) => {
                 write!(formatter, "invalid desired member material: {detail}")
             }
+            Self::InvalidMemberToolDeclaration(detail) => {
+                write!(formatter, "invalid member tool declaration: {detail}")
+            }
+            Self::InvalidConvergenceMode => write!(
+                formatter,
+                "identity convergence drain must be between 1 and {IDENTITY_CONVERGENCE_MAX_DRAIN_MS}ms"
+            ),
+            Self::InvalidMutationTarget => formatter
+                .write_str("member tool mutation does not match its physical mob and identity"),
             Self::DigestMismatch => {
                 formatter.write_str("identity intent digest does not match content")
             }
@@ -2223,13 +3733,167 @@ fn validate_execution(execution: &DesiredExecution) -> Result<(), IdentityIntent
 }
 
 #[cfg(test)]
+pub(crate) fn identity_adoption_fixture(
+    mob_id: MobId,
+    agent_identity: AgentIdentity,
+    request_id: &str,
+    session_id: SessionId,
+) -> (AdoptMemberIdentityDeclaration, IdentityIntentRecord) {
+    use meerkat_contracts::wire::PortableToolConfig;
+
+    let profile_name = ProfileName::from("worker");
+    let profile = PortableProfile {
+        model: "test-model".to_string(),
+        provider: meerkat_core::Provider::Anthropic,
+        self_hosted_server_id: None,
+        image_generation_provider: None,
+        auto_compact_threshold: None,
+        resume_overrides: Vec::new(),
+        skills: Vec::new(),
+        tools: PortableToolConfig::default(),
+        peer_description: String::new(),
+        external_addressable: false,
+        runtime_mode: WireMobRuntimeMode::AutonomousHost,
+        max_inline_peer_notifications: None,
+        output_schema: None,
+        provider_params: None,
+    };
+    let execution = DesiredExecution::ControllingSession;
+    let member = IdentityProfileMemberDeclaration {
+        profile_name: profile_name.clone(),
+        profile_override: Some(profile.clone()),
+        model_override: None,
+        external_addressable_override: None,
+        context: None,
+        labels: None,
+        additional_instructions: None,
+        system_prompt_override: Some(PortableSystemPrompt::Disable),
+        tool_access_policy: None,
+        auth_binding: None,
+        budget_limits: None,
+        runtime_mode: Some(WireMobRuntimeMode::AutonomousHost),
+        required_env_keys: Vec::new(),
+        required_local_callback_tools: Vec::new(),
+        execution: execution.clone(),
+    };
+    let request = AdoptMemberIdentityDeclaration {
+        mob_id,
+        agent_identity,
+        request_id: IdentityAdoptionId::new(request_id).expect("valid adoption id"),
+        precondition: IdentityAdoptionPrecondition::ExpectedAbsent,
+        declaration_scope: IdentityDeclarationScopeId::new("test-snapshot")
+            .expect("valid declaration scope"),
+        declaration_revision: 1,
+        session: DesiredSessionTarget {
+            lineage_id: SessionLineageId::for_session(&session_id),
+            lineage_generation: SessionGeneration::INITIAL,
+            session_id,
+            authority_policy: DesiredSessionAuthorityPolicy::RequireExisting,
+        },
+        member,
+        wiring_custody: IdentityWiringCustody::ExternalManaged,
+        owned_wiring: BTreeSet::new(),
+        convergence: IdentityConvergenceMode::Drain { max_wait_ms: 1_000 },
+    };
+    let material = DesiredMemberMaterial {
+        profile_name,
+        profile,
+        definition_extract: PortableDefinitionExtract {
+            profile_names: vec!["worker".to_string()],
+            ..PortableDefinitionExtract::default()
+        },
+        overlay: DesiredMemberOverlay {
+            context: None,
+            labels: None,
+            additional_instructions: None,
+            system_prompt: PortableSystemPrompt::Disable,
+            tool_access_policy: None,
+            tool_category_overrides: ToolCategoryOverrides::default(),
+            application_tool_policy: ApplicationToolPolicyBinding::Unmanaged,
+            auth_binding: None,
+            budget_limits: None,
+            runtime_mode: WireMobRuntimeMode::AutonomousHost,
+        },
+        required_env_keys: Vec::new(),
+        required_local_callback_tools: Vec::new(),
+        execution,
+    };
+    let record =
+        prepare_identity_adoption_record(&request, material, 10).expect("valid adoption record");
+    (request, record)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn identity_adoption_wire_is_strict_and_round_trips_full_declaration() {
+        let (request, compiled) = identity_adoption_fixture(
+            MobId::from("adoption-wire-mob"),
+            AgentIdentity::from("worker-1"),
+            "adoption-wire-request",
+            SessionId::new(),
+        );
+        let persisted_intent = serde_json::to_value(&compiled.intent)
+            .expect("serialize backward-compatible identity intent");
+        assert!(
+            persisted_intent.get("wiring_custody").is_none(),
+            "default external custody must preserve the pre-field intent digest shape"
+        );
+        let value = serde_json::to_value(&request).expect("serialize adoption declaration");
+        let wire: meerkat_contracts::wire::MobAdoptMemberIdentityDeclarationParams =
+            serde_json::from_value(value.clone()).expect("decode strict wire declaration");
+        let decoded = AdoptMemberIdentityDeclaration::try_from(wire)
+            .expect("lower wire declaration into durable domain request");
+        assert_eq!(decoded, request);
+
+        let mut without_custody =
+            serde_json::to_value(&request).expect("serialize default-custody adoption declaration");
+        without_custody
+            .as_object_mut()
+            .expect("adoption request is an object")
+            .remove("wiring_custody");
+        let defaulted_wire: meerkat_contracts::wire::MobAdoptMemberIdentityDeclarationParams =
+            serde_json::from_value(without_custody).expect("default external wiring custody");
+        assert_eq!(
+            AdoptMemberIdentityDeclaration::try_from(defaulted_wire)
+                .expect("lower default custody")
+                .wiring_custody,
+            IdentityWiringCustody::ExternalManaged
+        );
+
+        let mut invalid = request.clone();
+        invalid.owned_wiring.insert(
+            DesiredIdentityEdge::new(
+                invalid.agent_identity.clone(),
+                AgentIdentity::from("worker-2"),
+            )
+            .expect("canonical edge"),
+        );
+        assert!(matches!(
+            invalid.validate(),
+            Err(IdentityIntentError::InvalidMutationTarget)
+        ));
+
+        let mut with_unknown = value;
+        with_unknown
+            .as_object_mut()
+            .expect("adoption request is an object")
+            .insert("ambient_default".to_string(), serde_json::json!(true));
+        assert!(
+            serde_json::from_value::<
+                meerkat_contracts::wire::MobAdoptMemberIdentityDeclarationParams,
+            >(with_unknown)
+            .is_err()
+        );
+    }
 
     fn matching_facts() -> IdentityReconcileFacts {
         IdentityReconcileFacts {
             intent: IdentityAuthorityCondition::PresentRequireExisting,
             lease: IdentityLeaseCondition::HeldByCurrentIncarnation,
+            replacement: IdentityReplacementCondition::NotRequired,
             external_binding_required: false,
             initial_delivery_required: false,
             session_creation_receipt: IdentityReceiptCondition::NotRequired,
@@ -2566,6 +4230,36 @@ mod tests {
             classify_identity_reconciliation(facts),
             IdentityReconcileDecision::ReconcileWiring
         );
+    }
+
+    #[test]
+    fn replacement_conditions_have_one_generated_decision_each() {
+        for (replacement, expected) in [
+            (
+                IdentityReplacementCondition::AdmissionOpen,
+                IdentityReconcileDecision::CloseMemberAdmission,
+            ),
+            (
+                IdentityReplacementCondition::Draining,
+                IdentityReconcileDecision::AwaitMemberDrain,
+            ),
+            (
+                IdentityReplacementCondition::DrainBlocked,
+                IdentityReconcileDecision::DrainBlocked,
+            ),
+            (
+                IdentityReplacementCondition::CancelActive,
+                IdentityReconcileDecision::CancelActiveMember,
+            ),
+            (
+                IdentityReplacementCondition::Ready,
+                IdentityReconcileDecision::RetireMemberMaterialization,
+            ),
+        ] {
+            let mut facts = matching_facts();
+            facts.replacement = replacement;
+            assert_eq!(classify_identity_reconciliation(facts), expected);
+        }
     }
 
     #[test]
@@ -2940,6 +4634,7 @@ mod tests {
             tombstone_generation: Some(3),
             initial_delivery_generation_highwater: 0,
             retirement_plan: IdentityRetirementPlan::NoKnownRealization,
+            convergence_directive: None,
             intent_digest: intent.digest().unwrap(),
             authority_digest: String::new(),
             intent,

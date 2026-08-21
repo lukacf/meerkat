@@ -119,6 +119,15 @@ pub(crate) enum MobMachineCommand {
     GetIdentityConvergenceStatus {
         agent_identity: AgentIdentity,
     },
+    AdoptMemberIdentityDeclaration {
+        request: Box<crate::identity::AdoptMemberIdentityDeclaration>,
+    },
+    ApplyMemberToolDeclaration {
+        request: Box<crate::identity::ApplyMemberToolDeclaration>,
+    },
+    ResolveIdentityConvergenceBlock {
+        request: Box<crate::identity::ResolveIdentityConvergenceBlock>,
+    },
     ConcludeObjective {
         agent_identity: AgentIdentity,
         objective_id: meerkat_core::interaction::ObjectiveId,
@@ -246,6 +255,9 @@ pub(crate) enum MobMachineCommandResult {
     IdentityConvergenceStatus(
         crate::identity::IdentityStoredObservation<crate::identity::IdentityConvergenceStatus>,
     ),
+    AdoptMemberIdentityDeclaration(crate::identity::AdoptMemberIdentityDeclarationResult),
+    ApplyMemberToolDeclaration(crate::identity::ApplyMemberToolDeclarationResult),
+    ResolveIdentityConvergenceBlock(crate::identity::ResolveIdentityConvergenceBlockResult),
     #[allow(dead_code)]
     Bool(bool),
     EventStream(meerkat_core::EventStream),
@@ -332,7 +344,11 @@ impl MobMachineCommandVariant {
     #[must_use]
     pub const fn catalog_input(self) -> Option<MobMachineCatalogInput> {
         match self {
-            Self::GetIdentityIntent | Self::GetIdentityConvergenceStatus => None,
+            Self::GetIdentityIntent
+            | Self::GetIdentityConvergenceStatus
+            | Self::AdoptMemberIdentityDeclaration
+            | Self::ApplyMemberToolDeclaration
+            | Self::ResolveIdentityConvergenceBlock => None,
             #[cfg(test)]
             Self::FlowTrackerCounts
             | Self::OrchestratorSnapshot
@@ -398,6 +414,7 @@ pub enum MobMachineShellMechanicReason {
     FilteredRosterProjection,
     ProducerWiringBridge,
     IdentityProjection,
+    IdentityMutation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1270,6 +1287,13 @@ const fn mob_machine_command_classification(
         | MobMachineCommandVariant::GetIdentityConvergenceStatus => {
             MobMachineCommandClassification::ShellMechanic(
                 MobMachineShellMechanicReason::IdentityProjection,
+            )
+        }
+        MobMachineCommandVariant::AdoptMemberIdentityDeclaration
+        | MobMachineCommandVariant::ApplyMemberToolDeclaration
+        | MobMachineCommandVariant::ResolveIdentityConvergenceBlock => {
+            MobMachineCommandClassification::ShellMechanic(
+                MobMachineShellMechanicReason::IdentityMutation,
             )
         }
         MobMachineCommandVariant::Wire => MobMachineCommandClassification::CatalogInputs(&[

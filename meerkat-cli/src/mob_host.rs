@@ -1043,6 +1043,7 @@ pub(crate) async fn run_mob_host(args: MobHostArgs, scope: &RuntimeScope) -> any
         member_host: Some(HostMemberSubstrate {
             session_service: Arc::clone(&service) as Arc<dyn MobSessionService>,
             runtime_adapter: Arc::clone(&runtime_adapter),
+            tool_consequence_policy_registry: None,
             durable_event_log: durable_log.clone(),
             realm_backend_persistent: durable_sessions,
             member_identity_root,

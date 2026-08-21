@@ -160,6 +160,10 @@ subset.
 | `mob/list` | Mob | — | `MobListResult` | List mobs (mob feature) |
 | `mob/status` | Mob | `MobIdParams` | `MobStatusResult` | Get mob status (mob feature) |
 | `mob/members` | Mob | `MobIdParams` | `MobMembersResult` | List mob members (mob feature) |
+| `mob/member_tool_declaration` | Mob | `MobMemberToolDeclarationParams` | `MobMemberToolDeclarationResult` | Read one durable member-tool declaration and fresh identity convergence status (mob feature) |
+| `mob/apply_member_tool_declaration` | Mob | `MobApplyMemberToolDeclarationParams` | `MobApplyMemberToolDeclarationResult` | Apply one revision-fenced durable member-tool declaration update (mob feature) |
+| `mob/adopt_member_identity_declaration` | Mob | `MobAdoptMemberIdentityDeclarationParams` | `MobAdoptMemberIdentityDeclarationResult` | Adopt an already-realized member into durable identity intent under an explicit expected-absent precondition (mob feature) |
+| `mob/resolve_identity_convergence_block` | Mob | `MobResolveIdentityConvergenceBlockParams` | `MobResolveIdentityConvergenceBlockResult` | Resume or cancel blocked identity replacement under exact desired and active revisions (mob feature) |
 | `mob/spawn` | Mob | `MobSpawnParams` | `MobSpawnResult` | Spawn a member into a mob (mob feature) |
 | `mob/spawn_many` | Mob | `MobSpawnManyParams` | `MobSpawnManyResult` | Spawn multiple members into a mob (mob feature) |
 | `mob/retire` | Mob | `MobMemberParams` | `MobRetireResult` | Retire a mob member (mob feature) |

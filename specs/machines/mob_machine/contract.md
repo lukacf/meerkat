@@ -362,7 +362,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ClassifyMemberOperationEligibility`
 - `ClassifyBridgeRejectionRecovery`(rejection_cause: MobBridgeRejectionCause)
 - `ClassifyPendingSupervisorAcceptance`(rejection_cause: MobBridgeRejectionCause)
-- `ClassifyIdentityReconciliation`(intent: IdentityAuthorityCondition, lease: IdentityLeaseCondition, external_binding_required: Bool, initial_delivery_required: Bool, session_creation_receipt: IdentityReceiptCondition, retirement_receipt: IdentityReceiptCondition, session: IdentitySessionCondition, runtime: IdentityResourceCondition, member: IdentityResourceCondition, external_binding_receipt: IdentityReceiptCondition, external_trust: IdentityExternalTrustCondition, external_ceremony: IdentityExternalCeremonyCondition, initial_delivery_receipt: IdentityReceiptCondition, initial_delivery: IdentityInitialDeliveryCondition, wiring: IdentityResourceCondition)
+- `ClassifyIdentityReconciliation`(intent: IdentityAuthorityCondition, lease: IdentityLeaseCondition, replacement: IdentityReplacementCondition, external_binding_required: Bool, initial_delivery_required: Bool, session_creation_receipt: IdentityReceiptCondition, retirement_receipt: IdentityReceiptCondition, session: IdentitySessionCondition, runtime: IdentityResourceCondition, member: IdentityResourceCondition, external_binding_receipt: IdentityReceiptCondition, external_trust: IdentityExternalTrustCondition, external_ceremony: IdentityExternalCeremonyCondition, initial_delivery_receipt: IdentityReceiptCondition, initial_delivery: IdentityInitialDeliveryCondition, wiring: IdentityResourceCondition)
 - `ClassifyRetirePendingSpawnDisposition`(agent_identity: AgentIdentity)
 - `RetireAbsent`(agent_identity: AgentIdentity)
 - `RequestPendingSessionIngressDetachForMobDestroy`(mob_id: MobId, agent_runtime_id: AgentRuntimeId)
@@ -709,7 +709,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `GrantRevoked`(principal: PrincipalId, revoked: Set<ControlScope>, remaining: Set<ControlScope>)
 
 ## Helpers
-- `identity_reconcile_decision`(intent: IdentityAuthorityCondition, lease: IdentityLeaseCondition, external_binding_required: Bool, initial_delivery_required: Bool, session_creation_receipt: IdentityReceiptCondition, retirement_receipt: IdentityReceiptCondition, session: IdentitySessionCondition, runtime: IdentityResourceCondition, member: IdentityResourceCondition, external_binding_receipt: IdentityReceiptCondition, external_trust: IdentityExternalTrustCondition, external_ceremony: IdentityExternalCeremonyCondition, initial_delivery_receipt: IdentityReceiptCondition, initial_delivery: IdentityInitialDeliveryCondition, wiring: IdentityResourceCondition) -> `IdentityReconcileDecision`
+- `identity_reconcile_decision`(intent: IdentityAuthorityCondition, lease: IdentityLeaseCondition, replacement: IdentityReplacementCondition, external_binding_required: Bool, initial_delivery_required: Bool, session_creation_receipt: IdentityReceiptCondition, retirement_receipt: IdentityReceiptCondition, session: IdentitySessionCondition, runtime: IdentityResourceCondition, member: IdentityResourceCondition, external_binding_receipt: IdentityReceiptCondition, external_trust: IdentityExternalTrustCondition, external_ceremony: IdentityExternalCeremonyCondition, initial_delivery_receipt: IdentityReceiptCondition, initial_delivery: IdentityInitialDeliveryCondition, wiring: IdentityResourceCondition) -> `IdentityReconcileDecision`
 
 ## Command Plans
 ### `AuthorizedMobSpawnStart`
@@ -2439,25 +2439,25 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyIdentityReconciliationRunning`
 - From: `Running`
-- On: `ClassifyIdentityReconciliation`(intent, lease, external_binding_required, initial_delivery_required, session_creation_receipt, retirement_receipt, session, runtime, member, external_binding_receipt, external_trust, external_ceremony, initial_delivery_receipt, initial_delivery, wiring)
+- On: `ClassifyIdentityReconciliation`(intent, lease, replacement, external_binding_required, initial_delivery_required, session_creation_receipt, retirement_receipt, session, runtime, member, external_binding_receipt, external_trust, external_ceremony, initial_delivery_receipt, initial_delivery, wiring)
 - Emits: `IdentityReconciliationClassified`
 - To: `Running`
 
 ### `ClassifyIdentityReconciliationStopped`
 - From: `Stopped`
-- On: `ClassifyIdentityReconciliation`(intent, lease, external_binding_required, initial_delivery_required, session_creation_receipt, retirement_receipt, session, runtime, member, external_binding_receipt, external_trust, external_ceremony, initial_delivery_receipt, initial_delivery, wiring)
+- On: `ClassifyIdentityReconciliation`(intent, lease, replacement, external_binding_required, initial_delivery_required, session_creation_receipt, retirement_receipt, session, runtime, member, external_binding_receipt, external_trust, external_ceremony, initial_delivery_receipt, initial_delivery, wiring)
 - Emits: `IdentityReconciliationClassified`
 - To: `Stopped`
 
 ### `ClassifyIdentityReconciliationCompleted`
 - From: `Completed`
-- On: `ClassifyIdentityReconciliation`(intent, lease, external_binding_required, initial_delivery_required, session_creation_receipt, retirement_receipt, session, runtime, member, external_binding_receipt, external_trust, external_ceremony, initial_delivery_receipt, initial_delivery, wiring)
+- On: `ClassifyIdentityReconciliation`(intent, lease, replacement, external_binding_required, initial_delivery_required, session_creation_receipt, retirement_receipt, session, runtime, member, external_binding_receipt, external_trust, external_ceremony, initial_delivery_receipt, initial_delivery, wiring)
 - Emits: `IdentityReconciliationClassified`
 - To: `Completed`
 
 ### `ClassifyIdentityReconciliationDestroyed`
 - From: `Destroyed`
-- On: `ClassifyIdentityReconciliation`(intent, lease, external_binding_required, initial_delivery_required, session_creation_receipt, retirement_receipt, session, runtime, member, external_binding_receipt, external_trust, external_ceremony, initial_delivery_receipt, initial_delivery, wiring)
+- On: `ClassifyIdentityReconciliation`(intent, lease, replacement, external_binding_required, initial_delivery_required, session_creation_receipt, retirement_receipt, session, runtime, member, external_binding_receipt, external_trust, external_ceremony, initial_delivery_receipt, initial_delivery, wiring)
 - Emits: `IdentityReconciliationClassified`
 - To: `Destroyed`
 

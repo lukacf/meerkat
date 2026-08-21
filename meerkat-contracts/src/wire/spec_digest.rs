@@ -96,8 +96,12 @@ mod tests {
     /// added in 0.8.23: that field is omitted when false, so a spec carrying no
     /// read-only intent keeps its historical bytes and every recorded
     /// `spec_digest` in existing host stores still matches.
+    ///
+    /// Member Tool Policy v1 intentionally moved this pin because
+    /// `PortableSpawnOverlay` now digest-covers the resolved category and
+    /// application policy declarations sent to a member host.
     const FIXTURE_DIGEST_PIN: &str =
-        "54c78bdb185b66b218d38e2f23f08055ceb9db8e6dd79dcb0dc0f7966b089e6b";
+        "e8e2df644cb7377196e3b443abdfead41b35cbad56bd8987e8c56880028edd55";
 
     #[test]
     fn digest_is_deterministic_across_calls() {

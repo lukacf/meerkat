@@ -11,6 +11,7 @@ from .generated.types import (
     MobBindHostResult,
     MobHostStatus,
     MobMemberHistoryResult,
+    MobAdoptMemberIdentityDeclarationParams,
     MobRevokeHostResult,
     MobRouteInstallsResult,
     MobSpawnManyResult,
@@ -21,7 +22,9 @@ from .generated.types import (
     WireContentInput,
     WireHostRef,
     WireHostBindingDescriptor,
+    WireIdentityConvergenceMode,
     WireMemberLaunchMode,
+    WireMemberToolDeclaration,
     WireMobBackendKind,
     WireMobProfile,
     WireMobRuntimeMode,
@@ -416,6 +419,63 @@ class Mob:
 
     async def grants(self) -> list[MobGrantRecord]:
         return await self._client.list_mob_grants(self.id)
+
+    async def member_tool_declaration(
+        self,
+        agent_identity: str,
+    ) -> dict[str, Any]:
+        """Read one member's durable tool declaration and convergence."""
+        return await self._client.mob_member_tool_declaration(
+            self.id,
+            agent_identity,
+        )
+
+    async def apply_member_tool_declaration(
+        self,
+        agent_identity: str,
+        request_id: str,
+        expected_intent_revision: int,
+        declaration: WireMemberToolDeclaration | dict[str, Any],
+        convergence: WireIdentityConvergenceMode,
+    ) -> dict[str, Any]:
+        """Apply one revision-fenced durable member-tool declaration."""
+        return await self._client.apply_mob_member_tool_declaration(
+            self.id,
+            agent_identity,
+            request_id,
+            expected_intent_revision,
+            declaration,
+            convergence,
+        )
+
+    async def adopt_member_identity_declaration(
+        self,
+        declaration: MobAdoptMemberIdentityDeclarationParams | dict[str, Any],
+    ) -> dict[str, Any]:
+        """Adopt one realized member under an explicit expected-absent declaration."""
+        if isinstance(declaration, dict):
+            declaration = {**declaration, "mob_id": self.id}
+        elif declaration.mob_id != self.id:
+            raise ValueError("identity adoption mob_id must match this Mob handle")
+        return await self._client.adopt_mob_member_identity_declaration(declaration)
+
+    async def resolve_identity_convergence_block(
+        self,
+        agent_identity: str,
+        request_id: str,
+        expected_desired_revision: int,
+        observed_active_revision: int,
+        convergence: WireIdentityConvergenceMode,
+    ) -> dict[str, Any]:
+        """Continue blocked identity convergence under exact revision fences."""
+        return await self._client.resolve_mob_identity_convergence_block(
+            self.id,
+            agent_identity,
+            request_id,
+            expected_desired_revision,
+            observed_active_revision,
+            convergence,
+        )
 
     # ── Multi-host console verbs (phase 7, DEC-P7A-9) ────────────────────
 

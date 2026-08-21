@@ -679,6 +679,30 @@
       "result_type": "MobMembersResult"
     },
     {
+      "description": "Read the desired tool declaration and live convergence for one member",
+      "name": "mob/member_tool_declaration",
+      "params_type": "MobMemberToolDeclarationParams",
+      "result_type": "MobMemberToolDeclarationResult"
+    },
+    {
+      "description": "Atomically update one member's desired tool declaration",
+      "name": "mob/apply_member_tool_declaration",
+      "params_type": "MobApplyMemberToolDeclarationParams",
+      "result_type": "MobApplyMemberToolDeclarationResult"
+    },
+    {
+      "description": "Adopt an existing member into durable identity intent under an expected-absent precondition",
+      "name": "mob/adopt_member_identity_declaration",
+      "params_type": "MobAdoptMemberIdentityDeclarationParams",
+      "result_type": "MobAdoptMemberIdentityDeclarationResult"
+    },
+    {
+      "description": "Resume a blocked identity replacement under exact revision fences",
+      "name": "mob/resolve_identity_convergence_block",
+      "params_type": "MobResolveIdentityConvergenceBlockParams",
+      "result_type": "MobResolveIdentityConvergenceBlockResult"
+    },
+    {
       "description": "Read mob event history",
       "name": "mob/events",
       "params_type": "MobEventsParams",

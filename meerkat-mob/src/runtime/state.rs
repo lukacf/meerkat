@@ -878,6 +878,24 @@ pub(super) enum MobCommand {
             >,
         >,
     },
+    AdoptMemberIdentityDeclaration {
+        request: Box<crate::identity::AdoptMemberIdentityDeclaration>,
+        reply_tx: oneshot::Sender<
+            Result<crate::identity::AdoptMemberIdentityDeclarationResult, crate::MobError>,
+        >,
+    },
+    ApplyMemberToolDeclaration {
+        request: Box<crate::identity::ApplyMemberToolDeclaration>,
+        reply_tx: oneshot::Sender<
+            Result<crate::identity::ApplyMemberToolDeclarationResult, crate::MobError>,
+        >,
+    },
+    ResolveIdentityConvergenceBlock {
+        request: Box<crate::identity::ResolveIdentityConvergenceBlock>,
+        reply_tx: oneshot::Sender<
+            Result<crate::identity::ResolveIdentityConvergenceBlockResult, crate::MobError>,
+        >,
+    },
     ConcludeObjective {
         agent_identity: crate::ids::AgentIdentity,
         objective_id: meerkat_core::interaction::ObjectiveId,
@@ -1214,6 +1232,9 @@ impl MobCommand {
             Self::ProjectMemberStatus { .. } => "ProjectMemberStatus",
             Self::GetIdentityIntent { .. } => "GetIdentityIntent",
             Self::GetIdentityConvergenceStatus { .. } => "GetIdentityConvergenceStatus",
+            Self::AdoptMemberIdentityDeclaration { .. } => "AdoptMemberIdentityDeclaration",
+            Self::ApplyMemberToolDeclaration { .. } => "ApplyMemberToolDeclaration",
+            Self::ResolveIdentityConvergenceBlock { .. } => "ResolveIdentityConvergenceBlock",
             Self::ConcludeObjective { .. } => "ConcludeObjective",
             Self::BindObjectiveOwner { .. } => "BindObjectiveOwner",
             Self::MemberMachineProjection { .. } => "MemberMachineProjection",

@@ -501,6 +501,40 @@ pub fn rest_path_catalog() -> Vec<RestPathDescriptor> {
             ],
         ),
         RestPathDescriptor::new(
+            "/mob/{id}/members/{agent_identity}/tool-declaration",
+            vec![
+                RestOperationDescriptor::json(
+                    "get",
+                    "Read a durable member-tool declaration and convergence status",
+                    "MobMemberToolDeclarationResult",
+                ),
+                RestOperationDescriptor::with_json_request(
+                    "put",
+                    "Apply a durable member-tool declaration",
+                    "RestApplyMemberToolDeclarationRequest",
+                    "MobApplyMemberToolDeclarationResult",
+                ),
+            ],
+        ),
+        RestPathDescriptor::new(
+            "/mob/{id}/members/{agent_identity}/tool-convergence/resolve",
+            vec![RestOperationDescriptor::with_json_request(
+                "post",
+                "Resolve blocked member identity convergence",
+                "RestResolveIdentityConvergenceBlockRequest",
+                "MobResolveIdentityConvergenceBlockResult",
+            )],
+        ),
+        RestPathDescriptor::new(
+            "/mob/{id}/members/{agent_identity}/identity-adoption",
+            vec![RestOperationDescriptor::with_json_request(
+                "post",
+                "Adopt an existing member into durable identity intent",
+                "RestAdoptMemberIdentityDeclarationRequest",
+                "MobAdoptMemberIdentityDeclarationResult",
+            )],
+        ),
+        RestPathDescriptor::new(
             "/mob/{id}/members/{agent_identity}/cancel",
             vec![RestOperationDescriptor::json(
                 "post",
@@ -739,6 +773,9 @@ mod tests {
             "/mob/{id}/wait-kickoff",
             "/mob/{id}/wire-members-batch",
             "/mob/{id}/members/{agent_identity}/status",
+            "/mob/{id}/members/{agent_identity}/tool-declaration",
+            "/mob/{id}/members/{agent_identity}/identity-adoption",
+            "/mob/{id}/members/{agent_identity}/tool-convergence/resolve",
             "/mob/{id}/members/{agent_identity}/cancel",
             "/mob/{id}/members/{agent_identity}/respawn",
             "/mob/{id}/members/{agent_identity}/history",

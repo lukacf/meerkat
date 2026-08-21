@@ -104,6 +104,10 @@ pub trait MaterializePreflightProbe: ProviderPresenceProbe {
 pub struct HostMemberSubstrate {
     pub session_service: Arc<dyn MobSessionService>,
     pub runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
+    /// Process-local provider registry used to bind exact application policy
+    /// identities during member construction. Policy content is never carried
+    /// in the portable member spec.
+    pub tool_consequence_policy_registry: Option<Arc<meerkat_core::ToolConsequencePolicyRegistry>>,
     /// Durable event projection for generation-floor capture on Resume.
     /// `None` only for explicitly ephemeral hosts.
     pub durable_event_log:
@@ -423,6 +427,8 @@ pub struct DecompiledMemberBuild {
     pub additional_instructions: Option<Vec<String>>,
     pub system_prompt: DecompiledSystemPrompt,
     pub tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+    pub web_search_override: meerkat_core::ToolCategoryOverride,
+    pub application_tool_policy: meerkat_core::ApplicationToolPolicyBinding,
     /// Rehydrated UNSEALED context (serde cannot mint the seal) — visibility
     /// composition only; dispatch authority is controlling-side (R6).
     pub mob_tool_authority_context: Option<meerkat_core::service::MobToolAuthorityContext>,
@@ -563,7 +569,7 @@ fn decompile_portable_spec_with_env(
         })
         .transpose()?;
 
-    let profile = Profile {
+    let mut profile = Profile {
         model: spec.profile.model.clone(),
         // Provider is REQUIRED on the portable profile (R4): the member host
         // never re-infers a provider for the model id.
@@ -605,6 +611,19 @@ fn decompile_portable_spec_with_env(
         output_schema,
         provider_params: spec.profile.provider_params.clone().map(Into::into),
     };
+    let category_overrides = spec.overlay.tool_category_overrides;
+    profile.tools.builtins = category_overrides.builtins.resolve(profile.tools.builtins);
+    profile.tools.shell = category_overrides.shell.resolve(profile.tools.shell);
+    profile.tools.comms = category_overrides.comms.resolve(profile.tools.comms);
+    profile.tools.mob = category_overrides.mob.resolve(profile.tools.mob);
+    profile.tools.memory = category_overrides.memory.resolve(profile.tools.memory);
+    profile.tools.schedule = category_overrides.schedule.resolve(profile.tools.schedule);
+    profile.tools.workgraph = category_overrides
+        .workgraph
+        .resolve(profile.tools.workgraph);
+    profile.tools.image_generation = category_overrides
+        .image_generation
+        .resolve(profile.tools.image_generation);
 
     // Minimal definition shim: exactly the extract facts the compiler reads.
     let mut definition = MobDefinition::explicit(spec.mob_id.as_str());
@@ -667,6 +686,28 @@ fn decompile_portable_spec_with_env(
                 meerkat_core::ops::ToolAccessPolicy::DenyList(names.iter().cloned().collect())
             }
             WireResolvedToolAccessPolicy::ReadOnly => meerkat_core::ops::ToolAccessPolicy::ReadOnly,
+            WireResolvedToolAccessPolicy::Constraints(constraints) => {
+                meerkat_core::ops::ToolAccessPolicy::Constraints(
+                    constraints
+                        .iter()
+                        .map(|constraint| match constraint {
+                            meerkat_contracts::wire::WireToolAccessConstraint::AllowNames(
+                                names,
+                            ) => meerkat_core::ops::ToolAccessConstraint::AllowNames(
+                                names.iter().cloned().collect(),
+                            ),
+                            meerkat_contracts::wire::WireToolAccessConstraint::DenyNames(names) => {
+                                meerkat_core::ops::ToolAccessConstraint::DenyNames(
+                                    names.iter().cloned().collect(),
+                                )
+                            }
+                            meerkat_contracts::wire::WireToolAccessConstraint::ReadOnly => {
+                                meerkat_core::ops::ToolAccessConstraint::ReadOnly
+                            }
+                        })
+                        .collect(),
+                )
+            }
         }
     });
 
@@ -702,6 +743,8 @@ fn decompile_portable_spec_with_env(
         additional_instructions: spec.overlay.additional_instructions.clone(),
         system_prompt,
         tool_access_policy,
+        web_search_override: category_overrides.web_search,
+        application_tool_policy: spec.overlay.application_tool_policy.clone(),
         mob_tool_authority_context,
         auth_binding: spec
             .overlay
@@ -2741,6 +2784,10 @@ impl HostMemberMaterializer {
         config.keep_alive = true;
         // Realm-scoped auth binding resolves on THIS host at factory build.
         config.auth_binding = decompiled.auth_binding.clone();
+        config.override_web_search = decompiled.web_search_override;
+        config.application_tool_policy = decompiled.application_tool_policy.clone();
+        config.tool_consequence_policy_registry =
+            self.substrate.tool_consequence_policy_registry.clone();
 
         Ok(config)
     }
@@ -3100,6 +3147,8 @@ mod tests {
                 tool_access_policy: Some(WireResolvedToolAccessPolicy::AllowList(vec![
                     "member_status".to_string(),
                 ])),
+                tool_category_overrides: meerkat_core::ToolCategoryOverrides::default(),
+                application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
                 mob_tool_authority_context: Some(WireMobToolAuthorityContext {
                     principal_token: "principal-token-1".to_string(),
                     can_create_mobs: false,

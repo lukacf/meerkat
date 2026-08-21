@@ -111,6 +111,7 @@ pub enum AgentErrorClass {
     Llm,
     Store,
     Tool,
+    PolicyIndeterminate,
     Mcp,
     SessionNotFound,
     Budget,
@@ -444,6 +445,7 @@ impl From<&AgentError> for AgentErrorClass {
             AgentError::Llm { .. } => Self::Llm,
             AgentError::StoreError(_) => Self::Store,
             AgentError::Tool { .. } => Self::Tool,
+            AgentError::PolicyIndeterminate { .. } => Self::PolicyIndeterminate,
             AgentError::McpError(_) => Self::Mcp,
             AgentError::SessionNotFound(_) => Self::SessionNotFound,
             AgentError::TokenBudgetExceeded { .. }

@@ -343,6 +343,11 @@ impl AgentBuilder {
         self
     }
 
+    pub fn provider_native_tool_policy(mut self, policy: crate::ProviderNativeToolPolicy) -> Self {
+        self.config.provider_native_tools = policy;
+        self
+    }
+
     /// Set retry policy for LLM calls
     pub fn retry_policy(mut self, policy: RetryPolicy) -> Self {
         self.retry_policy = policy;

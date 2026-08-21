@@ -19,6 +19,7 @@ import type {
   MobTopologySpecInput,
   MobTurnStartParams,
   MobWiringRulesInput,
+  OutputSchema,
   WireAuthBindingRef,
   WireContentInput,
   WireHostRef,
@@ -28,6 +29,7 @@ import type {
   WireMobProfile,
   WireMobResumeOverrideField,
   WireMobRuntimeMode,
+  WireProviderParamsOverride,
   WireRuntimeBinding,
   WireToolAccessPolicy,
   WireToolFilter,
@@ -588,8 +590,8 @@ export interface MobProfile {
   readonly backend?: WireMobBackendKind;
   readonly runtime_mode?: WireMobRuntimeMode;
   readonly max_inline_peer_notifications?: number;
-  readonly output_schema?: unknown;
-  readonly provider_params?: unknown;
+  readonly output_schema?: OutputSchema;
+  readonly provider_params?: WireProviderParamsOverride;
 }
 
 export type MobProfileBinding = MobProfile | { readonly realm_profile: string };

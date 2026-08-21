@@ -575,6 +575,7 @@ pub struct ToolDispatchContext {
     turn_metadata: BTreeMap<String, serde_json::Value>,
     origin_session_id: Option<crate::types::SessionId>,
     interaction_lineage_id: Option<crate::interaction::InteractionId>,
+    run_id: Option<crate::RunId>,
     streaming: Option<crate::ToolStreamingDispatchContext>,
 }
 
@@ -592,6 +593,7 @@ impl ToolDispatchContext {
             turn_metadata: BTreeMap::new(),
             origin_session_id: None,
             interaction_lineage_id: None,
+            run_id: None,
             streaming: None,
         }
     }
@@ -641,6 +643,14 @@ impl ToolDispatchContext {
 
     pub const fn interaction_lineage_id(&self) -> Option<crate::interaction::InteractionId> {
         self.interaction_lineage_id
+    }
+
+    pub fn run_id(&self) -> Option<&crate::RunId> {
+        self.run_id.as_ref()
+    }
+
+    pub(crate) fn bind_run_id(&mut self, run_id: crate::RunId) {
+        self.run_id = Some(run_id);
     }
 
     /// Streaming-only liveness surface minted by the canonical supervisor.

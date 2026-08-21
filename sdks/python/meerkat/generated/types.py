@@ -1786,7 +1786,7 @@ class WireMobProfile:
     output_schema: Optional[Any] = None
     peer_description: Optional[str] = None
     provider: Optional[Provider] = None
-    provider_params: Optional[Any] = None
+    provider_params: Optional[WireProviderParamsOverride] = None
     resume_overrides: Optional[list[WireMobResumeOverrideField]] = None
     runtime_mode: Optional[WireMobRuntimeMode] = None
     self_hosted_server_id: Optional[str] = None
@@ -2011,6 +2011,82 @@ class MobMembersResult:
     """Response payload for `mob/members`."""
     members: list[MobMemberListEntryWire]
     mob_id: str
+
+
+@dataclass
+class MobMemberToolDeclarationParams:
+    """Wire payload for MobMemberToolDeclarationParams."""
+    agent_identity: str
+    mob_id: str
+
+
+@dataclass
+class MobMemberToolDeclarationResult:
+    """Wire payload for MobMemberToolDeclarationResult."""
+    agent_identity: str
+    convergence: WireIdentityConvergenceStatus
+    declaration: WireMemberToolDeclaration
+    desired_intent_revision: int
+    mob_id: str
+
+
+@dataclass
+class MobApplyMemberToolDeclarationParams:
+    """Wire payload for MobApplyMemberToolDeclarationParams."""
+    agent_identity: str
+    convergence: WireIdentityConvergenceMode
+    declaration: WireMemberToolDeclaration
+    expected_intent_revision: int
+    mob_id: str
+    request_id: str
+
+
+@dataclass
+class MobApplyMemberToolDeclarationResult:
+    """Wire payload for MobApplyMemberToolDeclarationResult."""
+    commit: WireMemberToolCommitOutcome
+    convergence: WireIdentityConvergenceStatus
+
+
+@dataclass
+class MobAdoptMemberIdentityDeclarationParams:
+    """Wire payload for MobAdoptMemberIdentityDeclarationParams."""
+    agent_identity: str
+    convergence: WireIdentityConvergenceMode
+    declaration_revision: int
+    declaration_scope: str
+    member: WireIdentityProfileMemberDeclaration
+    mob_id: str
+    owned_wiring: list[WireDesiredIdentityEdge]
+    precondition: WireIdentityAdoptionPrecondition
+    request_id: str
+    session: WireDesiredSessionTarget
+    wiring_custody: Optional[Literal['external_managed', 'identity_owned']] = None
+
+
+@dataclass
+class MobAdoptMemberIdentityDeclarationResult:
+    """Wire payload for MobAdoptMemberIdentityDeclarationResult."""
+    adoption: WireIdentityAdoptionOutcome
+    convergence: WireIdentityConvergenceStatus
+
+
+@dataclass
+class MobResolveIdentityConvergenceBlockParams:
+    """Wire payload for MobResolveIdentityConvergenceBlockParams."""
+    agent_identity: str
+    convergence: WireIdentityConvergenceMode
+    expected_desired_revision: int
+    mob_id: str
+    observed_active_revision: int
+    request_id: str
+
+
+@dataclass
+class MobResolveIdentityConvergenceBlockResult:
+    """Wire payload for MobResolveIdentityConvergenceBlockResult."""
+    convergence: WireIdentityConvergenceStatus
+    outcome: WireIdentityConvergenceResolutionOutcome
 
 
 @dataclass
@@ -2816,10 +2892,10 @@ class MobProfileInput:
     external_addressable: Optional[bool] = None
     image_generation_provider: Optional[Provider] = None
     max_inline_peer_notifications: Optional[int] = None
-    output_schema: Optional[Any] = None
+    output_schema: Optional[OutputSchema] = None
     peer_description: Optional[str] = None
     provider: Optional[Provider] = None
-    provider_params: Optional[Any] = None
+    provider_params: Optional[WireProviderParamsOverride] = None
     resume_overrides: Optional[list[WireMobResumeOverrideField]] = None
     runtime_mode: Optional[WireMobRuntimeMode] = None
     self_hosted_server_id: Optional[str] = None
@@ -2973,6 +3049,234 @@ class WireMemberLifecycleCapabilities:
     resume_after_restart: bool
     revisions: bool
     transcript_edits: bool
+
+
+@dataclass
+class ToolCategoryOverrides:
+    """Administrative per-category member-tool intent.
+
+This carrier deliberately keeps `Inherit`, `Enable`, and `Disable`
+distinct. Materialization resolves each field through its existing
+category owner; carrying the aggregate does not merge those owners."""
+    builtins: Optional[ToolCategoryOverride] = None
+    comms: Optional[ToolCategoryOverride] = None
+    image_generation: Optional[ToolCategoryOverride] = None
+    memory: Optional[ToolCategoryOverride] = None
+    mob: Optional[ToolCategoryOverride] = None
+    schedule: Optional[ToolCategoryOverride] = None
+    shell: Optional[ToolCategoryOverride] = None
+    web_search: Optional[ToolCategoryOverride] = None
+    workgraph: Optional[ToolCategoryOverride] = None
+
+
+@dataclass
+class WireDesiredLocalCallbackTool:
+    """Wire payload for WireDesiredLocalCallbackTool."""
+    description: str
+    input_schema: Any
+    name: str
+
+
+@dataclass
+class WireMemberToolDeclaration:
+    """Wire payload for WireMemberToolDeclaration."""
+    application_policy: ApplicationToolPolicyBinding
+    callback_tools: WireCallbackToolSetDeclaration
+    category_overrides: ToolCategoryOverrides
+    execution: WireMemberToolAccessDeclaration
+
+
+@dataclass
+class WireDesiredSessionTarget:
+    """Wire payload for WireDesiredSessionTarget."""
+    authority_policy: WireDesiredSessionAuthorityPolicy
+    lineage_generation: int
+    lineage_id: str
+    session_id: str
+
+
+@dataclass
+class WireIdentityProfileMemberDeclaration:
+    """Wire payload for WireIdentityProfileMemberDeclaration."""
+    execution: WireDesiredExecution
+    profile_name: str
+    additional_instructions: Optional[list[str]] = None
+    auth_binding: Optional[WireAuthBindingRef] = None
+    budget_limits: Optional[BudgetLimits] = None
+    context: Optional[WireOpaqueJson] = None
+    external_addressable_override: Optional[bool] = None
+    labels: Optional[dict[str, str]] = None
+    model_override: Optional[str] = None
+    profile_override: Optional[PortableProfile] = None
+    required_env_keys: Optional[list[str]] = None
+    required_local_callback_tools: Optional[list[WireDesiredLocalCallbackTool]] = None
+    runtime_mode: Optional[WireMobRuntimeMode] = None
+    system_prompt_override: Optional[PortableSystemPrompt] = None
+    tool_access_policy: Optional[WireResolvedToolAccessPolicy] = None
+
+
+@dataclass
+class WireDesiredIdentityEdge:
+    """Wire payload for WireDesiredIdentityEdge."""
+    a: str
+    b: str
+
+
+@dataclass
+class WireIdentityConvergenceStatus:
+    """Wire payload for WireIdentityConvergenceStatus."""
+    agent_identity: str
+    condition: WireIdentityConvergenceCondition
+    observed_at_ms: int
+    active_intent_revision: Optional[int] = None
+    decision: Optional[WireIdentityReconcileDecision] = None
+    desired_intent_revision: Optional[int] = None
+    detail: Optional[str] = None
+
+
+@dataclass
+class BudgetLimits:
+    """Resource limits for an agent run
+
+# Two time horizons, one owner
+
+[`Budget`] is the single owner of "may this run continue in time". It
+carries two independent horizons because they answer different questions
+and are measured from different epochs:
+
+- [`BudgetLimits::max_duration`] is the **agent-lifetime** horizon. Its
+  epoch is [`Budget::new`], which service-backed surfaces call once when the
+  session's agent is built, not once per turn. It therefore spans every turn
+  of that agent, including the idle wall-clock between turns.
+- [`BudgetLimits::max_turn_duration`] is the **per-turn aggregate** horizon.
+  Its epoch is re-armed by [`Budget::begin_turn`] at each run entry, so it
+  bounds one turn end-to-end regardless of how many LLM calls, retries, and
+  tool batches that turn contains.
+
+Every segment of a turn already carries its own bound (per-call LLM timeout,
+stream-inactivity watchdog, per-tool-call timeout). Before
+`max_turn_duration` existed, the *sum* of those segments was unbounded: a
+turn could legally spend an hour without any owner asking whether it was
+allowed to. `max_turn_duration` is that owner."""
+    max_duration: Optional[Duration] = None
+    max_tokens: Optional[int] = None
+    max_tool_calls: Optional[int] = None
+    max_turn_duration: Optional[Duration] = None
+
+
+@dataclass
+class Duration:
+    """Request payload for Duration."""
+    nanos: int
+    secs: int
+
+
+@dataclass
+class OutputSchema:
+    """Configuration for structured output extraction.
+
+When provided to an agent, the agent will perform an extraction turn after
+completing the agentic work, forcing the LLM to output validated JSON that
+conforms to the provided schema. [`RunResult::text`] remains the committed
+main-turn output; extraction populates [`RunResult::structured_output`] on
+success or [`RunResult::extraction_error`] on failure."""
+    schema: MeerkatSchema
+    compat: Optional[SchemaCompat] = None
+    format: Optional[SchemaFormat] = None
+    name: Optional[str] = None
+    strict: Optional[bool] = None
+
+
+@dataclass
+class PortableProfile:
+    """Portable projection of `meerkat_mob::Profile`.
+
+`provider` is REQUIRED (R4): the member host never re-infers a provider
+for the model id. There is no `backend` field — placement is not profile
+vocabulary; `RuntimeBinding` is machine-owned."""
+    model: str
+    provider: Provider
+    auto_compact_threshold: Optional[int] = None
+    external_addressable: Optional[bool] = None
+    image_generation_provider: Optional[Provider] = None
+    max_inline_peer_notifications: Optional[int] = None
+    output_schema: Optional[WireOpaqueJson] = None
+    peer_description: Optional[str] = None
+    provider_params: Optional[WireProviderParamsOverride] = None
+    resume_overrides: Optional[list[WireMobResumeOverrideField]] = None
+    runtime_mode: Optional[WireMobRuntimeMode] = None
+    self_hosted_server_id: Optional[str] = None
+    skills: Optional[list[str]] = None
+    tools: Optional[PortableToolConfig] = None
+
+
+@dataclass
+class PortableToolConfig:
+    """Portable projection of `meerkat_mob::ToolConfig` category toggles.
+
+Structural exclusions vs the domain type: no `rust_bundles` carrier
+(in-process `Arc` dispatchers cannot travel) and no `mcp` name allowlist
+(it gates the HOST-surface external-tools provider, which is
+non-portable). `non_portable_disabled` is a reserved typed projection;
+v1 rejects every non-portable category instead of silently disabling it,
+so production v1 specs carry an empty list."""
+    builtins: Optional[bool] = None
+    comms: Optional[bool] = None
+    image_generation: Optional[bool] = None
+    mcp_servers: Optional[dict[str, PortableMcpDecl]] = None
+    memory: Optional[bool] = None
+    mob: Optional[bool] = None
+    non_portable_disabled: Optional[list[WireNonPortableResourceKind]] = None
+    read_only: Optional[bool] = None
+    schedule: Optional[bool] = None
+    shell: Optional[bool] = None
+    workgraph: Optional[bool] = None
+
+
+@dataclass
+class StructuredProviderExtension:
+    """Typed non-semantic opaque bag for per-turn provider knobs that cannot be
+fully typed without blocking a wave boundary. Explicitly marked
+non-semantic and RMAT-exempt.
+
+Use of this type is a deliberate boundary marker: content is passed
+through without interpretation. Any consumer that needs to interpret the
+content must promote the relevant structure into a proper typed variant
+in its own wave.
+
+Relocated from `meerkat_contracts::wire::runtime` into core so
+`ProviderTag::Unknown { bag }` can name the bag without a cross-crate
+cycle (adversarial review flaw 5). `meerkat-contracts` re-exports this
+type so the wire path is preserved."""
+    key: str
+    namespace: str
+    body: Optional[str] = None
+
+
+@dataclass
+class WireGeminiThinkingConfig:
+    """Request payload for WireGeminiThinkingConfig."""
+    include_thoughts: Optional[bool] = None
+    thinking_budget: Optional[int] = None
+    thinking_level: Optional[WireGeminiThinkingLevel] = None
+
+
+@dataclass
+class WireOpenAiPromptCacheOptions:
+    """Request payload for WireOpenAiPromptCacheOptions."""
+    mode: Optional[WireOpenAiPromptCacheMode] = None
+    ttl: Optional[WireOpenAiPromptCacheTtl] = None
+
+
+@dataclass
+class WireProviderParamsOverride:
+    """Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ProviderParamsOverride`]."""
+    max_output_tokens: Optional[int] = None
+    provider_tag: Optional[WireProviderTag] = None
+    reasoning: Optional[WireReasoningMode] = None
+    temperature: Optional[float] = None
+    thinking_budget_tokens: Optional[int] = None
+    top_p: Optional[float] = None
 
 
 @dataclass
@@ -3921,10 +4225,10 @@ class MemberBuildRejectionBindingUnresolvable(TypedDict, total=False):
     binding_unresolvable: Required[MemberBuildRejectionBindingUnresolvablePayload]
 
 class MemberBuildRejectionProviderAuthPayload(TypedDict, total=False):
-    binding_id: NotRequired[Optional[str]]
+    binding_id: NotRequired[Optional[BindingId]]
     kind: Required[AuthErrorKind]
     provider: NotRequired[Optional[Provider]]
-    realm_id: NotRequired[Optional[str]]
+    realm_id: NotRequired[Optional[RealmId]]
 
 class MemberBuildRejectionProviderAuth(TypedDict, total=False):
     provider_auth: Required[MemberBuildRejectionProviderAuthPayload]
@@ -5114,9 +5418,9 @@ class WireAuthBindingRef:
 Pure structural shape — no `"realm:binding"` string form. Wave-b deleted
 `parse` and `Display` on both the core type and the wire projection so
 the colon-joined form cannot travel across wire boundaries."""
-    binding: str
-    realm: str
-    profile: Optional[str] = None
+    binding: BindingId
+    realm: RealmId
+    profile: Optional[ProfileId] = None
 
 
 @dataclass
@@ -5739,6 +6043,399 @@ class BridgeLiveControlOutcomeRefresh(TypedDict, total=False):
     verb: Required[Literal['refresh']]
 
 BridgeLiveControlOutcome = BridgeLiveControlOutcomeCommitInput | BridgeLiveControlOutcomeInterrupt | BridgeLiveControlOutcomeTruncate | BridgeLiveControlOutcomeRefresh
+
+# Mob RPC helper wire type for ApplicationToolPolicyBinding.
+class ApplicationToolPolicyBindingUnmanaged(TypedDict, total=False):
+    kind: Required[Literal['unmanaged']]
+
+class ApplicationToolPolicyBindingInherit(TypedDict, total=False):
+    kind: Required[Literal['inherit']]
+
+class ApplicationToolPolicyBindingProvider(TypedDict, total=False):
+    kind: Required[Literal['provider']]
+    policy_id: Required[str]
+    provider_id: Required[str]
+
+ApplicationToolPolicyBinding = ApplicationToolPolicyBindingUnmanaged | ApplicationToolPolicyBindingInherit | ApplicationToolPolicyBindingProvider
+
+# Caller intent for a tool category.
+#
+# Distinguishes "no opinion / didn't exist" (`Inherit`) from explicit
+# `Enable` / `Disable` so that resumed sessions don't freeze tool
+# availability at the capabilities of the Meerkat version that created them.
+#
+# **Dogma §10:** Inherit, disable, and set are different facts.
+ToolCategoryOverride = Literal['inherit', 'enable', 'disable']
+
+# Mob RPC helper wire type for WireCallbackToolSetDeclaration.
+class WireCallbackToolSetDeclarationInherit(TypedDict, total=False):
+    kind: Required[Literal['inherit']]
+
+class WireCallbackToolSetDeclarationSet(TypedDict, total=False):
+    kind: Required[Literal['set']]
+    tools: Required[list[WireDesiredLocalCallbackTool]]
+
+WireCallbackToolSetDeclaration = WireCallbackToolSetDeclarationInherit | WireCallbackToolSetDeclarationSet
+
+# Mob RPC helper wire type for WireMemberToolAccessConstraint.
+class WireMemberToolAccessConstraintAllowNames(TypedDict, total=False):
+    kind: Required[Literal['allow_names']]
+    names: Required[list[str]]
+
+class WireMemberToolAccessConstraintDenyNames(TypedDict, total=False):
+    kind: Required[Literal['deny_names']]
+    names: Required[list[str]]
+
+class WireMemberToolAccessConstraintReadOnly(TypedDict, total=False):
+    kind: Required[Literal['read_only']]
+
+WireMemberToolAccessConstraint = WireMemberToolAccessConstraintAllowNames | WireMemberToolAccessConstraintDenyNames | WireMemberToolAccessConstraintReadOnly
+
+# Mob RPC helper wire type for WireMemberToolAccessDeclaration.
+class WireMemberToolAccessDeclarationInherit(TypedDict, total=False):
+    kind: Required[Literal['inherit']]
+
+class WireMemberToolAccessDeclarationUnrestricted(TypedDict, total=False):
+    kind: Required[Literal['unrestricted']]
+
+class WireMemberToolAccessDeclarationConstraints(TypedDict, total=False):
+    constraints: Required[list[WireMemberToolAccessConstraint]]
+    kind: Required[Literal['constraints']]
+
+WireMemberToolAccessDeclaration = WireMemberToolAccessDeclarationInherit | WireMemberToolAccessDeclarationUnrestricted | WireMemberToolAccessDeclarationConstraints
+
+# Mob RPC helper wire type for WireIdentityConvergenceMode.
+class WireIdentityConvergenceModeDrain(TypedDict, total=False):
+    kind: Required[Literal['drain']]
+    max_wait_ms: Required[int]
+
+class WireIdentityConvergenceModeCancelActive(TypedDict, total=False):
+    kind: Required[Literal['cancel_active']]
+
+WireIdentityConvergenceMode = WireIdentityConvergenceModeDrain | WireIdentityConvergenceModeCancelActive
+
+# Mob RPC helper wire type for WireIdentityAdoptionPrecondition.
+WireIdentityAdoptionPrecondition = Literal['expected_absent']
+
+# Mob RPC helper wire type for WireDesiredSessionAuthorityPolicy.
+WireDesiredSessionAuthorityPolicy = Literal['require_existing']
+
+# Mob RPC helper wire type for WireDesiredExecution.
+class WireDesiredExecutionControllingSession(TypedDict, total=False):
+    execution: Required[Literal['controlling_session']]
+
+class WireDesiredExecutionAnyBoundHostSession(TypedDict, total=False):
+    execution: Required[Literal['any_bound_host_session']]
+
+class WireDesiredExecutionPlacedSession(TypedDict, total=False):
+    execution: Required[Literal['placed_session']]
+    host_id: Required[str]
+
+class WireDesiredExecutionExternal(TypedDict, total=False):
+    address: Required[str]
+    execution: Required[Literal['external']]
+    identity: Required[WireTrustedPeerIdentity]
+
+WireDesiredExecution = WireDesiredExecutionControllingSession | WireDesiredExecutionAnyBoundHostSession | WireDesiredExecutionPlacedSession | WireDesiredExecutionExternal
+
+# Mob RPC helper wire type for WireIdentityAdoptionOutcome.
+class WireIdentityAdoptionOutcomeAdopted(TypedDict, total=False):
+    desired_revision: Required[int]
+    outcome: Required[Literal['adopted']]
+
+class WireIdentityAdoptionOutcomePreconditionConflict(TypedDict, total=False):
+    actual_revision: Required[int]
+    outcome: Required[Literal['precondition_conflict']]
+
+class WireIdentityAdoptionOutcomeRequestConflict(TypedDict, total=False):
+    outcome: Required[Literal['request_conflict']]
+    request_id: Required[str]
+
+WireIdentityAdoptionOutcome = WireIdentityAdoptionOutcomeAdopted | WireIdentityAdoptionOutcomePreconditionConflict | WireIdentityAdoptionOutcomeRequestConflict
+
+# Mob RPC helper wire type for WireIdentityConvergenceCondition.
+WireIdentityConvergenceCondition = Literal['pending', 'reconciling', 'converged', 'backoff', 'repair_blocked', 'quarantined', 'tombstoned', 'suspended', 'drain_blocked']
+
+# Mob RPC helper wire type for WireIdentityReconcileDecision.
+WireIdentityReconcileDecision = Literal['backoff', 'repair_blocked', 'acquire_lease', 'await_lease', 'close_member_admission', 'await_member_drain', 'drain_blocked', 'cancel_active_member', 'seal_retirement_proven', 'seal_session_creation_consumed', 'ensure_session_authority', 'ensure_runtime_registration', 'await_external_binding_ceremony', 'ensure_external_binding_receipt', 'ensure_external_binding', 'ensure_member_materialization', 'ensure_initial_delivery_receipt', 'ensure_initial_delivery', 'await_initial_delivery', 'reconcile_wiring', 'retire_member_materialization', 'retire_runtime_registration', 'release_session_authority', 'converged', 'tombstoned', 'quarantined']
+
+# Mob RPC helper wire type for WireMemberToolCommitOutcome.
+class WireMemberToolCommitOutcomeCommitted(TypedDict, total=False):
+    desired_revision: Required[int]
+    outcome: Required[Literal['committed']]
+
+class WireMemberToolCommitOutcomeNoChange(TypedDict, total=False):
+    desired_revision: Required[int]
+    outcome: Required[Literal['no_change']]
+
+class WireMemberToolCommitOutcomeRevisionConflict(TypedDict, total=False):
+    actual: Required[int]
+    expected: Required[int]
+    outcome: Required[Literal['revision_conflict']]
+
+class WireMemberToolCommitOutcomeRequestConflict(TypedDict, total=False):
+    outcome: Required[Literal['request_conflict']]
+    request_id: Required[str]
+
+class WireMemberToolCommitOutcomeMemberAbsent(TypedDict, total=False):
+    outcome: Required[Literal['member_absent']]
+
+class WireMemberToolCommitOutcomeInvalidDeclaration(TypedDict, total=False):
+    outcome: Required[Literal['invalid_declaration']]
+    reason: Required[str]
+
+WireMemberToolCommitOutcome = WireMemberToolCommitOutcomeCommitted | WireMemberToolCommitOutcomeNoChange | WireMemberToolCommitOutcomeRevisionConflict | WireMemberToolCommitOutcomeRequestConflict | WireMemberToolCommitOutcomeMemberAbsent | WireMemberToolCommitOutcomeInvalidDeclaration
+
+# Mob RPC helper wire type for WireIdentityConvergenceResolutionOutcome.
+class WireIdentityConvergenceResolutionOutcomeResolved(TypedDict, total=False):
+    active_revision: Required[int]
+    desired_revision: Required[int]
+    outcome: Required[Literal['resolved']]
+
+class WireIdentityConvergenceResolutionOutcomeDesiredRevisionConflict(TypedDict, total=False):
+    actual: Required[int]
+    expected: Required[int]
+    outcome: Required[Literal['desired_revision_conflict']]
+
+class WireIdentityConvergenceResolutionOutcomeActiveRevisionConflict(TypedDict, total=False):
+    actual: Required[int]
+    expected: Required[int]
+    outcome: Required[Literal['active_revision_conflict']]
+
+class WireIdentityConvergenceResolutionOutcomeNotBlocked(TypedDict, total=False):
+    outcome: Required[Literal['not_blocked']]
+
+class WireIdentityConvergenceResolutionOutcomeMemberAbsent(TypedDict, total=False):
+    outcome: Required[Literal['member_absent']]
+
+class WireIdentityConvergenceResolutionOutcomeRequestConflict(TypedDict, total=False):
+    outcome: Required[Literal['request_conflict']]
+    request_id: Required[str]
+
+WireIdentityConvergenceResolutionOutcome = WireIdentityConvergenceResolutionOutcomeResolved | WireIdentityConvergenceResolutionOutcomeDesiredRevisionConflict | WireIdentityConvergenceResolutionOutcomeActiveRevisionConflict | WireIdentityConvergenceResolutionOutcomeNotBlocked | WireIdentityConvergenceResolutionOutcomeMemberAbsent | WireIdentityConvergenceResolutionOutcomeRequestConflict
+
+# Opaque slug identifying a binding inside a realm.
+BindingId = str
+
+# A Meerkat-native JSON schema.
+MeerkatSchema = Any
+
+# Portable MCP server declaration (A10).
+#
+# Mirrors `meerkat_core::mcp_config` transports MINUS the secret-bearing
+# value maps: stdio `env` and HTTP `headers` are structurally absent; only
+# the required key/header NAMES travel, satisfied member-host-side.
+class PortableMcpDeclStdio(TypedDict, total=False):
+    args: NotRequired[list[str]]
+    command: Required[str]
+    connect_timeout_secs: NotRequired[Optional[int]]
+    required_env_keys: NotRequired[list[str]]
+    transport: Required[Literal['stdio']]
+
+class PortableMcpDeclHttp(TypedDict, total=False):
+    connect_timeout_secs: NotRequired[Optional[int]]
+    http_transport: NotRequired[Optional[McpHttpTransport]]
+    required_header_names: NotRequired[list[str]]
+    transport: Required[Literal['http']]
+    url: Required[str]
+
+PortableMcpDecl = PortableMcpDeclStdio | PortableMcpDeclHttp
+
+# Resolved system prompt for the member build. `Inherit` is
+# unrepresentable (R3): the controlling host resolves inheritance before
+# the spec is minted, so the member host never guesses.
+class PortableSystemPromptSet(TypedDict, total=False):
+    prompt: Required[Literal['set']]
+    text: Required[str]
+
+class PortableSystemPromptDisable(TypedDict, total=False):
+    prompt: Required[Literal['disable']]
+
+PortableSystemPrompt = PortableSystemPromptSet | PortableSystemPromptDisable
+
+# Opaque slug identifying an auth profile override on a connection.
+ProfileId = str
+
+# Opaque slug identifying a realm.
+RealmId = str
+
+# Compatibility mode for provider lowering.
+SchemaCompat = Literal['lossy', 'strict']
+
+# Schema format versions supported by Meerkat.
+SchemaFormat = Literal['meerkat_v1']
+
+# Mob RPC helper wire type for WireAnthropicCacheControlPolicy.
+WireAnthropicCacheControlPolicy = Literal['disabled', 'automatic', 'system_prefix', 'system_and_conversation']
+
+# Mob RPC helper wire type for WireAnthropicCacheTtl.
+WireAnthropicCacheTtl = Literal['5m', '1h']
+
+# Mob RPC helper wire type for WireAnthropicCompactionConfig.
+class WireAnthropicCompactionConfigAuto(TypedDict, total=False):
+    kind: Required[Literal['auto']]
+
+class WireAnthropicCompactionConfigCustom(TypedDict, total=False):
+    edit: Required[Any]
+    kind: Required[Literal['custom']]
+
+WireAnthropicCompactionConfig = WireAnthropicCompactionConfigAuto | WireAnthropicCompactionConfigCustom
+
+# Mob RPC helper wire type for WireAnthropicContextWindow.
+WireAnthropicContextWindow = Literal['one_megabyte']
+
+# Mob RPC helper wire type for WireAnthropicEffort.
+WireAnthropicEffort = Literal['low', 'medium', 'high', 'max', 'xhigh']
+
+# Mob RPC helper wire type for WireAnthropicInferenceGeo.
+class WireAnthropicInferenceGeoUs(TypedDict, total=False):
+    kind: Required[Literal['us']]
+
+class WireAnthropicInferenceGeoGlobal(TypedDict, total=False):
+    kind: Required[Literal['global']]
+
+class WireAnthropicInferenceGeoOther(TypedDict, total=False):
+    kind: Required[Literal['other']]
+    region: Required[str]
+
+WireAnthropicInferenceGeo = WireAnthropicInferenceGeoUs | WireAnthropicInferenceGeoGlobal | WireAnthropicInferenceGeoOther
+
+# Mob RPC helper wire type for WireAnthropicThinkingConfig.
+class WireAnthropicThinkingConfigAdaptive(TypedDict, total=False):
+    type: Required[Literal['adaptive']]
+
+class WireAnthropicThinkingConfigEnabled(TypedDict, total=False):
+    budget_tokens: Required[int]
+    type: Required[Literal['enabled']]
+
+WireAnthropicThinkingConfig = WireAnthropicThinkingConfigAdaptive | WireAnthropicThinkingConfigEnabled
+
+# Mob RPC helper wire type for WireGeminiThinkingLevel.
+WireGeminiThinkingLevel = Literal['minimal', 'low', 'medium', 'high']
+
+# Opaque JSON carried as its serialized string form (the
+# `OpaqueProviderBody` precedent, transparent flavor).
+#
+# Used where the wire must ferry surface JSON through the bridge `Eq`
+# chain: `serde_json::Value` is not `Eq`, and `RawValue` cannot decode
+# through `serde_json::from_value` (which [`decode_bridge_command`] and
+# every Value-based consumer rely on). Equality is byte equality of the
+# stored string — producers serialize exactly once via
+# [`WireOpaqueJson::from_value`].
+WireOpaqueJson = str
+
+# Mob RPC helper wire type for WireOpenAiPromptCacheMode.
+WireOpenAiPromptCacheMode = Literal['implicit', 'explicit']
+
+# Mob RPC helper wire type for WireOpenAiPromptCacheRetention.
+WireOpenAiPromptCacheRetention = Literal['in_memory', '24h']
+
+# Mob RPC helper wire type for WireOpenAiPromptCacheTtl.
+WireOpenAiPromptCacheTtl = Literal['30m']
+
+# Mob RPC helper wire type for WireOpenAiReasoningContext.
+WireOpenAiReasoningContext = Literal['auto', 'current_turn', 'all_turns']
+
+# Mob RPC helper wire type for WireOpenAiReasoningMode.
+WireOpenAiReasoningMode = Literal['standard', 'pro']
+
+# Mob RPC helper wire type for WireOpenAiTextVerbosity.
+WireOpenAiTextVerbosity = Literal['low', 'medium', 'high']
+
+# Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ProviderTag`].
+class WireProviderTagAnthropic(TypedDict, total=False):
+    cache_control: NotRequired[Optional[WireAnthropicCacheControlPolicy]]
+    cache_ttl: NotRequired[Optional[WireAnthropicCacheTtl]]
+    compaction: NotRequired[Optional[WireAnthropicCompactionConfig]]
+    context: NotRequired[Optional[WireAnthropicContextWindow]]
+    effort: NotRequired[Optional[WireAnthropicEffort]]
+    inference_geo: NotRequired[Optional[WireAnthropicInferenceGeo]]
+    provider: Required[Literal['anthropic']]
+    structured_output: NotRequired[Optional[OutputSchema]]
+    supports_temperature_override: NotRequired[Optional[bool]]
+    thinking: NotRequired[Optional[WireAnthropicThinkingConfig]]
+    thinking_budget_tokens: NotRequired[Optional[int]]
+    top_k: NotRequired[Optional[int]]
+    web_search: NotRequired[Any]
+
+class WireProviderTagOpenAi(TypedDict, total=False):
+    chat_template_kwargs: NotRequired[Any]
+    frequency_penalty: NotRequired[Optional[float]]
+    presence_penalty: NotRequired[Optional[float]]
+    prompt_cache_enabled: NotRequired[Optional[bool]]
+    prompt_cache_key: NotRequired[Optional[str]]
+    prompt_cache_options: NotRequired[Optional[WireOpenAiPromptCacheOptions]]
+    prompt_cache_retention: NotRequired[Optional[WireOpenAiPromptCacheRetention]]
+    provider: Required[Literal['open_ai']]
+    reasoning: NotRequired[Any]
+    reasoning_context: NotRequired[Optional[WireOpenAiReasoningContext]]
+    reasoning_effort: NotRequired[Optional[WireReasoningEffort]]
+    reasoning_mode: NotRequired[Optional[WireOpenAiReasoningMode]]
+    seed: NotRequired[Optional[int]]
+    store: NotRequired[Optional[bool]]
+    structured_output: NotRequired[Optional[OutputSchema]]
+    supports_reasoning_override: NotRequired[Optional[bool]]
+    supports_temperature_override: NotRequired[Optional[bool]]
+    text_verbosity: NotRequired[Optional[WireOpenAiTextVerbosity]]
+    thinking: NotRequired[Any]
+    web_search: NotRequired[Any]
+
+class WireProviderTagGemini(TypedDict, total=False):
+    cached_content_name: NotRequired[Optional[str]]
+    candidate_count: NotRequired[Optional[int]]
+    google_search: NotRequired[Any]
+    provider: Required[Literal['gemini']]
+    structured_output: NotRequired[Optional[OutputSchema]]
+    thinking: NotRequired[Optional[WireGeminiThinkingConfig]]
+    thinking_budget: NotRequired[Optional[int]]
+    thinking_level: NotRequired[Optional[WireGeminiThinkingLevel]]
+    top_k: NotRequired[Optional[int]]
+    top_p: NotRequired[Optional[float]]
+
+class WireProviderTagUnknown(TypedDict, total=False):
+    bag: Required[StructuredProviderExtension]
+    provider: Required[Literal['unknown']]
+
+WireProviderTag = WireProviderTagAnthropic | WireProviderTagOpenAi | WireProviderTagGemini | WireProviderTagUnknown
+
+# Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ReasoningEffort`].
+WireReasoningEffort = Literal['none', 'low', 'medium', 'high', 'xhigh', 'max']
+
+# Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ReasoningMode`].
+WireReasoningMode = Literal['emit', 'silent', 'off']
+
+# Mob RPC helper wire type for WireResolvedToolAccessPolicy.
+class WireResolvedToolAccessPolicyAllowList(TypedDict, total=False):
+    type: Required[Literal['allow_list']]
+    value: Required[list[str]]
+
+class WireResolvedToolAccessPolicyDenyList(TypedDict, total=False):
+    type: Required[Literal['deny_list']]
+    value: Required[list[str]]
+
+class WireResolvedToolAccessPolicyReadOnly(TypedDict, total=False):
+    type: Required[Literal['read_only']]
+
+class WireResolvedToolAccessPolicyConstraints(TypedDict, total=False):
+    type: Required[Literal['constraints']]
+    value: Required[list[WireToolAccessConstraint]]
+
+WireResolvedToolAccessPolicy = WireResolvedToolAccessPolicyAllowList | WireResolvedToolAccessPolicyDenyList | WireResolvedToolAccessPolicyReadOnly | WireResolvedToolAccessPolicyConstraints
+
+# Resolved tool access policy — mirrors `WireToolAccessPolicy`'s
+# allow/deny shape exactly, with `Inherit` structurally absent (O3).
+class WireToolAccessConstraintAllowNames(TypedDict, total=False):
+    type: Required[Literal['allow_names']]
+    value: Required[list[str]]
+
+class WireToolAccessConstraintDenyNames(TypedDict, total=False):
+    type: Required[Literal['deny_names']]
+    value: Required[list[str]]
+
+class WireToolAccessConstraintReadOnly(TypedDict, total=False):
+    type: Required[Literal['read_only']]
+
+WireToolAccessConstraint = WireToolAccessConstraintAllowNames | WireToolAccessConstraintDenyNames | WireToolAccessConstraintReadOnly
 
 # WorkGraph RPC helper wire type for AttentionDelegatedAuthority.
 AttentionDelegatedAuthority = Literal['add_evidence', 'close_own_review_item', 'request_closure', 'close_if_policy_allows']

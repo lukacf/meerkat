@@ -313,7 +313,6 @@ fn identity_reconciliation_slice_unsupported_obligation(
             | IdentityReconcileDecision::EnsureInitialDelivery
             | IdentityReconcileDecision::AwaitInitialDelivery
             | IdentityReconcileDecision::ReconcileWiring
-            | IdentityReconcileDecision::RetireMemberMaterialization
             | IdentityReconcileDecision::RetireRuntimeRegistration
             | IdentityReconcileDecision::ReleaseSessionAuthority
             | IdentityReconcileDecision::Tombstoned
@@ -541,6 +540,7 @@ mod identity_session_observation_tests {
         IdentityReconcileFacts {
             intent: IdentityAuthorityCondition::PresentRequireExisting,
             lease: IdentityLeaseCondition::HeldByCurrentIncarnation,
+            replacement: crate::identity::IdentityReplacementCondition::NotRequired,
             external_binding_required: false,
             initial_delivery_required: false,
             session_creation_receipt: IdentityReceiptCondition::NotRequired,
@@ -931,7 +931,7 @@ mod identity_recovery_slice_tests {
     use crate::{MobError, store::MobStoreError};
 
     #[test]
-    fn nonempty_wiring_remains_a_typed_unsupported_obligation() {
+    fn divergent_wiring_remains_a_typed_unsupported_obligation() {
         assert!(identity_reconciliation_slice_unsupported_obligation(
             IdentityReconcileDecision::ReconcileWiring
         ));
@@ -3623,6 +3623,9 @@ struct DeferredResumeProvision {
     shell_env: Option<std::collections::HashMap<String, String>>,
     inherited_tool_filter: Option<meerkat_core::InheritedToolVisibilityAuthority>,
     tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+    web_search_override: meerkat_core::ToolCategoryOverride,
+    application_tool_policy: meerkat_core::ApplicationToolPolicyBinding,
+    tool_consequence_policy_registry: Option<Arc<meerkat_core::ToolConsequencePolicyRegistry>>,
     system_prompt_override: Option<super::handle::SpawnSystemPromptOverride>,
     resume_from_role: Option<ProfileName>,
     resume_id: SessionId,
@@ -3715,6 +3718,9 @@ impl DeferredResumeProvision {
             shell_env,
             inherited_tool_filter,
             tool_access_policy,
+            web_search_override,
+            application_tool_policy,
+            tool_consequence_policy_registry,
             system_prompt_override,
             resume_from_role,
             resume_id,
@@ -3762,6 +3768,9 @@ impl DeferredResumeProvision {
         })
         .await?;
         config.keep_alive = keep_alive;
+        config.override_web_search = web_search_override;
+        config.application_tool_policy = application_tool_policy;
+        config.tool_consequence_policy_registry = tool_consequence_policy_registry;
         if let Some(client) = default_llm_client {
             config.llm_client_override = Some(client);
         }
@@ -5158,6 +5167,10 @@ pub(super) struct MobActor {
     /// re-observed from their owning stores before one obligation executes.
     pub(super) identity_reconcile_queue: VecDeque<AgentIdentity>,
     pub(super) identity_reconcile_enqueued: BTreeSet<AgentIdentity>,
+    /// Mechanical projection of store-sealed convergence directives. It closes
+    /// new member work while desired and active executor material diverge.
+    pub(super) identity_admission_closed: BTreeSet<AgentIdentity>,
+    pub(super) identity_active_intent_revisions: BTreeMap<AgentIdentity, u64>,
     /// Volatile keyset position for the bounded cross-process safety scan.
     /// `None` starts a new pass; reaching the end resets it to `None`.
     pub(super) identity_reconcile_safety_cursor: Option<crate::store::IdentityIntentScanCursor>,
@@ -5231,6 +5244,8 @@ pub(super) struct MobActor {
     /// authority inside the actor.
     pub(super) phase_watch_tx: tokio::sync::watch::Sender<MobState>,
     pub(super) default_external_tools_provider: Option<crate::ExternalToolsProvider>,
+    pub(super) tool_consequence_policy_registry:
+        Option<Arc<meerkat_core::ToolConsequencePolicyRegistry>>,
     /// Fresh process-local dispatcher services for identity reconciliation.
     /// The provider is never persisted and receives only an exact sealed
     /// intent key; it cannot mutate portable desired material.
@@ -17749,6 +17764,234 @@ impl MobActor {
         format!("sha256:{:x}", Sha256::digest(bytes))
     }
 
+    async fn adopt_member_identity_declaration(
+        &mut self,
+        request: crate::identity::AdoptMemberIdentityDeclaration,
+    ) -> Result<crate::identity::AdoptMemberIdentityDeclarationResult, MobError> {
+        use crate::identity::{
+            DesiredExecution, IdentityAdoptionOutcome, IdentityStoredObservation,
+        };
+
+        if request.mob_id != self.definition.id {
+            return Err(MobError::WiringError(format!(
+                "identity adoption targets mob '{}', but this handle owns '{}'",
+                request.mob_id, self.definition.id
+            )));
+        }
+        request
+            .validate()
+            .map_err(|error| MobError::WiringError(error.to_string()))?;
+        if !matches!(
+            request.member.execution,
+            DesiredExecution::ControllingSession
+        ) {
+            return Err(MobError::WiringError(
+                "identity adoption currently requires controlling-session execution".to_string(),
+            ));
+        }
+        let entry = self
+            .roster
+            .read()
+            .await
+            .get(&request.agent_identity)
+            .cloned()
+            .ok_or_else(|| MobError::MemberNotFound(request.agent_identity.clone()))?;
+        if entry.role != request.member.profile_name {
+            return Err(MobError::WiringError(format!(
+                "identity adoption profile '{}' does not match active member role '{}'",
+                request.member.profile_name, entry.role
+            )));
+        }
+        if entry.member_ref.bridge_session_id() != Some(&request.session.session_id) {
+            return Err(MobError::WiringError(format!(
+                "identity adoption session '{}' does not match the active member binding",
+                request.session.session_id
+            )));
+        }
+        let canonical_lineage =
+            meerkat_core::SessionLineageId::for_session(&request.session.session_id);
+        if request.session.lineage_id != canonical_lineage
+            || request.session.lineage_generation != meerkat_core::SessionGeneration::INITIAL
+        {
+            return Err(MobError::WiringError(
+                "identity adoption session lineage does not match the existing member's canonical initial lineage"
+                    .to_string(),
+            ));
+        }
+        self.session_service
+            .read(&request.session.session_id)
+            .await
+            .map_err(MobError::from)?;
+
+        let resolved_profile = if request.member.profile_override.is_none() {
+            Some(
+                self.definition
+                    .resolve_profile(
+                        &request.member.profile_name,
+                        self.realm_profile_store.as_ref(),
+                    )
+                    .await?,
+            )
+        } else {
+            None
+        };
+        let material = super::spec_compiler::compile_desired_member_material(
+            super::spec_compiler::CompileDesiredMemberMaterialParams {
+                agent_identity: &request.agent_identity,
+                declaration: &request.member,
+                resolved_profile: resolved_profile.as_ref(),
+                definition: &self.definition,
+                base_prompt: self.spawn_base_prompt_source.as_deref(),
+                non_portable_disabled: Vec::new(),
+            },
+        )
+        .await?;
+        let material_runtime_mode = match material.overlay.runtime_mode {
+            meerkat_contracts::wire::WireMobRuntimeMode::AutonomousHost => {
+                crate::MobRuntimeMode::AutonomousHost
+            }
+            meerkat_contracts::wire::WireMobRuntimeMode::TurnDriven => {
+                crate::MobRuntimeMode::TurnDriven
+            }
+        };
+        if material_runtime_mode != entry.runtime_mode
+            || material.overlay.labels.clone().unwrap_or_default() != entry.labels
+        {
+            return Err(MobError::WiringError(
+                "identity adoption declaration changes active runtime mode or labels; adoption must state the exact existing identity baseline"
+                    .to_string(),
+            ));
+        }
+        if !material.required_local_callback_tools.is_empty() {
+            let provider = self
+                .identity_local_external_tools_provider
+                .as_deref()
+                .ok_or_else(|| {
+                    MobError::WiringError(
+                        "identity adoption callback preflight has no process-local provider"
+                            .to_string(),
+                    )
+                })?;
+            provider
+                .preflight_callback_tools(&material.required_local_callback_tools)
+                .map_err(|error| {
+                    MobError::WiringError(format!(
+                        "identity adoption callback preflight failed: {error}"
+                    ))
+                })?;
+        }
+        match &material.overlay.application_tool_policy {
+            meerkat_core::ApplicationToolPolicyBinding::Unmanaged => {}
+            meerkat_core::ApplicationToolPolicyBinding::Inherit => {
+                return Err(MobError::WiringError(
+                    "identity adoption application policy remained unresolved".to_string(),
+                ));
+            }
+            meerkat_core::ApplicationToolPolicyBinding::Provider {
+                provider_id,
+                policy_id,
+            } => {
+                let registry = self
+                    .tool_consequence_policy_registry
+                    .as_ref()
+                    .ok_or_else(|| {
+                        MobError::WiringError(
+                            "identity adoption application policy registry is not installed"
+                                .to_string(),
+                        )
+                    })?;
+                registry
+                    .bind(
+                        meerkat_core::MobMemberBinding {
+                            mob_id: self.definition.id.to_string(),
+                            role: material.profile_name.to_string(),
+                            member: request.agent_identity.to_string(),
+                        },
+                        provider_id.clone(),
+                        policy_id.clone(),
+                    )
+                    .map_err(|error| {
+                        MobError::WiringError(format!(
+                            "identity adoption application policy preflight failed: {error}"
+                        ))
+                    })?;
+            }
+        }
+        let committed_at_ms = Self::identity_reconcile_now_ms()?;
+        let compiled =
+            crate::identity::prepare_identity_adoption_record(&request, material, committed_at_ms)
+                .map_err(|error| MobError::WiringError(error.to_string()))?;
+        let adoption = self
+            .identity
+            .adopt_member_identity_declaration(&request, &compiled)
+            .await
+            .map_err(MobError::from)?;
+        let adopted_current = if matches!(adoption, IdentityAdoptionOutcome::Adopted { .. }) {
+            match self
+                .identity
+                .observe_identity_intent(&self.definition.id, &request.agent_identity)
+                .await
+                .map_err(MobError::from)?
+            {
+                IdentityStoredObservation::Valid(record) => Some(record),
+                _ => {
+                    return Err(MobError::Internal(
+                        "identity adoption committed without a readable intent".to_string(),
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+        let (desired_revision, active_revision) = match &adoption {
+            IdentityAdoptionOutcome::Adopted {
+                desired_revision: adopted_revision,
+            } => {
+                let current_revision = adopted_current
+                    .as_ref()
+                    .map(|record| record.intent_revision)
+                    .ok_or_else(|| {
+                        MobError::Internal(
+                            "identity adoption lost its committed intent observation".to_string(),
+                        )
+                    })?;
+                if current_revision < *adopted_revision {
+                    return Err(MobError::Internal(
+                        "identity adoption replay observed a regressed intent revision".to_string(),
+                    ));
+                }
+                if current_revision == *adopted_revision {
+                    self.identity_admission_closed
+                        .insert(request.agent_identity.clone());
+                    self.identity_active_intent_revisions
+                        .insert(request.agent_identity.clone(), *adopted_revision);
+                    self.enqueue_identity_reconcile(request.agent_identity.clone());
+                }
+                (
+                    Some(current_revision),
+                    self.identity_active_intent_revisions
+                        .get(&request.agent_identity)
+                        .copied(),
+                )
+            }
+            IdentityAdoptionOutcome::PreconditionConflict { actual_revision } => {
+                (Some(*actual_revision), None)
+            }
+            IdentityAdoptionOutcome::RequestConflict { .. } => (None, None),
+        };
+        let convergence = self
+            .fresh_identity_convergence_status(
+                &request.agent_identity,
+                desired_revision,
+                active_revision,
+            )
+            .await?;
+        Ok(crate::identity::AdoptMemberIdentityDeclarationResult {
+            adoption,
+            convergence,
+        })
+    }
+
     async fn replace_identity_reconcile_status(
         &mut self,
         identity: &AgentIdentity,
@@ -17761,6 +18004,7 @@ impl MobActor {
         let status = crate::identity::IdentityConvergenceStatus {
             identity: identity.clone(),
             intent_revision,
+            active_intent_revision: self.identity_active_intent_revisions.get(identity).copied(),
             lease_epoch,
             decision: Some(decision),
             observed_at_ms,
@@ -17804,6 +18048,256 @@ impl MobActor {
                 "identity convergence status projection failed"
             );
         }
+    }
+
+    async fn apply_member_tool_declaration(
+        &mut self,
+        request: crate::identity::ApplyMemberToolDeclaration,
+    ) -> Result<crate::identity::ApplyMemberToolDeclarationResult, MobError> {
+        use crate::identity::{IdentityIntent, IdentityStoredObservation, MemberToolCommitOutcome};
+
+        if request.mob_id != self.definition.id {
+            return Err(MobError::WiringError(format!(
+                "member-tool mutation targets mob '{}', but this handle owns '{}'",
+                request.mob_id, self.definition.id
+            )));
+        }
+        if let Err(error) = request.validate() {
+            return Ok(crate::identity::ApplyMemberToolDeclarationResult {
+                commit: MemberToolCommitOutcome::InvalidDeclaration {
+                    reason: error.to_string(),
+                },
+                convergence: self
+                    .fresh_identity_convergence_status(&request.agent_identity, None, None)
+                    .await?,
+            });
+        }
+        let current = match self
+            .identity
+            .observe_identity_intent(&self.definition.id, &request.agent_identity)
+            .await
+            .map_err(MobError::from)?
+        {
+            IdentityStoredObservation::Valid(record) => record,
+            IdentityStoredObservation::Missing => {
+                return Ok(crate::identity::ApplyMemberToolDeclarationResult {
+                    commit: MemberToolCommitOutcome::MemberAbsent,
+                    convergence: self
+                        .fresh_identity_convergence_status(&request.agent_identity, None, None)
+                        .await?,
+                });
+            }
+            IdentityStoredObservation::Unsupported { detail, .. }
+            | IdentityStoredObservation::Malformed { detail, .. } => {
+                return Err(MobError::WiringError(format!(
+                    "member-tool mutation cannot read sealed identity authority: {detail}"
+                )));
+            }
+        };
+        let prepared_at_ms = Self::identity_reconcile_now_ms()?;
+        let (_, candidate) = crate::identity::prepare_member_tool_intent_mutation(
+            &current,
+            &request,
+            prepared_at_ms,
+        )
+        .map_err(|error| MobError::WiringError(error.to_string()))?;
+        if let Some(candidate) = candidate.as_ref() {
+            let IdentityIntent::Present { member, .. } = &candidate.intent else {
+                return Err(MobError::Internal(
+                    "member-tool mutation prepared an absent candidate".to_string(),
+                ));
+            };
+            if !member.material.required_local_callback_tools.is_empty() {
+                let provider = self
+                    .identity_local_external_tools_provider
+                    .as_deref()
+                    .ok_or_else(|| {
+                        MobError::WiringError(
+                            "member-tool callback preflight has no process-local provider"
+                                .to_string(),
+                        )
+                    })?;
+                provider
+                    .preflight_callback_tools(&member.material.required_local_callback_tools)
+                    .map_err(|error| {
+                        MobError::WiringError(format!(
+                            "member-tool callback preflight failed: {error}"
+                        ))
+                    })?;
+            }
+            match &member.material.overlay.application_tool_policy {
+                meerkat_core::ApplicationToolPolicyBinding::Unmanaged => {}
+                meerkat_core::ApplicationToolPolicyBinding::Inherit => {
+                    return Err(MobError::WiringError(
+                        "member-tool application policy remained unresolved at preflight"
+                            .to_string(),
+                    ));
+                }
+                meerkat_core::ApplicationToolPolicyBinding::Provider {
+                    provider_id,
+                    policy_id,
+                } => {
+                    let registry =
+                        self.tool_consequence_policy_registry
+                            .as_ref()
+                            .ok_or_else(|| {
+                                MobError::WiringError(
+                                    "member-tool application policy registry is not installed"
+                                        .to_string(),
+                                )
+                            })?;
+                    registry
+                        .bind(
+                            meerkat_core::MobMemberBinding {
+                                mob_id: self.definition.id.to_string(),
+                                role: member.material.profile_name.to_string(),
+                                member: request.agent_identity.to_string(),
+                            },
+                            provider_id.clone(),
+                            policy_id.clone(),
+                        )
+                        .map_err(|error| {
+                            MobError::WiringError(format!(
+                                "member-tool application policy preflight failed: {error}"
+                            ))
+                        })?;
+                }
+            }
+        }
+
+        let commit = self
+            .identity
+            .apply_member_tool_declaration(&request)
+            .await
+            .map_err(MobError::from)?;
+        let (desired_revision, active_revision) = match &commit {
+            MemberToolCommitOutcome::Committed { desired_revision } => {
+                self.identity_admission_closed
+                    .insert(request.agent_identity.clone());
+                self.identity_active_intent_revisions.insert(
+                    request.agent_identity.clone(),
+                    request.expected_intent_revision,
+                );
+                self.enqueue_identity_reconcile(request.agent_identity.clone());
+                (
+                    Some(*desired_revision),
+                    Some(request.expected_intent_revision),
+                )
+            }
+            MemberToolCommitOutcome::NoChange { desired_revision } => {
+                (Some(*desired_revision), Some(*desired_revision))
+            }
+            MemberToolCommitOutcome::RevisionConflict { actual, .. } => (Some(*actual), None),
+            _ => (None, None),
+        };
+        let convergence = self
+            .fresh_identity_convergence_status(
+                &request.agent_identity,
+                desired_revision,
+                active_revision,
+            )
+            .await?;
+        Ok(crate::identity::ApplyMemberToolDeclarationResult {
+            commit,
+            convergence,
+        })
+    }
+
+    async fn fresh_identity_convergence_status(
+        &self,
+        identity: &AgentIdentity,
+        desired_revision: Option<u64>,
+        active_revision: Option<u64>,
+    ) -> Result<crate::identity::IdentityConvergenceStatus, MobError> {
+        match self
+            .identity_status
+            .load_identity_convergence_status(&self.definition.id, identity)
+            .await
+            .map_err(MobError::from)?
+        {
+            crate::identity::IdentityStoredObservation::Valid(mut status) => {
+                status.intent_revision = desired_revision.or(status.intent_revision);
+                status.active_intent_revision = active_revision.or(status.active_intent_revision);
+                Ok(status)
+            }
+            _ => Ok(crate::identity::IdentityConvergenceStatus {
+                identity: identity.clone(),
+                intent_revision: desired_revision,
+                active_intent_revision: active_revision,
+                lease_epoch: None,
+                decision: None,
+                observed_at_ms: Self::identity_reconcile_now_ms()?,
+                detail: None,
+            }),
+        }
+    }
+
+    async fn resolve_identity_convergence_block(
+        &mut self,
+        request: crate::identity::ResolveIdentityConvergenceBlock,
+    ) -> Result<crate::identity::ResolveIdentityConvergenceBlockResult, MobError> {
+        if request.mob_id != self.definition.id {
+            return Err(MobError::WiringError(format!(
+                "identity convergence resolution targets mob '{}', but this handle owns '{}'",
+                request.mob_id, self.definition.id
+            )));
+        }
+        request
+            .validate()
+            .map_err(|error| MobError::WiringError(error.to_string()))?;
+        let actual_active_revision = if let Some(revision) = self
+            .identity_active_intent_revisions
+            .get(&request.agent_identity)
+            .copied()
+        {
+            revision
+        } else {
+            match self
+                .identity_status
+                .load_identity_convergence_status(&self.definition.id, &request.agent_identity)
+                .await
+                .map_err(MobError::from)?
+            {
+                crate::identity::IdentityStoredObservation::Valid(status) => {
+                    status.active_intent_revision.ok_or_else(|| {
+                        MobError::WiringError(
+                            "identity convergence resolution has no active revision observation"
+                                .to_string(),
+                        )
+                    })?
+                }
+                _ => {
+                    return Err(MobError::WiringError(
+                        "identity convergence resolution has no active revision observation"
+                            .to_string(),
+                    ));
+                }
+            }
+        };
+        let outcome = self
+            .identity
+            .resolve_identity_convergence_block(&request, actual_active_revision)
+            .await
+            .map_err(MobError::from)?;
+        if matches!(
+            outcome,
+            crate::identity::IdentityConvergenceResolutionOutcome::Resolved { .. }
+        ) {
+            self.identity_admission_closed
+                .insert(request.agent_identity.clone());
+            self.enqueue_identity_reconcile(request.agent_identity.clone());
+        }
+        let convergence = self
+            .fresh_identity_convergence_status(
+                &request.agent_identity,
+                Some(request.expected_desired_revision),
+                Some(actual_active_revision),
+            )
+            .await?;
+        Ok(crate::identity::ResolveIdentityConvergenceBlockResult {
+            outcome,
+            convergence,
+        })
     }
 
     async fn record_identity_reconcile_disposition(
@@ -18108,6 +18602,24 @@ impl MobActor {
         }
     }
 
+    fn schedule_identity_reconcile_wait(
+        &mut self,
+        identity: &AgentIdentity,
+        authority: IdentityReconcileAuthorityKey,
+        delay: Duration,
+    ) {
+        let now = Instant::now();
+        self.identity_reconcile_backoff.insert(
+            identity.clone(),
+            IdentityReconcileBackoffState {
+                authority,
+                consecutive_failures: 0,
+                next_attempt_at: now.checked_add(delay).unwrap_or(now),
+                retry_enqueued: false,
+            },
+        );
+    }
+
     fn identity_unobserved_facts(
         intent: crate::identity::IdentityAuthorityCondition,
         lease: crate::identity::IdentityLeaseCondition,
@@ -18115,6 +18627,7 @@ impl MobActor {
         crate::identity::IdentityReconcileFacts {
             intent,
             lease,
+            replacement: crate::identity::IdentityReplacementCondition::NotRequired,
             external_binding_required: false,
             initial_delivery_required: false,
             session_creation_receipt: crate::identity::IdentityReceiptCondition::Unavailable,
@@ -18273,25 +18786,36 @@ impl MobActor {
         }
     }
 
-    /// The retained sealed-intent slice proves only an empty local/local topology.
-    /// Direct desired wiring remains sealed in the intent substrate, but any
-    /// non-empty desired or observed incident topology is a typed refusal; no
-    /// structural, generated-graph, or comms-trust mutation is attempted.
-    async fn observe_identity_wiring_empty(
+    /// Prove the exact already-realized local wiring owned by one identity.
+    ///
+    /// Edge ownership is canonical and singular: only edges whose
+    /// lexicographic owner is `identity` are compared with this intent's
+    /// `owned_wiring`. Non-owned incident edges belong to the other endpoint's
+    /// intent and must not be mistaken for drift here. This retained slice can
+    /// verify non-empty topology, which is required when adopting an existing
+    /// fleet after a separate empty-diff census. It still refuses to mutate a
+    /// divergent graph or trust projection until the target-atomic actuator is
+    /// available.
+    async fn observe_identity_wiring_exact(
         &self,
         identity: &AgentIdentity,
-        desired_incident_wiring: &BTreeSet<crate::identity::DesiredIdentityEdge>,
+        wiring_custody: crate::identity::IdentityWiringCustody,
+        desired_owned_wiring: &BTreeSet<crate::identity::DesiredIdentityEdge>,
     ) -> crate::identity::IdentityResourceObservation {
         use crate::store::IdentityWiringTargetObservation;
         use meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind;
 
-        if !desired_incident_wiring.is_empty() {
-            return crate::identity::IdentityResourceObservation::Malformed {
-                observed_version: None,
-                detail: "non-empty desired wiring requires a target-atomic graph/trust actuator outside the retained sealed-intent reconciliation slice"
-                    .to_string(),
+        if matches!(
+            wiring_custody,
+            crate::identity::IdentityWiringCustody::ExternalManaged
+        ) {
+            return crate::identity::IdentityResourceObservation::Matching {
+                version: Self::identity_evidence_digest(
+                    format!("identity={identity};wiring-custody=external-managed").as_bytes(),
+                ),
             };
         }
+
         let Some(member_store) = self.identity_member.as_ref() else {
             return crate::identity::IdentityResourceObservation::Unavailable {
                 detail: "atomic identity/wiring observation capability is unavailable".to_string(),
@@ -18308,7 +18832,7 @@ impl MobActor {
                 };
             }
         };
-        match &structural {
+        let structural_incident = match &structural {
             IdentityWiringTargetObservation::Malformed {
                 observed_version,
                 detail,
@@ -18318,146 +18842,122 @@ impl MobActor {
                     detail: detail.clone(),
                 };
             }
-            IdentityWiringTargetObservation::Present { incident_edges, .. }
-                if !incident_edges.is_empty() =>
-            {
-                return crate::identity::IdentityResourceObservation::Malformed {
-                    observed_version: structural.target_precondition().map(|target| match target {
-                        crate::identity::IdentityTargetObservationVersion::Version { version } => {
-                            version
-                        }
-                        crate::identity::IdentityTargetObservationVersion::Absent {
-                            absence_version,
-                        } => absence_version,
-                        crate::identity::IdentityTargetObservationVersion::InsertIfAbsent => {
-                            "insert-if-absent".to_string()
-                        }
-                    }),
-                    detail:
-                        "non-empty structural wiring is RepairBlocked in the retained sealed-intent reconciliation slice"
-                            .to_string(),
-                };
-            }
-            IdentityWiringTargetObservation::Absent { .. }
-            | IdentityWiringTargetObservation::Present { .. } => {}
-        }
-
-        for edge in &self.dsl_authority.state().wiring_edges {
-            if edge.a.0 == identity.as_str() || edge.b.0 == identity.as_str() {
-                return crate::identity::IdentityResourceObservation::Malformed {
-                    observed_version: None,
-                    detail: "non-empty generated wiring graph is RepairBlocked in the retained sealed-intent reconciliation slice"
-                        .to_string(),
-                };
-            }
-        }
-
-        let roster_entries: Vec<RosterEntry> = self.roster.read().await.list().cloned().collect();
-        let current_entry = roster_entries
-            .iter()
-            .find(|entry| &entry.agent_identity == identity);
-        let machine_spec = match self
-            .machine_member_peer_spec_for(identity, "identity empty-wiring observation")
-        {
-            Ok(spec) => spec,
-            Err(error) => {
-                return crate::identity::IdentityResourceObservation::Malformed {
-                    observed_version: None,
-                    detail: error.to_string(),
-                };
-            }
+            IdentityWiringTargetObservation::Absent { .. } => BTreeSet::new(),
+            IdentityWiringTargetObservation::Present { incident_edges, .. } => incident_edges
+                .iter()
+                .filter(|edge| edge.owner() == identity)
+                .cloned()
+                .collect(),
         };
-        let mut current_live = false;
-        if let Some(entry) = current_entry {
-            let dsl_identity = mob_dsl::AgentIdentity::from_domain(&entry.agent_identity);
-            if self
-                .dsl_authority
-                .state()
-                .member_placement
-                .contains_key(&dsl_identity)
-            {
-                return crate::identity::IdentityResourceObservation::Malformed {
-                    observed_version: None,
-                    detail:
-                        "identity recovery wiring supports only controlling-session local endpoints"
-                            .to_string(),
-                };
-            }
-            let member_ref = match self
-                .machine_member_ref_for_behavior(entry, "identity empty-wiring observation")
-            {
-                Ok(member_ref) => member_ref,
+        if &structural_incident != desired_owned_wiring {
+            return crate::identity::IdentityResourceObservation::Divergent {
+                version: Self::identity_evidence_digest(format!("{structural:?}").as_bytes()),
+                detail: format!(
+                    "owned structural wiring differs: desired={desired_owned_wiring:?}, observed={structural_incident:?}"
+                ),
+            };
+        }
+
+        let mut generated_owned = BTreeSet::new();
+        for edge in &self.dsl_authority.state().wiring_edges {
+            let domain = match crate::identity::DesiredIdentityEdge::new(
+                AgentIdentity::from(edge.a.0.as_str()),
+                AgentIdentity::from(edge.b.0.as_str()),
+            ) {
+                Ok(domain) => domain,
                 Err(error) => {
                     return crate::identity::IdentityResourceObservation::Malformed {
                         observed_version: None,
-                        detail: error.to_string(),
+                        detail: format!("generated wiring contains an invalid edge: {error}"),
                     };
                 }
             };
-            match member_ref {
-                MemberRef::BackendPeer { .. } => {
-                    return crate::identity::IdentityResourceObservation::Malformed {
-                        observed_version: None,
-                        detail: "identity recovery wiring supports only controlling-session local endpoints"
-                            .to_string(),
-                    };
-                }
-                MemberRef::Session { .. } => {
-                    if let Some(comms) = self.provisioner_comms(&member_ref).await {
-                        let rows = match comms
-                            .trusted_peer_projection_snapshot_for_source(
-                                GeneratedCommsTrustAuthoritySourceKind::MobMachineMemberTrustWiring,
-                            )
-                            .await
-                        {
-                            Ok(rows) => rows,
-                            Err(error) => {
-                                return crate::identity::IdentityResourceObservation::Unavailable {
-                                    detail: error.to_string(),
-                                };
-                            }
-                        };
-                        if !rows.is_empty() {
-                            return crate::identity::IdentityResourceObservation::Malformed {
-                                observed_version: None,
-                                detail: "non-empty source-scoped outgoing trust is RepairBlocked in the retained sealed-intent reconciliation slice"
-                                    .to_string(),
-                            };
-                        }
-                        current_live = true;
-                    }
-                    // A normal keep_alive=false member may have no current
-                    // process-local comms actor. There is then no live trust
-                    // store to inspect; durable structural/generated wiring
-                    // remains the resource authority checked above.
-                }
+            if domain.owner() == identity {
+                generated_owned.insert(domain);
             }
         }
+        if &generated_owned != desired_owned_wiring {
+            return crate::identity::IdentityResourceObservation::Divergent {
+                version: Self::identity_evidence_digest(
+                    format!("generated={generated_owned:?}").as_bytes(),
+                ),
+                detail: format!(
+                    "owned generated wiring differs: desired={desired_owned_wiring:?}, observed={generated_owned:?}"
+                ),
+            };
+        }
 
-        if let Some(expected) = machine_spec.as_ref() {
-            let current_peer_id = Self::trusted_peer_removal_key(expected);
-            for entry in roster_entries {
-                if &entry.agent_identity == identity {
-                    continue;
-                }
-                let dsl_identity = mob_dsl::AgentIdentity::from_domain(&entry.agent_identity);
+        let roster_entries: Vec<RosterEntry> = self.roster.read().await.list().cloned().collect();
+        let mut current_live = false;
+        for edge in desired_owned_wiring {
+            let endpoints = [&edge.a, &edge.b];
+            for (endpoint, peer) in [(endpoints[0], endpoints[1]), (endpoints[1], endpoints[0])] {
+                let Some(entry) = roster_entries
+                    .iter()
+                    .find(|entry| &entry.agent_identity == endpoint)
+                else {
+                    return crate::identity::IdentityResourceObservation::Divergent {
+                        version: Self::identity_evidence_digest(
+                            format!("missing-endpoint={endpoint}").as_bytes(),
+                        ),
+                        detail: format!("owned wiring endpoint '{endpoint}' is not materialized"),
+                    };
+                };
+                let dsl_identity = mob_dsl::AgentIdentity::from_domain(endpoint);
                 if self
                     .dsl_authority
                     .state()
                     .member_placement
                     .contains_key(&dsl_identity)
                 {
-                    continue;
+                    return crate::identity::IdentityResourceObservation::Malformed {
+                        observed_version: None,
+                        detail: "identity recovery wiring proof currently supports only controlling-session local endpoints"
+                            .to_string(),
+                    };
                 }
                 let member_ref = match self
-                    .machine_member_ref_for_behavior(&entry, "identity empty-wiring inbound proof")
+                    .machine_member_ref_for_behavior(entry, "identity owned-wiring observation")
                 {
                     Ok(member_ref @ MemberRef::Session { .. }) => member_ref,
-                    Ok(MemberRef::BackendPeer { .. }) | Err(_) => continue,
+                    Ok(MemberRef::BackendPeer { .. }) => {
+                        return crate::identity::IdentityResourceObservation::Malformed {
+                            observed_version: None,
+                            detail: "identity recovery wiring proof currently supports only controlling-session local endpoints"
+                                .to_string(),
+                        };
+                    }
+                    Err(error) => {
+                        return crate::identity::IdentityResourceObservation::Malformed {
+                            observed_version: None,
+                            detail: error.to_string(),
+                        };
+                    }
                 };
                 let Some(comms) = self.provisioner_comms(&member_ref).await else {
                     continue;
                 };
+                current_live = true;
+                let expected = match self
+                    .machine_member_peer_spec_for(peer, "identity owned-wiring peer proof")
+                {
+                    Ok(Some(expected)) => expected,
+                    Ok(None) => {
+                        return crate::identity::IdentityResourceObservation::Divergent {
+                            version: Self::identity_evidence_digest(
+                                format!("missing-peer-spec={peer}").as_bytes(),
+                            ),
+                            detail: format!("owned wiring peer '{peer}' has no current endpoint"),
+                        };
+                    }
+                    Err(error) => {
+                        return crate::identity::IdentityResourceObservation::Malformed {
+                            observed_version: None,
+                            detail: error.to_string(),
+                        };
+                    }
+                };
+                let expected_peer_id = Self::trusted_peer_removal_key(&expected);
                 let rows = match comms
                     .trusted_peer_projection_snapshot_for_source(
                         GeneratedCommsTrustAuthoritySourceKind::MobMachineMemberTrustWiring,
@@ -18471,14 +18971,17 @@ impl MobActor {
                         };
                     }
                 };
-                if rows
+                if !rows
                     .iter()
-                    .any(|row| Self::trusted_peer_removal_key(row) == current_peer_id)
+                    .any(|row| Self::trusted_peer_removal_key(row) == expected_peer_id)
                 {
-                    return crate::identity::IdentityResourceObservation::Malformed {
-                        observed_version: None,
-                        detail: "non-empty source-scoped inbound trust is RepairBlocked in the retained sealed-intent reconciliation slice"
-                            .to_string(),
+                    return crate::identity::IdentityResourceObservation::Divergent {
+                        version: Self::identity_evidence_digest(
+                            format!("missing-trust={endpoint}->{peer}").as_bytes(),
+                        ),
+                        detail: format!(
+                            "owned wiring trust projection is missing '{endpoint}' -> '{peer}'"
+                        ),
                     };
                 }
             }
@@ -18486,7 +18989,7 @@ impl MobActor {
 
         let version = Self::identity_evidence_digest(
             format!(
-                "identity={identity};structural={structural:?};graph=empty;trust=empty;live={current_live}"
+                "identity={identity};structural={structural:?};generated={generated_owned:?};desired={desired_owned_wiring:?};live={current_live}"
             )
             .as_bytes(),
         );
@@ -18752,6 +19255,13 @@ impl MobActor {
         for (identity, observation) in observations {
             match observation {
                 crate::identity::IdentityStoredObservation::Valid(record) => {
+                    if record.convergence_directive.is_some() {
+                        self.identity_admission_closed.insert(identity.clone());
+                        if let Some(directive) = record.convergence_directive.as_ref() {
+                            self.identity_active_intent_revisions
+                                .insert(identity.clone(), directive.expected_active_revision);
+                        }
+                    }
                     // Startup discovery and the slow cross-process safety scan
                     // both respect the same park/backoff gate as the causal
                     // queue.
@@ -19220,7 +19730,10 @@ impl MobActor {
         };
 
         let IdentityIntent::Present {
-            session, member, ..
+            session,
+            member,
+            wiring_custody,
+            ..
         } = &intent_record.intent
         else {
             unreachable!("absent intent was refused at the recovery-slice boundary")
@@ -19265,8 +19778,20 @@ impl MobActor {
         #[cfg(not(feature = "runtime-adapter"))]
         let runtime_observation = self.observe_identity_runtime(session).await;
         let member_observation = self.observe_identity_member(identity, &intent_record).await;
+        #[cfg(feature = "runtime-adapter")]
+        let member_has_active_work = runtime_target_observation.as_ref().is_some_and(|observed| {
+            use meerkat_runtime::store::MachineLifecycleObservation;
+            matches!(
+                observed.lifecycle(),
+                MachineLifecycleObservation::Decoded { record, .. }
+                    if record.run().current_run_id().is_some()
+                        || record.run().pre_run_phase().is_some()
+            )
+        });
+        #[cfg(not(feature = "runtime-adapter"))]
+        let member_has_active_work = false;
         let wiring_observation = self
-            .observe_identity_wiring_empty(identity, desired_incident_wiring)
+            .observe_identity_wiring_exact(identity, *wiring_custody, desired_incident_wiring)
             .await;
         let normalized_tombstone = intent_record.tombstone_generation.unwrap_or(0);
         let session_creation_slot = IdentityOperationSlot::SessionCreationConsumed {
@@ -19329,6 +19854,7 @@ impl MobActor {
         let mut facts = crate::identity::IdentityReconcileFacts {
             intent: intent_condition,
             lease: lease_condition,
+            replacement: crate::identity::IdentityReplacementCondition::NotRequired,
             external_binding_required,
             initial_delivery_required,
             session_creation_receipt,
@@ -19350,6 +19876,31 @@ impl MobActor {
             facts.external_binding_receipt = IdentityReceiptCondition::Unavailable;
             facts.external_trust = IdentityExternalTrustCondition::Unavailable;
             facts.external_ceremony = IdentityExternalCeremonyCondition::TemporarilyUnavailable;
+        }
+        if member_observation.condition() == crate::identity::IdentityResourceCondition::Divergent
+            && let Some(directive) = intent_record.convergence_directive.as_ref()
+        {
+            facts.replacement = if !self.identity_admission_closed.contains(identity) {
+                crate::identity::IdentityReplacementCondition::AdmissionOpen
+            } else if !member_has_active_work {
+                crate::identity::IdentityReplacementCondition::Ready
+            } else {
+                match directive.mode {
+                    crate::identity::IdentityConvergenceMode::CancelActive => {
+                        crate::identity::IdentityReplacementCondition::CancelActive
+                    }
+                    crate::identity::IdentityConvergenceMode::Drain { .. }
+                        if directive
+                            .drain_deadline_ms
+                            .is_some_and(|deadline| now_ms >= deadline) =>
+                    {
+                        crate::identity::IdentityReplacementCondition::DrainBlocked
+                    }
+                    crate::identity::IdentityConvergenceMode::Drain { .. } => {
+                        crate::identity::IdentityReplacementCondition::Draining
+                    }
+                }
+            };
         }
         let decision = crate::identity::classify_identity_reconciliation(facts);
         if session_observed_from_witness && decision != IdentityReconcileDecision::Converged {
@@ -19424,6 +19975,9 @@ impl MobActor {
             lease_epoch: Some(active_lease.epoch),
         };
         if decision == IdentityReconcileDecision::Converged {
+            self.identity_admission_closed.remove(identity);
+            self.identity_active_intent_revisions
+                .insert(identity.clone(), intent_record.intent_revision);
             self.identity_reconcile_backoff.remove(identity);
             self.identity_reconcile_parked.remove(identity);
             self.identity_reconcile_failures
@@ -19468,6 +20022,56 @@ impl MobActor {
 
         let action: Result<bool, MobError> = async {
             match decision {
+                IdentityReconcileDecision::CloseMemberAdmission => {
+                    self.identity_admission_closed.insert(identity.clone());
+                    Ok(true)
+                }
+                IdentityReconcileDecision::AwaitMemberDrain
+                | IdentityReconcileDecision::DrainBlocked => {
+                    self.schedule_identity_reconcile_wait(
+                        identity,
+                        IdentityReconcileAuthorityKey::from_intent(&intent_record),
+                        Duration::from_secs(1),
+                    );
+                    Ok(false)
+                }
+                IdentityReconcileDecision::CancelActiveMember => {
+                    let entry = self
+                        .roster
+                        .read()
+                        .await
+                        .get(identity)
+                        .cloned()
+                        .ok_or_else(|| MobError::MemberNotFound(identity.clone()))?;
+                    self.handle_cancel_all_work(entry.agent_runtime_id, entry.fence_token)
+                        .await?;
+                    self.schedule_identity_reconcile_wait(
+                        identity,
+                        IdentityReconcileAuthorityKey::from_intent(&intent_record),
+                        Duration::from_millis(100),
+                    );
+                    Ok(false)
+                }
+                IdentityReconcileDecision::RetireMemberMaterialization => {
+                    let old_generation = self
+                        .roster
+                        .read()
+                        .await
+                        .get(identity)
+                        .map(|entry| entry.generation.get());
+                    self.handle_retire_inner(
+                        identity,
+                        false,
+                        true,
+                        true,
+                        true,
+                        old_generation,
+                        None,
+                        None,
+                    )
+                    .await?;
+                    Ok(true)
+                }
                 IdentityReconcileDecision::SealSessionCreationConsumed => {
                     let Some(write_lease) = self.renew_identity_actuation_lease(identity).await?
                     else {
@@ -19777,7 +20381,6 @@ impl MobActor {
                 | IdentityReconcileDecision::EnsureInitialDelivery
                 | IdentityReconcileDecision::AwaitInitialDelivery
                 | IdentityReconcileDecision::ReconcileWiring
-                | IdentityReconcileDecision::RetireMemberMaterialization
                 | IdentityReconcileDecision::RetireRuntimeRegistration
                 | IdentityReconcileDecision::ReleaseSessionAuthority
                 | IdentityReconcileDecision::Tombstoned => Err(MobError::Internal(format!(
@@ -20354,7 +20957,17 @@ impl MobActor {
                     }
                 }
                 MobCommand::SubmitWork { payload, reply_tx } => {
-                    tracing::debug!(
+                    if self
+                        .identity_admission_closed
+                        .contains(&payload.runtime_id.identity)
+                    {
+                        let _ = reply_tx.send(Err(
+                            MobError::IdentityConvergenceAdmissionClosed {
+                                member_id: payload.runtime_id.identity.clone(),
+                            },
+                        ));
+                    } else {
+                        tracing::debug!(
                         agent_identity = %payload.runtime_id.identity,
                         runtime_id = %payload.runtime_id,
                         work_ref = %payload.work_ref,
@@ -20363,7 +20976,7 @@ impl MobActor {
                         ack_mode = ?payload.ack_mode,
                         "MobActor handling SubmitWork command"
                     );
-                    match Box::pin(self.handle_submit_work(payload)).await {
+                        match Box::pin(self.handle_submit_work(payload)).await {
                         Ok(SubmitWorkDispatchCompletion::Completed) => {
                             if !self.respawn_topology_reply_withheld {
                                 let _ = reply_tx.send(Ok(()));
@@ -20510,6 +21123,7 @@ impl MobActor {
                             if !self.respawn_topology_reply_withheld {
                                 let _ = reply_tx.send(Err(error));
                             }
+                        }
                         }
                     }
                 }
@@ -21529,6 +22143,27 @@ impl MobActor {
                         )
                         .await
                         .map_err(MobError::from);
+                    let _ = reply_tx.send(result);
+                }
+                MobCommand::AdoptMemberIdentityDeclaration {
+                    request,
+                    reply_tx,
+                } => {
+                    let result = self.adopt_member_identity_declaration(*request).await;
+                    let _ = reply_tx.send(result);
+                }
+                MobCommand::ApplyMemberToolDeclaration {
+                    request,
+                    reply_tx,
+                } => {
+                    let result = self.apply_member_tool_declaration(*request).await;
+                    let _ = reply_tx.send(result);
+                }
+                MobCommand::ResolveIdentityConvergenceBlock {
+                    request,
+                    reply_tx,
+                } => {
+                    let result = self.resolve_identity_convergence_block(*request).await;
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::ConcludeObjective {
@@ -23832,6 +24467,8 @@ impl MobActor {
             labels,
             launch_mode,
             tool_access_policy,
+            tool_category_overrides,
+            application_tool_policy,
             budget_limits,
             auto_wire_parent,
             additional_instructions,
@@ -23907,6 +24544,10 @@ impl MobActor {
             if let Some(model) = model_override {
                 profile.model = model;
             }
+            super::spec_compiler::apply_tool_category_overrides(
+                &mut profile,
+                tool_category_overrides,
+            );
             let effective_profile_override =
                 full_profile_override_requested.then(|| profile.clone());
             tracing::debug!(
@@ -24094,6 +24735,11 @@ impl MobActor {
                             shell_env,
                             inherited_tool_filter: inherited_tool_filter.clone(),
                             tool_access_policy: tool_access_policy.clone(),
+                            web_search_override: tool_category_overrides.web_search,
+                            application_tool_policy: application_tool_policy.clone(),
+                            tool_consequence_policy_registry: self
+                                .tool_consequence_policy_registry
+                                .clone(),
                             system_prompt_override: system_prompt_override.clone(),
                             resume_from_role: resume_from_role.clone(),
                             resume_id,
@@ -24175,6 +24821,10 @@ impl MobActor {
                     .await?;
                     config.keep_alive =
                         selected_runtime_mode == crate::MobRuntimeMode::AutonomousHost;
+                    config.override_web_search = tool_category_overrides.web_search;
+                    config.application_tool_policy = application_tool_policy.clone();
+                    config.tool_consequence_policy_registry =
+                        self.tool_consequence_policy_registry.clone();
                     if let Some(ref client) = self.default_llm_client {
                         config.llm_client_override = Some(client.clone());
                     }
@@ -24272,6 +24922,9 @@ impl MobActor {
             );
             config.keep_alive =
                 selected_runtime_mode == crate::MobRuntimeMode::AutonomousHost;
+            config.override_web_search = tool_category_overrides.web_search;
+            config.application_tool_policy = application_tool_policy.clone();
+            config.tool_consequence_policy_registry = self.tool_consequence_policy_registry.clone();
             if let Some(ref client) = self.default_llm_client {
                 config.llm_client_override = Some(client.clone());
             }
@@ -25556,6 +26209,8 @@ impl MobActor {
             labels,
             launch_mode,
             tool_access_policy,
+            tool_category_overrides,
+            application_tool_policy,
             budget_limits,
             auto_wire_parent,
             additional_instructions,
@@ -25629,6 +26284,7 @@ impl MobActor {
         if let Some(model) = model_override {
             profile.model = model;
         }
+        super::spec_compiler::apply_tool_category_overrides(&mut profile, tool_category_overrides);
         let effective_profile_override = full_profile_override_requested.then(|| profile.clone());
         // ADJ-6: explicit fact, captured before the inherited-open mutation.
         let explicit_workgraph = profile.tools.workgraph;
@@ -25720,6 +26376,8 @@ impl MobActor {
                 additional_instructions: additional_instructions.as_ref(),
                 system_prompt_override: system_prompt_override.as_ref(),
                 tool_access_policy: tool_access_policy.as_ref(),
+                tool_category_overrides,
+                application_tool_policy: &application_tool_policy,
                 auth_binding: auth_binding.as_ref(),
                 budget_limits: budget_limits.as_ref(),
                 runtime_mode: selected_runtime_mode,
@@ -27015,6 +27673,8 @@ impl MobActor {
             labels,
             launch_mode: _,
             tool_access_policy,
+            tool_category_overrides,
+            application_tool_policy,
             budget_limits,
             auto_wire_parent: _,
             additional_instructions,
@@ -27054,6 +27714,7 @@ impl MobActor {
         if let Some(model) = model_override.as_ref() {
             profile.model.clone_from(model);
         }
+        super::spec_compiler::apply_tool_category_overrides(&mut profile, tool_category_overrides);
         // ADJ-6: explicit fact captured before the inherited-open mutation.
         let explicit_workgraph = profile.tools.workgraph;
         if inherited_tool_filter.is_some() && override_profile.is_none() {
@@ -27110,6 +27771,9 @@ impl MobActor {
         })
         .await?;
         config.keep_alive = runtime_mode == crate::MobRuntimeMode::AutonomousHost;
+        config.override_web_search = tool_category_overrides.web_search;
+        config.application_tool_policy = application_tool_policy;
+        config.tool_consequence_policy_registry = self.tool_consequence_policy_registry.clone();
         if let Some(ref client) = self.default_llm_client {
             config.llm_client_override = Some(client.clone());
         }
@@ -37552,6 +38216,8 @@ impl MobActor {
             labels: replacement_labels,
             launch_mode: _,
             tool_access_policy: replacement_tool_access_policy,
+            tool_category_overrides: replacement_tool_category_overrides,
+            application_tool_policy: replacement_application_tool_policy,
             budget_limits: replacement_budget_limits,
             auto_wire_parent: _,
             additional_instructions: replacement_additional_instructions,
@@ -37732,6 +38398,10 @@ impl MobActor {
         if let Some(model) = replacement_model_override.as_ref() {
             profile.model.clone_from(model);
         }
+        super::spec_compiler::apply_tool_category_overrides(
+            &mut profile,
+            replacement_tool_category_overrides,
+        );
         if replacement_inherited_tool_filter.is_some() && replacement_profile_override.is_none() {
             build::open_profile_tool_categories_for_inherited_filter(&mut profile);
         }
@@ -37768,6 +38438,9 @@ impl MobActor {
         })
         .await?;
         config.keep_alive = snapshot.runtime_mode == crate::MobRuntimeMode::AutonomousHost;
+        config.override_web_search = replacement_tool_category_overrides.web_search;
+        config.application_tool_policy = replacement_application_tool_policy;
+        config.tool_consequence_policy_registry = self.tool_consequence_policy_registry.clone();
         if let Some(ref client) = self.default_llm_client {
             config.llm_client_override = Some(client.clone());
         }

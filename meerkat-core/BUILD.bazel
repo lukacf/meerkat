@@ -188,6 +188,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "tests/fixtures/compiled_application_tool_policy_invalid_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_valid_v1.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
     ],
@@ -198,6 +200,70 @@ rust_test(
     rustc_env = {
         "CARGO_PKG_VERSION": "0.8.25",
         "CARGO_BIN_NAME": "auth_binding_no_string_form",
+        "CARGO_MANIFEST_DIR": "./meerkat-core",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "small",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "16777216",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-core",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-core:meerkat_core",
+        "//meerkat-machine-kernels:meerkat_machine_kernels",
+        "//meerkat-machine-schema:meerkat_machine_schema",
+    ] + all_crate_deps(
+        package_name = "meerkat-core",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "compiled_application_tool_policy_test",
+    aliases = aliases(
+        package_name = "meerkat-core",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "compiled_application_tool_policy",
+    crate_root = "tests/compiled_application_tool_policy.rs",
+    crate_features = [
+        "__meerkat-facade-agent-factory-build",
+        "__meerkat-generated-authority-bridge",
+        "jsonschema",
+        "schema",
+        "test-support",
+    ],
+    edition = "2024",
+    rustc_flags = [
+        "--cfg=meerkat_internal_generated_authority_bridge",
+    ],
+    compile_data = [
+        "Cargo.toml",
+        "src/config_template.toml",
+        "tests/fixtures/compiled_application_tool_policy_invalid_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_valid_v1.json",
+        "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
+        "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
+    ],
+    srcs = [
+        "tests/compiled_application_tool_policy.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.25",
+        "CARGO_BIN_NAME": "compiled_application_tool_policy",
         "CARGO_MANIFEST_DIR": "./meerkat-core",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
@@ -250,6 +316,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "tests/fixtures/compiled_application_tool_policy_invalid_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_valid_v1.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
     ],
@@ -314,6 +382,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "tests/fixtures/compiled_application_tool_policy_invalid_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_valid_v1.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
     ],
@@ -376,6 +446,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "tests/fixtures/compiled_application_tool_policy_invalid_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_valid_v1.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
     ],
@@ -440,6 +512,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "tests/fixtures/compiled_application_tool_policy_invalid_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_valid_v1.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
     ],
@@ -508,6 +582,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "tests/fixtures/compiled_application_tool_policy_invalid_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_valid_v1.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
     ],
@@ -570,6 +646,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "tests/fixtures/compiled_application_tool_policy_invalid_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_valid_v1.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
     ],
@@ -632,6 +710,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "tests/fixtures/compiled_application_tool_policy_invalid_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_valid_v1.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
     ],
@@ -693,6 +773,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "tests/fixtures/compiled_application_tool_policy_invalid_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_valid_v1.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
     ],
@@ -757,6 +839,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "tests/fixtures/compiled_application_tool_policy_invalid_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_valid_v1.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
     ],
@@ -819,6 +903,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "tests/fixtures/compiled_application_tool_policy_invalid_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_valid_v1.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
     ],
@@ -881,6 +967,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "tests/fixtures/compiled_application_tool_policy_invalid_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_valid_v1.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
     ],
@@ -943,6 +1031,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "tests/fixtures/compiled_application_tool_policy_invalid_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_valid_v1.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
     ],
@@ -1005,6 +1095,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "tests/fixtures/compiled_application_tool_policy_invalid_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_valid_v1.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
     ],
@@ -1067,6 +1159,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "tests/fixtures/compiled_application_tool_policy_invalid_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_valid_v1.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
     ],
@@ -1129,6 +1223,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "tests/fixtures/compiled_application_tool_policy_invalid_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_valid_v1.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
     ],
@@ -1191,6 +1287,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "tests/fixtures/compiled_application_tool_policy_invalid_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_valid_v1.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
     ],
@@ -1232,6 +1330,7 @@ test_suite(
     name = "fast_tests",
     tests = [
         ":auth_binding_no_string_form_test",
+        ":compiled_application_tool_policy_test",
         ":document_cost_probe_test",
         ":durable_tail_classification_test",
         ":fork_at_rotates_session_id_test",

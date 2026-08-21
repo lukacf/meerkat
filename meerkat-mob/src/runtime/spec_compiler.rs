@@ -20,7 +20,7 @@ use meerkat_contracts::wire::supervisor_bridge::WireOpaqueJson;
 use meerkat_contracts::wire::{
     PortableDefinitionExtract, PortableMemberSpec, PortableSkillSource, PortableSpawnOverlay,
     PortableSystemPrompt, WireMobToolAuthorityContext, WireNonPortableResourceKind,
-    WireResolvedToolAccessPolicy, WireSpawnContinuityIntent,
+    WireResolvedToolAccessPolicy, WireSpawnContinuityIntent, WireToolAccessConstraint,
 };
 
 use crate::definition::{MobDefinition, SkillSource};
@@ -31,6 +31,22 @@ use crate::identity::{
 use crate::ids::{AgentIdentity, MobId, ProfileName};
 use crate::portable_profile::{project_portable_profile, wire_runtime_mode};
 use crate::profile::Profile;
+
+pub(crate) fn apply_tool_category_overrides(
+    profile: &mut Profile,
+    overrides: meerkat_core::ToolCategoryOverrides,
+) {
+    profile.tools.builtins = overrides.builtins.resolve(profile.tools.builtins);
+    profile.tools.shell = overrides.shell.resolve(profile.tools.shell);
+    profile.tools.comms = overrides.comms.resolve(profile.tools.comms);
+    profile.tools.mob = overrides.mob.resolve(profile.tools.mob);
+    profile.tools.memory = overrides.memory.resolve(profile.tools.memory);
+    profile.tools.schedule = overrides.schedule.resolve(profile.tools.schedule);
+    profile.tools.workgraph = overrides.workgraph.resolve(profile.tools.workgraph);
+    profile.tools.image_generation = overrides
+        .image_generation
+        .resolve(profile.tools.image_generation);
+}
 
 /// R3 case-3 base-prompt seam (ADJ-2): resolves the CONTROLLING host's
 /// assembled base system prompt (config/AGENTS.md chain) for remote spawns
@@ -125,6 +141,8 @@ pub(crate) struct CompileMemberSpecParams<'a> {
     pub additional_instructions: Option<&'a Vec<String>>,
     pub system_prompt_override: Option<&'a super::handle::SpawnSystemPromptOverride>,
     pub tool_access_policy: Option<&'a meerkat_core::ops::ToolAccessPolicy>,
+    pub tool_category_overrides: meerkat_core::ToolCategoryOverrides,
+    pub application_tool_policy: &'a meerkat_core::ApplicationToolPolicyBinding,
     pub auth_binding: Option<&'a meerkat_core::AuthBindingRef>,
     pub budget_limits: Option<&'a meerkat_core::BudgetLimits>,
     /// The SELECTED runtime mode (spec-or-profile resolution).
@@ -279,6 +297,8 @@ pub(crate) async fn compile_desired_member_material(
             additional_instructions: declaration.additional_instructions.clone(),
             system_prompt,
             tool_access_policy: declaration.tool_access_policy.clone(),
+            tool_category_overrides: meerkat_core::ToolCategoryOverrides::default(),
+            application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
             auth_binding: declaration.auth_binding.clone(),
             budget_limits: declaration.budget_limits.clone(),
             runtime_mode,
@@ -312,13 +332,13 @@ pub(crate) fn spawn_spec_from_desired_member(
         ))
     })?;
     let material = &member.material;
-    let profile = crate::portable_profile::rehydrate_portable_profile(&material.profile).map_err(
-        |error| {
+    let mut profile = crate::portable_profile::rehydrate_portable_profile(&material.profile)
+        .map_err(|error| {
             MobError::WiringError(format!(
                 "sealed desired profile for '{identity}' cannot be materialized: {error}"
             ))
-        },
-    )?;
+        })?;
+    apply_tool_category_overrides(&mut profile, material.overlay.tool_category_overrides);
     let mut spec =
         super::handle::SpawnMemberSpec::new(material.profile_name.clone(), identity.clone());
     spec.initial_message = None;
@@ -355,7 +375,14 @@ pub(crate) fn spawn_spec_from_desired_member(
                 WireResolvedToolAccessPolicy::ReadOnly => {
                     meerkat_core::ops::ToolAccessPolicy::ReadOnly
                 }
+                WireResolvedToolAccessPolicy::Constraints(constraints) => {
+                    meerkat_core::ops::ToolAccessPolicy::Constraints(
+                        constraints.iter().map(domain_tool_constraint).collect(),
+                    )
+                }
             });
+    spec.tool_category_overrides.web_search = material.overlay.tool_category_overrides.web_search;
+    spec.application_tool_policy = material.overlay.application_tool_policy.clone();
     spec.auth_binding = material.overlay.auth_binding.clone().map(Into::into);
     spec.budget_limits = material.overlay.budget_limits.clone();
     spec.system_prompt_override = Some(match &material.overlay.system_prompt {
@@ -484,9 +511,47 @@ fn resolved_tool_access_policy(
         Some(meerkat_core::ops::ToolAccessPolicy::ReadOnly) => {
             Ok(Some(WireResolvedToolAccessPolicy::ReadOnly))
         }
+        Some(meerkat_core::ops::ToolAccessPolicy::Constraints(constraints)) => {
+            if constraints.is_empty() {
+                return Err(MobError::WiringError(format!(
+                    "tool access constraints for member '{agent_identity}' must not be empty"
+                )));
+            }
+            Ok(Some(WireResolvedToolAccessPolicy::Constraints(
+                constraints.iter().map(wire_tool_constraint).collect(),
+            )))
+        }
         Some(meerkat_core::ops::ToolAccessPolicy::Inherit) => Err(MobError::WiringError(format!(
             "tool access policy for member '{agent_identity}' is still Inherit at material compile; callers must resolve it before the actor seals desired material"
         ))),
+    }
+}
+
+fn wire_tool_constraint(
+    constraint: &meerkat_core::ops::ToolAccessConstraint,
+) -> WireToolAccessConstraint {
+    match constraint {
+        meerkat_core::ops::ToolAccessConstraint::AllowNames(names) => {
+            WireToolAccessConstraint::AllowNames(sorted_tool_names(names))
+        }
+        meerkat_core::ops::ToolAccessConstraint::DenyNames(names) => {
+            WireToolAccessConstraint::DenyNames(sorted_tool_names(names))
+        }
+        meerkat_core::ops::ToolAccessConstraint::ReadOnly => WireToolAccessConstraint::ReadOnly,
+    }
+}
+
+fn domain_tool_constraint(
+    constraint: &WireToolAccessConstraint,
+) -> meerkat_core::ops::ToolAccessConstraint {
+    match constraint {
+        WireToolAccessConstraint::AllowNames(names) => {
+            meerkat_core::ops::ToolAccessConstraint::AllowNames(names.iter().cloned().collect())
+        }
+        WireToolAccessConstraint::DenyNames(names) => {
+            meerkat_core::ops::ToolAccessConstraint::DenyNames(names.iter().cloned().collect())
+        }
+        WireToolAccessConstraint::ReadOnly => meerkat_core::ops::ToolAccessConstraint::ReadOnly,
     }
 }
 
@@ -518,6 +583,8 @@ pub(crate) async fn compile_portable_member_spec(
         additional_instructions,
         system_prompt_override,
         tool_access_policy,
+        tool_category_overrides,
+        application_tool_policy,
         auth_binding,
         budget_limits,
         runtime_mode,
@@ -553,7 +620,7 @@ pub(crate) async fn compile_portable_member_spec(
         required_local_callback_tools: Vec::new(),
         execution: DesiredExecution::ControllingSession,
     };
-    let material = compile_desired_member_material(CompileDesiredMemberMaterialParams {
+    let mut material = compile_desired_member_material(CompileDesiredMemberMaterialParams {
         agent_identity,
         declaration: &declaration,
         resolved_profile: Some(profile),
@@ -562,6 +629,8 @@ pub(crate) async fn compile_portable_member_spec(
         non_portable_disabled,
     })
     .await?;
+    material.overlay.tool_category_overrides = tool_category_overrides;
+    material.overlay.application_tool_policy = application_tool_policy.clone();
 
     // Operator authority: mint via the build.rs:249-273 path, then PROJECT
     // to the wire (visibility composition only; dispatch authority is
@@ -626,6 +695,8 @@ pub(crate) async fn compile_portable_member_spec(
         additional_instructions,
         system_prompt,
         tool_access_policy,
+        tool_category_overrides,
+        application_tool_policy,
         auth_binding,
         budget_limits,
         runtime_mode,
@@ -643,6 +714,8 @@ pub(crate) async fn compile_portable_member_spec(
             additional_instructions,
             system_prompt,
             tool_access_policy,
+            tool_category_overrides,
+            application_tool_policy: application_tool_policy.clone(),
             mob_tool_authority_context,
             auth_binding,
             budget_limits,
@@ -765,6 +838,8 @@ mod tests {
             additional_instructions: None,
             system_prompt_override: None,
             tool_access_policy: None,
+            tool_category_overrides: meerkat_core::ToolCategoryOverrides::default(),
+            application_tool_policy: &meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
             auth_binding: None,
             budget_limits: None,
             runtime_mode: crate::MobRuntimeMode::TurnDriven,
@@ -886,15 +961,160 @@ mod tests {
                 material,
                 initial_delivery: None,
             }),
+            wiring_custody: crate::identity::IdentityWiringCustody::IdentityOwned,
             owned_wiring: Default::default(),
         };
         let original_digest = intent_for(material.clone()).digest().unwrap();
-        let mut changed = material;
+        let mut changed = material.clone();
         changed.required_local_callback_tools[0]
             .description
             .push_str(" changed");
         changed.validate().unwrap();
         assert_ne!(original_digest, intent_for(changed).digest().unwrap());
+
+        let intent = intent_for(material);
+        let mut record = crate::identity::IdentityIntentRecord {
+            schema_version: crate::identity::IDENTITY_INTENT_SCHEMA_VERSION,
+            mob_id: MobId::from("compiler-unit"),
+            intent_revision: 4,
+            declaration_scope: None,
+            declaration_revision: None,
+            tombstone_generation: None,
+            initial_delivery_generation_highwater: 0,
+            retirement_plan: crate::identity::IdentityRetirementPlan::Targets {
+                session: session.clone(),
+                execution: DesiredExecution::ControllingSession,
+                incident_wiring: Default::default(),
+            },
+            convergence_directive: None,
+            intent_digest: intent.digest().unwrap(),
+            authority_digest: String::new(),
+            intent,
+        };
+        record.authority_digest = record.canonical_authority_digest().unwrap();
+        record.validate().unwrap();
+        let current_declaration = match &record.intent {
+            crate::identity::IdentityIntent::Present { member, .. } => {
+                member.material.member_tool_declaration()
+            }
+            crate::identity::IdentityIntent::Absent { .. } => unreachable!(),
+        };
+        let mut declaration = current_declaration;
+        declaration.category_overrides.shell = meerkat_core::ToolCategoryOverride::Enable;
+        let request = crate::identity::ApplyMemberToolDeclaration {
+            mob_id: record.mob_id.clone(),
+            agent_identity: identity.clone(),
+            request_id: crate::identity::MemberToolMutationId::new("enable-shell").unwrap(),
+            expected_intent_revision: 4,
+            declaration,
+            convergence: crate::identity::IdentityConvergenceMode::Drain { max_wait_ms: 1_000 },
+        };
+        let (outcome, next) =
+            crate::identity::prepare_member_tool_intent_mutation(&record, &request, 100).unwrap();
+        assert_eq!(
+            outcome,
+            crate::identity::MemberToolCommitOutcome::Committed {
+                desired_revision: 5
+            }
+        );
+        let next = next.unwrap();
+        assert_eq!(next.intent_revision, 5);
+        assert_eq!(
+            next.convergence_directive
+                .as_ref()
+                .unwrap()
+                .drain_deadline_ms,
+            Some(1_100)
+        );
+
+        let (desired_session, desired_member) = match &next.intent {
+            crate::identity::IdentityIntent::Present {
+                session, member, ..
+            } => (session, member.as_ref()),
+            crate::identity::IdentityIntent::Absent { .. } => unreachable!(),
+        };
+        let replacement = spawn_spec_from_desired_member(
+            &request.agent_identity,
+            desired_session,
+            desired_member,
+        )
+        .expect("policy replacement compiles from sealed desired material");
+        assert!(
+            matches!(
+                replacement.launch_mode,
+                crate::launch::MemberLaunchMode::Resume {
+                    resume_from_role: None,
+                    ..
+                }
+            ),
+            "policy rematerialization must not consume a boot-scoped role-migration declaration"
+        );
+
+        let unchanged_declaration = desired_member.material.member_tool_declaration();
+        let unchanged_request = crate::identity::ApplyMemberToolDeclaration {
+            mob_id: next.mob_id.clone(),
+            agent_identity: request.agent_identity.clone(),
+            request_id: crate::identity::MemberToolMutationId::new("enable-shell-noop").unwrap(),
+            expected_intent_revision: 5,
+            declaration: unchanged_declaration.clone(),
+            convergence: crate::identity::IdentityConvergenceMode::Drain { max_wait_ms: 1_000 },
+        };
+        let (unchanged, unchanged_candidate) =
+            crate::identity::prepare_member_tool_intent_mutation(&next, &unchanged_request, 200)
+                .unwrap();
+        assert_eq!(
+            unchanged,
+            crate::identity::MemberToolCommitOutcome::NoChange {
+                desired_revision: 5
+            }
+        );
+        assert!(unchanged_candidate.is_none());
+
+        let stale_request = crate::identity::ApplyMemberToolDeclaration {
+            mob_id: next.mob_id.clone(),
+            agent_identity: request.agent_identity.clone(),
+            request_id: crate::identity::MemberToolMutationId::new("enable-shell-stale").unwrap(),
+            expected_intent_revision: 4,
+            declaration: unchanged_declaration,
+            convergence: crate::identity::IdentityConvergenceMode::CancelActive,
+        };
+        let (stale, stale_candidate) =
+            crate::identity::prepare_member_tool_intent_mutation(&next, &stale_request, 200)
+                .unwrap();
+        assert_eq!(
+            stale,
+            crate::identity::MemberToolCommitOutcome::RevisionConflict {
+                expected: 4,
+                actual: 5,
+            }
+        );
+        assert!(stale_candidate.is_none());
+
+        let resolve = crate::identity::ResolveIdentityConvergenceBlock {
+            mob_id: next.mob_id.clone(),
+            agent_identity: identity,
+            request_id: crate::identity::IdentityConvergenceResolutionId::new("cancel-drain")
+                .unwrap(),
+            expected_desired_revision: 5,
+            observed_active_revision: 4,
+            convergence: crate::identity::IdentityConvergenceMode::CancelActive,
+        };
+        let (resolution, resolved) =
+            crate::identity::prepare_identity_convergence_resolution(&next, &resolve, 4, 200)
+                .unwrap();
+        assert_eq!(
+            resolution,
+            crate::identity::IdentityConvergenceResolutionOutcome::Resolved {
+                desired_revision: 5,
+                active_revision: 4,
+            }
+        );
+        let resolved = resolved.unwrap();
+        assert_eq!(resolved.intent_revision, 5);
+        assert_eq!(
+            resolved.convergence_directive.unwrap().mode,
+            crate::identity::IdentityConvergenceMode::CancelActive
+        );
     }
 
     /// U3(iii): base source absent on a case-3 spawn is a typed failure.

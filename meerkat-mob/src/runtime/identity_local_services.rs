@@ -120,6 +120,19 @@ pub trait IdentityLocalExternalToolsProvider: Send + Sync {
         &self,
         key: &IdentityLocalMaterializationKey,
     ) -> Result<Option<Arc<dyn AgentToolDispatcher>>, IdentityLocalExternalToolsError>;
+
+    /// Validate callback definitions before desired-state CAS. Providers that
+    /// cannot prove the exact executable surface fail closed.
+    fn preflight_callback_tools(
+        &self,
+        required: &[DesiredLocalCallbackTool],
+    ) -> Result<(), IdentityLocalExternalToolsError> {
+        if required.is_empty() {
+            Ok(())
+        } else {
+            Err(IdentityLocalExternalToolsError::Missing)
+        }
+    }
 }
 
 impl<F> IdentityLocalExternalToolsProvider for F

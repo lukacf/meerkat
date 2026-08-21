@@ -103,8 +103,12 @@ from .types import (
     McpLiveOpResponse,
     McpReloadParams,
     McpRemoveParams,
+    MobAdoptMemberIdentityDeclarationParams,
+    MobAdoptMemberIdentityDeclarationResult,
     MobAppendSystemContextParams,
     MobAppendSystemContextResult,
+    MobApplyMemberToolDeclarationParams,
+    MobApplyMemberToolDeclarationResult,
     MobBindHostParams,
     MobBindHostResult,
     MobCancelAllWorkParams,
@@ -154,6 +158,8 @@ from .types import (
     MobMemberSendParams,
     MobMemberSendResult,
     MobMemberStatusResult,
+    MobMemberToolDeclarationParams,
+    MobMemberToolDeclarationResult,
     MobMembersResult,
     MobProfileCreateParams,
     MobProfileDeleteParams,
@@ -164,6 +170,8 @@ from .types import (
     MobProfileUpdateParams,
     MobReconcileParams,
     MobReconcileResult,
+    MobResolveIdentityConvergenceBlockParams,
+    MobResolveIdentityConvergenceBlockResult,
     MobRespawnParams,
     MobRespawnResult,
     MobRetireResult,
@@ -1192,6 +1200,38 @@ class RpcRequest(Protocol):
         params: MobIdParams,
         /,
     ) -> Awaitable[MobMembersResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["mob/member_tool_declaration"],
+        params: MobMemberToolDeclarationParams,
+        /,
+    ) -> Awaitable[MobMemberToolDeclarationResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["mob/apply_member_tool_declaration"],
+        params: MobApplyMemberToolDeclarationParams,
+        /,
+    ) -> Awaitable[MobApplyMemberToolDeclarationResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["mob/adopt_member_identity_declaration"],
+        params: MobAdoptMemberIdentityDeclarationParams,
+        /,
+    ) -> Awaitable[MobAdoptMemberIdentityDeclarationResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["mob/resolve_identity_convergence_block"],
+        params: MobResolveIdentityConvergenceBlockParams,
+        /,
+    ) -> Awaitable[MobResolveIdentityConvergenceBlockResult]: ...
 
     @overload
     def __call__(

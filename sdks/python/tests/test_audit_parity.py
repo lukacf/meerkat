@@ -123,6 +123,16 @@ RPC_PUBLIC_WRAPPERS: dict[str, tuple[type, str]] = {
     "mob/list": (MeerkatClient, "list_mobs"),
     "mob/status": (Mob, "status"),
     "mob/members": (Mob, "members"),
+    "mob/member_tool_declaration": (Mob, "member_tool_declaration"),
+    "mob/apply_member_tool_declaration": (Mob, "apply_member_tool_declaration"),
+    "mob/adopt_member_identity_declaration": (
+        Mob,
+        "adopt_member_identity_declaration",
+    ),
+    "mob/resolve_identity_convergence_block": (
+        Mob,
+        "resolve_identity_convergence_block",
+    ),
     "mob/spawn": (Mob, "spawn"),
     "mob/spawn_many": (Mob, "spawn_many"),
     "mob/retire": (Mob, "retire"),

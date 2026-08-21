@@ -596,6 +596,10 @@ pub struct AgentBuildConfig {
     /// `SessionMetadata.tooling.tool_access_policy` so children can inherit
     /// it transitively.
     pub tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+    /// Stable application consequence-policy binding for the member/session.
+    pub application_tool_policy: meerkat_core::ApplicationToolPolicyBinding,
+    /// Host-scoped registry containing in-process immutable policy providers.
+    pub tool_consequence_policy_registry: Option<Arc<meerkat_core::ToolConsequencePolicyRegistry>>,
     /// Pre-built session comms runtime, type-erased (multi-host mobs
     /// DEC-P3H-3 — the `llm_client_override` precedent). Produced by
     /// `crate::encode_session_comms_runtime_override_for_service`; the
@@ -805,6 +809,8 @@ impl AgentBuildConfig {
             initial_tool_visibility_state: None,
             initial_tool_filter: None,
             tool_access_policy: None,
+            application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
+            tool_consequence_policy_registry: None,
             session_comms_runtime_override: None,
             host_prompt_sections: meerkat_core::service::HostPromptSections::default(),
         }
@@ -922,6 +928,8 @@ impl AgentBuildConfig {
         self.initial_metadata_entries = build.initial_metadata_entries.clone();
         self.initial_tool_filter = build.initial_tool_filter.clone();
         self.tool_access_policy = build.tool_access_policy.clone();
+        self.application_tool_policy = build.application_tool_policy.clone();
+        self.tool_consequence_policy_registry = build.tool_consequence_policy_registry.clone();
         self.shell_env = build.shell_env.clone();
         self.checkpointer = build.checkpointer.clone();
         self.call_timeout_override = build.call_timeout_override.clone();
@@ -992,6 +1000,8 @@ impl AgentBuildConfig {
             initial_metadata_entries: self.initial_metadata_entries.clone(),
             initial_tool_filter: self.initial_tool_filter.clone(),
             tool_access_policy: self.tool_access_policy.clone(),
+            application_tool_policy: self.application_tool_policy.clone(),
+            tool_consequence_policy_registry: self.tool_consequence_policy_registry.clone(),
             shell_env: self.shell_env.clone(),
             checkpointer: self.checkpointer.clone(),
             call_timeout_override: self.call_timeout_override.clone(),
@@ -3314,6 +3324,9 @@ impl AgentFactory {
         if !mask.tool_access_policy && build_config.tool_access_policy.is_none() {
             build_config.tool_access_policy = metadata.tooling.tool_access_policy.clone();
         }
+        if !mask.application_tool_policy {
+            build_config.application_tool_policy = metadata.tooling.application_tool_policy.clone();
+        }
         if !mask.keep_alive {
             build_config.keep_alive = metadata.keep_alive;
         }
@@ -3724,6 +3737,7 @@ impl AgentFactory {
                 identity.provider != Provider::OpenAI
                     || openai_cache_defaults_supported(config, identity.auth_binding.as_ref()),
             ),
+            provider_native_tools: meerkat_core::ProviderNativeToolPolicy::Inherit,
         })
     }
 
@@ -5862,6 +5876,54 @@ impl AgentFactory {
             .transpose()
             .map_err(|err| BuildAgentError::Config(format!("Tool access policy: {err}")))?;
 
+        let bound_consequence_policy = match &build_config.application_tool_policy {
+            meerkat_core::ApplicationToolPolicyBinding::Unmanaged => None,
+            meerkat_core::ApplicationToolPolicyBinding::Inherit => {
+                return Err(BuildAgentError::Config(
+                    "application tool policy 'inherit' is unresolved at the AgentFactory seam"
+                        .to_string(),
+                ));
+            }
+            meerkat_core::ApplicationToolPolicyBinding::Provider {
+                provider_id,
+                policy_id,
+            } => {
+                let member = build_config.mob_member_binding.clone().ok_or_else(|| {
+                    BuildAgentError::Config(
+                        "provider-bound application tool policy requires MobMemberBinding"
+                            .to_string(),
+                    )
+                })?;
+                let registry = build_config
+                    .tool_consequence_policy_registry
+                    .as_ref()
+                    .ok_or_else(|| {
+                        BuildAgentError::Config(
+                            "provider-bound application tool policy requires the host policy registry"
+                                .to_string(),
+                        )
+                    })?;
+                Some(
+                    registry
+                        .bind(member, provider_id.clone(), policy_id.clone())
+                        .map_err(|error| {
+                            BuildAgentError::Config(format!(
+                                "application tool policy binding failed: {error}"
+                            ))
+                        })?,
+                )
+            }
+        };
+        let provider_native_tool_policy = if bound_consequence_policy.is_some()
+            || tool_execution_policy
+                .as_ref()
+                .is_some_and(|policy| !policy.is_unrestricted())
+        {
+            meerkat_core::ProviderNativeToolPolicy::DisableAll
+        } else {
+            meerkat_core::ProviderNativeToolPolicy::Inherit
+        };
+
         // Persist the *override intent* (Inherit/Enable/Disable), not the resolved
         // effective bool. This ensures Inherit survives across save/resume cycles so
         // the session continues to follow future runtime defaults.
@@ -5892,6 +5954,7 @@ impl AgentFactory {
             // Effective (resolved) policy only — an unresolved `Inherit`
             // failed the build above, so `Inherit` can never persist here.
             metadata.tooling.tool_access_policy = build_config.tool_access_policy.clone();
+            metadata.tooling.application_tool_policy = build_config.application_tool_policy.clone();
             if build_config.resume_override_mask.preload_skills || active_skill_ids.is_some() {
                 metadata.tooling.active_skills = active_skill_ids.clone();
             }
@@ -5930,6 +5993,7 @@ impl AgentFactory {
                     // Effective (resolved) policy only — an unresolved
                     // `Inherit` failed the build above.
                     tool_access_policy: build_config.tool_access_policy.clone(),
+                    application_tool_policy: build_config.application_tool_policy.clone(),
                     active_skills: active_skill_ids.clone(),
                 },
                 keep_alive: build_config.keep_alive,
@@ -5980,6 +6044,7 @@ impl AgentFactory {
             // this seam; without it every factory-built agent silently ran on
             // `ToolsConfig::default()`.
             .with_tools_config(config.tools.clone())
+            .provider_native_tool_policy(provider_native_tool_policy)
             .with_call_timeout_override(effective_call_timeout_override);
 
         if let Some(defaults) = provider_request_defaults_for(
@@ -6226,10 +6291,16 @@ impl AgentFactory {
         // reach the inner dispatcher. Provider-native server tools never
         // traverse the dispatcher and cannot be gated here; hosts that need
         // them gated must disable the native capability on gated builds.
-        if let Some(policy) = tool_execution_policy {
-            tools = Arc::new(meerkat_core::ExecutionPolicyGatedDispatcher::new(
-                tools, policy,
-            ));
+        if tool_execution_policy.is_some() || bound_consequence_policy.is_some() {
+            let mut gate = meerkat_core::ExecutionPolicyGatedDispatcher::new(
+                tools,
+                tool_execution_policy
+                    .unwrap_or_else(meerkat_core::ToolExecutionPolicy::unrestricted),
+            );
+            if let Some(policy) = bound_consequence_policy {
+                gate = gate.with_consequence_policy(policy);
+            }
+            tools = Arc::new(gate);
         }
 
         // 13. Build agent. AgentFactory owns the policy composition above; core

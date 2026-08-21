@@ -12,25 +12,32 @@ use crate::session_runtime::SessionRuntime;
 use meerkat::surface::RequestContext;
 use meerkat_contracts::wire::{WireAuthBindingRef, WireHostRef, WireMobProfile};
 use meerkat_contracts::{
-    ErrorCode, MobAppendSystemContextResult, MobCancelAllWorkResult, MobCancelWorkResult,
+    ErrorCode, MobAdoptMemberIdentityDeclarationParams, MobAdoptMemberIdentityDeclarationResult,
+    MobAppendSystemContextResult, MobApplyMemberToolDeclarationParams,
+    MobApplyMemberToolDeclarationResult, MobCancelAllWorkResult, MobCancelWorkResult,
     MobConcludeObjectiveParams, MobConcludeObjectiveResult, MobCreateParams, MobCreateResult,
     MobDestroyResult, MobEventsResult, MobFlowCancelResult, MobFlowRunResult, MobFlowsResult,
     MobForceCancelResult, MobHelperResult, MobLifecycleResult, MobListResult,
-    MobMemberListEntryWire, MobMembersResult, MobProfileDeleteResult, MobRespawnReceipt,
-    MobRespawnResult, MobRetireResult, MobRotateSupervisorResult, MobRunParams, MobRunResult,
-    MobRunResultParams, MobSnapshotResult, MobSpawnManyResult, MobSpawnManyResultEntry,
-    MobSpawnResult, MobStatusResult, MobUnwireResult, MobWaitMembersResult,
-    MobWireMembersBatchEdge, MobWireMembersBatchParams, MobWireMembersBatchResult, MobWireResult,
-    SupervisorRotationIncompleteDataWire, SupervisorRotationIncompleteDetailsWire,
-    SupervisorRotationReportWire, SupervisorRotationRetryAuthority, SupervisorRotationRetryScope,
-    WireMobBackendKind, WireMobMemberStatus, WireMobRespawnOutcome, WireMobRuntimeMode,
+    MobMemberListEntryWire, MobMemberToolDeclarationParams, MobMemberToolDeclarationResult,
+    MobMembersResult, MobProfileDeleteResult, MobResolveIdentityConvergenceBlockParams,
+    MobResolveIdentityConvergenceBlockResult, MobRespawnReceipt, MobRespawnResult, MobRetireResult,
+    MobRotateSupervisorResult, MobRunParams, MobRunResult, MobRunResultParams, MobSnapshotResult,
+    MobSpawnManyResult, MobSpawnManyResultEntry, MobSpawnResult, MobStatusResult, MobUnwireResult,
+    MobWaitMembersResult, MobWireMembersBatchEdge, MobWireMembersBatchParams,
+    MobWireMembersBatchResult, MobWireResult, SupervisorRotationIncompleteDataWire,
+    SupervisorRotationIncompleteDetailsWire, SupervisorRotationReportWire,
+    SupervisorRotationRetryAuthority, SupervisorRotationRetryScope, WireMobBackendKind,
+    WireMobMemberStatus, WireMobRespawnOutcome, WireMobRuntimeMode,
 };
 use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
 use meerkat_core::service::AppendSystemContextRequest;
 use meerkat_core::types::ContentInput;
 use meerkat_mob::{
-    AgentIdentity, FlowId, MemberRespawnReceipt, MobBackendKind, MobError, MobId, MobMemberStatus,
-    MobRespawnError, MobRuntimeMode, Profile, RunId, SpawnMemberSpec, SpawnResult, ToolConfig,
+    AgentIdentity, ApplyMemberToolDeclaration, FlowId, IdentityConvergenceResolutionId,
+    IdentityConvergenceStatus, IdentityIntent, IdentityStoredObservation, MemberRespawnReceipt,
+    MemberToolMutationId, MobBackendKind, MobError, MobId, MobMemberStatus, MobRespawnError,
+    MobRuntimeMode, Profile, ResolveIdentityConvergenceBlock, RunId, SpawnMemberSpec, SpawnResult,
+    ToolConfig,
 };
 use meerkat_mob_mcp::{MobAppendSystemContextError, MobMcpDestroyError, MobMcpState};
 use std::collections::BTreeMap;
@@ -486,6 +493,202 @@ pub async fn handle_members(
             }
         }
         Err(err) => mob_call_error(id, &err),
+    }
+}
+
+async fn member_tool_convergence(
+    state: &Arc<MobMcpState>,
+    mob_id: &MobId,
+    identity: &AgentIdentity,
+    desired_revision: u64,
+) -> Result<meerkat_contracts::WireIdentityConvergenceStatus, MobError> {
+    let status = match state
+        .mob_identity_convergence_status(mob_id, identity)
+        .await?
+    {
+        IdentityStoredObservation::Valid(status) => status,
+        IdentityStoredObservation::Missing => IdentityConvergenceStatus {
+            identity: identity.clone(),
+            intent_revision: Some(desired_revision),
+            active_intent_revision: None,
+            lease_epoch: None,
+            decision: None,
+            observed_at_ms: 0,
+            detail: None,
+        },
+        IdentityStoredObservation::Unsupported { detail, .. }
+        | IdentityStoredObservation::Malformed { detail, .. } => {
+            return Err(MobError::WiringError(format!(
+                "identity convergence status is unavailable: {detail}"
+            )));
+        }
+    };
+    Ok(status.to_wire())
+}
+
+pub async fn handle_member_tool_declaration(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: MobMemberToolDeclarationParams = match parse_params(params) {
+        Ok(params) => params,
+        Err(error) => return error.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(mob_id) => mob_id,
+        Err(response) => return response,
+    };
+    let identity = AgentIdentity::from(params.agent_identity.as_str());
+    let record = match state.mob_identity_intent(&mob_id, &identity).await {
+        Ok(IdentityStoredObservation::Valid(record)) => record,
+        Ok(IdentityStoredObservation::Missing) => {
+            return invalid_params(id, "member has no durable identity intent");
+        }
+        Ok(IdentityStoredObservation::Unsupported { detail, .. })
+        | Ok(IdentityStoredObservation::Malformed { detail, .. }) => {
+            return RpcResponse::error(id, error::INTERNAL_ERROR, detail);
+        }
+        Err(error) => return mob_call_error(id, &error),
+    };
+    let declaration = match &record.intent {
+        IdentityIntent::Present { member, .. } => member.material.member_tool_declaration(),
+        IdentityIntent::Absent { .. } => {
+            return invalid_params(id, "member desired presence is absent");
+        }
+    };
+    let convergence =
+        match member_tool_convergence(state, &mob_id, &identity, record.intent_revision).await {
+            Ok(status) => status,
+            Err(error) => return mob_call_error(id, &error),
+        };
+    RpcResponse::success(
+        id,
+        MobMemberToolDeclarationResult {
+            mob_id: mob_id.to_string(),
+            agent_identity: identity.to_string(),
+            desired_intent_revision: record.intent_revision,
+            declaration: declaration.to_wire(),
+            convergence,
+        },
+    )
+}
+
+pub async fn handle_apply_member_tool_declaration(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: MobApplyMemberToolDeclarationParams = match parse_params(params) {
+        Ok(params) => params,
+        Err(error) => return error.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(mob_id) => mob_id,
+        Err(response) => return response,
+    };
+    let declaration: Result<meerkat_mob::MemberToolDeclaration, _> = params.declaration.try_into();
+    let declaration = match declaration {
+        Ok(declaration) => declaration,
+        Err(error) => return invalid_params(id, error.to_string()),
+    };
+    let request_id = match MemberToolMutationId::new(params.request_id) {
+        Ok(request_id) => request_id,
+        Err(error) => return invalid_params(id, error.to_string()),
+    };
+    let request = ApplyMemberToolDeclaration {
+        mob_id: mob_id.clone(),
+        agent_identity: AgentIdentity::from(params.agent_identity.as_str()),
+        request_id,
+        expected_intent_revision: params.expected_intent_revision,
+        declaration,
+        convergence: params.convergence.into(),
+    };
+    match state
+        .mob_apply_member_tool_declaration(&mob_id, request)
+        .await
+    {
+        Ok(result) => RpcResponse::success(
+            id,
+            MobApplyMemberToolDeclarationResult {
+                commit: result.commit.to_wire(),
+                convergence: result.convergence.to_wire(),
+            },
+        ),
+        Err(error) => mob_call_error(id, &error),
+    }
+}
+
+pub async fn handle_adopt_member_identity_declaration(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: MobAdoptMemberIdentityDeclarationParams = match parse_params(params) {
+        Ok(params) => params,
+        Err(error) => return error.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(mob_id) => mob_id,
+        Err(response) => return response,
+    };
+    let request: Result<meerkat_mob::AdoptMemberIdentityDeclaration, _> = params.try_into();
+    let request = match request {
+        Ok(request) => request,
+        Err(error) => return invalid_params(id, error.to_string()),
+    };
+    match state
+        .mob_adopt_member_identity_declaration(&mob_id, request)
+        .await
+    {
+        Ok(result) => RpcResponse::success(
+            id,
+            MobAdoptMemberIdentityDeclarationResult {
+                adoption: result.adoption.to_wire(),
+                convergence: result.convergence.to_wire(),
+            },
+        ),
+        Err(error) => mob_call_error(id, &error),
+    }
+}
+
+pub async fn handle_resolve_identity_convergence_block(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: MobResolveIdentityConvergenceBlockParams = match parse_params(params) {
+        Ok(params) => params,
+        Err(error) => return error.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(mob_id) => mob_id,
+        Err(response) => return response,
+    };
+    let request_id = match IdentityConvergenceResolutionId::new(params.request_id) {
+        Ok(request_id) => request_id,
+        Err(error) => return invalid_params(id, error.to_string()),
+    };
+    let request = ResolveIdentityConvergenceBlock {
+        mob_id: mob_id.clone(),
+        agent_identity: AgentIdentity::from(params.agent_identity.as_str()),
+        request_id,
+        expected_desired_revision: params.expected_desired_revision,
+        observed_active_revision: params.observed_active_revision,
+        convergence: params.convergence.into(),
+    };
+    match state
+        .mob_resolve_identity_convergence_block(&mob_id, request)
+        .await
+    {
+        Ok(result) => RpcResponse::success(
+            id,
+            MobResolveIdentityConvergenceBlockResult {
+                outcome: result.outcome.to_wire(),
+                convergence: result.convergence.to_wire(),
+            },
+        ),
+        Err(error) => mob_call_error(id, &error),
     }
 }
 

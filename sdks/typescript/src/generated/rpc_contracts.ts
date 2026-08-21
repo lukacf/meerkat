@@ -95,8 +95,12 @@ import type {
   McpLiveOpResponse,
   McpReloadParams,
   McpRemoveParams,
+  MobAdoptMemberIdentityDeclarationParams,
+  MobAdoptMemberIdentityDeclarationResult,
   MobAppendSystemContextParams,
   MobAppendSystemContextResult,
+  MobApplyMemberToolDeclarationParams,
+  MobApplyMemberToolDeclarationResult,
   MobBindHostParams,
   MobBindHostResult,
   MobCancelAllWorkParams,
@@ -146,6 +150,8 @@ import type {
   MobMemberSendParams,
   MobMemberSendResult,
   MobMemberStatusResult,
+  MobMemberToolDeclarationParams,
+  MobMemberToolDeclarationResult,
   MobMembersResult,
   MobProfileCreateParams,
   MobProfileDeleteParams,
@@ -156,6 +162,8 @@ import type {
   MobProfileUpdateParams,
   MobReconcileParams,
   MobReconcileResult,
+  MobResolveIdentityConvergenceBlockParams,
+  MobResolveIdentityConvergenceBlockResult,
   MobRespawnParams,
   MobRespawnResult,
   MobRetireResult,
@@ -723,6 +731,22 @@ export interface RpcMethodContracts {
   "mob/members": {
     params: MobIdParams;
     result: (MobMembersResult) & Record<string, unknown>;
+  };
+  "mob/member_tool_declaration": {
+    params: MobMemberToolDeclarationParams;
+    result: (MobMemberToolDeclarationResult) & Record<string, unknown>;
+  };
+  "mob/apply_member_tool_declaration": {
+    params: MobApplyMemberToolDeclarationParams;
+    result: (MobApplyMemberToolDeclarationResult) & Record<string, unknown>;
+  };
+  "mob/adopt_member_identity_declaration": {
+    params: MobAdoptMemberIdentityDeclarationParams;
+    result: (MobAdoptMemberIdentityDeclarationResult) & Record<string, unknown>;
+  };
+  "mob/resolve_identity_convergence_block": {
+    params: MobResolveIdentityConvergenceBlockParams;
+    result: (MobResolveIdentityConvergenceBlockResult) & Record<string, unknown>;
   };
   "mob/events": {
     params: MobEventsParams;

@@ -520,6 +520,7 @@ mod tests {
         let status = crate::IdentityConvergenceStatus {
             identity: identity.clone(),
             intent_revision: None,
+            active_intent_revision: None,
             lease_epoch: Some(1),
             decision: Some(crate::IdentityReconcileDecision::AcquireLease),
             observed_at_ms: 1,

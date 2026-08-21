@@ -2362,6 +2362,18 @@ pub fn router(state: AppState) -> Router {
             get(mob_member_status),
         )
         .route(
+            "/mob/{id}/members/{agent_identity}/tool-declaration",
+            get(mob_member_tool_declaration).put(mob_apply_member_tool_declaration),
+        )
+        .route(
+            "/mob/{id}/members/{agent_identity}/identity-adoption",
+            post(mob_adopt_member_identity_declaration),
+        )
+        .route(
+            "/mob/{id}/members/{agent_identity}/tool-convergence/resolve",
+            post(mob_resolve_identity_convergence_block),
+        )
+        .route(
             "/mob/{id}/members/{agent_identity}/cancel",
             post(mob_force_cancel),
         )
@@ -2740,6 +2752,12 @@ use meerkat_contracts::wire::RestMobWaitRequest as WaitKickoffRequest;
 use meerkat_contracts::wire::RestMobWireMembersBatchRequest;
 
 #[cfg(feature = "mob")]
+use meerkat_contracts::wire::{
+    RestAdoptMemberIdentityDeclarationRequest, RestApplyMemberToolDeclarationRequest,
+    RestResolveIdentityConvergenceBlockRequest,
+};
+
+#[cfg(feature = "mob")]
 fn rest_member_wire_edge(
     edge: meerkat_mob::MemberWireEdge,
 ) -> meerkat_contracts::MobWireMembersBatchEdge {
@@ -2885,6 +2903,201 @@ async fn mob_member_status(
         .to_member_status_result(member_ref)
         .map_err(|err| mob_rest_error(&err, ApiError::Internal))?;
     Ok(Json(json!(result)))
+}
+
+#[cfg(feature = "mob")]
+async fn rest_member_tool_convergence(
+    state: &AppState,
+    mob_id: &meerkat_mob::MobId,
+    identity: &meerkat_mob::AgentIdentity,
+    desired_revision: u64,
+) -> Result<meerkat_contracts::WireIdentityConvergenceStatus, Response> {
+    use meerkat_mob::{IdentityConvergenceStatus, IdentityStoredObservation};
+
+    let status = match state
+        .mob_state
+        .mob_identity_convergence_status(mob_id, identity)
+        .await
+        .map_err(|error| mob_rest_error(&error, ApiError::BadRequest))?
+    {
+        IdentityStoredObservation::Valid(status) => status,
+        IdentityStoredObservation::Missing => IdentityConvergenceStatus {
+            identity: identity.clone(),
+            intent_revision: Some(desired_revision),
+            active_intent_revision: None,
+            lease_epoch: None,
+            decision: None,
+            observed_at_ms: 0,
+            detail: None,
+        },
+        IdentityStoredObservation::Unsupported { detail, .. }
+        | IdentityStoredObservation::Malformed { detail, .. } => {
+            return Err(ApiError::Internal(format!(
+                "identity convergence status is unavailable: {detail}"
+            ))
+            .into_response());
+        }
+    };
+    Ok(status.to_wire())
+}
+
+/// GET /mob/{id}/members/{agent_identity}/tool-declaration - read the durable
+/// declaration and a fresh identity convergence projection.
+#[cfg(feature = "mob")]
+async fn mob_member_tool_declaration(
+    State(state): State<AppState>,
+    Path((id, agent_identity)): Path<(String, String)>,
+) -> Result<Json<meerkat_contracts::MobMemberToolDeclarationResult>, Response> {
+    use meerkat_mob::{IdentityIntent, IdentityStoredObservation};
+
+    let mob_id = meerkat_mob::MobId::from(id.as_str());
+    let identity = meerkat_mob::AgentIdentity::from(agent_identity.as_str());
+    let record = match state
+        .mob_state
+        .mob_identity_intent(&mob_id, &identity)
+        .await
+        .map_err(|error| mob_rest_error(&error, ApiError::BadRequest))?
+    {
+        IdentityStoredObservation::Valid(record) => record,
+        IdentityStoredObservation::Missing => {
+            return Err(
+                ApiError::BadRequest("member has no durable identity intent".to_string())
+                    .into_response(),
+            );
+        }
+        IdentityStoredObservation::Unsupported { detail, .. }
+        | IdentityStoredObservation::Malformed { detail, .. } => {
+            return Err(ApiError::Internal(detail).into_response());
+        }
+    };
+    let declaration = match &record.intent {
+        IdentityIntent::Present { member, .. } => member.material.member_tool_declaration(),
+        IdentityIntent::Absent { .. } => {
+            return Err(
+                ApiError::BadRequest("member desired presence is absent".to_string())
+                    .into_response(),
+            );
+        }
+    };
+    let convergence =
+        rest_member_tool_convergence(&state, &mob_id, &identity, record.intent_revision).await?;
+    Ok(Json(meerkat_contracts::MobMemberToolDeclarationResult {
+        mob_id: mob_id.to_string(),
+        agent_identity: identity.to_string(),
+        desired_intent_revision: record.intent_revision,
+        declaration: declaration.to_wire(),
+        convergence,
+    }))
+}
+
+/// PUT /mob/{id}/members/{agent_identity}/tool-declaration - apply one
+/// revision-fenced durable declaration update.
+#[cfg(feature = "mob")]
+async fn mob_apply_member_tool_declaration(
+    State(state): State<AppState>,
+    Path((id, agent_identity)): Path<(String, String)>,
+    Json(request): Json<RestApplyMemberToolDeclarationRequest>,
+) -> Result<Json<meerkat_contracts::MobApplyMemberToolDeclarationResult>, Response> {
+    let mob_id = meerkat_mob::MobId::from(id.as_str());
+    let declaration: meerkat_mob::MemberToolDeclaration =
+        request
+            .declaration
+            .try_into()
+            .map_err(|error: meerkat_mob::IdentityIntentError| {
+                ApiError::BadRequest(error.to_string()).into_response()
+            })?;
+    let request_id = meerkat_mob::MemberToolMutationId::new(request.request_id)
+        .map_err(|error| ApiError::BadRequest(error.to_string()).into_response())?;
+    let result = state
+        .mob_state
+        .mob_apply_member_tool_declaration(
+            &mob_id,
+            meerkat_mob::ApplyMemberToolDeclaration {
+                mob_id: mob_id.clone(),
+                agent_identity: meerkat_mob::AgentIdentity::from(agent_identity.as_str()),
+                request_id,
+                expected_intent_revision: request.expected_intent_revision,
+                declaration,
+                convergence: request.convergence.into(),
+            },
+        )
+        .await
+        .map_err(|error| mob_rest_error(&error, ApiError::BadRequest))?;
+    Ok(Json(
+        meerkat_contracts::MobApplyMemberToolDeclarationResult {
+            commit: result.commit.to_wire(),
+            convergence: result.convergence.to_wire(),
+        },
+    ))
+}
+
+/// POST /mob/{id}/members/{agent_identity}/identity-adoption - adopt one
+/// already-realized member under an explicit expected-absent precondition.
+#[cfg(feature = "mob")]
+async fn mob_adopt_member_identity_declaration(
+    State(state): State<AppState>,
+    Path((id, agent_identity)): Path<(String, String)>,
+    Json(request): Json<RestAdoptMemberIdentityDeclarationRequest>,
+) -> Result<Json<meerkat_contracts::MobAdoptMemberIdentityDeclarationResult>, Response> {
+    let mob_id = meerkat_mob::MobId::from(id.as_str());
+    let declaration: meerkat_mob::AdoptMemberIdentityDeclaration =
+        meerkat_contracts::MobAdoptMemberIdentityDeclarationParams {
+            mob_id: id,
+            agent_identity,
+            request_id: request.request_id,
+            precondition: request.precondition,
+            declaration_scope: request.declaration_scope,
+            declaration_revision: request.declaration_revision,
+            session: request.session,
+            member: request.member,
+            wiring_custody: request.wiring_custody,
+            owned_wiring: request.owned_wiring,
+            convergence: request.convergence,
+        }
+        .try_into()
+        .map_err(|error: meerkat_mob::IdentityIntentError| {
+            ApiError::BadRequest(error.to_string()).into_response()
+        })?;
+    let result = state
+        .mob_state
+        .mob_adopt_member_identity_declaration(&mob_id, declaration)
+        .await
+        .map_err(|error| mob_rest_error(&error, ApiError::BadRequest))?;
+    Ok(Json(result.to_wire()))
+}
+
+/// POST /mob/{id}/members/{agent_identity}/tool-convergence/resolve - resume
+/// or cancel a blocked identity replacement under exact revision fences.
+#[cfg(feature = "mob")]
+async fn mob_resolve_identity_convergence_block(
+    State(state): State<AppState>,
+    Path((id, agent_identity)): Path<(String, String)>,
+    Json(request): Json<RestResolveIdentityConvergenceBlockRequest>,
+) -> Result<Json<meerkat_contracts::MobResolveIdentityConvergenceBlockResult>, Response> {
+    let mob_id = meerkat_mob::MobId::from(id.as_str());
+    let request_id = meerkat_mob::IdentityConvergenceResolutionId::new(request.request_id)
+        .map_err(|error| ApiError::BadRequest(error.to_string()).into_response())?;
+    let result = state
+        .mob_state
+        .mob_resolve_identity_convergence_block(
+            &mob_id,
+            meerkat_mob::ResolveIdentityConvergenceBlock {
+                mob_id: mob_id.clone(),
+                agent_identity: meerkat_mob::AgentIdentity::from(agent_identity.as_str()),
+                request_id,
+                expected_desired_revision: request.expected_desired_revision,
+                observed_active_revision: request.observed_active_revision,
+                convergence: request.convergence.into(),
+            },
+        )
+        .await
+        .map_err(|error| mob_rest_error(&error, ApiError::BadRequest))?;
+    Ok(Json(
+        meerkat_contracts::MobResolveIdentityConvergenceBlockResult {
+            outcome: result.outcome.to_wire(),
+            convergence: result.convergence.to_wire(),
+        },
+    ))
 }
 
 /// POST /mob/{id}/members/{agent_identity}/cancel — force-cancel in-flight turn.
@@ -5023,6 +5236,8 @@ async fn create_session_inner(
         };
     let mut build = SessionBuildOptions {
         tool_access_policy: None,
+        application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
+        tool_consequence_policy_registry: None,
         custom_models: std::collections::BTreeMap::new(),
         image_generation_provider: None,
         auto_compact_threshold_override: None,
@@ -6172,6 +6387,8 @@ async fn continue_session_inner(
         let auth_binding_override = req.auth_binding.clone().map(Into::into);
         let mut build = SessionBuildOptions {
             tool_access_policy: None,
+            application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
+            tool_consequence_policy_registry: None,
             custom_models: std::collections::BTreeMap::new(),
             image_generation_provider: None,
             auto_compact_threshold_override: None,

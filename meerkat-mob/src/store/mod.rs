@@ -22,10 +22,13 @@ use crate::event::{MemberRef, MobEvent, MobEventKind, NewMobEvent};
 #[cfg(feature = "runtime-adapter")]
 use crate::identity::DesiredSessionTarget;
 use crate::identity::{
-    IdentityActuationPermit, IdentityConvergenceStatus, IdentityIntent, IdentityIntentRecord,
-    IdentityLeaseClaim, IdentityLeaseClaimOutcome, IdentityLeaseRecord, IdentityOperationReceipt,
-    IdentityOperationReceiptInsertOutcome, IdentityOperationSlot, IdentityOperationSubject,
-    IdentityResourceObservation, IdentityStoredObservation, IdentityTargetObservationVersion,
+    AdoptMemberIdentityDeclaration, ApplyMemberToolDeclaration, IdentityActuationPermit,
+    IdentityAdoptionOutcome, IdentityConvergenceResolutionOutcome, IdentityConvergenceStatus,
+    IdentityIntent, IdentityIntentRecord, IdentityLeaseClaim, IdentityLeaseClaimOutcome,
+    IdentityLeaseRecord, IdentityOperationReceipt, IdentityOperationReceiptInsertOutcome,
+    IdentityOperationSlot, IdentityOperationSubject, IdentityResourceObservation,
+    IdentityStoredObservation, IdentityTargetObservationVersion, MemberToolCommitOutcome,
+    ResolveIdentityConvergenceBlock,
 };
 use crate::ids::{
     AgentIdentity, FlowId, FrameId, Generation, LoopId, LoopInstanceId, MobId, PlacedSpawnId,
@@ -206,6 +209,11 @@ pub enum MobStoreError {
     /// This identity store has no bounded keyset discovery seam.
     #[error("bounded identity intent discovery is unavailable")]
     IdentityIntentScanUnavailable,
+
+    /// This identity store cannot atomically establish an expected-absent
+    /// initial intent and its immutable adoption receipt.
+    #[error("durable identity adoption is unavailable")]
+    IdentityAdoptionUnavailable,
 
     /// This storage composition has no durable external-delivery ledger.
     ///
@@ -5267,6 +5275,36 @@ pub trait MobIdentityStore: Send + Sync {
         mob_id: &MobId,
         identity: &AgentIdentity,
     ) -> Result<IdentityStoredObservation<IdentityIntentRecord>, MobStoreError>;
+
+    /// Atomically establish revision 1 under an explicit expected-absent
+    /// precondition and insert the immutable adoption receipt. The actor owns
+    /// declaration compilation; the store owns absence, incident-wiring
+    /// cleanup evidence, and receipt atomicity.
+    async fn adopt_member_identity_declaration(
+        &self,
+        _request: &AdoptMemberIdentityDeclaration,
+        _compiled: &IdentityIntentRecord,
+    ) -> Result<IdentityAdoptionOutcome, MobStoreError> {
+        Err(MobStoreError::IdentityAdoptionUnavailable)
+    }
+
+    /// Atomically compare the exact current desired revision, replace only
+    /// the member-tool portion when admitted, and insert the immutable
+    /// idempotency receipt. Implementations must never commit one without the
+    /// other.
+    async fn apply_member_tool_declaration(
+        &self,
+        request: &ApplyMemberToolDeclaration,
+    ) -> Result<MemberToolCommitOutcome, MobStoreError>;
+
+    /// Atomically fence desired and actor-observed active revisions, update
+    /// only the store-sealed convergence directive, and record an immutable
+    /// idempotency receipt.
+    async fn resolve_identity_convergence_block(
+        &self,
+        request: &ResolveIdentityConvergenceBlock,
+        actual_active_revision: u64,
+    ) -> Result<IdentityConvergenceResolutionOutcome, MobStoreError>;
 
     async fn list_identity_intents(
         &self,

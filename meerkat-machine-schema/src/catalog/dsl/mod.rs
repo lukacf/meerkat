@@ -2956,12 +2956,27 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                 ],
             ),
             NamedTypeBinding::string_enum(
+                "IdentityReplacementCondition",
+                &[
+                    "NotRequired",
+                    "AdmissionOpen",
+                    "Draining",
+                    "DrainBlocked",
+                    "CancelActive",
+                    "Ready",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
                 "IdentityReconcileDecision",
                 &[
                     "Backoff",
                     "RepairBlocked",
                     "AcquireLease",
                     "AwaitLease",
+                    "CloseMemberAdmission",
+                    "AwaitMemberDrain",
+                    "DrainBlocked",
+                    "CancelActiveMember",
                     "SealRetirementProven",
                     "SealSessionCreationConsumed",
                     "EnsureSessionAuthority",

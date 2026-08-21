@@ -109,6 +109,8 @@ fn portable_spec(identity: &str) -> PortableMemberSpec {
                 text: format!("You are {identity}."),
             },
             tool_access_policy: None,
+            tool_category_overrides: meerkat_core::ToolCategoryOverrides::default(),
+            application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
             mob_tool_authority_context: Some(WireMobToolAuthorityContext {
                 principal_token: format!("principal:{identity}"),
                 can_create_mobs: true,

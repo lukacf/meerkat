@@ -185,6 +185,11 @@ pub enum MobError {
     #[error("mob member already exists: {0}")]
     MemberAlreadyExists(AgentIdentity),
 
+    /// Desired member material is committed but its replacement executor is
+    /// not yet active. New work remains closed until identity convergence.
+    #[error("member '{member_id}' admission is closed for identity convergence")]
+    IdentityConvergenceAdmissionClosed { member_id: AgentIdentity },
+
     /// The durable child session committed, but ordinary resume provisioning
     /// did not seat the requested member identity. The child session id is
     /// retained so an operator can retry resume rather than losing the fork.

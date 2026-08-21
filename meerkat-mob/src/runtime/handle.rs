@@ -2015,6 +2015,9 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         MobError::RetirementInProgress { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::Internal
         }
+        MobError::IdentityConvergenceAdmissionClosed { .. } => {
+            mob_dsl::MobSpawnManyFailureObservationKind::Internal
+        }
         MobError::MemberRetirementInProgress { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::Internal
         }
@@ -4357,6 +4360,10 @@ pub struct SpawnMemberSpec {
     pub launch_mode: crate::launch::MemberLaunchMode,
     /// Tool access policy for this member.
     pub tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+    /// Administrative per-category overrides carried by durable identity intent.
+    pub tool_category_overrides: meerkat_core::ToolCategoryOverrides,
+    /// Stable application consequence-policy identity for this member.
+    pub application_tool_policy: meerkat_core::ApplicationToolPolicyBinding,
     /// Hard resource caps for the spawned member session.
     pub budget_limits: Option<meerkat_core::BudgetLimits>,
     /// When true, automatically wire this member to its spawner.
@@ -4428,6 +4435,8 @@ impl std::fmt::Debug for SpawnMemberSpec {
             .field("labels", &self.labels)
             .field("launch_mode", &self.launch_mode)
             .field("tool_access_policy", &self.tool_access_policy)
+            .field("tool_category_overrides", &self.tool_category_overrides)
+            .field("application_tool_policy", &self.application_tool_policy)
             .field("budget_limits", &self.budget_limits)
             .field("auto_wire_parent", &self.auto_wire_parent)
             .field("additional_instructions", &self.additional_instructions)
@@ -4462,6 +4471,8 @@ impl SpawnMemberSpec {
             labels: None,
             launch_mode: crate::launch::MemberLaunchMode::Fresh,
             tool_access_policy: None,
+            tool_category_overrides: meerkat_core::ToolCategoryOverrides::default(),
+            application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
             budget_limits: None,
             auto_wire_parent: false,
             additional_instructions: None,
@@ -5624,6 +5635,35 @@ impl MobHandle {
                     .await??;
                 Ok(MobMachineCommandResult::IdentityConvergenceStatus(
                     observation,
+                ))
+            }
+            MobMachineCommand::AdoptMemberIdentityDeclaration { request } => {
+                let result =
+                    self.send_actor_command(|reply_tx| {
+                        MobCommand::AdoptMemberIdentityDeclaration { request, reply_tx }
+                    })
+                    .await??;
+                Ok(MobMachineCommandResult::AdoptMemberIdentityDeclaration(
+                    result,
+                ))
+            }
+            MobMachineCommand::ApplyMemberToolDeclaration { request } => {
+                let result = self
+                    .send_actor_command(|reply_tx| MobCommand::ApplyMemberToolDeclaration {
+                        request,
+                        reply_tx,
+                    })
+                    .await??;
+                Ok(MobMachineCommandResult::ApplyMemberToolDeclaration(result))
+            }
+            MobMachineCommand::ResolveIdentityConvergenceBlock { request } => {
+                let result =
+                    self.send_actor_command(|reply_tx| {
+                        MobCommand::ResolveIdentityConvergenceBlock { request, reply_tx }
+                    })
+                    .await??;
+                Ok(MobMachineCommandResult::ResolveIdentityConvergenceBlock(
+                    result,
                 ))
             }
             MobMachineCommand::ConcludeObjective {
@@ -7227,6 +7267,66 @@ impl MobHandle {
             MobMachineCommandResult::IdentityConvergenceStatus(observation) => Ok(observation),
             _ => Err(MobError::Internal(
                 "unexpected identity convergence status command result variant".into(),
+            )),
+        }
+    }
+
+    /// Atomically update only the tool portion of an existing durable member
+    /// intent, then return a fresh live convergence projection.
+    pub async fn apply_member_tool_declaration(
+        &self,
+        mut request: crate::identity::ApplyMemberToolDeclaration,
+    ) -> Result<crate::identity::ApplyMemberToolDeclarationResult, MobError> {
+        request.mob_id = self.mob_id().clone();
+        match self
+            .execute_machine_command(MobMachineCommand::ApplyMemberToolDeclaration {
+                request: Box::new(request),
+            })
+            .await?
+        {
+            MobMachineCommandResult::ApplyMemberToolDeclaration(result) => Ok(result),
+            _ => Err(MobError::Internal(
+                "unexpected member-tool declaration command result variant".into(),
+            )),
+        }
+    }
+
+    /// Establish revision 1 for an existing member under an explicit
+    /// expected-absent precondition, then schedule normal identity convergence.
+    pub async fn adopt_member_identity_declaration(
+        &self,
+        mut request: crate::identity::AdoptMemberIdentityDeclaration,
+    ) -> Result<crate::identity::AdoptMemberIdentityDeclarationResult, MobError> {
+        request.mob_id = self.mob_id().clone();
+        match self
+            .execute_machine_command(MobMachineCommand::AdoptMemberIdentityDeclaration {
+                request: Box::new(request),
+            })
+            .await?
+        {
+            MobMachineCommandResult::AdoptMemberIdentityDeclaration(result) => Ok(result),
+            _ => Err(MobError::Internal(
+                "unexpected command result variant for identity adoption".to_string(),
+            )),
+        }
+    }
+
+    /// Resume a blocked identity replacement under a fresh finite drain or
+    /// explicit cancellation decision, fenced by desired and active revisions.
+    pub async fn resolve_identity_convergence_block(
+        &self,
+        mut request: crate::identity::ResolveIdentityConvergenceBlock,
+    ) -> Result<crate::identity::ResolveIdentityConvergenceBlockResult, MobError> {
+        request.mob_id = self.mob_id().clone();
+        match self
+            .execute_machine_command(MobMachineCommand::ResolveIdentityConvergenceBlock {
+                request: Box::new(request),
+            })
+            .await?
+        {
+            MobMachineCommandResult::ResolveIdentityConvergenceBlock(result) => Ok(result),
+            _ => Err(MobError::Internal(
+                "unexpected convergence resolution command result variant".into(),
             )),
         }
     }

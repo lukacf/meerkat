@@ -100,6 +100,10 @@ fn identity_reconciliation_fields(
             field("lease"),
             named_variant("IdentityLeaseCondition", "HeldByCurrentIncarnation"),
         ),
+        (
+            field("replacement"),
+            named_variant("IdentityReplacementCondition", "NotRequired"),
+        ),
         (field("external_binding_required"), KernelValue::Bool(false)),
         (field("initial_delivery_required"), KernelValue::Bool(false)),
         (

@@ -358,13 +358,20 @@ pub async fn build_agent_config(
         explicit => explicit,
     };
 
-    // A read-only profile is a declaration by the mob author, so it is the
-    // floor rather than a default: it replaces whatever the spawn site asked
-    // for instead of being overridden by it. Every other composition above
-    // already ran, so this is the single seam where the effective policy for a
-    // profile-built member is decided.
+    // A read-only profile is a declaration by the mob author. It composes
+    // conjunctively with a narrower member or parent name policy; replacing
+    // that policy would widen an allow-list to every declared read-only tool.
     if profile.tools.read_only {
-        config.tool_access_policy = Some(meerkat_core::ops::ToolAccessPolicy::ReadOnly);
+        config.tool_access_policy = Some(match config.tool_access_policy.take() {
+            None => meerkat_core::ops::ToolAccessPolicy::ReadOnly,
+            Some(policy) => policy
+                .conjoin(meerkat_core::ops::ToolAccessPolicy::ReadOnly)
+                .map_err(|error| {
+                    MobError::WiringError(format!(
+                        "failed to compose profile tool constraints: {error}"
+                    ))
+                })?,
+        });
     }
 
     Ok(config)
@@ -1199,6 +1206,7 @@ mod tests {
                     image_generation: meerkat_core::session::ToolCategoryOverride::Enable,
                     web_search: meerkat_core::session::ToolCategoryOverride::Inherit,
                     tool_access_policy: None,
+                    application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
                     active_skills: None,
                 },
                 keep_alive: false,
@@ -1483,16 +1491,21 @@ mod tests {
             "a read-only profile must resolve to read-only intent with no spec policy"
         );
 
-        // The widest possible spawn request must not defeat the declaration.
-        let wide = meerkat_core::ops::ToolAccessPolicy::DenyList(Default::default());
-        let config = build_agent_config(params(Some(wide)))
+        // A narrow spawn request and read-only profile remain a conjunction.
+        let narrow =
+            meerkat_core::ops::ToolAccessPolicy::AllowList(["only_this"].into_iter().collect());
+        let config = build_agent_config(params(Some(narrow)))
             .await
             .expect("build_agent_config");
-        assert_eq!(
-            config.tool_access_policy,
-            Some(meerkat_core::ops::ToolAccessPolicy::ReadOnly),
-            "a spawn-site policy must not widen a read-only profile"
-        );
+        let effective = meerkat_core::ToolExecutionPolicy::resolve(
+            config
+                .tool_access_policy
+                .expect("composed policy must be present"),
+        )
+        .expect("composed policy resolves");
+        assert!(effective.permits_call("only_this", meerkat_core::ToolMutationClass::ReadOnly));
+        assert!(!effective.permits_call("only_this", meerkat_core::ToolMutationClass::Mutating));
+        assert!(!effective.permits_call("another", meerkat_core::ToolMutationClass::ReadOnly));
 
         // Control: the same definition without the declaration keeps the
         // spawn-site policy, so the assertion above is about the declaration.

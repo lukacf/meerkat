@@ -6822,6 +6822,29 @@ pub struct SessionLlmRequestPolicy {
     /// Typed provider-native request defaults resolved for the swapped target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_tool_defaults: Option<crate::lifecycle::run_primitive::ProviderTag>,
+    /// Narrow-only final policy for provider-native server tools.
+    #[serde(default)]
+    pub provider_native_tools: ProviderNativeToolPolicy,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderNativeToolPolicy {
+    #[default]
+    Inherit,
+    DisableAll,
+}
+
+impl ProviderNativeToolPolicy {
+    #[must_use]
+    pub fn narrow(self, other: Self) -> Self {
+        if matches!(self, Self::DisableAll) || matches!(other, Self::DisableAll) {
+            Self::DisableAll
+        } else {
+            Self::Inherit
+        }
+    }
 }
 
 impl SessionMetadata {
@@ -6857,6 +6880,7 @@ pub const SESSION_METADATA_KEY: &str = "session_metadata";
 ///
 /// **Dogma §10:** Inherit, disable, and set are different facts.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ToolCategoryOverride {
     /// No explicit intent — inherit runtime/factory default.
@@ -6928,6 +6952,35 @@ impl ToolCategoryOverride {
     }
 }
 
+/// Administrative per-category member-tool intent.
+///
+/// This carrier deliberately keeps `Inherit`, `Enable`, and `Disable`
+/// distinct. Materialization resolves each field through its existing
+/// category owner; carrying the aggregate does not merge those owners.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct ToolCategoryOverrides {
+    #[serde(default)]
+    pub builtins: ToolCategoryOverride,
+    #[serde(default)]
+    pub shell: ToolCategoryOverride,
+    #[serde(default)]
+    pub comms: ToolCategoryOverride,
+    #[serde(default)]
+    pub mob: ToolCategoryOverride,
+    #[serde(default)]
+    pub memory: ToolCategoryOverride,
+    #[serde(default)]
+    pub schedule: ToolCategoryOverride,
+    #[serde(default)]
+    pub workgraph: ToolCategoryOverride,
+    #[serde(default)]
+    pub image_generation: ToolCategoryOverride,
+    #[serde(default)]
+    pub web_search: ToolCategoryOverride,
+}
+
 /// Tooling intent captured at session creation time.
 ///
 /// Fields use [`ToolCategoryOverride`] to distinguish "no opinion" from
@@ -6972,6 +7025,9 @@ pub struct SessionTooling {
     /// by spawning).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_access_policy: Option<crate::ops::ToolAccessPolicy>,
+    /// Stable application policy identity governing consequence narrowing.
+    #[serde(default)]
+    pub application_tool_policy: crate::ApplicationToolPolicyBinding,
     /// Active skills at session creation time (for deterministic resume).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_skills: Option<Vec<crate::skills::SkillKey>>,

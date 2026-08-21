@@ -2808,6 +2808,9 @@ impl MockSessionService {
                         .map(|b| b.override_web_search)
                         .unwrap_or(ToolCategoryOverride::Inherit),
                     tool_access_policy: build.and_then(|b| b.tool_access_policy.clone()),
+                    application_tool_policy: build
+                        .map(|b| b.application_tool_policy.clone())
+                        .unwrap_or(meerkat_core::ApplicationToolPolicyBinding::Unmanaged),
                     active_skills: build.and_then(|b| b.preload_skills.clone()),
                 },
                 keep_alive: build.map(|b| b.keep_alive).unwrap_or(false),
@@ -9929,7 +9932,7 @@ impl AgentToolDispatcher for EchoBundleDispatcher {
 }
 
 struct PersistentMockAgent {
-    session_id: SessionId,
+    session: Session,
     llm_identity: SessionLlmIdentity,
     transient_turn_context_state: meerkat_core::TransientTurnContextStateHandle,
 }
@@ -9942,7 +9945,7 @@ impl SessionAgent for PersistentMockAgent {
         _event_tx: tokio::sync::mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
         Ok(mock_run_result(
-            self.session_id.clone(),
+            self.session.id().clone(),
             "Persistent mock turn".to_string(),
         ))
     }
@@ -9972,7 +9975,7 @@ impl SessionAgent for PersistentMockAgent {
     }
 
     fn session_id(&self) -> SessionId {
-        self.session_id.clone()
+        self.session.id().clone()
     }
 
     fn snapshot(&self) -> SessionSnapshot {
@@ -9987,7 +9990,7 @@ impl SessionAgent for PersistentMockAgent {
     }
 
     fn session_clone(&self) -> Result<Session, meerkat_core::error::AgentError> {
-        Ok(Session::with_id(self.session_id.clone()))
+        Ok(self.session.clone())
     }
 
     fn session_transcript_authority(
@@ -10020,9 +10023,50 @@ impl SessionAgentBuilder for PersistentMockBuilder {
         req: &CreateSessionRequest,
         _event_tx: tokio::sync::mpsc::Sender<AgentEvent>,
     ) -> Result<Self::Agent, SessionError> {
-        let session_id = requested_test_session_id(req);
+        let session = req
+            .build
+            .as_ref()
+            .and_then(|build| build.resume_session.clone())
+            .unwrap_or_else(|| Session::with_id(requested_test_session_id(req)));
+        let mut session =
+            factory_policy_session(session, req.model.clone(), req.max_tokens.unwrap_or(4096));
+        if let Some(build) = req.build.as_ref() {
+            let mut metadata = session
+                .session_metadata()
+                .expect("factory policy test session metadata");
+            if let Some(provider) = build.provider {
+                metadata.provider = provider;
+            }
+            metadata.provider_params = build.provider_params.clone();
+            metadata.tooling.builtins = build.override_builtins;
+            metadata.tooling.shell = build.override_shell;
+            metadata.tooling.comms = build.override_comms;
+            metadata.tooling.mob = build.override_mob;
+            metadata.tooling.memory = build.override_memory;
+            metadata.tooling.schedule = build.override_schedule;
+            metadata.tooling.workgraph = build.override_workgraph;
+            metadata.tooling.image_generation = build.override_image_generation;
+            metadata.tooling.web_search = build.override_web_search;
+            metadata.tooling.tool_access_policy = build.tool_access_policy.clone();
+            metadata.tooling.application_tool_policy = build.application_tool_policy.clone();
+            metadata.tooling.active_skills = build.preload_skills.clone();
+            metadata.keep_alive = build.keep_alive;
+            metadata.comms_name = build.comms_name.clone();
+            metadata.peer_meta = build.peer_meta.clone();
+            metadata.realm_id = build.realm_id.clone();
+            metadata.instance_id = build.instance_id.clone();
+            metadata.backend = build.backend.map(|backend| backend.as_str().to_string());
+            metadata.config_generation = build.config_generation;
+            metadata.auth_binding = build.auth_binding.clone();
+            metadata.mob_member_binding = build.mob_member_binding.clone();
+            session.set_session_metadata(metadata).map_err(|error| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to seed persistent mock session metadata: {error}"
+                )))
+            })?;
+        }
         Ok(PersistentMockAgent {
-            session_id,
+            session,
             llm_identity: test_llm_identity(req.model.clone()),
             transient_turn_context_state: meerkat_core::TransientTurnContextStateHandle::new(),
         })
@@ -11850,6 +11894,275 @@ async fn test_mob_handle_is_clone() {
     let (handle, _service) = create_test_mob(sample_definition()).await;
     let handle2 = handle.clone();
     assert_eq!(handle2.mob_id().as_str(), "test-mob");
+}
+
+#[tokio::test]
+async fn test_existing_member_adoption_tool_update_and_resume_keep_identity_and_session() {
+    let definition = with_unique_mob_id(sample_definition(), "identity-adoption");
+    let mob_id = definition.id.clone();
+    let event_store = InMemoryMobEventStore::new();
+    let runs = Arc::new(InMemoryMobRunStore::new());
+    let specs = Arc::new(InMemoryMobSpecStore::new());
+    let runtime_metadata = Arc::new(InMemoryMobRuntimeMetadataStore::new());
+    let identity_store = Arc::new(InMemoryMobIdentityStore::paired_with_event_store(
+        &event_store,
+        Arc::new(crate::store::SystemMobIdentityStoreClock),
+    ));
+    let events: Arc<dyn MobEventStore> = Arc::new(event_store);
+    let identity_status = Arc::new(InMemoryMobIdentityStatusStore::new());
+    let session_store = Arc::new(MemoryStore::new());
+    let session_store_dyn: Arc<dyn SessionStore> = session_store.clone();
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+    let blob_store: Arc<dyn meerkat_core::BlobStore> =
+        Arc::new(meerkat_store::MemoryBlobStore::new());
+    let service = Arc::new(meerkat_session::PersistentSessionService::new(
+        PersistentMockBuilder,
+        16,
+        session_store_dyn,
+        runtime_store,
+        blob_store,
+    ));
+    let storage = MobStorage {
+        events: events.clone(),
+        runs: runs.clone(),
+        specs: specs.clone(),
+        runtime_metadata: runtime_metadata.clone(),
+        identity: identity_store.clone(),
+        identity_member: Some(identity_store.clone()),
+        identity_status: identity_status.clone(),
+        realm_profiles: None,
+    };
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .with_spawn_base_prompt_source(Arc::new(crate::StaticSpawnBasePromptSource(
+            "adoption test base prompt".to_string(),
+        )))
+        .create()
+        .await
+        .expect("create adoption test mob");
+    let member = AgentIdentity::from("worker-1");
+    let mut spawn = SpawnMemberSpec::new(ProfileName::from("worker"), member.clone());
+    spawn.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    handle
+        .spawn_spec(spawn)
+        .await
+        .expect("spawn pre-existing member");
+    let session_id = handle
+        .resolve_bridge_session_id(&member)
+        .await
+        .expect("session-backed member");
+
+    let adoption = crate::identity::AdoptMemberIdentityDeclaration {
+        mob_id: mob_id.clone(),
+        agent_identity: member.clone(),
+        request_id: crate::identity::IdentityAdoptionId::new("adopt-worker-1")
+            .expect("valid adoption id"),
+        precondition: crate::identity::IdentityAdoptionPrecondition::ExpectedAbsent,
+        declaration_scope: crate::identity::IdentityDeclarationScopeId::new("homecore-policy")
+            .expect("valid declaration scope"),
+        declaration_revision: 1,
+        session: crate::identity::DesiredSessionTarget {
+            session_id: session_id.clone(),
+            lineage_id: meerkat_core::SessionLineageId::for_session(&session_id),
+            lineage_generation: meerkat_core::SessionGeneration::INITIAL,
+            authority_policy: crate::identity::DesiredSessionAuthorityPolicy::RequireExisting,
+        },
+        member: crate::identity::IdentityProfileMemberDeclaration {
+            profile_name: ProfileName::from("worker"),
+            profile_override: None,
+            model_override: None,
+            external_addressable_override: None,
+            context: None,
+            labels: None,
+            additional_instructions: None,
+            system_prompt_override: None,
+            tool_access_policy: None,
+            auth_binding: None,
+            budget_limits: None,
+            runtime_mode: Some(meerkat_contracts::wire::WireMobRuntimeMode::TurnDriven),
+            required_env_keys: Vec::new(),
+            required_local_callback_tools: Vec::new(),
+            execution: crate::identity::DesiredExecution::ControllingSession,
+        },
+        wiring_custody: crate::identity::IdentityWiringCustody::ExternalManaged,
+        owned_wiring: BTreeSet::new(),
+        convergence: crate::identity::IdentityConvergenceMode::Drain { max_wait_ms: 5_000 },
+    };
+    assert!(matches!(
+        handle
+            .adopt_member_identity_declaration(adoption.clone())
+            .await
+            .expect("adopt existing member")
+            .adoption,
+        crate::identity::IdentityAdoptionOutcome::Adopted {
+            desired_revision: 1
+        }
+    ));
+    let adoption_convergence = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if matches!(
+                handle
+                    .identity_convergence_status(&member)
+                    .await
+                    .expect("read adoption convergence"),
+                crate::identity::IdentityStoredObservation::Valid(
+                    crate::identity::IdentityConvergenceStatus {
+                        intent_revision: Some(1),
+                        active_intent_revision: Some(1),
+                        decision: Some(crate::identity::IdentityReconcileDecision::Converged),
+                        ..
+                    }
+                )
+            ) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(
+        adoption_convergence.is_ok(),
+        "adoption must converge before the next revision is applied; latest status: {:?}",
+        handle
+            .identity_convergence_status(&member)
+            .await
+            .expect("read final adoption convergence")
+    );
+
+    let adopted = match identity_store
+        .observe_identity_intent(&mob_id, &member)
+        .await
+        .expect("read adopted identity intent")
+    {
+        crate::identity::IdentityStoredObservation::Valid(record) => record,
+        other => panic!("expected valid adopted identity intent, got {other:?}"),
+    };
+    let mut declaration = match &adopted.intent {
+        crate::identity::IdentityIntent::Present { member, .. } => {
+            member.material.member_tool_declaration()
+        }
+        crate::identity::IdentityIntent::Absent { .. } => {
+            panic!("adoption must persist present intent")
+        }
+    };
+    declaration.category_overrides.shell = ToolCategoryOverride::Enable;
+    let update = handle
+        .apply_member_tool_declaration(crate::identity::ApplyMemberToolDeclaration {
+            mob_id: mob_id.clone(),
+            agent_identity: member.clone(),
+            request_id: crate::identity::MemberToolMutationId::new("enable-shell")
+                .expect("valid mutation id"),
+            expected_intent_revision: 1,
+            declaration,
+            convergence: crate::identity::IdentityConvergenceMode::CancelActive,
+        })
+        .await
+        .expect("apply tool declaration after adoption");
+    assert!(matches!(
+        update.commit,
+        crate::identity::MemberToolCommitOutcome::Committed {
+            desired_revision: 2
+        }
+    ));
+
+    let tool_convergence = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let shell = MobSessionService::load_persisted_session(service.as_ref(), &session_id)
+                .await
+                .expect("read rematerialized session")
+                .and_then(|session| session.session_metadata())
+                .map(|metadata| metadata.tooling.shell);
+            if shell == Some(ToolCategoryOverride::Enable) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(
+        tool_convergence.is_ok(),
+        "tool update must rematerialize the existing session; latest status: {:?}; persisted metadata: {:?}",
+        handle
+            .identity_convergence_status(&member)
+            .await
+            .expect("read final tool convergence"),
+        MobSessionService::load_persisted_session(service.as_ref(), &session_id)
+            .await
+            .expect("read final persisted session")
+            .and_then(|session| session.session_metadata())
+    );
+    let rematerialized_session_id = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(rematerialized_session_id) = handle.resolve_bridge_session_id(&member).await
+            {
+                break rematerialized_session_id;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("member binding must return after tool rematerialization");
+    assert_eq!(
+        rematerialized_session_id, session_id,
+        "tool rematerialization must retain the exact session identity"
+    );
+    let replay = handle
+        .adopt_member_identity_declaration(adoption)
+        .await
+        .expect("replay original adoption after a later tool revision");
+    assert_eq!(
+        replay.convergence.intent_revision,
+        Some(2),
+        "an old adoption receipt must not regress live convergence to revision 1"
+    );
+
+    handle.shutdown().await.expect("shutdown adoption test mob");
+    let resumed = MobBuilder::for_resume(MobStorage {
+        events,
+        runs,
+        specs,
+        runtime_metadata,
+        identity: identity_store.clone(),
+        identity_member: Some(identity_store.clone()),
+        identity_status,
+        realm_profiles: None,
+    })
+    .with_session_service(service.clone())
+    .with_spawn_base_prompt_source(Arc::new(crate::StaticSpawnBasePromptSource(
+        "adoption test base prompt".to_string(),
+    )))
+    .notify_orchestrator_on_resume(false)
+    .resume()
+    .await
+    .expect("resume adopted mob");
+    assert_eq!(
+        resumed
+            .resolve_bridge_session_id(&member)
+            .await
+            .expect("member session after resume"),
+        session_id,
+        "resume must retain the adopted member session"
+    );
+    let durable = identity_store
+        .observe_identity_intent(&mob_id, &member)
+        .await
+        .expect("read adopted identity after resume");
+    assert!(matches!(
+        durable,
+        crate::identity::IdentityStoredObservation::Valid(crate::identity::IdentityIntentRecord {
+            intent_revision: 2,
+            ..
+        })
+    ));
+    let metadata = MobSessionService::load_persisted_session(service.as_ref(), &session_id)
+        .await
+        .expect("load adopted session after resume")
+        .expect("adopted session after resume")
+        .session_metadata()
+        .expect("adopted session metadata");
+    assert_eq!(metadata.tooling.shell, ToolCategoryOverride::Enable);
+    resumed.shutdown().await.expect("shutdown resumed mob");
 }
 
 #[tokio::test]
@@ -24635,6 +24948,7 @@ async fn test_build_resumed_agent_config_rejects_mismatched_session_identity() {
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
                 tool_access_policy: None,
+                application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
                 active_skills: Some(vec![meerkat_core::skills::SkillKey::builtin(
                     meerkat_core::skills::SkillName::parse("mob-communication")
                         .expect("valid skill name"),
@@ -44861,6 +45175,9 @@ impl RealCommsSessionService {
                             .unwrap_or(ToolCategoryOverride::Inherit),
                         tool_access_policy: build
                             .and_then(|options| options.tool_access_policy.clone()),
+                        application_tool_policy: build
+                            .map(|options| options.application_tool_policy.clone())
+                            .unwrap_or(meerkat_core::ApplicationToolPolicyBinding::Unmanaged),
                         active_skills: build.and_then(|options| options.preload_skills.clone()),
                     },
                     keep_alive: build.map(|options| options.keep_alive).unwrap_or(false),
@@ -63337,6 +63654,9 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
         }
         MobError::MemberRoleMigrationRejected { .. } => {
             "member_role_migration_rejected".to_string()
+        }
+        MobError::IdentityConvergenceAdmissionClosed { .. } => {
+            "identity_convergence_admission_closed".to_string()
         }
         MobError::NotExternallyAddressable(_) => "not_externally_addressable".to_string(),
         MobError::InvalidTransition { from, to } => {

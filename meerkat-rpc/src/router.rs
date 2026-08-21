@@ -1687,9 +1687,8 @@ impl MethodRouter {
         request: RpcRequest,
         request_context: Option<RequestContext>,
     ) -> Option<RpcResponse> {
-        let mut routed = self
-            .dispatch_routed_with_request_context(request, request_context)
-            .await?;
+        let mut routed =
+            Box::pin(self.dispatch_routed_with_request_context(request, request_context)).await?;
         let response_id = routed.response.id.clone();
         if let Err(settlement_error) = routed.settle_delivery(true) {
             return Some(RpcResponse::error(
@@ -1964,6 +1963,29 @@ impl MethodRouter {
             }
             #[cfg(feature = "mob")]
             "mob/members" => handlers::mob::handle_members(id, params, &self.mob_state).await,
+            #[cfg(feature = "mob")]
+            "mob/member_tool_declaration" => {
+                handlers::mob::handle_member_tool_declaration(id, params, &self.mob_state).await
+            }
+            #[cfg(feature = "mob")]
+            "mob/apply_member_tool_declaration" => {
+                handlers::mob::handle_apply_member_tool_declaration(id, params, &self.mob_state)
+                    .await
+            }
+            #[cfg(feature = "mob")]
+            "mob/adopt_member_identity_declaration" => {
+                handlers::mob::handle_adopt_member_identity_declaration(id, params, &self.mob_state)
+                    .await
+            }
+            #[cfg(feature = "mob")]
+            "mob/resolve_identity_convergence_block" => {
+                handlers::mob::handle_resolve_identity_convergence_block(
+                    id,
+                    params,
+                    &self.mob_state,
+                )
+                .await
+            }
             #[cfg(feature = "mob")]
             "mob/retire" => handlers::mob::handle_retire(id, params, &self.mob_state).await,
             #[cfg(feature = "mob")]

@@ -4117,6 +4117,8 @@ async fn handle_meerkat_run(
                     .map_err(ToolCallError::internal)?;
             let mut build = SessionBuildOptions {
                 tool_access_policy: None,
+                application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
+                tool_consequence_policy_registry: None,
                 custom_models: std::collections::BTreeMap::new(),
                 image_generation_provider: None,
                 auto_compact_threshold_override: None,
@@ -4538,6 +4540,8 @@ async fn handle_meerkat_resume(
     let build_session_options = |runtime_bindings, external_tools| {
         let mut build = SessionBuildOptions {
             tool_access_policy: None,
+            application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
+            tool_consequence_policy_registry: None,
             custom_models: std::collections::BTreeMap::new(),
             image_generation_provider: None,
             auto_compact_threshold_override: None,

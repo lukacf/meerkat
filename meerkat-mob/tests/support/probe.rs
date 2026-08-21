@@ -536,6 +536,8 @@ pub fn portable_member_spec_for_raw_probe(
                 text: format!("You are {identity}, a deterministic raw-probe member."),
             },
             tool_access_policy: None,
+            tool_category_overrides: meerkat_core::ToolCategoryOverrides::default(),
+            application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
             mob_tool_authority_context: None,
             auth_binding: None,
             budget_limits: None,

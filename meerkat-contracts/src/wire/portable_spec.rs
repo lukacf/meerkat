@@ -235,6 +235,14 @@ pub struct PortableSpawnOverlay {
     /// means no per-member policy, not "inherit something ambient".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_access_policy: Option<WireResolvedToolAccessPolicy>,
+    /// Administrative per-category intent. The receiving host resolves each
+    /// field through the same category owner used for local materialization.
+    #[serde(default)]
+    pub tool_category_overrides: meerkat_core::ToolCategoryOverrides,
+    /// Stable application policy identity. Snapshot content remains owned by
+    /// the host-injected provider and is never copied into this member spec.
+    #[serde(default)]
+    pub application_tool_policy: meerkat_core::ApplicationToolPolicyBinding,
     /// Minted by the controlling host; shipped for member-side visibility
     /// composition only. Dispatch authority is re-resolved
     /// controlling-host-side (R6) — this projection is never a second
@@ -267,6 +275,15 @@ pub enum PortableSystemPrompt {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
+pub enum WireToolAccessConstraint {
+    AllowNames(Vec<String>),
+    DenyNames(Vec<String>),
+    ReadOnly,
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum WireResolvedToolAccessPolicy {
     AllowList(Vec<String>),
     DenyList(Vec<String>),
@@ -274,6 +291,8 @@ pub enum WireResolvedToolAccessPolicy {
     /// materialized member keeps the declaration instead of silently
     /// downgrading to unrestricted.
     ReadOnly,
+    /// Every contained constraint must admit the call.
+    Constraints(Vec<WireToolAccessConstraint>),
 }
 
 /// Wire mirror of `meerkat_mob::SpawnContinuityIntent` (same serde shape).
@@ -421,6 +440,8 @@ pub(crate) fn sample_portable_member_spec() -> PortableMemberSpec {
             tool_access_policy: Some(WireResolvedToolAccessPolicy::AllowList(vec![
                 "member_status".to_string(),
             ])),
+            tool_category_overrides: meerkat_core::ToolCategoryOverrides::default(),
+            application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
             mob_tool_authority_context: Some(WireMobToolAuthorityContext {
                 principal_token: "principal-token-1".to_string(),
                 can_create_mobs: false,

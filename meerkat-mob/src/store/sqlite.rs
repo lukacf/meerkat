@@ -45,13 +45,18 @@ use crate::event::{
 #[cfg(feature = "runtime-adapter")]
 use crate::identity::DesiredSessionTarget;
 use crate::identity::{
-    IDENTITY_INTENT_SCHEMA_VERSION, IDENTITY_LEASE_MAX_TTL_MS, IDENTITY_LEASE_SCHEMA_VERSION,
+    AdoptMemberIdentityDeclaration, ApplyMemberToolDeclaration, IDENTITY_INTENT_SCHEMA_VERSION,
+    IDENTITY_LEASE_MAX_TTL_MS, IDENTITY_LEASE_SCHEMA_VERSION,
     IDENTITY_OPERATION_RECEIPT_SCHEMA_VERSION, IdentityActuationPermit, IdentityActuatorTarget,
-    IdentityConvergenceStatus, IdentityIntent, IdentityIntentError, IdentityIntentRecord,
-    IdentityLeaseClaim, IdentityLeaseClaimOutcome, IdentityLeaseRecord, IdentityOperationKind,
+    IdentityAdoptionOutcome, IdentityAdoptionReceipt, IdentityConvergenceResolutionOutcome,
+    IdentityConvergenceResolutionReceipt, IdentityConvergenceStatus, IdentityIntent,
+    IdentityIntentError, IdentityIntentMutationReceipt, IdentityIntentRecord, IdentityLeaseClaim,
+    IdentityLeaseClaimOutcome, IdentityLeaseRecord, IdentityOperationKind,
     IdentityOperationReceipt, IdentityOperationReceiptInsertOutcome,
     IdentityOperationReceiptPayload, IdentityOperationSlot, IdentityOperationSubject,
     IdentityRetirementPlan, IdentityStoredObservation, IdentityTargetObservationVersion,
+    MemberToolCommitOutcome, ResolveIdentityConvergenceBlock,
+    prepare_identity_convergence_resolution, prepare_member_tool_intent_mutation,
 };
 use crate::ids::{
     AgentIdentity, FlowId, FrameId, Generation, LoopId, LoopInstanceId, MobId, RunId, StepId,
@@ -233,6 +238,30 @@ CREATE TABLE IF NOT EXISTS mob_identity_operation_receipts (
 );
 CREATE INDEX IF NOT EXISTS mob_identity_receipts_identity
     ON mob_identity_operation_receipts (mob_id, subject_identity);
+CREATE TABLE IF NOT EXISTS mob_identity_intent_mutation_receipts (
+    mob_id TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    agent_identity TEXT NOT NULL,
+    request_digest TEXT NOT NULL,
+    receipt_json BLOB NOT NULL,
+    PRIMARY KEY (mob_id, request_id)
+);
+CREATE TABLE IF NOT EXISTS mob_identity_convergence_resolution_receipts (
+    mob_id TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    agent_identity TEXT NOT NULL,
+    request_digest TEXT NOT NULL,
+    receipt_json BLOB NOT NULL,
+    PRIMARY KEY (mob_id, request_id)
+);
+CREATE TABLE IF NOT EXISTS mob_identity_adoption_receipts (
+    mob_id TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    agent_identity TEXT NOT NULL,
+    request_digest TEXT NOT NULL,
+    receipt_json BLOB NOT NULL,
+    PRIMARY KEY (mob_id, request_id)
+);
 CREATE TABLE IF NOT EXISTS mob_identity_statuses (
     mob_id TEXT NOT NULL,
     agent_identity TEXT NOT NULL,
@@ -1076,12 +1105,55 @@ fn migration_0004_release_0_8_11_schema(tx: &Transaction<'_>) -> Result<(), rusq
     Ok(())
 }
 
+fn migration_0005_identity_intent_mutation_receipts(
+    tx: &Transaction<'_>,
+) -> Result<(), rusqlite::Error> {
+    tx.execute_batch(
+        "CREATE TABLE mob_identity_intent_mutation_receipts (
+             mob_id TEXT NOT NULL,
+             request_id TEXT NOT NULL,
+             agent_identity TEXT NOT NULL,
+             request_digest TEXT NOT NULL,
+             receipt_json BLOB NOT NULL,
+             PRIMARY KEY (mob_id, request_id)
+         );",
+    )
+}
+
+fn migration_0006_identity_convergence_resolution_receipts(
+    tx: &Transaction<'_>,
+) -> Result<(), rusqlite::Error> {
+    tx.execute_batch(
+        "CREATE TABLE mob_identity_convergence_resolution_receipts (
+             mob_id TEXT NOT NULL,
+             request_id TEXT NOT NULL,
+             agent_identity TEXT NOT NULL,
+             request_digest TEXT NOT NULL,
+             receipt_json BLOB NOT NULL,
+             PRIMARY KEY (mob_id, request_id)
+         );",
+    )
+}
+
+fn migration_0007_identity_adoption_receipts(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+    tx.execute_batch(
+        "CREATE TABLE mob_identity_adoption_receipts (
+             mob_id TEXT NOT NULL,
+             request_id TEXT NOT NULL,
+             agent_identity TEXT NOT NULL,
+             request_digest TEXT NOT NULL,
+             receipt_json BLOB NOT NULL,
+             PRIMARY KEY (mob_id, request_id)
+         );",
+    )
+}
+
 fn migration_0001_mob_schema(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
     tx.execute_batch(CREATE_SCHEMA_SQL)
 }
 
 fn initialize_current_mob_schema(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
-    // CREATE_SCHEMA_SQL is the direct current v4 shape. The two historical
+    // CREATE_SCHEMA_SQL is the direct current v7 shape. The historical
     // probes still install the released event index and verify/complete the
     // member-operator request table, but v4's destructive v3 transition must
     // never be replayed on this fresh shape.
@@ -1220,12 +1292,136 @@ fn verify_released_0_8_10_mob_schema(conn: &Connection) -> Result<(), String> {
     )
 }
 
+// Frozen v4 catalog shipped by Meerkat 0.8.25. The builder deliberately
+// starts from the literal 0.8.10 catalog and applies only the released v4
+// transition; it must not reuse the current v7 initializer.
+fn build_released_0_8_25_mob_schema(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+    build_released_0_8_10_mob_schema(tx)?;
+    migration_0004_release_0_8_11_schema(tx)
+}
+
+const RELEASED_0_8_25_MOB_OBJECTS: &[meerkat_sqlite::SchemaObject] = &[
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_events",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_event_meta",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_external_deliveries",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runs",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_run_remote_turn_intents",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_run_remote_turn_receipts",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_specs",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_supervisors",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_host_authorities",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_host_binding_generation_highwaters",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_member_operator_requests",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_placed_spawns",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_operator_grants",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_member_event_cursors",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_member_live_cleanups",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_binding_overlays",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_identity_store_meta",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_identity_intents",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_identity_leases",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_identity_operation_receipts",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_identity_statuses",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "realm_profiles",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Index,
+        name: "mob_events_mob_cursor",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Index,
+        name: "mob_identity_intents_session",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Index,
+        name: "mob_identity_intents_lineage",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Index,
+        name: "mob_identity_receipts_identity",
+    },
+];
+
+fn verify_released_0_8_25_mob_schema(conn: &Connection) -> Result<(), String> {
+    meerkat_sqlite::verify_released_schema_fingerprint(
+        conn,
+        &MOB_DOMAIN,
+        RELEASED_0_8_25_MOB_OBJECTS,
+        build_released_0_8_25_mob_schema,
+    )
+}
+
 /// The mob store bundle's schema domain in the per-file migration ledger.
 ///
-/// The only historical transition admitted by this binary is the exact
-/// released v3 -> v4 step. Migrations 0002/0003 remain as frozen history and
-/// as pieces of the direct current/released schema builders; their lower
-/// ledger versions are not eligible predecessors.
+/// The oldest historical transition admitted by this binary is the exact
+/// released v3 shape. Migrations 0002/0003 remain as frozen history and as
+/// pieces of the direct current/released schema builders; their lower ledger
+/// versions are not eligible predecessors.
 pub const MOB_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::SchemaDomain {
     name: "mob",
     migrations: &[
@@ -1249,14 +1445,35 @@ pub const MOB_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::SchemaDomai
             name: "release-0.8.11-schema",
             apply: migration_0004_release_0_8_11_schema,
         },
+        meerkat_sqlite::Migration {
+            version: 5,
+            name: "identity-intent-mutation-receipts",
+            apply: migration_0005_identity_intent_mutation_receipts,
+        },
+        meerkat_sqlite::Migration {
+            version: 6,
+            name: "identity-convergence-resolution-receipts",
+            apply: migration_0006_identity_convergence_resolution_receipts,
+        },
+        meerkat_sqlite::Migration {
+            version: 7,
+            name: "identity-adoption-receipts",
+            apply: migration_0007_identity_adoption_receipts,
+        },
     ],
     initialize_current: initialize_current_mob_schema,
-    allowed_existing_versions: &[3, 4],
+    allowed_existing_versions: &[3, 4, 7],
     bridge_recoverable_versions: &[],
-    released_predecessors: &[meerkat_sqlite::SchemaPredecessor {
-        version: 3,
-        verify: verify_released_0_8_10_mob_schema,
-    }],
+    released_predecessors: &[
+        meerkat_sqlite::SchemaPredecessor {
+            version: 3,
+            verify: verify_released_0_8_10_mob_schema,
+        },
+        meerkat_sqlite::SchemaPredecessor {
+            version: 4,
+            verify: verify_released_0_8_25_mob_schema,
+        },
+    ],
     owned_objects: &[
         meerkat_sqlite::SchemaObject {
             kind: meerkat_sqlite::SchemaObjectKind::Table,
@@ -1340,6 +1557,18 @@ pub const MOB_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::SchemaDomai
         },
         meerkat_sqlite::SchemaObject {
             kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "mob_identity_intent_mutation_receipts",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "mob_identity_convergence_resolution_receipts",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "mob_identity_adoption_receipts",
+        },
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
             name: "mob_identity_statuses",
         },
         meerkat_sqlite::SchemaObject {
@@ -1364,7 +1593,7 @@ pub const MOB_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::SchemaDomai
         },
     ],
     // Released-only names remain owned forever so an unledgered or partial
-    // candidate shape cannot masquerade as a fresh v4 domain.
+    // candidate shape cannot masquerade as a fresh current domain.
     retired_objects: &[
         meerkat_sqlite::SchemaObject {
             kind: meerkat_sqlite::SchemaObjectKind::Table,
@@ -1407,7 +1636,7 @@ mod schema_floor_tests {
         let report =
             meerkat_sqlite::apply_domain_migrations(&mut conn, &MOB_DOMAIN).expect("upgrade");
         assert_eq!(report.from_version, 3);
-        assert_eq!(report.to_version, 4);
+        assert_eq!(report.to_version, 7);
     }
 
     #[test]
@@ -2851,6 +3080,83 @@ fn write_identity_intent(
     Ok(())
 }
 
+fn recompute_sqlite_present_incident_wiring(
+    tx: &Transaction<'_>,
+    mob_id: &MobId,
+) -> Result<(), MobStoreError> {
+    let mut statement = tx
+        .prepare(
+            "SELECT agent_identity, CAST(record_json AS BLOB)
+             FROM mob_identity_intents
+             WHERE mob_id = ?1
+             ORDER BY agent_identity",
+        )
+        .map_err(se)?;
+    let rows = statement
+        .query_map(params![mob_id.as_str()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })
+        .map_err(se)?;
+    let mut records = Vec::new();
+    for row in rows {
+        let (physical_identity, bytes) = row.map_err(se)?;
+        let record: IdentityIntentRecord = decode_json(&bytes)?;
+        record.validate().map_err(|error| {
+            identity_authority_blocked(
+                Some(identity_raw_evidence_digest(&bytes)),
+                error.to_string(),
+            )
+        })?;
+        if record.mob_id != *mob_id || record.intent.identity().as_str() != physical_identity {
+            return Err(identity_authority_blocked(
+                Some(identity_raw_evidence_digest(&bytes)),
+                "identity intent does not match its physical key",
+            ));
+        }
+        records.push(record);
+    }
+    drop(statement);
+    let all_owned = records
+        .iter()
+        .filter_map(|record| match &record.intent {
+            IdentityIntent::Present { owned_wiring, .. } => Some(owned_wiring.iter()),
+            IdentityIntent::Absent { .. } => None,
+        })
+        .flatten()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for mut record in records {
+        let IdentityIntent::Present {
+            identity,
+            session,
+            member,
+            ..
+        } = &record.intent
+        else {
+            continue;
+        };
+        let expected = IdentityRetirementPlan::Targets {
+            session: session.clone(),
+            execution: member.execution().clone(),
+            incident_wiring: all_owned
+                .iter()
+                .filter(|edge| edge.a == *identity || edge.b == *identity)
+                .cloned()
+                .collect(),
+        };
+        if record.retirement_plan != expected {
+            record.retirement_plan = expected;
+            record.authority_digest = record
+                .canonical_authority_digest()
+                .map_err(identity_contract_error)?;
+            record.validate().map_err(identity_contract_error)?;
+            let identity = record.intent.identity().clone();
+            write_identity_intent(tx, mob_id, &identity, &record)?;
+        }
+    }
+    Ok(())
+}
+
 fn write_identity_lease(
     tx: &Transaction<'_>,
     mob_id: &MobId,
@@ -2967,6 +3273,349 @@ impl MobIdentityStore for SqliteMobIdentityStore {
         run_sqlite_task(move || {
             let conn = open_existing_identity_read_connection(&path, &store_instance_id)?;
             query_identity_intent_observation(&conn, &mob_id, &identity)
+        })
+        .await
+    }
+
+    async fn adopt_member_identity_declaration(
+        &self,
+        request: &AdoptMemberIdentityDeclaration,
+        compiled: &IdentityIntentRecord,
+    ) -> Result<IdentityAdoptionOutcome, MobStoreError> {
+        request.validate().map_err(identity_contract_error)?;
+        compiled.validate().map_err(identity_contract_error)?;
+        let IdentityIntent::Present {
+            identity,
+            session,
+            member,
+            wiring_custody,
+            owned_wiring,
+        } = &compiled.intent
+        else {
+            return Err(identity_authority_blocked(
+                None,
+                "identity adoption compiled an absent desired intent",
+            ));
+        };
+        if compiled.mob_id != request.mob_id
+            || identity != &request.agent_identity
+            || compiled.intent_revision != 1
+            || compiled.declaration_scope.as_ref() != Some(&request.declaration_scope)
+            || compiled.declaration_revision != Some(request.declaration_revision)
+            || session != &request.session
+            || member.material.profile_name != request.member.profile_name
+            || member.material.execution != request.member.execution
+            || wiring_custody != &request.wiring_custody
+            || owned_wiring != &request.owned_wiring
+        {
+            return Err(identity_authority_blocked(
+                None,
+                "compiled identity adoption record does not match the explicit request",
+            ));
+        }
+        let request_digest = request
+            .canonical_digest()
+            .map_err(identity_contract_error)?;
+        let path = self.path.clone();
+        let store_instance_id = self.store_instance_id.clone();
+        let request = request.clone();
+        let compiled = compiled.clone();
+        run_sqlite_task(move || {
+            let mut conn = open_existing_identity_write_connection(&path, &store_instance_id)?;
+            let tx = begin_identity_immediate(&mut conn, &store_instance_id)?;
+            let existing_receipt: Option<Vec<u8>> = tx
+                .query_row(
+                    "SELECT CAST(receipt_json AS BLOB)
+                     FROM mob_identity_adoption_receipts
+                     WHERE mob_id = ?1 AND request_id = ?2",
+                    params![request.mob_id.as_str(), request.request_id.as_str()],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(se)?;
+            if let Some(bytes) = existing_receipt {
+                let receipt: IdentityAdoptionReceipt = decode_json(&bytes)?;
+                receipt.validate().map_err(|error| {
+                    identity_authority_blocked(
+                        Some(identity_raw_evidence_digest(&bytes)),
+                        error.to_string(),
+                    )
+                })?;
+                if receipt.mob_id != request.mob_id
+                    || receipt.request_id != request.request_id
+                    || receipt.agent_identity != request.agent_identity
+                {
+                    return Err(identity_authority_blocked(
+                        Some(identity_raw_evidence_digest(&bytes)),
+                        "identity adoption receipt does not match its physical key",
+                    ));
+                }
+                return if receipt.request_digest == request_digest {
+                    Ok(receipt.outcome)
+                } else {
+                    Ok(IdentityAdoptionOutcome::RequestConflict {
+                        request_id: request.request_id,
+                    })
+                };
+            }
+            let outcome = match query_identity_intent_observation(
+                &tx,
+                &request.mob_id,
+                &request.agent_identity,
+            )? {
+                IdentityStoredObservation::Valid(current) => {
+                    IdentityAdoptionOutcome::PreconditionConflict {
+                        actual_revision: current.intent_revision,
+                    }
+                }
+                IdentityStoredObservation::Missing => {
+                    write_identity_intent(
+                        &tx,
+                        &request.mob_id,
+                        &request.agent_identity,
+                        &compiled,
+                    )?;
+                    recompute_sqlite_present_incident_wiring(&tx, &request.mob_id)?;
+                    IdentityAdoptionOutcome::Adopted {
+                        desired_revision: 1,
+                    }
+                }
+                IdentityStoredObservation::Unsupported {
+                    evidence_digest,
+                    detail,
+                }
+                | IdentityStoredObservation::Malformed {
+                    evidence_digest,
+                    detail,
+                } => {
+                    return Err(identity_authority_blocked(Some(evidence_digest), detail));
+                }
+            };
+            let receipt = IdentityAdoptionReceipt::new(&request, outcome.clone())
+                .map_err(identity_contract_error)?;
+            tx.execute(
+                "INSERT INTO mob_identity_adoption_receipts
+                     (mob_id, request_id, agent_identity, request_digest, receipt_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    request.mob_id.as_str(),
+                    request.request_id.as_str(),
+                    request.agent_identity.as_str(),
+                    receipt.request_digest,
+                    encode_json(&receipt)?,
+                ],
+            )
+            .map_err(|error| {
+                sqlite_identity_write_error(error, "insert identity adoption receipt")
+            })?;
+            tx.commit().map_err(se)?;
+            Ok(outcome)
+        })
+        .await
+    }
+
+    async fn apply_member_tool_declaration(
+        &self,
+        request: &ApplyMemberToolDeclaration,
+    ) -> Result<MemberToolCommitOutcome, MobStoreError> {
+        request.validate().map_err(identity_contract_error)?;
+        let request_digest = request
+            .canonical_digest()
+            .map_err(identity_contract_error)?;
+        let path = self.path.clone();
+        let store_instance_id = self.store_instance_id.clone();
+        let clock = Arc::clone(&self.clock);
+        let request = request.clone();
+        run_sqlite_task(move || {
+            let committed_at_ms = clock.now_ms()?;
+            let mut conn = open_existing_identity_write_connection(&path, &store_instance_id)?;
+            let tx = begin_identity_immediate(&mut conn, &store_instance_id)?;
+            let existing: Option<Vec<u8>> = tx
+                .query_row(
+                    "SELECT CAST(receipt_json AS BLOB)
+                     FROM mob_identity_intent_mutation_receipts
+                     WHERE mob_id = ?1 AND request_id = ?2",
+                    params![request.mob_id.as_str(), request.request_id.as_str()],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(se)?;
+            if let Some(bytes) = existing {
+                let receipt: IdentityIntentMutationReceipt = decode_json(&bytes)?;
+                receipt.validate().map_err(|error| {
+                    identity_authority_blocked(
+                        Some(identity_raw_evidence_digest(&bytes)),
+                        error.to_string(),
+                    )
+                })?;
+                if receipt.mob_id != request.mob_id
+                    || receipt.request_id != request.request_id
+                    || receipt.agent_identity != request.agent_identity
+                {
+                    return Err(identity_authority_blocked(
+                        Some(identity_raw_evidence_digest(&bytes)),
+                        "identity intent mutation receipt does not match its physical key",
+                    ));
+                }
+                return if receipt.request_digest == request_digest {
+                    Ok(receipt.outcome)
+                } else {
+                    Ok(MemberToolCommitOutcome::RequestConflict {
+                        request_id: request.request_id,
+                    })
+                };
+            }
+
+            let current =
+                query_identity_intent_observation(&tx, &request.mob_id, &request.agent_identity)?;
+            let (outcome, next) = match current {
+                IdentityStoredObservation::Valid(current) => {
+                    prepare_member_tool_intent_mutation(&current, &request, committed_at_ms)
+                        .map_err(identity_contract_error)?
+                }
+                IdentityStoredObservation::Missing => (MemberToolCommitOutcome::MemberAbsent, None),
+                IdentityStoredObservation::Unsupported {
+                    evidence_digest,
+                    detail,
+                } => {
+                    return Err(identity_authority_blocked(Some(evidence_digest), detail));
+                }
+                IdentityStoredObservation::Malformed {
+                    evidence_digest,
+                    detail,
+                } => {
+                    return Err(identity_authority_blocked(Some(evidence_digest), detail));
+                }
+            };
+            let receipt = IdentityIntentMutationReceipt::new(&request, outcome.clone())
+                .map_err(identity_contract_error)?;
+            if let Some(next) = next {
+                write_identity_intent(&tx, &request.mob_id, &request.agent_identity, &next)?;
+            }
+            tx.execute(
+                "INSERT INTO mob_identity_intent_mutation_receipts
+                     (mob_id, request_id, agent_identity, request_digest, receipt_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    request.mob_id.as_str(),
+                    request.request_id.as_str(),
+                    request.agent_identity.as_str(),
+                    receipt.request_digest,
+                    encode_json(&receipt)?,
+                ],
+            )
+            .map_err(|error| {
+                sqlite_identity_write_error(error, "insert identity intent mutation receipt")
+            })?;
+            tx.commit().map_err(se)?;
+            Ok(outcome)
+        })
+        .await
+    }
+
+    async fn resolve_identity_convergence_block(
+        &self,
+        request: &ResolveIdentityConvergenceBlock,
+        actual_active_revision: u64,
+    ) -> Result<IdentityConvergenceResolutionOutcome, MobStoreError> {
+        request.validate().map_err(identity_contract_error)?;
+        let request_digest = request
+            .canonical_digest()
+            .map_err(identity_contract_error)?;
+        let path = self.path.clone();
+        let store_instance_id = self.store_instance_id.clone();
+        let clock = Arc::clone(&self.clock);
+        let request = request.clone();
+        run_sqlite_task(move || {
+            let committed_at_ms = clock.now_ms()?;
+            let mut conn = open_existing_identity_write_connection(&path, &store_instance_id)?;
+            let tx = begin_identity_immediate(&mut conn, &store_instance_id)?;
+            let existing: Option<Vec<u8>> = tx
+                .query_row(
+                    "SELECT CAST(receipt_json AS BLOB)
+                     FROM mob_identity_convergence_resolution_receipts
+                     WHERE mob_id = ?1 AND request_id = ?2",
+                    params![request.mob_id.as_str(), request.request_id.as_str()],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(se)?;
+            if let Some(bytes) = existing {
+                let receipt: IdentityConvergenceResolutionReceipt = decode_json(&bytes)?;
+                receipt.validate().map_err(|error| {
+                    identity_authority_blocked(
+                        Some(identity_raw_evidence_digest(&bytes)),
+                        error.to_string(),
+                    )
+                })?;
+                if receipt.mob_id != request.mob_id
+                    || receipt.request_id != request.request_id
+                    || receipt.agent_identity != request.agent_identity
+                {
+                    return Err(identity_authority_blocked(
+                        Some(identity_raw_evidence_digest(&bytes)),
+                        "identity convergence resolution receipt does not match its physical key",
+                    ));
+                }
+                return if receipt.request_digest == request_digest {
+                    Ok(receipt.outcome)
+                } else {
+                    Ok(IdentityConvergenceResolutionOutcome::RequestConflict {
+                        request_id: request.request_id,
+                    })
+                };
+            }
+
+            let current =
+                query_identity_intent_observation(&tx, &request.mob_id, &request.agent_identity)?;
+            let (outcome, next) = match current {
+                IdentityStoredObservation::Valid(current) => {
+                    prepare_identity_convergence_resolution(
+                        &current,
+                        &request,
+                        actual_active_revision,
+                        committed_at_ms,
+                    )
+                    .map_err(identity_contract_error)?
+                }
+                IdentityStoredObservation::Missing => {
+                    (IdentityConvergenceResolutionOutcome::MemberAbsent, None)
+                }
+                IdentityStoredObservation::Unsupported {
+                    evidence_digest,
+                    detail,
+                } => {
+                    return Err(identity_authority_blocked(Some(evidence_digest), detail));
+                }
+                IdentityStoredObservation::Malformed {
+                    evidence_digest,
+                    detail,
+                } => {
+                    return Err(identity_authority_blocked(Some(evidence_digest), detail));
+                }
+            };
+            let receipt = IdentityConvergenceResolutionReceipt::new(&request, outcome.clone())
+                .map_err(identity_contract_error)?;
+            if let Some(next) = next {
+                write_identity_intent(&tx, &request.mob_id, &request.agent_identity, &next)?;
+            }
+            tx.execute(
+                "INSERT INTO mob_identity_convergence_resolution_receipts
+                     (mob_id, request_id, agent_identity, request_digest, receipt_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    request.mob_id.as_str(),
+                    request.request_id.as_str(),
+                    request.agent_identity.as_str(),
+                    receipt.request_digest,
+                    encode_json(&receipt)?,
+                ],
+            )
+            .map_err(|error| {
+                sqlite_identity_write_error(error, "insert identity convergence resolution receipt")
+            })?;
+            tx.commit().map_err(se)?;
+            Ok(outcome)
         })
         .await
     }
@@ -8321,6 +8970,69 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn sqlite_identity_adoption_and_receipt_survive_reopen() {
+        let (_dir, path) = temp_db_path();
+        let mob_id = MobId::from("sqlite-adoption-mob");
+        let identity = AgentIdentity::from("worker-1");
+        let session_id = meerkat_core::SessionId::new();
+        let (request, compiled) = crate::identity::identity_adoption_fixture(
+            mob_id.clone(),
+            identity.clone(),
+            "sqlite-adopt-1",
+            session_id.clone(),
+        );
+
+        {
+            let stores = SqliteMobStores::open(&path).expect("open identity store");
+            assert_eq!(
+                stores
+                    .identity_store()
+                    .adopt_member_identity_declaration(&request, &compiled)
+                    .await
+                    .expect("initial sqlite adoption"),
+                IdentityAdoptionOutcome::Adopted {
+                    desired_revision: 1
+                }
+            );
+        }
+
+        {
+            let stores = SqliteMobStores::open(&path).expect("reopen identity store");
+            let store = stores.identity_store();
+            assert_eq!(
+                store
+                    .adopt_member_identity_declaration(&request, &compiled)
+                    .await
+                    .expect("replay durable adoption receipt"),
+                IdentityAdoptionOutcome::Adopted {
+                    desired_revision: 1
+                }
+            );
+            assert_eq!(
+                store
+                    .observe_identity_intent(&mob_id, &identity)
+                    .await
+                    .expect("observe durable adopted intent"),
+                IdentityStoredObservation::Valid(compiled.clone())
+            );
+
+            let (second_request, second_compiled) = crate::identity::identity_adoption_fixture(
+                mob_id,
+                identity,
+                "sqlite-adopt-2",
+                session_id,
+            );
+            assert_eq!(
+                store
+                    .adopt_member_identity_declaration(&second_request, &second_compiled)
+                    .await
+                    .expect("expected-absent sqlite conflict"),
+                IdentityAdoptionOutcome::PreconditionConflict { actual_revision: 1 }
+            );
+        }
+    }
+
     fn sqlite_external_delivery_intent(key: &str, action: &str) -> MobExternalDeliveryIntent {
         MobExternalDeliveryIntent::new(
             MobId::from("mob"),
@@ -8464,7 +9176,7 @@ mod tests {
     }
 
     #[test]
-    fn released_v3_migrates_directly_to_canonical_v4_schema() {
+    fn released_v3_migrates_directly_to_canonical_current_schema() {
         let (_dir, path) = temp_db_path();
         {
             let mut conn = Connection::open(&path).unwrap();
@@ -8511,7 +9223,7 @@ mod tests {
                 |row| row.get::<_, i64>(0),
             )
             .unwrap(),
-            4
+            7
         );
         for retired in [
             "mob_identity_declaration_scopes",
@@ -8573,6 +9285,53 @@ mod tests {
             0,
             "retired declaration-facade receipts must not become undecodable poison rows"
         );
+    }
+
+    #[test]
+    fn released_v4_migrates_to_canonical_current_schema() {
+        let (_dir, path) = temp_db_path();
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            let tx = conn.transaction().unwrap();
+            build_released_0_8_25_mob_schema(&tx).unwrap();
+            tx.execute_batch(
+                "CREATE TABLE meerkat_schema (
+                     domain TEXT PRIMARY KEY,
+                     version INTEGER NOT NULL
+                 );
+                 INSERT INTO meerkat_schema VALUES ('mob', 4);",
+            )
+            .unwrap();
+            tx.commit().unwrap();
+        }
+
+        drop(SqliteMobStores::open(&path).unwrap());
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT version FROM meerkat_schema WHERE domain = 'mob'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            7
+        );
+        for table in [
+            "mob_identity_intent_mutation_receipts",
+            "mob_identity_convergence_resolution_receipts",
+            "mob_identity_adoption_receipts",
+        ] {
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    [table],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+                1,
+                "{table} must exist after the released-v4 migration"
+            );
+        }
     }
 
     fn operator_request(

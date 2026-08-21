@@ -140,6 +140,14 @@ MOB_RPC_CONTRACT_TYPES = [
     "MobUnwireParams",
     "MobUnwireResult",
     "MobMembersResult",
+    "MobMemberToolDeclarationParams",
+    "MobMemberToolDeclarationResult",
+    "MobApplyMemberToolDeclarationParams",
+    "MobApplyMemberToolDeclarationResult",
+    "MobAdoptMemberIdentityDeclarationParams",
+    "MobAdoptMemberIdentityDeclarationResult",
+    "MobResolveIdentityConvergenceBlockParams",
+    "MobResolveIdentityConvergenceBlockResult",
     "MobEventsParams",
     "MobEventsResult",
     "MobMemberSendParams",
@@ -503,6 +511,53 @@ MOB_RPC_CONTRACT_ALIAS_TYPES = [
     "WireHostBindingDescriptorKind",
     "BridgeLiveControlVerb",
     "BridgeLiveControlOutcome",
+    "ApplicationToolPolicyBinding",
+    "ToolCategoryOverride",
+    "WireCallbackToolSetDeclaration",
+    "WireMemberToolAccessConstraint",
+    "WireMemberToolAccessDeclaration",
+    "WireIdentityConvergenceMode",
+    "WireIdentityAdoptionPrecondition",
+    "WireDesiredSessionAuthorityPolicy",
+    "WireDesiredExecution",
+    "WireIdentityAdoptionOutcome",
+    "WireIdentityConvergenceCondition",
+    "WireIdentityReconcileDecision",
+    "WireMemberToolCommitOutcome",
+    "WireIdentityConvergenceResolutionOutcome",
+    # Full transitive vocabulary of explicit member identity adoption. These
+    # names are schema-local under the adoption request; keeping them named
+    # prevents PortableProfile and provider overrides from degrading to
+    # dangling references or opaque maps in generated SDKs.
+    "BindingId",
+    "MeerkatSchema",
+    "PortableMcpDecl",
+    "PortableSystemPrompt",
+    "ProfileId",
+    "RealmId",
+    "SchemaCompat",
+    "SchemaFormat",
+    "WireAnthropicCacheControlPolicy",
+    "WireAnthropicCacheTtl",
+    "WireAnthropicCompactionConfig",
+    "WireAnthropicContextWindow",
+    "WireAnthropicEffort",
+    "WireAnthropicInferenceGeo",
+    "WireAnthropicThinkingConfig",
+    "WireGeminiThinkingLevel",
+    "WireMobResumeOverrideField",
+    "WireOpaqueJson",
+    "WireOpenAiPromptCacheMode",
+    "WireOpenAiPromptCacheRetention",
+    "WireOpenAiPromptCacheTtl",
+    "WireOpenAiReasoningContext",
+    "WireOpenAiReasoningMode",
+    "WireOpenAiTextVerbosity",
+    "WireProviderTag",
+    "WireReasoningEffort",
+    "WireReasoningMode",
+    "WireResolvedToolAccessPolicy",
+    "WireToolAccessConstraint",
 ]
 
 MOB_RPC_CONTRACT_HELPER_TYPES = [
@@ -535,6 +590,22 @@ MOB_RPC_CONTRACT_HELPER_TYPES = [
     # named public SDK type instead of widening it to an opaque map.
     "WireGrantRecord",
     "WireMemberLifecycleCapabilities",
+    "ToolCategoryOverrides",
+    "WireDesiredLocalCallbackTool",
+    "WireMemberToolDeclaration",
+    "WireDesiredSessionTarget",
+    "WireIdentityProfileMemberDeclaration",
+    "WireDesiredIdentityEdge",
+    "WireIdentityConvergenceStatus",
+    "BudgetLimits",
+    "Duration",
+    "OutputSchema",
+    "PortableProfile",
+    "PortableToolConfig",
+    "StructuredProviderExtension",
+    "WireGeminiThinkingConfig",
+    "WireOpenAiPromptCacheOptions",
+    "WireProviderParamsOverride",
 ]
 
 # Item 6 / K20 pattern: the `skills/list` RPC result is catalog-typed
@@ -6319,6 +6390,14 @@ def generate_web_mob_types(schemas: dict, output_dir: Path) -> None:
     helper_result_context = _schema_root_with_local_defs(
         wire_schema, _lookup_named_schema(wire_schema, "MobHelperResult")
     )
+    adoption_params_context = _schema_root_with_local_defs(
+        wire_schema,
+        _lookup_named_schema(wire_schema, "MobAdoptMemberIdentityDeclarationParams"),
+    )
+    adoption_result_context = _schema_root_with_local_defs(
+        wire_schema,
+        _lookup_named_schema(wire_schema, "MobAdoptMemberIdentityDeclarationResult"),
+    )
     emitted: set[str] = set()
     lines: list[str] = [
         "// Generated mob wire types for @rkat/web",
@@ -6468,6 +6547,9 @@ def generate_web_mob_types(schemas: dict, output_dir: Path) -> None:
     append_interface("WireWorkGraphFlowExecutionBinding")
     append_interface("MobFlowStatusResult")
     append_interface("MobRunResult")
+    append_alias("BindingId", root=adoption_params_context)
+    append_alias("ProfileId", root=adoption_params_context)
+    append_alias("RealmId", root=adoption_params_context)
     append_interface("WireAuthBindingRef", root=spawn_helper_context)
     append_alias("WireMobBackendKind", root=spawn_helper_context)
     append_alias("WireMobRuntimeMode", root=spawn_helper_context)
@@ -6481,6 +6563,58 @@ def generate_web_mob_types(schemas: dict, output_dir: Path) -> None:
     append_interface("MobMemberStatusResult")
     append_interface("MobAppendSystemContextResult")
     append_interface("MobLifecycleResult")
+    append_alias("ApplicationToolPolicyBinding")
+    append_alias("ToolCategoryOverride")
+    append_interface("ToolCategoryOverrides")
+    append_interface("WireDesiredLocalCallbackTool")
+    append_alias("WireCallbackToolSetDeclaration")
+    append_alias("WireMemberToolAccessConstraint")
+    append_alias("WireMemberToolAccessDeclaration")
+    append_interface("WireMemberToolDeclaration")
+    append_alias("WireIdentityAdoptionPrecondition", root=adoption_params_context)
+    append_alias("WireDesiredSessionAuthorityPolicy", root=adoption_params_context)
+    append_interface("WireDesiredSessionTarget", root=adoption_params_context)
+    append_alias("WireTrustedPeerIdentity", root=adoption_params_context)
+    append_alias("WireDesiredExecution", root=adoption_params_context)
+    lines.extend(
+        [
+            "export interface WireIdentityProfileMemberDeclaration {",
+            "  profile_name: string;",
+            "  profile_override?: Record<string, unknown> | null;",
+            "  model_override?: string | null;",
+            "  external_addressable_override?: boolean | null;",
+            "  context?: string | null;",
+            "  labels?: Record<string, string> | null;",
+            "  additional_instructions?: string[] | null;",
+            "  system_prompt_override?: Record<string, unknown> | null;",
+            "  tool_access_policy?: Record<string, unknown> | null;",
+            "  auth_binding?: WireAuthBindingRef | null;",
+            "  budget_limits?: Record<string, unknown> | null;",
+            "  runtime_mode?: WireMobRuntimeMode | null;",
+            "  required_env_keys?: string[];",
+            "  required_local_callback_tools?: WireDesiredLocalCallbackTool[];",
+            "  execution: WireDesiredExecution;",
+            "}",
+            "",
+        ]
+    )
+    emitted.add("WireIdentityProfileMemberDeclaration")
+    append_interface("WireDesiredIdentityEdge", root=adoption_params_context)
+    append_alias("WireIdentityAdoptionOutcome", root=adoption_result_context)
+    append_alias("WireIdentityConvergenceMode")
+    append_alias("WireIdentityConvergenceCondition")
+    append_alias("WireIdentityReconcileDecision")
+    append_interface("WireIdentityConvergenceStatus")
+    append_alias("WireMemberToolCommitOutcome")
+    append_alias("WireIdentityConvergenceResolutionOutcome")
+    append_interface("MobMemberToolDeclarationParams")
+    append_interface("MobMemberToolDeclarationResult")
+    append_interface("MobApplyMemberToolDeclarationParams")
+    append_interface("MobApplyMemberToolDeclarationResult")
+    append_interface("MobAdoptMemberIdentityDeclarationParams")
+    append_interface("MobAdoptMemberIdentityDeclarationResult")
+    append_interface("MobResolveIdentityConvergenceBlockParams")
+    append_interface("MobResolveIdentityConvergenceBlockResult")
 
     (output_dir / "mob.ts").write_text("\n".join(lines))
 

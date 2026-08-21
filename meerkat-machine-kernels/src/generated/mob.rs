@@ -2232,6 +2232,14 @@ pub enum IdentityReconcileDecision {
     AcquireLease,
     #[serde(rename = "AwaitLease")]
     AwaitLease,
+    #[serde(rename = "CloseMemberAdmission")]
+    CloseMemberAdmission,
+    #[serde(rename = "AwaitMemberDrain")]
+    AwaitMemberDrain,
+    #[serde(rename = "DrainBlocked")]
+    DrainBlocked,
+    #[serde(rename = "CancelActiveMember")]
+    CancelActiveMember,
     #[serde(rename = "SealRetirementProven")]
     SealRetirementProven,
     #[serde(rename = "SealSessionCreationConsumed")]
@@ -2276,6 +2284,10 @@ impl IdentityReconcileDecision {
             Self::RepairBlocked => "RepairBlocked",
             Self::AcquireLease => "AcquireLease",
             Self::AwaitLease => "AwaitLease",
+            Self::CloseMemberAdmission => "CloseMemberAdmission",
+            Self::AwaitMemberDrain => "AwaitMemberDrain",
+            Self::DrainBlocked => "DrainBlocked",
+            Self::CancelActiveMember => "CancelActiveMember",
             Self::SealRetirementProven => "SealRetirementProven",
             Self::SealSessionCreationConsumed => "SealSessionCreationConsumed",
             Self::EnsureSessionAuthority => "EnsureSessionAuthority",
@@ -2305,6 +2317,10 @@ impl std::convert::TryFrom<&str> for IdentityReconcileDecision {
             "RepairBlocked" => Ok(Self::RepairBlocked),
             "AcquireLease" => Ok(Self::AcquireLease),
             "AwaitLease" => Ok(Self::AwaitLease),
+            "CloseMemberAdmission" => Ok(Self::CloseMemberAdmission),
+            "AwaitMemberDrain" => Ok(Self::AwaitMemberDrain),
+            "DrainBlocked" => Ok(Self::DrainBlocked),
+            "CancelActiveMember" => Ok(Self::CancelActiveMember),
             "SealRetirementProven" => Ok(Self::SealRetirementProven),
             "SealSessionCreationConsumed" => Ok(Self::SealSessionCreationConsumed),
             "EnsureSessionAuthority" => Ok(Self::EnsureSessionAuthority),
@@ -2334,6 +2350,74 @@ impl std::convert::TryFrom<String> for IdentityReconcileDecision {
     }
 }
 impl std::fmt::Display for IdentityReconcileDecision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum IdentityReplacementCondition {
+    #[default]
+    #[serde(rename = "NotRequired")]
+    NotRequired,
+    #[serde(rename = "AdmissionOpen")]
+    AdmissionOpen,
+    #[serde(rename = "Draining")]
+    Draining,
+    #[serde(rename = "DrainBlocked")]
+    DrainBlocked,
+    #[serde(rename = "CancelActive")]
+    CancelActive,
+    #[serde(rename = "Ready")]
+    Ready,
+}
+impl IdentityReplacementCondition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NotRequired => "NotRequired",
+            Self::AdmissionOpen => "AdmissionOpen",
+            Self::Draining => "Draining",
+            Self::DrainBlocked => "DrainBlocked",
+            Self::CancelActive => "CancelActive",
+            Self::Ready => "Ready",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for IdentityReplacementCondition {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "NotRequired" => Ok(Self::NotRequired),
+            "AdmissionOpen" => Ok(Self::AdmissionOpen),
+            "Draining" => Ok(Self::Draining),
+            "DrainBlocked" => Ok(Self::DrainBlocked),
+            "CancelActive" => Ok(Self::CancelActive),
+            "Ready" => Ok(Self::Ready),
+            other => Err(format!(
+                "invalid IdentityReplacementCondition value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for IdentityReplacementCondition {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for IdentityReplacementCondition {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -6950,6 +7034,7 @@ pub mod inputs {
     pub struct ClassifyIdentityReconciliation {
         pub intent: IdentityAuthorityCondition,
         pub lease: IdentityLeaseCondition,
+        pub replacement: IdentityReplacementCondition,
         pub external_binding_required: bool,
         pub initial_delivery_required: bool,
         pub session_creation_receipt: IdentityReceiptCondition,

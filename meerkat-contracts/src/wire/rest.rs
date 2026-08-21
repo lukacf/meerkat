@@ -352,6 +352,52 @@ pub struct RestMobWireMembersBatchRequest {
     pub edges: Vec<super::mob::MobWireMembersBatchEdge>,
 }
 
+/// `PUT /mob/{id}/members/{agent_identity}/tool-declaration` - update the
+/// durable member-tool declaration against an exact desired revision.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct RestApplyMemberToolDeclarationRequest {
+    pub request_id: String,
+    pub expected_intent_revision: u64,
+    pub declaration: super::mob::WireMemberToolDeclaration,
+    pub convergence: super::mob::WireIdentityConvergenceMode,
+}
+
+/// `POST /mob/{id}/members/{agent_identity}/identity-adoption` - adopt one
+/// already-realized member under an explicit expected-absent precondition.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct RestAdoptMemberIdentityDeclarationRequest {
+    pub request_id: String,
+    pub precondition: super::mob::WireIdentityAdoptionPrecondition,
+    pub declaration_scope: String,
+    pub declaration_revision: u64,
+    pub session: super::mob::WireDesiredSessionTarget,
+    pub member: super::mob::WireIdentityProfileMemberDeclaration,
+    #[serde(
+        default,
+        skip_serializing_if = "super::mob::WireIdentityWiringCustody::is_external_managed"
+    )]
+    pub wiring_custody: super::mob::WireIdentityWiringCustody,
+    pub owned_wiring: std::collections::BTreeSet<super::mob::WireDesiredIdentityEdge>,
+    pub convergence: super::mob::WireIdentityConvergenceMode,
+}
+
+/// `POST /mob/{id}/members/{agent_identity}/tool-convergence/resolve` -
+/// continue a blocked identity replacement against exact desired and active
+/// revisions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct RestResolveIdentityConvergenceBlockRequest {
+    pub request_id: String,
+    pub expected_desired_revision: u64,
+    pub observed_active_revision: u64,
+    pub convergence: super::mob::WireIdentityConvergenceMode,
+}
+
 /// `GET /sessions/{id}` — session details response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

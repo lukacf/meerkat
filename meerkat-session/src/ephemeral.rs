@@ -9681,6 +9681,7 @@ mod inline_video_admission_tests {
                     model: target_identity.model.clone(),
                     provider_params: None,
                     provider_tool_defaults: None,
+                    provider_native_tools: meerkat_core::ProviderNativeToolPolicy::Inherit,
                 },
             )
             .await
@@ -9745,6 +9746,7 @@ mod inline_video_admission_tests {
                         model: target.model,
                         provider_params: None,
                         provider_tool_defaults: None,
+                        provider_native_tools: meerkat_core::ProviderNativeToolPolicy::Inherit,
                     },
                 )
                 .await

@@ -207,6 +207,7 @@
                   "architecture/workgraph-attention-goals",
                   "plans/storage-unification-plan",
                   "plans/durable-tool-execution-and-background-jobs-v1",
+                  "plans/member-tool-policy-v1",
                   "plans/durable-tool-execution-and-background-jobs-v1-deferred-findings",
                   "plans/durable-tool-execution-deferred-findings"
                 ]

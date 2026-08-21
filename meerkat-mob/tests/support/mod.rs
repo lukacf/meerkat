@@ -1823,6 +1823,7 @@ pub async fn spawn_host_daemon_fixture(
             Some(HostMemberSubstrate {
                 session_service: service,
                 runtime_adapter: adapter,
+                tool_consequence_policy_registry: None,
                 durable_event_log: None,
                 realm_backend_persistent: false,
                 member_identity_root: identity_root,
@@ -1889,6 +1890,7 @@ pub async fn spawn_host_daemon_fixture(
             Some(HostMemberSubstrate {
                 session_service: mob_service,
                 runtime_adapter: adapter,
+                tool_consequence_policy_registry: None,
                 durable_event_log: member_durable_log.clone().map(|log| {
                     log as Arc<dyn meerkat_runtime::member_observation::DurableEventLogRead>
                 }),
@@ -3896,6 +3898,8 @@ pub fn sample_portable_member_spec(
                 text: format!("You are {identity}, a deterministic fixture member."),
             },
             tool_access_policy: None,
+            tool_category_overrides: meerkat_core::ToolCategoryOverrides::default(),
+            application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
             mob_tool_authority_context: None,
             auth_binding: None,
             budget_limits: None,

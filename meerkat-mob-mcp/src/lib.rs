@@ -1248,6 +1248,65 @@ impl MobMcpState {
             .await
     }
 
+    pub async fn mob_identity_intent(
+        &self,
+        mob_id: &MobId,
+        identity: &AgentIdentity,
+    ) -> Result<meerkat_mob::IdentityStoredObservation<meerkat_mob::IdentityIntentRecord>, MobError>
+    {
+        self.admitted_handle_for(mob_id, ControlScope::List)
+            .await?
+            .identity_intent(identity)
+            .await
+    }
+
+    pub async fn mob_identity_convergence_status(
+        &self,
+        mob_id: &MobId,
+        identity: &AgentIdentity,
+    ) -> Result<
+        meerkat_mob::IdentityStoredObservation<meerkat_mob::IdentityConvergenceStatus>,
+        MobError,
+    > {
+        self.admitted_handle_for(mob_id, ControlScope::List)
+            .await?
+            .identity_convergence_status(identity)
+            .await
+    }
+
+    pub async fn mob_apply_member_tool_declaration(
+        &self,
+        mob_id: &MobId,
+        request: meerkat_mob::ApplyMemberToolDeclaration,
+    ) -> Result<meerkat_mob::ApplyMemberToolDeclarationResult, MobError> {
+        self.admitted_handle_for(mob_id, ControlScope::Retire)
+            .await?
+            .apply_member_tool_declaration(request)
+            .await
+    }
+
+    pub async fn mob_adopt_member_identity_declaration(
+        &self,
+        mob_id: &MobId,
+        request: meerkat_mob::AdoptMemberIdentityDeclaration,
+    ) -> Result<meerkat_mob::AdoptMemberIdentityDeclarationResult, MobError> {
+        self.admitted_handle_for(mob_id, ControlScope::Retire)
+            .await?
+            .adopt_member_identity_declaration(request)
+            .await
+    }
+
+    pub async fn mob_resolve_identity_convergence_block(
+        &self,
+        mob_id: &MobId,
+        request: meerkat_mob::ResolveIdentityConvergenceBlock,
+    ) -> Result<meerkat_mob::ResolveIdentityConvergenceBlockResult, MobError> {
+        self.admitted_handle_for(mob_id, ControlScope::Retire)
+            .await?
+            .resolve_identity_convergence_block(request)
+            .await
+    }
+
     #[doc(hidden)]
     pub async fn archive_mob_owned_bridge_session_with_cleanup(
         &self,
@@ -6647,6 +6706,10 @@ mod tests {
                             tool_access_policy: build
                                 .as_ref()
                                 .and_then(|options| options.tool_access_policy.clone()),
+                            application_tool_policy: build
+                                .as_ref()
+                                .map(|options| options.application_tool_policy.clone())
+                                .unwrap_or_default(),
                             active_skills: build
                                 .as_ref()
                                 .and_then(|options| options.preload_skills.clone()),

@@ -679,7 +679,7 @@ impl PolicyEvaluationSupervisor {
         #[cfg(target_arch = "wasm32")]
         {
             let _ = (provider_id, generation, snapshot, request);
-            return Err(ToolConsequenceFailure::UnsupportedRuntime);
+            Err(ToolConsequenceFailure::UnsupportedRuntime)
         }
 
         #[cfg(not(target_arch = "wasm32"))]

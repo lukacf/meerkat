@@ -8297,6 +8297,7 @@
       "ApplicationToolPolicyBinding": {
         "oneOf": [
           {
+            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "unmanaged",
@@ -8309,6 +8310,7 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "inherit",
@@ -8321,6 +8323,7 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "provider",
@@ -16728,6 +16731,7 @@
       "ApplicationToolPolicyBinding": {
         "oneOf": [
           {
+            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "unmanaged",
@@ -16740,6 +16744,7 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "inherit",
@@ -16752,6 +16757,7 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "provider",
@@ -40561,6 +40567,7 @@
       "ApplicationToolPolicyBinding": {
         "oneOf": [
           {
+            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "unmanaged",
@@ -40573,6 +40580,7 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "inherit",
@@ -40585,6 +40593,7 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "provider",
@@ -52236,6 +52245,7 @@
       "ApplicationToolPolicyBinding": {
         "oneOf": [
           {
+            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "unmanaged",
@@ -52248,6 +52258,7 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "inherit",
@@ -52260,6 +52271,7 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "provider",
@@ -84772,6 +84784,7 @@
       "ApplicationToolPolicyBinding": {
         "oneOf": [
           {
+            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "unmanaged",
@@ -84784,6 +84797,7 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "inherit",
@@ -84796,6 +84810,7 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "provider",
@@ -92413,6 +92428,7 @@
       "ApplicationToolPolicyBinding": {
         "oneOf": [
           {
+            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "unmanaged",
@@ -92425,6 +92441,7 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "inherit",
@@ -92437,6 +92454,7 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "provider",
@@ -98499,6 +98517,7 @@
       "ApplicationToolPolicyBinding": {
         "oneOf": [
           {
+            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "unmanaged",
@@ -98511,6 +98530,7 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "inherit",
@@ -98523,6 +98543,7 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "provider",
@@ -101413,6 +101434,7 @@
       "ApplicationToolPolicyBinding": {
         "oneOf": [
           {
+            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "unmanaged",
@@ -101425,6 +101447,7 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "inherit",
@@ -101437,6 +101460,7 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "provider",
@@ -131896,6 +131920,7 @@
       "ApplicationToolPolicyBinding": {
         "oneOf": [
           {
+            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "unmanaged",
@@ -131908,6 +131933,7 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "inherit",
@@ -131920,6 +131946,7 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "provider",

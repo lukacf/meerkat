@@ -188,7 +188,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
-        "tests/fixtures/compiled_application_tool_policy_invalid_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
         "tests/fixtures/compiled_application_tool_policy_valid_v1.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
@@ -252,7 +253,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
-        "tests/fixtures/compiled_application_tool_policy_invalid_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
         "tests/fixtures/compiled_application_tool_policy_valid_v1.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
@@ -316,7 +318,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
-        "tests/fixtures/compiled_application_tool_policy_invalid_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
         "tests/fixtures/compiled_application_tool_policy_valid_v1.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
@@ -382,7 +385,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
-        "tests/fixtures/compiled_application_tool_policy_invalid_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
         "tests/fixtures/compiled_application_tool_policy_valid_v1.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
@@ -446,7 +450,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
-        "tests/fixtures/compiled_application_tool_policy_invalid_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
         "tests/fixtures/compiled_application_tool_policy_valid_v1.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
@@ -512,7 +517,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
-        "tests/fixtures/compiled_application_tool_policy_invalid_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
         "tests/fixtures/compiled_application_tool_policy_valid_v1.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
@@ -582,7 +588,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
-        "tests/fixtures/compiled_application_tool_policy_invalid_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
         "tests/fixtures/compiled_application_tool_policy_valid_v1.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
@@ -646,7 +653,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
-        "tests/fixtures/compiled_application_tool_policy_invalid_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
         "tests/fixtures/compiled_application_tool_policy_valid_v1.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
@@ -710,7 +718,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
-        "tests/fixtures/compiled_application_tool_policy_invalid_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
         "tests/fixtures/compiled_application_tool_policy_valid_v1.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
@@ -773,7 +782,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
-        "tests/fixtures/compiled_application_tool_policy_invalid_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
         "tests/fixtures/compiled_application_tool_policy_valid_v1.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
@@ -839,7 +849,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
-        "tests/fixtures/compiled_application_tool_policy_invalid_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
         "tests/fixtures/compiled_application_tool_policy_valid_v1.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
@@ -903,7 +914,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
-        "tests/fixtures/compiled_application_tool_policy_invalid_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
         "tests/fixtures/compiled_application_tool_policy_valid_v1.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
@@ -967,7 +979,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
-        "tests/fixtures/compiled_application_tool_policy_invalid_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
         "tests/fixtures/compiled_application_tool_policy_valid_v1.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
@@ -1031,7 +1044,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
-        "tests/fixtures/compiled_application_tool_policy_invalid_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
         "tests/fixtures/compiled_application_tool_policy_valid_v1.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
@@ -1095,7 +1109,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
-        "tests/fixtures/compiled_application_tool_policy_invalid_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
         "tests/fixtures/compiled_application_tool_policy_valid_v1.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
@@ -1159,7 +1174,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
-        "tests/fixtures/compiled_application_tool_policy_invalid_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
         "tests/fixtures/compiled_application_tool_policy_valid_v1.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
@@ -1223,7 +1239,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
-        "tests/fixtures/compiled_application_tool_policy_invalid_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
         "tests/fixtures/compiled_application_tool_policy_valid_v1.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
@@ -1287,7 +1304,8 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
-        "tests/fixtures/compiled_application_tool_policy_invalid_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
         "tests/fixtures/compiled_application_tool_policy_valid_v1.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
         "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",

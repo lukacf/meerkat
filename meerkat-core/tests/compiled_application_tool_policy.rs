@@ -1,16 +1,20 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use meerkat_core::{
-    CompiledApplicationToolPolicy, CompiledApplicationToolPolicyError, MobMemberBinding,
-    PolicyDigest, PolicyEvaluationProvenance, PolicyEvaluationSupervisorConfig, PolicyId,
-    PolicyProviderGeneration, PolicyProviderId, PolicyRevision, ToolConsequenceFailure,
-    ToolConsequenceNarrowingPolicy, ToolConsequencePolicyRegistry, ToolConsequencePolicySnapshot,
-    ToolConsequenceRequest, ToolConsequenceVerdict,
+    ApplicationToolPolicyBinding, CompiledApplicationToolPolicy,
+    CompiledApplicationToolPolicyError, MobMemberBinding, PolicyDigest, PolicyEvaluationProvenance,
+    PolicyEvaluationSupervisorConfig, PolicyId, PolicyProviderGeneration, PolicyProviderId,
+    PolicyRevision, ToolConsequenceFailure, ToolConsequenceNarrowingPolicy,
+    ToolConsequencePolicyRegistry, ToolConsequencePolicySnapshot, ToolConsequenceRequest,
+    ToolConsequenceVerdict,
 };
 use std::sync::{Arc, RwLock};
 
 const VALID: &[u8] = include_bytes!("fixtures/compiled_application_tool_policy_valid_v1.json");
-const INVALID: &[u8] = include_bytes!("fixtures/compiled_application_tool_policy_invalid_v1.json");
+const INVALID_UNKNOWN_FIELD: &[u8] =
+    include_bytes!("fixtures/compiled_application_tool_policy_unknown_field_v1.json");
+const INVALID_ABSENT_DEFAULT_DENY: &[u8] =
+    include_bytes!("fixtures/compiled_application_tool_policy_absent_default_deny_v1.json");
 
 #[test]
 fn canonical_compiled_policy_fixture_round_trips_exactly() {
@@ -22,11 +26,34 @@ fn canonical_compiled_policy_fixture_round_trips_exactly() {
 }
 
 #[test]
-fn unknown_and_absent_meaningful_fields_fail_before_installation() {
+fn unknown_meaningful_fields_fail_before_installation() {
+    let error = CompiledApplicationToolPolicy::parse_canonical_json(INVALID_UNKNOWN_FIELD)
+        .expect_err("unknown fields must be rejected");
     assert!(matches!(
-        CompiledApplicationToolPolicy::parse_canonical_json(INVALID),
-        Err(CompiledApplicationToolPolicyError::InvalidJson(_))
+        error,
+        CompiledApplicationToolPolicyError::InvalidJson(ref detail)
+            if detail.contains("unknown field `future_mode`")
     ));
+}
+
+#[test]
+fn absent_default_deny_fails_before_installation() {
+    let error = CompiledApplicationToolPolicy::parse_canonical_json(INVALID_ABSENT_DEFAULT_DENY)
+        .expect_err("default_deny must be explicit");
+    assert!(matches!(
+        error,
+        CompiledApplicationToolPolicyError::InvalidJson(ref detail)
+            if detail.contains("missing field `default_deny`")
+    ));
+}
+
+#[test]
+fn application_policy_binding_rejects_unknown_fields() {
+    let error = serde_json::from_str::<ApplicationToolPolicyBinding>(
+        r#"{"kind":"provider","provider_id":"homecore","policy_id":"household-tools","risk_tier":"r9"}"#,
+    )
+    .expect_err("application policy bindings must reject unknown fields");
+    assert!(error.to_string().contains("unknown field `risk_tier`"));
 }
 
 #[test]

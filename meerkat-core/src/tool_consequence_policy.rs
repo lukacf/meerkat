@@ -113,7 +113,7 @@ pub struct PolicyEvaluationProvenance {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ApplicationToolPolicyBinding {
     #[default]
     Unmanaged,

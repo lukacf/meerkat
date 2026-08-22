@@ -1837,6 +1837,17 @@ struct MockSessionService {
     archive_delay_ms: AtomicU64,
     start_turn_delay_ms: AtomicU64,
     start_turn_interrupts: RwLock<HashMap<SessionId, tokio::sync::watch::Sender<u64>>>,
+    /// Exact runtime runs whose executor call has entered this mock service.
+    /// The production session services fence interruption by `RunId`; the mock
+    /// must retain the same fact across the small gap before `start_turn`
+    /// subscribes to its cooperative interrupt channel.
+    runtime_apply_runs: RwLock<HashMap<SessionId, meerkat_core::RunId>>,
+    /// Exact interrupts delivered after machine run admission but before the
+    /// mock turn has subscribed. A watch subscription starts at the sender's
+    /// current version, so the watch channel alone cannot represent this race.
+    /// This remains independent of the machine queue gate: the exact run is
+    /// already admitted when this mock-only delivery gap opens.
+    pending_runtime_interrupts: RwLock<HashSet<(SessionId, meerkat_core::RunId)>>,
     inject_delay_ms: AtomicU64,
     flow_turn_delay_ms: AtomicU64,
     flow_turn_never_terminal: std::sync::atomic::AtomicBool,
@@ -1953,6 +1964,8 @@ impl MockSessionService {
             archive_delay_ms: AtomicU64::new(0),
             start_turn_delay_ms: AtomicU64::new(0),
             start_turn_interrupts: RwLock::new(HashMap::new()),
+            runtime_apply_runs: RwLock::new(HashMap::new()),
+            pending_runtime_interrupts: RwLock::new(HashSet::new()),
             inject_delay_ms: AtomicU64::new(0),
             flow_turn_delay_ms: AtomicU64::new(0),
             flow_turn_never_terminal: std::sync::atomic::AtomicBool::new(false),
@@ -3126,6 +3139,18 @@ impl SessionService for MockSessionService {
             .await
             .get(id)
             .map(tokio::sync::watch::Sender::subscribe);
+        let active_runtime_run = self.runtime_apply_runs.read().await.get(id).cloned();
+        if let Some(run_id) = active_runtime_run
+            && self
+                .pending_runtime_interrupts
+                .write()
+                .await
+                .remove(&(id.clone(), run_id))
+        {
+            return Err(SessionError::Agent(
+                meerkat_core::error::AgentError::Cancelled,
+            ));
+        }
         self.flow_turn_overlays
             .write()
             .await
@@ -4070,7 +4095,7 @@ impl MobSessionService for MockSessionService {
     async fn interrupt_run_with_machine_authority(
         &self,
         session_id: &SessionId,
-        _expected_run_id: &meerkat_core::RunId,
+        expected_run_id: &meerkat_core::RunId,
         _authority: meerkat_runtime::MachineSessionControlAuthority,
     ) -> Result<bool, SessionError> {
         let barrier = { self.runtime_control_barrier.read().await.clone() };
@@ -4078,10 +4103,26 @@ impl MobSessionService for MockSessionService {
             barrier.hard_calls.fetch_add(1, Ordering::Relaxed);
             barrier.wait_for_release().await;
         }
+        self.pending_runtime_interrupts
+            .write()
+            .await
+            .insert((session_id.clone(), expected_run_id.clone()));
         match SessionService::interrupt(self, session_id).await {
             Ok(()) => Ok(true),
-            Err(SessionError::NotRunning { .. }) => Ok(false),
-            Err(error) => Err(error),
+            Err(SessionError::NotRunning { .. }) => {
+                // Machine authority already admitted this exact run. Ambient
+                // live-session `NotRunning` can therefore be the same
+                // pre-entry window the latch closes; retaining the exact tuple
+                // is delivery to that run, not widening to a future successor.
+                Ok(true)
+            }
+            Err(error) => {
+                self.pending_runtime_interrupts
+                    .write()
+                    .await
+                    .remove(&(session_id.clone(), expected_run_id.clone()));
+                Err(error)
+            }
         }
     }
 
@@ -4277,7 +4318,27 @@ impl MobSessionService for MockSessionService {
         contributing_input_ids: Vec<meerkat_core::InputId>,
     ) -> Result<meerkat_core::lifecycle::core_executor::CoreApplyOutput, SessionError> {
         let exact_result_text = req.prompt.text_content();
-        <Self as SessionService>::start_turn(self, session_id, req).await?;
+        let replaced = self
+            .runtime_apply_runs
+            .write()
+            .await
+            .insert(session_id.clone(), run_id.clone());
+        debug_assert!(
+            replaced.is_none(),
+            "mock runtime service admitted overlapping exact runs for session {session_id}"
+        );
+        let turn_result = <Self as SessionService>::start_turn(self, session_id, req).await;
+        {
+            let mut active_runs = self.runtime_apply_runs.write().await;
+            if active_runs.get(session_id) == Some(&run_id) {
+                active_runs.remove(session_id);
+            }
+        }
+        self.pending_runtime_interrupts
+            .write()
+            .await
+            .remove(&(session_id.clone(), run_id.clone()));
+        turn_result?;
         let receipt = meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft {
             run_id,
             boundary,
@@ -4359,6 +4420,11 @@ impl MobSessionService for MockSessionService {
         self.live_session_data.write().await.remove(session_id);
         self.keep_alive_notifiers.write().await.remove(session_id);
         self.start_turn_interrupts.write().await.remove(session_id);
+        self.runtime_apply_runs.write().await.remove(session_id);
+        self.pending_runtime_interrupts
+            .write()
+            .await
+            .retain(|(candidate, _)| candidate != session_id);
         self.session_comms_names.write().await.remove(session_id);
         self.external_tools_by_session
             .write()
@@ -4401,6 +4467,11 @@ impl MobSessionService for MockSessionService {
             notifier.notify_waiters();
         }
         self.start_turn_interrupts.write().await.remove(session_id);
+        self.runtime_apply_runs.write().await.remove(session_id);
+        self.pending_runtime_interrupts
+            .write()
+            .await
+            .retain(|(candidate, _)| candidate != session_id);
         self.session_comms_names.write().await.remove(session_id);
         self.external_tools_by_session
             .write()
@@ -58231,6 +58302,70 @@ async fn test_spawn_member_customizer_spawner_provenance_ignores_roster_state_mi
                     .is_some_and(|id| id.identity.as_str() == lead.as_str())),
         "spawn provenance must be gated by MobMachine lifecycle projection, not the roster compatibility state mirror"
     );
+}
+
+#[tokio::test]
+async fn mock_exact_interrupt_before_turn_subscription_is_not_lost() {
+    let service = Arc::new(MockSessionService::new());
+    let adapter = service.enable_runtime_adapter();
+    let session_id = service
+        .create_session(CreateSessionRequest {
+            injected_context: Vec::new(),
+            model: "pre-subscription-interrupt-model".to_string(),
+            prompt: ContentInput::Text("create pre-subscription interrupt probe".to_string()),
+            system_prompt: meerkat_core::SystemPromptOverride::Inherit,
+            max_tokens: None,
+            event_tx: None,
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+            build: None,
+            labels: None,
+        })
+        .await
+        .expect("create interrupt probe session")
+        .session_id;
+    service
+        .keep_alive_notifiers
+        .write()
+        .await
+        .insert(session_id.clone(), Arc::new(tokio::sync::Notify::new()));
+
+    let run_id = meerkat_core::RunId::new();
+    let interrupted =
+        <MockSessionService as MobSessionService>::interrupt_run_with_machine_authority(
+            service.as_ref(),
+            &session_id,
+            &run_id,
+            adapter.session_control_authority(),
+        )
+        .await
+        .expect("deliver exact interrupt before executor entry");
+    assert!(interrupted);
+
+    let error = tokio::time::timeout(
+        Duration::from_secs(1),
+        <MockSessionService as MobSessionService>::apply_runtime_turn(
+            service.as_ref(),
+            &session_id,
+            run_id,
+            StartTurnRequest {
+                injected_context: Vec::new(),
+                prompt: ContentInput::Text("turn must observe the retained interrupt".to_string()),
+                system_prompt: None,
+                event_tx: None,
+                runtime: meerkat_core::service::StartTurnRuntimeSemantics::default(),
+            },
+            meerkat_core::lifecycle::run_primitive::RunApplyBoundary::Immediate,
+            Vec::new(),
+        ),
+    )
+    .await
+    .expect("retained exact interrupt must prevent a stranded keep-alive turn")
+    .expect_err("pre-subscription exact interrupt must cancel the same runtime run");
+    assert!(matches!(
+        error,
+        SessionError::Agent(meerkat_core::error::AgentError::Cancelled)
+    ));
 }
 
 #[tokio::test]

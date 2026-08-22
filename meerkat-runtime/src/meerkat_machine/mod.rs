@@ -5499,6 +5499,38 @@ impl MeerkatMachine {
         Ok(gate_guard)
     }
 
+    /// Acquire queue-admission authority for a current runtime-loop driver.
+    ///
+    /// Existing run commit and terminalization must remain available while an
+    /// unregister is Draining, but no new queued run may cross that boundary.
+    /// Holding the session mutation gate while checking Active gives queue
+    /// admission and BeginUnregisterSession one total order.
+    pub(crate) async fn lock_current_runtime_loop_queue_driver_authority(
+        &self,
+        session_id: &SessionId,
+        driver: &SharedDriver,
+    ) -> Result<crate::tokio::sync::OwnedMutexGuard<()>, RuntimeDriverError> {
+        let gate_guard = self
+            .lock_current_session_driver_gate(session_id, driver)
+            .await?;
+        {
+            let sessions = self.sessions.read().await;
+            let entry = sessions
+                .get(session_id)
+                .ok_or(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                })?;
+            if !entry.generated_executor_registration_active() {
+                return Err(RuntimeDriverError::ValidationFailed {
+                    reason:
+                        "generated MeerkatMachine has no active runtime-loop queue registration"
+                            .to_string(),
+                });
+            }
+        }
+        Ok(gate_guard)
+    }
+
     pub(crate) async fn current_runtime_stop_cleanup_in_progress(
         &self,
         session_id: &SessionId,

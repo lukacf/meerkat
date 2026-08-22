@@ -4402,6 +4402,37 @@ impl RuntimeLoopAuthorityBinding {
             })
     }
 
+    async fn lock_current_queue_driver_authority(
+        &self,
+        driver: &crate::meerkat_machine::SharedDriver,
+        context: &'static str,
+    ) -> Result<crate::tokio::sync::OwnedMutexGuard<()>, crate::traits::RuntimeDriverError> {
+        #[cfg(test)]
+        if let Some(gate) = &self.detached_test_gate {
+            let _ = (driver, context);
+            return Ok(std::sync::Arc::clone(gate).lock_owned().await);
+        }
+
+        let machine =
+            self.machine
+                .upgrade()
+                .ok_or(crate::traits::RuntimeDriverError::NotReady {
+                    state: crate::runtime_state::RuntimeState::Destroyed,
+                })?;
+        machine
+            .lock_current_runtime_loop_queue_driver_authority(&self.session_id, driver)
+            .await
+            .map_err(|err| {
+                tracing::warn!(
+                    session_id = %self.session_id,
+                    error = %err,
+                    context,
+                    "runtime loop refused queue admission outside Active registration"
+                );
+                err
+            })
+    }
+
     /// Exact teardown authority for an executor already retained by the
     /// runtime-loop handoff slot. Unlike live loop work, teardown recovery must
     /// also admit `Queuing` after `RuntimeExecutorExited`; exact session/driver
@@ -5716,7 +5747,7 @@ async fn process_queue(
             .await;
 
         let queue_authority_guard = match authority_binding
-            .lock_current_driver_authority(driver, "runtime loop queue processing")
+            .lock_current_queue_driver_authority(driver, "runtime loop queue processing")
             .await
         {
             Ok(guard) => guard,

@@ -12830,6 +12830,128 @@ async fn cancel_after_boundary_on_idle_attached_runtime_consumes_before_successo
 }
 
 #[tokio::test]
+async fn unregister_draining_fences_queue_admission_before_executor_apply() {
+    struct CountingExecutor {
+        apply_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for CountingExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            self.apply_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                },
+                None,
+                None,
+            ))
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let apply_calls = Arc::new(AtomicUsize::new(0));
+    adapter
+        .register_session_with_executor(
+            session_id.clone(),
+            Box::new(CountingExecutor {
+                apply_calls: Arc::clone(&apply_calls),
+            }),
+        )
+        .await
+        .expect("idle runtime executor registration should succeed");
+
+    // Pause the accepted input immediately before queue authority. Unregister
+    // must win the mutation-gate order, commit Draining, and observe no run ID
+    // before the loop is released to attempt queue admission.
+    let (queue_gap_entered, queue_gap_release) =
+        adapter.arm_runtime_loop_before_queue_authority_test_hook(session_id.clone());
+    let (outcome, completion) = adapter
+        .accept_input_with_completion(&session_id, make_prompt("must not start"))
+        .await
+        .expect("queued input should be accepted before unregister");
+    assert!(outcome.is_accepted());
+    tokio::time::timeout(Duration::from_secs(1), queue_gap_entered)
+        .await
+        .expect("runtime loop should reach the forced queue-authority gap")
+        .expect("runtime-loop queue-authority hook should remain armed");
+
+    let unregister_adapter = Arc::clone(&adapter);
+    let unregister_session_id = session_id.clone();
+    let unregister = tokio::spawn(async move {
+        unregister_adapter
+            .unregister_session(&unregister_session_id)
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let state = adapter
+                .session_dsl_state(&session_id)
+                .await
+                .expect("session should remain observable during drain");
+            if state.registration_phase == crate::meerkat_machine::dsl::RegistrationPhase::Draining
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("unregister should commit Draining while the queue is paused");
+
+    queue_gap_release
+        .send(())
+        .expect("runtime loop should still be waiting at the forced gap");
+    tokio::time::timeout(Duration::from_secs(5), unregister)
+        .await
+        .expect("unregister should not wait on a post-Draining run")
+        .expect("unregister task should not panic")
+        .expect("session should unregister cleanly");
+
+    assert_eq!(
+        apply_calls.load(Ordering::SeqCst),
+        0,
+        "Draining must reject new queued executor work"
+    );
+    let completion_outcome = tokio::time::timeout(
+        Duration::from_secs(1),
+        completion
+            .expect("accepted input should retain a completion waiter")
+            .wait_authorized(),
+    )
+    .await
+    .expect("unregister should resolve refused queued work through canonical stop");
+    assert!(matches!(
+        completion_outcome,
+        CompletionOutcome::RuntimeTerminated { .. }
+    ));
+    assert!(!adapter.contains_session(&session_id).await);
+}
+
+#[tokio::test]
 async fn hard_cancel_current_run_uses_prepared_session_interrupt_handle_before_executor_attach() {
     struct CountingInterruptHandle {
         calls: Arc<AtomicUsize>,

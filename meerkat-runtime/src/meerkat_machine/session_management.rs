@@ -8218,6 +8218,12 @@ impl MeerkatMachine {
             // (mid `start_turn`) never observes the closed channel. Hard-cancel
             // the in-flight run so a well-behaved executor unwinds `apply` and
             // the loop reaches its clean stop/terminal-handoff exit promptly.
+            // `None` cannot race a later executor entry here. Queue admission
+            // requires Active while holding this registration's mutation gate,
+            // whereas an already-admitted run may retain the broader
+            // Active-or-Draining authority needed to commit and terminalize.
+            // Thus BeginUnregisterSession either follows a published run ID or
+            // makes every later queue-admission attempt fail closed.
             if let (Some(interrupt_handle), Some(expected_run_id)) =
                 (loop_interrupt_handle, loop_interrupt_run_id)
             {

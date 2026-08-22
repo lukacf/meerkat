@@ -48,7 +48,7 @@ adapter types remain owned by `meerkat-live`.
   <Step title="Add the dependency">
     ```toml
     [dependencies]
-    meerkat = "=0.8.25"
+    meerkat = "=0.8.26"
     tokio = { version = "1", features = ["full"] }
     ```
   </Step>
@@ -58,17 +58,17 @@ adapter types remain owned by `meerkat-live`.
     <CodeGroup>
     ```toml Default (all providers, no storage)
     [dependencies]
-    meerkat = "=0.8.25"
+    meerkat = "=0.8.26"
     ```
 
     ```toml Add persistence
     [dependencies]
-    meerkat = { version = "=0.8.25", features = ["sqlite-store", "session-store"] }
+    meerkat = { version = "=0.8.26", features = ["sqlite-store", "session-store"] }
     ```
 
     ```toml Full native harness
     [dependencies]
-    meerkat = { version = "=0.8.25", features = [
+    meerkat = { version = "=0.8.26", features = [
         "sqlite-store", "session-store", "session-compaction",
         "memory-store-session", "atif", "comms", "mcp", "skills",
         "schedule", "workgraph", "openai-realtime", "live",
@@ -78,7 +78,7 @@ adapter types remain owned by `meerkat-live`.
 
     ```toml Minimal (single provider)
     [dependencies]
-    meerkat = { version = "=0.8.25", default-features = false, features = ["anthropic"] }
+    meerkat = { version = "=0.8.26", default-features = false, features = ["anthropic"] }
     ```
     </CodeGroup>
   </Step>

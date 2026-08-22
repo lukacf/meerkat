@@ -45,7 +45,7 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.25",
+        "CARGO_PKG_VERSION": "0.8.26",
         "CARGO_MANIFEST_DIR": "./meerkat-session",
     },
     proc_macro_deps = all_crate_deps(
@@ -93,7 +93,7 @@ rust_library(
         "//tests/integration:__pkg__",
     ],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.25",
+        "CARGO_PKG_VERSION": "0.8.26",
         "CARGO_MANIFEST_DIR": "./meerkat-session",
     },
     proc_macro_deps = all_crate_deps(
@@ -133,7 +133,7 @@ rust_library(
         "//meerkat:__pkg__",
     ],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.25",
+        "CARGO_PKG_VERSION": "0.8.26",
         "CARGO_MANIFEST_DIR": "./meerkat-session",
     },
     proc_macro_deps = all_crate_deps(
@@ -173,7 +173,7 @@ rust_library(
         "//meerkat:__pkg__",
     ],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.25",
+        "CARGO_PKG_VERSION": "0.8.26",
         "CARGO_MANIFEST_DIR": "./meerkat-session",
     },
     proc_macro_deps = all_crate_deps(
@@ -217,7 +217,7 @@ rust_test(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.25",
+        "CARGO_PKG_VERSION": "0.8.26",
         "CARGO_MANIFEST_DIR": "./meerkat-session",
     },
     tags = [
@@ -276,7 +276,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.25",
+        "CARGO_PKG_VERSION": "0.8.26",
         "CARGO_BIN_NAME": "ephemeral_contract",
         "CARGO_MANIFEST_DIR": "./meerkat-session",
     },
@@ -334,7 +334,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.25",
+        "CARGO_PKG_VERSION": "0.8.26",
         "CARGO_BIN_NAME": "persistence_compat",
         "CARGO_MANIFEST_DIR": "./meerkat-session",
     },
@@ -392,7 +392,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.25",
+        "CARGO_PKG_VERSION": "0.8.26",
         "CARGO_BIN_NAME": "regression_lifecycle",
         "CARGO_MANIFEST_DIR": "./meerkat-session",
     },
@@ -450,7 +450,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.25",
+        "CARGO_PKG_VERSION": "0.8.26",
         "CARGO_BIN_NAME": "session_store_append_only_trybuild",
         "CARGO_MANIFEST_DIR": "./meerkat-session",
     },

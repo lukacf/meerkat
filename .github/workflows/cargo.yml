@@ -210,6 +210,10 @@ jobs:
       - name: Machine authority docs gate
         run: make machine-authority-docs-gate
 
+      - name: Docs-only load-bearing contracts
+        if: ${{ needs.changes.outputs.code_changed == 'false' }}
+        run: make docs-only-contract-gate
+
       - name: Machine poster coverage
         run: make verify-machine-poster-coverage
 

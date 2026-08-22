@@ -24,6 +24,7 @@ profile=default
 case "$family" in
   unit)
     cargo_args=(--workspace --lib)
+    profile=ci-unit
     ;;
   int-heavy)
     cargo_args=(-p meerkat-integration-tests --tests --profile fast)
@@ -116,8 +117,8 @@ case "${1:-}" in
       --final-status-level fail
       --partition "$partition"
     )
-    if [[ "$profile" == fast ]]; then
-      run_args+=(--profile fast)
+    if [[ "$profile" != default ]]; then
+      run_args+=(--profile "$profile")
     fi
     MEERKAT_WORKSPACE_ROOT="$ROOT" "$NEXTEST_BIN" "${run_args[@]}"
     ;;

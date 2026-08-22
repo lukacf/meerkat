@@ -5,6 +5,22 @@
 # Turbo-S live-smoke cohort is a Bazel sh_test suite, so its serialization and
 # retry policy belongs to scripts/buildbuddy-bazel-poc rather than here.
 
+[profile.ci-unit]
+# CI unit shards normally finish in a few minutes total. Bound any single test
+# that stops making progress so nextest reports its name instead of leaving an
+# anonymous shard running until a human cancels the workflow. Integration and
+# e2e lanes intentionally do not select this profile.
+inherits = "default"
+slow-timeout = { period = "60s", terminate-after = 4 }
+
+[[profile.ci-unit.overrides]]
+# This workflow-style xtask test performs nested machine-authority compilation.
+# Its measured healthy runtime is about 4.5 minutes on GitHub-hosted runners,
+# so give only this exact case additional headroom without weakening the unit
+# lane's general four-minute attribution bound.
+filter = 'test(=machines::tests::machine_workflow_red_ok_detects_missing_and_stale_generated_artifacts)'
+slow-timeout = { period = "60s", terminate-after = 8 }
+
 [profile.fast]
 # Cargo's default fast lane: unit + integration-fast, with dedicated e2e lane
 # wrappers left behind explicit `cargo e2e-*` aliases.

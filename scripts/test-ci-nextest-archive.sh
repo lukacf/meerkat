@@ -92,8 +92,13 @@ while IFS= read -r command; do
 done < <(grep '^nextest ' "$LOG")
 
 unit_run="$(grep '^nextest ' "$LOG" | head -n 1)"
-[[ "$unit_run" != *' <--profile> <fast>'* ]] || {
-  echo "unit archive run unexpectedly selected the fast profile" >&2
+[[ "$unit_run" == *' <--profile> <ci-unit>'* ]] || {
+  echo "unit archive run omitted the bounded ci-unit profile" >&2
+  exit 1
+}
+ci_unit_run_count="$(grep '^nextest ' "$LOG" | grep -c -- '<--profile> <ci-unit>')"
+[[ "$ci_unit_run_count" == 1 ]] || {
+  echo "expected one ci-unit archive run, got ${ci_unit_run_count}" >&2
   exit 1
 }
 fast_run_count="$(grep '^nextest ' "$LOG" | grep -c -- '<--profile> <fast>')"
@@ -114,6 +119,7 @@ fi
 BUILD_ACTION="$ROOT/.github/actions/build-nextest-archive/action.yml"
 RUN_ACTION="$ROOT/.github/actions/run-nextest-archive/action.yml"
 WORKFLOW="$ROOT/.github/workflows/cargo.yml"
+NEXTEST_CONFIG="$ROOT/.config/nextest.toml"
 
 assert_file_contains() {
   local file="$1"
@@ -133,6 +139,11 @@ assert_file_contains "$RUN_ACTION" "name: ${stable_artifact_name}"
 assert_file_contains "$RUN_ACTION" 'uses: ./.github/actions/setup-rust-ci'
 assert_file_contains "$RUN_ACTION" 'components: rustfmt'
 assert_file_contains "$RUN_ACTION" 'scripts/ci-nextest-archive.sh run'
+assert_file_contains "$NEXTEST_CONFIG" '[profile.ci-unit]'
+assert_file_contains "$NEXTEST_CONFIG" 'inherits = "default"'
+assert_file_contains "$NEXTEST_CONFIG" 'slow-timeout = { period = "60s", terminate-after = 4 }'
+assert_file_contains "$NEXTEST_CONFIG" 'filter = '\''test(=machines::tests::machine_workflow_red_ok_detects_missing_and_stale_generated_artifacts)'\'''
+assert_file_contains "$NEXTEST_CONFIG" 'slow-timeout = { period = "60s", terminate-after = 8 }'
 
 for dependency in unit-archive int-archives; do
   assert_file_contains "$WORKFLOW" "      - ${dependency}"

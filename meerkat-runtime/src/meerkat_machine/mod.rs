@@ -1262,6 +1262,13 @@ struct PendingUnregisterFinalization {
 struct UnregisterTeardownMechanicalObservations {
     runtime_loop_forced_abort: std::sync::atomic::AtomicBool,
     comms_drain_forced_abort: std::sync::atomic::AtomicBool,
+    /// Report intervals elapsed while the unregister saga waited for the
+    /// runtime loop to hand off the exact executor.
+    ///
+    /// Non-zero means that handoff stalled. This is an observation and never a
+    /// bound: nothing is aborted or failed on its account, and the wait itself
+    /// stays deliberately unbounded for the reason recorded at its await site.
+    runtime_loop_handoff_wait_reports: std::sync::atomic::AtomicU32,
 }
 
 /// Owned persistence worker for one runtime's ops epoch. The unregister saga
@@ -1282,6 +1289,7 @@ impl UnregisterTeardownMechanicalObservations {
         Self {
             runtime_loop_forced_abort: std::sync::atomic::AtomicBool::new(false),
             comms_drain_forced_abort: std::sync::atomic::AtomicBool::new(false),
+            runtime_loop_handoff_wait_reports: std::sync::atomic::AtomicU32::new(0),
         }
     }
 

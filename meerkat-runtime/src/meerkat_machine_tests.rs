@@ -12830,6 +12830,129 @@ async fn cancel_after_boundary_on_idle_attached_runtime_consumes_before_successo
 }
 
 #[tokio::test]
+async fn unregister_reports_a_stalled_runtime_loop_handoff_without_aborting_it() {
+    struct StallingStopExecutor {
+        stop_entered: Option<tokio::sync::oneshot::Sender<()>>,
+        stop_release: Option<tokio::sync::oneshot::Receiver<()>>,
+        stop_returned: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for StallingStopExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                },
+                None,
+                None,
+            ))
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            if let Some(entered) = self.stop_entered.take() {
+                let _ = entered.send(());
+            }
+            if let Some(release) = self.stop_release.take() {
+                let _ = release.await;
+            }
+            self.stop_returned.store(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let (stop_entered_tx, stop_entered_rx) = tokio::sync::oneshot::channel();
+    let (stop_release_tx, stop_release_rx) = tokio::sync::oneshot::channel();
+    let stop_returned = Arc::new(AtomicUsize::new(0));
+    adapter
+        .register_session_with_executor(
+            session_id.clone(),
+            Box::new(StallingStopExecutor {
+                stop_entered: Some(stop_entered_tx),
+                stop_release: Some(stop_release_rx),
+                stop_returned: Arc::clone(&stop_returned),
+            }),
+        )
+        .await
+        .expect("idle runtime executor registration should succeed");
+
+    let unregister_adapter = Arc::clone(&adapter);
+    let unregister_session_id = session_id.clone();
+    let unregister = tokio::spawn(async move {
+        unregister_adapter
+            .unregister_session(&unregister_session_id)
+            .await
+    });
+
+    // Park the runtime loop inside its canonical executor stop so the handoff
+    // wait cannot complete.
+    tokio::time::timeout(Duration::from_secs(2), stop_entered_rx)
+        .await
+        .expect("the runtime loop should reach its canonical executor stop")
+        .expect("stop-entry signal should not be dropped");
+
+    // Visibility: the wait must report while it waits. Test builds use a 50ms
+    // report interval.
+    let reports = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(reports) = adapter
+                .unregister_runtime_loop_handoff_wait_reports(&session_id)
+                .await
+                && reports > 0
+            {
+                break reports;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("a stalled handoff must report at least one elapsed interval");
+    assert!(
+        reports >= 1,
+        "stalled handoff should have reported at least once, got {reports}"
+    );
+
+    // Non-abort: the parked loop is still alive to take its release. Had the
+    // wait aborted the task, the executor future would already be dropped and
+    // this send could not be received.
+    stop_release_tx
+        .send(())
+        .expect("the stalled runtime loop must still be alive to release");
+
+    tokio::time::timeout(Duration::from_secs(5), unregister)
+        .await
+        .expect("unregister should complete once the loop hands off")
+        .expect("unregister task should not panic")
+        .expect("session should unregister cleanly after a reported stall");
+    assert_eq!(
+        stop_returned.load(Ordering::SeqCst),
+        1,
+        "the executor stop must have returned rather than been dropped by an abort"
+    );
+    assert!(!adapter.contains_session(&session_id).await);
+}
+
+#[tokio::test]
 async fn unregister_draining_fences_queue_admission_before_executor_apply() {
     struct CountingExecutor {
         apply_calls: Arc<AtomicUsize>,

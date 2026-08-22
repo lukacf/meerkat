@@ -8258,7 +8258,37 @@ impl MeerkatMachine {
             // would drop the exact executor and make required external cleanup
             // impossible to retry, so machine-owned Draining truth is retained
             // until the loop actually hands the executor off.
-            match loop_handle.await {
+            // Waiting forever is the deliberate choice above; waiting SILENTLY
+            // is not. A stalled handoff previously surfaced only as an
+            // anonymous four-minute CI shard death. Re-arm a report every
+            // interval so the stall is attributable while the wait stays
+            // unbounded. `timeout` drops only the `&mut` borrow of the handle on
+            // elapse, never the task, so this cannot abort the runtime loop.
+            #[cfg(not(test))]
+            const HANDOFF_REPORT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+            #[cfg(test)]
+            const HANDOFF_REPORT_INTERVAL: std::time::Duration =
+                std::time::Duration::from_millis(50);
+            let handoff_wait_started = std::time::Instant::now();
+            let mut loop_handle = loop_handle;
+            let loop_join_result = loop {
+                match crate::tokio::time::timeout(HANDOFF_REPORT_INTERVAL, &mut loop_handle).await {
+                    Ok(join_result) => break join_result,
+                    Err(_elapsed) => {
+                        let reports = teardown_observations
+                            .runtime_loop_handoff_wait_reports
+                            .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+                            + 1;
+                        tracing::warn!(
+                            %session_id,
+                            reports,
+                            waited_ms = handoff_wait_started.elapsed().as_millis(),
+                            "unregister is still waiting for the runtime loop to hand off the exact executor"
+                        );
+                    }
+                }
+            };
+            match loop_join_result {
                 Ok(()) => {}
                 Err(join_error) => {
                     teardown_observations
@@ -9250,6 +9280,25 @@ impl MeerkatMachine {
     /// Check whether a runtime driver is already registered for a session.
     pub async fn contains_session(&self, session_id: &SessionId) -> bool {
         self.sessions.read().await.contains_key(session_id)
+    }
+
+    /// Report intervals elapsed so far while an in-flight unregister waits for
+    /// the runtime loop to hand off the exact executor.
+    ///
+    /// `None` once the registration is gone. Observation only: a non-zero count
+    /// never fails or bounds the wait.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub async fn unregister_runtime_loop_handoff_wait_reports(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<u32> {
+        self.sessions.read().await.get(session_id).map(|entry| {
+            entry
+                .unregister_teardown_observations
+                .runtime_loop_handoff_wait_reports
+                .load(std::sync::atomic::Ordering::Acquire)
+        })
     }
 
     /// Observe whether archiving still has runtime retirement work to finish.

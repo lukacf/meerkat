@@ -606,17 +606,137 @@ fn test_trusted_peer_descriptor(name: &str, address: &str) -> TrustedPeerDescrip
     .expect("valid non-zero test trusted peer descriptor")
 }
 
+/// How long the helper below keeps re-asking before it declares the unregister
+/// stranded.
+///
+/// `MeerkatMachine::unregister_session` reports `UnregisterInProgress` only when
+/// its own two-second caller grace elapses, so retrying that report without a
+/// budget is an unbounded wait wearing a timeout's clothes: 120 turns land
+/// exactly on the four-minute CI unit-test bound, and the shard then dies
+/// without naming which wait never finished.
+const UNREGISTER_COMPLETION_BUDGET: Duration = Duration::from_secs(30);
+
+/// Why a bounded unregister retry stopped asking.
+#[derive(Debug)]
+enum UnregisterRetryStop {
+    /// The coordinator reported a genuine driver error.
+    Driver(meerkat_runtime::RuntimeDriverError),
+    /// The coordinator kept reporting `UnregisterInProgress` until the budget
+    /// was spent.
+    StillInProgress { attempts: u32, waited: Duration },
+}
+
+/// Retry `attempt` while the unregister coordinator reports that a teardown is
+/// still in progress, giving up once `budget` is spent.
+///
+/// Separated from its one production caller so the budget itself is testable
+/// without a live `MeerkatMachine`.
+async fn retry_while_unregister_in_progress<F, Fut>(
+    budget: Duration,
+    mut attempt: F,
+) -> Result<(), UnregisterRetryStop>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<(), meerkat_runtime::RuntimeDriverError>>,
+{
+    let started = Instant::now();
+    let mut attempts = 0_u32;
+    loop {
+        attempts += 1;
+        match attempt().await {
+            Ok(()) => return Ok(()),
+            Err(meerkat_runtime::RuntimeDriverError::UnregisterInProgress { .. }) => {
+                let waited = started.elapsed();
+                if waited >= budget {
+                    return Err(UnregisterRetryStop::StillInProgress { attempts, waited });
+                }
+                tokio::task::yield_now().await;
+            }
+            Err(error) => return Err(UnregisterRetryStop::Driver(error)),
+        }
+    }
+}
+
 async fn unregister_runtime_session_until_complete(
     adapter: &meerkat_runtime::MeerkatMachine,
     session_id: &SessionId,
 ) -> Result<(), meerkat_runtime::RuntimeDriverError> {
-    loop {
-        match adapter.unregister_session(session_id).await {
-            Ok(()) => return Ok(()),
-            Err(meerkat_runtime::RuntimeDriverError::UnregisterInProgress { .. }) => {}
-            Err(error) => return Err(error),
-        }
+    match retry_while_unregister_in_progress(UNREGISTER_COMPLETION_BUDGET, || {
+        adapter.unregister_session(session_id)
+    })
+    .await
+    {
+        Ok(()) => Ok(()),
+        Err(UnregisterRetryStop::Driver(error)) => Err(error),
+        Err(UnregisterRetryStop::StillInProgress { attempts, waited }) => panic!(
+            "unregister for session {session_id} did not complete within {waited:?}: all \
+             {attempts} attempts reported UnregisterInProgress. The exact executor may be \
+             stranded in a non-interruptible turn; take a stack sample of this process to \
+             establish what the coordinator is waiting on"
+        ),
     }
+}
+
+#[tokio::test]
+async fn bounded_unregister_retry_stops_once_the_budget_is_spent() {
+    let session_id = SessionId::new();
+    let attempts = std::cell::Cell::new(0_u32);
+    let budget = Duration::from_millis(20);
+
+    let stop = retry_while_unregister_in_progress(budget, || {
+        attempts.set(attempts.get() + 1);
+        std::future::ready(Err(
+            meerkat_runtime::RuntimeDriverError::UnregisterInProgress {
+                runtime_id: meerkat_runtime::LogicalRuntimeId::for_session(&session_id),
+            },
+        ))
+    })
+    .await
+    .expect_err("a coordinator that never completes must exhaust the budget");
+
+    match stop {
+        UnregisterRetryStop::StillInProgress {
+            attempts: reported,
+            waited,
+        } => {
+            assert_eq!(
+                reported,
+                attempts.get(),
+                "the reported attempt count must be the attempts actually made"
+            );
+            assert!(
+                waited >= budget,
+                "the retry must spend the whole budget before giving up, waited {waited:?}"
+            );
+        }
+        other => panic!("expected an exhausted budget, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn bounded_unregister_retry_still_completes_a_slow_but_finishing_teardown() {
+    let session_id = SessionId::new();
+    let attempts = std::cell::Cell::new(0_u32);
+
+    retry_while_unregister_in_progress(UNREGISTER_COMPLETION_BUDGET, || {
+        let made = attempts.get() + 1;
+        attempts.set(made);
+        std::future::ready(if made < 3 {
+            Err(meerkat_runtime::RuntimeDriverError::UnregisterInProgress {
+                runtime_id: meerkat_runtime::LogicalRuntimeId::for_session(&session_id),
+            })
+        } else {
+            Ok(())
+        })
+    })
+    .await
+    .expect("a teardown that finishes must not be reported as stranded");
+
+    assert_eq!(
+        attempts.get(),
+        3,
+        "the retry must keep asking until the coordinator completes"
+    );
 }
 
 async fn install_machine_peer_request_response_authority(

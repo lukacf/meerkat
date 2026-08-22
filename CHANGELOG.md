@@ -28,6 +28,65 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- **The first-class member tool-policy contract adds fields to existing public
+  Rust construction surfaces.** Direct struct literals must now provide the
+  new policy fields on `meerkat_contracts::PortableSpawnOverlay`,
+  `meerkat_core::AgentConfig`, `meerkat_core::SessionBuildOptions`,
+  `meerkat_core::ResumeOverrideMask`, `meerkat_core::SessionLlmRequestPolicy`,
+  `meerkat_core::SessionTooling`, `meerkat_mob::DesiredMemberOverlay`,
+  `meerkat_mob::IdentityIntentRecord`, `meerkat_mob::SpawnMemberSpec`,
+  `meerkat_mob::DecompiledMemberBuild`, and `meerkat::AgentBuildConfig`.
+  Callers should prefer the provided defaults, builders, and wire constructors,
+  which preserve the prior unmanaged and inherited behavior.
+
+### Added
+
+- Mobs now support a first-class, durable, revisioned per-member tool policy.
+  Declarations use compare-and-swap revision authority, converge across resume
+  and rematerialization, and compose allow and deny constraints conjunctively
+  with call-level, provider-native, and application consequence policy. The
+  sealed result is enforced at the outer dispatcher, while application
+  evaluators remain narrow-only, bounded, and fail-closed. RPC, REST, MCP,
+  Python, TypeScript, Web, persistence, schemas, and machine authority carry
+  the same contract.
+- A canonical `CompiledApplicationToolPolicy` schema and strict canonical-JSON
+  parser are published for application policy providers. Unknown fields,
+  absent fail-closed defaults, non-canonical encodings, and digest mismatches
+  are rejected.
+
+### Changed
+
+- Public documentation and companion agent skills now describe the current
+  checkpoint-free session authority, durable jobs, scheduling and WorkGraph,
+  approvals, event projection, live transport, multi-host mobs, realms, auth,
+  providers, SDKs, APIs, and CLI behavior. New guides cover durable jobs and
+  storage operations.
+- CI now gives ordinary unit tests a bounded named timeout, reports slow
+  integration tests without killing them, validates load-bearing contracts on
+  docs-only changes, and documents the observed recovery rules for cancelled
+  or superseded check suites.
+- The `WorkGraphStore::update_item_and_attention_cas` contract now states that
+  it is one atomic store primitive. Implementations using per-key locks must
+  acquire the complete item and attention key set in deterministic order and
+  must not call public methods that reacquire those locks.
+
+### Corrected
+
+- Runtime unregister can no longer admit queued executor work after the
+  machine has committed `Draining` and observed no current run. Queue dequeue
+  now requires an Active registration under the same mutation gate, while an
+  already-admitted run retains Active-or-Draining authority to commit and
+  terminalize. Refused queued work is resolved by canonical stop rather than
+  being dropped. The Mob test service also preserves exact interrupts delivered
+  after run admission but before its cooperative interrupt subscription.
+- Resuming a durable mob member now reasserts the current mob's `comms_name`,
+  peer metadata, standard identity labels, and current conflicting labels on
+  every resume, not only after a role migration. Durable-only adopter labels
+  remain preserved, and admission still fails closed on mob, member, or role
+  mismatch.
+
 ## [0.8.25] - 2026-08-20
 
 ### Breaking

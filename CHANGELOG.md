@@ -28,6 +28,8 @@ them.
 
 ## [Unreleased]
 
+## [0.8.26] - 2026-08-22
+
 ### Breaking
 
 - **The first-class member tool-policy contract adds fields to existing public
@@ -7005,7 +7007,8 @@ tag, so its comparison link uses v0.3.0 as the exact ancestry base.
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.8.25...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.8.26...HEAD
+[0.8.26]: https://github.com/lukacf/meerkat/compare/v0.8.25...v0.8.26
 [0.8.25]: https://github.com/lukacf/meerkat/compare/v0.8.24...v0.8.25
 [0.8.24]: https://github.com/lukacf/meerkat/compare/v0.8.23...v0.8.24
 [0.8.23]: https://github.com/lukacf/meerkat/compare/v0.8.22...v0.8.23

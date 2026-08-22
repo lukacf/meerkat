@@ -131,13 +131,17 @@ Treat check-context precedence as part of retry recovery:
    before classifying a slow job as hung.
 3. When a new PR-associated attempt is necessary, expect the automatic
    cancellation residue. The replacement attempt must reach both aggregate
-   gates so its later results supersede the failures.
+   gates in the newest check suite before its results can clear the failures.
 4. Verify the PR's latest `GHA Cargo / Cargo lane gate` and `CI gate` contexts
    directly. A green shard or successful manual workflow is useful evidence,
    but it does not by itself prove that the required PR contexts were replaced.
 
-Do not infer mergeability from a workflow's overall conclusion alone. The PR
-rollup's latest result for each required context name is authoritative.
+Do not infer mergeability from a workflow's overall conclusion alone, and do not
+assume that any later successful result supersedes an earlier failure. A newer
+failed check suite can keep merge policy blocked even when an older suite's later
+attempt reports success for the same required context, so recovery must succeed
+in the newest suite. Treat an attempted merge that stays blocked as stronger
+evidence than a required-check CLI that reports pass.
 
 ## Nightly Lanes
 

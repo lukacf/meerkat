@@ -129,6 +129,17 @@ pub trait WorkGraphStore: Send + Sync {
         Err(unsupported(self.kind()))
     }
 
+    /// Atomically update one item and its attention bindings under one store
+    /// mutation boundary.
+    ///
+    /// This is a primitive, not a composition hook. Implementations that use
+    /// per-key locks must acquire the complete item-plus-attention key set in
+    /// one deterministic order, validate every expected revision, and apply
+    /// every mutation inline while those guards are held. They must not call
+    /// [`WorkGraphStore::update_item_cas`] (or another public method that
+    /// reacquires any key in that set) from inside the boundary. Async mutexes
+    /// are not reentrant, so the otherwise natural acquire-then-delegate shape
+    /// silently self-deadlocks instead of returning a store error.
     async fn update_item_and_attention_cas(
         &self,
         item: WorkItem,

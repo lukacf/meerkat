@@ -537,6 +537,9 @@ fn apply_resumed_session_metadata_with_role_migration(
             // The current definition owns description and every label it
             // declares. Durable-only adopter annotations remain compatible
             // across cold resume; key conflicts resolve to current intent.
+            // Label deletion does not propagate: absence cannot distinguish
+            // an intentional delete from a durable-only adopter annotation.
+            // Removing one requires a future typed deletion intent.
             merged.description = current.description;
             merged.labels.extend(current.labels);
             Some(merged)

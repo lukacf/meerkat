@@ -396,10 +396,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Checkout release helpers
+      # A recovery dispatch must run the fixed generic preflight from the
+      # workflow commit. Package build and publish jobs below still check out
+      # the immutable release tag selected by release_tag.
+      - name: Checkout workflow helpers
         uses: actions/checkout@v6
-        with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '' && github.event.inputs.release_tag || github.ref }}
 
       - name: Setup Node
         uses: actions/setup-node@v6

@@ -29,7 +29,6 @@ preflight_dir="$(mktemp -d "${TMPDIR:-/tmp}/meerkat-npm-preflight.XXXXXX")"
 trap 'rm -rf "${preflight_dir}"' EXIT
 
 npm_config="${preflight_dir}/npmrc"
-permissions_json="${preflight_dir}/permissions.json"
 printf 'registry=%s\n%s:_authToken=%s\n' \
   "${registry}" \
   "${auth_config_key}" \
@@ -42,12 +41,16 @@ if [[ -z "${actor}" ]]; then
   exit 1
 fi
 
-npm access list packages "${actor}" --json --registry="${registry}" >"${permissions_json}"
+required_packages=('@rkat/sdk' '@rkat/web')
+for package_index in "${!required_packages[@]}"; do
+  package_name="${required_packages[package_index]}"
+  permissions_json="${preflight_dir}/permissions-${package_index}.json"
+  npm access list collaborators "${package_name}" --json --registry="${registry}" >"${permissions_json}"
 
-node - "${permissions_json}" '@rkat/sdk' '@rkat/web' <<'NODE'
+  node - "${permissions_json}" "${actor}" "${package_name}" <<'NODE'
 const fs = require('node:fs');
 
-const [permissionsPath, ...requiredPackages] = process.argv.slice(2);
+const [permissionsPath, actor, packageName] = process.argv.slice(2);
 let permissions;
 try {
   permissions = JSON.parse(fs.readFileSync(permissionsPath, 'utf8'));
@@ -61,18 +64,12 @@ if (permissions === null || Array.isArray(permissions) || typeof permissions !==
   process.exit(1);
 }
 
-let failed = false;
-for (const packageName of requiredPackages) {
-  const permission = permissions[packageName];
-  if (permission !== 'read-write') {
-    console.error(`${packageName} npm permission is ${permission ?? 'missing'}; read-write is required`);
-    failed = true;
-  }
-}
-
-if (failed) {
+const permission = permissions[actor];
+if (permission !== 'read-write') {
+  console.error(`${actor} npm permission on ${packageName} is ${permission ?? 'missing'}; read-write is required`);
   process.exit(1);
 }
 NODE
+done
 
 printf 'npm publication preflight passed for %s: @rkat/sdk and @rkat/web are read-write\n' "${actor}"

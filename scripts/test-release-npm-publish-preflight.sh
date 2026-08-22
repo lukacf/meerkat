@@ -40,7 +40,7 @@ case "${1:-}" in
     if [[ -n "${FAKE_NPM_ACCESS_JSON+x}" ]]; then
       printf '%s\n' "${FAKE_NPM_ACCESS_JSON}"
     else
-      printf '%s\n' '{"@rkat/sdk":"read-write","@rkat/web":"read-write"}'
+      printf '%s\n' '{"release-owner":"read-write"}'
     fi
     ;;
   *)
@@ -114,10 +114,26 @@ assert_secret_absent
 
 run_case failure FAKE_NPM_WHOAMI_MODE=failure
 run_case failure FAKE_NPM_ACCESS_MODE=failure
-run_case failure FAKE_NPM_ACCESS_JSON='{"@rkat/sdk":"read-only","@rkat/web":"read-write"}'
-run_case failure FAKE_NPM_ACCESS_JSON='{"@rkat/sdk":"read-write"}'
+run_case failure FAKE_NPM_ACCESS_JSON='{"release-owner":"read-only"}'
+run_case failure FAKE_NPM_ACCESS_JSON='{}'
 run_case failure FAKE_NPM_ACCESS_JSON='{not-json'
-run_case success FAKE_NPM_ACCESS_JSON='{"@rkat/sdk":"read-write","@rkat/web":"read-write"}'
+run_case success FAKE_NPM_ACCESS_JSON='{"release-owner":"read-write"}'
+
+if ! grep -Fxq 'access list collaborators @rkat/sdk --json --registry=https://registry.npmjs.org/' "${fake_log}"; then
+  echo "npm preflight did not inspect @rkat/sdk collaborators" >&2
+  cat "${fake_log}" >&2
+  exit 1
+fi
+if ! grep -Fxq 'access list collaborators @rkat/web --json --registry=https://registry.npmjs.org/' "${fake_log}"; then
+  echo "npm preflight did not inspect @rkat/web collaborators" >&2
+  cat "${fake_log}" >&2
+  exit 1
+fi
+if grep -Fq 'access list packages' "${fake_log}"; then
+  echo "npm preflight used the organization package-list endpoint" >&2
+  cat "${fake_log}" >&2
+  exit 1
+fi
 
 python3 - "${root}/.github/workflows/release.yml" <<'PY'
 import pathlib
@@ -141,6 +157,8 @@ web = job("publish_web_sdk")
 
 assert "scripts/release-npm-publish-preflight" in preflight
 assert "alpha_crates_only" in preflight
+assert "Checkout workflow helpers" in preflight
+assert "github.event.inputs.release_tag" not in preflight
 assert re.search(r"(?m)^    needs: \[require_ci_green\]$", preflight)
 assert "needs.require_ci_green.result == 'success'" in preflight
 for name, body in (("publish_registries", registries), ("publish_web_sdk", web)):

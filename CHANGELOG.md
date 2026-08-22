@@ -42,6 +42,85 @@ them.
   `meerkat_mob::DecompiledMemberBuild`, and `meerkat::AgentBuildConfig`.
   Callers should prefer the provided defaults, builders, and wire constructors,
   which preserve the prior unmanaged and inherited behavior.
+- **The exact added tool-policy fields are public API breaks.** They are
+  `AgentBuildConfig.application_tool_policy`,
+  `AgentBuildConfig.tool_consequence_policy_registry`,
+  `PortableSpawnOverlay.tool_category_overrides`,
+  `PortableSpawnOverlay.application_tool_policy`,
+  `SessionBuildOptions.application_tool_policy`,
+  `SessionBuildOptions.tool_consequence_policy_registry`,
+  `SessionTooling.application_tool_policy`,
+  `SessionLlmRequestPolicy.provider_native_tools`,
+  `ResumeOverrideMask.application_tool_policy`,
+  `AgentConfig.provider_native_tools`,
+  `HostMemberSubstrate.tool_consequence_policy_registry`,
+  `DesiredMemberOverlay.tool_category_overrides`,
+  `DesiredMemberOverlay.application_tool_policy`,
+  `DecompiledMemberBuild.web_search_override`, and
+  `DecompiledMemberBuild.application_tool_policy`.
+- **Tool-policy enum evolution changes exhaustive matches and implicit
+  discriminants.** New variants are `WireResolvedToolAccessPolicy::Constraints`,
+  `ToolExecutionPolicyError::EmptyConstraints`,
+  `ToolAccessPolicy::Constraints`, `AgentErrorClass::PolicyIndeterminate`,
+  `ToolDispatchTerminalErrorKind::PolicyDenied`,
+  `ToolDispatchTerminalErrorKind::PolicyIndeterminate`,
+  `ToolError::PolicyDenied`, and `ToolError::PolicyIndeterminate`. Inserting
+  the new variants shifts the implicit discriminants of
+  `AgentErrorClass::Mcp`, `AgentErrorClass::SessionNotFound`,
+  `AgentErrorClass::Budget`, `AgentErrorClass::MaxTokens`,
+  `AgentErrorClass::ContentFiltered`, `AgentErrorClass::MaxTurns`,
+  `AgentErrorClass::Cancelled`, `AgentErrorClass::InvalidState`,
+  `AgentErrorClass::OperationNotFound`, `AgentErrorClass::DepthLimit`,
+  `AgentErrorClass::ConcurrencyLimit`, `AgentErrorClass::Config`,
+  `AgentErrorClass::Internal`, `AgentErrorClass::Build`,
+  `AgentErrorClass::Auth`, `AgentErrorClass::CallbackPending`,
+  `AgentErrorClass::Skill`, `AgentErrorClass::StructuredOutput`,
+  `AgentErrorClass::InvalidOutputSchema`, `AgentErrorClass::Hook`,
+  `AgentErrorClass::Terminal`, `AgentErrorClass::NoPendingBoundary`,
+  `ToolDispatchTerminalErrorKind::Other`, and
+  `ToolDispatchTerminalErrorKind::CallbackPending`.
+- **`ExecutionPolicyGatedDispatcher` no longer implements the auto traits
+  `UnwindSafe` and `RefUnwindSafe`.** Code requiring either bound must wrap or
+  otherwise isolate the dispatcher explicitly.
+- **Identity convergence gains an explicit drain-and-replacement protocol.**
+  Added public fields are `ClassifyIdentityReconciliation.replacement`, the
+  `replacement` field of `MobMachineInput::ClassifyIdentityReconciliation`,
+  `IdentityReconcileFacts.replacement`,
+  `IdentityIntentRecord.convergence_directive`,
+  `IdentityConvergenceStatus.active_intent_revision`, and the `wiring_custody`
+  field of `IdentityIntent::Present`. New exhaustive-match cases are
+  `IdentityReconcileDecision::CloseMemberAdmission`,
+  `IdentityReconcileDecision::AwaitMemberDrain`,
+  `IdentityReconcileDecision::DrainBlocked`,
+  `IdentityReconcileDecision::CancelActiveMember`,
+  `MobError::IdentityConvergenceAdmissionClosed`,
+  `IdentityConvergenceCondition::DrainBlocked`, and
+  `MobStoreError::IdentityAdoptionUnavailable`.
+- **The new identity decisions shift the implicit discriminants of every
+  later `IdentityReconcileDecision` variant.** The affected variants are
+  `IdentityReconcileDecision::SealRetirementProven`,
+  `IdentityReconcileDecision::SealSessionCreationConsumed`,
+  `IdentityReconcileDecision::EnsureSessionAuthority`,
+  `IdentityReconcileDecision::EnsureRuntimeRegistration`,
+  `IdentityReconcileDecision::AwaitExternalBindingCeremony`,
+  `IdentityReconcileDecision::EnsureExternalBindingReceipt`,
+  `IdentityReconcileDecision::EnsureExternalBinding`,
+  `IdentityReconcileDecision::EnsureMemberMaterialization`,
+  `IdentityReconcileDecision::EnsureInitialDeliveryReceipt`,
+  `IdentityReconcileDecision::EnsureInitialDelivery`,
+  `IdentityReconcileDecision::AwaitInitialDelivery`,
+  `IdentityReconcileDecision::ReconcileWiring`,
+  `IdentityReconcileDecision::RetireMemberMaterialization`,
+  `IdentityReconcileDecision::RetireRuntimeRegistration`,
+  `IdentityReconcileDecision::ReleaseSessionAuthority`,
+  `IdentityReconcileDecision::Converged`,
+  `IdentityReconcileDecision::Tombstoned`, and
+  `IdentityReconcileDecision::Quarantined`.
+- **`MobIdentityStore` implementors must add
+  `apply_member_tool_declaration` and
+  `resolve_identity_convergence_block`.** Both trait methods are required at
+  the canonical `meerkat_mob::MobIdentityStore` and
+  `meerkat_mob::store::MobIdentityStore` public paths.
 
 ### Added
 

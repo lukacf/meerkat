@@ -96,16 +96,39 @@ unit_run="$(grep '^nextest ' "$LOG" | head -n 1)"
   echo "unit archive run omitted the bounded ci-unit profile" >&2
   exit 1
 }
+[[ "$unit_run" == *' <--final-status-level> <fail>'* ]] || {
+  echo "unit archive run changed its failure-only final status" >&2
+  exit 1
+}
+[[ "$unit_run" == *' <--status-level> <none>'* ]] || {
+  echo "unit archive run changed its quiet streaming status" >&2
+  exit 1
+}
 ci_unit_run_count="$(grep '^nextest ' "$LOG" | grep -c -- '<--profile> <ci-unit>')"
 [[ "$ci_unit_run_count" == 1 ]] || {
   echo "expected one ci-unit archive run, got ${ci_unit_run_count}" >&2
   exit 1
 }
-fast_run_count="$(grep '^nextest ' "$LOG" | grep -c -- '<--profile> <fast>')"
-[[ "$fast_run_count" == 3 ]] || {
-  echo "expected three fast-profile archive runs, got ${fast_run_count}" >&2
+fast_build_count="$(grep '^cargo ' "$LOG" | grep -c -- '<--profile> <fast>')"
+[[ "$fast_build_count" == 3 ]] || {
+  echo "expected three fast-profile integration archive builds, got ${fast_build_count}" >&2
   exit 1
 }
+fast_run_count="$(grep '^nextest ' "$LOG" | grep -c -- '<--profile> <fast>')"
+[[ "$fast_run_count" == 3 ]] || {
+  echo "expected three fast-profile integration archive runs, got ${fast_run_count}" >&2
+  exit 1
+}
+while IFS= read -r command; do
+  [[ "$command" == *' <--status-level> <slow>'* ]] || {
+    echo "integration archive run suppressed streaming slow-test markers: ${command}" >&2
+    exit 1
+  }
+  [[ "$command" == *' <--final-status-level> <slow>'* ]] || {
+    echo "integration archive run suppressed its slow-test summary: ${command}" >&2
+    exit 1
+  }
+done < <(grep '^nextest ' "$LOG" | grep -- '<--profile> <fast>')
 
 if "$ROOT/scripts/ci-nextest-archive.sh" build unknown "${TEST_ROOT}/unknown.tar.zst" >/dev/null 2>&1; then
   echo "unknown archive family was accepted" >&2
@@ -144,6 +167,15 @@ assert_file_contains "$NEXTEST_CONFIG" 'inherits = "default"'
 assert_file_contains "$NEXTEST_CONFIG" 'slow-timeout = { period = "60s", terminate-after = 4 }'
 assert_file_contains "$NEXTEST_CONFIG" 'filter = '\''test(=machines::tests::machine_workflow_red_ok_detects_missing_and_stale_generated_artifacts)'\'''
 assert_file_contains "$NEXTEST_CONFIG" 'slow-timeout = { period = "60s", terminate-after = 8 }'
+fast_profile="$(sed -n '/^\[profile.fast\]$/,/^\[/p' "$NEXTEST_CONFIG")"
+[[ "$fast_profile" == *'slow-timeout = { period = "60s" }'* ]] || {
+  echo "fast profile must report slow tests every 60 seconds" >&2
+  exit 1
+}
+[[ "$fast_profile" != *'terminate-after'* ]] || {
+  echo "fast observation profile must not terminate tests" >&2
+  exit 1
+}
 
 for dependency in unit-archive int-archives; do
   assert_file_contains "$WORKFLOW" "      - ${dependency}"

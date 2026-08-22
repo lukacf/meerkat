@@ -23,8 +23,12 @@ slow-timeout = { period = "60s", terminate-after = 8 }
 
 [profile.fast]
 # Cargo's default fast lane: unit + integration-fast, with dedicated e2e lane
-# wrappers left behind explicit `cargo e2e-*` aliases.
+# wrappers left behind explicit `cargo e2e-*` aliases. Report every test still
+# running at one-minute intervals without killing it. CI integration shards
+# surface those observations by raising their status levels; local fast aliases
+# deliberately keep status output quiet.
 default-filter = 'not binary(e2e_auth_lane) and not binary(e2e_build_lane) and not binary(e2e_fast_lane) and not binary(e2e_system_lane) and not binary(e2e_live_lane) and not binary(e2e_smoke_lane) and not binary(e2e_models_lane)'
+slow-timeout = { period = "60s" }
 
 # Real-loopback mob integration tests previously shared a process-local mutex,
 # but Nextest runs each test in its own process. On macOS, concurrent binaries

@@ -21,6 +21,8 @@ archive_file="${3:-}"
 [[ -n "$family" && -n "$archive_file" ]] || usage
 
 profile=default
+status_level=none
+final_status_level=fail
 case "$family" in
   unit)
     cargo_args=(--workspace --lib)
@@ -29,6 +31,8 @@ case "$family" in
   int-heavy)
     cargo_args=(-p meerkat-integration-tests --tests --profile fast)
     profile=fast
+    status_level=slow
+    final_status_level=slow
     ;;
   int-mob)
     cargo_args=(
@@ -42,6 +46,8 @@ case "$family" in
       --profile fast
     )
     profile=fast
+    status_level=slow
+    final_status_level=slow
     ;;
   int-everything-else)
     cargo_args=(
@@ -84,6 +90,8 @@ case "$family" in
       --profile fast
     )
     profile=fast
+    status_level=slow
+    final_status_level=slow
     ;;
   *)
     echo "error: unknown nextest archive family '${family}'" >&2
@@ -113,8 +121,8 @@ case "${1:-}" in
       --workspace-remap "$ROOT"
       --no-tests=fail
       --show-progress none
-      --status-level none
-      --final-status-level fail
+      --status-level "$status_level"
+      --final-status-level "$final_status_level"
       --partition "$partition"
     )
     if [[ "$profile" != default ]]; then

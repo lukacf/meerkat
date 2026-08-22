@@ -379,9 +379,10 @@ pub async fn build_agent_config(
 
 /// Build an [`AgentBuildConfig`] for a resumed mob member.
 ///
-/// This preserves durable session identity from the stored session while still
-/// composing current runtime mechanics such as external tool dispatchers and
-/// realm attachment.
+/// This admits the current mob/member identity against the durable binding,
+/// preserves durable transcript state, and composes current runtime mechanics
+/// such as routing, peer discovery, external tool dispatchers, and realm
+/// attachment.
 pub async fn build_resumed_agent_config(
     params: BuildResumedAgentConfigParams<'_>,
 ) -> Result<AgentBuildConfig, MobError> {
@@ -477,13 +478,18 @@ fn apply_resumed_session_metadata_with_role_migration(
                 "applied declared member role migration"
             );
         }
-        // AgentFactory performs its own generic resume projection after this
-        // mob-specific admission. Fence the two identity projections that
-        // must stay current so durable metadata cannot overwrite the admitted
-        // target role before the factory restamps SessionMetadata.
-        config.resume_override_mask.comms_name = true;
-        config.resume_override_mask.peer_meta = true;
     }
+
+    // AgentFactory performs its own generic resume projection after this
+    // mob-specific admission. A mob definition owns the current transport
+    // routing name and supplementary discovery metadata, while the durable
+    // member binding proves whether that definition may resume this session.
+    // Fence both freshly derived projections after every successful identity
+    // admission so stale durable metadata cannot overwrite a same-role
+    // definition edit. Role drift remains fail-closed above and requires an
+    // exact one-request migration declaration.
+    config.resume_override_mask.comms_name = true;
+    config.resume_override_mask.peer_meta = true;
 
     // Durable metadata restores only the fields the profile did not claim via
     // `resume_overrides` (typed mask, set from the profile in
@@ -525,7 +531,18 @@ fn apply_resumed_session_metadata_with_role_migration(
     // keep_alive is NOT restored from metadata — mob runtime owns it
     // (determined by runtime_mode == AutonomousHost). §1: one owner.
     config.comms_name = Some(current_comms_name);
-    config.peer_meta = metadata.peer_meta.clone();
+    config.peer_meta = match (metadata.peer_meta.clone(), config.peer_meta.take()) {
+        (durable, Some(current)) => {
+            let mut merged = durable.unwrap_or_default();
+            // The current definition owns description and every label it
+            // declares. Durable-only adopter annotations remain compatible
+            // across cold resume; key conflicts resolve to current intent.
+            merged.description = current.description;
+            merged.labels.extend(current.labels);
+            Some(merged)
+        }
+        (durable, None) => durable,
+    };
     if let Some(binding) = config.mob_member_binding.clone() {
         let peer_meta = config.peer_meta.take().unwrap_or_default();
         config.peer_meta = Some(stamp_standard_mob_member_labels(peer_meta, &binding));
@@ -2867,11 +2884,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_to_create_session_request_preserves_resumed_labels() {
+    async fn test_to_create_session_request_uses_current_resumed_labels() {
         let def = sample_definition();
         let lead_key = ProfileName::from("lead");
         let lead = def.profiles[&lead_key].as_inline().unwrap();
         let session_id = SessionId::new();
+        let mut current_labels = BTreeMap::new();
+        current_labels.insert("display_name".to_string(), "Current".to_string());
+        current_labels.insert("fixture".to_string(), "current".to_string());
         let mut resumed_session = resumed_session_with_metadata(session_id.clone());
         let mut persisted_meta = resumed_session
             .session_metadata()
@@ -2880,7 +2900,9 @@ mod tests {
             PeerMeta::default()
                 .with_label("mob_id", "test-mob")
                 .with_label("role", "lead")
-                .with_label("meerkat_id", "lead-1"),
+                .with_label("meerkat_id", "lead-1")
+                .with_label("display_name", "Previous")
+                .with_label("fixture", "stale"),
         );
         resumed_session
             .set_session_metadata(persisted_meta)
@@ -2896,7 +2918,7 @@ mod tests {
                 external_tools: None,
                 compaction_curator_override: None,
                 context: None,
-                labels: None,
+                labels: Some(current_labels),
                 additional_instructions: None,
                 shell_env: None,
                 mob_tool_authority_context: None,
@@ -2920,6 +2942,11 @@ mod tests {
             labels.get("agent_identity").map(String::as_str),
             Some("lead-1")
         );
+        assert_eq!(
+            labels.get("display_name").map(String::as_str),
+            Some("Current")
+        );
+        assert_eq!(labels.get("fixture").map(String::as_str), Some("current"));
     }
 
     #[tokio::test]
@@ -3497,6 +3524,7 @@ mod tests {
         let mut config = AgentBuildConfig::new("gpt-5.5");
         config.comms_name = Some("homecore/identity/parent-1".to_string());
         config.mob_member_binding = Some(canonical_binding.clone());
+        config.peer_meta = Some(PeerMeta::default().with_label("fixture", "current"));
 
         let legacy_alias = "mk--rt_cidentity_cparent-1_c0";
         let metadata = SessionMetadata {
@@ -3512,7 +3540,7 @@ mod tests {
             comms_name: Some(format!("homecore/identity/{legacy_alias}")),
             peer_meta: Some(
                 PeerMeta::default()
-                    .with_label("fixture", "retained")
+                    .with_label("fixture", "stale")
                     .with_label("agent_identity", legacy_alias)
                     .with_label("meerkat_id", legacy_alias),
             ),
@@ -3536,7 +3564,7 @@ mod tests {
         );
         assert_eq!(config.mob_member_binding, Some(canonical_binding.clone()));
         let labels = &config.peer_meta.expect("canonical peer metadata").labels;
-        assert_eq!(labels.get("fixture").map(String::as_str), Some("retained"));
+        assert_eq!(labels.get("fixture").map(String::as_str), Some("current"));
         assert_eq!(
             labels.get("agent_identity").map(String::as_str),
             Some("parent-1")
@@ -3766,8 +3794,58 @@ mod tests {
         assert_eq!(config.comms_name, expected_comms_name);
         assert_eq!(config.mob_member_binding, expected_binding);
         assert!(
-            !config.resume_override_mask.comms_name && !config.resume_override_mask.peer_meta,
-            "a declaration must not authorize another restamp once durable and current roles match"
+            config.resume_override_mask.comms_name && config.resume_override_mask.peer_meta,
+            "current mob routing and discovery projections stay fenced after every admitted resume"
+        );
+    }
+
+    #[test]
+    fn same_role_resume_keeps_current_routing_and_peer_metadata() {
+        let (mut config, mut metadata) = role_migration_fixture();
+        config.comms_name = Some("homecore/identity/mk--rt_cidentity_cchild-2_c0".to_string());
+        config.mob_member_binding = Some(meerkat_core::MobMemberBinding {
+            mob_id: "homecore".to_string(),
+            role: "identity".to_string(),
+            member: "child-2".to_string(),
+        });
+        config.peer_meta = Some(
+            PeerMeta::default()
+                .with_description("Current member")
+                .with_label("display_name", "Current"),
+        );
+
+        metadata.comms_name = config.comms_name.clone();
+        metadata.mob_member_binding = config.mob_member_binding.clone();
+        metadata.peer_meta = Some(
+            PeerMeta::default()
+                .with_description("Previous member")
+                .with_label("display_name", "Previous")
+                .with_label("durable_annotation", "retained"),
+        );
+
+        apply_resumed_session_metadata_with_role_migration(&mut config, &metadata, None)
+            .expect("same-role identity admission should succeed");
+
+        assert!(
+            config.resume_override_mask.comms_name && config.resume_override_mask.peer_meta,
+            "AgentFactory must not restore stale routing or discovery projections"
+        );
+        let peer_meta = config.peer_meta.expect("current peer metadata");
+        assert_eq!(peer_meta.description.as_deref(), Some("Current member"));
+        assert_eq!(
+            peer_meta.labels.get("display_name").map(String::as_str),
+            Some("Current")
+        );
+        assert_eq!(
+            peer_meta
+                .labels
+                .get("durable_annotation")
+                .map(String::as_str),
+            Some("retained")
+        );
+        assert_eq!(
+            peer_meta.labels.get("agent_identity").map(String::as_str),
+            Some("child-2")
         );
     }
 

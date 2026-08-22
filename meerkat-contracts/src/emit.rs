@@ -39,6 +39,16 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
     });
     write_pretty_json(output_dir.join("version.json"), &version_schema)?;
 
+    // Standalone application-owned policy artifact for external compilers.
+    // Keep it separate from the SDK wire bundles: hosts install this document,
+    // but it is not itself an RPC request or result contract.
+    let compiled_application_tool_policy =
+        serde_json::to_value(schema_for!(meerkat_core::CompiledApplicationToolPolicy))?;
+    write_pretty_json(
+        output_dir.join("compiled-application-tool-policy.json"),
+        &compiled_application_tool_policy,
+    )?;
+
     // Wire types (contracts-owned types only — types embedding core types
     // without JsonSchema use serde for serialization but not for schema generation)
     let wire_types = serde_json::json!({
@@ -1274,6 +1284,111 @@ mod tests {
             !validator.is_valid(instance),
             "schema should reject invalid shape {instance}"
         );
+    }
+
+    fn compiled_policy_fixture(name: &str) -> serde_json::Value {
+        let bytes: &[u8] = match name {
+            "compiled_application_tool_policy_valid_v1.json" => include_bytes!(
+                "../../meerkat-core/tests/fixtures/compiled_application_tool_policy_valid_v1.json"
+            ),
+            "compiled_application_tool_policy_unknown_field_v1.json" => include_bytes!(
+                "../../meerkat-core/tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json"
+            ),
+            "compiled_application_tool_policy_absent_default_deny_v1.json" => include_bytes!(
+                "../../meerkat-core/tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json"
+            ),
+            _ => panic!("unknown compiled policy fixture: {name}"),
+        };
+        serde_json::from_slice(bytes).expect("parse compiled policy fixture")
+    }
+
+    fn runtime_accepts_compiled_policy(instance: &serde_json::Value) -> bool {
+        serde_json::from_value::<meerkat_core::CompiledApplicationToolPolicy>(instance.clone())
+            .is_ok_and(|policy| policy.validate().is_ok())
+    }
+
+    fn assert_compiled_policy_schema_runtime_agree(
+        schema: &serde_json::Value,
+        instance: &serde_json::Value,
+    ) {
+        let schema_accepts = jsonschema::validator_for(schema)
+            .expect("compiled policy schema compiles")
+            .is_valid(instance);
+        let runtime_accepts = runtime_accepts_compiled_policy(instance);
+        assert_eq!(
+            schema_accepts, runtime_accepts,
+            "compiled policy schema/runtime disagreement for {instance}"
+        );
+    }
+
+    #[test]
+    fn emitted_compiled_policy_schema_matches_runtime_on_gated_cases() {
+        let output_dir = temp_output_dir("compiled-policy-runtime-agreement");
+        emit_all_schemas(&output_dir).expect("emit schemas");
+
+        let schema: serde_json::Value = serde_json::from_slice(
+            &fs::read(output_dir.join("compiled-application-tool-policy.json")).unwrap(),
+        )
+        .unwrap();
+
+        for fixture in [
+            "compiled_application_tool_policy_valid_v1.json",
+            "compiled_application_tool_policy_unknown_field_v1.json",
+            "compiled_application_tool_policy_absent_default_deny_v1.json",
+        ] {
+            let instance = compiled_policy_fixture(fixture);
+            assert_compiled_policy_schema_runtime_agree(&schema, &instance);
+        }
+
+        let valid = compiled_policy_fixture("compiled_application_tool_policy_valid_v1.json");
+        assert_schema_accepts(&schema, &valid);
+
+        for (pointer, invalid_value) in [
+            ("/schema_version", serde_json::json!(2)),
+            ("/revision", serde_json::json!(0)),
+            ("/default_deny", serde_json::json!(false)),
+            ("/policy_digest", serde_json::json!("sha256:NOT-HEX")),
+        ] {
+            let mut invalid = valid.clone();
+            *invalid
+                .pointer_mut(pointer)
+                .expect("compiled policy fixture pointer exists") = invalid_value;
+            assert_compiled_policy_schema_runtime_agree(&schema, &invalid);
+            assert_schema_rejects(&schema, &invalid);
+        }
+
+        fs::remove_dir_all(&output_dir).unwrap();
+    }
+
+    #[test]
+    fn application_tool_policy_binding_schema_agrees_with_strict_parser() {
+        let schema = serde_json::to_value(schemars::schema_for!(
+            meerkat_core::ApplicationToolPolicyBinding
+        ))
+        .expect("serialize application tool policy binding schema");
+        let validator = jsonschema::validator_for(&schema).expect("binding schema compiles");
+
+        for instance in [
+            serde_json::json!({ "kind": "unmanaged" }),
+            serde_json::json!({ "kind": "inherit" }),
+            serde_json::json!({
+                "kind": "provider",
+                "provider_id": "homecore",
+                "policy_id": "household-tools"
+            }),
+            serde_json::json!({ "kind": "unmanaged", "provider_id": "homecore" }),
+            serde_json::json!({ "kind": "inherit", "policy_id": "household-tools" }),
+        ] {
+            let schema_accepts = validator.is_valid(&instance);
+            let runtime_accepts = serde_json::from_value::<
+                meerkat_core::ApplicationToolPolicyBinding,
+            >(instance.clone())
+            .is_ok();
+            assert_eq!(
+                schema_accepts, runtime_accepts,
+                "binding schema/runtime disagreement for {instance}"
+            );
+        }
     }
 
     #[test]

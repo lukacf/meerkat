@@ -1,0 +1,133 @@
+{
+  "$defs": {
+    "CompiledMemberToolAction": {
+      "description": "The closed member-to-tool action vocabulary.\n\nThis is intentionally unrelated to operator-facing ABAC actions. V1 has\none action: a stable member invokes an exact dispatcher tool name.",
+      "enum": [
+        "invoke"
+      ],
+      "type": "string"
+    },
+    "CompiledMemberToolGrant": {
+      "additionalProperties": false,
+      "description": "One exact allow entry. There are no wildcards or deny entries in v1.",
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/CompiledMemberToolAction"
+        },
+        "consequence": {
+          "$ref": "#/$defs/CompiledToolConsequence"
+        },
+        "tool_name": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "tool_name",
+        "action",
+        "consequence"
+      ],
+      "type": "object"
+    },
+    "CompiledMemberToolGrants": {
+      "additionalProperties": false,
+      "description": "Total resolved grants for one stable member identity.",
+      "properties": {
+        "grants": {
+          "items": {
+            "$ref": "#/$defs/CompiledMemberToolGrant"
+          },
+          "type": "array"
+        },
+        "member_identity": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "member_identity",
+        "grants"
+      ],
+      "type": "object"
+    },
+    "CompiledPolicySourceProvenance": {
+      "additionalProperties": false,
+      "description": "Source-bundle evidence retained separately from the compiled policy\ndigest. It is provenance only and never an execution decision.",
+      "properties": {
+        "source_digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "source_id": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_id",
+        "source_digest"
+      ],
+      "type": "object"
+    },
+    "CompiledToolConsequence": {
+      "description": "Policy-owned consequence classification. Caller-authored arguments never\noverride this value.",
+      "enum": [
+        "r0",
+        "r1",
+        "r2",
+        "r3"
+      ],
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Closed canonical artifact accepted by application policy providers.\n\nEvery semantic field is required. `default_deny` must be explicitly true,\nand an exact tool name absent from a member's enumerated grants is denied.\nMembers and grants use ascending bytewise order so the digest covers one\ndeterministic compiled representation.\n\nThe emitted JSON Schema captures the closed shape and constraints JSON\nSchema can represent. Runtime validation remains authoritative for\ncanonical ordering, exact canonical bytes, and digest recomputation.",
+  "properties": {
+    "default_deny": {
+      "const": true,
+      "type": "boolean"
+    },
+    "members": {
+      "items": {
+        "$ref": "#/$defs/CompiledMemberToolGrants"
+      },
+      "type": "array"
+    },
+    "policy_digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "policy_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "provider_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "revision": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "schema_version": {
+      "const": 1,
+      "type": "integer"
+    },
+    "source": {
+      "$ref": "#/$defs/CompiledPolicySourceProvenance"
+    }
+  },
+  "required": [
+    "schema_version",
+    "provider_id",
+    "policy_id",
+    "revision",
+    "policy_digest",
+    "source",
+    "default_deny",
+    "members"
+  ],
+  "title": "CompiledApplicationToolPolicy",
+  "type": "object"
+}

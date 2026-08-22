@@ -159,6 +159,46 @@ impl<'de> Deserialize<'de> for ApplicationToolPolicyBinding {
 
 pub const COMPILED_APPLICATION_TOOL_POLICY_SCHEMA_VERSION: u32 = 1;
 
+#[cfg(feature = "schema")]
+fn compiled_policy_schema_version_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "integer",
+        "const": COMPILED_APPLICATION_TOOL_POLICY_SCHEMA_VERSION
+    })
+}
+
+#[cfg(feature = "schema")]
+fn compiled_policy_default_deny_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "boolean",
+        "const": true
+    })
+}
+
+#[cfg(feature = "schema")]
+fn compiled_policy_nonempty_string_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "string",
+        "minLength": 1
+    })
+}
+
+#[cfg(feature = "schema")]
+fn compiled_policy_revision_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "integer",
+        "minimum": 1
+    })
+}
+
+#[cfg(feature = "schema")]
+fn compiled_policy_digest_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "string",
+        "pattern": "^sha256:[0-9a-f]{64}$"
+    })
+}
+
 /// The closed member-to-tool action vocabulary.
 ///
 /// This is intentionally unrelated to operator-facing ABAC actions. V1 has
@@ -187,6 +227,7 @@ pub enum CompiledToolConsequence {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct CompiledMemberToolGrant {
+    #[cfg_attr(feature = "schema", schemars(length(min = 1)))]
     pub tool_name: String,
     pub action: CompiledMemberToolAction,
     pub consequence: CompiledToolConsequence,
@@ -197,6 +238,7 @@ pub struct CompiledMemberToolGrant {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct CompiledMemberToolGrants {
+    #[cfg_attr(feature = "schema", schemars(length(min = 1)))]
     pub member_identity: String,
     pub grants: Vec<CompiledMemberToolGrant>,
 }
@@ -207,7 +249,12 @@ pub struct CompiledMemberToolGrants {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct CompiledPolicySourceProvenance {
+    #[cfg_attr(feature = "schema", schemars(length(min = 1)))]
     pub source_id: String,
+    #[cfg_attr(
+        feature = "schema",
+        schemars(schema_with = "compiled_policy_digest_schema")
+    )]
     pub source_digest: PolicyDigest,
 }
 
@@ -217,16 +264,44 @@ pub struct CompiledPolicySourceProvenance {
 /// and an exact tool name absent from a member's enumerated grants is denied.
 /// Members and grants use ascending bytewise order so the digest covers one
 /// deterministic compiled representation.
+///
+/// The emitted JSON Schema captures the closed shape and constraints JSON
+/// Schema can represent. Runtime validation remains authoritative for
+/// canonical ordering, exact canonical bytes, and digest recomputation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct CompiledApplicationToolPolicy {
+    #[cfg_attr(
+        feature = "schema",
+        schemars(schema_with = "compiled_policy_schema_version_schema")
+    )]
     pub schema_version: u32,
+    #[cfg_attr(
+        feature = "schema",
+        schemars(schema_with = "compiled_policy_nonempty_string_schema")
+    )]
     pub provider_id: PolicyProviderId,
+    #[cfg_attr(
+        feature = "schema",
+        schemars(schema_with = "compiled_policy_nonempty_string_schema")
+    )]
     pub policy_id: PolicyId,
+    #[cfg_attr(
+        feature = "schema",
+        schemars(schema_with = "compiled_policy_revision_schema")
+    )]
     pub revision: PolicyRevision,
+    #[cfg_attr(
+        feature = "schema",
+        schemars(schema_with = "compiled_policy_digest_schema")
+    )]
     pub policy_digest: PolicyDigest,
     pub source: CompiledPolicySourceProvenance,
+    #[cfg_attr(
+        feature = "schema",
+        schemars(schema_with = "compiled_policy_default_deny_schema")
+    )]
     pub default_deny: bool,
     pub members: Vec<CompiledMemberToolGrants>,
 }

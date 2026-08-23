@@ -11557,6 +11557,32 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn runtime_backed_exact_boundary_cancel_requires_machine_authority() {
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::new(MemoryStore::new()),
+            Arc::new(InMemoryRuntimeStore::new()),
+            memory_blob_store(),
+        );
+        let session_id = SessionId::new();
+        let run_id = RunId::new();
+
+        let error = SessionService::cancel_after_boundary_for_run(&service, &session_id, &run_id)
+            .await
+            .expect_err("public exact boundary cancel must not bypass machine authority");
+
+        match error {
+            SessionError::Unsupported(message) => {
+                assert!(message.contains("cancel_after_boundary_for_run"));
+                assert!(message.contains("machine-owned"));
+                assert!(message.contains("machine-authority seam"));
+            }
+            other => panic!("expected machine-owned exact-boundary refusal, got {other:?}"),
+        }
+    }
+
     /// The three WholeBlob checkpoint refusals below all say "live actor reload
     /// required", and the runtime can only honour that by tearing the live
     /// executor down. Reported as `InternalError` they were indistinguishable

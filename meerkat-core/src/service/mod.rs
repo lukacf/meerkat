@@ -3110,6 +3110,31 @@ mod tests {
         assert!(matches!(err, SessionError::Unsupported(name) if name == "has_live_session"));
     }
 
+    #[tokio::test]
+    async fn exact_run_controls_default_to_typed_unsupported() {
+        let service = UnsupportedSessionService;
+        let session_id = SessionId::new();
+        let run_id = RunId::new();
+
+        let interrupt = service
+            .interrupt_run_if_current(&session_id, &run_id)
+            .await
+            .expect_err("an implementation without exact-run authority must fail closed");
+        assert!(
+            matches!(interrupt, SessionError::Unsupported(ref name) if name == "interrupt_run_if_current"),
+            "default exact interrupt must name its unsupported capability: {interrupt:?}"
+        );
+
+        let boundary_cancel = service
+            .cancel_after_boundary_for_run(&session_id, &run_id)
+            .await
+            .expect_err("an implementation without exact-run authority must fail closed");
+        assert!(
+            matches!(boundary_cancel, SessionError::Unsupported(ref name) if name == "cancel_after_boundary_for_run"),
+            "default exact boundary cancel must name its unsupported capability: {boundary_cancel:?}"
+        );
+    }
+
     #[test]
     fn spawn_profile_scope_allows_only_granted_profile_without_manage_scope() {
         let ctx = MobToolAuthorityContext::generated_for_test(

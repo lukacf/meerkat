@@ -4991,7 +4991,7 @@ async fn cold_registration_cannot_publish_an_epoch_retired_by_overlapping_unregi
         contended,
         "overlapping register/unregister must encounter the first cold publisher's exact held transaction slot"
     );
-    release.notify_waiters();
+    release.notify_one();
     first_registration
         .await
         .expect("first registration task")

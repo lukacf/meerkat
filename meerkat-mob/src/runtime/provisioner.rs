@@ -8895,9 +8895,13 @@ impl MobProvisioner for SessionBackend {
             // adapter registration truth, not direct session-service fallback.
             self.remove_runtime_session_state(&session_id, expected_state.as_ref())
                 .await;
-            return Err(MobError::Internal(format!(
-                "runtime-backed interrupt requested for unregistered runtime session '{session_id}'"
-            )));
+            // The registration's absence proves that no runtime turn remains
+            // to cancel. Preserve that as typed `NotRunning`: shutdown may
+            // converge the level-triggered request, while ordinary callers
+            // still observe that their previously-live target disappeared.
+            return Err(MobError::SessionError(SessionError::NotRunning {
+                id: session_id,
+            }));
         }
         self.session_service
             .cancel_after_boundary(&session_id)

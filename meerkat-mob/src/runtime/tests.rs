@@ -38302,6 +38302,26 @@ async fn test_interrupt_member_without_adapter_rejects_unsupported_boundary_canc
 
 #[cfg(feature = "runtime-adapter")]
 #[tokio::test]
+async fn test_runtime_backed_interrupt_reports_unregistered_session_as_typed_not_running() {
+    let service = Arc::new(MockSessionService::new());
+    let adapter = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
+    let provisioner = super::provisioner::SessionBackend::new(service, Some(adapter), None);
+    let session_id = SessionId::new();
+    let member_ref = MemberRef::from_bridge_session_id(session_id.clone());
+
+    let error = provisioner
+        .interrupt_member(&member_ref, None)
+        .await
+        .expect_err("an ordinary interrupt caller must observe runtime absence");
+
+    assert!(matches!(
+        error,
+        MobError::SessionError(SessionError::NotRunning { id }) if id == session_id
+    ));
+}
+
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
 async fn test_explicit_hard_cancel_member_without_adapter_is_rejected() {
     let service = Arc::new(MockSessionService::new());
     let session = service

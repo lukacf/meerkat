@@ -14830,12 +14830,7 @@ impl MobActor {
                 let result = provisioner
                     .interrupt_member(&member_ref, expected_member.as_ref())
                     .await;
-                let result = match result {
-                    Err(MobError::SessionError(
-                        meerkat_core::service::SessionError::NotFound { .. },
-                    )) => Ok(()),
-                    result => result,
-                };
+                let result = converge_autonomous_stop_interrupt_result(result);
                 let _ = result_tx.send(result);
             });
             self.autonomous_stop_interrupts.insert(
@@ -52481,6 +52476,20 @@ fn routed_effect_session_scope(effect: &mob_dsl::MobMachineEffect) -> Option<Ses
     routed_effect_session_scope_dsl(effect).and_then(|id| SessionId::parse(&id.0).ok())
 }
 
+/// A shutdown interrupt is level-triggered: if the exact runtime registration
+/// disappeared before dispatch, its terminal objective already holds. Keep
+/// this convergence local to shutdown so ordinary force-cancel callers still
+/// observe the typed absence instead of receiving a false global success.
+fn converge_autonomous_stop_interrupt_result(result: Result<(), MobError>) -> Result<(), MobError> {
+    match result {
+        Err(MobError::SessionError(
+            meerkat_core::service::SessionError::NotFound { .. }
+            | meerkat_core::service::SessionError::NotRunning { .. },
+        )) => Ok(()),
+        result => result,
+    }
+}
+
 fn revival_error_means_session_already_live(
     error: &MobError,
     bridge_session_id: &SessionId,
@@ -52512,9 +52521,12 @@ fn recovered_single_target_failure(
 mod autonomous_stop_planning_tests {
     use super::{
         AutonomousStopPhase, MAX_CONCURRENT_AUTONOMOUS_STOP_INTERRUPTS, advance_rotating_cursor,
-        autonomous_stop_phase, disposal_uses_host_release_authority, lifecycle_origin_fenced,
-        mob_dsl,
+        autonomous_stop_phase, converge_autonomous_stop_interrupt_result,
+        disposal_uses_host_release_authority, lifecycle_origin_fenced, mob_dsl,
     };
+    use crate::MobError;
+    use meerkat_core::service::SessionError;
+    use meerkat_core::types::SessionId;
 
     #[test]
     fn bounded_rotation_advances_past_each_full_window() {
@@ -52549,6 +52561,30 @@ mod autonomous_stop_planning_tests {
             autonomous_stop_phase(0, 0),
             AutonomousStopPhase::DriveInterrupts
         );
+    }
+
+    #[test]
+    fn shutdown_interrupt_converges_typed_runtime_absence_only() {
+        for error in [
+            SessionError::NotFound {
+                id: SessionId::new(),
+            },
+            SessionError::NotRunning {
+                id: SessionId::new(),
+            },
+        ] {
+            assert!(
+                converge_autonomous_stop_interrupt_result(Err(MobError::SessionError(error)))
+                    .is_ok(),
+                "shutdown should converge an already-absent runtime"
+            );
+        }
+
+        let error = MobError::Internal("runtime authority is unknown".to_string());
+        assert!(matches!(
+            converge_autonomous_stop_interrupt_result(Err(error)),
+            Err(MobError::Internal(message)) if message == "runtime authority is unknown"
+        ));
     }
 
     #[test]

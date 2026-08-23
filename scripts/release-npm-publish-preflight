@@ -42,9 +42,36 @@ if [[ -z "${actor}" ]]; then
 fi
 
 required_packages=('@rkat/sdk' '@rkat/web')
+read_write_packages=()
+first_publish_packages=()
 for package_index in "${!required_packages[@]}"; do
   package_name="${required_packages[package_index]}"
+  package_view="${preflight_dir}/view-${package_index}.json"
+  package_view_error="${preflight_dir}/view-${package_index}.err"
   permissions_json="${preflight_dir}/permissions-${package_index}.json"
+
+  set +e
+  npm view "${package_name}" --json --registry="${registry}" \
+    >"${package_view}" 2>"${package_view_error}"
+  view_status=$?
+  set -e
+  if [[ ${view_status} -ne 0 ]]; then
+    if grep -Eq '(^|[^[:alnum:]_])E404([^[:alnum:]_]|$)' \
+      "${package_view}" "${package_view_error}"; then
+      printf 'npm publication preflight: first publish of %s, no access record to check yet\n' \
+        "${package_name}"
+      first_publish_packages+=("${package_name}")
+      continue
+    fi
+    if grep -Eq '(^|[^[:alnum:]_])E403([^[:alnum:]_]|$)' \
+      "${package_view}" "${package_view_error}"; then
+      echo "npm registry denied access while checking ${package_name}; refusing publication" >&2
+    else
+      echo "npm package lookup failed for ${package_name}; refusing to treat it as a first publish" >&2
+    fi
+    exit "${view_status}"
+  fi
+
   npm access list collaborators "${package_name}" --json --registry="${registry}" >"${permissions_json}"
 
   node - "${permissions_json}" "${actor}" "${package_name}" <<'NODE'
@@ -70,6 +97,19 @@ if (permission !== 'read-write') {
   process.exit(1);
 }
 NODE
+  read_write_packages+=("${package_name}")
 done
 
-printf 'npm publication preflight passed for %s: @rkat/sdk and @rkat/web are read-write\n' "${actor}"
+if [[ ${#read_write_packages[@]} -eq 0 ]]; then
+  echo "all required npm packages appear unpublished; refusing a preflight with no verified access record" >&2
+  exit 1
+fi
+
+printf 'npm publication preflight passed for %s' "${actor}"
+if [[ ${#read_write_packages[@]} -gt 0 ]]; then
+  printf ': existing packages are read-write (%s)' "${read_write_packages[*]}"
+fi
+if [[ ${#first_publish_packages[@]} -gt 0 ]]; then
+  printf ': first-publish packages have no access record yet (%s)' "${first_publish_packages[*]}"
+fi
+printf '\n'

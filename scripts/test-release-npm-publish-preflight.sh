@@ -32,6 +32,33 @@ case "${1:-}" in
     fi
     printf '%s\n' "${FAKE_NPM_ACTOR:-release-owner}"
     ;;
+  view)
+    if [[ -n "${FAKE_NPM_NOT_FOUND_PACKAGE:-}" && "${2:-}" == "${FAKE_NPM_NOT_FOUND_PACKAGE}" ]]; then
+      echo 'npm error code E404' >&2
+      exit 4
+    fi
+    case "${FAKE_NPM_VIEW_MODE:-success}" in
+      success)
+        printf '%s\n' '{"name":"published-package"}'
+        ;;
+      not_found)
+        echo 'npm error code E404' >&2
+        exit 4
+        ;;
+      forbidden)
+        echo 'npm error code E403' >&2
+        exit 5
+        ;;
+      failure)
+        echo 'npm error code EUNKNOWN' >&2
+        exit 6
+        ;;
+      *)
+        echo "unexpected FAKE_NPM_VIEW_MODE: ${FAKE_NPM_VIEW_MODE}" >&2
+        exit 93
+        ;;
+    esac
+    ;;
   access)
     if [[ "${FAKE_NPM_ACCESS_MODE:-success}" == "failure" ]]; then
       echo "access lookup failed" >&2
@@ -113,12 +140,84 @@ fi
 assert_secret_absent
 
 run_case failure FAKE_NPM_WHOAMI_MODE=failure
+run_case failure FAKE_NPM_VIEW_MODE=not_found
+for package_name in @rkat/sdk @rkat/web; do
+  if ! grep -Fxq "view ${package_name} --json --registry=https://registry.npmjs.org/" "${fake_log}"; then
+    echo "npm preflight did not inspect ${package_name} existence" >&2
+    cat "${fake_log}" >&2
+    exit 1
+  fi
+  if ! grep -Fq "first publish of ${package_name}, no access record to check yet" "${run_output}"; then
+    echo "npm preflight did not identify ${package_name} as a first publish" >&2
+    cat "${run_output}" >&2
+    exit 1
+  fi
+done
+if grep -Fq 'access list collaborators' "${fake_log}"; then
+  echo "first-publish preflight unexpectedly requested a nonexistent access record" >&2
+  cat "${fake_log}" >&2
+  exit 1
+fi
+if ! grep -Fq 'refusing a preflight with no verified access record' "${run_output}"; then
+  echo "all-first-publish preflight did not fail as a vacuous registry check" >&2
+  cat "${run_output}" >&2
+  exit 1
+fi
+
+run_case success FAKE_NPM_NOT_FOUND_PACKAGE=@rkat/web
+if ! grep -Fxq 'access list collaborators @rkat/sdk --json --registry=https://registry.npmjs.org/' "${fake_log}"; then
+  echo "mixed first-publish preflight did not verify the existing package" >&2
+  cat "${fake_log}" >&2
+  exit 1
+fi
+if grep -Fq 'access list collaborators @rkat/web' "${fake_log}"; then
+  echo "mixed first-publish preflight requested a nonexistent access record" >&2
+  cat "${fake_log}" >&2
+  exit 1
+fi
+if ! grep -Fq 'existing packages are read-write (@rkat/sdk)' "${run_output}" || \
+  ! grep -Fq 'first-publish packages have no access record yet (@rkat/web)' "${run_output}"; then
+  echo "mixed first-publish preflight did not report its two evidence classes" >&2
+  cat "${run_output}" >&2
+  exit 1
+fi
+
+run_case failure FAKE_NPM_VIEW_MODE=forbidden
+if ! grep -Fq 'npm registry denied access while checking @rkat/sdk; refusing publication' "${run_output}"; then
+  echo "npm preflight did not distinguish forbidden access from a first publish" >&2
+  cat "${run_output}" >&2
+  exit 1
+fi
+
+run_case failure FAKE_NPM_VIEW_MODE=failure
+if ! grep -Fq 'refusing to treat it as a first publish' "${run_output}"; then
+  echo "npm preflight did not fail closed for an unknown package-lookup error" >&2
+  cat "${run_output}" >&2
+  exit 1
+fi
+
 run_case failure FAKE_NPM_ACCESS_MODE=failure
 run_case failure FAKE_NPM_ACCESS_JSON='{"release-owner":"read-only"}'
 run_case failure FAKE_NPM_ACCESS_JSON='{}'
 run_case failure FAKE_NPM_ACCESS_JSON='{not-json'
 run_case success FAKE_NPM_ACCESS_JSON='{"release-owner":"read-write"}'
 
+if ! grep -Fq 'existing packages are read-write (@rkat/sdk @rkat/web)' "${run_output}"; then
+  echo "npm preflight did not report the verified existing-package permissions" >&2
+  cat "${run_output}" >&2
+  exit 1
+fi
+
+if ! grep -Fxq 'view @rkat/sdk --json --registry=https://registry.npmjs.org/' "${fake_log}"; then
+  echo "npm preflight did not inspect @rkat/sdk existence" >&2
+  cat "${fake_log}" >&2
+  exit 1
+fi
+if ! grep -Fxq 'view @rkat/web --json --registry=https://registry.npmjs.org/' "${fake_log}"; then
+  echo "npm preflight did not inspect @rkat/web existence" >&2
+  cat "${fake_log}" >&2
+  exit 1
+fi
 if ! grep -Fxq 'access list collaborators @rkat/sdk --json --registry=https://registry.npmjs.org/' "${fake_log}"; then
   echo "npm preflight did not inspect @rkat/sdk collaborators" >&2
   cat "${fake_log}" >&2

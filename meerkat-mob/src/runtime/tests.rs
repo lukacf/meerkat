@@ -4140,7 +4140,7 @@ impl MobSessionService for MockSessionService {
     async fn cancel_after_boundary_with_machine_authority(
         &self,
         session_id: &SessionId,
-        _expected_run_id: &meerkat_core::RunId,
+        expected_run_id: &meerkat_core::RunId,
         _authority: meerkat_runtime::MachineSessionControlAuthority,
     ) -> Result<(), SessionError> {
         let barrier = { self.runtime_control_barrier.read().await.clone() };
@@ -4148,6 +4148,15 @@ impl MobSessionService for MockSessionService {
             barrier.boundary_calls.fetch_add(1, Ordering::Relaxed);
             barrier.wait_for_release().await;
         }
+        let active_runs = self.runtime_apply_runs.read().await;
+        if active_runs.get(session_id) != Some(expected_run_id) {
+            return Err(SessionError::NotRunning {
+                id: session_id.clone(),
+            });
+        }
+        // Retain the exact-run read fence through delivery. Completion cannot
+        // remove this run and admit a successor before the ambient test
+        // transport receives the already-authorized boundary request.
         SessionService::cancel_after_boundary(self, session_id).await
     }
 
@@ -45801,15 +45810,6 @@ impl MobSessionService for RealCommsSessionService {
         SessionService::interrupt(self, session_id).await
     }
 
-    async fn cancel_after_boundary_with_machine_authority(
-        &self,
-        session_id: &SessionId,
-        _expected_run_id: &meerkat_core::RunId,
-        _authority: meerkat_runtime::MachineSessionControlAuthority,
-    ) -> Result<(), SessionError> {
-        SessionService::cancel_after_boundary(self, session_id).await
-    }
-
     async fn cancel_current_after_boundary_with_machine_authority(
         &self,
         session_id: &SessionId,
@@ -47096,9 +47096,17 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
     async fn cancel_after_boundary_with_machine_authority(
         &self,
         session_id: &SessionId,
-        _expected_run_id: &meerkat_core::RunId,
+        expected_run_id: &meerkat_core::RunId,
         _authority: meerkat_runtime::MachineSessionControlAuthority,
     ) -> Result<(), SessionError> {
+        let active_runs = self.active_runtime_runs.read().await;
+        if active_runs.get(session_id) != Some(expected_run_id) {
+            return Err(SessionError::NotRunning {
+                id: session_id.clone(),
+            });
+        }
+        // Retain the exact-run read fence through delivery so a completed run
+        // cannot be replaced between comparison and ambient fixture cancel.
         SessionService::cancel_after_boundary(self, session_id).await
     }
 
@@ -47431,6 +47439,64 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
     ) -> Result<bool, SessionError> {
         self.discard_exact_actor(witness).await
     }
+}
+
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn test_runtime_fixture_exact_boundary_cancel_never_targets_successor() {
+    let session_id = SessionId::new();
+    let stale_run_id = meerkat_core::RunId::new();
+    let successor_run_id = meerkat_core::RunId::new();
+
+    let mock = MockSessionService::new();
+    let mock_adapter = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
+    mock.set_runtime_adapter(mock_adapter.clone());
+    mock.runtime_apply_runs
+        .write()
+        .await
+        .insert(session_id.clone(), successor_run_id.clone());
+    let mock_error = MobSessionService::cancel_after_boundary_with_machine_authority(
+        &mock,
+        &session_id,
+        &stale_run_id,
+        mock_adapter.session_control_authority(),
+    )
+    .await
+    .expect_err("mock fixture must refuse a stale exact run");
+    assert!(matches!(
+        mock_error,
+        SessionError::NotRunning { id } if id == session_id
+    ));
+
+    let runtime_backed = RuntimeBackedRealCommsSessionService::new();
+    runtime_backed
+        .active_runtime_runs
+        .write()
+        .await
+        .insert(session_id.clone(), successor_run_id);
+    let runtime_backed_error = MobSessionService::cancel_after_boundary_with_machine_authority(
+        &runtime_backed,
+        &session_id,
+        &stale_run_id,
+        runtime_backed.runtime_adapter.session_control_authority(),
+    )
+    .await
+    .expect_err("runtime-backed fixture must refuse a stale exact run");
+    assert!(matches!(
+        runtime_backed_error,
+        SessionError::NotRunning { id } if id == session_id
+    ));
+
+    let real_comms = RealCommsSessionService::new();
+    let unsupported = MobSessionService::cancel_after_boundary_with_machine_authority(
+        &real_comms,
+        &session_id,
+        &stale_run_id,
+        real_comms.runtime_adapter.session_control_authority(),
+    )
+    .await
+    .expect_err("a fixture without runtime-turn apply cannot claim exact-run cancellation");
+    assert!(matches!(unsupported, SessionError::Unsupported(_)));
 }
 
 async fn create_test_mob_with_runtime_backed_real_comms(

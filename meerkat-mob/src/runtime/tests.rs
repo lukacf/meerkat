@@ -1830,6 +1830,7 @@ struct MockSessionService {
     load_persisted_session_delay_ms: AtomicU64,
     load_persisted_session_started: tokio::sync::Notify,
     load_persisted_session_calls: AtomicU64,
+    load_persisted_session_metadata_calls: AtomicU64,
     load_persisted_session_in_flight: AtomicU64,
     load_persisted_session_max_in_flight: AtomicU64,
     create_session_in_flight: AtomicU64,
@@ -1957,6 +1958,7 @@ impl MockSessionService {
             load_persisted_session_delay_ms: AtomicU64::new(0),
             load_persisted_session_started: tokio::sync::Notify::new(),
             load_persisted_session_calls: AtomicU64::new(0),
+            load_persisted_session_metadata_calls: AtomicU64::new(0),
             load_persisted_session_in_flight: AtomicU64::new(0),
             load_persisted_session_max_in_flight: AtomicU64::new(0),
             create_session_in_flight: AtomicU64::new(0),
@@ -2534,6 +2536,15 @@ impl MockSessionService {
 
     fn max_concurrent_load_persisted_session_calls(&self) -> u64 {
         self.load_persisted_session_max_in_flight
+            .load(Ordering::Relaxed)
+    }
+
+    fn persisted_session_load_call_count(&self) -> u64 {
+        self.load_persisted_session_calls.load(Ordering::Relaxed)
+    }
+
+    fn persisted_session_metadata_load_call_count(&self) -> u64 {
+        self.load_persisted_session_metadata_calls
             .load(Ordering::Relaxed)
     }
 
@@ -4283,6 +4294,29 @@ impl MobSessionService for MockSessionService {
             self.persisted_session_clone(session_id).await
         };
         Ok(persisted)
+    }
+
+    async fn load_persisted_session_metadata(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<meerkat_core::PersistedSessionMetadataView>, SessionError> {
+        self.load_persisted_session_metadata_calls
+            .fetch_add(1, Ordering::Relaxed);
+        let _authority_guard = self.resume_authority_gate.lock().await;
+        let persisted = if self.archived_session_ids.read().await.contains(session_id) {
+            None
+        } else {
+            self.persisted_session_clone(session_id).await
+        };
+        persisted
+            .as_ref()
+            .map(meerkat_core::PersistedSessionMetadataView::try_from_session)
+            .transpose()
+            .map_err(|error| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                    "session {session_id} durable metadata failed typed restore: {error}"
+                )))
+            })
     }
 
     async fn session_known_to_archive_authority(
@@ -12386,6 +12420,8 @@ async fn test_mob_shutdown_interrupts_active_autonomous_member() {
     )
     .await;
     let baseline_target_interrupts = service.interrupt_call_count_for(&session_id);
+    let baseline_full_loads = service.persisted_session_load_call_count();
+    let baseline_metadata_loads = service.persisted_session_metadata_load_call_count();
 
     handle
         .shutdown()
@@ -12397,6 +12433,15 @@ async fn test_mob_shutdown_interrupts_active_autonomous_member() {
         service.interrupt_call_count_for(&session_id),
         baseline_target_interrupts + 1,
         "active autonomous shutdown must realize exactly one machine-authorized target interrupt"
+    );
+    assert_eq!(
+        service.persisted_session_load_call_count(),
+        baseline_full_loads,
+        "shutdown presence probes must not materialize the full persisted session"
+    );
+    assert!(
+        service.persisted_session_metadata_load_call_count() > baseline_metadata_loads,
+        "shutdown must use the metadata visibility seam for its presence probe"
     );
     assert!(
         !adapter.contains_session(&session_id).await,

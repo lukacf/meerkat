@@ -14931,7 +14931,7 @@ impl MobActor {
                     .await?;
                 let session_projection_visible = self
                     .session_service
-                    .load_persisted_session(session_id)
+                    .load_persisted_session_metadata(session_id)
                     .await?
                     .is_some();
                 #[cfg(feature = "runtime-adapter")]

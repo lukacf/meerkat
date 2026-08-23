@@ -1710,6 +1710,27 @@ pub struct ApplyMemberToolDeclaration {
     pub convergence: IdentityConvergenceMode,
 }
 
+impl TryFrom<meerkat_contracts::wire::MobApplyMemberToolDeclarationParams>
+    for ApplyMemberToolDeclaration
+{
+    type Error = IdentityIntentError;
+
+    fn try_from(
+        value: meerkat_contracts::wire::MobApplyMemberToolDeclarationParams,
+    ) -> Result<Self, Self::Error> {
+        let request = Self {
+            mob_id: MobId::from(value.mob_id),
+            agent_identity: AgentIdentity::from(value.agent_identity),
+            request_id: MemberToolMutationId::new(value.request_id)?,
+            expected_intent_revision: value.expected_intent_revision,
+            declaration: value.declaration.try_into()?,
+            convergence: value.convergence.into(),
+        };
+        request.validate()?;
+        Ok(request)
+    }
+}
+
 impl ApplyMemberToolDeclaration {
     pub fn validate(&self) -> Result<(), IdentityIntentError> {
         validate_text("mob_id", self.mob_id.as_str())?;
@@ -3826,6 +3847,48 @@ pub(crate) fn identity_adoption_fixture(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn member_tool_apply_wire_lowers_through_one_validated_domain_boundary() {
+        let declaration = MemberToolDeclaration {
+            category_overrides: ToolCategoryOverrides::default(),
+            callback_tools: CallbackToolSetDeclaration::Inherit,
+            execution: MemberToolAccessDeclaration::Unrestricted,
+            application_policy: ApplicationToolPolicyBinding::Unmanaged,
+        };
+        let params = meerkat_contracts::wire::MobApplyMemberToolDeclarationParams {
+            mob_id: "tool-policy-mob".to_string(),
+            agent_identity: "worker-1".to_string(),
+            request_id: "apply-tool-policy-1".to_string(),
+            expected_intent_revision: 7,
+            declaration: declaration.to_wire(),
+            convergence: meerkat_contracts::wire::WireIdentityConvergenceMode::CancelActive,
+        };
+
+        let request = ApplyMemberToolDeclaration::try_from(params.clone())
+            .expect("lower valid wire request through the domain boundary");
+        assert_eq!(request.mob_id.as_str(), params.mob_id);
+        assert_eq!(
+            request.agent_identity,
+            AgentIdentity::from(params.agent_identity.as_str())
+        );
+        assert_eq!(request.request_id.as_str(), params.request_id.as_str());
+        assert_eq!(
+            request.expected_intent_revision,
+            params.expected_intent_revision
+        );
+        assert_eq!(request.declaration, declaration);
+        assert_eq!(request.convergence, IdentityConvergenceMode::CancelActive);
+
+        let invalid = meerkat_contracts::wire::MobApplyMemberToolDeclarationParams {
+            expected_intent_revision: 0,
+            ..params
+        };
+        assert!(matches!(
+            ApplyMemberToolDeclaration::try_from(invalid),
+            Err(IdentityIntentError::ZeroIntentRevision)
+        ));
+    }
 
     #[test]
     fn identity_adoption_wire_is_strict_and_round_trips_full_declaration() {

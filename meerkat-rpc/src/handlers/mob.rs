@@ -35,9 +35,8 @@ use meerkat_core::types::ContentInput;
 use meerkat_mob::{
     AgentIdentity, ApplyMemberToolDeclaration, FlowId, IdentityConvergenceResolutionId,
     IdentityConvergenceStatus, IdentityIntent, IdentityStoredObservation, MemberRespawnReceipt,
-    MemberToolMutationId, MobBackendKind, MobError, MobId, MobMemberStatus, MobRespawnError,
-    MobRuntimeMode, Profile, ResolveIdentityConvergenceBlock, RunId, SpawnMemberSpec, SpawnResult,
-    ToolConfig,
+    MobBackendKind, MobError, MobId, MobMemberStatus, MobRespawnError, MobRuntimeMode, Profile,
+    ResolveIdentityConvergenceBlock, RunId, SpawnMemberSpec, SpawnResult, ToolConfig,
 };
 use meerkat_mob_mcp::{MobAppendSystemContextError, MobMcpDestroyError, MobMcpState};
 use std::collections::BTreeMap;
@@ -583,27 +582,11 @@ pub async fn handle_apply_member_tool_declaration(
         Ok(params) => params,
         Err(error) => return error.with_id(id),
     };
-    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
-        Ok(mob_id) => mob_id,
-        Err(response) => return response,
-    };
-    let declaration: Result<meerkat_mob::MemberToolDeclaration, _> = params.declaration.try_into();
-    let declaration = match declaration {
-        Ok(declaration) => declaration,
+    let request = match ApplyMemberToolDeclaration::try_from(params) {
+        Ok(request) => request,
         Err(error) => return invalid_params(id, error.to_string()),
     };
-    let request_id = match MemberToolMutationId::new(params.request_id) {
-        Ok(request_id) => request_id,
-        Err(error) => return invalid_params(id, error.to_string()),
-    };
-    let request = ApplyMemberToolDeclaration {
-        mob_id: mob_id.clone(),
-        agent_identity: AgentIdentity::from(params.agent_identity.as_str()),
-        request_id,
-        expected_intent_revision: params.expected_intent_revision,
-        declaration,
-        convergence: params.convergence.into(),
-    };
+    let mob_id = request.mob_id.clone();
     match state
         .mob_apply_member_tool_declaration(&mob_id, request)
         .await

@@ -4,21 +4,31 @@ description: "JWT validation, OIDC discovery, provider configuration, and email 
 icon: "lock"
 ---
 
-MobKit authenticates console access and API requests using JWT tokens validated against OIDC providers. The auth system supports multiple identity providers with email-based access control.
+MobKit authenticates protected console, REST, JSON-RPC, Flow Editor, and SSE
+requests with JWTs. Signature and claim validation establishes a principal;
+`AuthPolicy` then applies provider matching and an exact principal allowlist.
+The reference HTTP router deliberately leaves only its shells, static assets,
+and health endpoint public.
 
 ## Auth providers
 
 | Provider | Description |
 |----------|-------------|
-| `GoogleOAuth` | Google OAuth 2.0 (default) |
-| `GitHubOAuth` | GitHub OAuth |
-| `GenericOidc` | Any OIDC-compliant identity provider |
-| `ServiceIdentity` | Machine-to-machine service accounts (prefix: `svc:`) |
-| `TestProvider` | Testing only -- rejected in production |
+| `GoogleOAuth` | Google user-token policy classification (default) |
+| `GitHubOAuth` | GitHub user-token policy classification |
+| `GenericOidc` | Generic OIDC user-token policy classification |
+| `ServiceIdentity` | Machine-to-machine principals (prefix: `svc:`) |
+| `TestProvider` | Testing classification -- rejected by protected policy |
+
+These values classify an already validated token; MobKit does not run the
+provider's browser OAuth login flow. An absent or unrecognized `provider`
+claim maps to `GenericOidc`. A token with `actor_type = "service"`, or a
+principal beginning with `svc:`, maps to `ServiceIdentity`.
 
 ## Auth policy
 
-Authentication is configured through an `AuthPolicy`:
+`AuthPolicy` selects one default user identity provider. Service identities use
+their own path and do not need to match that default:
 
 ```rust
 AuthPolicy {
@@ -32,12 +42,14 @@ AuthPolicy {
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `default_provider` | `AuthProvider` | `GoogleOAuth` | Which OIDC provider to expect |
+| `default_provider` | `AuthProvider` | `GoogleOAuth` | Which user-provider classification protected policy expects |
 | `email_allowlist` | `Vec<String>` | `[]` | Allowed email addresses or service identities |
 
 ## JWT validation
 
-MobKit validates JWT tokens locally without calling the identity provider at request time:
+MobKit's low-level JWT implementation supports `HS256`, `RS256`, and `ES256`
+with P-256 keys. For a token backed by a parsed JWKS document, use the helpers
+in this order:
 
 <Steps>
   <Step title="Header inspection">
@@ -47,52 +59,114 @@ MobKit validates JWT tokens locally without calling the identity provider at req
     let header: JwtHeaderView = inspect_jwt_header(&token)?;
     ```
 
-    Supported algorithms: `HS256` (HMAC-SHA256) and `RS256` (RSA-SHA256).
+    The header parser does not validate the signature. It only returns `alg`
+    and optional `kid` for the next steps.
   </Step>
   <Step title="Key selection">
-    For RS256 tokens, select the matching key from the JWKS document:
+    Select a key by the token's optional `kid` and algorithm:
 
     ```rust
-    let jwk: &Jwk = select_jwk_for_token(&jwks_document, &header)?;
+    let jwk: &Jwk = select_jwk_for_token(
+        &jwks_document,
+        header.kid.as_deref(),
+        &header.alg,
+    )?;
     ```
   </Step>
   <Step title="Signature verification">
-    Verify the token signature against the selected key:
+    Build the algorithm-specific verification key, then validate the signature,
+    issuer, audience, expiry, and not-before claims:
 
     ```rust
-    let validated: ValidatedJwt = validate_jwt_locally(&token, &validation_config)?;
+    let verification_key =
+        meerkat_mobkit::auth::build_jwt_verification_key(jwk, &header.alg)?;
+    let validated: ValidatedJwt =
+        meerkat_mobkit::auth::validate_jwt_with_verification_key(
+            &token,
+            &verification_key,
+            &meerkat_mobkit::auth::JwtClaimsValidationConfig {
+                issuer: Some(expected_issuer),
+                audience: Some(expected_audience),
+                now_epoch_seconds,
+                leeway_seconds: 30,
+            },
+        )?;
     ```
 
     The validated JWT contains the claims (subject, email, issuer, expiration).
   </Step>
 </Steps>
 
-### OIDC discovery
+`validate_jwt_locally` is the narrower HS256 convenience helper. It always
+builds an HMAC key from `JwtValidationConfig.shared_secret`; it is not the
+general RS256 or ES256 entry point.
 
-For RS256 providers, MobKit fetches the OIDC discovery document and JWKS keys:
+### Fixed trusted OIDC snapshot
+
+The reference console auth path reads a fixed, host-trusted snapshot from
+`RuntimeDecisionState.trusted_oidc`:
 
 ```rust
-let discovery: OidcDiscoveryDocument = parse_oidc_discovery_json(&json_text)?;
-let jwks: JwksDocument = parse_jwks_json(&jwks_json_text)?;
+TrustedOidcRuntimeConfig {
+    discovery_json: discovery_json_text,
+    jwks_json: jwks_json_text,
+    audience: "meerkat-console".to_string(),
+}
 ```
 
-The discovery document provides the JWKS URI, issuer, and supported algorithms. Keys are cached and refreshed when a token references an unknown `kid`.
+This path parses the issuer and JWKS URI from `discovery_json`, selects a key
+from the supplied `jwks_json`, and requires the configured audience. It does
+not fetch the JWKS URI, cache remote keys, or refresh on an unknown `kid`.
+Rotate keys by replacing the trusted snapshot through the host's configuration
+path. Caller-supplied discovery, JWKS, and audience query parameters are
+ignored.
+
+### Refreshable `JwksCache`
+
+`JwksCache` is a separate helper for hosts that wrap an Axum router with
+`with_auth_layer`:
+
+```rust
+let cache = JwksCache::new(
+    JwksCacheConfig::new(
+        "https://id.example/.well-known/openid-configuration".to_string(),
+    )
+    .with_issuer("https://id.example")
+    .with_audience("meerkat-console"),
+);
+
+let protected_router = with_auth_layer(router, cache);
+```
+
+The cache fetches discovery and JWKS documents on first use, refreshes at its
+configured interval, and forces one refresh when no key matches the token. It
+fails closed unless an audience is configured. Expected issuer checking is
+optional and comes from `JwksCacheConfig`; it is not implicitly copied from
+the discovery document. This middleware accepts only an `Authorization:
+Bearer <token>` header. It does not implement the console router's
+`auth_token` query parameter.
 
 ### HS256 shared secrets
 
-For HMAC-based validation (testing, internal services):
+For an explicitly trusted HMAC JWK, the extraction helper takes that JWK and
+returns the decoded secret:
 
 ```rust
-let secret: Vec<u8> = extract_hs256_shared_secret(&config)?;
+let secret: String = extract_hs256_shared_secret(jwk)?;
 ```
 
 <Warning>
-HS256 is appropriate for internal service-to-service communication where both parties share the secret. Use RS256 with OIDC for user-facing authentication.
+The fixed `trusted_oidc` console path accepts HS256 only when both the issuer
+and JWKS URI use a development host (`localhost`, loopback, or a
+`.localhost` name). `JwksCache` rejects HS256 by default unless the host calls
+`.allow_hs256(true)`. Prefer RS256 or ES256 for production OIDC.
 </Warning>
 
 ## Console access enforcement
 
-Console routes are protected by `enforce_console_route_access`:
+After JWT validation, the provider and allowlist step is enforced by
+`enforce_console_route_access`. This function evaluates policy; it does not
+verify the JWT itself:
 
 ```rust
 enforce_console_route_access(
@@ -107,14 +181,33 @@ enforce_console_route_access(
 
 ### Enforcement rules
 
-1. If `console_policy.require_app_auth` is `false`, all requests are allowed
-2. The request provider must match `auth_policy.default_provider`
-3. `TestProvider` is always rejected (even if it matches)
-4. The email must appear in `auth_policy.email_allowlist`
+1. If `console_policy.require_app_auth` is `false`, this provider/allowlist
+   check allows the request; read-only policy and optional ABAC remain separate
+2. `ServiceIdentity` uses its prefix and allowlist checks without matching the
+   default user provider
+3. Every other request provider must match `auth_policy.default_provider`
+4. `TestProvider` is rejected even when it is the configured default
+5. The principal must appear exactly in `auth_policy.email_allowlist`
 
 Console HTTP routes are designed for explicit bearer-token authentication. If a
 deployment puts cookie-based auth in front of the console, the deployment must
 also enforce CSRF/origin checks for mutation routes.
+
+### HTTP surface boundary
+
+In the reference app router, these surfaces remain public even when
+`require_app_auth` is `true`:
+
+- `/`, `/favicon.ico`, and `/healthz`
+- `/console`, `/console/`, and `/console/assets/*`
+- `/flow-editor`, `/flow-editor/`, and `/flow-editor/assets/*`
+
+Console JSON, JSON-RPC, timeline, blob, Flow Editor RPC, and all MobKit SSE
+surfaces honor `require_app_auth`. When enabled, they accept either
+`Authorization: Bearer <token>` or an exact `auth_token` query parameter.
+Query values are percent-decoded, so callers must URL-encode reserved
+characters. Prefer the header except where a browser or SSE bootstrap requires
+a query token.
 
 ### Service identity
 

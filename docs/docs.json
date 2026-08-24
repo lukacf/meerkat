@@ -317,12 +317,6 @@
                   "mobkit/reference/decisions",
                   "mobkit/reference/governance"
                 ]
-              },
-              {
-                "group": "Plans",
-                "pages": [
-                  "mobkit/plans/storage-unification-plan"
-                ]
               }
             ]
           }

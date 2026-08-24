@@ -119,6 +119,74 @@ unsupported field. Move definitions to the durable schedule store through
 schedule tools or `ScheduleService`.
 </Warning>
 
+## Member role migrations
+
+`role_migrations` is a **top-level** `mobkit/init` param, a sibling of
+`runtime_options` rather than a field inside it. On `rpc_gateway`,
+`runtime_options` is a closed allowlist and unknown keys are a hard error, so
+nesting the declaration there fails initialization with
+`unsupported runtime_options fields: role_migrations`.
+
+A durable member whose role changed refuses to resume: Meerkat returns
+`MobError::MemberRoleMigrationRequired` rather than silently restamping the
+member's durable role, comms name and binding together. The host clears that
+refusal by declaring, for one boot, which exact identity is migrating and which
+role it is migrating from.
+
+```json
+{
+  "role_migrations": [
+    { "identity": "domain:home-automation", "from_role": "domain" }
+  ]
+}
+```
+
+Python hosts declare the same thing through the builder:
+
+```python
+from meerkat_mobkit import MobKit, RoleMigrationDeclaration
+
+runtime = await (
+    MobKit.builder()
+    .gateway("./target/debug/rpc_gateway")
+    .roster(roster_provider)
+    .role_migrations(
+        [
+            RoleMigrationDeclaration(
+                identity="domain:home-automation", from_role="domain"
+            )
+        ]
+    )
+    .build()
+)
+```
+
+`.role_migrations([...])` accepts `RoleMigrationDeclaration` dataclasses or
+plain dicts and validates both; a conflicting pair raises `ValueError`; leaving
+the setter unused emits no `role_migrations` key at all. The TypeScript builder
+exposes no equivalent setter.
+
+| Property | Behavior |
+|----------|----------|
+| Lifetime | Boot-scoped. The list is installed on the session bridge, which lives for exactly one boot, and is never written to the continuity store. Dropping it from the next boot payload is how the authority goes away. |
+| Matching | Exact `AgentIdentity` match. No prefix, suffix, or case variant of a declared identity inherits authority. |
+| Authority | MobKit only carries the declared predecessor role into the resume request. Meerkat re-verifies it against durable state and refuses with `MobError::MemberRoleMigrationRejected` on mismatch; MobKit never infers a declaration and never retries a resume Meerkat refused. |
+| Leftovers | Once the durable and requested roles agree, Meerkat returns before reading the declaration, so a declaration left in place after the migration landed is inert. An identical repeated declaration is therefore accepted on purpose. |
+| Bad payloads | A payload that does not deserialize refuses the boot rather than arming nothing. One identity declared twice with conflicting predecessor roles is refused too, because nothing but map order could pick which predecessor becomes authority. |
+
+The two gateway binaries, whose names differ by one word, refuse bad payloads
+differently and install accepted ones under different conditions.
+
+| Binary | Refusals | Install condition |
+|--------|----------|-------------------|
+| `rpc_gateway` (untyped init params; what SDK hosts run) | Parses and conflict-checks at init scope, answering both the malformed and the conflicting case with `-32602` on the request id | Inside the roster-provider branch |
+| `mobkit_gateway` (typed `InitParams`) | Malformed params fail typed deserialization and answer `-32602` with a null `id`; the conflict check sits inside the identity-first block and fails the boot out as `-32603`, also with a null `id`. Under `identity_first: false` that block never runs, so a self-contradicting payload is not refused at all; `identity_first` defaults to true | Inside the identity-first block |
+
+Declarations that reach neither identity plane arm nothing, because there is no
+identity plane to migrate on. See
+[roster and member lifecycle](/mobkit/concepts/roster#role-migration) for the operator
+view of the refusal.
+
 ## Storage layout and durability
 
 `MobKitStorageLayout` is the single path authority for storage roots and the

@@ -12,11 +12,19 @@ The editor has three hosting modes.
 
 ### On a running runtime
 
-Every host that serves the reference app router — `mobkit_gateway`, `rpc_gateway`, and any embedding that calls `UnifiedRuntime::build_reference_app_router` — mounts the Flow Editor on the same port as the console:
+Every host that serves the reference app router - `mobkit_gateway`,
+`rpc_gateway`, and any embedding that calls
+`UnifiedRuntime::build_reference_app_router` - mounts the Flow Editor on the
+same listener as the console. The shipping gateways bind `127.0.0.1` on an
+available OS-selected port and report the concrete `http_base_url` during
+initialization. Append `/flow-editor` to that value:
 
 ```
-http://localhost:8080/flow-editor
+http://127.0.0.1:<reported-port>/flow-editor
 ```
+
+An embedding that serves the returned Axum router itself uses its own listener
+address instead.
 
 In this mode the authoring catalogs are runtime-backed: tools, skills, agent definitions, and flow registries reflect the live mob definition and loaded modules, and `mobkit/capabilities` reports `runtime_backed_catalogs: true`.
 
@@ -32,9 +40,13 @@ For authoring without a runtime, run the dedicated binary:
 | Option | Purpose |
 |--------|---------|
 | `--listen HOST:PORT` | Bind address (default `127.0.0.1:4191`; also `MOBKIT_FLOW_EDITOR_LISTEN_ADDR`) |
-| `--allow-host-deploy` | Opt in to executing `rkat mob run` on the host (also `MOBKIT_FLOW_EDITOR_ALLOW_HOST_DEPLOY=1`) |
+| `--allow-host-deploy` | Opt in to host-mutating `rkat mob validate` and `rkat mob run` execution (also `MOBKIT_FLOW_EDITOR_ALLOW_HOST_DEPLOY=1`) |
 
-Without `--allow-host-deploy`, the standalone server refuses `mobkit/mobpacks/deploy` with `execute: true` and points you at deploy planning or running `rkat mob run` manually.
+Without `--allow-host-deploy`, the standalone server refuses
+`mobkit/mobpacks/deploy` with `execute: true` and points you at deploy planning
+or running `rkat mob run` manually. A validate request with
+`rkat_validate: true` is reduced to structural validation, so it cannot write
+an archive or spawn `rkat`.
 
 ### Library routers
 
@@ -46,9 +58,9 @@ use meerkat_mobkit::flow_editor_router;
 let app = axum::Router::new().merge(flow_editor_router());
 ```
 
-- `flow_editor_router()` — frontend + RPC, deploy execution disabled
-- `flow_editor_router_with_host_deploy()` — same, with host deploy enabled
-- `flow_editor_frontend_router()` / `flow_editor_rpc_router()` / `flow_editor_rpc_router_allowing_host_deploy()` — compose the shell and the RPC plane separately
+- `flow_editor_router()` - frontend + RPC, host mutation disabled
+- `flow_editor_router_with_host_deploy()` - same, with `rkat` validation and deploy execution enabled
+- `flow_editor_frontend_router()` / `flow_editor_rpc_router()` / `flow_editor_rpc_router_allowing_host_deploy()` - compose the shell and the RPC plane separately
 
 ## Runtime contract
 
@@ -113,16 +125,38 @@ Drafts autosave through `mobkit/mobpacks/save` into a host JSON store with optim
 
 ## Validation and deploy
 
-`mobkit/mobpacks/validate` always runs MobKit structural validation (`meerkat_mob::validate_definition` + `SpecValidator`). When the request sets `rkat_validate: true` and structural validation passes, the document is exported as an archive and checked with `rkat mob validate`. If `rkat` is not on `PATH`, validation degrades to a warning row ("rkat mob validate skipped") instead of failing — embedding hosts do not always ship `rkat`.
+`mobkit/mobpacks/validate` always runs MobKit structural validation
+(`meerkat_mob::validate_definition` + `SpecValidator`). Setting
+`rkat_validate: true` requests a second, host-mutating phase: after structural
+validation passes, the server writes a rendered archive and spawns
+`rkat mob validate`.
+
+That second phase runs only when the surface and caller have host-mutation
+authority. The standalone server without `--allow-host-deploy` strips the
+request flag and returns structural validation only. An ABAC-enabled runtime
+requires `mobpack.deploy`; without it the call is denied with error `-32030`.
+After admission, a missing `rkat` executable produces a warning row
+(`rkat mob validate skipped`) instead of failing the structural result.
 
 Deploys are plans by default. `mobkit/mobpacks/deploy` without `execute` returns the `rkat mob run …` argv plus a `plan_trace` the editor replays step by step; `mobkit/mobpacks/deploy_command` previews the exact shell command. Only with `execute: true` — and only when the surface allows it — does the server write the archive and run `rkat mob run` on the host. The run validates the input params, provisions the flow's members, blocks until the run is terminal, and prints the result envelope on stdout; the server parses that envelope and surfaces the flow's run output (status, run id, and the result payload) as deploy display rows, so the editor shows what the flow actually produced. The deploy `prompt` setting becomes the `--prompt` run input:
 
-- **Standalone binary** — requires `--allow-host-deploy` (or the env flag); otherwise the call fails with a pointer to manual deploy.
-- **Runtime-mounted editor** — requires the caller's `mobpack.deploy` grant when access control is enforced; open otherwise.
+- **Standalone binary** - `rkat_validate: true` and deploy `execute: true` both require `--allow-host-deploy` (or the env flag). Without it, validation stays structural and execute-deploy fails with a pointer to manual deploy.
+- **Runtime-mounted editor** - both host-mutating operations require the caller's `mobpack.deploy` grant when access control is enforced; open otherwise.
 
 ## Access control
 
-On ABAC-enabled runtimes the Flow Editor RPC plane enforces the mobpack actions from the [access control](/mobkit/concepts/access-control) layer: every mobpack-authoring method requires `mobpack.author`, and `mobkit/mobpacks/deploy` with `execute: true` requires `mobpack.deploy` instead. `mobkit/capabilities` stays open — it only describes the method surface — but its `authoring_capabilities` advertisement intersects with the caller's grants, so `deploy_execute_allowed` and `host_mutation_allowed` are `false` for callers without `mobpack.deploy` and the editor never renders deploy affordances they cannot use. Per-call enforcement remains authoritative; denials surface as JSON-RPC error `-32030` with `data.kind = "access_denied"`.
+On ABAC-enabled runtimes the Flow Editor RPC plane enforces the mobpack actions
+from the [access control](/mobkit/concepts/access-control) layer. Pure authoring and
+structural validation require `mobpack.author`. Deploy with `execute: true` and
+validation with `rkat_validate: true` require `mobpack.deploy` instead because
+both write an archive and spawn a host process.
+
+`mobkit/capabilities` stays open - it only describes the method surface - but
+its `authoring_capabilities` advertisement intersects with the caller's grants.
+For callers without `mobpack.deploy`, `deploy_execute_allowed` and
+`host_mutation_allowed` are `false`, and the editor does not render the related
+host-mutation affordances. Per-call enforcement remains authoritative; denials
+surface as JSON-RPC error `-32030` with `data.kind = "access_denied"`.
 
 The standalone binary is a token-less local tool: it binds `127.0.0.1` by default, there is no principal to evaluate, and `--allow-host-deploy` is the only deploy gate.
 

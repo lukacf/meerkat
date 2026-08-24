@@ -4,15 +4,26 @@ description: "MobKit Python SDK — typed builder API, async runtime, and stream
 icon: "python"
 ---
 
-The MobKit Python SDK provides a typed builder API for starting and managing
-MobKit runtimes. Apps own policy (who exists, who's wired, what tools they
-have). MobKit owns mechanism (spawn, wire, route, reconcile, persist, serve).
+The MobKit Python SDK provides a typed host API for launching and operating
+Meerkat mobs through the SDK-facing gateway. Apps own policy. Meerkat and
+`meerkat-mob` remain authoritative for agent execution, identity, membership,
+lifecycle, and wiring; MobKit packages gateway startup, provider adapters,
+operational modules, persistence projections, and operator surfaces.
 
 ## Installation
 
 ```bash
 pip install meerkat-mobkit
 ```
+
+<Note>
+  The wheel is client-only and does not contain `rpc_gateway`. Download
+  `mobkit-rpc-gateway-<version>-<target>.tar.gz` for Unix or macOS, or
+  `mobkit-rpc-gateway-<version>-<target>.zip` for Windows, and extract its
+  `rpc_gateway` binary (`rpc_gateway.exe` on Windows). Alternatively, follow the
+  [source-build instructions](/mobkit/quickstart#install). Pass that binary's path to
+  `.gateway(...)`.
+</Note>
 
 ## Quick start
 
@@ -21,7 +32,7 @@ import asyncio
 from meerkat_mobkit import MobKit
 
 async def main():
-    async with await MobKit.builder().mob("config/mob.toml").gateway("./mobkit-rpc").build() as rt:
+    async with await MobKit.builder().mob("config/mob.toml").gateway("/path/to/rpc_gateway").build() as rt:
         handle = rt.mob_handle()
 
         # Send a message (comms)
@@ -71,6 +82,7 @@ runtime = await (
     .persistent_state("state/mobkit")
     .job_credentials(resolve_profile_credentials)
     .session_service(AppAgentBuilder())
+    .gateway("/path/to/rpc_gateway")
     .build()
 )
 
@@ -237,7 +249,7 @@ print(status.running, status.loaded_modules)
 # (per-user agents, coordinators) belong on the identity plane instead —
 # see "new user first contact" below.
 snapshot = await handle.ensure_member("scratch-worker-7", role="worker")
-print(snapshot.meerkat_id, snapshot.state)
+print(snapshot.agent_identity, snapshot.state)
 
 # Find members by label
 members = await handle.find_members("owner", "user-123")
@@ -262,7 +274,7 @@ messages = await gmail("gmail_search", query="is:unread")
 # List the full roster
 members = await handle.list_members()
 for m in members:
-    print(f"{m.meerkat_id}: {m.state} ({m.profile})")
+    print(f"{m.agent_identity}: {m.state} ({m.role})")
 
 # Inspect a specific member
 snapshot = await handle.get_member("agent-1")
@@ -279,8 +291,12 @@ await handle.respawn_member("agent-1")
 | `retire_member(member_id)` | `None` | Retire a member (graceful shutdown) |
 | `respawn_member(member_id)` | `None` | Respawn a previously retired member |
 
-Member state is exposed via constants `MEMBER_STATE_ACTIVE` and `MEMBER_STATE_RETIRING`,
-importable from the top-level package.
+`MemberSnapshot` exposes `agent_identity`, `role`, `state`, `wired_to`, and
+`labels`. Known state strings are exported from the top-level package as
+`MEMBER_STATE_ACTIVE`, `MEMBER_STATE_RETIRING`, `MEMBER_STATE_BROKEN`,
+`MEMBER_STATE_COMPLETED`, and `MEMBER_STATE_UNKNOWN`. The underlying Rust
+status enum is non-exhaustive, so consumers should tolerate future state
+strings.
 
 ### Common pattern: new user first contact
 
@@ -296,7 +312,7 @@ my_roster.add_identity(f"personal:{user_id}", profile="personal",
                        labels={"owner": user_id})
 await runtime.reconcile()
 result = await runtime.send(f"personal:{user_id}", slack_message)
-async for event in runtime.subscribe_agent(f"personal:{user_id}"):
+async for event in runtime.mob_handle().subscribe_agent(f"personal:{user_id}"):
     forward_to_slack(event)
 ```
 
@@ -314,7 +330,7 @@ rt = await (
     .mob("config/mob.toml")
     .session_service(my_builder, my_store)
     .discovery(discover_fn)
-    .gateway("./mobkit-rpc")
+    .gateway("./rpc_gateway")
     .build()
 )
 ```
@@ -333,6 +349,7 @@ rt = await (
 | `.topology_provider(provider)` | Identity-first topology provider |
 | `.agent_customizer(customizer)` | Identity-first agent customizer |
 | `.identity_bootstrap_mode(mode)` | Eager, lazy, or bounded background-warm identity materialization; requires `.roster(...)` |
+| `.role_migrations(declarations)` | Authorize durable member role migrations for THIS boot. Takes an iterable of `RoleMigrationDeclaration` dataclasses or equivalent `identity` / `from_role` dicts, validating either form; a conflicting pair for one identity raises `ValueError`, an identical repeat is accepted, and leaving the setter unused emits no `role_migrations` init-params key at all |
 | `.session_service(builder, store)` | Session agent builder and optional store |
 | `.discovery(callback)` | Discovery callback (mob-level) |
 | `.pre_spawn(callback)` | Pre-spawn callback |
@@ -359,6 +376,18 @@ For continuity stores, `checkpoint_version` is monotonic per identity and
 continuity generation. A live session rebind changes `session_id` without
 resetting the version; only destructive reset advances `generation` and starts
 the version stream over.
+
+A durable member whose role changed refuses to resume with
+`MobError::MemberRoleMigrationRequired` until the host declares the migration.
+`.role_migrations([...])` is that declaration: it emits a top-level
+`role_migrations` init param, not a `runtime_options` field, and the authority
+lasts exactly one boot because nothing persists it. Meerkat re-verifies the
+declared `from_role` against durable state and refuses with
+`MobError::MemberRoleMigrationRejected` on mismatch, and ignores the declaration
+entirely once the roles already agree, so a declaration left in place after the
+migration landed is inert. It arms only where an identity plane exists; on
+`rpc_gateway` that means alongside `.roster(...)`. See
+[roster and member lifecycle](/mobkit/concepts/roster#role-migration).
 
 Every explicit `.identity_bootstrap_mode(...)` call declares identity-first
 intent and requires `.roster(...)`, including explicit eager mode. Omitting the
@@ -416,12 +445,12 @@ declared by Rust embedders via `ephemeral_blobs(true)` /
 
 ```python
 # Context manager (recommended)
-async with await MobKit.builder().mob("mob.toml").gateway("./mobkit-rpc").build() as rt:
+async with await MobKit.builder().mob("mob.toml").gateway("./rpc_gateway").build() as rt:
     handle = rt.mob_handle()
     # ...
 
 # Explicit lifecycle
-rt = await MobKit.builder().mob("mob.toml").gateway("./mobkit-rpc").build()
+rt = await MobKit.builder().mob("mob.toml").gateway("./rpc_gateway").build()
 try:
     handle = rt.mob_handle()
     # ...
@@ -548,7 +577,9 @@ from meerkat_mobkit import (
     KeepAliveConfig, EventEnvelope,
     RoutingResolution, DeliveryResult,
     # Roster
-    MemberSnapshot, MEMBER_STATE_ACTIVE, MEMBER_STATE_RETIRING,
+    MemberSnapshot,
+    MEMBER_STATE_ACTIVE, MEMBER_STATE_RETIRING, MEMBER_STATE_BROKEN,
+    MEMBER_STATE_COMPLETED, MEMBER_STATE_UNKNOWN,
     # Routing & delivery
     RuntimeRouteResult, DeliveryHistoryResult,
     # Gating

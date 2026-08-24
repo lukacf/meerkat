@@ -4,15 +4,28 @@ description: "Embedded MobKit console with configurable branding, grouped roster
 icon: "desktop"
 ---
 
-MobKit ships a web-based admin console embedded directly in the Rust gateway binary. The console provides real-time visibility into agents, conversations, events, logs, approvals, and recovery actions. The stock shell is built from shared `@console-core` and `@console-components` packages, while app-specific policy stays in runtime config and host code.
+MobKit ships a web-based operator console through its HTTP composition. The
+console/admin `mobkit_gateway` serves it directly. A persistent, SDK-driven
+`rpc_gateway` also mounts the console routes, but the two binaries are not
+interchangeable: SDK hosts drive `rpc_gateway` over stdio, while
+`mobkit_gateway` accepts its init handshake and then serves console/admin HTTP.
+The console provides real-time visibility into agents, conversations, events,
+logs, approvals, and recovery actions. The stock shell is built from shared
+`@console-core` and `@console-components` packages, while app-specific policy
+stays in runtime config and host code.
 
 ## Accessing the console
 
 Once the runtime is serving HTTP, open the console at:
 
 ```
-http://localhost:8080/console
+<http_base_url>/console
 ```
+
+Both gateway binaries bind an available loopback port and report the exact
+`http_base_url` in their init result. A Rust library host chooses its own bind
+address. `http://localhost:8080/console` is correct only when your host or
+reverse proxy explicitly publishes MobKit there.
 
 The HTML, JavaScript, and CSS are compiled into the binary via `include_str!`, with no external CDN or build step at deployment time.
 
@@ -40,6 +53,13 @@ The bundled console uses a small set of stable protocol surfaces:
 | `GET /blobs/{blob_id}` | Blob/image retrieval for rendered media. |
 
 The console contract version is `0.5.0` in `console/src/lib/contract.ts` and `docs/rct/console-rest-sse-contract-v0.5.0.json`. The runtime JSON-RPC contract is separately versioned by `MOBKIT_CONTRACT_VERSION`.
+
+Gateway custody also differs. `rpc_gateway` installs a SQLite console timeline
+store only when its init request configures `persistent_state`; long-lived
+`--persistent` process mode alone does not make the timeline durable. Without
+persistent state, its timeline stays in memory. The console-only
+`mobkit_gateway` also keeps its timeline in memory. Do not infer timeline
+durability from the presence of the same browser shell and route names.
 
 ## Layout
 
@@ -123,11 +143,17 @@ Prefer mob member labels for domain-specific grouping:
 ```rust
 use std::collections::BTreeMap;
 
+use meerkat_mob::ids::AgentIdentity;
+use meerkat_mob::{ProfileName, SpawnMemberSpec};
+
 fn labels(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
     pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
 }
 
-SpawnMemberSpec::new(ProfileName::from("lead"), MeerkatId::from("domain:billing"))
+SpawnMemberSpec::new(
+    ProfileName::from("lead"),
+    AgentIdentity::from("domain:billing"),
+)
     .with_labels(labels(&[
         ("display_name", "Billing"),
         ("console_group", "Domain"),
@@ -378,8 +404,11 @@ rather than accepting reconnect/suppression intent that would disappear on
 restart:
 
 ```rust
-let runtime = UnifiedRuntimeBuilder::new(...)
-    .persistent_state(app_state_dir)
+use meerkat_mobkit::{TopologyControlMode, TopologyControlPolicy, UnifiedRuntime};
+
+let runtime = UnifiedRuntime::builder()
+    .definition_path("config/mob.toml")
+    .persistent_state(".mobkit/state")
     .topology_control(TopologyControlPolicy {
         mode: TopologyControlMode::Editable,
         allow_bulk: false,
@@ -393,7 +422,7 @@ let runtime = UnifiedRuntimeBuilder::new(...)
 
 ## Authentication
 
-Console access is governed by `ConsolePolicy`:
+Coarse console access is governed by `ConsolePolicy`:
 
 ```rust
 ConsolePolicy {
@@ -402,10 +431,23 @@ ConsolePolicy {
 }
 ```
 
-When `require_app_auth` is `true`, every request is checked against the `AuthPolicy`. See [authentication](/mobkit/guides/authentication) for details.
+When `require_app_auth` is `true`, protected console JSON, RPC, blob, and stream
+requests are checked against the `AuthPolicy`. The shell, static assets, and
+`/healthz` remain public. See [authentication](/mobkit/guides/authentication) for the
+exact HTTP surface boundary.
+
 When `read_only` is `true`, the console can inspect identities, timelines,
 logs, and topology, but chat sends, uploads, lifecycle controls, and other write
 RPCs are denied server-side.
+
+For per-principal and per-agent authorization, install MobKit's optional
+`AccessController` from `config/access.toml` or the runtime builder. When
+enabled, its ABAC policy is deny-by-default with deny-overrides across console
+REST, JSON-RPC, and SSE. JSON-RPC denials use code `-32030` with
+`data.kind = "access_denied"`; REST and SSE return HTTP 403. `mob.observe`
+authorizes mob-level observation but does not grant `agent.view` for every
+agent. To observe everything, a principal needs both `mob.observe` and an
+applicable `agent.view` grant.
 
 Upstream hosts that already know a user's ACL can also force the stock console UI
 into view-only mode without changing MobKit auth: set

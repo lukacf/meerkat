@@ -1,100 +1,300 @@
 ---
 title: "Roster and member lifecycle"
-description: "The mob roster tracks all members and their lifecycle states. List, inspect, spawn, retire, and respawn members through the roster API."
+description: "Understand MobKit's lightweight roster projection, deep member status, lifecycle states, and mutation results."
 icon: "users"
 ---
 
-The roster is the authoritative record of every member in a mob. It tracks active and retiring members, their profiles, peer wiring, and labels. All roster mutations flow through the gateway's JSON-RPC interface, and every query returns a consistent `MobMemberSnapshot`.
+The mob roster is the operational view of the members known to a mob. Roster
+reads return lightweight `MobMemberListEntry` projections. Deep execution
+inspection is a separate operation that returns `MobMemberSnapshot`.
 
 <Warning>
-The member API on this page is the **worker plane**: it is the right surface
-for ephemeral, disposable members — helpers a parent agent spawns and an
-idle-retire policy reaps. **Durable members (per-user agents, long-lived
-coordinators, anything that must survive a restart) belong on the identity
-plane**: declare them in an identity roster and reconcile, instead of
-`ensure_member`-ing them into the mob roster. Identity-plane members get
-continuity records, lease-fenced embodiment, and resume across restarts —
-mob-plane members get none of that. On an identity-first gateway the member
-methods below re-dispatch to identity semantics automatically.
+Member lifecycle is dual-plane. Use the worker plane for ephemeral, disposable
+members such as helpers spawned by a parent agent and reaped by an idle-retire
+policy. Durable members, including per-user agents and long-lived coordinators,
+belong on the identity plane: declare them in an identity roster and reconcile
+them. The gateway profile changes the default behavior of
+`mobkit/ensure_member`; see the profile-specific contract below.
 </Warning>
-
-## Member states
-
-Each member is in exactly one lifecycle state at any time.
-
-| State | Constant | Description |
-|-------|----------|-------------|
-| `active` | `MEMBER_STATE_ACTIVE` | Member is running and accepting work |
-| `retiring` | `MEMBER_STATE_RETIRING` | Member is draining active work before disposal |
-
-<Note>
-Idle members with no active sessions may be immediately disposed when retired, skipping the `retiring` phase entirely.
-</Note>
 
 ## Roster operations
 
-All operations are exposed as JSON-RPC methods on the gateway.
+All operations are available through the gateway's JSON-RPC interface.
 
-| Method | Description |
-|--------|-------------|
-| `mobkit/list_members` | List all members (active + retiring) |
-| `mobkit/get_member` | Get a single member by ID |
-| `mobkit/retire_member` | Transition a member to retiring |
-| `mobkit/respawn_member` | Replace a member with a fresh instance |
-| `mobkit/ensure_member` | Idempotent: spawn if missing, return snapshot |
-| `mobkit/find_members` | Find members by label key-value |
+| Method | Result | Description |
+|--------|--------|-------------|
+| `mobkit/list_members` | `MobMemberListEntry[]` | List operationally visible members, including retiring members |
+| `mobkit/get_member` | `MobMemberListEntry` | Get one lightweight roster entry by member ID |
+| `mobkit/find_members` | `MobMemberListEntry[]` | Find lightweight roster entries by a label key-value pair |
+| `mobkit/ensure_member` | Gateway-profile dependent | Ensure a durable identity or an ephemeral worker as described below |
+| `mobkit/member_status` | `MobMemberSnapshot` | Inspect one member's deep execution and connectivity state |
+| `mobkit/retire_member` | Acceptance acknowledgement | Retire a member |
+| `mobkit/respawn_member` | Acceptance acknowledgement | Replace a member with a fresh runtime incarnation |
 
-## MobMemberSnapshot
+## `ensure_member` gateway profiles
 
-Every roster query returns one or more `MobMemberSnapshot` objects:
+The same method name has different ownership and result contracts across the
+two gateway profiles:
+
+| Gateway profile | Behavior | Result |
+|-----------------|----------|--------|
+| SDK-facing `rpc_gateway` (`StdioRpc`) | Calls `MobHandle::ensure_member` on the ephemeral worker plane | `MobMemberListEntry`, or `null` if the post-ensure roster lookup finds no entry |
+| Console/admin `mobkit_gateway` with identity-first runtime and roster | By default, upserts a durable identity into the desired roster and reconciles it through the identity runtime | Identity receipt with `agent_identity`, `role`, `identity_first: true`, `outcome`, and `state` |
+| Identity-first console/admin request with `plane: "worker"` | Explicitly uses `MobHandle::ensure_member` on the ephemeral worker plane | `MobMemberListEntry`, or `null` if the post-ensure roster lookup finds no entry |
+
+<Warning>
+To create an ephemeral worker through an identity-first console/admin gateway,
+you must pass `plane: "worker"`. Omitting it creates or retains a durable
+identity and returns an identity receipt, not a `MobMemberListEntry`.
+</Warning>
+
+The identity receipt's `outcome` is `created`, `resumed`, `dormant`, `broken`,
+or `unchanged`. The other roster operations keep the contracts shown in the
+operation table.
+
+## Lightweight roster entries
+
+`list_members`, `get_member`, and `find_members` project Meerkat's
+`MobMemberListEntry`. `ensure_member` projects the same type only on the
+worker-plane paths described above. A raw MobKit worker-plane response has this
+shape:
 
 ```json
 {
-  "meerkat_id": "agent-1",
-  "profile": "worker",
-  "state": "active",
+  "agent_identity": "agent-1",
+  "role": "worker",
+  "runtime_mode": "turn_driven",
   "wired_to": ["agent-2", "agent-3"],
-  "labels": {"owner": "user-123"}
+  "labels": {"owner": "user-123"},
+  "status": "active",
+  "state": "active",
+  "is_final": false
 }
 ```
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `meerkat_id` | `String` | Unique identifier for the member |
-| `profile` | `String` | Profile name assigned at spawn |
-| `state` | `String` | Current lifecycle state (`active` or `retiring`) |
-| `wired_to` | `Vec<String>` | Peer IDs this member is connected to |
-| `labels` | `Map<String, String>` | Arbitrary key-value metadata |
+| `agent_identity` | `string` | Canonical public identity used to address the member |
+| `role` | `string` | Role or profile name used to build the member |
+| `runtime_mode` | `string` | `autonomous_host` or `turn_driven` |
+| `wired_to` | `string[]` | Canonical identities of currently wired peers |
+| `labels` | `object` | String key-value metadata |
+| `status` | `string` | Machine-projected lifecycle status |
+| `error` | `string`, optional | Machine-recorded member restore failure; omitted when absent |
+| `is_final` | `boolean` | Whether the member has reached a terminal state |
+| `kickoff` | `object`, optional | Initial autonomous-turn kickoff state, when present |
+| `state` | `string` | MobKit compatibility alias of `status`; this is not a field on the Rust `MobMemberListEntry` |
 
-## Python SDK
+The lightweight entry deliberately omits session IDs and live connectivity
+fanout. Use `mobkit/member_status` when those details are required.
 
-The Python SDK exposes typed wrappers for every roster operation:
+Operational list projections retain `active`, `retiring`, and `broken` rows as
+applicable. They filter terminal `completed` and `unknown` rows, even though
+those values remain part of the status vocabulary.
 
-```python
-from meerkat_mobkit import MEMBER_STATE_ACTIVE, MemberSnapshot
+## Deep member status
 
-members = await handle.list_members()
-active = [m for m in members if m.state == MEMBER_STATE_ACTIVE]
+`mobkit/member_status` serializes Meerkat's `MobMemberSnapshot`. It is a deep
+inspection result, not the type returned by roster list operations. Its core
+fields are `status`, `output_preview`, `error`, `tokens_used`, `is_final`, and
+`current_session_id`. It can also include peer connectivity, kickoff,
+external-member observations, resolved model capabilities, execution progress,
+placement, reachability, freshness, and lifecycle-capability diagnostics.
 
-snapshot = await handle.get_member("agent-1")
-print(snapshot.profile, snapshot.wired_to)
+The snapshot's Rust `agent_identity` is bridge-internal and skipped during
+serialization. The requested member ID identifies the result on the MobKit RPC
+surface. The snapshot also does not carry the roster entry's `role`,
+`runtime_mode`, `wired_to`, or `labels` fields.
 
-await handle.retire_member("agent-1")
-await handle.respawn_member("agent-1")
+## Member statuses
+
+The known `MobMemberStatus` values are:
+
+| Status | SDK constant | Meaning |
+|--------|--------------|---------|
+| `active` | `MEMBER_STATE_ACTIVE` | Active and potentially running |
+| `retiring` | `MEMBER_STATE_RETIRING` | Retirement is in progress |
+| `broken` | `MEMBER_STATE_BROKEN` | Durable session restore failed and the member needs repair |
+| `completed` | `MEMBER_STATE_COMPLETED` | The session was archived or not found |
+| `unknown` | `MEMBER_STATE_UNKNOWN` | The member is not in the roster |
+
+<Note>
+`MobMemberStatus` is non-exhaustive. Branch on the known values and tolerate
+new status strings. Do not reduce lifecycle handling to only `active` and
+`retiring`. The Rust `MobMemberSnapshot` structure is also non-exhaustive.
+</Note>
+
+`retiring` can be transient. At the Meerkat Rust layer, a successful
+`MobHandle::retire` is the terminal lifecycle barrier and returns unit, so a
+later roster read can show the member as absent rather than retiring.
+
+## Role migration
+
+A durable member's role is part of its durable identity, not a configuration
+knob: the stored role, the member's comms name, and its mob-member binding are
+one fact. A resume that targets a different role than the durable predecessor is
+therefore a restamp of identity, and Meerkat refuses it with
+`MobError::MemberRoleMigrationRequired` unless that exact resume declares the
+migration. If a durable member stopped resuming after a role or profile rename,
+this is the refusal to look for.
+
+Migration authority is supplied by the activation, per exact identity, as a
+top-level `mobkit/init` param. It is not a `runtime_options` field:
+
+```json
+"role_migrations": [{"identity": "domain:home-automation", "from_role": "domain"}]
 ```
 
-`list_members()` and `find_members()` return `list[MemberSnapshot]`. Single-member operations (`get_member`, `ensure_member`) return a single `MemberSnapshot`. Mutation operations (`retire_member`, `respawn_member`) return the updated snapshot after the state transition completes.
+Python hosts declare the same thing on the builder, with
+`RoleMigrationDeclaration` dataclasses or plain
+`{"identity": ..., "from_role": ...}` dicts:
+
+```python
+from meerkat_mobkit import RoleMigrationDeclaration
+
+builder.role_migrations([
+    RoleMigrationDeclaration(identity="domain:home-automation", from_role="domain"),
+])
+```
+
+The declaration is boot-scoped and never persisted. It is installed on the
+session bridge, which lives for exactly one boot, so dropping it from the next
+boot payload is how the authority goes away. Lookup is an exact identity match:
+no prefix, suffix, or case variant of a declared identity inherits authority.
+MobKit only carries the declared predecessor role into the resume request.
+Meerkat re-verifies it against durable state and refuses with
+`MobError::MemberRoleMigrationRejected` on mismatch, so a mistyped `from_role`
+cannot authorize an unintended restamp, and MobKit never retries a resume that
+Meerkat refused. Once the durable and requested roles agree, Meerkat returns
+before it reads the declaration at all, so a declaration left in place after the
+migration landed is inert rather than a repeated restamp. That is why an
+identical repeated declaration is accepted on purpose, while one identity
+declared twice with conflicting predecessor roles is refused.
+
+<Warning>
+A malformed or self-contradicting `role_migrations` payload refuses the boot
+rather than arming nothing, and the two gateway binaries refuse differently.
+`rpc_gateway` parses and checks the key at init scope and answers both refusals
+with `-32602` on the request id. `mobkit_gateway` answers with a null `id` in
+both cases: `-32602` when its typed init params fail to deserialize, and
+`-32603` from the conflict check that sits inside its identity-first block.
+Under `identity_first: false` that block never runs, so a self-contradicting
+payload is then not refused at all; `identity_first` defaults to true. The
+Python builder raises `ValueError` on a conflicting pair before any of this
+reaches a gateway.
+</Warning>
+
+Only the identity plane carries migration authority. Every mob-plane resume path
+passes no declared predecessor role, so a role change reached through the worker
+plane still fails closed. Which declarations arm also depends on the binary:
+`rpc_gateway` installs them inside its roster-provider branch, `mobkit_gateway`
+inside its identity-first block. Declarations that reach neither arm nothing,
+because there is no identity plane to migrate on.
+
+## Mutation results
+
+The underlying Meerkat Rust operations have different success types:
+
+- `MobHandle::retire` returns `Result<(), MobError>`.
+- `MobHandle::respawn` returns
+  `Result<MemberRespawnReceipt, MobRespawnError>`. The receipt identifies the
+  respawned member.
+
+The domain `MemberRespawnReceipt` publicly serializes only `identity`; its
+runtime and fence atoms are internal. Meerkat's typed `mob/respawn` surface
+wraps that outcome as `status` (`completed` or `topology_restore_failed`), a
+`receipt` containing `identity` and an opaque `member_ref`, and optional
+`failed_peer_ids`.
+
+MobKit's compatibility RPC consumes the worker-plane respawn receipt and
+projects both mutations as acceptance acknowledgements. Identity-owned targets
+can add identity-first receipt fields such as a fencing token for retire, or a
+session ID and generation for respawn. The Python and TypeScript SDK wrappers
+discard these acknowledgement objects and return `None` or `void`. Re-read the
+member when the caller needs the resulting roster or execution state.
+
+## SDK projections
+
+The SDK type named `MemberSnapshot` wraps the lightweight roster response. It
+currently exposes `agent_identity`, `role`, `state`, `wired_to`, and `labels`.
+It does not expose every field present in the raw `MobMemberListEntry` JSON.
+The separate `RichMemberSnapshot` type wraps `mobkit/member_status`.
+
+<Tabs>
+  <Tab title="Python">
+    ```python
+    from meerkat_mobkit import (
+        MEMBER_STATE_ACTIVE,
+        MEMBER_STATE_BROKEN,
+        MEMBER_STATE_COMPLETED,
+        MEMBER_STATE_RETIRING,
+        MEMBER_STATE_UNKNOWN,
+    )
+
+    known_states = {
+        MEMBER_STATE_ACTIVE,
+        MEMBER_STATE_RETIRING,
+        MEMBER_STATE_BROKEN,
+        MEMBER_STATE_COMPLETED,
+        MEMBER_STATE_UNKNOWN,
+    }
+
+    members = await handle.list_members()
+    for member in members:
+        if member.state not in known_states:
+            # A newer gateway may add a status value.
+            continue
+
+    detail = await handle.member_status("agent-1")
+    print(detail.status, detail.is_final, detail.error)
+
+    await handle.retire_member("agent-1")  # Returns None.
+    ```
+  </Tab>
+  <Tab title="TypeScript">
+    ```typescript
+    import {
+      MEMBER_STATE_ACTIVE,
+      MEMBER_STATE_BROKEN,
+      MEMBER_STATE_COMPLETED,
+      MEMBER_STATE_RETIRING,
+      MEMBER_STATE_UNKNOWN,
+    } from "@rkat/mobkit-sdk";
+
+    const knownStates = new Set<string>([
+      MEMBER_STATE_ACTIVE,
+      MEMBER_STATE_RETIRING,
+      MEMBER_STATE_BROKEN,
+      MEMBER_STATE_COMPLETED,
+      MEMBER_STATE_UNKNOWN,
+    ]);
+
+    const members = await handle.listMembers();
+    for (const member of members) {
+      if (!knownStates.has(member.state)) {
+        // A newer gateway may add a status value.
+        continue;
+      }
+    }
+
+    const detail = await handle.memberStatus("agent-1");
+    console.log(detail.status, detail.isFinal, detail.error);
+
+    await handle.respawnMember("agent-1"); // Returns void.
+    ```
+  </Tab>
+</Tabs>
 
 ## Reconciliation
 
-The `reconcile()` call uses the roster to determine which members to spawn, retain, or retire. It compares the desired member set (from the session build options) against the current roster and applies the minimal set of mutations to converge.
-
-See the [unified runtime guide](/mobkit/guides/unified-runtime) for the full reconciliation flow.
+Reconciliation compares the desired member set with the current roster and
+spawns, retains, or retires members to converge. See the
+[unified runtime guide](/mobkit/guides/unified-runtime) for the complete flow.
 
 ## See also
 
-- [Identity-first doctrine](https://github.com/lukacf/meerkat-mobkit/blob/main/docs/design/identity-first-doctrine.md) -- when to use the identity plane vs this worker plane
-
-- [Python SDK](/mobkit/sdks/python) -- full SDK reference including roster helpers
-- [RPC API](/mobkit/api/rpc) -- JSON-RPC protocol and method signatures
-- [Unified runtime guide](/mobkit/guides/unified-runtime) -- reconciliation and session lifecycle
+- [Identity-first doctrine](https://github.com/lukacf/meerkat-mobkit/blob/main/docs/design/identity-first-doctrine.md) - choose the identity plane or worker plane
+- [Python SDK](/mobkit/sdks/python) - Python roster helpers
+- [TypeScript SDK](/mobkit/sdks/typescript) - TypeScript roster helpers
+- [RPC API](/mobkit/api/rpc) - JSON-RPC protocol and method signatures
+- [Unified runtime guide](/mobkit/guides/unified-runtime) - reconciliation and session lifecycle

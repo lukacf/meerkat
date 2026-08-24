@@ -1,113 +1,147 @@
 ---
 title: "Gating"
-description: "Risk-based approval gates for agent actions. Evaluate risk tiers, queue pending approvals, and audit decisions."
+description: "Runtime-owned R0-R3 policy evaluation, pending approvals, safe-draft fallback, and audit records."
 icon: "shield-check"
 ---
 
-Gating is MobKit's risk-based approval system. Before an agent takes a high-risk action -- sending an external message, modifying production data, spending money -- the action can be routed through a gate that evaluates the risk and either approves, queues for human review, or denies.
+Gating is a policy service owned by the MobKit runtime. A caller submits an action, actor, and risk tier. The runtime evaluates that request, records the result, and may create a pending approval entry.
+
+<Warning>
+Gating does not perform the proposed action. The caller must enforce the returned `outcome` before it invokes delivery, changes state, or performs another side effect.
+</Warning>
+
+There is no gating module or gating MCP tool. The runtime implements the evaluate, pending, decide, and audit contracts directly.
 
 ## Risk tiers
 
-Every gated action is classified into a risk tier:
+`GatingRiskTier` is serialized in snake case as `r0` through `r3`:
 
-| Tier | Meaning | Typical handling |
-|------|---------|-----------------|
-| `SafeDraft` | Low risk, no external effect | Auto-approve |
-| `SafeDispatch` | External but reversible | Auto-approve with audit |
-| `ReviewRequired` | Significant impact, needs human approval | Queue as pending |
-| `Blocked` | Policy violation, cannot proceed | Deny |
+| Tier | Default outcome | Runtime behavior |
+|------|-----------------|------------------|
+| `r0` | `allowed` | Allow immediately and write an `evaluated` audit entry |
+| `r1` | `allowed` | Allow immediately and write an `evaluated` audit entry |
+| `r2` | `allowed_with_audit` | Allow with consequence-mode audit unless conflict handling falls back to `safe_draft` |
+| `r3` | `pending_approval` | Create a pending entry unless conflict handling falls back to `safe_draft` |
 
-Risk tier classification is performed by the gating module via MCP tool call.
+For `r2` and `r3`, memory-conflict policy can override the default. It returns `safe_draft` when the referenced memory is conflicted, required conflict context is missing while conflicts exist, or the memory conflict lookup fails.
 
-## Evaluation flow
+## Evaluation contract
 
-<Steps>
-  <Step title="Request evaluation">
-    The runtime sends a `GatingEvaluateRequest` to the gating module with the action details:
+The evaluate request has this wire shape:
 
-    ```rust
-    GatingEvaluateRequest {
-        action_id: "send-email-001",
-        actor_id: "agent-lead",
-        action_type: "delivery.send",
-        context: json!({ "recipient": "customer@example.com" }),
-    }
-    ```
-  </Step>
-  <Step title="Risk assessment">
-    The gating module evaluates the action and returns a `GatingEvaluateResult` with a risk tier, explanation, and recommended handling.
-  </Step>
-  <Step title="Decision">
-    Based on the risk tier:
-    - **SafeDraft / SafeDispatch**: Auto-approved, recorded in audit log
-    - **ReviewRequired**: Queued as a `GatingPendingEntry` with a timeout deadline
-    - **Blocked**: Denied immediately
-  </Step>
-  <Step title="Resolution">
-    Pending entries are resolved by a human approver calling `gating.decide`, or by timeout fallback to `SafeDraft`.
-  </Step>
-</Steps>
-
-## Pending entries
-
-When an action requires review, it enters the pending queue:
-
-```rust
-GatingPendingEntry {
-    pending_id: "pending-000012",
-    action_id: "send-email-001",
-    actor_id: "agent-lead",
-    risk_tier: GatingRiskTier::ReviewRequired,
-    deadline_at_ms: 1709500000000,  // timeout deadline
-    context: json!({ ... }),
+```json
+{
+  "action": "send_customer_update",
+  "actor_id": "agent-lead",
+  "risk_tier": "r3",
+  "rationale": "The customer requested an update",
+  "requested_approver": "human-reviewer",
+  "approval_recipient": "review-queue",
+  "approval_channel": "notification",
+  "approval_timeout_ms": 60000,
+  "entity": "customer:42",
+  "topic": "outbound_status"
 }
 ```
 
-Pending entries have a configurable timeout. When the deadline passes without a decision, the action falls back to `SafeDraft` and an audit entry is recorded with `event_type: "timeout_fallback"`.
+Only `action`, `actor_id`, and `risk_tier` are required. MobKit mints the `action_id`. A `GatingEvaluateResult` returns:
 
-## Deciding on pending actions
+- `action_id`, `action`, `actor_id`, and the effective `risk_tier`
+- one of `allowed`, `allowed_with_audit`, `pending_approval`, or `safe_draft` in `outcome`
+- `pending_id` when approval is pending
+- `fallback_reason` when conflict policy forced `safe_draft`
 
-Resolve a pending action with a `GatingDecideRequest`:
+<Note>
+When the stdio `rpc_gateway` loads an `actions` map from `runtime_options.gating_config_path`, the configured tier for a matching action is authoritative. It replaces a caller-supplied `risk_tier` before evaluation.
+</Note>
 
-```rust
-GatingDecideRequest {
-    pending_id: "pending-000012",
-    decision: GatingDecision::Approve,
-    decided_by: "human-reviewer",
+## Pending approval
+
+An `r3` evaluation creates a `GatingPendingEntry` with the action and actor identity, optional requested approver and notification fields, and `created_at_ms` and `deadline_at_ms` timestamps.
+
+If both `approval_recipient` and `approval_channel` are present, the runtime attempts to route and send a `gating_approval_request` through the loaded router and delivery modules. A missing module or failed notification is recorded in the `pending_created` audit detail. It does not prevent the pending entry from being created.
+
+Approval timeouts default to 60 seconds and are clamped to the runtime limits. Expiry is refreshed lazily when another gating operation evaluates, lists pending entries, decides, or reads the audit log. An expired entry is removed and recorded as:
+
+```json
+{
+  "event_type": "timeout_fallback",
+  "outcome": "safe_draft",
+  "detail": {
+    "fallback": "safe_draft",
+    "reason": "approval_timeout"
+  }
 }
 ```
 
-| Decision | Effect |
-|----------|--------|
-| `Approve` | Action proceeds, audit entry recorded |
-| `Deny` | Action blocked, audit entry recorded |
+## Decisions
 
-## Audit log
+Resolve a pending entry with:
 
-Every gating interaction is recorded in the audit log:
-
-```rust
-GatingAuditEntry {
-    audit_id: "gate-audit-000042",
-    timestamp_ms: 1709500000000,
-    event_type: "evaluate",      // or "decide", "timeout_fallback"
-    action_id: "send-email-001",
-    pending_id: None,
-    actor_id: "agent-lead",
-    risk_tier: GatingRiskTier::SafeDispatch,
-    outcome: GatingOutcome::SafeDraft,
-    detail: json!({ ... }),
+```json
+{
+  "pending_id": "gate-pending-000002",
+  "approver_id": "human-reviewer",
+  "decision": "approve",
+  "reason": "Reviewed against the customer request"
 }
 ```
 
-The audit log retains the most recent entries (bounded by `GATING_AUDIT_MAX_RETAINED`) for inspection via the RPC API.
+| Decision | Outcome | Audit event |
+|----------|---------|-------------|
+| `approve` | `allowed` | `approval_decided` |
+| `reject` | `safe_draft` | `rejection_decided` |
+| `escalate` | `pending_approval` | `escalation_decided` and a `pending_created` entry for the successor |
+
+Approval by the original `actor_id` is rejected. When `requested_approver` is set, every decision must come from that approver. Escalation creates a successor pending entry, clears the requested approver, preserves the original deadline, and returns its ID in `next_pending_id`.
+
+## Audit records
+
+`GatingAuditEntry` contains:
+
+```rust
+pub struct GatingAuditEntry {
+    pub audit_id: String,
+    pub timestamp_ms: u64,
+    pub event_type: String,
+    pub action_id: String,
+    pub pending_id: Option<String>,
+    pub actor_id: String,
+    pub risk_tier: GatingRiskTier,
+    pub outcome: GatingOutcome,
+    pub detail: serde_json::Value,
+}
+```
+
+The current runtime writes these event types:
+
+- `evaluated`
+- `conflict_blocked`
+- `memory_conflict_lookup_failed`
+- `pending_created`
+- `approval_decided`
+- `rejection_decided`
+- `escalation_decided`
+- `timeout_fallback`
+
+The audit log and pending queue are bounded runtime collections. They are not the unified event stream.
 
 ## Memory conflict integration
 
-Gating integrates with the memory subsystem to detect conflicts. Before approving a delivery, the gate can check for conflicting assertions in Elephant's truth maintenance system via the `memory.conflict_read` MCP tool.
+For `r2` and `r3`, the runtime checks the supplied `entity` and `topic` against memory conflicts. If the `memory` module is loaded, that core MCP boundary must provide the `memory.conflict_read` tool. Without a loaded memory module, the runtime uses its in-process conflict ledger.
+
+## API methods
+
+The JSON-RPC methods are:
+
+- `mobkit/gating/evaluate`
+- `mobkit/gating/pending`
+- `mobkit/gating/decide`
+- `mobkit/gating/audit`
 
 ## See also
 
-- [Delivery](/mobkit/concepts/delivery) -- actions commonly gated before dispatch
-- [RPC API](/mobkit/api/rpc) -- `gating.*` methods
-- [Decisions](/mobkit/reference/decisions) -- policy enforcement
+- [Delivery](/mobkit/concepts/delivery) - route and send after the caller accepts a gating outcome
+- [Memory](/mobkit/concepts/memory) - assertions and conflict handling
+- [JSON-RPC API](/mobkit/api/rpc) - exact method parameters and responses
+- [Configuration](/mobkit/reference/configuration) - runtime configuration

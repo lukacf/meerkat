@@ -10,32 +10,26 @@ The Rust crate `meerkat-mobkit` is the primary interface for MobKit. All other i
 
 ```toml Cargo.toml
 [dependencies]
-meerkat-mobkit = "0.8.18"
+meerkat-mobkit = "0.8.22"
 tokio = { version = "1", features = ["full"] }
 serde_json = "1"
 ```
 
 ## Quick start
 
+Host-supplied modules are optional. This runnable baseline starts no module
+processes; add module declarations only for executables or MCP transports your
+host actually supplies.
+
 ```rust
-use meerkat_mobkit::{
-    start_mobkit_runtime, MobKitConfig, ModuleConfig,
-    DiscoverySpec, RestartPolicy,
-};
+use meerkat_mobkit::{start_mobkit_runtime, DiscoverySpec, MobKitConfig};
 use std::time::Duration;
 
 let config = MobKitConfig {
-    modules: vec![
-        ModuleConfig {
-            id: "router".into(),
-            command: "meerkat-router".into(),
-            args: vec![],
-            restart_policy: RestartPolicy::OnFailure,
-        },
-    ],
+    modules: vec![],
     discovery: DiscoverySpec {
         namespace: "my-app".into(),
-        modules: vec!["router".into()],
+        modules: vec![],
     },
     pre_spawn: vec![],
 };
@@ -89,7 +83,11 @@ Agent or module event discriminator.
 
 ```rust
 enum UnifiedEvent {
-    Agent { agent_id: String, event_type: String },
+    Agent {
+        agent_id: String,
+        event_type: String,
+        payload: Option<Value>,
+    },
     Module(ModuleEvent),
 }
 
@@ -151,6 +149,7 @@ use meerkat_mobkit::{AgentMemoryConfig, SqliteAgentMemoryStore, UnifiedRuntime};
 let memory = Arc::new(SqliteAgentMemoryStore::open(".mobkit/state/agent-memory")?);
 
 let runtime = UnifiedRuntime::builder()
+    .definition_path("config/mob.toml")
     .persistent_state(".mobkit/state")
     .roster_provider(roster_provider)
     .agent_memory(memory, AgentMemoryConfig::default())
@@ -204,23 +203,26 @@ if let Some(record) = records.first() {
 
 ### `route_module_call`
 
-Route a call to a module:
+Route a typed call to a module:
 
 ```rust
-fn route_module_call(
-    handle: &MobkitRuntimeHandle,
-    request: ModuleRouteRequest,
+pub fn route_module_call(
+    runtime: &MobkitRuntimeHandle,
+    request: &ModuleRouteRequest,
+    timeout: Duration,
 ) -> Result<ModuleRouteResponse, ModuleRouteError>
 ```
 
 ### `route_module_call_rpc_json`
 
-Route via JSON-RPC:
+Route a JSON-encoded request and receive a JSON-encoded response:
 
 ```rust
-fn route_module_call_rpc_json(
-    request: &JsonRpcRequest,
-) -> Result<JsonRpcResponse, RpcRouteError>
+pub fn route_module_call_rpc_json(
+    runtime: &MobkitRuntimeHandle,
+    request_json: &str,
+    timeout: Duration,
+) -> Result<String, RpcRouteError>
 ```
 
 ## Operational subsystem functions
@@ -259,8 +261,9 @@ Build Axum routers for serving the console and interactions:
 let frontend: Router = console_frontend_router();
 
 // Console JSON API, JSON-RPC, timeline SSE, multipart upload/send, and blobs
-let json_api: Router = console_json_router(decisions);
-let json_api: Router = console_json_router_with_runtime(decisions, mob_runtime);
+let json_api_without_runtime: Router = console_json_router(decisions.clone());
+let json_api_with_runtime: Router =
+    console_json_router_with_runtime(decisions, mob_runtime, None, None);
 ```
 
 ## See also

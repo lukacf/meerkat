@@ -4,14 +4,17 @@ description: "Server-Sent Events for real-time MobKit interaction and event subs
 icon: "bolt"
 ---
 
-MobKit uses Server-Sent Events (SSE) for several real-time flows:
+MobKit uses Server-Sent Events (SSE) for several live HTTP streams:
 
 - agent-scoped streaming through `GET /agents/{agent_id}/events`
 - mob-merged streaming through `GET /mob/events`
 - structural mob events through `GET /mobkit/mob_events/stream`
+- lossy WorkGraph wake events through `GET /mobkit/workgraph/facts/stream`
 - console timeline replay and live continuation through `GET /console/timeline/stream`
 - identity-filtered console timeline streaming through `GET /console/identity/{identity}/stream`
-- event subscription and replay through `mobkit/events/subscribe`
+
+The related `mobkit/events/subscribe` JSON-RPC method returns bounded replay
+snapshots in SSE frame format, but does not open a stream.
 
 ## Authentication
 
@@ -36,17 +39,17 @@ Subscribe to raw Meerkat agent events for one agent (`Content-Type: text/event-s
 ### Frame format
 
 ```
-id: evt-1
+id: worker-1:0
 event: text_delta
 data: {"type": "text_delta", "delta": "Analyzing the metrics now..."}
 
-id: evt-2
-event: tool_call
-data: {"type": "tool_call", "name": "query_metrics", "args": {...}}
+id: worker-1:1
+event: tool_call_requested
+data: {"type": "tool_call_requested", "id": "tool-1", "tool_call_id": "tool-1", "name": "query_metrics", "args": {"metric": "latency_p95"}}
 
-id: evt-3
-event: interaction_complete
-data: {"type": "interaction_complete", "result": "Done."}
+id: worker-1:2
+event: run_completed
+data: {"type": "run_completed", "session_id": "session-1", "result": "Done."}
 ```
 
 ## Console timeline stream
@@ -79,7 +82,10 @@ Convenience route for an identity-filtered console timeline stream. It sets the 
 
 ## Event subscription
 
-Use the `mobkit/events/subscribe` JSON-RPC method to request a point-in-time event snapshot plus replay frames.
+Use the `mobkit/events/subscribe` JSON-RPC method to request a bounded
+point-in-time snapshot. It returns each selected event both as a typed envelope
+and as an SSE-ready frame. It does not open a live connection or return a
+stream URL; use the HTTP routes on this page for live observation.
 
 Example request:
 
@@ -89,7 +95,8 @@ Example request:
   "id": "sub-1",
   "method": "mobkit/events/subscribe",
   "params": {
-    "scope": "mob",
+    "scope": "agent",
+    "agent_id": "worker-1",
     "last_event_id": "evt-42"
   }
 }
@@ -99,18 +106,64 @@ The response includes:
 
 | Field | Description |
 |-------|-------------|
+| `scope` | Normalized selected scope |
+| `replay_from_event_id` | Requested checkpoint, or `null` |
 | `keep_alive.interval_ms` | Server keep-alive cadence |
 | `keep_alive.event` | Keep-alive event name |
+| `keep_alive_comment` | SSE comment frame for keep-alive output |
 | `event_frames` | SSE-ready frames for replay |
-| `events` | Parsed event payloads |
+| `events` | Typed `EventEnvelope<UnifiedEvent>` values |
 
 Supported scopes:
 
 | Scope | Notes |
 |-------|-------|
-| `mob` | Whole runtime |
-| `agent` | Requires `agent_id` |
-| `interaction` | Interaction-scoped replay |
+| `mob` | All merged module and agent events; this is the default |
+| `agent` | Agent events only; requires a non-empty `agent_id` |
+| `interaction` | Agent or module events whose `event_type` starts with `interaction` |
+
+For `agent` scope, `agent_id` may be the exact projected ID or the bare alias
+whose only difference is a trailing numeric generation suffix. The server
+applies the scope first and retains at most its three newest matching events.
+
+`last_event_id` is an `event_id` from an earlier
+`mobkit/events/subscribe` result, not an HTTP SSE frame ID. It must be present
+in that bounded, scope-filtered window. Replay is inclusive: the checkpoint
+event is returned again, followed by later retained events. An unknown,
+out-of-scope, or expired checkpoint returns JSON-RPC `-32602`, so reconnecting
+consumers should deduplicate the first event by `event_id`.
+
+## WorkGraph wake stream
+
+```
+GET /mobkit/workgraph/facts/stream
+```
+
+This route is present when the runtime has a WorkGraph service. It is a
+dedicated, lossy wake channel, not another view of the merged event log. Its
+`data` field is a bare `UnifiedEvent::Module` value with module
+`mobkit.workgraph`; the event is not wrapped in `EventEnvelope` and is not
+duplicated into `GET /mob/events` or `mobkit/events/subscribe`.
+
+Every connection starts with this mandatory resynchronization signal:
+
+```
+event: workgraph.resync_required
+data: {"kind":"module","module":"mobkit.workgraph","event_type":"workgraph.resync_required","payload":{"reason":"initial_sync","skipped":null,"authority":"durable_workgraph_pull"}}
+```
+
+On receipt, read authoritative state through `mobkit/workgraph/get`,
+`mobkit/workgraph/list`, `mobkit/workgraph/ready`, or
+`mobkit/workgraph/snapshot`. Subsequent `workgraph.fact` events carry
+identifiers that can accelerate another read, but they are never state
+authority.
+
+The stream has no SSE `id`, `Last-Event-ID`, cursor query, catch-up, or replay
+contract. A slow consumer can miss events. When broadcast lag occurs, the
+server sends `workgraph.resync_required` with `reason: "lagged"` and the
+number of skipped wakes in `skipped`; read authoritative WorkGraph state again.
+When access control is enforced, the caller also needs the `workgraph.view`
+grant.
 
 ## Structural mob events stream
 
@@ -174,10 +227,16 @@ even when no events match yet.
 
 ### Cursor durability
 
-`MobStructuralEvent.cursor` is the meerkat ledger cursor — durable
-across mobkit gateway restarts when the runtime is built with
-`.persistent_state(path)`. SDK consumers can checkpoint a cursor
-and resume by reconnecting with `after_seq=<checkpointed cursor>`.
+`MobStructuralEvent.cursor` is the upstream meerkat ledger cursor. Consumers
+can checkpoint it and reconnect with `after_seq=<checkpointed cursor>` only
+while the configured mob-event store retains that cursor and its later events.
+
+`.persistent_state(path)` alone does not make the mob-event ledger durable. It
+persists MobKit projection metadata, while the stock unified-runtime builder
+still uses in-memory Mob storage. Restart-safe replay requires a separately
+configured upstream Meerkat mob-event store that retains the ledger across the
+restart. If a checkpoint is ahead of the available ledger, the route returns
+HTTP **410 Gone** as described above.
 
 ## Keep-alive
 
@@ -201,7 +260,9 @@ To send a message to an agent, use the `mobkit/send_message` RPC method and capt
 }
 ```
 
-Then observe streamed responses via `GET /console/timeline/stream`, `GET /console/identity/{identity}/stream`, or broader replayable event history via `mobkit/events/subscribe`.
+Then observe live responses via `GET /console/timeline/stream` or
+`GET /console/identity/{identity}/stream`. Use `mobkit/events/subscribe` only
+when a bounded merged-event replay snapshot is sufficient.
 
 ## Error handling
 

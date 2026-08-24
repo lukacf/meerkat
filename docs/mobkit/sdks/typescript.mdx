@@ -12,6 +12,15 @@ The TypeScript SDK (`@rkat/mobkit-sdk`) provides type-safe access to the MobKit 
 npm install @rkat/mobkit-sdk
 ```
 
+<Note>
+  The npm package is client-only and does not contain `rpc_gateway`. Download
+  `mobkit-rpc-gateway-<version>-<target>.tar.gz` for Unix or macOS, or
+  `mobkit-rpc-gateway-<version>-<target>.zip` for Windows, and extract its
+  `rpc_gateway` binary (`rpc_gateway.exe` on Windows). Alternatively, follow the
+  [source-build instructions](/mobkit/quickstart#install). Pass that binary's path to
+  `.gateway(...)`.
+</Note>
+
 ## Quick start
 
 ```typescript
@@ -22,7 +31,7 @@ const rt = await MobKit.builder()
   .memory(memory.localJson())
   .persistentState(".mobkit/state")
   .consoleConfig("config/console.toml")
-  .gateway("./target/debug/rpc_gateway")
+  .gateway("/path/to/rpc_gateway")
   .build();
 
 const handle = rt.mobHandle();
@@ -72,6 +81,7 @@ const runtime = await MobKit.builder()
       );
     },
   })
+  .gateway("/path/to/rpc_gateway")
   .build();
 
 const job = await runtime.jobs.get(jobId);
@@ -90,32 +100,36 @@ For identity-first builds with a `rosterProvider`, `.agentMemory()` enables opti
 
 ## Type definitions
 
-The SDK exports TypeScript interfaces matching the Rust contracts:
+The SDK exports camelCase result types. Its wire parsers translate snake_case
+gateway JSON into these shapes:
 
 ```typescript
-interface ModuleConfig {
-  id: string;
-  command: string;
-  args: string[];
-  restart_policy: "never" | "on_failure" | "always";
+export interface EventEnvelope {
+  readonly eventId: string;
+  readonly source: string;
+  readonly timestampMs: number;
+  readonly event: unknown;
 }
 
-interface EventEnvelope<T> {
-  event_id: string;
-  source: string;
-  timestamp_ms: number;
-  event: T;
+export interface UnifiedAgentEvent {
+  readonly kind: "agent";
+  readonly agentId: string;
+  readonly eventType: string;
+  readonly payload?: Record<string, unknown> | null;
 }
 
-interface UnifiedEvent {
-  kind: "agent" | "module";
-  agentId?: string;
-  eventType?: string;
-  module?: string;
-  payload?: unknown;
+export interface UnifiedModuleEvent {
+  readonly kind: "module";
+  readonly module: string;
+  readonly eventType: string;
+  readonly payload: Record<string, unknown>;
 }
 
+export type UnifiedEvent = UnifiedAgentEvent | UnifiedModuleEvent;
 ```
+
+`ModuleConfig` is not a public TypeScript SDK export. Pass module declaration
+objects to `.modules(...)`, whose public parameter type is `unknown[]`.
 
 ## Module support
 
@@ -157,10 +171,7 @@ try {
 Both APIs return the full meerkat ledger projection:
 
 ```typescript
-import {
-  MobEventsStaleError,
-  MOB_EVENTS_STALE_CURSOR_CODE,
-} from "@rkat/mobkit-sdk";
+import { isMobEventsStaleError } from "@rkat/mobkit-sdk";
 
 const events = await handle.queryMobEvents({
   eventTypes: ["flow_started", "flow_completed"],
@@ -176,7 +187,7 @@ for (const e of events) {
 try {
   const more = await handle.queryMobEvents({ afterSeq: lastCursor });
 } catch (err) {
-  if (err instanceof MobEventsStaleError) {
+  if (isMobEventsStaleError(err)) {
     // Rewind to err.latestCursor and reconnect.
   }
 }
@@ -214,6 +225,8 @@ External identity providers are all-or-nothing: configure `continuityStore()`, `
 Continuity stores should treat `checkpoint_version` as monotonic per identity and continuity generation. A live session rebind changes `session_id` without resetting the version; only destructive reset advances `generation` and starts the version stream over.
 
 Gateway memory config accepts `{ backend: "local_json" }` with an optional `healthCheckEndpoint` (`memory.localJson(...)`); the legacy Elephant `{ backend, endpoint }` shape still works but is deprecated. Store, collection, and space selectors are retained on the helper object for app code but are not sent to the Rust gateway. Gateway auth config supports JWT validation; Google/OIDC helpers are model objects, not accepted by `mobkit/init` today.
+
+The builder exposes no `roleMigrations(...)` setter and sends no `role_migrations` init param, so a TypeScript host cannot authorize a role-migrating resume: a durable member whose role changed keeps refusing to resume with `MobError::MemberRoleMigrationRequired`. Declaring the migration currently requires the Python builder's `.role_migrations([...])` or a hand-built `mobkit/init` payload; see the [configuration reference](/mobkit/reference/configuration#member-role-migrations).
 
 The builder forwards `consoleConfig(path)` as `runtime_options.console_config_path`, which lets the bundled console consume the same `console_config` contract projected by `/console/experience`. Use `consoleAuthRequired(false)` only for explicit local demos.
 

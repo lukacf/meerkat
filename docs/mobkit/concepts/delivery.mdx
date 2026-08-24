@@ -1,91 +1,145 @@
 ---
 title: "Delivery"
-description: "Message delivery with sink adapters, idempotency keys, rate limiting, and trusted routing resolution."
+description: "Trusted route resolution and MCP-backed delivery with optional bounded idempotency and fixed-window rate limits."
 icon: "paper-plane"
 ---
 
-Delivery is MobKit's message dispatch subsystem. When an agent needs to send a message to an external system -- email, webhook, notification service, or another mob member -- delivery handles routing resolution, rate limiting, idempotency, and dispatch through sink adapters.
+MobKit separates route selection from message dispatch. The runtime owns trusted routing resolutions, rate limiting, bounded delivery history, and optional idempotency. The `router` and `delivery` modules provide the external MCP boundaries.
 
 ## Delivery flow
 
 <Steps>
-  <Step title="Routing resolution">
-    The runtime resolves a route for the delivery target. Routes map logical destinations to physical sink adapters. Resolution produces a `RoutingResolution` that is stored as a trusted reference.
+  <Step title="Resolve">
+    Call `mobkit/routing/resolve` with a recipient and optional channel, retry, backoff, and rate-limit values. The runtime calls the router module's `routing.resolve` MCP tool, applies any matching runtime-route override, mints a `route_id`, and retains the resulting `RoutingResolution` as trusted state.
   </Step>
-  <Step title="Send request">
-    A `DeliverySendRequest` includes the resolved route, payload, and an idempotency key:
-
-    ```rust
-    DeliverySendRequest {
-        resolution: routing_resolution,
-        payload: json!({ "subject": "Update", "body": "..." }),
-        idempotency_key: "msg-001",
-    }
-    ```
+  <Step title="Send">
+    Call `mobkit/delivery/send` with the complete trusted `resolution`, a JSON `payload`, and an optional `idempotency_key`.
   </Step>
-  <Step title="Validation">
-    The runtime validates that the provided resolution matches the trusted stored resolution. Forged or unknown resolutions are rejected with `DeliverySendError::ForgedResolution`.
+  <Step title="Validate">
+    The runtime requires the supplied resolution to equal the retained resolution for its `route_id`. Unknown or modified resolutions are rejected before dispatch.
   </Step>
-  <Step title="Dispatch">
-    The delivery module dispatches the message through the resolved sink adapter via MCP tool call.
+  <Step title="Dispatch and record">
+    Unless keyed idempotency replays an existing record, the runtime applies the resolved rate limit, invokes the delivery module's `delivery.send` MCP tool, and appends a `DeliveryRecord` to bounded history.
   </Step>
 </Steps>
 
-## Idempotency
+## Routing contracts
 
-Every delivery request carries an `idempotency_key`. The key is scoped to the route ID, producing a composite key: `{route_id}:{idempotency_key}`. If a request with the same scoped key has already been delivered, the runtime replays the previous delivery record instead of dispatching again.
-
-This makes retries safe -- the same message is never sent twice to the same destination.
-
-## Rate limiting
-
-Delivery is rate-limited per route using a sliding window:
-
-- Window size: `DELIVERY_RATE_WINDOW_MS` (configurable)
-- Windows retained: `DELIVERY_RATE_WINDOWS_RETAINED`
-- Per-window counters track send volume
-
-When the rate limit is exceeded, the delivery request is rejected. Old window counters are pruned automatically.
-
-## Routing
-
-Routes are the mapping layer between logical destinations and physical sink adapters:
+A mutable route override and a resolved route are different types:
 
 ```rust
-RuntimeRoute {
-    route_id: "mob.member.lead-1.notification",
-    channel: "notification",
-    sink_adapter: "mob_member",
-    target_module: "delivery",
+pub struct RuntimeRoute {
+    pub route_key: String,
+    pub recipient: String,
+    pub channel: Option<String>,
+    pub sink: String,
+    pub target_module: String,
+    pub retry_max: Option<u32>,
+    pub backoff_ms: Option<u64>,
+    pub rate_limit_per_minute: Option<u32>,
+}
+
+pub struct RoutingResolution {
+    pub route_id: String,
+    pub recipient: String,
+    pub channel: String,
+    pub sink: String,
+    pub target_module: String,
+    pub retry_max: u32,
+    pub backoff_ms: u64,
+    pub rate_limit_per_minute: u32,
 }
 ```
 
-Routes can be added, listed, and deleted through the RPC API. The unified runtime automatically registers routes for mob members using the pattern `mob.member.{member_id}.{channel}`.
+The request defaults are `channel = "notification"`, `retry_max = 1`, `backoff_ms = 250`, and `rate_limit_per_minute = 2`. Before module and runtime-route overrides, the runtime infers `email` for recipients containing `@`, `sms` for recipients starting with `+`, and `webhook` otherwise.
 
-## Sink adapters
+These sink strings are routing defaults, not a promise that MobKit ships an SMTP, SMS, or webhook adapter. The router module can override the sink and return a `target_module`; a matching runtime route can override both again. The current `mobkit/delivery/send` contract dispatches only a trusted resolution whose `target_module` is exactly `delivery`. Any other target is rejected before the delivery MCP boundary call, so alternate target values are representable for routing inspection but are not dispatchable. The `delivery` module owns actual dispatch.
 
-Sink adapters are the physical delivery backends. The adapter is resolved from the routing resolution and invoked by the delivery module:
+Runtime routes can be listed, added, and deleted through:
 
-| Adapter | Target |
-|---------|--------|
-| `mob_member` | Deliver to a Meerkat mob member |
-| `webhook` | HTTP POST to an external URL |
-| `email` | Email delivery (via configured SMTP) |
+- `mobkit/routing/routes/list`
+- `mobkit/routing/routes/add`
+- `mobkit/routing/routes/delete`
 
-<Note>
-v0.1 ships with the `mob_member` sink adapter. Webhook and email adapters are planned for future releases.
-</Note>
+Runtime routes may use `*` recipient and channel matches. A matching route is applied after the router MCP response.
 
-## Delivery records
+### Mob-member routes
 
-Every successful delivery produces a `DeliveryRecord` with a monotonic sequence number, timestamp, and the resolved adapter. Records are available for replay (idempotency) and audit (via the delivery history RPC method).
+When the unified runtime reconciles its active roster and the router module is loaded, it manages one route per member:
 
-## Clock monotonicity
+```rust
+RuntimeRoute {
+    route_key: format!("mob.member.{member_id}"),
+    recipient: member_id,
+    channel: Some("notification".to_string()),
+    sink: "mob_member".to_string(),
+    target_module: "delivery".to_string(),
+    retry_max: None,
+    backoff_ms: None,
+    rate_limit_per_minute: None,
+}
+```
 
-Delivery timestamps use a monotonic clock that is at least as recent as the latest merged event timestamp. This ensures causal ordering: a delivery that follows an event always has a timestamp >= that event.
+The route key has no channel suffix.
+
+## Optional idempotency
+
+`DeliverySendRequest.idempotency_key` is `Option<String>`:
+
+```rust
+DeliverySendRequest {
+    resolution,
+    payload: serde_json::json!({
+        "subject": "Update",
+        "body": "The work is complete"
+    }),
+    idempotency_key: Some("customer-update-42".to_string()),
+}
+```
+
+When a non-empty key is present, the runtime scopes it as `{route_id}:{idempotency_key}`. A repeat with the same payload and canonical resolution returns the existing `DeliveryRecord` without another boundary call. Reusing the scoped key with a different payload is rejected.
+
+This protection is conditional and bounded:
+
+- No key means no idempotency lookup.
+- The index is local to the runtime instance.
+- Delivery history retains at most 200 records.
+- Evicting a record also removes its idempotency entries, so a later retry can dispatch again.
+
+Idempotency therefore protects a keyed retry only while the corresponding record remains in the current runtime's bounded history.
+
+## Rate limiting
+
+Each resolution carries `rate_limit_per_minute`. The implementation uses fixed 60-second windows keyed by:
+
+- `route_id`
+- `recipient`
+- `sink`
+- the window start timestamp
+
+The runtime retains counters for the current and previous window. It charges the counter only after the MCP boundary call succeeds. A request at the limit is rejected with `DeliverySendError::RateLimited`.
+
+## Delivery records and adapters
+
+`DeliveryRecord` contains the delivery and route IDs, recipient, sink, target module, original payload, status, attempt records, first and final attempt timestamps, optional idempotency key, and optional `sink_adapter`.
+
+The `sink` comes from routing. The optional `sink_adapter` is recorded only when the delivery module returns a non-empty `adapter` string. MobKit does not maintain a fixed built-in adapter inventory in this contract.
+
+Delivery dispatch emits a unified module event with:
+
+- `module: "delivery"`
+- `event_type: "send"`
+- payload fields `delivery_id`, `route_id`, `recipient`, `sink`, `status`, and `attempts`
+
+Query bounded history with `mobkit/delivery/history`. The request supports optional `recipient` and `sink` filters plus a capped `limit`.
+
+## Clock ordering
+
+Routing and delivery timestamps use a runtime-relative monotonic floor that is also advanced to the latest merged-event timestamp. A route or delivery inserted after an existing merged event therefore does not receive an earlier timestamp.
 
 ## See also
 
-- [Gating](/mobkit/concepts/gating) -- risk assessment before delivery
-- [Scheduling](/mobkit/concepts/scheduling) -- triggered deliveries on a cron schedule
-- [RPC API](/mobkit/api/rpc) -- `routing.*` and `delivery.*` methods
+- [Gating](/mobkit/concepts/gating) - evaluate policy before dispatch
+- [Modules](/mobkit/concepts/modules) - router and delivery MCP boundaries
+- [Events](/mobkit/concepts/events) - exact `resolved` and `send` event names
+- [JSON-RPC API](/mobkit/api/rpc) - routing and delivery methods

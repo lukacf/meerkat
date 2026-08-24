@@ -1,121 +1,130 @@
 ---
 title: "Modules"
-description: "MCP-based subprocess modules with supervision, restart policies, and discovery."
+description: "Subprocess capability boundaries, core MCP tools, discovery, and startup supervision."
 icon: "puzzle-piece"
 ---
 
-Modules are the building blocks of MobKit's operational layer. Each module is an MCP server or subprocess executable that provides a specific capability -- routing, delivery, gating, or memory. MobKit supervises their lifecycle and routes calls to them. Durable scheduling is owned separately by Meerkat's `ScheduleService`.
+Modules are application-supplied subprocess capability boundaries. MobKit starts the configured modules, records startup health transitions, and routes module calls over either MCP or the generic JSON-line boundary.
+
+Durable scheduling and gating are runtime services, not modules.
 
 ## Module configuration
 
-A module is defined by a `ModuleConfig`:
+`ModuleConfig` contains exactly four fields:
 
 ```rust
 ModuleConfig {
-    id: "router",
-    command: "meerkat-router",
-    args: vec!["--port", "9001"],
+    id: "router".to_string(),
+    command: "/opt/my-app/bin/router-module".to_string(),
+    args: vec![],
     restart_policy: RestartPolicy::OnFailure,
 }
 ```
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `id` | `String` | Unique module identifier |
+| `id` | `String` | Module identifier |
 | `command` | `String` | Executable to spawn |
-| `args` | `Vec<String>` | Command-line arguments |
-| `restart_policy` | `RestartPolicy` | How to handle process exits |
+| `args` | `Vec<String>` | Arguments passed to the executable |
+| `restart_policy` | `RestartPolicy` | `never`, `on_failure`, or `always` |
 
-### Restart policies
-
-| Policy | Behavior |
-|--------|----------|
-| `Never` | Module runs once; no restart on exit |
-| `OnFailure` | Restart only on non-zero exit (default) |
-| `Always` | Restart unconditionally on any exit |
+Restart budgets and backoff are runtime options. `OnFailure` retries a failed generic subprocess start within its budget. `Always` can also restart a successful generic subprocess start within its budget. MCP module startup is a one-shot tool probe and does not use those restart loops.
 
 ## Discovery
 
-Modules are discovered through a `DiscoverySpec` that declares a namespace and the modules expected in that namespace:
+`DiscoverySpec` names a namespace and the configured module IDs the runtime should start:
 
 ```rust
 DiscoverySpec {
-    namespace: "production",
-    modules: vec!["router", "delivery", "gating", "memory"],
-}
-```
-
-At bootstrap, MobKit verifies that every declared module is present in the configuration. Missing modules cause a startup error.
-
-## Pre-spawn environment
-
-Modules can receive environment variables before spawning:
-
-```rust
-PreSpawnData {
-    module_id: "memory",
-    env: vec![
-        ("ELEPHANT_ENDPOINT".to_string(), "http://localhost:3000".to_string()),
+    namespace: "production".to_string(),
+    modules: vec![
+        "router".to_string(),
+        "delivery".to_string(),
+        "memory".to_string(),
     ],
 }
 ```
 
-This is useful for injecting secrets or connection strings without hardcoding them in the module command.
+At bootstrap, every ID in `discovery.modules` must have a matching `ModuleConfig`. A missing configuration is a startup error. A configured module that reaches a terminal start error instead contributes a `supervisor.warning` event and bootstrap continues to the next module.
+
+## Pre-spawn environment
+
+`PreSpawnData` associates environment entries with one module:
+
+```rust
+PreSpawnData {
+    module_id: "router".to_string(),
+    env: vec![
+        ("MOBKIT_MODULE_BOUNDARY".to_string(), "mcp".to_string()),
+    ],
+}
+```
+
+Set `MOBKIT_MODULE_BOUNDARY=mcp` to select the MCP boundary. Other environment entries can carry module-specific configuration or secret references.
 
 ## Core modules
 
-MobKit ships with four core module types, each backed by an MCP server:
+Three module IDs have hard MCP requirements:
 
-| Module | Purpose | Key MCP tools |
-|--------|---------|---------------|
-| **router** | Routing resolution and dispatch | `routing.resolve`, `routing.routes` |
-| **delivery** | Message delivery with sink adapters | `delivery.send` |
-| **gating** | Risk-based approval workflows | `gating.evaluate`, `gating.decide` |
-| **memory** | Elephant integration for semantic memory | `memory.index`, `memory.query` |
+| Module ID | Runtime use | Required MCP tool |
+|-----------|-------------|-------------------|
+| `router` | Resolve a recipient into a trusted route | `routing.resolve` |
+| `delivery` | Dispatch a validated delivery request | `delivery.send` |
+| `memory` | Read conflict state for runtime gating | `memory.conflict_read` |
 
-Each core module communicates with the runtime over MCP tool calls. Non-MCP modules use the JSON-line subprocess protocol.
+For these IDs, a call fails closed if `MOBKIT_MODULE_BOUNDARY=mcp` is absent or the required tool is unavailable.
 
-Scheduling is not a module-plane capability. Use the durable scheduling tools and `ScheduleService` described in [Scheduling](/mobkit/concepts/scheduling).
+The following related runtime surfaces are not module tools:
 
-## Module health
+- Runtime-route list, add, and delete
+- Delivery history and idempotency
+- All gating evaluate, pending, decide, and audit operations
+- The operational assertion and conflict ledger: `mobkit/memory/stores`, `mobkit/memory/index`, and `mobkit/memory/query`
+- The separate identity agent-memory API: `mobkit/agent_memory/recall` when a provider is configured, plus `mobkit/agent_memory/remember`, `mobkit/agent_memory/forget`, `mobkit/agent_memory/update`, and `mobkit/agent_memory/manifest` when the provider supports each capability
+- Agent-memory record-engine surfaces for quarantine review and steward consolidation
 
-Modules go through health state transitions tracked by the supervisor:
+The operational ledger and the identity agent-memory record layer are distinct authorities. The ledger owns assertion and conflict index/query state consumed by gating. Quarantine review and steward consolidation belong to the agent-memory record-engine layer.
 
-| State | Meaning |
-|-------|---------|
-| `Starting` | Process spawned, waiting for readiness |
-| `Healthy` | Module responding to health checks |
-| `Unhealthy` | Health check failed or process exited |
-| `Restarting` | Supervisor is restarting the module per its restart policy |
+Non-core module IDs may use the MCP marker or the generic JSON-line subprocess boundary.
 
-Health transitions are emitted as module events in the unified event stream.
+Scheduling is owned by Meerkat's `ScheduleService`. See [Scheduling](/mobkit/concepts/scheduling).
 
-## Trusted modules
+## Startup health
 
-For production deployments, modules can be declared in a `mobkit.toml` trust manifest:
+`ModuleHealthState` has five values:
+
+| State | Meaning during startup supervision |
+|-------|------------------------------------|
+| `Starting` | Startup or MCP probing began |
+| `Healthy` | The generic boundary yielded its first valid event, or the MCP tool probe succeeded |
+| `Failed` | A startup attempt or MCP probe failed |
+| `Restarting` | A generic subprocess retry is about to run |
+| `Stopped` | Startup ended without a live module |
+
+Each `ModuleHealthTransition` records `module_id`, optional `from` state, `to` state, and attempt number. Transitions are retained in `SupervisorReport`; they are not emitted as `health_transition` unified events.
+
+A successful MCP probe emits `event_type: "mcp.ready"` with the discovered tool names. A terminal startup error emits `event_type: "supervisor.warning"` with the error payload. The `ModulesStarted` lifecycle stage means startup attempts have completed, not that every module is healthy.
+
+## Trusted module manifest
+
+`load_trusted_mobkit_modules_from_toml` accepts a `[[modules]]` manifest:
 
 ```toml
 [[modules]]
 id = "router"
-command = "meerkat-router"
-args = ["--port", "9001"]
+command = "/opt/my-app/bin/router-module"
+args = []
 restart_policy = "on_failure"
 
 [[modules]]
 id = "delivery"
-command = "meerkat-delivery"
+command = "/opt/my-app/bin/delivery-module"
 ```
 
-Load trusted modules with:
-
-```rust
-let modules = load_trusted_mobkit_modules_from_toml(&toml_text)?;
-```
-
-Only modules declared in the trust manifest are accepted. This prevents untrusted code from being loaded as a module.
+The trusted-manifest loader validates non-empty IDs and commands, defaults missing `args` to an empty list, and defaults a missing `restart_policy` to `on_failure`. The executable names and their implementations belong to the host application.
 
 ## See also
 
-- [Events](/mobkit/concepts/events) -- module events in the unified stream
-- [Module system guide](/mobkit/guides/module-system) -- deep dive into routing and boundaries
-- [Architecture](/mobkit/reference/architecture) -- how modules fit into the runtime
+- [Events](/mobkit/concepts/events) - exact module event types and startup lifecycle
+- [Architecture](/mobkit/reference/architecture) - module ownership in the runtime
+- [Configuration](/mobkit/reference/configuration) - runtime options and manifests

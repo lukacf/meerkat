@@ -10,7 +10,7 @@ icon: "rocket"
   <Tab title="Rust crate">
     ```toml Cargo.toml
     [dependencies]
-    meerkat-mobkit = "0.8.18"
+    meerkat-mobkit = "0.8.22"
     tokio = { version = "1", features = ["full"] }
     ```
   </Tab>
@@ -26,37 +26,40 @@ icon: "rocket"
   </Tab>
 </Tabs>
 
+<Note>
+  The Python and TypeScript packages are clients and do not bundle a gateway
+  executable. Download `mobkit-rpc-gateway-<version>-<target>.tar.gz` for Unix
+  or macOS, or `mobkit-rpc-gateway-<version>-<target>.zip` for Windows, from
+  [GitHub Releases](https://github.com/lukacf/meerkat-mobkit/releases) and
+  extract its `rpc_gateway` binary (`rpc_gateway.exe` on Windows). For a source
+  build, run
+  `./scripts/repo-cargo build -p meerkat-mobkit --bin rpc_gateway --locked`,
+  then run `./scripts/repo-cargo --print-env`; the debug binary is at
+  `<CARGO_TARGET_DIR>/debug/rpc_gateway`. Pass the extracted or built path to
+  `.gateway(...)`.
+</Note>
+
 ## Bootstrap a runtime
 
-The fastest way to get a running system is `start_mobkit_runtime`. It takes a module configuration, agent event stream, and a startup timeout.
+The fastest way to get a running system is `start_mobkit_runtime`. It takes a
+module configuration, agent event stream, and a startup timeout. Host-supplied
+modules are optional, so this runnable baseline starts with an empty module and
+discovery list.
 
 <Tabs>
   <Tab title="Rust">
     ```rust
     use meerkat_mobkit::{
-        start_mobkit_runtime, MobKitConfig, ModuleConfig, DiscoverySpec,
-        RestartPolicy, EventEnvelope, UnifiedEvent,
+        start_mobkit_runtime, DiscoverySpec, EventEnvelope, MobKitConfig,
+        UnifiedEvent,
     };
     use std::time::Duration;
 
     let config = MobKitConfig {
-        modules: vec![
-            ModuleConfig {
-                id: "router".to_string(),
-                command: "meerkat-router".to_string(),
-                args: vec![],
-                restart_policy: RestartPolicy::OnFailure,
-            },
-            ModuleConfig {
-                id: "delivery".to_string(),
-                command: "meerkat-delivery".to_string(),
-                args: vec![],
-                restart_policy: RestartPolicy::OnFailure,
-            },
-        ],
+        modules: vec![],
         discovery: DiscoverySpec {
             namespace: "my-app".to_string(),
-            modules: vec!["router".to_string(), "delivery".to_string()],
+            modules: vec![],
         },
         pre_spawn: vec![],
     };
@@ -79,7 +82,7 @@ The fastest way to get a running system is `start_mobkit_runtime`. It takes a mo
     const rt = await MobKit.builder()
       .mob("config/mob.toml")
       .persistentState(".mobkit/state")
-      .gateway("./target/debug/rpc_gateway")
+      .gateway("/path/to/rpc_gateway")
       .build();
 
     const status = await rt.mobHandle().status();
@@ -91,7 +94,7 @@ The fastest way to get a running system is `start_mobkit_runtime`. It takes a mo
     ```python
     from meerkat_mobkit import MobKit
 
-    async with await MobKit.builder().gateway("./mobkit-rpc").build() as rt:
+    async with await MobKit.builder().gateway("/path/to/rpc_gateway").build() as rt:
         handle = rt.mob_handle()
         status = await handle.status()
         print("Running:", status.running)
@@ -122,8 +125,12 @@ The unified runtime bootstraps both systems, merges their event streams, and man
 Once the runtime is serving HTTP, open the admin console at:
 
 ```
-http://localhost:8080/console
+<http_base_url>/console
 ```
+
+The bundled gateways bind an available loopback port and return the exact
+`http_base_url` in the initialization result. A library host may choose its own
+address.
 
 The console shows the agent sidebar, conversation workspace, signals rail, topology, logs, and health overview. The bundled app seeds from REST, sends through JSON-RPC, and tails replayable timeline frames over SSE.
 
@@ -173,6 +180,12 @@ await luka.send_and_wait("What's happening today?", timeout=60)
 ```
 
 Use `respawn()` for non-destructive recovery that keeps continuity, and `reset()` only when the app intentionally wants a destructive new generation and session.
+
+If you change a durable identity's role in the roster, its resume fails closed
+until that boot declares the migration with `.role_migrations([...])`. See the
+[Python SDK](/mobkit/sdks/python) page for the builder form and
+[Configuration](/mobkit/reference/configuration#member-role-migrations) for the init
+parameter.
 
 ## What's next
 

@@ -42,7 +42,13 @@ class PublishMobKitDocsWorkflowTests(unittest.TestCase):
         self.assertLess(docs_check, publish)
         self.assertLess(mint_check, publish)
         self.assertIn("grep -Ev '^docs/(mobkit/|docs\\.json$)'", self.workflow[publish:])
-        self.assertIn("git push origin HEAD:main", self.workflow[publish:])
+        self.assertIn("pull-requests: write", self.workflow)
+        self.assertIn("actions: write", self.workflow)
+        self.assertIn('git push origin "HEAD:refs/heads/${pr_branch}"', self.workflow[publish:])
+        self.assertIn("gh pr create", self.workflow[publish:])
+        self.assertIn('gh workflow run ci.yml --ref "${pr_branch}"', self.workflow[publish:])
+        self.assertIn('gh pr merge "${pr_url}" --auto --squash', self.workflow[publish:])
+        self.assertNotIn("git push origin HEAD:main", self.workflow[publish:])
 
 
 if __name__ == "__main__":

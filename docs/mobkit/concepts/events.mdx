@@ -1,158 +1,159 @@
 ---
 title: "Events"
-description: "Unified event model that merges agent and module events into a single timestamped stream."
+description: "Unified agent and module envelopes, structural mob events, lossy WorkGraph wakes, ordering, and runtime lifecycle stages."
 icon: "timeline"
 ---
 
-MobKit produces a unified event stream that merges agent events from Meerkat with module events from MobKit's operational subsystems. Every event is wrapped in an `EventEnvelope` with a unique ID, source tag, and millisecond timestamp.
+MobKit exposes three related event surfaces:
 
-## Event envelope
+- `EventEnvelope<UnifiedEvent>` merges projected Meerkat agent events with MobKit module events.
+- `MobStructuralEventEnvelope` projects structural events from the Meerkat mob-event ledger.
+- The WorkGraph wake stream emits bare `UnifiedEvent::Module` values at `GET /mobkit/workgraph/facts/stream` as lossy notifications.
+
+They have different transport shapes and durability properties.
+
+## Unified event envelope
 
 ```rust
-EventEnvelope<T> {
-    event_id: String,        // unique identifier (e.g. "evt-000042")
-    source: String,          // "agent" or "module"
-    timestamp_ms: u64,       // milliseconds since epoch
-    event: T,                // the event payload
+pub struct EventEnvelope<T> {
+    pub event_id: String,
+    pub source: String,
+    pub timestamp_ms: u64,
+    pub event: T,
 }
-```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `event_id` | `String` | Unique identifier for deduplication and ordering |
-| `source` | `String` | Origin: `"agent"` for Meerkat events, `"module"` for MobKit events |
-| `timestamp_ms` | `u64` | Wall-clock time in milliseconds since Unix epoch |
-| `event` | `T` | Generic payload -- typically `UnifiedEvent` |
-
-## Unified event types
-
-The `UnifiedEvent` enum distinguishes agent events from module events:
-
-```rust
-enum UnifiedEvent {
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum UnifiedEvent {
     Agent {
         agent_id: String,
         event_type: String,
+        payload: Option<serde_json::Value>,
     },
     Module(ModuleEvent),
 }
 
-struct ModuleEvent {
-    module: String,
-    event_type: String,
-    payload: Value,
+pub struct ModuleEvent {
+    pub module: String,
+    pub event_type: String,
+    pub payload: serde_json::Value,
 }
 ```
 
-### Agent events
+For `UnifiedEvent::Agent`, `source` must be `"agent"`. For `UnifiedEvent::Module`, it must be `"module"`. The optional agent `payload` is part of the wire contract and must not be dropped when matching or forwarding the event.
 
-Agent events originate from Meerkat's agent loop. MobKit does not generate agent events -- it receives them from the Meerkat runtime and merges them into the unified stream.
+### Agent event names
 
-### Module events
+Agent event names come from Meerkat's exhaustive event mapper. Current examples include:
 
-Module events originate from MobKit's operational subsystems. Common module event types:
+- Run and turn: `run_started`, `run_completed`, `run_failed`, `turn_started`, `turn_completed`
+- Model output: `reasoning_delta`, `reasoning_complete`, `text_delta`, `text_complete`
+- Tools: `tool_call_requested`, `tool_result_received`, `tool_execution_started`, `tool_execution_completed`, `tool_execution_timed_out`
+- Hooks: `hook_started`, `hook_completed`, `hook_failed`, `hook_denied`
+- Compaction: `compaction_started`, `compaction_completed`, `compaction_failed`
+- Interaction: `interaction_complete`, `interaction_callback_pending`, `interaction_failed`
 
-| Event type | Module | Description |
-|------------|--------|-------------|
-| `health_transition` | any | Module health state change |
-| `route_resolved` | router | Routing resolution completed |
-| `delivery_sent` | delivery | Message delivered to a sink |
-| `gate_evaluated` | gating | Risk assessment completed |
-| `memory_indexed` | memory | Content indexed in Elephant |
+These strings are projections of Meerkat `AgentEvent` variants. MobKit does not synthesize them as module events.
 
-## Event merging
+### Merged module event names
 
-The unified runtime merges events from both sources into a single `merged_events` vector, ordered by `timestamp_ms`. When timestamps collide, agent events sort before module events to preserve causal ordering from the agent's perspective.
+MobKit itself generates these module event types in the merged envelope log:
+
+| `module` | `event_type` | Payload |
+|----------|--------------|---------|
+| Configured module ID | `mcp.ready` | `tools` returned by the startup probe |
+| Configured module ID | `supervisor.warning` | Startup or runtime boundary `error` |
+| `router` | `resolved` | Full `RoutingResolution` |
+| `delivery` | `send` | `delivery_id`, `route_id`, `recipient`, `sink`, `status`, and `attempts` |
+
+Generic modules may supply additional event names through their own valid envelopes. Gating audit entries, memory operations, and supervisor health transitions are not currently generated as unified module events by MobKit.
+
+### WorkGraph wake events
+
+The separate WorkGraph wake stream uses the `UnifiedEvent::Module` shape but serializes that value directly as SSE data. It does not wrap the value in `EventEnvelope`, write it to `merged_events`, or include it in `mobkit/events/subscribe`.
+
+| `module` | `event_type` | Payload |
+|----------|--------------|---------|
+| `mobkit.workgraph` | `workgraph.fact` | Lossy WorkGraph fact wake payload |
+| `mobkit.workgraph` | `workgraph.resync_required` | Resynchronization reason and optional skipped count |
+
+Every connection begins with `workgraph.resync_required` and `reason = "initial_sync"`. The stream then sends `workgraph.fact` wakes and can send `workgraph.resync_required` with `reason = "lagged"` after broadcast lag. It has no SSE ID, `Last-Event-ID`, catch-up, or replay contract. Consumers obtain authoritative graph state through the WorkGraph `get`, `list`, `ready`, and `snapshot` pull methods.
+
+## Ordering and normalization
+
+`merge_unified_events` orders envelopes by:
+
+1. `timestamp_ms`
+2. `event_id`
+3. `source`
+
+There is no special agent-before-module tie rule.
+
+The module boundary accepts direct `EventEnvelope<UnifiedEvent>` JSON and a supported flat event form. Normalization verifies that the `source` agrees with the `UnifiedEvent` variant and rejects malformed input. It does not mint missing IDs, enforce ID uniqueness, deduplicate events, or rewrite timestamps.
+
+`insert_event_sorted` uses the same ordering when runtime operations add later events.
+
+## Structural mob events
+
+The structural surface preserves a Meerkat mob-event cursor and the serialized `MobEventKind` payload:
 
 ```rust
-let runtime = start_mobkit_runtime(config, agent_events, timeout)?;
-
-for event in &runtime.merged_events {
-    match &event.event {
-        UnifiedEvent::Agent { agent_id, event_type } => {
-            println!("[agent:{}] {}", agent_id, event_type);
-        }
-        UnifiedEvent::Module(module_event) => {
-            println!("[module:{}] {}", module_event.module, module_event.event_type);
-        }
-    }
+pub struct MobStructuralEventEnvelope {
+    pub event_id: String,
+    pub cursor: u64,
+    pub mob_id: String,
+    pub timestamp_ms: u64,
+    pub kind: String,
+    pub run_id: Option<String>,
+    pub step_id: Option<String>,
+    pub agent_identity: Option<String>,
+    pub mob_labels: BTreeMap<String, String>,
+    pub run_labels: BTreeMap<String, String>,
+    pub data: serde_json::Value,
 }
 ```
 
-## Normalization
+The projection uses `event_id: "mob-evt-{cursor}"`, preserves the upstream cursor and timestamp, maps the event kind to its snake-case name, and places the full serialized kind payload in `data`. Current kinds include `mob_created`, `member_spawned`, `flow_started`, `step_dispatched`, `members_wired`, and `supervisor_escalation`. The enum can grow, so clients should not depend on a fixed variant count.
 
-Raw event lines from modules are normalized before entering the merged stream. Normalization ensures:
+### Cursor persistence and replay
 
-- Event IDs are present and unique
-- Timestamps are monotonically increasing
-- Source tags are consistent
-- Malformed events produce `NormalizationError` rather than silent corruption
+The structural subscriber reads from `MobEventsView`. With a saved cursor it uses `subscribe_after(cursor)`; without one it starts from the latest cursor. It writes the last projected cursor to `PersistentMetadataStore` after projection.
 
-## Structural mob events (durable)
+Cursor persistence is not event persistence:
 
-In addition to the lossy `UnifiedEvent::Agent` projection, mobkit
-exposes the **structural** event surface — typed envelopes
-preserving every meerkat `MobEventKind` (25 variants —
-`flow_started`, `step_dispatched`, `members_wired`,
-`supervisor_escalation`, ...) with their `mob_id`, `run_id`,
-`step_id`, and `agent_identity` context intact.
+- If a persistent-state path is configured and no explicit metadata store is supplied, MobKit creates `<path>/mobkit_metadata.sqlite3` for projection metadata.
+- That metadata stores the resume cursor, not the mob-event ledger.
+- `.persistent_state(path)` by itself keeps Mob storage in memory.
+- Replaying events written while MobKit was down requires an upstream Meerkat mob-event store that retained those events.
 
-```
-{
-  "event_id": "mob-evt-1234",
-  "cursor": 1234,
-  "mob_id": "home",
-  "timestamp_ms": 1729700000000,
-  "kind": "step_dispatched",
-  "run_id": "run-9c1...",
-  "step_id": "draft",
-  "agent_identity": "lead",
-  "mob_labels": {...},
-  "run_labels": {...},
-  "data": { /* full MobEventKind payload */ }
-}
-```
-
-### Durable cursors
-
-`cursor` is the **meerkat ledger cursor** — the same monotonic id
-the upstream store uses. Mobkit's subscription task streams events
-from `MobEventsView::subscribe_after(cursor)` and writes the
-last-projected cursor to a `PersistentMetadataStore` after each
-projection. On restart, the runtime resumes from that cursor —
-events written while mobkit was down are replayed, not skipped.
-
-- `.persistent_state(path)` builds auto-install a SQLite metadata
-  store at `<path>/mobkit_metadata.sqlite`. No caller action required.
-- Ephemeral builds use the in-memory store (no durable resume —
-  the ledger isn't persistent either).
+If a saved cursor is stale for the available ledger, the subscriber falls back to the latest cursor.
 
 ### Access surfaces
 
-| Surface | Use for |
+| Surface | Purpose |
 |---------|---------|
-| `mobkit/mob_events/query` JSON-RPC | Snapshot / batched scan |
-| `mobkit/mob_events/subscribe` JSON-RPC | Snapshot + handshake; returns a `subscribe_url` for the SSE route |
-| `GET /mobkit/mob_events/stream` SSE | Per-client live tail with cursor + filter resume |
+| `mobkit/mob_events/query` JSON-RPC | Query a structural snapshot or batch |
+| `mobkit/mob_events/subscribe` JSON-RPC | Create a subscription and receive its SSE URL |
+| `GET /mobkit/mob_events/stream` SSE | Tail structural events with cursor and filter resume |
 
-See [SSE API](/mobkit/api/sse) for the SSE shape and
-[JSON-RPC API](/mobkit/api/rpc) for the snapshot RPCs and error codes.
+See [SSE API](/mobkit/api/sse) for stream parameters and [JSON-RPC API](/mobkit/api/rpc) for request and response shapes.
 
 ## Lifecycle events
 
-The runtime emits lifecycle events at key milestones:
+`LifecycleStage` has these exact variants:
 
 | Stage | Meaning |
 |-------|---------|
-| `MobStarted` | Meerkat mob runtime initialized |
-| `ModulesStarted` | All modules passed health checks |
-| `EventsMerged` | Agent and module event streams merged |
-| `RuntimeReady` | System ready to accept work |
+| `MobStarted` | Runtime bootstrap began |
+| `ModulesStarted` | All configured module startup attempts completed |
+| `MergedStreamStarted` | The initial agent and module envelopes were merged |
+| `ShutdownRequested` | Runtime shutdown began |
+| `ShutdownComplete` | Runtime shutdown completed |
 
-These are available through `runtime.lifecycle_events()` for observability and readiness checks.
+Each `LifecycleEvent` contains a monotonic `seq` and one `stage`. Read the retained entries through `MobkitRuntimeHandle::lifecycle_events()`. `ModulesStarted` is not proof that every module is healthy; inspect `SupervisorReport` for module transitions.
 
 ## See also
 
-- [Modules](/mobkit/concepts/modules) -- where module events originate
-- [SSE API](/mobkit/api/sse) -- streaming events to the console
-- [Architecture](/mobkit/reference/architecture) -- event transport design
+- [Modules](/mobkit/concepts/modules) - module startup and event origins
+- [Delivery](/mobkit/concepts/delivery) - `resolved` and `send` payloads
+- [SSE API](/mobkit/api/sse) - unified, WorkGraph wake, and structural streams
+- [Architecture](/mobkit/reference/architecture) - event transport and ownership

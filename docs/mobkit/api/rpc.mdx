@@ -13,15 +13,78 @@ MobKit exposes its operational API over JSON-RPC 2.0. SDK gateways use JSON line
 - **Version:** JSON-RPC 2.0
 - **Contract version:** `0.5.0`
 
-### Capabilities handshake
+### Initialization handshake
 
-The first line from the MobKit process is a capabilities declaration:
+The persistent SDK gateway (`rpc_gateway --persistent`) does not emit an
+unsolicited capabilities line. It waits for the client, whose first JSON line
+must be a `mobkit/init` request:
 
 ```json
-{"contract_version": "0.5.0"}
+{
+  "jsonrpc": "2.0",
+  "id": "init-1",
+  "method": "mobkit/init",
+  "params": {}
+}
 ```
 
-Clients must validate the contract version before sending requests.
+On success, the JSON-RPC response carries `contract_version` in `result`,
+together with `http_base_url` and the gateway's runtime metadata. Clients that
+enforce contract compatibility compare `result.contract_version` before
+sending later requests. After init, `mobkit/capabilities` returns the methods
+available on that runtime.
+
+#### `role_migrations`
+
+A durable member whose role changed refuses to resume
+(`MobError::MemberRoleMigrationRequired`) until the host declares the
+migration, so an unintended role edit cannot silently restamp a member's
+durable role, comms name and binding.
+
+The key sits at the TOP LEVEL of `params`, a sibling of `runtime_options` and
+`persistent_state`, not inside `runtime_options`. `rpc_gateway` reads it at init
+scope, and its `runtime_options` handling is a closed allowlist that would
+reject it as an unsupported field.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "init-1",
+  "method": "mobkit/init",
+  "params": {
+    "role_migrations": [
+      {"identity": "domain:home-automation", "from_role": "domain"}
+    ]
+  }
+}
+```
+
+Each entry is `{identity, from_role}`: the exact identity being migrated (no
+wildcards, no prefix matching) and the role it is migrating FROM. The gateway
+installs the list on its session bridge for the life of this boot and never
+persists it, so omitting it next boot removes the authority. Lookup is by exact
+identity; an identity the host did not name carries no migration authority.
+
+Meerkat re-verifies `from_role` against the durable predecessor role and refuses
+with `MobError::MemberRoleMigrationRejected` on mismatch, and ignores the
+declaration once the roles already agree, so a leftover declaration is inert
+rather than a repeat restamp.
+
+A malformed payload fails `mobkit/init` with `-32602` rather than arming
+nothing, on both gateway binaries and whether or not an identity plane is
+configured. One identity declared twice with conflicting `from_role` values is
+refused too, rather than letting hash order pick which predecessor role becomes
+authority, but the refusal differs by binary: `rpc_gateway` checks at init scope
+and answers `-32602` on the request, while `mobkit_gateway` checks inside its
+identity-first block and fails the boot out as a `-32603` internal error with a
+null `id`. Under `identity_first: false` `mobkit_gateway` runs neither that
+check nor the install, so a self-contradicting payload is not refused and
+nothing is armed. An identical repeat is accepted on purpose.
+
+The Python SDK exposes this as `MobKitBuilder.role_migrations([...])`, taking
+`RoleMigrationDeclaration` dataclasses or plain dicts, both validated; a
+conflicting pair raises `ValueError`, and an omitted or empty list emits no
+`role_migrations` key at all. The TypeScript SDK has no equivalent surface.
 
 ### Request format
 
@@ -208,7 +271,7 @@ both runtime policies and endpoint grants before changing either side.
 
 ## Mob events
 
-### `mob_events/query`
+### `mobkit/mob_events/query`
 
 Scan the meerkat structural-event ledger and return matches.
 
@@ -227,7 +290,7 @@ The response always carries a numeric `next_after_seq` — even when
 the filter matches nothing — so polling SDKs keep a valid resume
 anchor (caller's `after_seq` or the current `latest_cursor`).
 
-### `mob_events/subscribe`
+### `mobkit/mob_events/subscribe`
 
 JSON-RPC handshake that returns a snapshot plus a `subscribe_url`
 pointing to the [`/mobkit/mob_events/stream`](/mobkit/api/sse) SSE route.
@@ -650,13 +713,42 @@ read method, `runtime.admin` grant) surfaces. Additive method — no
 
 ### `mobkit/events/subscribe`
 
-Subscribe to runtime events with scope filtering.
+Return a bounded replay snapshot of merged runtime events. The result includes
+both typed event envelopes and the same events rendered as SSE frames; this
+method does not itself open a live HTTP stream.
 
 <Accordion title="Parameters">
 | Param | Type | Required | Description |
 |-------|------|----------|-------------|
-| `scope` | `string` | yes | Event scope: `"all"`, `"agent"`, or `"module"` |
-| `cursor` | `string` | no | Resume from a previous event cursor |
+| `scope` | `string` | no | `"mob"` (default), `"agent"`, or `"interaction"` |
+| `last_event_id` | `string` | no | An `event_id` returned by an earlier call. It must be non-empty and present in the selected scope's bounded replay window. Replay includes the checkpoint event itself. |
+| `agent_id` | `string` | when `scope` is `"agent"` | Agent filter. It may be the exact projected agent ID or its bare alias when the projected ID differs only by a trailing numeric generation suffix. |
+</Accordion>
+
+Scopes have these meanings:
+
+| Scope | Events selected |
+|-------|-----------------|
+| `mob` | All merged module and agent events |
+| `agent` | Agent events matching `agent_id`; module events are excluded |
+| `interaction` | Agent or module events whose `event_type` starts with `interaction` |
+
+The server applies the scope first, then retains at most the three newest
+matching events. With no `last_event_id`, all retained events are returned.
+With a checkpoint, replay starts at that event, inclusively. A checkpoint that
+is unknown, belongs to another scope, or has fallen outside the three-event
+window returns JSON-RPC `-32602`. A reconnecting consumer should deduplicate
+the first replayed event by `event_id`.
+
+<Accordion title="Result">
+| Field | Type | Description |
+|-------|------|-------------|
+| `scope` | `string` | Normalized selected scope |
+| `replay_from_event_id` | `string \| null` | The requested checkpoint, or `null` when none was supplied |
+| `keep_alive` | `object` | SSE keep-alive contract: `interval_ms` and event name |
+| `keep_alive_comment` | `string` | Ready-to-write SSE keep-alive comment frame |
+| `event_frames` | `string[]` | Ready-to-write SSE frames for the replayed events |
+| `events` | `object[]` | Replayed `EventEnvelope<UnifiedEvent>` values |
 </Accordion>
 
 ---

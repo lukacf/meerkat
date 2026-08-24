@@ -1,154 +1,189 @@
 ---
 title: "Module System"
-description: "Deep dive into module routing, MCP boundaries, subprocess protocols, and supervisor behavior."
+description: "Route module calls, select MCP or event-line boundaries, and inspect module startup health."
 icon: "diagram-project"
 ---
 
-MobKit's module system manages the lifecycle, routing, and communication for operational subsystems. This guide covers how module calls are routed, how MCP boundaries work, and how the supervisor manages process health.
+MobKit modules are subprocesses declared in `MobKitConfig`. The runtime resolves
+each discovered module, selects its process boundary, records startup health,
+and exposes module operations through `UnifiedRuntime`.
 
-## Module call routing
+## Route a module call
 
-When the runtime needs to invoke a module - for example, for a delivery send
-or memory conflict lookup - it routes the call through `route_module_call`:
+Use the host-facing `UnifiedRuntime::route_module_call` method. A request names
+the configured module, the method or MCP tool, and its JSON parameters:
 
 ```rust
-let response = route_module_call(&runtime_handle, ModuleRouteRequest {
-    module_id: "delivery",
-    tool: "delivery.send",
-    arguments: json!({ "route_id": "...", "payload": { ... } }),
-})?;
+use meerkat_mobkit::ModuleRouteRequest;
+use serde_json::json;
+use std::time::Duration;
+
+let request = ModuleRouteRequest {
+    module_id: "delivery".to_string(),
+    method: "delivery.send".to_string(),
+    params: json!({
+        "route_id": "route-1",
+        "payload": { "message": "hello" }
+    }),
+};
+
+let response = runtime
+    .route_module_call(&request, Duration::from_secs(5))
+    .await?;
 ```
 
 The routing layer:
 
-1. Looks up the module by ID in the loaded modules table
-2. Checks if the module uses MCP (core modules) or the subprocess JSON-line protocol
-3. Dispatches the call through the appropriate boundary
+1. Verifies that `module_id` is loaded
+2. Resolves the matching `ModuleConfig` and optional `PreSpawnData`
+3. Selects the MCP boundary when the pre-spawn environment contains
+   `MOBKIT_MODULE_BOUNDARY=mcp`
+4. Returns `ModuleRouteResponse { module_id, method, payload }`
 
 ## MCP boundary
 
-Core module-backed operations (router, delivery, and memory) communicate over MCP tool calls. The MCP boundary:
-
-- Serializes the tool name and arguments to JSON
-- Sends the request to the module's MCP server
-- Parses the response and extracts the result payload
-- Applies a timeout (`CORE_MODULE_MCP_TIMEOUT`) to prevent hung modules
+Mark a module as MCP through its pre-spawn environment:
 
 ```rust
-let result = call_module_mcp_tool_json(
-    &module_process,
-    "delivery.send",
-    &json!({ "route_id": "...", "payload": { ... } }),
-    CORE_MODULE_MCP_TIMEOUT,
-)?;
+use meerkat_mobkit::PreSpawnData;
+
+let boundary = PreSpawnData {
+    module_id: "delivery".to_string(),
+    env: vec![(
+        "MOBKIT_MODULE_BOUNDARY".to_string(),
+        "mcp".to_string(),
+    )],
+};
 ```
 
-### MCP requirement checking
+For an MCP module, a routed call connects to the configured stdio server,
+lists its tools, invokes `request.method` with `request.params`, and closes the
+connection. The caller-provided timeout bounds connect, list, call, and close
+operations.
 
-Before dispatching, the boundary verifies the module supports MCP:
+The core module IDs `router`, `delivery`, and `memory` require MCP. Routing one
+of those IDs without the MCP marker fails with
+`ModuleRouteError::ModuleRuntime(RuntimeBoundaryError::Mcp(McpBoundaryError::McpRequired { .. }))`.
+There is no event-line fallback for those core flows.
 
-```rust
-if !module_uses_mcp(&module_config) {
-    return Err(mcp_required_error(&module_config.id, &tool_name));
+## Event-line boundary
+
+A module without the MCP marker uses the event-line boundary. The process must
+write a JSON event as its first stdout line. For example:
+
+```json
+{
+  "event_id": "evt-module-1",
+  "source": "module",
+  "timestamp_ms": 1709500000000,
+  "module": "analytics",
+  "event_type": "analytics.ready",
+  "payload": { "status": "ready" }
 }
 ```
 
-Non-MCP modules receive calls through the subprocess JSON-line protocol instead.
+The runtime normalizes that line into `EventEnvelope<UnifiedEvent>`. On this
+boundary, `route_module_call` launches the module and returns the first
+normalized module event's `payload` field as `ModuleRouteResponse.payload`. It
+does not include the event envelope metadata or the normalized event's `module`
+and `event_type` fields in that payload. It also does not write
+`request.method` or `request.params` to the module's stdin. Use MCP when the
+subprocess needs a request/response tool-call contract.
 
-## Subprocess protocol
+For a discovered one-shot module that emits one event and exits, use the public
+configuration-aware helper:
 
-Non-MCP modules communicate over a JSON-line protocol on stdout/stderr:
+```rust
+use meerkat_mobkit::run_discovered_module_once;
+use std::time::Duration;
 
-<Steps>
-  <Step title="Spawn">
-    The supervisor spawns the module process with the configured command and arguments.
-  </Step>
-  <Step title="Capabilities handshake">
-    The first line of stdout must be a JSON capabilities declaration:
+let event = run_discovered_module_once(
+    &config,
+    "analytics",
+    Duration::from_secs(5),
+)?;
+```
 
-    ```json
-    {"contract_version": "0.5.0"}
-    ```
+The helper verifies that the module is both configured and discovered, applies
+its matching `PreSpawnData`, executes it once, and returns the normalized event.
 
-    The runtime validates the contract version matches `MOBKIT_CONTRACT_VERSION` (`"0.5.0"`).
-  </Step>
-  <Step title="Request/Response">
-    Subsequent communication uses JSON-RPC over the JSON-line protocol. Each line is a complete JSON object.
-  </Step>
-</Steps>
+## Startup health
 
-### RPC routing
+The module supervisor records startup transitions. Read them through the
+unified runtime:
 
-Subprocess modules receive JSON-RPC requests routed by method name. Durable
-scheduling does not use this module path; it is owned by `ScheduleService`.
+```rust
+for transition in runtime.module_health_transitions().await {
+    println!(
+        "{}: {:?} -> {:?} (attempt {})",
+        transition.module_id,
+        transition.from,
+        transition.to,
+        transition.attempt,
+    );
+}
+```
 
-## Supervisor
+`ModuleHealthTransition` has four fields:
 
-The supervisor manages module process lifecycle:
+| Field | Type | Meaning |
+|-------|------|---------|
+| `module_id` | `String` | Configured module ID |
+| `from` | `Option<ModuleHealthState>` | Previous state, or `None` for the initial transition |
+| `to` | `ModuleHealthState` | New state |
+| `attempt` | `u32` | Startup attempt number; the initial `Starting` transition uses `0` |
 
-### Health tracking
+`ModuleHealthState` has exactly these variants:
 
-Each module transitions through health states:
+| State | Meaning |
+|-------|---------|
+| `Starting` | The startup attempt has begun |
+| `Healthy` | The boundary produced a valid first event or the MCP tool probe succeeded |
+| `Failed` | The current startup or restart attempt failed |
+| `Restarting` | The supervisor will make another non-MCP startup attempt |
+| `Stopped` | Startup exhausted its retry policy |
 
 ```mermaid
 stateDiagram-v2
     [*] --> Starting
-    Starting --> Healthy : health check passed
-    Starting --> Unhealthy : health check failed / timeout
-    Healthy --> Unhealthy : process exited / health check failed
-    Unhealthy --> Restarting : restart policy allows
-    Restarting --> Starting : process respawned
-    Unhealthy --> [*] : restart policy = Never
+    Starting --> Healthy : boundary ready
+    Starting --> Failed : startup failed
+    Failed --> Restarting : retry budget remains
+    Restarting --> Healthy : next attempt succeeds
+    Restarting --> Failed : next attempt fails
+    Healthy --> Restarting : Always policy restarts
+    Failed --> Stopped : retry budget exhausted
 ```
 
-### Health transitions
+### Restart policies
 
-Health transitions are recorded as `ModuleHealthTransition` events and emitted into the unified event stream:
+For event-line modules, restart behavior is bounded by `RuntimeOptions`:
 
-```rust
-ModuleHealthTransition {
-    module_id: "delivery",
-    from: ModuleHealthState::Starting,
-    to: ModuleHealthState::Healthy,
-    timestamp_ms: 1709500000000,
-}
-```
+| Policy | Startup failure | Successful first event |
+|--------|-----------------|------------------------|
+| `Never` | Do not retry | Keep the child and mark it healthy |
+| `OnFailure` | Retry while `on_failure_retry_budget` remains | Keep the child and mark it healthy |
+| `Always` | Retry while `always_restart_budget` remains | Restart while `always_restart_budget` remains, then keep the final healthy child |
 
-### Restart behavior
+MCP startup probes the configured tool server once. It records
+`Starting -> Healthy` on success or `Starting -> Failed -> Stopped` on failure;
+the event-line restart budgets are not applied to that probe.
 
-| Policy | On exit code 0 | On non-zero exit | On signal |
-|--------|---------------|------------------|-----------|
-| `Never` | Stop | Stop | Stop |
-| `OnFailure` | Stop | Restart | Restart |
-| `Always` | Restart | Restart | Restart |
+## Boundary errors
 
-## Module boundary errors
-
-The boundary layer produces typed errors:
+The public routing path preserves the boundary that failed:
 
 | Error | Cause |
 |-------|-------|
-| `McpBoundaryError::InvalidToolPayload` | MCP response could not be parsed |
-| `McpBoundaryError::ToolNotFound` | Module does not expose the requested tool |
-| `McpBoundaryError::Timeout` | MCP call exceeded timeout |
-| `ProcessBoundaryError` | Subprocess communication failed |
-| `RpcRouteError` | JSON-RPC method routing failed |
-
-## Running a module once
-
-For testing or one-off execution, use `run_module_boundary_once`:
-
-```rust
-let result = run_module_boundary_once(
-    &module_config,
-    &json!({ "action": "test" }),
-)?;
-```
-
-This spawns the module, sends a single request, collects the response, and terminates the process.
+| `ModuleRouteError::UnloadedModule` | The requested module is not loaded |
+| `ModuleRouteError::ModuleRuntime` | The process, normalization, or MCP boundary failed |
+| `ModuleRouteError::UnexpectedRouteResponse` | The event-line process returned a non-module event or the wrong module ID |
+| `RuntimeBoundaryError::Process` | Process spawn, stdout, timeout, or JSON-line I/O failed |
+| `RuntimeBoundaryError::Normalize` | The first event line did not satisfy the unified event contract |
+| `RuntimeBoundaryError::Mcp` | MCP setup, discovery, tool call, close, or response parsing failed |
 
 ## See also
 
-- [Modules](/mobkit/concepts/modules) -- module configuration and discovery
-- [Events](/mobkit/concepts/events) -- health transition events
-- [RPC API](/mobkit/api/rpc) -- module-level RPC methods
+- [Modules](/mobkit/concepts/modules) - module configuration and discovery
+- [Events](/mobkit/concepts/events) - unified event envelopes
+- [RPC API](/mobkit/api/rpc) - module-level RPC methods

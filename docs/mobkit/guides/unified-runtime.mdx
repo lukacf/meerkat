@@ -6,9 +6,33 @@ icon: "layer-group"
 
 The unified runtime is the production entry point for MobKit. It bootstraps a Meerkat mob and MobKit's module subsystems together, merges their event streams, and manages the combined lifecycle through a single handle.
 
-## Builder pattern
+## Builder paths
 
-Use `UnifiedRuntime::builder()` to configure and start the runtime:
+For new hosts, build from a mob definition. `definition_path` loads TOML, while
+`definition` accepts an already parsed `MobDefinition`:
+
+```rust
+use meerkat_mobkit::UnifiedRuntime;
+
+let runtime = UnifiedRuntime::builder()
+    .definition_path("config/mob.toml")
+    .persistent_state(".mobkit/state")
+    .build()
+    .await?;
+```
+
+On this definition-based path, only `definition(...)` or
+`definition_path(...)` is required. The other common fields have defaults:
+
+| Builder field | Default when omitted |
+|---------------|----------------------|
+| `module_config` | Empty module and discovery configuration |
+| `timeout` | 30 seconds |
+| `persistent_state` | Ephemeral session service with an auto-created temporary directory |
+
+The older `mob_spec(...)` path accepts a pre-built `MobBootstrapSpec`. It still
+requires explicit module configuration and timeout because the spec already
+owns its session service and construction policy:
 
 ```rust
 use meerkat_mobkit::UnifiedRuntime;
@@ -22,15 +46,9 @@ let runtime = UnifiedRuntime::builder()
     .await?;
 ```
 
-### Required fields
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `mob_spec` | `MobBootstrapSpec` | Meerkat mob definition and bootstrap options |
-| `module_config` | `MobKitConfig` | Module declarations, discovery spec, and pre-spawn data |
-| `timeout` | `Duration` | Maximum time to wait for all systems to become ready |
-
-Missing required fields produce `UnifiedRuntimeBuilderError::MissingRequiredField` with the specific field name.
+If neither definition source nor `mob_spec` is present, the builder returns
+`MissingRequiredField(MobSpec)`. On the legacy path, omitting
+`module_config` or `timeout` returns the corresponding missing-field error.
 
 ## Bootstrap sequence
 
@@ -39,28 +57,23 @@ Missing required fields produce `UnifiedRuntimeBuilderError::MissingRequiredFiel
     The Meerkat mob runtime starts first. Members are provisioned, wiring is established, and the mob reaches an operational state. If this fails, the builder returns `UnifiedRuntimeBootstrapError::Mob`.
   </Step>
   <Step title="Module startup">
-    MobKit modules are spawned as subprocesses. The supervisor monitors health checks and waits for all modules to reach the `Healthy` state within the timeout. If module startup fails, the builder attempts to roll back the mob runtime before returning the error.
+    The supervisor attempts each discovered module and records its startup transitions. A module that exhausts its restart policy remains unloaded and emits a supervisor warning. A module-runtime initialization error or startup-thread panic rolls back the already-started mob before the builder returns an error.
   </Step>
   <Step title="Event merging">
-    Agent events from the mob and module events from MobKit are merged into a single timestamped stream, accessible through `runtime.merged_events`.
-  </Step>
-  <Step title="Route registration">
-    The unified runtime automatically registers delivery routes for each mob member using the pattern `mob.member.{member_id}.notification`, enabling inter-member messaging through the delivery subsystem.
-  </Step>
-  <Step title="HTTP serving">
-    The runtime composes Axum routers for the console frontend, console JSON API, console JSON-RPC, timeline SSE, agent/mob SSE, structural mob-events SSE, and blob serving into a single HTTP server.
+    Agent and module events feed the unified event transport. Hosts read the public snapshot and subscription APIs rather than accessing the internal event vector.
   </Step>
 </Steps>
 
 ## Rollback on failure
 
-If module startup fails after the mob has already started, the runtime performs a coordinated rollback:
+If module-runtime initialization fails or its startup thread panics after the
+mob has already started, the runtime performs a coordinated rollback:
 
 1. Attempt to shut down the mob runtime
 2. If rollback succeeds, return the original module startup error
 3. If rollback also fails, return `ModuleStartupRollbackFailed` containing both errors
 
-This prevents orphaned mob processes when modules fail to start.
+This prevents orphaned mob processes when module-runtime bootstrap fails.
 
 ## Runtime handle
 
@@ -68,25 +81,50 @@ After successful bootstrap, the builder returns a `UnifiedRuntime` handle with a
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `merged_events` | `Vec<EventEnvelope<UnifiedEvent>>` | Combined event stream |
-| `mob_runtime` | `RealMobRuntime` | Handle to the Meerkat mob |
-| `module_runtime` | `MobkitRuntimeHandle` | Handle to MobKit modules |
+| `mob_handle()` | `MobHandle` | Public Meerkat mob control handle |
+| `mob_runtime()` | `&MobRuntime` | Underlying mob runtime owned by the unified runtime |
+| `loaded_modules().await` | `Vec<String>` | Loaded module IDs |
+| `module_events().await` | `Vec<EventEnvelope<UnifiedEvent>>` | Current module-runtime event snapshot |
+| `subscribe_events(request).await` | `SubscribeResponse` | Bounded unified-event replay for the requested scope |
+| `module_health_transitions().await` | `Vec<ModuleHealthTransition>` | Recorded module startup transitions |
+
+The raw `MobkitRuntimeHandle` is intentionally not exposed. Module operations
+such as routing, delivery, memory, and gating are methods on `UnifiedRuntime`.
 
 ### Reconciliation
 
-The unified runtime supports reconciling member changes:
+The reconciliation method depends on which authority model built the runtime.
+
+For a classic runtime without identity-first authority, pass the complete
+desired member specs:
 
 ```rust
 let report: UnifiedRuntimeReconcileReport = runtime
-    .reconcile(reconcile_options)
+    .reconcile(desired_specs)
     .await?;
 ```
 
-Reconciliation updates routing tables when members are added or removed from the mob, ensuring delivery routes stay in sync with the current membership.
+`desired_specs` is a `Vec<SpawnMemberSpec>`. This path reconciles members,
+managed peer edges, and delivery routing. When the `router` module is loaded,
+it maintains route keys named `mob.member.{member_id}` with the
+`notification` channel.
+
+For an identity-first runtime, roster and topology providers own desired state.
+Refresh those providers through the identity authority instead:
+
+```rust
+let result = runtime.refresh_desired_topology().await?;
+```
+
+`refresh_desired_topology` returns `Some(RestoreFlowResult)` when identity-first
+authority is attached and `None` otherwise. Calling whole-mob `reconcile` on an
+identity-first runtime fails rather than bypassing that authority.
 
 ### Shutdown
 
-Graceful shutdown tears down both systems in reverse order:
+In the mob/module teardown sequence, graceful shutdown quiesces and stops the
+mob while its router and module dependencies remain alive. It then closes the
+event router and shuts down the modules:
 
 ```rust
 let report: UnifiedRuntimeShutdownReport = runtime.shutdown().await;
@@ -94,23 +132,38 @@ let report: UnifiedRuntimeShutdownReport = runtime.shutdown().await;
 
 The shutdown report includes status from both the mob and module runtimes.
 
-## HTTP composition
+## HTTP composition and binding
 
-The unified runtime composes three Axum routers:
+`build_reference_app_router` is the public composition root for the health,
+console, Flow Editor, JSON-RPC, blob, and SSE surfaces. The router does not bind
+a socket by itself:
 
 ```rust
-// Console frontend (HTML + JS)
-let frontend = console_frontend_router();
+use meerkat_mobkit::gateway_composition::GatewayHttpBinding;
+use std::sync::Arc;
 
-// Console JSON API/RPC/SSE with live runtime projection
-let json_api = console_json_router_with_runtime(decisions, mob_runtime.clone());
+let runtime = Arc::new(runtime);
+let event_drain_task = Arc::clone(&runtime).spawn_event_drain_task();
+let app = runtime.build_reference_app_router(decisions);
+let binding = GatewayHttpBinding::bind_loopback().await?;
+let http_base_url = binding.http_base_url();
+let http_server = binding.serve(app);
 
-// Compose into a single app
-let app = frontend.merge(json_api);
+println!("reference app: {http_base_url}/console");
 ```
+
+`GatewayHttpBinding::bind_loopback` selects an available port on `127.0.0.1`.
+The shipping gateways return that concrete `http_base_url` during
+initialization. Embedders may instead serve the returned Axum router on their
+own listener. A host-owned Axum server must keep `event_drain_task` running so
+mob events reach console SSE and event-log consumers. During ordered shutdown,
+drain `http_server`, abort the event-drain task, and then shut down the runtime.
+
+Key routes in the reference app include:
 
 | Route | Method | Description |
 |-------|--------|-------------|
+| `/healthz` | GET | Runtime health summary |
 | `/console` | GET | Admin console HTML |
 | `/console/assets/console-app.js` | GET | React bundle |
 | `/console/assets/console-app.css` | GET | Stylesheet |
@@ -126,20 +179,22 @@ let app = frontend.merge(json_api);
 | `/agents/{agent_id}/events` | GET | Per-agent event SSE |
 | `/mob/events` | GET | Mob-merged event SSE |
 | `/mobkit/mob_events/stream` | GET | Structural mob-events SSE |
+| `/flow-editor` | GET | Visual mobpack editor |
+| `/flow-editor/rpc` | POST | Mobpack-authoring JSON-RPC |
 
 ## Error hierarchy
 
 | Error | Cause |
 |-------|-------|
-| `UnifiedRuntimeBuilderError::MissingRequiredField` | Builder field not set |
+| `UnifiedRuntimeBuilderError::MissingRequiredField` | No definition/spec, or a required legacy-path field is missing |
 | `UnifiedRuntimeBootstrapError::Mob` | Meerkat mob failed to start |
-| `UnifiedRuntimeBootstrapError::Module` | MobKit modules failed to start |
+| `UnifiedRuntimeBootstrapError::Module` | MobKit module-runtime initialization failed |
 | `UnifiedRuntimeBootstrapError::ModuleStartupThreadPanicked` | Module startup thread panicked |
 | `UnifiedRuntimeBootstrapError::ModuleStartupRollbackFailed` | Both startup and rollback failed |
 
 ## See also
 
-- [Quickstart](/mobkit/quickstart) -- minimal bootstrap example
-- [Modules](/mobkit/concepts/modules) -- module configuration
-- [Console guide](/mobkit/guides/console) -- admin console details
-- [Architecture](/mobkit/reference/architecture) -- internal design
+- [Quickstart](/mobkit/quickstart) - minimal bootstrap example
+- [Modules](/mobkit/concepts/modules) - module configuration
+- [Console guide](/mobkit/guides/console) - admin console details
+- [Architecture](/mobkit/reference/architecture) - internal design

@@ -11,7 +11,9 @@ on:
         type: string
 
 permissions:
+  actions: write
   contents: write
+  pull-requests: write
 
 concurrency:
   group: publish-mobkit-docs
@@ -92,7 +94,9 @@ jobs:
         working-directory: docs
         run: npx --yes mint@4.2.728 broken-links
 
-      - name: Publish generated snapshot to main
+      - name: Publish generated snapshot through a protected pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           git add docs/mobkit docs/docs.json
@@ -111,4 +115,14 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -m "docs: publish MobKit ${MOBKIT_TAG}"
-          git push origin HEAD:main
+
+          pr_branch="codex/publish-mobkit-docs-${MOBKIT_TAG#v}-${GITHUB_RUN_ID}"
+          git push origin "HEAD:refs/heads/${pr_branch}"
+          pr_url=$(gh pr create \
+            --base main \
+            --head "${pr_branch}" \
+            --title "docs: publish MobKit ${MOBKIT_TAG}" \
+            --body "Publish the immutable ${MOBKIT_TAG} documentation snapshot after registry, generated-site, and link validation. This pull request is created because main requires the CI gate; the publication workflow must not bypass branch protection.")
+          gh workflow run ci.yml --ref "${pr_branch}"
+          gh pr merge "${pr_url}" --auto --squash
+          echo "Queued protected MobKit docs publication: ${pr_url}" >> "${GITHUB_STEP_SUMMARY}"

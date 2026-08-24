@@ -9,10 +9,14 @@ MobKit serves a REST API over HTTP using Axum. The API provides console access, 
 ## Base URL
 
 ```
-http://localhost:8080
+<http_base_url>
 ```
 
-The port is configurable at runtime startup.
+The console/admin `mobkit_gateway` and SDK-facing persistent `rpc_gateway`
+bind an available loopback port and report the exact `http_base_url` in their
+`mobkit/init` result. Use that value for every route on this page; do not
+assume port 8080. A Rust library host chooses its own listener and must supply
+that base URL to its clients.
 
 ---
 
@@ -85,16 +89,18 @@ When a Meerkat mob runtime is configured, the response includes live agent data 
 
 ### `GET /console/modules`
 
-Returns the list of loaded modules.
+Returns the configured module IDs from `RuntimeDecisionState`. This response
+does not contain per-module health or startup state.
 
 **Response:**
 
 ```json
 {
+  "contract_version": "0.5.0",
   "modules": [
-    { "id": "router", "health": "healthy" },
-    { "id": "delivery", "health": "healthy" },
-    { "id": "memory", "health": "starting" }
+    "router",
+    "delivery",
+    "memory"
   ]
 }
 ```
@@ -168,13 +174,30 @@ Returns blob/image content by ID when a blob store is configured.
 
 ## Authentication
 
-When `ConsolePolicy.require_app_auth` is `true`, all endpoints require a valid JWT token in the `Authorization` header:
+The reference router keeps its frontend shell and bootstrap assets public:
+
+- `/`, `/favicon.ico`, and `/healthz`
+- `/console`, `/console/`, and `/console/assets/*`
+- `/flow-editor`, `/flow-editor/`, and `/flow-editor/assets/*`
+
+When `ConsolePolicy.require_app_auth` is `true`, the console JSON, JSON-RPC,
+timeline, blob, Flow Editor RPC, and SSE surfaces require a valid JWT. Clients
+may use either a bearer header:
 
 ```
 Authorization: Bearer eyJhbGciOiJSUzI1NiIs...
 ```
 
-The token is validated against the configured auth policy. See [authentication](/mobkit/guides/authentication) for details.
+or an exact query parameter:
+
+```
+?auth_token=<url-encoded-token>
+```
+
+Query values are percent-decoded. URL-encode reserved characters such as `=`,
+`&`, `+`, and `%`. Prefer the header except for browser or SSE bootstrap cases.
+The token is validated against the fixed trusted OIDC snapshot and configured
+auth policy. See [authentication](/mobkit/guides/authentication) for details.
 
 MobKit's built-in console auth is bearer-token based and does not rely on
 cookies. Deployments that add cookie-backed console auth at a reverse proxy must

@@ -1,12 +1,21 @@
 ---
 title: "Introduction"
-description: "MobKit — build advanced multi-agent systems with a few lines of code. Orchestrate groups of Meerkat agents with built-in routing, lifecycle management, and operational tooling."
+description: "MobKit is the application gateway, policy, SDK, persistence-projection, and console layer for Meerkat agents and mobs."
 icon: "boxes-stacked"
 ---
 
-MobKit lets you stand up a production multi-agent system in a few lines of code. You describe the agents you want, how they connect, and what operational capabilities they need — MobKit handles the rest: spawning, wiring, routing, lifecycle management, and a live admin console.
+MobKit lets an application boot, expose, observe, and operate a production
+Meerkat mob without hand-wiring every host integration. You describe desired
+agents, topology, and operational policy. MobKit packages gateway startup,
+module routing, policy enforcement, persistence projections, SDKs, and a live
+operator console around that runtime.
 
-It builds on [Meerkat](https://github.com/lukacf/meerkat), which provides the agent runtime (prompt assembly, tool dispatch, sessions, the core agent loop). MobKit adds the orchestration layer that turns individual agents into coordinated groups.
+[Meerkat](https://github.com/lukacf/meerkat) already owns both individual-agent
+execution and multi-agent mob orchestration: prompt assembly, tools, sessions,
+stable member identity, spawning, lifecycle, wiring, flows, comms, and
+coordination. MobKit is the companion product and gateway layer. It invokes
+those primitives and projects them for applications and operators; it does not
+replace `meerkat-mob` or maintain a second mob authority.
 
 ```python
 rt = await (
@@ -27,7 +36,12 @@ await triage.dispatch_text("New event", origin="connector")
 output = await luka.send_and_wait("What's happening?", timeout=60)
 ```
 
-<img src="/mobkit/images/architecture-overview.png" alt="MobKit architecture: Your App → MobKit (orchestration, routing, lifecycle, admin console) → Meerkat (agent loop, sessions, tools, comms). Agent topology: Domain, Personal, and Task agents." style={{ borderRadius: '8px', marginTop: '1rem', marginBottom: '1rem' }} />
+```mermaid
+flowchart TB
+    APP["Your application"] --> MOBKIT["MobKit companion layer<br/>startup, module routing, policy,<br/>persistence projections, SDKs, console"]
+    MOBKIT --> MEERKAT["Meerkat runtime<br/>agent sessions and mob identity,<br/>spawn, lifecycle, wiring, flows, comms"]
+    MEERKAT --> TEAM["Durable and ephemeral members<br/>domain, personal, coordination, task"]
+```
 
 ## What you can build
 
@@ -38,28 +52,45 @@ MobKit's primary pattern is layered agent architectures — but it's not limited
 - **Group agents** that coordinate across a team or initiative
 - **Task agents** that are spawned on demand for short-lived work
 
-You define agents as profiles in a mob config, wire them together with peer connections, and MobKit handles the lifecycle: spawning at startup, retiring when no longer needed, respawning on failure, and reconciling the roster when your desired topology changes.
+You define profiles and wiring in a Meerkat mob config. MobKit's startup and
+roster layers submit desired members and topology to the Meerkat mob runtime,
+invoke its spawn, retire, respawn, and wiring operations, and reconcile the
+host's desired state against the resulting runtime projection.
 
 ## What MobKit provides
 
-- **Orchestration.** Bootstrap an entire mob and its operational modules in a single call. Process supervision, health gates, and configurable restart policies.
-- **Identity-first continuity.** Durable agent identities with roster providers, topology-aware prompts, non-destructive respawn, destructive reset, and in-process reconciliation. Agents survive restarts with stable session IDs.
-- **Roster management.** List, inspect, spawn, retire, and respawn members. Ensure agents exist before sending them work. Reconcile the roster against a desired state.
-- **Operational subsystems.** Message routing with sink adapters, risk-based approval gates, durable scheduling with occurrence claims, and semantic memory.
-- **Admin console.** React web UI with agent sidebar, activity feed, chat inspector, topology view, and health overview — all updating in real time via SSE.
-- **Session persistence.** JSON file storage for development, BigQuery adapter for production. Complements Meerkat's own runtime-backed session durability.
-- **Authentication.** JWT/OIDC validation with JWKS discovery and email allowlists. Google, GitHub, Generic OIDC, and Service Identity providers.
-- **SDKs.** Python and TypeScript SDKs with typed returns and contract parity tests against the Rust core.
+- **Unified startup.** Bootstrap a Meerkat mob and MobKit operational modules
+  through one composition root, with health supervision and bounded rollback.
+- **Identity-first convenience.** Expose Meerkat `AgentIdentity` through roster
+  providers, topology providers, lease-fenced host continuity records, SDK
+  handles, and console projections.
+- **Operator workflows.** Invoke Meerkat member lifecycle and topology
+  operations, then reconcile application desired state with runtime truth.
+- **Operational subsystems.** Compose module routing and delivery, approval
+  gates, durable scheduling adapters, WorkGraph integration, and optional
+  memory record and retrieval providers.
+- **Admin console.** Serve a React workbench with identity and roster views,
+  conversations, topology, approvals, health, timeline replay, and live SSE.
+- **Persistence projections.** Store MobKit continuity, lease, metadata,
+  timeline, blob, schedule, and agent-memory records through a declared storage
+  provider. Persistent mode fails closed instead of silently falling back to
+  memory. Meerkat remains the owner of canonical session and mob durability.
+- **Authentication and policy.** Apply JWT/OIDC authentication, coarse
+  server-side read-only policy, and optional deny-by-default ABAC across
+  console REST, RPC, and SSE.
+- **SDKs.** Use Python and TypeScript clients with typed returns and contract
+  parity tests against the Rust core.
 
 ## MobKit and Meerkat
 
 | | Meerkat | MobKit |
 |---|---|---|
-| **Role** | Agent runtime — runs individual agents | Orchestration — coordinates groups of agents |
-| **Owns** | Agent loop, prompt assembly, tool dispatch, sessions, comms | Startup, routing, lifecycle management, operational subsystems |
-| **Interface** | Library crate, CLI, REST, RPC, MCP | Library crate, JSON-RPC, admin console, SDKs |
+| **Role** | Agent and multi-agent mob runtime | Companion application and operator layer |
+| **Owns** | Agent loop, prompt assembly, tools, sessions, mob orchestration, `AgentIdentity`, membership, spawn, lifecycle, wiring, flows, comms, coordination | Gateway startup, host desired-state providers, module routing and delivery, operational policy, MobKit persistence projections, SDK transport, console and timeline UX |
+| **Interface** | Rust crates, CLI, REST, JSON-RPC, MCP, and SDKs | Rust composition crate, `rpc_gateway`, `mobkit_gateway`, JSON-RPC/REST/SSE packaging, Python and TypeScript SDKs, console |
 
-Meerkat is the engine that makes each agent work. MobKit is the toolkit that makes them work together.
+Meerkat runs agents and mobs. MobKit makes that runtime convenient to embed,
+integrate, expose, and operate as a product.
 
 ## Explore the documentation
 

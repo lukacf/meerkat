@@ -28,6 +28,8 @@ them.
 
 ## [Unreleased]
 
+## [0.8.28] - 2026-08-24
+
 ### Added
 
 - `MobHandle::respawn_with_successor_spec` atomically replaces a member from a
@@ -35,6 +37,18 @@ them.
   predecessor retirement, successor generation and fence minting, fresh
   session creation, and topology restoration. `MemberRespawnReceipt::runtime_id`
   exposes the exact committed successor runtime identity to bridge surfaces.
+
+### Fixed
+
+- `require_existing` adoption now preserves the complete ordered durable
+  system-prompt transcript as the sole prompt authority. Explicit lossy prompt
+  restatements are rejected instead of replacing an existing multi-row
+  transcript with one message.
+- Successor respawn now treats an omitted runtime binding as preserve-current,
+  while continuing to reject an explicitly different binding. This allows
+  MobKit to apply a new roster profile atomically without changing placement.
+- HTML output artifacts are flushed before their path is published or opened,
+  preventing an immediate reader from observing an empty or partial file.
 
 ## [0.8.27] - 2026-08-24
 
@@ -7104,7 +7118,8 @@ tag, so its comparison link uses v0.3.0 as the exact ancestry base.
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.8.27...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.8.28...HEAD
+[0.8.28]: https://github.com/lukacf/meerkat/compare/v0.8.27...v0.8.28
 [0.8.27]: https://github.com/lukacf/meerkat/compare/v0.8.26...v0.8.27
 [0.8.26]: https://github.com/lukacf/meerkat/compare/v0.8.25...v0.8.26
 [0.8.25]: https://github.com/lukacf/meerkat/compare/v0.8.24...v0.8.25

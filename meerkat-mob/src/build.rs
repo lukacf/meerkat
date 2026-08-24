@@ -765,14 +765,19 @@ fn resumed_member_segment_matches_current_or_legacy(current: &str, stored: &str)
     if current == stored {
         return true;
     }
-    if current
-        .strip_prefix("mk--")
-        .map(decode_legacy_member_alias_segment)
-        .is_some_and(|legacy| stored == legacy)
-    {
-        return true;
-    }
-    mobkit_generation_zero_identity_runtime_alias(current).is_some_and(|alias| stored == alias)
+    let current_identity = if let Some(encoded) = current.strip_prefix("mk--") {
+        let Some(decoded) = decode_legacy_member_alias_segment(encoded) else {
+            return false;
+        };
+        if stored == decoded {
+            return true;
+        }
+        decoded
+    } else {
+        current.to_string()
+    };
+    mobkit_generation_zero_identity_runtime_alias(&current_identity)
+        .is_some_and(|alias| stored == alias)
 }
 
 fn mobkit_generation_zero_identity_runtime_alias(current: &str) -> Option<String> {
@@ -790,7 +795,11 @@ fn mobkit_generation_zero_identity_runtime_alias(current: &str) -> Option<String
             character if character.is_ascii_alphanumeric() || character == '-' => {
                 encoded.push(character);
             }
-            _ => return None,
+            character => {
+                encoded.push_str("_x");
+                encoded.push_str(&format!("{:x}", character as u32));
+                encoded.push('_');
+            }
         }
     }
     encoded.push_str("_c0");
@@ -811,22 +820,36 @@ pub(crate) fn legacy_raw_alias_comms_name(current: &str) -> Option<String> {
     let (mob_id, role, member) = split_member_comms_name(current)?;
     let legacy_member = member
         .strip_prefix("mk--")
-        .map(decode_legacy_member_alias_segment)?;
+        .and_then(decode_legacy_member_alias_segment)?;
     Some(format!("{mob_id}/{role}/{legacy_member}"))
 }
 
-fn decode_legacy_member_alias_segment(encoded: &str) -> String {
+fn decode_legacy_member_alias_segment(encoded: &str) -> Option<String> {
     let mut decoded = String::with_capacity(encoded.len());
-    let mut chars = encoded.chars().peekable();
+    let mut chars = encoded.chars();
     while let Some(ch) = chars.next() {
-        if ch == '_' && chars.peek() == Some(&'c') {
-            chars.next();
-            decoded.push(':');
-        } else {
+        if ch != '_' {
             decoded.push(ch);
+            continue;
+        }
+        match chars.next()? {
+            '_' => decoded.push('_'),
+            'c' => decoded.push(':'),
+            'x' => {
+                let mut hex = String::new();
+                loop {
+                    match chars.next()? {
+                        '_' => break,
+                        digit => hex.push(digit),
+                    }
+                }
+                let code = u32::from_str_radix(&hex, 16).ok()?;
+                decoded.push(char::from_u32(code)?);
+            }
+            _ => return None,
         }
     }
-    decoded
+    Some(decoded)
 }
 
 /// Bridge an [`AgentBuildConfig`] to a [`CreateSessionRequest`].
@@ -3591,6 +3614,42 @@ mod tests {
     }
 
     #[test]
+    fn encoded_stable_identity_accepts_legacy_generation_zero_runtime_binding() {
+        for (stable_member, legacy_member) in [
+            ("mk--agent_calice", "mk--rt_cagent_calice_c0"),
+            ("mk--agent_calice__smith", "mk--rt_cagent_calice__smith_c0"),
+            (
+                "mk--agent_calice_x2e_smith",
+                "mk--rt_cagent_calice_x2e_smith_c0",
+            ),
+        ] {
+            let current = format!("homecore/identity/{stable_member}");
+            let stored = format!("homecore/identity/{legacy_member}");
+            assert!(
+                resumed_comms_name_matches_current_or_legacy(&current, &stored),
+                "stable encoded member {stable_member} must prove its exact legacy generation-zero binding"
+            );
+        }
+    }
+
+    #[test]
+    fn encoded_stable_identity_rejects_unproven_legacy_runtime_binding() {
+        let current = "homecore/identity/mk--agent_calice";
+        for stored in [
+            "homecore/identity/mk--rt_cagent_cbob_c0",
+            "homecore/identity/mk--rt_cagent_calice_c1",
+            "other/identity/mk--rt_cagent_calice_c0",
+            "homecore/worker/mk--rt_cagent_calice_c0",
+            "homecore/identity/mk--agent_calice_x",
+        ] {
+            assert!(
+                !resumed_comms_name_matches_current_or_legacy(current, stored),
+                "unproven legacy binding {stored} must fail closed"
+            );
+        }
+    }
+
+    #[test]
     fn test_identity_runtime_alias_rejects_wrong_mob_role_member_or_generation() {
         let current = "homecore/identity/parent-1";
         for stored in [
@@ -3616,6 +3675,14 @@ mod tests {
         assert_eq!(
             mobkit_generation_zero_identity_runtime_alias("parent-1").as_deref(),
             Some("mk--rt_cidentity_cparent-1_c0")
+        );
+        assert_eq!(
+            mobkit_generation_zero_identity_runtime_alias("agent:alice_smith").as_deref(),
+            Some("mk--rt_cagent_calice__smith_c0")
+        );
+        assert_eq!(
+            mobkit_generation_zero_identity_runtime_alias("agent:alice.smith").as_deref(),
+            Some("mk--rt_cagent_calice_x2e_smith_c0")
         );
     }
 

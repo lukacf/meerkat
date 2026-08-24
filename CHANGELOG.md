@@ -28,6 +28,14 @@ them.
 
 ## [Unreleased]
 
+### Fixed
+
+- Resuming a MobKit session now recognizes the exact comms-safe stable member
+  identity as the successor of that same identity's legacy generation-zero
+  runtime binding. This preserves the session across the transition to stable
+  roster identities while continuing to reject wrong identities, generations,
+  mobs, roles, and malformed encodings.
+
 ## [0.8.26] - 2026-08-22
 
 ### Breaking

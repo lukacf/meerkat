@@ -295,7 +295,7 @@ pub(crate) async fn compile_desired_member_material(
             context: declaration.context.clone(),
             labels: declaration.labels.clone(),
             additional_instructions: declaration.additional_instructions.clone(),
-            system_prompt,
+            system_prompt: Some(system_prompt),
             tool_access_policy: declaration.tool_access_policy.clone(),
             tool_category_overrides: meerkat_core::ToolCategoryOverrides::default(),
             application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
@@ -385,12 +385,17 @@ pub(crate) fn spawn_spec_from_desired_member(
     spec.application_tool_policy = material.overlay.application_tool_policy.clone();
     spec.auth_binding = material.overlay.auth_binding.clone().map(Into::into);
     spec.budget_limits = material.overlay.budget_limits.clone();
-    spec.system_prompt_override = Some(match &material.overlay.system_prompt {
-        PortableSystemPrompt::Set { text } => {
-            super::handle::SpawnSystemPromptOverride::Replace(text.clone())
-        }
-        PortableSystemPrompt::Disable => super::handle::SpawnSystemPromptOverride::Disable,
-    });
+    spec.system_prompt_override =
+        material
+            .overlay
+            .system_prompt
+            .as_ref()
+            .map(|prompt| match prompt {
+                PortableSystemPrompt::Set { text } => {
+                    super::handle::SpawnSystemPromptOverride::Replace(text.clone())
+                }
+                PortableSystemPrompt::Disable => super::handle::SpawnSystemPromptOverride::Disable,
+            });
     spec.override_profile = Some(profile);
     spec.continuity_intent = super::handle::SpawnContinuityIntent::DurableIdentity {
         continuity_key: identity.as_str().to_string(),
@@ -702,6 +707,11 @@ pub(crate) async fn compile_portable_member_spec(
         runtime_mode,
     } = overlay;
 
+    let system_prompt = system_prompt.ok_or_else(|| {
+        MobError::Internal(format!(
+            "fresh portable member spec for '{agent_identity}' cannot inherit an existing session transcript"
+        ))
+    })?;
     let spec = PortableMemberSpec {
         mob_id: mob_id.as_str().to_string(),
         profile_name: profile_name.as_str().to_string(),

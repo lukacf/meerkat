@@ -12400,6 +12400,190 @@ async fn test_existing_member_adoption_tool_update_and_resume_keep_identity_and_
 }
 
 #[tokio::test]
+async fn test_existing_member_adoption_preserves_prompt_sequence_without_spawn_prompt_source() {
+    let definition = with_unique_mob_id(sample_definition(), "persisted-prompt-adoption");
+    let mob_id = definition.id.clone();
+    let member = AgentIdentity::from("worker-persisted-prompt");
+    let stale_prompt = "stale prompt with retired private context";
+    let intermediate_prompt = "intermediate unkeyed prompt";
+    let persisted_prompt = "HomeCore current agent-specific persisted prompt";
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let initial = service
+        .create_session(CreateSessionRequest {
+            injected_context: Vec::new(),
+            model: "claude-sonnet-4-5".to_string(),
+            prompt: "seed".to_string().into(),
+            system_prompt: meerkat_core::SystemPromptOverride::Set(stale_prompt.to_string()),
+            max_tokens: Some(4096),
+            event_tx: None,
+            build: Some(meerkat_core::service::SessionBuildOptions {
+                comms_name: Some(format!("{mob_id}/worker/{member}")),
+                ..Default::default()
+            }),
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+            labels: None,
+        })
+        .await
+        .expect("seed existing session");
+    let session_id = initial.session_id;
+    let mut evolved = service
+        .live_session_clone(&session_id)
+        .await
+        .expect("live session before prompt evolution");
+    evolved.append_system_message(intermediate_prompt);
+    evolved.append_system_message(persisted_prompt);
+    service.replace_live_session(evolved).await;
+    MobSessionService::discard_live_session(service.as_ref(), &session_id)
+        .await
+        .expect("discard live session while retaining the durable snapshot");
+
+    let event_store = InMemoryMobEventStore::new();
+    let runs = Arc::new(InMemoryMobRunStore::new());
+    let specs = Arc::new(InMemoryMobSpecStore::new());
+    let runtime_metadata = Arc::new(InMemoryMobRuntimeMetadataStore::new());
+    let identity_store = Arc::new(InMemoryMobIdentityStore::paired_with_event_store(
+        &event_store,
+        Arc::new(crate::store::SystemMobIdentityStoreClock),
+    ));
+    let storage = MobStorage {
+        events: Arc::new(event_store),
+        runs,
+        specs,
+        runtime_metadata,
+        identity: identity_store.clone(),
+        identity_member: Some(identity_store.clone()),
+        identity_status: Arc::new(InMemoryMobIdentityStatusStore::new()),
+        realm_profiles: None,
+    };
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create adoption mob without SpawnBasePromptSource");
+    handle
+        .attach_existing_session_as_member(
+            ProfileName::from("worker"),
+            member.clone(),
+            session_id.clone(),
+        )
+        .await
+        .expect("attach existing persisted session");
+
+    let adoption = crate::identity::AdoptMemberIdentityDeclaration {
+        mob_id: mob_id.clone(),
+        agent_identity: member.clone(),
+        request_id: crate::identity::IdentityAdoptionId::new("adopt-persisted-prompt")
+            .expect("valid adoption id"),
+        precondition: crate::identity::IdentityAdoptionPrecondition::ExpectedAbsent,
+        declaration_scope: crate::identity::IdentityDeclarationScopeId::new("homecore")
+            .expect("valid declaration scope"),
+        declaration_revision: 1,
+        session: crate::identity::DesiredSessionTarget {
+            session_id: session_id.clone(),
+            lineage_id: meerkat_core::SessionLineageId::for_session(&session_id),
+            lineage_generation: meerkat_core::SessionGeneration::INITIAL,
+            authority_policy: crate::identity::DesiredSessionAuthorityPolicy::RequireExisting,
+        },
+        member: crate::identity::IdentityProfileMemberDeclaration {
+            profile_name: ProfileName::from("worker"),
+            profile_override: None,
+            model_override: None,
+            external_addressable_override: None,
+            context: None,
+            labels: None,
+            additional_instructions: None,
+            system_prompt_override: None,
+            tool_access_policy: None,
+            auth_binding: None,
+            budget_limits: None,
+            runtime_mode: Some(meerkat_contracts::wire::WireMobRuntimeMode::AutonomousHost),
+            required_env_keys: Vec::new(),
+            required_local_callback_tools: Vec::new(),
+            execution: crate::identity::DesiredExecution::ControllingSession,
+        },
+        wiring_custody: crate::identity::IdentityWiringCustody::ExternalManaged,
+        owned_wiring: BTreeSet::new(),
+        convergence: crate::identity::IdentityConvergenceMode::Drain { max_wait_ms: 5_000 },
+    };
+    let mut clobbering_adoption = adoption.clone();
+    clobbering_adoption.member.system_prompt_override =
+        Some(meerkat_contracts::wire::PortableSystemPrompt::Set {
+            text: "reconstructed host base prompt".to_string(),
+        });
+    let error = handle
+        .adopt_member_identity_declaration(clobbering_adoption)
+        .await
+        .expect_err("adoption must reject a prompt that would clobber persisted state");
+    assert!(
+        error
+            .to_string()
+            .contains("cannot restate an existing session's durable system prompt"),
+        "prompt restatement rejection should be explicit: {error}"
+    );
+
+    handle
+        .adopt_member_identity_declaration(adoption.clone())
+        .await
+        .expect("adopt existing member while preserving transcript authority");
+
+    let record = match identity_store
+        .observe_identity_intent(&mob_id, &member)
+        .await
+        .expect("read adopted identity intent")
+    {
+        crate::identity::IdentityStoredObservation::Valid(record) => record,
+        other => panic!("expected valid adopted identity intent, got {other:?}"),
+    };
+    let crate::identity::IdentityIntent::Present {
+        member: desired_member,
+        ..
+    } = record.intent
+    else {
+        panic!("adoption must persist present intent");
+    };
+    assert!(
+        desired_member.material.overlay.system_prompt.is_none(),
+        "adoption must preserve the existing transcript instead of sealing one selected prompt row"
+    );
+    let rematerialization = super::spec_compiler::spawn_spec_from_desired_member(
+        &member,
+        &adoption.session,
+        &desired_member,
+    )
+    .expect("lower adopted desired member");
+    assert!(
+        rematerialization.system_prompt_override.is_none(),
+        "exact-session resume must not replace or collapse the persisted System sequence"
+    );
+    let history = service
+        .read_history(
+            &session_id,
+            meerkat_core::service::SessionHistoryQuery {
+                offset: 0,
+                limit: None,
+            },
+        )
+        .await
+        .expect("read preserved adopted history");
+    let system_prompts = history
+        .messages
+        .iter()
+        .filter_map(|message| match message {
+            meerkat_core::Message::System(system) => Some(system.content.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        system_prompts,
+        vec![stale_prompt, intermediate_prompt, persisted_prompt],
+        "adoption must leave every legacy unkeyed System row intact and ordered"
+    );
+    handle.shutdown().await.expect("shutdown adoption mob");
+}
+
+#[tokio::test]
 async fn test_mob_shutdown() {
     let (handle, _service) = create_test_mob(sample_definition()).await;
     handle.shutdown().await.expect("shutdown");
@@ -20555,7 +20739,7 @@ async fn test_respawn_contract_aligns_receipt_with_canonical_member_state() {
 }
 
 #[tokio::test]
-async fn test_respawn_with_successor_spec_commits_reprofiled_successor_atomically() {
+async fn test_respawn_with_successor_spec_preserves_omitted_binding_and_reprofiles_atomically() {
     let mut definition = sample_definition();
     definition.id = MobId::from("successor-spec-commit-mob");
     let (handle, _service) = create_test_mob(definition).await;
@@ -20577,7 +20761,6 @@ async fn test_respawn_with_successor_spec_commits_reprofiled_successor_atomicall
         .expect("predecessor exists");
 
     let mut successor = SpawnMemberSpec::new("lead", member_id.clone());
-    successor.binding = Some(crate::RuntimeBinding::Session);
     successor.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
     successor.labels = Some(BTreeMap::from([(
         "successor-policy".to_string(),

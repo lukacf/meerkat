@@ -17818,6 +17818,24 @@ impl MobActor {
             .await
             .map_err(MobError::from)?;
 
+        // Adoption records the baseline of an already-materialized member.
+        // Its ordered System messages are durable transcript state, including
+        // legacy histories with multiple unkeyed rows. A resolved one-message
+        // replacement cannot faithfully restate that sequence, and resume
+        // must not append, collapse, or reconstruct it.
+        if request.member.system_prompt_override.is_some() {
+            return Err(MobError::WiringError(
+                "identity adoption cannot restate an existing session's durable system prompt; omit system_prompt_override so the transcript remains authoritative"
+                    .to_string(),
+            ));
+        }
+        let mut compiled_declaration = request.member.clone();
+        // Satisfy the fresh-material compiler without consulting a mutable
+        // host prompt source, then replace the placeholder with the explicit
+        // exact-session preservation state below.
+        compiled_declaration.system_prompt_override =
+            Some(meerkat_contracts::wire::PortableSystemPrompt::Disable);
+
         let resolved_profile = if request.member.profile_override.is_none() {
             Some(
                 self.definition
@@ -17830,17 +17848,18 @@ impl MobActor {
         } else {
             None
         };
-        let material = super::spec_compiler::compile_desired_member_material(
+        let mut material = super::spec_compiler::compile_desired_member_material(
             super::spec_compiler::CompileDesiredMemberMaterialParams {
                 agent_identity: &request.agent_identity,
-                declaration: &request.member,
+                declaration: &compiled_declaration,
                 resolved_profile: resolved_profile.as_ref(),
                 definition: &self.definition,
-                base_prompt: self.spawn_base_prompt_source.as_deref(),
+                base_prompt: None,
                 non_portable_disabled: Vec::new(),
             },
         )
         .await?;
+        material.overlay.system_prompt = None;
         let material_runtime_mode = match material.overlay.runtime_mode {
             meerkat_contracts::wire::WireMobRuntimeMode::AutonomousHost => {
                 crate::MobRuntimeMode::AutonomousHost
@@ -38169,7 +38188,16 @@ impl MobActor {
                 "respawn successor for '{original_identity}' cannot auto-wire a parent; Meerkat restores machine-owned topology"
             ))));
         }
-        if placed_host.is_none() && replacement_spec.binding.as_ref() != Some(&snapshot.binding) {
+        // A successor-spec caller does not own the predecessor's runtime
+        // binding and the roster intentionally does not expose it. Omission
+        // therefore means preserve; only an explicit unequal binding is a
+        // forbidden change request.
+        if placed_host.is_none()
+            && replacement_spec
+                .binding
+                .as_ref()
+                .is_some_and(|binding| binding != &snapshot.binding)
+        {
             return Err(MobRespawnError::from(MobError::Internal(format!(
                 "spawn customizer cannot change respawn runtime binding for '{original_identity}'"
             ))));

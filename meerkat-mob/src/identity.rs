@@ -291,7 +291,11 @@ pub struct DesiredMemberOverlay {
     pub labels: Option<BTreeMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_instructions: Option<Vec<String>>,
-    pub system_prompt: PortableSystemPrompt,
+    /// Build-time prompt replacement for materializing a fresh member.
+    /// `None` is reserved for adoption of an existing exact session: its
+    /// durable transcript remains the sole prompt authority on resume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<PortableSystemPrompt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_access_policy: Option<WireResolvedToolAccessPolicy>,
     #[serde(default)]
@@ -3827,7 +3831,7 @@ pub(crate) fn identity_adoption_fixture(
             context: None,
             labels: None,
             additional_instructions: None,
-            system_prompt: PortableSystemPrompt::Disable,
+            system_prompt: Some(PortableSystemPrompt::Disable),
             tool_access_policy: None,
             tool_category_overrides: ToolCategoryOverrides::default(),
             application_tool_policy: ApplicationToolPolicyBinding::Unmanaged,

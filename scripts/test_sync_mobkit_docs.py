@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -37,6 +38,66 @@ class SyncMobKitDocsTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertEqual(sync.workspace_version(cargo_toml), "1.2.3")
+
+    def test_release_navigation_replaces_retired_pages_at_the_product_boundary(self) -> None:
+        source_config = {
+            "navigation": {
+                "tabs": [
+                    {
+                        "tab": "Documentation",
+                        "groups": [
+                            {
+                                "group": "Getting started",
+                                "pages": ["introduction", "quickstart"],
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+        site_config = {
+            "navigation": {
+                "products": [
+                    {"product": "Meerkat", "tabs": []},
+                    {
+                        "product": "MobKit",
+                        "description": "preserved",
+                        "tabs": [
+                            {
+                                "tab": "Plans",
+                                "groups": [
+                                    {
+                                        "group": "Plans",
+                                        "pages": [
+                                            "mobkit/plans/storage-unification-plan"
+                                        ],
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                ]
+            }
+        }
+
+        rendered = sync.site_config_for_source(source_config, site_config)
+
+        mobkit = rendered["navigation"]["products"][1]
+        self.assertEqual(mobkit["description"], "preserved")
+        self.assertEqual(
+            mobkit["tabs"][0]["groups"][0]["pages"],
+            ["mobkit/introduction", "mobkit/quickstart"],
+        )
+        self.assertNotIn("storage-unification-plan", json.dumps(rendered))
+        self.assertEqual(site_config["navigation"]["products"][1]["tabs"][0]["tab"], "Plans")
+
+    def test_release_navigation_requires_one_mobkit_product(self) -> None:
+        source_config = {"navigation": {"tabs": [{"tab": "Docs", "groups": []}]}}
+        with self.assertRaisesRegex(SystemExit, "exactly one MobKit product"):
+            sync.site_config_for_source(
+                source_config,
+                {"navigation": {"products": []}},
+            )
 
 
 if __name__ == "__main__":

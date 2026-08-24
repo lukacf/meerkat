@@ -37,11 +37,11 @@ class PublishMobKitDocsWorkflowTests(unittest.TestCase):
     def test_validates_then_publishes_only_generated_paths(self) -> None:
         docs_check = self.workflow.index("run: make docs-check")
         mint_check = self.workflow.index("mint@4.2.728 broken-links")
-        publish = self.workflow.index("git add docs/mobkit")
+        publish = self.workflow.index("git add docs/mobkit docs/docs.json")
 
         self.assertLess(docs_check, publish)
         self.assertLess(mint_check, publish)
-        self.assertIn("grep -Ev '^docs/mobkit/'", self.workflow[publish:])
+        self.assertIn("grep -Ev '^docs/(mobkit/|docs\\.json$)'", self.workflow[publish:])
         self.assertIn("git push origin HEAD:main", self.workflow[publish:])
 
 

@@ -13,6 +13,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import re
@@ -24,6 +25,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DESTINATION = ROOT / "docs" / "mobkit"
+SITE_CONFIG = ROOT / "docs" / "docs.json"
 ASSET_PATHS = ("images", "logo.png")
 ROOT_LINK_RE = re.compile(r'(?P<prefix>\]\(|(?:href|src)=["\'])/(?P<path>[^/])')
 REQUIRED_PAGE_ICONS = {
@@ -69,6 +71,54 @@ def flatten_pages(value: object) -> list[str]:
             for page in flatten_pages(value[key])
         ]
     return []
+
+
+def namespace_navigation(value: object, prefix: str) -> object:
+    """Prefix page references while preserving navigation labels and metadata."""
+    if isinstance(value, str):
+        return f"{prefix}/{value}"
+    if isinstance(value, list):
+        return [namespace_navigation(item, prefix) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: (
+                namespace_navigation(item, prefix)
+                if key in {"pages", "groups", "tabs", "products"}
+                else copy.deepcopy(item)
+            )
+            for key, item in value.items()
+        }
+    return copy.deepcopy(value)
+
+
+def site_config_for_source(
+    source_config: dict[str, object],
+    site_config: dict[str, object],
+) -> dict[str, object]:
+    """Replace the MobKit product tabs from the release-owned navigation."""
+    source_navigation = source_config.get("navigation")
+    if not isinstance(source_navigation, dict):
+        raise SystemExit("MobKit docs config has no navigation object")
+    source_tabs = source_navigation.get("tabs")
+    if not isinstance(source_tabs, list) or not source_tabs:
+        raise SystemExit("MobKit docs navigation contains no tabs")
+
+    rendered = copy.deepcopy(site_config)
+    site_navigation = rendered.get("navigation")
+    if not isinstance(site_navigation, dict):
+        raise SystemExit("docs/docs.json has no navigation object")
+    products = site_navigation.get("products")
+    if not isinstance(products, list):
+        raise SystemExit("docs/docs.json navigation has no products")
+    mobkit_products = [
+        product
+        for product in products
+        if isinstance(product, dict) and product.get("product") == "MobKit"
+    ]
+    if len(mobkit_products) != 1:
+        raise SystemExit("docs/docs.json must contain exactly one MobKit product")
+    mobkit_products[0]["tabs"] = namespace_navigation(source_tabs, "mobkit")
+    return rendered
 
 
 def git_output(source: Path, *args: str) -> str:
@@ -197,6 +247,12 @@ def build_snapshot(
 def main() -> int:
     args = parse_args()
     source = args.source.resolve()
+    source_config_path = source / "docs" / "docs.json"
+    if not source_config_path.is_file():
+        raise SystemExit(f"MobKit docs config not found: {source_config_path}")
+    source_config = json.loads(source_config_path.read_text(encoding="utf-8"))
+    site_config = json.loads(SITE_CONFIG.read_text(encoding="utf-8"))
+    expected_site_config = site_config_for_source(source_config, site_config)
 
     if args.check:
         if not DESTINATION.is_dir():
@@ -218,6 +274,11 @@ def main() -> int:
                     "MobKit docs snapshot is stale; run "
                     f"python3 scripts/sync-mobkit-docs.py {source}"
                 )
+        if site_config != expected_site_config:
+            raise SystemExit(
+                "MobKit docs navigation is stale; run "
+                f"python3 scripts/sync-mobkit-docs.py {source}"
+            )
         print("mobkit-docs-sync: ok")
         return 0
 
@@ -228,6 +289,10 @@ def main() -> int:
         DESTINATION,
         source_ref=args.source_ref,
         require_clean=args.require_clean,
+    )
+    SITE_CONFIG.write_text(
+        json.dumps(expected_site_config, indent=2) + "\n",
+        encoding="utf-8",
     )
     manifest = json.loads((DESTINATION / "_source.json").read_text())
     print(

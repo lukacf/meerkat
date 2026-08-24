@@ -491,6 +491,9 @@ async fn write_html_output_artifact(
     file.write_all(html.as_bytes())
         .await
         .map_err(|e| anyhow::anyhow!("Failed to write HTML artifact {}: {e}", path.display()))?;
+    file.flush()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to flush HTML artifact {}: {e}", path.display()))?;
     Ok(path)
 }
 

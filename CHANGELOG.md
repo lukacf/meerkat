@@ -28,6 +28,8 @@ them.
 
 ## [Unreleased]
 
+## [0.8.27] - 2026-08-24
+
 ### Fixed
 
 - Resuming a MobKit session now recognizes the exact comms-safe stable member
@@ -7094,7 +7096,8 @@ tag, so its comparison link uses v0.3.0 as the exact ancestry base.
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.8.26...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.8.27...HEAD
+[0.8.27]: https://github.com/lukacf/meerkat/compare/v0.8.26...v0.8.27
 [0.8.26]: https://github.com/lukacf/meerkat/compare/v0.8.25...v0.8.26
 [0.8.25]: https://github.com/lukacf/meerkat/compare/v0.8.24...v0.8.25
 [0.8.24]: https://github.com/lukacf/meerkat/compare/v0.8.23...v0.8.24

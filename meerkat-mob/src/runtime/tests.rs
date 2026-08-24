@@ -20555,6 +20555,114 @@ async fn test_respawn_contract_aligns_receipt_with_canonical_member_state() {
 }
 
 #[tokio::test]
+async fn test_respawn_with_successor_spec_commits_reprofiled_successor_atomically() {
+    let mut definition = sample_definition();
+    definition.id = MobId::from("successor-spec-commit-mob");
+    let (handle, _service) = create_test_mob(definition).await;
+    let member_id = AgentIdentity::from("successor-spec-target");
+    handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            member_id.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn predecessor");
+    let predecessor = handle
+        .get_member(&member_id)
+        .await
+        .expect("predecessor lookup")
+        .expect("predecessor exists");
+
+    let mut successor = SpawnMemberSpec::new("lead", member_id.clone());
+    successor.binding = Some(crate::RuntimeBinding::Session);
+    successor.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    successor.labels = Some(BTreeMap::from([(
+        "successor-policy".to_string(),
+        "applied".to_string(),
+    )]));
+    successor.initial_message = Some("start the successor".into());
+
+    let receipt = handle
+        .respawn_with_successor_spec(successor)
+        .await
+        .expect("successor respawn succeeds");
+    let committed = handle
+        .get_member(&member_id)
+        .await
+        .expect("successor lookup")
+        .expect("successor exists");
+
+    assert_eq!(receipt.identity, member_id);
+    assert_eq!(receipt.runtime_id(), &committed.agent_runtime_id);
+    assert_eq!(committed.role, ProfileName::from("lead"));
+    assert_eq!(committed.runtime_mode, crate::MobRuntimeMode::TurnDriven);
+    assert_eq!(
+        committed.labels.get("successor-policy").map(String::as_str),
+        Some("applied")
+    );
+    assert_eq!(
+        committed.agent_runtime_id.generation,
+        predecessor
+            .agent_runtime_id
+            .generation
+            .next()
+            .expect("test generation has a successor")
+    );
+}
+
+#[tokio::test]
+async fn test_respawn_with_successor_spec_rejects_session_adoption_before_retire() {
+    let mut definition = sample_definition();
+    definition.id = MobId::from("successor-spec-refusal-mob");
+    let (handle, _service) = create_test_mob(definition).await;
+    let member_id = AgentIdentity::from("successor-resume-refused");
+    let predecessor_ref = handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            member_id.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn predecessor");
+    let predecessor = handle
+        .get_member(&member_id)
+        .await
+        .expect("predecessor lookup")
+        .expect("predecessor exists");
+
+    let mut successor = SpawnMemberSpec::new("lead", member_id.clone())
+        .with_resume_bridge_session_id(
+            predecessor_ref
+                .bridge_session_id()
+                .cloned()
+                .expect("predecessor session"),
+        );
+    successor.binding = Some(crate::RuntimeBinding::Session);
+    let error = handle
+        .respawn_with_successor_spec(successor)
+        .await
+        .expect_err("successor cannot adopt a caller-selected session");
+    assert!(
+        error.to_string().contains("must use fresh launch mode"),
+        "unexpected refusal: {error}"
+    );
+
+    let still_live = handle
+        .get_member(&member_id)
+        .await
+        .expect("post-refusal lookup")
+        .expect("predecessor remains live");
+    assert_eq!(still_live.agent_runtime_id, predecessor.agent_runtime_id);
+    assert_eq!(still_live.fence_token, predecessor.fence_token);
+    assert_eq!(still_live.role, ProfileName::from("worker"));
+}
+
+#[tokio::test]
 async fn test_respawn_abandonment_append_failure_closes_reply_and_actor_channels() {
     let events = Arc::new(FaultInjectedMobEventStore::new());
     let (handle, _service) = create_test_mob_with_events(sample_definition(), events.clone()).await;

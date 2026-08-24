@@ -20856,11 +20856,12 @@ impl MobActor {
                 MobCommand::Respawn {
                     agent_identity,
                     initial_message,
+                    successor_spec,
                     reply_tx,
                 } => {
                     let respawn_identity = agent_identity.clone();
                     match boxed_arm_future(|| {
-                        self.handle_respawn(agent_identity, initial_message)
+                        self.handle_respawn(agent_identity, initial_message, successor_spec)
                     })
                     .await
                     {
@@ -38025,9 +38026,11 @@ impl MobActor {
         &mut self,
         agent_identity: AgentIdentity,
         initial_message: Option<ContentInput>,
+        successor_spec: Option<Box<super::handle::SpawnMemberSpec>>,
     ) -> Result<RespawnProgress, super::handle::MobRespawnError> {
         use super::handle::{MemberRespawnReceipt, MobRespawnError};
 
+        let explicit_successor = successor_spec.is_some();
         let (placed_host, snapshot, replacement_spec, original_identity) =
             boxed_arm_future(|| async {
                 tracing::debug!(
@@ -38114,22 +38117,27 @@ impl MobActor {
         );
 
                 let original_identity = AgentIdentity::from(agent_identity.as_str());
-                let mut replacement_spec = super::handle::SpawnMemberSpec::new(
-                    snapshot.profile_name.clone(),
-                    original_identity.clone(),
-                );
-        replacement_spec.initial_message = initial_message;
-        replacement_spec.runtime_mode = Some(snapshot.runtime_mode);
-        // ADJ-24: a placed member's replacement carries the machine placement
-        // fact and NO explicit binding (placement and binding are mutually
-        // exclusive on the remote lane — one transport story per member).
-        match placed_host.as_ref() {
-            Some(host) => replacement_spec.placement = Some(host.clone()),
-            None => replacement_spec.binding = Some(snapshot.binding.clone()),
-        }
-        replacement_spec.labels = Some(snapshot.labels.clone());
-        replacement_spec.override_profile = snapshot.effective_profile_override.clone();
-        replacement_spec.model_override = snapshot.effective_model_override.clone();
+                let mut replacement_spec = match successor_spec {
+                    Some(spec) => *spec,
+                    None => {
+                        let mut spec = super::handle::SpawnMemberSpec::new(
+                            snapshot.profile_name.clone(),
+                            original_identity.clone(),
+                        );
+                        spec.initial_message = initial_message;
+                        spec.runtime_mode = Some(snapshot.runtime_mode);
+                        // ADJ-24: a placed member's replacement carries the
+                        // machine placement fact and NO explicit binding.
+                        match placed_host.as_ref() {
+                            Some(host) => spec.placement = Some(host.clone()),
+                            None => spec.binding = Some(snapshot.binding.clone()),
+                        }
+                        spec.labels = Some(snapshot.labels.clone());
+                        spec.override_profile = snapshot.effective_profile_override.clone();
+                        spec.model_override = snapshot.effective_model_override.clone();
+                        spec
+                    }
+                };
         self.customize_spawn_spec(
             super::handle::SpawnSource::Respawn,
             None,
@@ -38142,10 +38150,23 @@ impl MobActor {
                 replacement_spec.identity
             ))));
         }
-        if replacement_spec.role_name != snapshot.profile_name {
+        if !explicit_successor && replacement_spec.role_name != snapshot.profile_name {
             return Err(MobRespawnError::from(MobError::Internal(format!(
                 "spawn customizer cannot change respawn profile for '{original_identity}' from '{}' to '{}'",
                 snapshot.profile_name, replacement_spec.role_name
+            ))));
+        }
+        if !matches!(
+            replacement_spec.launch_mode,
+            crate::launch::MemberLaunchMode::Fresh
+        ) {
+            return Err(MobRespawnError::from(MobError::Internal(format!(
+                "respawn successor for '{original_identity}' must use fresh launch mode; Meerkat mints the successor session"
+            ))));
+        }
+        if replacement_spec.auto_wire_parent {
+            return Err(MobRespawnError::from(MobError::Internal(format!(
+                "respawn successor for '{original_identity}' cannot auto-wire a parent; Meerkat restores machine-owned topology"
             ))));
         }
         if placed_host.is_none() && replacement_spec.binding.as_ref() != Some(&snapshot.binding) {
@@ -38201,10 +38222,10 @@ impl MobActor {
         }
 
         let super::handle::SpawnMemberSpec {
-            role_name: _,
+            role_name: replacement_profile_name,
             identity: _,
             initial_message: replacement_initial_message,
-            runtime_mode: _,
+            runtime_mode: replacement_runtime_mode,
             backend: _,
             binding: _,
             context: replacement_context,
@@ -38220,7 +38241,7 @@ impl MobActor {
             inherited_tool_filter: replacement_inherited_tool_filter,
             override_profile: replacement_profile_override,
             model_override: replacement_model_override,
-            objective_id: _,
+            objective_id: replacement_objective_id,
             auth_binding: replacement_auth_binding,
             external_tools: replacement_external_tools,
             compaction_curator_override: replacement_compaction_curator_override,
@@ -38377,7 +38398,7 @@ impl MobActor {
             }
             None => (
                 ContentInput::from(
-                    self.fallback_spawn_prompt(&snapshot.profile_name, &agent_identity),
+                    self.fallback_spawn_prompt(&replacement_profile_name, &agent_identity),
                 ),
                 None,
             ),
@@ -38387,7 +38408,7 @@ impl MobActor {
             p
         } else {
             self.definition
-                .resolve_profile(&snapshot.profile_name, self.realm_profile_store.as_ref())
+                .resolve_profile(&replacement_profile_name, self.realm_profile_store.as_ref())
                 .await?
         };
         if let Some(model) = replacement_model_override.as_ref() {
@@ -38397,13 +38418,14 @@ impl MobActor {
             &mut profile,
             replacement_tool_category_overrides,
         );
+        let replacement_runtime_mode = replacement_runtime_mode.unwrap_or(profile.runtime_mode);
         if replacement_inherited_tool_filter.is_some() && replacement_profile_override.is_none() {
             build::open_profile_tool_categories_for_inherited_filter(&mut profile);
         }
         let replacement_authorized_profile_material = self
             .authorize_spawn_profile_material(
                 &agent_identity,
-                &snapshot.profile_name,
+                &replacement_profile_name,
                 &profile,
                 "respawn_profile_authority",
             )
@@ -38416,7 +38438,7 @@ impl MobActor {
             self.external_tools_for_profile(&profile, replacement_external_tools.clone())?;
         let mut config = build::build_agent_config(build::BuildAgentConfigParams {
             mob_id: &self.definition.id,
-            profile_name: &snapshot.profile_name,
+            profile_name: &replacement_profile_name,
             agent_identity: &agent_identity,
             profile: &profile,
             definition: &self.definition,
@@ -38432,7 +38454,7 @@ impl MobActor {
             system_prompt_override: replacement_system_prompt_override,
         })
         .await?;
-        config.keep_alive = snapshot.runtime_mode == crate::MobRuntimeMode::AutonomousHost;
+        config.keep_alive = replacement_runtime_mode == crate::MobRuntimeMode::AutonomousHost;
         config.override_web_search = replacement_tool_category_overrides.web_search;
         config.application_tool_policy = replacement_application_tool_policy;
         config.tool_consequence_policy_registry = self.tool_consequence_policy_registry.clone();
@@ -38446,7 +38468,7 @@ impl MobActor {
         let req = with_spawn_budget_limits(req, replacement_budget_limits);
         let peer_name = render_member_comms_name(
             self.definition.id.as_str(),
-            snapshot.profile_name.as_str(),
+            replacement_profile_name.as_str(),
             agent_identity.as_str(),
         )?;
         let mut provision_request = ProvisionMemberRequest {
@@ -38547,14 +38569,14 @@ impl MobActor {
 
         let (respawn_inline_reply_tx, _respawn_inline_reply_rx) = oneshot::channel();
         let respawn_pending = PendingSpawn {
-            profile_name: snapshot.profile_name.clone(),
+            profile_name: replacement_profile_name.clone(),
             agent_identity: agent_identity.clone(),
             admitted_bridge_session_id,
             prompt: prompt.clone(),
             initial_turn_prompt: initial_turn_prompt.clone(),
             suppress_autonomous_initial_prompt: false,
             identity_member_permit: None,
-            runtime_mode: snapshot.runtime_mode,
+            runtime_mode: replacement_runtime_mode,
             labels: replacement_labels.clone(),
             owner_bridge_session_id: None,
             auto_wire_parent: false,
@@ -38567,7 +38589,7 @@ impl MobActor {
             }),
             effective_profile_override: replacement_profile_override.clone(),
             effective_model_override: replacement_model_override.clone(),
-            objective_id: None,
+            objective_id: replacement_objective_id,
             per_spawn_external_tools: replacement_external_tools.clone(),
             authorized_profile_material: replacement_authorized_profile_material.clone(),
             continuity_intent: replacement_continuity_intent.clone(),
@@ -38691,7 +38713,7 @@ impl MobActor {
                 member_ref = ?spawn_receipt.member_ref,
                 "MobActor::handle_respawn provisioned replacement member"
             );
-            if snapshot.runtime_mode == crate::MobRuntimeMode::AutonomousHost
+            if replacement_runtime_mode == crate::MobRuntimeMode::AutonomousHost
                 && let Err(capability_error) =
                     Self::ensure_autonomous_dispatch_capability_for_provisioner(
                         &self.provisioner,
@@ -38774,11 +38796,11 @@ impl MobActor {
                 "MobActor::handle_respawn finalizing replacement spawn"
             );
             let finalized = boxed_arm_future(|| self.finalize_spawn_from_pending(
-                    &snapshot.profile_name,
+                    &replacement_profile_name,
                     &agent_identity,
                     replacement_generation,
                     respawn_fence,
-                    snapshot.runtime_mode,
+                    replacement_runtime_mode,
                     prompt,
                     initial_turn_prompt,
                     false,
@@ -38793,7 +38815,7 @@ impl MobActor {
                     .then_some(snapshot.restore_wiring.clone()),
                     replacement_profile_override,
                     replacement_model_override,
-                    None,
+                    replacement_objective_id,
                     replacement_external_tools,
                     replacement_authorized_profile_material,
                     replacement_continuity_intent,

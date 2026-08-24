@@ -491,6 +491,7 @@ mod tests {
             MobCommand::Respawn {
                 agent_identity: crate::ids::AgentIdentity::from("m"),
                 initial_message: None,
+                successor_spec: None,
                 reply_tx: tx,
             }
             .required_control_scope(),

@@ -1506,6 +1506,12 @@ impl MemberRespawnReceipt {
             fence_token,
         }
     }
+
+    /// Exact runtime identity minted for the committed successor generation.
+    #[must_use]
+    pub fn runtime_id(&self) -> &AgentRuntimeId {
+        &self.agent_runtime_id
+    }
 }
 
 /// Report returned after rotating a mob-owned supervisor authority.
@@ -5442,11 +5448,13 @@ impl MobHandle {
             MobMachineCommand::Respawn {
                 agent_identity,
                 initial_message,
+                successor_spec,
             } => {
                 let receipt = self
                     .send_actor_command(|reply_tx| MobCommand::Respawn {
                         agent_identity,
                         initial_message,
+                        successor_spec,
                         reply_tx,
                     })
                     .await?;
@@ -8591,23 +8599,48 @@ impl MobHandle {
         identity: AgentIdentity,
         initial_message: Option<ContentInput>,
     ) -> Result<MemberRespawnReceipt, MobRespawnError> {
-        let reply = match self
+        match self
             .execute_machine_command(MobMachineCommand::Respawn {
                 agent_identity: identity,
                 initial_message,
+                successor_spec: None,
             })
             .await?
         {
             MobMachineCommandResult::Respawn(reply) => reply,
-            _ => {
-                return Err(MobRespawnError::from(MobError::Internal(
-                    "unexpected command result variant".into(),
-                )));
-            }
-        };
-        match reply {
-            Ok(receipt) => Ok(receipt),
-            Err(err) => Err(err),
+            _ => Err(MobRespawnError::from(MobError::Internal(
+                "unexpected command result variant".into(),
+            ))),
+        }
+    }
+
+    /// Atomically retire a member and replace it from a fully lowered spawn spec.
+    ///
+    /// The successor spec's exact identity names the existing roster member and
+    /// remains unchanged. Callers that encode public identities at the Mob
+    /// boundary must pass the already-encoded roster key here exactly once;
+    /// Meerkat does not decode or re-encode application-owned identity formats.
+    /// Meerkat owns predecessor retirement, successor
+    /// generation and fence minting, fresh session creation, and topology
+    /// restoration. Resume and fork launch modes are rejected because a
+    /// successor always receives a newly minted session.
+    pub async fn respawn_with_successor_spec(
+        &self,
+        successor_spec: SpawnMemberSpec,
+    ) -> Result<MemberRespawnReceipt, MobRespawnError> {
+        let identity = successor_spec.identity.clone();
+        match self
+            .execute_machine_command(MobMachineCommand::Respawn {
+                agent_identity: identity,
+                initial_message: None,
+                successor_spec: Some(Box::new(successor_spec)),
+            })
+            .await?
+        {
+            MobMachineCommandResult::Respawn(reply) => reply,
+            _ => Err(MobRespawnError::from(MobError::Internal(
+                "unexpected command result variant".into(),
+            ))),
         }
     }
 

@@ -78,6 +78,7 @@ pub(crate) enum MobMachineCommand {
     Respawn {
         agent_identity: AgentIdentity,
         initial_message: Option<meerkat_core::types::ContentInput>,
+        successor_spec: Option<Box<crate::runtime::SpawnMemberSpec>>,
     },
     RetireAll,
     /// Submit a unit of work to a mob member. Fence-token freshness,

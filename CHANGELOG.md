@@ -28,6 +28,14 @@ them.
 
 ## [Unreleased]
 
+### Added
+
+- `MobHandle::respawn_with_successor_spec` atomically replaces a member from a
+  fully lowered `SpawnMemberSpec` while Meerkat retains authority over
+  predecessor retirement, successor generation and fence minting, fresh
+  session creation, and topology restoration. `MemberRespawnReceipt::runtime_id`
+  exposes the exact committed successor runtime identity to bridge surfaces.
+
 ## [0.8.27] - 2026-08-24
 
 ### Fixed

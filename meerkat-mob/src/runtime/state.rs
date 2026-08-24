@@ -555,6 +555,7 @@ pub(super) enum MobCommand {
     Respawn {
         agent_identity: AgentIdentity,
         initial_message: Option<ContentInput>,
+        successor_spec: Option<Box<super::handle::SpawnMemberSpec>>,
         reply_tx: oneshot::Sender<
             Result<super::handle::MemberRespawnReceipt, super::handle::MobRespawnError>,
         >,

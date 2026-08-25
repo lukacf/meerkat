@@ -22,6 +22,23 @@ pub enum ModelTier {
     Supported,
 }
 
+/// Release maturity of a catalog model.
+///
+/// This is catalog authority, not a surface inference from a model name.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelReleaseStage {
+    /// Supported as part of the normal product surface.
+    #[default]
+    Stable,
+    /// Available only through an explicit experimental admission path.
+    Experimental,
+    /// Defined by operator configuration rather than the built-in catalog.
+    OperatorDefined,
+}
+
 /// A curated model entry in the catalog.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CatalogEntry {
@@ -33,6 +50,9 @@ pub struct CatalogEntry {
     pub provider: &'static str,
     /// Recommendation tier.
     pub tier: ModelTier,
+    /// Release maturity and admission class.
+    #[serde(default)]
+    pub release_stage: ModelReleaseStage,
     /// Maximum input context window in tokens, if known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u32>,

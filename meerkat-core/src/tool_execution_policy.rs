@@ -60,6 +60,24 @@ use crate::types::{ToolCallView, ToolDef, ToolNameSet};
 use async_trait::async_trait;
 use std::sync::Arc;
 
+/// Process-local authority consulted immediately before an actual tool call.
+///
+/// This seam is intentionally asynchronous: provisional execution may resolve
+/// and advertise the ordinary tool catalog while the final authority needed
+/// to execute a call is still pending. Implementations wait for their owning
+/// generated machine rather than returning a model-visible retry error.
+///
+/// The admission object does not replace [`ToolExecutionPolicy`]. Once it
+/// admits a call, the ordinary access and consequence policies still apply.
+#[async_trait]
+pub trait ToolDispatchAdmission: Send + Sync {
+    async fn await_dispatch_admission(
+        &self,
+        call: ToolCallView<'_>,
+        context: Option<&ToolDispatchContext>,
+    ) -> Result<(), ToolError>;
+}
+
 /// Error resolving a [`ToolAccessPolicy`] into a [`ToolExecutionPolicy`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ToolExecutionPolicyError {
@@ -267,6 +285,7 @@ pub struct ExecutionPolicyGatedDispatcher<T: AgentToolDispatcher + ?Sized> {
     inner: Arc<T>,
     policy: ToolExecutionPolicy,
     consequence_policy: Option<crate::BoundToolConsequencePolicy>,
+    dispatch_admission: Option<Arc<dyn ToolDispatchAdmission>>,
 }
 
 impl<T: AgentToolDispatcher + ?Sized> ExecutionPolicyGatedDispatcher<T> {
@@ -276,6 +295,7 @@ impl<T: AgentToolDispatcher + ?Sized> ExecutionPolicyGatedDispatcher<T> {
             inner,
             policy,
             consequence_policy: None,
+            dispatch_admission: None,
         }
     }
 
@@ -286,6 +306,17 @@ impl<T: AgentToolDispatcher + ?Sized> ExecutionPolicyGatedDispatcher<T> {
         consequence_policy: crate::BoundToolConsequencePolicy,
     ) -> Self {
         self.consequence_policy = Some(consequence_policy);
+        self
+    }
+
+    /// Attach a process-local pre-dispatch admission authority.
+    ///
+    /// The factory applies this wrapper after every dispatcher composition, so
+    /// the check covers built-ins, dynamic gateways, MCP, Mob, memory, and
+    /// catalog-control tools at the last actual dispatch boundary.
+    #[must_use]
+    pub fn with_dispatch_admission(mut self, admission: Arc<dyn ToolDispatchAdmission>) -> Self {
+        self.dispatch_admission = Some(admission);
         self
     }
 
@@ -336,6 +367,17 @@ impl<T: AgentToolDispatcher + ?Sized> ExecutionPolicyGatedDispatcher<T> {
             .evaluate(call, context.and_then(ToolDispatchContext::run_id).cloned())
             .await
     }
+
+    async fn await_dispatch_admission(
+        &self,
+        call: ToolCallView<'_>,
+        context: Option<&ToolDispatchContext>,
+    ) -> Result<(), ToolError> {
+        let Some(admission) = self.dispatch_admission.as_ref() else {
+            return Ok(());
+        };
+        admission.await_dispatch_admission(call, context).await
+    }
 }
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -357,6 +399,10 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher
 
     fn tool_mutation_class(&self, tool_name: &str) -> ToolMutationClass {
         self.inner.tool_mutation_class(tool_name)
+    }
+
+    fn execution_binding_epoch(&self, tool_name: &str) -> u64 {
+        self.inner.execution_binding_epoch(tool_name)
     }
 
     fn pending_catalog_sources(&self) -> Arc<[String]> {
@@ -409,10 +455,31 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher
             .resolve_execution_plan(call, dispatch_context, resolution_context)
     }
 
+    fn validate_resolved_execution_plan(
+        &self,
+        call: ToolCallView<'_>,
+        resolution_context: &crate::ToolExecutionResolutionContext,
+        plan: &crate::ResolvedToolExecutionPlan,
+    ) -> Result<(), crate::ToolExecutionResolutionError> {
+        if !self.permits_inner_call(call.name) {
+            return Err(match self.denial_error(call.name) {
+                ToolError::NotFound { .. } => crate::ToolExecutionResolutionError::NotFound {
+                    tool_name: call.name.to_string(),
+                },
+                _ => crate::ToolExecutionResolutionError::AccessDenied {
+                    tool_name: call.name.to_string(),
+                },
+            });
+        }
+        self.inner
+            .validate_resolved_execution_plan(call, resolution_context, plan)
+    }
+
     async fn dispatch(
         &self,
         call: ToolCallView<'_>,
     ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+        self.await_dispatch_admission(call, None).await?;
         if !self.permits_inner_call(call.name) {
             return Err(self.denial_error(call.name));
         }
@@ -425,6 +492,7 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher
         call: ToolCallView<'_>,
         context: &ToolDispatchContext,
     ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+        self.await_dispatch_admission(call, Some(context)).await?;
         if !self.permits_inner_call(call.name) {
             return Err(self.denial_error(call.name));
         }
@@ -439,6 +507,7 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher
         context: &ToolDispatchContext,
         plan: &crate::ResolvedToolExecutionPlan,
     ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+        self.await_dispatch_admission(call, Some(context)).await?;
         if !self.permits_inner_call(call.name) {
             return Err(self.denial_error(call.name));
         }
@@ -477,6 +546,7 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher
                 inner,
                 policy: owned.policy,
                 consequence_policy: owned.consequence_policy,
+                dispatch_admission: owned.dispatch_admission,
             });
             Ok(if bound {
                 BindOutcome::Bound(gated)
@@ -489,6 +559,7 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher
                     inner: owned.inner,
                     policy: owned.policy,
                     consequence_policy: owned.consequence_policy,
+                    dispatch_admission: owned.dispatch_admission,
                 },
             )))
         }
@@ -539,6 +610,43 @@ mod tests {
     };
     use std::collections::BTreeSet;
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct BlockingAdmission {
+        released: AtomicBool,
+        notify: tokio::sync::Notify,
+    }
+
+    impl BlockingAdmission {
+        fn new() -> Self {
+            Self {
+                released: AtomicBool::new(false),
+                notify: tokio::sync::Notify::new(),
+            }
+        }
+
+        fn release(&self) {
+            self.released.store(true, Ordering::Release);
+            self.notify.notify_waiters();
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ToolDispatchAdmission for BlockingAdmission {
+        async fn await_dispatch_admission(
+            &self,
+            _call: ToolCallView<'_>,
+            _context: Option<&ToolDispatchContext>,
+        ) -> Result<(), ToolError> {
+            loop {
+                let notified = self.notify.notified();
+                if self.released.load(Ordering::Acquire) {
+                    return Ok(());
+                }
+                notified.await;
+            }
+        }
+    }
 
     fn tool_def(name: &str) -> Arc<ToolDef> {
         Arc::new(ToolDef::new(
@@ -1512,6 +1620,45 @@ mod tests {
             .expect_err("static policy must remain authoritative");
         assert_eq!(error, ToolError::access_denied("beta"));
         assert!(inner.dispatched().is_empty());
+    }
+
+    #[tokio::test]
+    async fn dispatch_admission_is_outermost_and_still_intersects_ordinary_policy() {
+        let inner = Arc::new(SpyDispatcher::new(&["alpha", "beta"]));
+        let admission = Arc::new(BlockingAdmission::new());
+        let gated = Arc::new(
+            ExecutionPolicyGatedDispatcher::new(Arc::clone(&inner), allow_list(&["alpha"]))
+                .with_dispatch_admission(Arc::clone(&admission) as Arc<dyn ToolDispatchAdmission>),
+        );
+
+        let pending = tokio::spawn({
+            let gated = Arc::clone(&gated);
+            async move { dispatch_named_with_context(gated.as_ref(), "alpha").await }
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            inner.dispatched().is_empty(),
+            "inner dispatcher must not observe a provisional tool call"
+        );
+
+        let denied = tokio::spawn({
+            let gated = Arc::clone(&gated);
+            async move { dispatch_named_with_context(gated.as_ref(), "beta").await }
+        });
+        tokio::task::yield_now().await;
+        assert!(inner.dispatched().is_empty());
+
+        admission.release();
+        pending
+            .await
+            .expect("dispatch task")
+            .expect("released exact operation must dispatch");
+        let denied = denied
+            .await
+            .expect("denied dispatch task")
+            .expect_err("ordinary policy must still narrow released admission");
+        assert_eq!(denied, ToolError::access_denied("beta"));
+        assert_eq!(inner.dispatched(), vec!["alpha"]);
     }
 
     struct WedgedConsequenceSnapshot;

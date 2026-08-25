@@ -11,7 +11,7 @@ use meerkat_contracts::{
 };
 use meerkat_core::realtime_transcript::{AppendRealtimeTranscript, TranscriptLane};
 use meerkat_core::{
-    ContentBlock, ImageData, Message, Provider, RealtimeOpenProjectionAdmission,
+    ContentBlock, ImageData, InteractionId, Message, Provider, RealtimeOpenProjectionAdmission,
     RealtimeOpenProjectionLease, RealtimeTranscriptEvent, RealtimeTranscriptRole,
     RealtimeUserContentIdentity, RealtimeUserContentTombstone, ToolCallId, ToolDef, ToolName,
     ToolResult,
@@ -1623,7 +1623,7 @@ pub struct OpenAiRealtimeSession {
     /// [`truncate_assistant_output`]. Used to correlate the server's
     /// `conversation.item.truncated` with the playback cursor when emitting
     /// `AssistantTranscriptTruncated`.
-    pending_truncations: BTreeMap<String, u64>,
+    pending_truncations: BTreeMap<String, PendingPlaybackTruncation>,
     /// R1: snapshot of the model id this OpenAI realtime session was opened
     /// against. The OpenAI Realtime API does not expose a mutable `model`
     /// field on `session.update`; the model is locked to whatever the
@@ -1651,6 +1651,12 @@ pub struct OpenAiRealtimeSession {
     /// these facts are typed values that follow model identity, not process
     /// env reads scattered across the adapter.
     realtime_policy: OpenAiRealtimePolicy,
+}
+
+struct PendingPlaybackTruncation {
+    interaction_id: Option<InteractionId>,
+    audio_played_ms: u64,
+    reported_playback_prefix: Option<String>,
 }
 
 struct PendingRealtimeImageInput {
@@ -2994,27 +3000,19 @@ impl OpenAiRealtimeSession {
                 if self.is_projected_seed_item(&item_id) {
                     return Ok(None);
                 }
-                // Honor the server-side truncation cursor over any stale
-                // client-reported one: the canonical session must reflect
-                // what OpenAI considers heard, not what the client guessed.
-                // Fall back to the adapter's remembered playback cursor when
-                // the server cursor is less than what we captured.
+                // The server acknowledgement confirms the provider-side audio
+                // truncation point. Canonical transcript replacement still
+                // requires exact caller-reported prefix text; a millisecond
+                // cursor cannot prove a text prefix or biological hearing.
                 let authoritative_ms = u64::from(audio_end_ms);
-                let audio_played_ms = self
-                    .pending_truncations
-                    .remove(&item_id)
-                    .map(|client_ms| authoritative_ms.max(client_ms))
-                    .unwrap_or(authoritative_ms);
-                // Best-effort truncated transcript: slice the accumulated
-                // transcript delta for this item at the same char offset as
-                // the audio-end fraction of the original duration. Providers
-                // that cannot supply an exact projection leave `None` and
-                // downstream projectors leave the existing transcript intact.
-                let truncated_text = self
-                    .pending_output_audio_transcripts
-                    .get(&openai_output_audio_transcript_key(&item_id, 0))
-                    .cloned();
+                let pending = self.pending_truncations.remove(&item_id);
+                let audio_played_ms = pending.as_ref().map_or(authoritative_ms, |pending| {
+                    authoritative_ms.max(pending.audio_played_ms)
+                });
+                let interaction_id = pending.as_ref().and_then(|pending| pending.interaction_id);
+                let truncated_text = pending.and_then(|pending| pending.reported_playback_prefix);
                 Some(RealtimeSessionEvent::AssistantTranscriptTruncated {
+                    interaction_id,
                     response_id: self.response_id_for_item(&item_id),
                     item_id,
                     // OpenAI's `conversation.item.truncated` server event echoes
@@ -3650,8 +3648,14 @@ impl RealtimeSession for OpenAiRealtimeSession {
         // Remember the pending truncation so the `conversation.item.truncated`
         // server event can emit the AssistantTranscriptTruncated session
         // event with the canonical playback cursor.
-        self.pending_truncations
-            .insert(item_id.clone(), audio_played_ms);
+        self.pending_truncations.insert(
+            item_id.clone(),
+            PendingPlaybackTruncation {
+                interaction_id: None,
+                audio_played_ms,
+                reported_playback_prefix: None,
+            },
+        );
         let clamped_ms = u32::try_from(audio_played_ms).unwrap_or(u32::MAX);
         self.raw_mut()?
             .send_raw(ClientEvent::ConversationItemTruncate {
@@ -4568,6 +4572,8 @@ fn realtime_transcript_payload_bytes(event: &RealtimeTranscriptEvent) -> usize {
         | RealtimeTranscriptEvent::AssistantTranscriptDelta { delta, .. } => delta.len(),
         RealtimeTranscriptEvent::ItemObserved { .. }
         | RealtimeTranscriptEvent::ItemSkipped { .. }
+        | RealtimeTranscriptEvent::AssistantPlaybackTargetAdmitted { .. }
+        | RealtimeTranscriptEvent::AssistantPlaybackTargetResolved { .. }
         | RealtimeTranscriptEvent::AssistantTurnCompleted { .. }
         | RealtimeTranscriptEvent::AssistantTurnInterrupted { .. } => 0,
     }
@@ -6168,12 +6174,29 @@ async fn execute_openai_live_command_with_budget(
             Ok(())
         }
         LiveAdapterCommand::TruncateAssistantOutput {
+            interaction_id,
             item_id,
             content_index,
             audio_played_ms,
+            reported_playback_prefix,
         } => {
+            session.pending_truncations.insert(
+                item_id.clone(),
+                PendingPlaybackTruncation {
+                    interaction_id: Some(interaction_id),
+                    audio_played_ms,
+                    reported_playback_prefix,
+                },
+            );
+            let clamped_ms = u32::try_from(audio_played_ms).unwrap_or(u32::MAX);
             session
-                .truncate_assistant_output(item_id, content_index, audio_played_ms)
+                .raw_mut()?
+                .send_raw(ClientEvent::ConversationItemTruncate {
+                    event_id: None,
+                    item_id,
+                    content_index,
+                    audio_end_ms: clamped_ms,
+                })
                 .await?;
             Ok(())
         }
@@ -6327,12 +6350,14 @@ fn translate_realtime_event(event: RealtimeSessionEvent) -> LiveAdapterObservati
             arguments,
         },
         RealtimeSessionEvent::AssistantTranscriptTruncated {
+            interaction_id,
             response_id,
             item_id,
             content_index,
             truncated_text,
             ..
         } => LiveAdapterObservation::AssistantTranscriptTruncated {
+            interaction_id,
             provider_item_id: Some(item_id),
             previous_item_id: None,
             content_index,

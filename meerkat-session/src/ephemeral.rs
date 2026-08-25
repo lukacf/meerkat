@@ -1228,6 +1228,70 @@ enum SessionCommand {
             Result<RealtimeTranscriptApplyOutcome, meerkat_core::error::AgentError>,
         >,
     },
+    AdmitLiveAssistantPlaybackTarget {
+        channel_id: meerkat_core::LiveChannelId,
+        interaction_id: meerkat_core::InteractionId,
+        response_id: String,
+        item_id: String,
+        content_index: u32,
+        reply_tx: oneshot::Sender<
+            Result<meerkat_core::LiveAssistantPlaybackTarget, meerkat_core::error::AgentError>,
+        >,
+    },
+    ResolveLiveAssistantPlaybackTarget {
+        channel_id: meerkat_core::LiveChannelId,
+        item_id: String,
+        content_index: u32,
+        reply_tx: oneshot::Sender<Option<meerkat_core::LiveAssistantPlaybackTarget>>,
+    },
+    ResolveLiveAssistantPlaybackOnChannelClose {
+        channel_id: meerkat_core::LiveChannelId,
+        reply_tx: oneshot::Sender<
+            Result<
+                Option<meerkat_core::LiveAssistantPlaybackTruncationEvidence>,
+                meerkat_core::error::AgentError,
+            >,
+        >,
+    },
+    CommitLiveUserTranscriptFinal {
+        provisional: meerkat_core::ProvisionalLiveHandoff,
+        final_event: Option<RealtimeTranscriptEvent>,
+        reply_tx: oneshot::Sender<
+            Result<
+                meerkat_core::FinalLiveUserTranscriptCommitEvidence,
+                meerkat_core::error::AgentError,
+            >,
+        >,
+    },
+    CommitLiveAssistantPlaybackTruncation {
+        channel_id: meerkat_core::LiveChannelId,
+        interaction_id: meerkat_core::InteractionId,
+        response_id: String,
+        item_id: String,
+        content_index: u32,
+        evidence: meerkat_core::LiveAssistantPlaybackEvidence,
+        reply_tx: oneshot::Sender<
+            Result<
+                meerkat_core::LiveAssistantPlaybackTruncationEvidence,
+                meerkat_core::error::AgentError,
+            >,
+        >,
+    },
+    CommitLiveAssistantPlaybackComplete {
+        channel_id: meerkat_core::LiveChannelId,
+        interaction_id: meerkat_core::InteractionId,
+        response_id: String,
+        item_id: String,
+        content_index: u32,
+        stop_reason: meerkat_core::StopReason,
+        usage: meerkat_core::TurnUsage,
+        reply_tx: oneshot::Sender<
+            Result<
+                meerkat_core::LiveAssistantPlaybackTruncationEvidence,
+                meerkat_core::error::AgentError,
+            >,
+        >,
+    },
     DispatchExternalToolCall {
         call: meerkat_core::ToolCall,
         timeout_policy: meerkat_core::ToolDispatchTimeoutPolicy,
@@ -2081,6 +2145,72 @@ pub trait SessionAgent: Send {
     ) -> Result<RealtimeTranscriptApplyOutcome, meerkat_core::error::AgentError> {
         Err(meerkat_core::error::AgentError::ConfigError(
             "realtime transcript append is not supported by this session agent".to_string(),
+        ))
+    }
+
+    /// Observe one exact unmaterialized spoken segment before generated
+    /// playback-prefix authority decides whether canonical truncation is legal.
+    fn staged_realtime_assistant_segment_text(
+        &self,
+        _response_id: &str,
+        _item_id: &str,
+        _content_index: u32,
+    ) -> Option<String> {
+        None
+    }
+
+    fn staged_realtime_assistant_segment_is_final(
+        &self,
+        _response_id: &str,
+        _item_id: &str,
+        _content_index: u32,
+    ) -> bool {
+        false
+    }
+
+    /// Admit the exact foreground assistant playback target once.
+    fn admit_live_assistant_playback_target(
+        &mut self,
+        _channel_id: &meerkat_core::LiveChannelId,
+        _interaction_id: meerkat_core::InteractionId,
+        _response_id: &str,
+        _item_id: &str,
+        _content_index: u32,
+    ) -> Result<meerkat_core::LiveAssistantPlaybackTarget, meerkat_core::error::AgentError> {
+        Err(meerkat_core::error::AgentError::ConfigError(
+            "live assistant playback target admission is not supported by this session agent"
+                .to_string(),
+        ))
+    }
+
+    /// Resolve the exact durable target for a terminal playback report.
+    fn live_assistant_playback_target(
+        &self,
+        _channel_id: &meerkat_core::LiveChannelId,
+        _item_id: &str,
+        _content_index: u32,
+    ) -> Option<meerkat_core::LiveAssistantPlaybackTarget> {
+        None
+    }
+
+    fn live_assistant_playback_target_for_channel(
+        &self,
+        _channel_id: &meerkat_core::LiveChannelId,
+    ) -> Option<meerkat_core::LiveAssistantPlaybackTarget> {
+        None
+    }
+
+    fn resolve_live_assistant_playback_target(
+        &mut self,
+        _channel_id: &meerkat_core::LiveChannelId,
+        _interaction_id: meerkat_core::InteractionId,
+        _response_id: &str,
+        _item_id: &str,
+        _content_index: u32,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        Err(meerkat_core::error::AgentError::ConfigError(
+            "live assistant playback target resolution is not supported by this session agent"
+                .to_string(),
         ))
     }
 
@@ -3466,6 +3596,233 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                     "Session task dropped the reply channel".to_string(),
                 ))
             })?
+            .map_err(SessionError::Agent)
+    }
+
+    /// Admit the exact foreground assistant target in the owning session
+    /// actor. Replay returns the original interaction; no terminal caller can
+    /// mint or replace it.
+    pub async fn admit_live_assistant_playback_target(
+        &self,
+        id: &SessionId,
+        channel_id: meerkat_core::LiveChannelId,
+        interaction_id: meerkat_core::InteractionId,
+        response_id: String,
+        item_id: String,
+        content_index: u32,
+    ) -> Result<meerkat_core::LiveAssistantPlaybackTarget, SessionError> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(id)
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        handle
+            .command_tx
+            .send(SessionCommand::AdmitLiveAssistantPlaybackTarget {
+                channel_id,
+                interaction_id,
+                response_id,
+                item_id,
+                content_index,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task has exited".to_string(),
+                ))
+            })?;
+        reply_rx
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task dropped the reply channel".to_string(),
+                ))
+            })?
+            .map_err(SessionError::Agent)
+    }
+
+    /// Resolve a previously admitted target. This read never creates an
+    /// interaction identity.
+    pub async fn live_assistant_playback_target(
+        &self,
+        id: &SessionId,
+        channel_id: meerkat_core::LiveChannelId,
+        item_id: String,
+        content_index: u32,
+    ) -> Result<Option<meerkat_core::LiveAssistantPlaybackTarget>, SessionError> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(id)
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        handle
+            .command_tx
+            .send(SessionCommand::ResolveLiveAssistantPlaybackTarget {
+                channel_id,
+                item_id,
+                content_index,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task has exited".to_string(),
+                ))
+            })?;
+        reply_rx.await.map_err(|_| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                "Session task dropped the reply channel".to_string(),
+            ))
+        })
+    }
+
+    /// Abandon the exact pending assistant output on channel close through
+    /// SessionDocument's close-specific Unmeasured terminal authority.
+    pub async fn resolve_live_assistant_playback_on_channel_close(
+        &self,
+        id: &SessionId,
+        channel_id: meerkat_core::LiveChannelId,
+    ) -> Result<Option<meerkat_core::LiveAssistantPlaybackTruncationEvidence>, SessionError> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(id)
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        handle
+            .command_tx
+            .send(SessionCommand::ResolveLiveAssistantPlaybackOnChannelClose {
+                channel_id,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| SessionError::Agent(meerkat_core::error::AgentError::Cancelled))?;
+        reply_rx
+            .await
+            .map_err(|_| SessionError::Agent(meerkat_core::error::AgentError::Cancelled))?
+            .map_err(SessionError::Agent)
+    }
+
+    /// Commit provider-final live user input through canonical transcript and
+    /// SessionDocument authority, returning non-forgeable reconciliation
+    /// evidence only after both steps succeed in the session actor.
+    ///
+    /// `None` is the explicit terminal missing-input observation. A present
+    /// event must be `UserTranscriptFinal` for the exact provider user-turn
+    /// correlation carried by `provisional`.
+    pub async fn commit_live_user_transcript_final(
+        &self,
+        id: &SessionId,
+        provisional: meerkat_core::ProvisionalLiveHandoff,
+        final_event: Option<RealtimeTranscriptEvent>,
+    ) -> Result<meerkat_core::FinalLiveUserTranscriptCommitEvidence, SessionError> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(id)
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        handle
+            .command_tx
+            .send(SessionCommand::CommitLiveUserTranscriptFinal {
+                provisional,
+                final_event,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task has exited".to_string(),
+                ))
+            })?;
+        reply_rx
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task dropped the reply channel".to_string(),
+                ))
+            })?
+            .map_err(SessionError::Agent)
+    }
+
+    /// Apply an assistant playback-prefix observation only after generated
+    /// SessionDocument authority classifies the exact interaction evidence.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn commit_live_assistant_playback_truncation(
+        &self,
+        id: &SessionId,
+        channel_id: meerkat_core::LiveChannelId,
+        interaction_id: meerkat_core::InteractionId,
+        response_id: String,
+        item_id: String,
+        content_index: u32,
+        evidence: meerkat_core::LiveAssistantPlaybackEvidence,
+    ) -> Result<meerkat_core::LiveAssistantPlaybackTruncationEvidence, SessionError> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(id)
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        handle
+            .command_tx
+            .send(SessionCommand::CommitLiveAssistantPlaybackTruncation {
+                channel_id,
+                interaction_id,
+                response_id,
+                item_id,
+                content_index,
+                evidence,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task has exited".to_string(),
+                ))
+            })?;
+        reply_rx
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task dropped the reply channel".to_string(),
+                ))
+            })?
+            .map_err(SessionError::Agent)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn commit_live_assistant_playback_complete(
+        &self,
+        id: &SessionId,
+        channel_id: meerkat_core::LiveChannelId,
+        interaction_id: meerkat_core::InteractionId,
+        response_id: String,
+        item_id: String,
+        content_index: u32,
+        stop_reason: meerkat_core::StopReason,
+        usage: meerkat_core::TurnUsage,
+    ) -> Result<meerkat_core::LiveAssistantPlaybackTruncationEvidence, SessionError> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(id)
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        handle
+            .command_tx
+            .send(SessionCommand::CommitLiveAssistantPlaybackComplete {
+                channel_id,
+                interaction_id,
+                response_id,
+                item_id,
+                content_index,
+                stop_reason,
+                usage,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| SessionError::Agent(meerkat_core::error::AgentError::Cancelled))?;
+        reply_rx
+            .await
+            .map_err(|_| SessionError::Agent(meerkat_core::error::AgentError::Cancelled))?
             .map_err(SessionError::Agent)
     }
 
@@ -5599,6 +5956,24 @@ async fn drain_session_task_commands<A: SessionAgent>(
             SessionCommand::AppendRealtimeTranscriptEvent { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(meerkat_core::error::AgentError::Cancelled));
             }
+            SessionCommand::AdmitLiveAssistantPlaybackTarget { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(meerkat_core::error::AgentError::Cancelled));
+            }
+            SessionCommand::ResolveLiveAssistantPlaybackTarget { reply_tx, .. } => {
+                let _ = reply_tx.send(None);
+            }
+            SessionCommand::ResolveLiveAssistantPlaybackOnChannelClose { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(meerkat_core::error::AgentError::Cancelled));
+            }
+            SessionCommand::CommitLiveUserTranscriptFinal { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(meerkat_core::error::AgentError::Cancelled));
+            }
+            SessionCommand::CommitLiveAssistantPlaybackTruncation { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(meerkat_core::error::AgentError::Cancelled));
+            }
+            SessionCommand::CommitLiveAssistantPlaybackComplete { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(meerkat_core::error::AgentError::Cancelled));
+            }
             SessionCommand::DispatchExternalToolCall { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(meerkat_core::error::AgentError::Cancelled));
             }
@@ -6594,6 +6969,128 @@ async fn session_task<A: SessionAgent>(
                         }
                     }
                 }
+                let _ = reply_tx.send(result);
+            }
+            SessionCommand::AdmitLiveAssistantPlaybackTarget {
+                channel_id,
+                interaction_id,
+                response_id,
+                item_id,
+                content_index,
+                reply_tx,
+            } => {
+                let result = crate::live_transcript_authority::admit_live_assistant_playback_target(
+                    &mut agent,
+                    &session_id,
+                    channel_id,
+                    interaction_id,
+                    response_id,
+                    item_id,
+                    content_index,
+                );
+                let _ = reply_tx.send(result);
+            }
+            SessionCommand::ResolveLiveAssistantPlaybackTarget {
+                channel_id,
+                item_id,
+                content_index,
+                reply_tx,
+            } => {
+                let target =
+                    agent.live_assistant_playback_target(&channel_id, &item_id, content_index);
+                let _ = reply_tx.send(target);
+            }
+            SessionCommand::ResolveLiveAssistantPlaybackOnChannelClose {
+                channel_id,
+                reply_tx,
+            } => {
+                let result = crate::live_transcript_authority::resolve_live_assistant_playback_on_channel_close(
+                    &mut agent,
+                    &session_id,
+                    channel_id,
+                );
+                let _ = reply_tx.send(result);
+            }
+            SessionCommand::CommitLiveUserTranscriptFinal {
+                provisional,
+                final_event,
+                reply_tx,
+            } => {
+                let result = crate::live_transcript_authority::commit_final_live_user_transcript(
+                    &mut agent,
+                    &session_id,
+                    provisional,
+                    final_event,
+                );
+                if result.is_ok() {
+                    let snap = agent.snapshot();
+                    control.publish_summary(SessionSummaryCache {
+                        updated_at: snap.updated_at,
+                        message_count: snap.message_count,
+                        total_tokens: snap.total_tokens,
+                        usage: snap.usage,
+                        last_assistant_text: snap.last_assistant_text,
+                    });
+                }
+                let _ = reply_tx.send(result);
+            }
+            SessionCommand::CommitLiveAssistantPlaybackTruncation {
+                channel_id,
+                interaction_id,
+                response_id,
+                item_id,
+                content_index,
+                evidence,
+                reply_tx,
+            } => {
+                let result =
+                    crate::live_transcript_authority::commit_live_assistant_playback_truncation(
+                        &mut agent,
+                        &session_id,
+                        channel_id,
+                        interaction_id,
+                        response_id,
+                        item_id,
+                        content_index,
+                        evidence,
+                    );
+                if matches!(
+                    result.as_ref().map(|receipt| receipt.disposition()),
+                    Ok(meerkat_core::LiveAssistantPlaybackTruncationDisposition::CommittedReportedPrefix)
+                ) {
+                    let snap = agent.snapshot();
+                    control.publish_summary(SessionSummaryCache {
+                        updated_at: snap.updated_at,
+                        message_count: snap.message_count,
+                        total_tokens: snap.total_tokens,
+                        usage: snap.usage,
+                        last_assistant_text: snap.last_assistant_text,
+                    });
+                }
+                let _ = reply_tx.send(result);
+            }
+            SessionCommand::CommitLiveAssistantPlaybackComplete {
+                channel_id,
+                interaction_id,
+                response_id,
+                item_id,
+                content_index,
+                stop_reason,
+                usage,
+                reply_tx,
+            } => {
+                let result =
+                    crate::live_transcript_authority::commit_live_assistant_playback_complete(
+                        &mut agent,
+                        &session_id,
+                        channel_id,
+                        interaction_id,
+                        response_id,
+                        item_id,
+                        content_index,
+                        stop_reason,
+                        usage,
+                    );
                 let _ = reply_tx.send(result);
             }
             SessionCommand::DispatchExternalToolCall {

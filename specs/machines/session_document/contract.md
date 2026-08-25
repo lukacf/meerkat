@@ -11,6 +11,13 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `session_pending_initial_prompt_present`: `Map<SessionId, Bool>`
 - `session_pending_tool_results_count`: `Map<SessionId, u64>`
 - `session_lifecycle_terminal`: `Map<SessionId, SessionDocumentLifecycle>`
+- `session_live_channel_id`: `Map<SessionId, String>`
+- `session_live_interaction_id`: `Map<SessionId, String>`
+- `session_live_transcript_reconciliation`: `Map<SessionId, LiveTranscriptReconciliation>`
+- `session_live_provisional_transcript_present`: `Map<SessionId, Bool>`
+- `session_live_assistant_playback_response_id`: `Map<SessionId, String>`
+- `session_live_assistant_playback_item_id`: `Map<SessionId, String>`
+- `session_live_assistant_playback_content_index`: `Map<SessionId, u64>`
 
 ## Inputs
 - `MarkSessionInitialTurnPending`(session_id: SessionId)
@@ -35,6 +42,15 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResolveRealtimeAssistantTurnInterrupted`(response_id_valid: Bool)
 - `ResolveRealtimeMaterializeCandidate`(item_materialized: Bool, predecessor_materialized: Bool, item_skipped: Bool, item_ready: Bool, item_text_present: Bool, role: RealtimeTranscriptRoleKind, response_id_present: Bool, completion_present: Bool, completion_usage_consumed: Bool)
 - `RestoreRealtimeTranscriptState`(item_count: u64, first_seen_count: u64, first_seen_unique_count: u64, every_item_has_order_entry: Bool, every_order_entry_has_item: Bool, all_materialized_predecessor_references_exist: Bool, no_self_predecessor_references: Bool, causal_graph_acyclic: Bool, all_materialized_items_have_materialized_ancestry: Bool, all_identity_fields_valid: Bool, all_user_content_identity_keys_match: Bool, all_user_content_identity_fields_valid: Bool, all_user_content_identity_item_ids_unique: Bool, all_user_content_identities_reference_materialized_user_items: Bool, all_user_content_tombstones_valid: Bool, user_content_identities_and_tombstones_disjoint: Bool, pending_user_content_blob_fields_valid: Bool, pending_user_content_blob_uncommitted: Bool, all_delta_ids_valid: Bool, all_completion_response_ids_valid: Bool, all_discarded_response_ids_valid: Bool, all_materialized_items_were_ready_or_skipped: Bool, all_assistant_items_have_response_unless_skipped: Bool, all_ready_assistant_items_have_completion_or_are_skipped: Bool, all_materialized_assistant_completions_consumed: Bool, all_completed_assistant_text_items_are_ready_or_materialized_or_skipped: Bool, all_discarded_assistant_items_are_skipped_or_materialized: Bool)
+- `AdmitLiveInteractionTranscript`(session_id: SessionId, channel_id: String, interaction_id: String)
+- `StageLiveProvisionalUserTranscript`(session_id: SessionId, channel_id: String, interaction_id: String, provisional_has_content: Bool)
+- `ReconcileLiveFinalUserTranscript`(session_id: SessionId, channel_id: String, interaction_id: String, reconciliation: LiveTranscriptReconciliation)
+- `CompleteLiveInteractionTranscript`(session_id: SessionId, channel_id: String, interaction_id: String)
+- `AdmitLiveAssistantPlaybackTarget`(session_id: SessionId, channel_id: String, interaction_id: String, response_id: String, item_id: String, content_index: u64)
+- `RecoverLiveAssistantPlaybackTarget`(session_id: SessionId, channel_id: String, interaction_id: String, response_id: String, item_id: String, content_index: u64)
+- `ResolveLiveAssistantPlaybackOnChannelClose`(session_id: SessionId, channel_id: String, interaction_id: String, response_id: String, item_id: String, content_index: u64)
+- `ResolveLiveAssistantPlaybackTerminal`(session_id: SessionId, channel_id: String, interaction_id: String, response_id: String, item_id: String, content_index: u64, authoritative_assistant_chars: u64, authoritative_text_digest: String, authoritative_assistant_final: Bool, observation: LiveAssistantPlaybackTerminalObservation, reported_prefix_chars: u64, reported_prefix_digest: String, reported_prefix_matches_authoritative: Bool)
+- `ClassifyLiveContextCommittedRow`(session_id: SessionId, canonical_row_sequence: u64, row_kind: LiveContextCommittedRowKind, provenance: LiveContextCommittedTextProvenance, content_digest: String, store_commit_authority: String)
 - `AuthorizeSessionMetadataPersist`(schema_version: u64, model_present: Bool)
 - `AuthorizeSessionBuildStatePersist`(mob_tool_authority_context_present: Bool, mob_tool_authority_context_generated: Bool)
 - `RestoreSessionBuildState`
@@ -67,6 +83,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RealtimeUserContentBlobRecoveryResolved`(disposition: RealtimeUserContentBlobRecoveryDisposition)
 - `RealtimeUserContentBlobFinalizeResolved`(disposition: RealtimeUserContentBlobFinalizeDisposition)
 - `RealtimeTranscriptSnapshotRestoreAuthorized`
+- `LiveInteractionTranscriptAdmitted`(session_id: SessionId, channel_id: String, interaction_id: String)
+- `LiveProvisionalUserTranscriptStaged`(session_id: SessionId, channel_id: String, interaction_id: String)
+- `LiveFinalUserTranscriptReconciled`(session_id: SessionId, channel_id: String, interaction_id: String, reconciliation: LiveTranscriptReconciliation)
+- `LiveInteractionTranscriptCompleted`(session_id: SessionId, channel_id: String, interaction_id: String)
+- `LiveAssistantPlaybackTargetAdmitted`(session_id: SessionId, channel_id: String, interaction_id: String, response_id: String, item_id: String, content_index: u64)
+- `LiveAssistantPlaybackTargetRecovered`(session_id: SessionId, channel_id: String, interaction_id: String, response_id: String, item_id: String, content_index: u64)
+- `LiveAssistantPlaybackTerminalResolved`(session_id: SessionId, channel_id: String, interaction_id: String, response_id: String, item_id: String, content_index: u64, disposition: LiveAssistantPlaybackTerminalDisposition, canonical_chars: Option<u64>, canonical_text_digest: Option<String>, biological_hearing_claimed: Bool)
+- `LiveContextCommittedRowClassified`(session_id: SessionId, canonical_row_sequence: u64, row_kind: LiveContextCommittedRowKind, provenance: LiveContextCommittedTextProvenance, disposition: LiveContextCommittedRowDisposition, content_digest: String, store_commit_authority: String)
 - `SessionMetadataPersistAuthorized`
 - `SessionBuildStatePersistAuthorized`
 - `SessionBuildStateRestoreAuthorized`
@@ -104,6 +128,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `archive_should_retire_runtime`(runtime_backed: Bool, durable_document_present: Bool, runtime_observation: SessionArchiveRuntimeObservation) -> `Bool`
 
 ## Invariants
+- `live_interaction_transcript_binding_is_complete`
+- `committed_live_transcript_had_provisional_admission`
+- `live_assistant_playback_target_is_complete_and_interaction_bound`
 
 ## Transitions
 ### `MarkSessionInitialTurnPendingInactiveOrPending`
@@ -606,6 +633,94 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - ``
 - Emits: `RealtimeTranscriptSnapshotRestoreAuthorized`
+- To: `Ready`
+
+### `AdmitLiveInteractionTranscript`
+- From: `Ready`
+- On: `AdmitLiveInteractionTranscript`(session_id, channel_id, interaction_id)
+- Guards:
+  - ``
+- Emits: `LiveInteractionTranscriptAdmitted`
+- To: `Ready`
+
+### `StageLiveProvisionalUserTranscript`
+- From: `Ready`
+- On: `StageLiveProvisionalUserTranscript`(session_id, channel_id, interaction_id, provisional_has_content)
+- Guards:
+  - ``
+- Emits: `LiveProvisionalUserTranscriptStaged`
+- To: `Ready`
+
+### `ReconcileLiveFinalUserTranscript`
+- From: `Ready`
+- On: `ReconcileLiveFinalUserTranscript`(session_id, channel_id, interaction_id, reconciliation)
+- Guards:
+  - ``
+- Emits: `LiveFinalUserTranscriptReconciled`
+- To: `Ready`
+
+### `CompleteLiveInteractionTranscript`
+- From: `Ready`
+- On: `CompleteLiveInteractionTranscript`(session_id, channel_id, interaction_id)
+- Guards:
+  - ``
+- Emits: `LiveInteractionTranscriptCompleted`
+- To: `Ready`
+
+### `AdmitLiveAssistantPlaybackTarget`
+- From: `Ready`
+- On: `AdmitLiveAssistantPlaybackTarget`(session_id, channel_id, interaction_id, response_id, item_id, content_index)
+- Guards:
+  - ``
+- Emits: `LiveAssistantPlaybackTargetAdmitted`
+- To: `Ready`
+
+### `RecoverLiveAssistantPlaybackTarget`
+- From: `Ready`
+- On: `RecoverLiveAssistantPlaybackTarget`(session_id, channel_id, interaction_id, response_id, item_id, content_index)
+- Guards:
+  - ``
+- Emits: `LiveAssistantPlaybackTargetRecovered`
+- To: `Ready`
+
+### `ResolveLiveAssistantPlaybackOnChannelClose`
+- From: `Ready`
+- On: `ResolveLiveAssistantPlaybackOnChannelClose`(session_id, channel_id, interaction_id, response_id, item_id, content_index)
+- Guards:
+  - ``
+- Emits: `LiveAssistantPlaybackTerminalResolved`
+- To: `Ready`
+
+### `ResolveLiveAssistantPlaybackComplete`
+- From: `Ready`
+- On: `ResolveLiveAssistantPlaybackTerminal`(session_id, channel_id, interaction_id, response_id, item_id, content_index, authoritative_assistant_chars, authoritative_text_digest, authoritative_assistant_final, observation, reported_prefix_chars, reported_prefix_digest, reported_prefix_matches_authoritative)
+- Guards:
+  - ``
+- Emits: `LiveAssistantPlaybackTerminalResolved`
+- To: `Ready`
+
+### `ResolveLiveAssistantPlaybackReportedPrefix`
+- From: `Ready`
+- On: `ResolveLiveAssistantPlaybackTerminal`(session_id, channel_id, interaction_id, response_id, item_id, content_index, authoritative_assistant_chars, authoritative_text_digest, authoritative_assistant_final, observation, reported_prefix_chars, reported_prefix_digest, reported_prefix_matches_authoritative)
+- Guards:
+  - ``
+- Emits: `LiveAssistantPlaybackTerminalResolved`
+- To: `Ready`
+
+### `ResolveLiveAssistantPlaybackUnmeasured`
+- From: `Ready`
+- On: `ResolveLiveAssistantPlaybackTerminal`(session_id, channel_id, interaction_id, response_id, item_id, content_index, authoritative_assistant_chars, authoritative_text_digest, authoritative_assistant_final, observation, reported_prefix_chars, reported_prefix_digest, reported_prefix_matches_authoritative)
+- Guards:
+  - ``
+- Emits: `LiveAssistantPlaybackTerminalResolved`
+- To: `Ready`
+
+### `ClassifyLiveContextCommittedRow`
+- From: `Ready`
+- On: `ClassifyLiveContextCommittedRow`(session_id, canonical_row_sequence, row_kind, provenance, content_digest, store_commit_authority)
+- Guards:
+  - ``
+- Emits: `LiveContextCommittedRowClassified`
 - To: `Ready`
 
 ### `AuthorizeSessionMetadataPersist`

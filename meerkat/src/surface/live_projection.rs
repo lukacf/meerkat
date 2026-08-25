@@ -32,15 +32,15 @@ use meerkat_core::live_adapter::LiveAdapterErrorCode;
 use meerkat_core::service::SessionService as _;
 use meerkat_core::types::{AssistantBlock, ContentInput, SessionId, StopReason, Usage};
 use meerkat_live::{
-    LiveChannelCloseFeedback, LiveChannelCloseObservation, LiveChannelId,
-    LiveChannelStatusFeedback, LiveChannelStatusObservation, LiveProjectionError,
+    LiveAssistantOutputAddress, LiveChannelCloseFeedback, LiveChannelCloseObservation,
+    LiveChannelId, LiveChannelStatusFeedback, LiveChannelStatusObservation, LiveProjectionError,
     LiveProjectionSink, LiveTokenString, LiveTranscriptIdentity, LiveTranscriptIdentityError,
     LiveWsTokenAdmission, LiveWsTokenAdmissionPublicErrorClass, LiveWsTokenAdmissionRejection,
     LiveWsTokenAuthority, LiveWsTokenIssue,
 };
 use meerkat_runtime::MeerkatMachine;
 
-use crate::{FactoryAgentBuilder, PersistentSessionService};
+use crate::{FactoryAgentBuilder, PersistentSessionService, SessionAgentBuilder};
 
 /// One buffered assistant **display-text** fragment awaiting an
 /// authoritative `signal_turn_completed` flush (text lane only; the spoken
@@ -56,8 +56,11 @@ struct PendingTurn {
 }
 
 /// Four-role live projection over the daemon's session service + machine.
-pub struct ServiceLiveProjection {
-    service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+///
+/// The builder parameter admits any shared [`SessionAgentBuilder`] service;
+/// [`FactoryAgentBuilder`] remains the default for existing callers.
+pub struct ServiceLiveProjection<B: SessionAgentBuilder + 'static = FactoryAgentBuilder> {
+    service: Arc<PersistentSessionService<B>>,
     machine: Arc<MeerkatMachine>,
     /// Per-(session, response_id) buffer of assistant finals awaiting an
     /// authoritative `TurnCompleted`. Held only for short sync sections —
@@ -65,11 +68,8 @@ pub struct ServiceLiveProjection {
     pending_turns: StdMutex<HashMap<(SessionId, Option<String>), PendingTurn>>,
 }
 
-impl ServiceLiveProjection {
-    pub fn new(
-        service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
-        machine: Arc<MeerkatMachine>,
-    ) -> Self {
+impl<B: SessionAgentBuilder + 'static> ServiceLiveProjection<B> {
+    pub fn new(service: Arc<PersistentSessionService<B>>, machine: Arc<MeerkatMachine>) -> Self {
         Self {
             service,
             machine,
@@ -179,7 +179,7 @@ fn session_error_to_projection(
 }
 
 #[async_trait]
-impl LiveChannelCloseFeedback for ServiceLiveProjection {
+impl<B: SessionAgentBuilder + 'static> LiveChannelCloseFeedback for ServiceLiveProjection<B> {
     async fn record_live_channel_closed(
         &self,
         channel_id: &LiveChannelId,
@@ -206,7 +206,7 @@ impl LiveChannelCloseFeedback for ServiceLiveProjection {
 }
 
 #[async_trait]
-impl LiveChannelStatusFeedback for ServiceLiveProjection {
+impl<B: SessionAgentBuilder + 'static> LiveChannelStatusFeedback for ServiceLiveProjection<B> {
     async fn record_live_channel_status(
         &self,
         channel_id: &LiveChannelId,
@@ -240,7 +240,7 @@ impl LiveChannelStatusFeedback for ServiceLiveProjection {
 }
 
 #[async_trait]
-impl LiveWsTokenAuthority for ServiceLiveProjection {
+impl<B: SessionAgentBuilder + 'static> LiveWsTokenAuthority for ServiceLiveProjection<B> {
     async fn record_live_ws_token_issued(
         &self,
         session_id: &SessionId,
@@ -351,7 +351,7 @@ fn live_ws_token_public_error_class_from_machine(
 }
 
 #[async_trait]
-impl LiveProjectionSink for ServiceLiveProjection {
+impl<B: SessionAgentBuilder + 'static> LiveProjectionSink for ServiceLiveProjection<B> {
     async fn append_user_transcript(
         &self,
         session_id: &SessionId,
@@ -369,7 +369,11 @@ impl LiveProjectionSink for ServiceLiveProjection {
             };
             return self
                 .service
-                .append_realtime_transcript_event(session_id, event)
+                .append_realtime_transcript_event_with_machine(
+                    self.machine.as_ref(),
+                    session_id,
+                    event,
+                )
                 .await
                 .map(|_outcome| ())
                 .map_err(|err| session_error_to_projection(err, session_id));
@@ -390,7 +394,7 @@ impl LiveProjectionSink for ServiceLiveProjection {
         let event = build_assistant_text_delta_event(delta, identity)
             .map_err(identity_error_to_projection)?;
         self.service
-            .append_realtime_transcript_event(session_id, event)
+            .append_realtime_transcript_event_with_machine(self.machine.as_ref(), session_id, event)
             .await
             .map(|_outcome| ())
             .map_err(|err| session_error_to_projection(err, session_id))
@@ -405,7 +409,7 @@ impl LiveProjectionSink for ServiceLiveProjection {
         let event = build_assistant_transcript_delta_event(delta, identity)
             .map_err(identity_error_to_projection)?;
         self.service
-            .append_realtime_transcript_event(session_id, event)
+            .append_realtime_transcript_event_with_machine(self.machine.as_ref(), session_id, event)
             .await
             .map(|_outcome| ())
             .map_err(|err| session_error_to_projection(err, session_id))
@@ -456,15 +460,134 @@ impl LiveProjectionSink for ServiceLiveProjection {
             text: text.to_string(),
         };
         self.service
-            .append_realtime_transcript_event(session_id, event)
+            .append_realtime_transcript_event_with_machine(self.machine.as_ref(), session_id, event)
             .await
             .map(|_outcome| ())
             .map_err(|err| session_error_to_projection(err, session_id))
     }
 
+    async fn admit_assistant_playback_target(
+        &self,
+        session_id: &SessionId,
+        channel_id: &LiveChannelId,
+        provider_turn_ref: &str,
+        response_id: &str,
+        provider_item_id: &str,
+        content_index: u32,
+    ) -> Result<LiveAssistantOutputAddress, LiveProjectionError> {
+        let handle = self
+            .machine
+            .live_assistant_output_handle_for_turn(session_id, channel_id, provider_turn_ref)
+            .ok_or_else(|| {
+                LiveProjectionError::Rejected(
+                    "assistant playback target has no generated assistant-start handle".to_string(),
+                )
+            })?;
+        let target = self
+            .service
+            .admit_live_assistant_playback_target(
+                session_id,
+                channel_id.clone(),
+                handle.interaction_id(),
+                response_id.to_string(),
+                provider_item_id.to_string(),
+                content_index,
+            )
+            .await
+            .map_err(|err| session_error_to_projection(err, session_id))?;
+        if target.interaction_id() != handle.interaction_id() {
+            return Err(LiveProjectionError::Rejected(
+                "assistant output handle did not match persisted target".to_string(),
+            ));
+        }
+        handle
+            .__bind_target(response_id, provider_item_id, content_index)
+            .map_err(|error| LiveProjectionError::Rejected(error.to_string()))?;
+        Ok(LiveAssistantOutputAddress {
+            channel_id: channel_id.clone(),
+            output_id: handle.output_id().to_string(),
+            content_index,
+        })
+    }
+
+    async fn complete_assistant_playback(
+        &self,
+        session_id: &SessionId,
+        channel_id: &LiveChannelId,
+        interaction_id: meerkat_core::InteractionId,
+        response_id: &str,
+        provider_item_id: &str,
+        content_index: u32,
+        stop_reason: StopReason,
+        usage: meerkat_core::TurnUsage,
+    ) -> Result<(), LiveProjectionError> {
+        self.service
+            .commit_live_assistant_playback_complete(
+                session_id,
+                channel_id.clone(),
+                interaction_id,
+                response_id.to_string(),
+                provider_item_id.to_string(),
+                content_index,
+                stop_reason,
+                usage,
+            )
+            .await
+            .map(|_receipt| ())
+            .map_err(|err| session_error_to_projection(err, session_id))
+    }
+
+    async fn fail_assistant_output_publication(
+        &self,
+        session_id: &SessionId,
+        address: &LiveAssistantOutputAddress,
+    ) -> Result<(), LiveProjectionError> {
+        let reservation = self
+            .machine
+            .reserve_live_assistant_output_handle(
+                session_id,
+                &address.channel_id,
+                &address.output_id,
+            )
+            .await
+            .map_err(|error| LiveProjectionError::Rejected(error.to_string()))?;
+        let handle = reservation.handle();
+        let (response_id, item_id, content_index) = handle.__target().ok_or_else(|| {
+            LiveProjectionError::Rejected(
+                "assistant output publication failure has no exact target".to_string(),
+            )
+        })?;
+        self.service
+            .commit_live_assistant_playback_truncation(
+                session_id,
+                address.channel_id.clone(),
+                handle.interaction_id(),
+                response_id.clone(),
+                item_id,
+                content_index,
+                meerkat_core::LiveAssistantPlaybackEvidence::Unmeasured,
+            )
+            .await
+            .map_err(|error| session_error_to_projection(error, session_id))?;
+        self.machine
+            .commit_live_assistant_output_terminal(reservation)
+            .map_err(|error| LiveProjectionError::Rejected(error.to_string()))?;
+        self.service
+            .append_realtime_transcript_event_with_machine(
+                self.machine.as_ref(),
+                session_id,
+                RealtimeTranscriptEvent::AssistantTurnInterrupted { response_id },
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| session_error_to_projection(error, session_id))
+    }
+
     async fn truncate_assistant_transcript(
         &self,
         session_id: &SessionId,
+        channel_id: &LiveChannelId,
+        interaction_id: Option<meerkat_core::InteractionId>,
         provider_item_id: Option<&str>,
         _previous_item_id: Option<&str>,
         content_index: Option<u32>,
@@ -483,16 +606,29 @@ impl LiveProjectionSink for ServiceLiveProjection {
                 "AssistantTranscriptTruncated missing provider_item_id from adapter".to_string(),
             ));
         };
-        let event = RealtimeTranscriptEvent::AssistantTranscriptTruncated {
-            response_id: response_id.to_string(),
-            item_id: item_id.to_string(),
-            content_index: content_index.unwrap_or(0),
-            text: text.unwrap_or_default().to_string(),
+        let Some(interaction_id) = interaction_id else {
+            return Err(LiveProjectionError::Rejected(
+                "AssistantTranscriptTruncated missing Meerkat interaction identity".to_string(),
+            ));
         };
+        let evidence = text.map_or(
+            meerkat_core::LiveAssistantPlaybackEvidence::Unmeasured,
+            |prefix| {
+                meerkat_core::LiveAssistantPlaybackEvidence::ReportedPrefix(prefix.to_string())
+            },
+        );
         self.service
-            .append_realtime_transcript_event(session_id, event)
+            .commit_live_assistant_playback_truncation(
+                session_id,
+                channel_id.clone(),
+                interaction_id,
+                response_id.to_string(),
+                item_id.to_string(),
+                content_index.unwrap_or(0),
+                evidence,
+            )
             .await
-            .map(|_outcome| ())
+            .map(|_receipt| ())
             .map_err(|err| session_error_to_projection(err, session_id))
     }
 
@@ -527,7 +663,11 @@ impl LiveProjectionSink for ServiceLiveProjection {
             let event = RealtimeTranscriptEvent::AssistantTurnInterrupted { response_id: rid };
             match self
                 .service
-                .append_realtime_transcript_event(session_id, event)
+                .append_realtime_transcript_event_with_machine(
+                    self.machine.as_ref(),
+                    session_id,
+                    event,
+                )
                 .await
             {
                 Ok(_) => {}
@@ -569,7 +709,11 @@ impl LiveProjectionSink for ServiceLiveProjection {
             };
             match self
                 .service
-                .append_realtime_transcript_event(session_id, event)
+                .append_realtime_transcript_event_with_machine(
+                    self.machine.as_ref(),
+                    session_id,
+                    event,
+                )
                 .await
             {
                 Ok(outcome) => {
@@ -641,7 +785,11 @@ impl LiveProjectionSink for ServiceLiveProjection {
         event: &RealtimeTranscriptEvent,
     ) -> Result<meerkat_core::RealtimeTranscriptApplyOutcome, LiveProjectionError> {
         self.service
-            .append_realtime_transcript_event(session_id, event.clone())
+            .append_realtime_transcript_event_with_machine(
+                self.machine.as_ref(),
+                session_id,
+                event.clone(),
+            )
             .await
             .map_err(|err| session_error_to_projection(err, session_id))
     }

@@ -174,8 +174,9 @@ pub fn catalog() -> &'static [CatalogEntry] {
                 display_name: c.display_name,
                 provider: c.provider.as_str(),
                 tier: c.tier,
-                context_window: Some(c.context_window),
-                max_output_tokens: Some(c.max_output_tokens),
+                release_stage: c.release_stage,
+                context_window: c.context_window,
+                max_output_tokens: c.max_output_tokens,
             })
             .collect()
     })
@@ -323,6 +324,30 @@ pub fn provider_priority() -> &'static [Provider] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use meerkat_core::ModelReleaseStage;
+
+    #[test]
+    fn release_stage_is_projected_from_capability_authority() {
+        let entries = catalog();
+        for capabilities in capabilities::all_capabilities() {
+            let entry = entries
+                .iter()
+                .find(|entry| {
+                    entry.id == capabilities.id && entry.provider == capabilities.provider.as_str()
+                })
+                .expect("every capability row must project to the catalog");
+            assert_eq!(entry.release_stage, capabilities.release_stage);
+        }
+        let experimental = entries
+            .iter()
+            .filter(|entry| entry.release_stage == ModelReleaseStage::Experimental)
+            .collect::<Vec<_>>();
+        assert_eq!(experimental.len(), 1);
+        assert_eq!(experimental[0].id, "gpt-live-1-codex");
+        assert_eq!(experimental[0].provider, Provider::OpenAI.as_str());
+        assert_eq!(experimental[0].context_window, None);
+        assert_eq!(experimental[0].max_output_tokens, None);
+    }
 
     #[test]
     fn approximate_request_byte_caps_cover_the_major_providers() {

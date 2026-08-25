@@ -19,6 +19,7 @@ use meerkat_runtime::MeerkatMachine;
 
 use meerkat_session::{
     MachineServiceTurnCommitProtocol, MachineSessionArchiveProtocol, PersistentSessionService,
+    SessionAgentBuilder,
 };
 
 use crate::session_runtime::admission::{
@@ -40,8 +41,10 @@ pub(crate) fn surface_materialization_error_to_session_error(
     }
 }
 
-pub(crate) async fn materialize_session_actor_unattached_with_actor_slot(
-    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
+pub(crate) async fn materialize_session_actor_unattached_with_actor_slot<
+    B: SessionAgentBuilder + 'static,
+>(
+    service: &Arc<PersistentSessionService<B>>,
     runtime_adapter: &Arc<MeerkatMachine>,
     create_req: CreateSessionRequest,
     admission: ActiveCapacityGuard,
@@ -1127,9 +1130,9 @@ impl PendingPromotionCleanup {
 
     /// Reserve a fresh staged-capacity admission if the guard does not
     /// already hold one.
-    pub async fn replenish_staged_capacity_admission(
+    pub async fn replenish_staged_capacity_admission<B: SessionAgentBuilder + 'static>(
         &mut self,
-        service: &PersistentSessionService<FactoryAgentBuilder>,
+        service: &PersistentSessionService<B>,
     ) -> Result<(), SessionError> {
         if self.staged_capacity_admission.is_none() {
             self.staged_capacity_admission =
@@ -1139,9 +1142,11 @@ impl PendingPromotionCleanup {
     }
 
     /// Reserve a runtime-turn admission for the materialized session.
-    pub async fn recover_materialized_staged_capacity_admission(
+    pub async fn recover_materialized_staged_capacity_admission<
+        B: SessionAgentBuilder + 'static,
+    >(
         &mut self,
-        service: &PersistentSessionService<FactoryAgentBuilder>,
+        service: &PersistentSessionService<B>,
     ) -> Result<(), SessionError> {
         if self.staged_capacity_admission.is_none() {
             self.staged_capacity_admission = Some(

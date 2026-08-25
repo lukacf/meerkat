@@ -6,6 +6,8 @@
 )]
 
 mod agent_tools;
+#[cfg(all(feature = "experimental-gpt-live", not(target_arch = "wasm32")))]
+pub mod live_delegation;
 mod public_definition;
 mod public_mcp;
 pub mod run_accounting;
@@ -1414,6 +1416,28 @@ impl MobMcpState {
             }
         }
         false
+    }
+
+    /// Resolve the exact live mob/member authority that owns a durable bridge
+    /// session. No reverse index is cached, so respawn and retirement cannot
+    /// leave a shadow owner behind.
+    #[doc(hidden)]
+    pub async fn live_member_owner(
+        &self,
+        bridge_session_id: &SessionId,
+    ) -> Result<Option<(MobId, MobHandle, meerkat_mob::AgentIdentity)>, MobError> {
+        self.ensure_restored().await?;
+        let mob_ids = self.mobs.read().await.keys().cloned().collect::<Vec<_>>();
+        for mob_id in mob_ids {
+            let handle = self.handle_for(&mob_id).await?;
+            let roster = handle.roster().await;
+            if let Some(entry) = roster.find_by_bridge_session_id(bridge_session_id) {
+                let identity = entry.agent_identity.clone();
+                drop(roster);
+                return Ok(Some((mob_id, handle, identity)));
+            }
+        }
+        Ok(None)
     }
 
     #[doc(hidden)]

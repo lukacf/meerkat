@@ -30,6 +30,27 @@ pub use embedded::{
 };
 #[cfg(all(
     feature = "session-store",
+    feature = "live-webrtc",
+    not(target_arch = "wasm32")
+))]
+pub use live_host::{
+    CoordinatedLiveWebrtcAnswer, LiveWebrtcAnswerCoordinatorError, LiveWebrtcAnswerDeliveryCustody,
+    LiveWebrtcBoundReadyBindFailure, LiveWebrtcBoundReadyBinder, LiveWebrtcBoundReadyCustody,
+    coordinate_live_webrtc_answer,
+};
+#[cfg(all(
+    feature = "session-store",
+    feature = "live",
+    feature = "live-webrtc",
+    feature = "experimental-gpt-live",
+    not(target_arch = "wasm32")
+))]
+pub use live_host::{
+    ExperimentalGptLiveContextMirrorHost, ExperimentalLiveChannelCloseError,
+    ExperimentalLiveContextRecoveryError, ExperimentalLiveReplacementRequired,
+};
+#[cfg(all(
+    feature = "session-store",
     feature = "live",
     not(target_arch = "wasm32")
 ))]
@@ -909,6 +930,17 @@ pub fn build_models_catalog_response(
                             ))
                         })?;
                     let profile = Some(meerkat_contracts::WireModelProfile {
+                        release_stage: match model_profile.release_stage {
+                            meerkat_core::ModelReleaseStage::Stable => {
+                                meerkat_contracts::WireModelReleaseStage::Stable
+                            }
+                            meerkat_core::ModelReleaseStage::Experimental => {
+                                meerkat_contracts::WireModelReleaseStage::Experimental
+                            }
+                            meerkat_core::ModelReleaseStage::OperatorDefined => {
+                                meerkat_contracts::WireModelReleaseStage::OperatorDefined
+                            }
+                        },
                         model_family: model_profile.model_family.clone(),
                         supports_temperature: model_profile.supports_temperature,
                         supports_thinking: model_profile.supports_thinking,
@@ -940,6 +972,17 @@ pub fn build_models_catalog_response(
                             }
                             meerkat_core::model_profile::catalog::ModelTier::Supported => {
                                 meerkat_contracts::WireModelTier::Supported
+                            }
+                        },
+                        release_stage: match entry.release_stage {
+                            meerkat_core::ModelReleaseStage::Stable => {
+                                meerkat_contracts::WireModelReleaseStage::Stable
+                            }
+                            meerkat_core::ModelReleaseStage::Experimental => {
+                                meerkat_contracts::WireModelReleaseStage::Experimental
+                            }
+                            meerkat_core::ModelReleaseStage::OperatorDefined => {
+                                meerkat_contracts::WireModelReleaseStage::OperatorDefined
                             }
                         },
                         context_window: entry.context_window,

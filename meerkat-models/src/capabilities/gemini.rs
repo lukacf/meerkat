@@ -6,7 +6,7 @@
 
 use meerkat_core::Provider;
 use meerkat_core::model_profile::capabilities::{ModelCapabilities, ThinkingSupport};
-use meerkat_core::model_profile::catalog::ModelTier;
+use meerkat_core::model_profile::catalog::{ModelReleaseStage, ModelTier};
 
 /// Capability rows for Gemini catalog models.
 pub const CAPABILITIES: &[ModelCapabilities] = &[
@@ -27,9 +27,10 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         provider: Provider::Gemini,
         display_name: "Gemini 3.5 Flash",
         tier: ModelTier::Recommended,
+        release_stage: ModelReleaseStage::Stable,
         model_family: "gemini-3",
-        context_window: 1_048_576,
-        max_output_tokens: 65_536,
+        context_window: Some(1_048_576),
+        max_output_tokens: Some(65_536),
         context_window_beta: None,
         max_output_tokens_beta: None,
         vision: true,
@@ -77,9 +78,10 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         provider: Provider::Gemini,
         display_name: "Gemini 3.1 Pro Preview",
         tier: ModelTier::Supported,
+        release_stage: ModelReleaseStage::Stable,
         model_family: "gemini-3",
-        context_window: 1_048_576,
-        max_output_tokens: 65_536,
+        context_window: Some(1_048_576),
+        max_output_tokens: Some(65_536),
         context_window_beta: None,
         max_output_tokens_beta: None,
         vision: true,
@@ -123,9 +125,10 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         provider: Provider::Gemini,
         display_name: "Gemini 3.1 Flash Lite Preview",
         tier: ModelTier::Supported,
+        release_stage: ModelReleaseStage::Stable,
         model_family: "gemini-3",
-        context_window: 1_048_576,
-        max_output_tokens: 65_536,
+        context_window: Some(1_048_576),
+        max_output_tokens: Some(65_536),
         context_window_beta: None,
         max_output_tokens_beta: None,
         vision: true,

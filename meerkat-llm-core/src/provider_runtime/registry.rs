@@ -257,15 +257,12 @@ impl ProviderRuntimeRegistry {
     /// callers never extract credential material from the connection.
     pub fn build_realtime_session_factory(
         &self,
-        connection: ResolvedConnection,
+        target: crate::provider_runtime::binding::ResolvedRealtimeTarget,
     ) -> Result<Arc<dyn crate::realtime_session::RealtimeSessionFactory>, ProviderClientError> {
-        let runtime =
-            self.runtimes
-                .get(&connection.provider)
-                .ok_or(ProviderClientError::MissingFeature(
-                    "runtime-not-registered",
-                ))?;
-        runtime.build_realtime_session_factory(connection)
+        let runtime = self.runtimes.get(&target.identity().provider).ok_or(
+            ProviderClientError::MissingFeature("runtime-not-registered"),
+        )?;
+        runtime.build_realtime_session_factory(target)
     }
 
     /// Build the optional image-generation executor owned by the same

@@ -195,6 +195,8 @@ pub enum WireConversionError {
     /// cannot leak inline image bytes through diagnostics.
     #[error("internal realtime user-content event has no public wire representation")]
     InternalRealtimeUserContent,
+    #[error("internal realtime playback authority event has no public transcript projection")]
+    InternalRealtimePlaybackAuthority,
 }
 
 #[cfg(test)]

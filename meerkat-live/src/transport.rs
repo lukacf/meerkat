@@ -1789,9 +1789,49 @@ mod tests {
             Ok(())
         }
 
+        async fn admit_assistant_playback_target(
+            &self,
+            _session_id: &SessionId,
+            channel_id: &LiveChannelId,
+            _provider_turn_ref: &str,
+            _response_id: &str,
+            _provider_item_id: &str,
+            content_index: u32,
+        ) -> Result<crate::LiveAssistantOutputAddress, LiveProjectionError> {
+            Ok(crate::LiveAssistantOutputAddress {
+                channel_id: channel_id.clone(),
+                output_id: "terminal-recording-output".to_string(),
+                content_index,
+            })
+        }
+
+        async fn complete_assistant_playback(
+            &self,
+            _session_id: &SessionId,
+            _channel_id: &LiveChannelId,
+            _interaction_id: meerkat_core::InteractionId,
+            _response_id: &str,
+            _provider_item_id: &str,
+            _content_index: u32,
+            _stop_reason: meerkat_core::types::StopReason,
+            _usage: meerkat_core::TurnUsage,
+        ) -> Result<(), LiveProjectionError> {
+            Ok(())
+        }
+
+        async fn fail_assistant_output_publication(
+            &self,
+            _session_id: &SessionId,
+            _address: &crate::LiveAssistantOutputAddress,
+        ) -> Result<(), LiveProjectionError> {
+            Ok(())
+        }
+
         async fn truncate_assistant_transcript(
             &self,
             _session_id: &SessionId,
+            _channel_id: &LiveChannelId,
+            _interaction_id: Option<meerkat_core::InteractionId>,
             _provider_item_id: Option<&str>,
             _previous_item_id: Option<&str>,
             _content_index: Option<u32>,

@@ -189,9 +189,21 @@ pub enum LiveAdapterCommand {
     },
     Interrupt,
     TruncateAssistantOutput {
+        interaction_id: crate::InteractionId,
         item_id: String,
         content_index: u32,
         audio_played_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reported_playback_prefix: Option<String>,
+    },
+    /// Resolve one exact assistant output after the playback owner reports
+    /// that the complete item finished playing. The interaction identity is
+    /// resolved from the session's admitted playback target, never minted by
+    /// a caller or surface.
+    CompleteAssistantPlayback {
+        interaction_id: crate::InteractionId,
+        item_id: String,
+        content_index: u32,
     },
     SubmitToolResult {
         result: LiveToolResult,
@@ -295,6 +307,16 @@ pub enum LiveAdapterObservation {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         content_index: Option<u32>,
     },
+    /// Redacted address for one assistant output, emitted as soon as the
+    /// provider starts the role-bearing assistant turn. The host binds this
+    /// mechanical handle to machine-owned interaction authority before any
+    /// transcript can be staged or any playback terminal can be accepted.
+    AssistantOutputStarted {
+        provider_turn_ref: String,
+        response_id: String,
+        provider_item_id: String,
+        content_index: u32,
+    },
     AssistantTranscriptFinal {
         provider_item_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -309,6 +331,8 @@ pub enum LiveAdapterObservation {
     },
     AssistantTranscriptTruncated {
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        interaction_id: Option<crate::InteractionId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_item_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         previous_item_id: Option<String>,
@@ -318,6 +342,17 @@ pub enum LiveAdapterObservation {
         response_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         text: Option<String>,
+    },
+    /// The playback owner reported that one exact assistant output item
+    /// completed. This is a playback-path terminal observation, not evidence
+    /// about delivery to a person.
+    AssistantPlaybackCompleted {
+        interaction_id: crate::InteractionId,
+        provider_item_id: String,
+        content_index: u32,
+        response_id: String,
+        stop_reason: StopReason,
+        usage: crate::types::TurnUsage,
     },
     /// Pass-through of a structured `RealtimeTranscriptEvent` from the provider.
     ///
@@ -1283,9 +1318,11 @@ mod tests {
     #[test]
     fn command_truncate_round_trips() {
         let cmd = LiveAdapterCommand::TruncateAssistantOutput {
+            interaction_id: crate::InteractionId::new(),
             item_id: "item_abc".into(),
             content_index: 0,
             audio_played_ms: 3200,
+            reported_playback_prefix: Some("partial".into()),
         };
         let json = serde_json::to_string(&cmd).unwrap();
         let deser: LiveAdapterCommand = serde_json::from_str(&json).unwrap();
@@ -1294,10 +1331,13 @@ mod tests {
                 item_id,
                 content_index,
                 audio_played_ms,
+                reported_playback_prefix,
+                ..
             } => {
                 assert_eq!(item_id, "item_abc");
                 assert_eq!(content_index, 0);
                 assert_eq!(audio_played_ms, 3200);
+                assert_eq!(reported_playback_prefix.as_deref(), Some("partial"));
             }
             other => panic!("expected TruncateAssistantOutput, got {other:?}"),
         }
@@ -1625,6 +1665,21 @@ mod tests {
     }
 
     #[test]
+    fn assistant_output_started_round_trips_redacted_addressability() {
+        let observation = LiveAdapterObservation::AssistantOutputStarted {
+            provider_turn_ref: "turn:7".into(),
+            response_id: "response:7".into(),
+            provider_item_id: "item:7".into(),
+            content_index: 0,
+        };
+        let json = serde_json::to_string(&observation).unwrap();
+        assert!(json.contains("\"observation\":\"assistant_output_started\""));
+        assert!(json.contains("\"provider_item_id\":\"item:7\""));
+        let decoded: LiveAdapterObservation = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, observation);
+    }
+
+    #[test]
     fn assistant_transcript_final_round_trips_without_optional_ordering() {
         let obs = LiveAdapterObservation::AssistantTranscriptFinal {
             provider_item_id: "item_only".into(),
@@ -1689,6 +1744,7 @@ mod tests {
     #[test]
     fn assistant_transcript_truncated_round_trips_all_shapes() {
         let both = LiveAdapterObservation::AssistantTranscriptTruncated {
+            interaction_id: Some(crate::InteractionId::new()),
             provider_item_id: Some("item_abc".into()),
             previous_item_id: Some("item_aba".into()),
             content_index: Some(0),
@@ -1702,6 +1758,7 @@ mod tests {
         assert_eq!(both, deser);
 
         let neither = LiveAdapterObservation::AssistantTranscriptTruncated {
+            interaction_id: None,
             provider_item_id: None,
             previous_item_id: None,
             content_index: None,
@@ -1717,6 +1774,7 @@ mod tests {
         assert_eq!(neither, deser);
 
         let id_only = LiveAdapterObservation::AssistantTranscriptTruncated {
+            interaction_id: None,
             provider_item_id: Some("item_def".into()),
             previous_item_id: None,
             content_index: None,
@@ -1728,6 +1786,7 @@ mod tests {
         assert_eq!(id_only, deser);
 
         let text_only = LiveAdapterObservation::AssistantTranscriptTruncated {
+            interaction_id: None,
             provider_item_id: None,
             previous_item_id: None,
             content_index: None,

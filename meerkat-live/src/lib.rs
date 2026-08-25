@@ -10,6 +10,7 @@
 //! admission.
 
 pub mod host;
+pub mod provider_webrtc;
 pub mod transport;
 #[cfg(feature = "webrtc")]
 pub mod webrtc;
@@ -17,12 +18,24 @@ pub mod wire_input;
 
 pub use host::{
     DEFAULT_LIVE_TOOL_TIMEOUT, DeltaIdentity, LiveAdapterHost, LiveAdapterHostError,
-    LiveChannelCloseCommitAuthority, LiveChannelCloseObservation, LiveChannelId,
-    LiveChannelOpenAuthority, LiveChannelStatusCommitAuthority, LiveChannelStatusObservation,
-    LiveCommandAcceptanceKind, LiveCommandQueueAcceptance, LiveProjectionError, LiveProjectionSink,
-    LiveRefreshQueueAcceptance, LiveToolDispatchError, LiveToolDispatchTimeout, LiveToolDispatcher,
-    LiveTranscriptIdentity, LiveTranscriptIdentityError, NoOpProjectionSink, ObservationOutcome,
-    ObservationRouting, ToolDispatchSkipReason,
+    LiveAssistantOutputAddress, LiveChannelCloseCommitAuthority, LiveChannelCloseObservation,
+    LiveChannelId, LiveChannelOpenAuthority, LiveChannelStatusCommitAuthority,
+    LiveChannelStatusObservation, LiveCommandAcceptanceKind, LiveCommandQueueAcceptance,
+    LiveProjectionError, LiveProjectionSink, LiveRefreshQueueAcceptance, LiveToolDispatchError,
+    LiveToolDispatchTimeout, LiveToolDispatcher, LiveTranscriptIdentity,
+    LiveTranscriptIdentityError, NoOpProjectionSink, ObservationOutcome, ObservationRouting,
+    ToolDispatchSkipReason,
+};
+pub use provider_webrtc::{
+    LiveRuntimeBindingFence, LiveRuntimeBindingGeneration, LiveSidebandAppendAttempt,
+    LiveSidebandAppendAuthority, LiveSidebandCommand, LiveSidebandCommandDelivery,
+    LiveSidebandCommandError, LiveSidebandDelegationRef, LiveSidebandObservation,
+    LiveSidebandObservationKind, LiveSidebandProviderCommand, LiveSidebandReleaseAuthority,
+    LiveSidebandTranscriptItemRef, LiveSidebandTurnRef, LiveSidebandTurnRole,
+    LiveWebrtcAdmissionSealError, LiveWebrtcAnswerAdmissionSeal, LiveWebrtcRuntimeBinding,
+    ProviderWebrtcBinding, ProviderWebrtcBoundReadyReceipt, ProviderWebrtcBroker,
+    ProviderWebrtcBrokerAnswer, ProviderWebrtcBrokerError, ProviderWebrtcOffer,
+    ProviderWebrtcSidebandSession, ProviderWebrtcSignalingError,
 };
 pub use transport::{
     LIVE_WS_PATH, LiveChannelCloseFeedback, LiveChannelStatusFeedback, LiveTokenString,
@@ -32,7 +45,8 @@ pub use transport::{
 };
 #[cfg(feature = "webrtc")]
 pub use webrtc::{
-    LIVE_WEBRTC_ANSWER_METHOD, LIVE_WEBRTC_ANSWER_PATH, LiveWebrtcAnswerAccepted, LiveWebrtcError,
+    LIVE_WEBRTC_ANSWER_METHOD, LIVE_WEBRTC_ANSWER_PATH, LiveWebrtcAdmittedOffer,
+    LiveWebrtcAnswerAccepted, LiveWebrtcAnswerTransport, LiveWebrtcBindingRequest, LiveWebrtcError,
     LiveWebrtcState, WebrtcAudioBridge, live_webrtc_router, serve_live_ws_and_webrtc_listener,
 };
 pub use wire_input::{

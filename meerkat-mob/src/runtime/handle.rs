@@ -4378,6 +4378,10 @@ pub struct SpawnMemberSpec {
     pub launch_mode: crate::launch::MemberLaunchMode,
     /// Tool access policy for this member.
     pub tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+    /// Process-local final dispatch admission for provisional executions.
+    /// This authority is forwarded to AgentFactory's outermost dispatcher
+    /// gate and is never persisted or serialized for remote placement.
+    pub tool_dispatch_admission: Option<Arc<dyn meerkat_core::ToolDispatchAdmission>>,
     /// Administrative per-category overrides carried by durable identity intent.
     pub tool_category_overrides: meerkat_core::ToolCategoryOverrides,
     /// Stable application consequence-policy identity for this member.
@@ -4453,6 +4457,10 @@ impl std::fmt::Debug for SpawnMemberSpec {
             .field("labels", &self.labels)
             .field("launch_mode", &self.launch_mode)
             .field("tool_access_policy", &self.tool_access_policy)
+            .field(
+                "tool_dispatch_admission",
+                &self.tool_dispatch_admission.is_some(),
+            )
             .field("tool_category_overrides", &self.tool_category_overrides)
             .field("application_tool_policy", &self.application_tool_policy)
             .field("budget_limits", &self.budget_limits)
@@ -4489,6 +4497,7 @@ impl SpawnMemberSpec {
             labels: None,
             launch_mode: crate::launch::MemberLaunchMode::Fresh,
             tool_access_policy: None,
+            tool_dispatch_admission: None,
             tool_category_overrides: meerkat_core::ToolCategoryOverrides::default(),
             application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
             budget_limits: None,
@@ -9752,6 +9761,39 @@ impl MobHandle {
             WorkRef::new(),
             spec,
             handling_mode,
+            result_spec,
+        )
+        .await
+    }
+
+    /// Resolve the current machine-owned runtime/fence for one identity and
+    /// admit a caller-identified exact bounded work item.
+    ///
+    /// This is the identity-first counterpart to
+    /// [`Self::start_work_with_mode_and_delivery_identity_bounded`]. The
+    /// caller-owned delivery identity supplies stable idempotency while the
+    /// MobMachine still validates the current runtime binding at admission.
+    pub async fn start_work_for_identity_with_delivery_identity_bounded(
+        &self,
+        identity: AgentIdentity,
+        spec: WorkSpec,
+        handling_mode: HandlingMode,
+        delivery_identity: crate::store::MobDeliveryIdentity,
+        result_spec: BoundedResultSpec,
+    ) -> Result<WorkTurnHandle, MobError> {
+        let (runtime_id, fence_token) = self
+            .resolve_submit_work_runtime_binding(
+                &identity,
+                WorkOrigin::Internal,
+                "start_work_for_identity_with_delivery_identity_bounded",
+            )
+            .await?;
+        self.start_work_with_mode_and_delivery_identity_bounded(
+            runtime_id,
+            fence_token,
+            spec,
+            handling_mode,
+            delivery_identity,
             result_spec,
         )
         .await

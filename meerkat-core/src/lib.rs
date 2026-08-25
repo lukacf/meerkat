@@ -47,6 +47,7 @@ pub mod image_generation;
 pub mod interaction;
 pub mod lifecycle;
 pub mod live_adapter;
+pub mod live_execution;
 pub mod mcp_config;
 pub mod memory;
 pub mod model_defaults;
@@ -125,9 +126,11 @@ pub use artifact::{
     ArtifactOwner, ArtifactPayload, ArtifactRecord, ArtifactStore, ArtifactType,
 };
 pub use auth::{
-    ActingOnBehalfOf, AuthGrant, GrantAction, GrantScope, PrincipalContractError, PrincipalId,
-    PrincipalKind, PrincipalRef, VisibilityClass, can_observe_visibility,
-    metadata_grants_no_visibility,
+    ActingOnBehalfOf, AuthBindingUseDecision, AuthBindingUseDenial, AuthBindingUseGateError,
+    AuthBindingUseRequest, AuthBindingUseWitness, AuthGrant, GrantAction, GrantScope,
+    PrincipalContractError, PrincipalId, PrincipalKind, PrincipalRef, VisibilityClass,
+    authorize_explicit_auth_binding_use, authorize_then_materialize_auth_binding,
+    can_observe_visibility, metadata_grants_no_visibility,
 };
 pub use blob::{
     BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError, ImageBlobIntegrityError,
@@ -257,6 +260,16 @@ pub use lifecycle::{
     CoreInteractionTerminalPublicationReceipt, CoreRenderable, InputId, RunApplyBoundary,
     RunBoundaryReceipt, RunBoundaryReceiptDraft, RunEvent, RunId, RunPrimitive, StagedRunInput,
 };
+pub use live_execution::{
+    AmbiguousDeliveryNoRetryEvidence, CanonicalTranscriptPrefixDigest,
+    FinalLiveUserTranscriptCommitError, FinalLiveUserTranscriptCommitEvidence,
+    FinalLiveUserTranscriptDisposition, LiveAppendDeliveryOutcome, LiveAppendDeliveryReceipt,
+    LiveAssistantPlaybackEvidence, LiveAssistantPlaybackTruncationDisposition,
+    LiveAssistantPlaybackTruncationError, LiveAssistantPlaybackTruncationEvidence, LiveChannelId,
+    LiveContextCursor, LiveExecutionIdentityError, LiveHandoffInputProvenance,
+    LiveHandoffReconciliation, LiveResultDisposition, LiveUserTurnCorrelation,
+    NormalizedLiveUserInputDigest, OpaqueProviderCorrelation, ProvisionalLiveHandoff,
+};
 pub use mcp_config::{McpConfig, McpConfigError, McpScope, McpServerConfig, McpServerWithScope};
 pub use memory::{
     CompactionCommitCoordinationError, CompactionCommitCoordinator, CompactionHandoffRefusal,
@@ -268,6 +281,7 @@ pub use memory::{
     MemoryStore, MemoryStoreError, MessageRange, SESSION_COMPACTION_PROJECTION_INTENTS_KEY,
 };
 pub use model_defaults::ModelOperationalDefaultsResolver;
+pub use model_profile::catalog::ModelReleaseStage;
 pub use model_profile::{ModelCatalog, ModelProfile};
 pub use model_registry::{
     ModelCapability, ModelProfileWitness, ModelRegistry, ModelRegistryEntry, SelfHostedServerRef,
@@ -313,9 +327,9 @@ pub use provider_evidence::{
     provider_cache_breakpoint_claim,
 };
 pub use realtime_transcript::{
-    PendingRealtimeUserContentBlob, RealtimeTranscriptApplyOutcome, RealtimeTranscriptEvent,
-    RealtimeTranscriptMaterializedMessage, RealtimeTranscriptRole, RealtimeUserContentApplyOutcome,
-    RealtimeUserContentIdentity, RealtimeUserContentTombstone,
+    LiveAssistantPlaybackTarget, PendingRealtimeUserContentBlob, RealtimeTranscriptApplyOutcome,
+    RealtimeTranscriptEvent, RealtimeTranscriptMaterializedMessage, RealtimeTranscriptRole,
+    RealtimeUserContentApplyOutcome, RealtimeUserContentIdentity, RealtimeUserContentTombstone,
     SESSION_REALTIME_TRANSCRIPT_STATE_KEY,
 };
 pub use realtime_transcript_sidecar::{
@@ -454,8 +468,8 @@ pub use tool_execution::{
     ToolProgressPolicy, ephemeral_tool_catalog_binding_fingerprint,
 };
 pub use tool_execution_policy::{
-    ExecutionPolicyGatedDispatcher, ToolExecutionPolicy, ToolExecutionPolicyError,
-    ToolMutationClass,
+    ExecutionPolicyGatedDispatcher, ToolDispatchAdmission, ToolExecutionPolicy,
+    ToolExecutionPolicyError, ToolMutationClass,
 };
 pub use tool_scope::{
     ComposedToolFilter, EXTERNAL_TOOL_FILTER_METADATA_KEY, ExternalToolSurfaceBaseState,

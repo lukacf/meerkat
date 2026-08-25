@@ -63,6 +63,8 @@ pub mod input_ledger;
 pub mod input_scope;
 pub mod input_state;
 pub mod interrupt_public_result;
+pub mod live_context_mirror;
+pub mod live_execution;
 pub mod meerkat_machine;
 pub(crate) mod meerkat_machine_types;
 pub mod member_live;

@@ -15,7 +15,11 @@ pub mod registry;
 pub mod runtime;
 
 pub use binding::{
-    DynamicLease, NormalizedAuthMethod, NormalizedBackendKind, ResolvedConnection, StaticLease,
+    AdmittedExperimentalRealtimeTarget, DynamicLease, ExperimentalRealtimeAdmissionAuthority,
+    ExperimentalRealtimeAdmissionError, ExperimentalRealtimeAdmissionRetention,
+    ExperimentalRealtimeQualificationPolicy, ExperimentalRealtimeQualificationWitness,
+    NormalizedAuthMethod, NormalizedBackendKind, ResolvedConnection, ResolvedRealtimeTarget,
+    StaticLease,
 };
 pub use catalog::{ProviderRuntimeCatalog, ValidatedBinding};
 pub use errors::{ProviderAuthError, ProviderBindingError, ProviderClientError};

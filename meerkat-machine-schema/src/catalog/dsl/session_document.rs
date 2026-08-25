@@ -180,6 +180,74 @@ pub enum RealtimeUserContentBlobFinalizeDisposition {
     ClearCommitted,
 }
 
+/// Session-document disposition of authoritative final user input.
+///
+/// This machine owns whether canonical final input was committed or was
+/// terminally missing. It deliberately does not classify compatibility with
+/// the provisional handoff. MeerkatMachine derives Confirmed versus
+/// MaterialConflict by comparing the sealed canonical digest with its exact
+/// staged operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveTranscriptReconciliation {
+    #[default]
+    Provisional,
+    Committed,
+    Missing,
+}
+
+/// Closed row shape used for total live-context coverage classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveContextCommittedRowKind {
+    #[default]
+    UserText,
+    AssistantText,
+    NonText,
+}
+
+/// Closed ingress provenance for a committed transcript row considered for
+/// live-context mirroring. Only the parent session's ordinary service-turn
+/// commit is eligible. Same-shape text from live transcript and executor
+/// mutation paths remains explicitly ineligible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveContextCommittedTextProvenance {
+    #[default]
+    ParentSessionServiceTurn,
+    LiveRealtimeTranscript,
+    ExecutorTrace,
+}
+
+/// Generated disposition for one exact canonical committed row. Every row
+/// advances canonical coverage exactly once, while only ordinary parent text
+/// is eligible for a provider context append.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveContextCommittedRowDisposition {
+    #[default]
+    MirrorParentText,
+    AlreadyPresentInLiveChannel,
+    ExcludedFromLiveContext,
+}
+
+/// Provider-neutral observation at the explicit terminal boundary for one
+/// exact staged assistant playback target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveAssistantPlaybackTerminalObservation {
+    #[default]
+    Unmeasured,
+    PlaybackComplete,
+    ReportedPrefix,
+}
+
+/// SessionDocument-owned terminal decision for one exact staged assistant
+/// playback target. `Unmeasured` is intentionally neither a delivery nor a
+/// biological-hearing claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveAssistantPlaybackTerminalDisposition {
+    #[default]
+    Unmeasured,
+    PlaybackComplete,
+    TruncateToReportedPrefix,
+}
+
 // ---------------------------------------------------------------------------
 // Durable-config region typed vocabulary (folded from the retired
 // SessionDurableConfigAuthorityMachine).
@@ -506,6 +574,13 @@ machine! {
             session_pending_initial_prompt_present: Map<SessionId, bool>,
             session_pending_tool_results_count: Map<SessionId, u64>,
             session_lifecycle_terminal: Map<SessionId, Enum<SessionDocumentLifecycle>>,
+            session_live_channel_id: Map<SessionId, String>,
+            session_live_interaction_id: Map<SessionId, String>,
+            session_live_transcript_reconciliation: Map<SessionId, Enum<LiveTranscriptReconciliation>>,
+            session_live_provisional_transcript_present: Map<SessionId, bool>,
+            session_live_assistant_playback_response_id: Map<SessionId, String>,
+            session_live_assistant_playback_item_id: Map<SessionId, String>,
+            session_live_assistant_playback_content_index: Map<SessionId, u64>,
         }
 
         init(Ready) {
@@ -513,6 +588,13 @@ machine! {
             session_pending_initial_prompt_present = EmptyMap,
             session_pending_tool_results_count = EmptyMap,
             session_lifecycle_terminal = EmptyMap,
+            session_live_channel_id = EmptyMap,
+            session_live_interaction_id = EmptyMap,
+            session_live_transcript_reconciliation = EmptyMap,
+            session_live_provisional_transcript_present = EmptyMap,
+            session_live_assistant_playback_response_id = EmptyMap,
+            session_live_assistant_playback_item_id = EmptyMap,
+            session_live_assistant_playback_content_index = EmptyMap,
         }
 
         terminal []
@@ -658,6 +740,75 @@ machine! {
                 all_materialized_assistant_completions_consumed: bool,
                 all_completed_assistant_text_items_are_ready_or_materialized_or_skipped: bool,
                 all_discarded_assistant_items_are_skipped_or_materialized: bool,
+            },
+            AdmitLiveInteractionTranscript {
+                session_id: SessionId,
+                channel_id: String,
+                interaction_id: String,
+            },
+            StageLiveProvisionalUserTranscript {
+                session_id: SessionId,
+                channel_id: String,
+                interaction_id: String,
+                provisional_has_content: bool,
+            },
+            ReconcileLiveFinalUserTranscript {
+                session_id: SessionId,
+                channel_id: String,
+                interaction_id: String,
+                reconciliation: Enum<LiveTranscriptReconciliation>,
+            },
+            CompleteLiveInteractionTranscript {
+                session_id: SessionId,
+                channel_id: String,
+                interaction_id: String,
+            },
+            AdmitLiveAssistantPlaybackTarget {
+                session_id: SessionId,
+                channel_id: String,
+                interaction_id: String,
+                response_id: String,
+                item_id: String,
+                content_index: u64,
+            },
+            RecoverLiveAssistantPlaybackTarget {
+                session_id: SessionId,
+                channel_id: String,
+                interaction_id: String,
+                response_id: String,
+                item_id: String,
+                content_index: u64,
+            },
+            ResolveLiveAssistantPlaybackOnChannelClose {
+                session_id: SessionId,
+                channel_id: String,
+                interaction_id: String,
+                response_id: String,
+                item_id: String,
+                content_index: u64,
+            },
+            ResolveLiveAssistantPlaybackTerminal {
+                session_id: SessionId,
+                channel_id: String,
+                interaction_id: String,
+                response_id: String,
+                item_id: String,
+                content_index: u64,
+                authoritative_assistant_chars: u64,
+                authoritative_text_digest: String,
+                authoritative_assistant_final: bool,
+                observation: Enum<LiveAssistantPlaybackTerminalObservation>,
+                reported_prefix_chars: u64,
+                reported_prefix_digest: String,
+                reported_prefix_matches_authoritative: bool,
+            },
+            ClassifyLiveContextCommittedRow {
+                session_id: SessionId,
+                canonical_row_sequence: u64,
+                row_kind: Enum<LiveContextCommittedRowKind>,
+                provenance: Enum<LiveContextCommittedTextProvenance>,
+                content_digest: String,
+                store_commit_authority: String,
             },
 
             // -----------------------------------------------------------
@@ -904,6 +1055,64 @@ machine! {
                 disposition: Enum<RealtimeUserContentBlobFinalizeDisposition>,
             },
             RealtimeTranscriptSnapshotRestoreAuthorized,
+            LiveInteractionTranscriptAdmitted {
+                session_id: SessionId,
+                channel_id: String,
+                interaction_id: String,
+            },
+            LiveProvisionalUserTranscriptStaged {
+                session_id: SessionId,
+                channel_id: String,
+                interaction_id: String,
+            },
+            LiveFinalUserTranscriptReconciled {
+                session_id: SessionId,
+                channel_id: String,
+                interaction_id: String,
+                reconciliation: Enum<LiveTranscriptReconciliation>,
+            },
+            LiveInteractionTranscriptCompleted {
+                session_id: SessionId,
+                channel_id: String,
+                interaction_id: String,
+            },
+            LiveAssistantPlaybackTargetAdmitted {
+                session_id: SessionId,
+                channel_id: String,
+                interaction_id: String,
+                response_id: String,
+                item_id: String,
+                content_index: u64,
+            },
+            LiveAssistantPlaybackTargetRecovered {
+                session_id: SessionId,
+                channel_id: String,
+                interaction_id: String,
+                response_id: String,
+                item_id: String,
+                content_index: u64,
+            },
+            LiveAssistantPlaybackTerminalResolved {
+                session_id: SessionId,
+                channel_id: String,
+                interaction_id: String,
+                response_id: String,
+                item_id: String,
+                content_index: u64,
+                disposition: Enum<LiveAssistantPlaybackTerminalDisposition>,
+                canonical_chars: Option<u64>,
+                canonical_text_digest: Option<String>,
+                biological_hearing_claimed: bool,
+            },
+            LiveContextCommittedRowClassified {
+                session_id: SessionId,
+                canonical_row_sequence: u64,
+                row_kind: Enum<LiveContextCommittedRowKind>,
+                provenance: Enum<LiveContextCommittedTextProvenance>,
+                disposition: Enum<LiveContextCommittedRowDisposition>,
+                content_digest: String,
+                store_commit_authority: String,
+            },
 
             // Durable-config region effects. Each is a fieldless authorization
             // marker: the admission verdict is the machine's decision (a
@@ -1178,6 +1387,14 @@ machine! {
         disposition RealtimeUserContentBlobRecoveryResolved => local seam NoOwnerRealization,
         disposition RealtimeUserContentBlobFinalizeResolved => local seam NoOwnerRealization,
         disposition RealtimeTranscriptSnapshotRestoreAuthorized => local seam NoOwnerRealization,
+        disposition LiveInteractionTranscriptAdmitted => local seam OwnerRealizationOnly,
+        disposition LiveProvisionalUserTranscriptStaged => local seam OwnerRealizationOnly,
+        disposition LiveFinalUserTranscriptReconciled => local seam OwnerRealizationOnly,
+        disposition LiveInteractionTranscriptCompleted => local seam OwnerRealizationOnly,
+        disposition LiveAssistantPlaybackTargetAdmitted => local seam OwnerRealizationOnly,
+        disposition LiveAssistantPlaybackTargetRecovered => local seam OwnerRealizationOnly,
+        disposition LiveAssistantPlaybackTerminalResolved => local seam OwnerRealizationOnly,
+        disposition LiveContextCommittedRowClassified => local seam OwnerRealizationOnly,
         disposition SessionMetadataPersistAuthorized => local seam NoOwnerRealization,
         disposition SessionBuildStatePersistAuthorized => local seam NoOwnerRealization,
         disposition SessionBuildStateRestoreAuthorized => local seam NoOwnerRealization,
@@ -1195,6 +1412,32 @@ machine! {
         disposition SessionLifecycleTerminalRecovered => local seam NoOwnerRealization,
         disposition SessionRevivalResolved => local seam NoOwnerRealization,
         disposition SessionArchiveResolved => local seam NoOwnerRealization,
+
+        invariant live_interaction_transcript_binding_is_complete {
+            self.session_live_channel_id.keys() == self.session_live_interaction_id.keys()
+            && self.session_live_channel_id.keys()
+                == self.session_live_transcript_reconciliation.keys()
+            && self.session_live_channel_id.keys()
+                == self.session_live_provisional_transcript_present.keys()
+        }
+
+        invariant committed_live_transcript_had_provisional_admission {
+            for_all(session_id in self.session_live_transcript_reconciliation.keys(),
+                self.session_live_transcript_reconciliation.get_copied(session_id)
+                    != Some(LiveTranscriptReconciliation::Committed)
+                || self.session_live_provisional_transcript_present.get_copied(session_id)
+                    == Some(true))
+        }
+
+        invariant live_assistant_playback_target_is_complete_and_interaction_bound {
+            self.session_live_assistant_playback_response_id.keys()
+                == self.session_live_assistant_playback_item_id.keys()
+            && self.session_live_assistant_playback_response_id.keys()
+                == self.session_live_assistant_playback_content_index.keys()
+            && for_all(session_id in self.session_live_assistant_playback_response_id.keys(),
+                self.session_live_channel_id.contains_key(session_id)
+                && self.session_live_interaction_id.contains_key(session_id))
+        }
 
         // ---------------------------------------------------------------
         // MarkSessionInitialTurnPending
@@ -2772,6 +3015,407 @@ machine! {
             update {}
             to Ready
             emit RealtimeTranscriptSnapshotRestoreAuthorized
+        }
+
+        // GPT Live interaction identity is admitted before either provisional
+        // or final transcript mutation. One session can have one active live
+        // interaction in this first serialized implementation.
+        transition AdmitLiveInteractionTranscript {
+            on input AdmitLiveInteractionTranscript { session_id, channel_id, interaction_id }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && channel_id != ""
+                && interaction_id != ""
+                && !self.session_live_interaction_id.contains_key(session_id)
+            }
+            update {
+                self.session_live_channel_id.insert(session_id, channel_id);
+                self.session_live_interaction_id.insert(session_id, interaction_id);
+                self.session_live_transcript_reconciliation.insert(
+                    session_id,
+                    LiveTranscriptReconciliation::Provisional
+                );
+                self.session_live_provisional_transcript_present.insert(session_id, false);
+            }
+            to Ready
+            emit LiveInteractionTranscriptAdmitted {
+                session_id: session_id,
+                channel_id: channel_id,
+                interaction_id: interaction_id
+            }
+        }
+
+        transition StageLiveProvisionalUserTranscript {
+            on input StageLiveProvisionalUserTranscript {
+                session_id, channel_id, interaction_id, provisional_has_content
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && provisional_has_content == true
+                && self.session_live_channel_id.get_cloned(session_id) == Some(channel_id)
+                && self.session_live_interaction_id.get_cloned(session_id) == Some(interaction_id)
+                && self.session_live_transcript_reconciliation.get_copied(session_id)
+                    == Some(LiveTranscriptReconciliation::Provisional)
+                && self.session_live_provisional_transcript_present.get_copied(session_id)
+                    == Some(false)
+            }
+            update {
+                self.session_live_provisional_transcript_present.insert(session_id, true);
+            }
+            to Ready
+            emit LiveProvisionalUserTranscriptStaged {
+                session_id: session_id,
+                channel_id: channel_id,
+                interaction_id: interaction_id
+            }
+        }
+
+        transition ReconcileLiveFinalUserTranscript {
+            on input ReconcileLiveFinalUserTranscript {
+                session_id, channel_id, interaction_id, reconciliation
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && (reconciliation == LiveTranscriptReconciliation::Committed
+                    || reconciliation == LiveTranscriptReconciliation::Missing)
+                && self.session_live_channel_id.get_cloned(session_id) == Some(channel_id)
+                && self.session_live_interaction_id.get_cloned(session_id) == Some(interaction_id)
+                && self.session_live_transcript_reconciliation.get_copied(session_id)
+                    == Some(LiveTranscriptReconciliation::Provisional)
+                && ((reconciliation == LiveTranscriptReconciliation::Committed
+                        && self.session_live_provisional_transcript_present.get_copied(session_id)
+                            == Some(true))
+                    || reconciliation != LiveTranscriptReconciliation::Committed)
+            }
+            update {
+                self.session_live_transcript_reconciliation.insert(session_id, reconciliation);
+            }
+            to Ready
+            emit LiveFinalUserTranscriptReconciled {
+                session_id: session_id,
+                channel_id: channel_id,
+                interaction_id: interaction_id,
+                reconciliation: reconciliation
+            }
+        }
+
+        transition CompleteLiveInteractionTranscript {
+            on input CompleteLiveInteractionTranscript { session_id, channel_id, interaction_id }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.session_live_channel_id.get_cloned(session_id) == Some(channel_id)
+                && self.session_live_interaction_id.get_cloned(session_id) == Some(interaction_id)
+                && (self.session_live_transcript_reconciliation.get_copied(session_id)
+                        != Some(LiveTranscriptReconciliation::Provisional)
+                    || self.session_live_provisional_transcript_present.get_copied(session_id)
+                        == Some(false))
+                && !self.session_live_assistant_playback_response_id.contains_key(session_id)
+            }
+            update {
+                self.session_live_channel_id.remove(session_id);
+                self.session_live_interaction_id.remove(session_id);
+                self.session_live_transcript_reconciliation.remove(session_id);
+                self.session_live_provisional_transcript_present.remove(session_id);
+            }
+            to Ready
+            emit LiveInteractionTranscriptCompleted {
+                session_id: session_id,
+                channel_id: channel_id,
+                interaction_id: interaction_id
+            }
+        }
+
+        // Admit one exact staged assistant response as the only playback
+        // target for this interaction. Admission happens on the first
+        // assistant delta/audio identity, before final text exists.
+        transition AdmitLiveAssistantPlaybackTarget {
+            on input AdmitLiveAssistantPlaybackTarget {
+                session_id, channel_id, interaction_id, response_id, item_id,
+                content_index
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && response_id != ""
+                && item_id != ""
+                && self.session_live_channel_id.get_cloned(session_id) == Some(channel_id)
+                && self.session_live_interaction_id.get_cloned(session_id) == Some(interaction_id)
+                && !self.session_live_assistant_playback_response_id.contains_key(session_id)
+            }
+            update {
+                self.session_live_assistant_playback_response_id.insert(session_id, response_id);
+                self.session_live_assistant_playback_item_id.insert(session_id, item_id);
+                self.session_live_assistant_playback_content_index.insert(session_id, content_index);
+            }
+            to Ready
+            emit LiveAssistantPlaybackTargetAdmitted {
+                session_id: session_id,
+                channel_id: channel_id,
+                interaction_id: interaction_id,
+                response_id: response_id,
+                item_id: item_id,
+                content_index: content_index
+            }
+        }
+
+        // Recover only an exact durably persisted target. This is the sole
+        // path that reconstructs the interaction correlation after process
+        // loss, so a terminal caller cannot mint a fresh response/item to
+        // authorize canonical assistant text.
+        transition RecoverLiveAssistantPlaybackTarget {
+            on input RecoverLiveAssistantPlaybackTarget {
+                session_id, channel_id, interaction_id, response_id, item_id,
+                content_index
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && channel_id != ""
+                && interaction_id != ""
+                && response_id != ""
+                && item_id != ""
+                && !self.session_live_interaction_id.contains_key(session_id)
+                && !self.session_live_assistant_playback_response_id.contains_key(session_id)
+            }
+            update {
+                self.session_live_channel_id.insert(session_id, channel_id);
+                self.session_live_interaction_id.insert(session_id, interaction_id);
+                self.session_live_transcript_reconciliation.insert(
+                    session_id,
+                    LiveTranscriptReconciliation::Missing
+                );
+                self.session_live_provisional_transcript_present.insert(session_id, false);
+                self.session_live_assistant_playback_response_id.insert(session_id, response_id);
+                self.session_live_assistant_playback_item_id.insert(session_id, item_id);
+                self.session_live_assistant_playback_content_index.insert(session_id, content_index);
+            }
+            to Ready
+            emit LiveAssistantPlaybackTargetRecovered {
+                session_id: session_id,
+                channel_id: channel_id,
+                interaction_id: interaction_id,
+                response_id: response_id,
+                item_id: item_id,
+                content_index: content_index
+            }
+        }
+
+        // A live channel close or replacement is an exact playback terminal.
+        // It canonicalizes no assistant text and makes no hearing claim, but
+        // consumes the durably correlated target and its foreground
+        // interaction so a replacement channel can admit a fresh turn.
+        transition ResolveLiveAssistantPlaybackOnChannelClose {
+            on input ResolveLiveAssistantPlaybackOnChannelClose {
+                session_id, channel_id, interaction_id, response_id, item_id,
+                content_index
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.session_live_channel_id.get_cloned(session_id) == Some(channel_id)
+                && self.session_live_interaction_id.get_cloned(session_id) == Some(interaction_id)
+                && self.session_live_assistant_playback_response_id.get_cloned(session_id)
+                    == Some(response_id)
+                && self.session_live_assistant_playback_item_id.get_cloned(session_id)
+                    == Some(item_id)
+                && self.session_live_assistant_playback_content_index.get_copied(session_id)
+                    == Some(content_index)
+            }
+            update {
+                self.session_live_assistant_playback_response_id.remove(session_id);
+                self.session_live_assistant_playback_item_id.remove(session_id);
+                self.session_live_assistant_playback_content_index.remove(session_id);
+                self.session_live_channel_id.remove(session_id);
+                self.session_live_interaction_id.remove(session_id);
+                self.session_live_transcript_reconciliation.remove(session_id);
+                self.session_live_provisional_transcript_present.remove(session_id);
+            }
+            to Ready
+            emit LiveAssistantPlaybackTerminalResolved {
+                session_id: session_id,
+                channel_id: channel_id,
+                interaction_id: interaction_id,
+                response_id: response_id,
+                item_id: item_id,
+                content_index: content_index,
+                disposition: LiveAssistantPlaybackTerminalDisposition::Unmeasured,
+                canonical_chars: None,
+                canonical_text_digest: None,
+                biological_hearing_claimed: false
+            }
+        }
+
+        transition ResolveLiveAssistantPlaybackComplete {
+            on input ResolveLiveAssistantPlaybackTerminal {
+                session_id, channel_id, interaction_id, response_id, item_id,
+                content_index, authoritative_assistant_chars,
+                authoritative_text_digest, authoritative_assistant_final,
+                observation, reported_prefix_chars, reported_prefix_digest,
+                reported_prefix_matches_authoritative
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && observation == LiveAssistantPlaybackTerminalObservation::PlaybackComplete
+                && authoritative_assistant_final == true
+                && authoritative_assistant_chars > 0
+                && authoritative_text_digest != ""
+                && reported_prefix_chars == 0
+                && reported_prefix_digest == ""
+                && reported_prefix_matches_authoritative == false
+                && self.session_live_channel_id.get_cloned(session_id) == Some(channel_id)
+                && self.session_live_interaction_id.get_cloned(session_id) == Some(interaction_id)
+                && self.session_live_assistant_playback_response_id.get_cloned(session_id)
+                    == Some(response_id)
+                && self.session_live_assistant_playback_item_id.get_cloned(session_id)
+                    == Some(item_id)
+                && self.session_live_assistant_playback_content_index.get_copied(session_id)
+                    == Some(content_index)
+            }
+            update {
+                self.session_live_assistant_playback_response_id.remove(session_id);
+                self.session_live_assistant_playback_item_id.remove(session_id);
+                self.session_live_assistant_playback_content_index.remove(session_id);
+            }
+            to Ready
+            emit LiveAssistantPlaybackTerminalResolved {
+                session_id: session_id,
+                channel_id: channel_id,
+                interaction_id: interaction_id,
+                response_id: response_id,
+                item_id: item_id,
+                content_index: content_index,
+                disposition: LiveAssistantPlaybackTerminalDisposition::PlaybackComplete,
+                canonical_chars: Some(authoritative_assistant_chars),
+                canonical_text_digest: Some(authoritative_text_digest),
+                biological_hearing_claimed: false
+            }
+        }
+
+        transition ResolveLiveAssistantPlaybackReportedPrefix {
+            on input ResolveLiveAssistantPlaybackTerminal {
+                session_id, channel_id, interaction_id, response_id, item_id,
+                content_index, authoritative_assistant_chars,
+                authoritative_text_digest, authoritative_assistant_final,
+                observation, reported_prefix_chars, reported_prefix_digest,
+                reported_prefix_matches_authoritative
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && observation == LiveAssistantPlaybackTerminalObservation::ReportedPrefix
+                && authoritative_text_digest != ""
+                && reported_prefix_digest != ""
+                && reported_prefix_matches_authoritative == true
+                && reported_prefix_chars <= authoritative_assistant_chars
+                && self.session_live_channel_id.get_cloned(session_id) == Some(channel_id)
+                && self.session_live_interaction_id.get_cloned(session_id) == Some(interaction_id)
+                && self.session_live_assistant_playback_response_id.get_cloned(session_id)
+                    == Some(response_id)
+                && self.session_live_assistant_playback_item_id.get_cloned(session_id)
+                    == Some(item_id)
+                && self.session_live_assistant_playback_content_index.get_copied(session_id)
+                    == Some(content_index)
+            }
+            update {
+                self.session_live_assistant_playback_response_id.remove(session_id);
+                self.session_live_assistant_playback_item_id.remove(session_id);
+                self.session_live_assistant_playback_content_index.remove(session_id);
+            }
+            to Ready
+            emit LiveAssistantPlaybackTerminalResolved {
+                session_id: session_id,
+                channel_id: channel_id,
+                interaction_id: interaction_id,
+                response_id: response_id,
+                item_id: item_id,
+                content_index: content_index,
+                disposition: LiveAssistantPlaybackTerminalDisposition::TruncateToReportedPrefix,
+                canonical_chars: Some(reported_prefix_chars),
+                canonical_text_digest: Some(reported_prefix_digest),
+                biological_hearing_claimed: false
+            }
+        }
+
+        transition ResolveLiveAssistantPlaybackUnmeasured {
+            on input ResolveLiveAssistantPlaybackTerminal {
+                session_id, channel_id, interaction_id, response_id, item_id,
+                content_index, authoritative_assistant_chars,
+                authoritative_text_digest, authoritative_assistant_final,
+                observation, reported_prefix_chars, reported_prefix_digest,
+                reported_prefix_matches_authoritative
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && observation == LiveAssistantPlaybackTerminalObservation::Unmeasured
+                && reported_prefix_chars == 0
+                && reported_prefix_digest == ""
+                && reported_prefix_matches_authoritative == false
+                && self.session_live_channel_id.get_cloned(session_id) == Some(channel_id)
+                && self.session_live_interaction_id.get_cloned(session_id) == Some(interaction_id)
+                && self.session_live_assistant_playback_response_id.get_cloned(session_id)
+                    == Some(response_id)
+                && self.session_live_assistant_playback_item_id.get_cloned(session_id)
+                    == Some(item_id)
+                && self.session_live_assistant_playback_content_index.get_copied(session_id)
+                    == Some(content_index)
+            }
+            update {
+                self.session_live_assistant_playback_response_id.remove(session_id);
+                self.session_live_assistant_playback_item_id.remove(session_id);
+                self.session_live_assistant_playback_content_index.remove(session_id);
+            }
+            to Ready
+            emit LiveAssistantPlaybackTerminalResolved {
+                session_id: session_id,
+                channel_id: channel_id,
+                interaction_id: interaction_id,
+                response_id: response_id,
+                item_id: item_id,
+                content_index: content_index,
+                disposition: LiveAssistantPlaybackTerminalDisposition::Unmeasured,
+                canonical_chars: None,
+                canonical_text_digest: None,
+                biological_hearing_claimed: false
+            }
+        }
+
+        // Authorize one exact text row only after the runtime shell has
+        // observed the store-issued authority for the boundary that committed
+        // it. The content stays outside the machine; its digest binds the
+        // sealed shell carrier to this exact generated effect. Row sequence is
+        // canonical and one-based, matching the durable transcript order.
+        transition ClassifyLiveContextCommittedRow {
+            on input ClassifyLiveContextCommittedRow {
+                session_id,
+                canonical_row_sequence,
+                row_kind,
+                provenance,
+                content_digest,
+                store_commit_authority,
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && canonical_row_sequence > 0
+                && content_digest != ""
+                && store_commit_authority != ""
+            }
+            update {}
+            to Ready
+            emit LiveContextCommittedRowClassified {
+                session_id: session_id,
+                canonical_row_sequence: canonical_row_sequence,
+                row_kind: row_kind,
+                provenance: provenance,
+                disposition: if provenance == LiveContextCommittedTextProvenance::ParentSessionServiceTurn
+                    && (row_kind == LiveContextCommittedRowKind::UserText
+                        || row_kind == LiveContextCommittedRowKind::AssistantText) {
+                    LiveContextCommittedRowDisposition::MirrorParentText
+                } else {
+                    if provenance == LiveContextCommittedTextProvenance::LiveRealtimeTranscript {
+                        LiveContextCommittedRowDisposition::AlreadyPresentInLiveChannel
+                    } else {
+                        LiveContextCommittedRowDisposition::ExcludedFromLiveContext
+                    }
+                },
+                content_digest: content_digest,
+                store_commit_authority: store_commit_authority,
+            }
         }
 
         // ===============================================================

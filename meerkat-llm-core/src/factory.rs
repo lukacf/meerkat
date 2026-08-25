@@ -54,6 +54,17 @@ pub enum FactoryError {
     #[error("Failed to create client: {0}")]
     ClientCreationFailed(String),
 
+    /// A pre-release model was selected as a durable ordinary agent model.
+    /// Experimental live models are channel-scoped and require their explicit
+    /// admitted factory instead of mutating durable session identity.
+    #[error(
+        "experimental model '{model}' for provider '{provider}' requires an admitted live-channel execution identity"
+    )]
+    ExperimentalModelRequiresLiveChannel {
+        provider: &'static str,
+        model: String,
+    },
+
     /// Server-constrained self-hosted credential selection failed, carrying the
     /// typed [`meerkat_core::SelfHostedConnectionError`] cause.
     ///

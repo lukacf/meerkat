@@ -14,6 +14,10 @@ use std::sync::Arc;
 #[cfg(feature = "live-webrtc")]
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(feature = "experimental-gpt-live")]
+use meerkat::experimental_gpt_live::{
+    ExperimentalLiveOpenAuthorityError, ExperimentalLiveOpenAuthorityProvider,
+};
 use meerkat::session_runtime::errors::{LiveChannelVerbError, LiveIngressError, LiveOpenError};
 use meerkat::session_runtime::live_orchestration::{
     LiveSeedProjectionError, LiveSeedWindow, LiveTransportContext,
@@ -23,19 +27,20 @@ use meerkat_client::realtime_session::RealtimeSessionFactory;
 #[cfg(test)]
 use meerkat_contracts::LiveInputChunkWire;
 use meerkat_contracts::{
-    LiveChannelParams, LiveCommitInputParams, LiveOpenParams, LiveSendInputErrorData,
-    LiveSendInputParams, LiveStatusResult, LiveTruncateParams, WireLiveAdapterErrorCode,
+    LiveChannelParams, LiveCommitInputParams, LiveOpenParams, LivePlaybackCompleteParams,
+    LiveSendInputErrorData, LiveSendInputParams, LiveStatusResult, LiveTruncateParams,
+    WireLiveAdapterErrorCode,
 };
 #[cfg(feature = "live-webrtc")]
 use meerkat_contracts::{LiveWebrtcAnswerParams, LiveWebrtcAnswerResult};
 use meerkat_core::live_adapter::{LiveAdapterError, LiveAdapterErrorCode};
 use meerkat_core::types::SessionId;
-#[cfg(feature = "live-webrtc")]
-use meerkat_live::LiveWebrtcState;
 use meerkat_live::{
     LiveAdapterHost, LiveAdapterHostError, LiveChannelId, LiveWsState,
     live_input_chunk_decode_rejection, live_input_chunk_from_wire,
 };
+#[cfg(feature = "live-webrtc")]
+use meerkat_live::{LiveWebrtcAdmittedOffer, LiveWebrtcAnswerTransport, LiveWebrtcState};
 
 use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
@@ -48,6 +53,40 @@ enum LiveWebrtcAnswerCleanupDisposition {
     Reject,
 }
 
+pub async fn handle_live_playback_complete(
+    id: Option<RpcId>,
+    params: Option<&serde_json::value::RawValue>,
+    host: &LiveAdapterHost,
+    runtime: &Arc<SessionRuntime>,
+) -> RpcResponse {
+    let parsed: LivePlaybackCompleteParams = match super::parse_params(params) {
+        Ok(params) => params,
+        Err(response) => return response,
+    };
+    if parsed.output_id.trim().is_empty() {
+        return RpcResponse::error(
+            id,
+            error::INVALID_PARAMS,
+            "output_id must be non-empty".to_string(),
+        );
+    }
+    let channel_id = LiveChannelId::new(parsed.channel_id);
+    match runtime
+        .complete_live_playback(host, &channel_id, &parsed.output_id)
+        .await
+    {
+        Ok(result) => match serde_json::to_value(result) {
+            Ok(value) => RpcResponse::success(id, value),
+            Err(error) => RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                format!("failed to serialize playback completion: {error}"),
+            ),
+        },
+        Err(error) => live_verb_error_response(id, error),
+    }
+}
+
 /// Transport-delivery custody for one accepted WebRTC answer.
 ///
 /// The answer coordinator retains both the exact peer cleanup obligation and
@@ -56,36 +95,50 @@ enum LiveWebrtcAnswerCleanupDisposition {
 /// channel, which the coordinator treats exactly like an explicit rejection.
 #[cfg(feature = "live-webrtc")]
 pub(crate) struct LiveWebrtcAnswerDeliveryCustody {
-    decision_tx: tokio::sync::oneshot::Sender<LiveWebrtcAnswerCleanupDisposition>,
+    inner: LiveWebrtcAnswerDeliveryCustodyInner,
+}
+
+#[cfg(feature = "live-webrtc")]
+enum LiveWebrtcAnswerDeliveryCustodyInner {
+    Shared(meerkat::surface::LiveWebrtcAnswerDeliveryCustody),
+    #[cfg(test)]
+    Test(tokio::sync::oneshot::Sender<LiveWebrtcAnswerCleanupDisposition>),
 }
 
 #[cfg(feature = "live-webrtc")]
 impl LiveWebrtcAnswerDeliveryCustody {
-    fn new(
-        decision_tx: tokio::sync::oneshot::Sender<LiveWebrtcAnswerCleanupDisposition>,
-        cleanup_task: tokio::task::JoinHandle<Result<(), meerkat_live::LiveWebrtcError>>,
-    ) -> Self {
-        // The coordinator is already an owned task. Dropping its JoinHandle
-        // detaches it; the decision sender is the only custody the response
-        // handoff needs to retain.
-        drop(cleanup_task);
-        Self { decision_tx }
+    fn from_shared(custody: meerkat::surface::LiveWebrtcAnswerDeliveryCustody) -> Self {
+        Self {
+            inner: LiveWebrtcAnswerDeliveryCustodyInner::Shared(custody),
+        }
     }
 
-    pub(crate) fn delivered(self) -> Result<(), String> {
-        self.decision_tx
-            .send(LiveWebrtcAnswerCleanupDisposition::Accept)
-            .map_err(|_| {
-                "live WebRTC answer cleanup coordinator stopped before decision".to_string()
-            })
+    pub(crate) async fn delivered(self) -> Result<(), String> {
+        match self.inner {
+            LiveWebrtcAnswerDeliveryCustodyInner::Shared(custody) => {
+                custody.delivered().await.map_err(|error| error.to_string())
+            }
+            #[cfg(test)]
+            LiveWebrtcAnswerDeliveryCustodyInner::Test(decision_tx) => decision_tx
+                .send(LiveWebrtcAnswerCleanupDisposition::Accept)
+                .map_err(|_| {
+                    "live WebRTC answer cleanup coordinator stopped before decision".to_string()
+                }),
+        }
     }
 
-    pub(crate) fn rejected(self) -> Result<(), String> {
-        self.decision_tx
-            .send(LiveWebrtcAnswerCleanupDisposition::Reject)
-            .map_err(|_| {
-                "live WebRTC answer cleanup coordinator stopped before decision".to_string()
-            })
+    pub(crate) async fn rejected(self) -> Result<(), String> {
+        match self.inner {
+            LiveWebrtcAnswerDeliveryCustodyInner::Shared(custody) => {
+                custody.rejected().await.map_err(|error| error.to_string())
+            }
+            #[cfg(test)]
+            LiveWebrtcAnswerDeliveryCustodyInner::Test(decision_tx) => decision_tx
+                .send(LiveWebrtcAnswerCleanupDisposition::Reject)
+                .map_err(|_| {
+                    "live WebRTC answer cleanup coordinator stopped before decision".to_string()
+                }),
+        }
     }
 }
 
@@ -128,10 +181,14 @@ pub(crate) fn test_live_webrtc_answer_delivery_custody() -> (
             Ok(LiveWebrtcAnswerCleanupDisposition::Accept)
         );
         let _ = settled_tx.send(delivered);
-        Ok(())
     });
     (
-        LiveWebrtcAnswerDeliveryCustody::new(decision_tx, cleanup_task),
+        {
+            drop(cleanup_task);
+            LiveWebrtcAnswerDeliveryCustody {
+                inner: LiveWebrtcAnswerDeliveryCustodyInner::Test(decision_tx),
+            }
+        },
         settled_rx,
     )
 }
@@ -174,6 +231,7 @@ fn live_open_projection_error_code(error: &RealtimeSessionOpenProjectionError) -
             meerkat_client::error::LlmError::InvalidInputShape { .. },
         ) => crate::error::INVALID_PARAMS,
         RealtimeSessionOpenProjectionError::Session(_)
+        | RealtimeSessionOpenProjectionError::SessionMismatch { .. }
         | RealtimeSessionOpenProjectionError::Seed(
             LiveSeedProjectionError::Session(_)
             | LiveSeedProjectionError::Serialization(_)
@@ -737,6 +795,83 @@ pub struct LiveOpenHandlerContext<'a> {
     pub live_webrtc: Option<&'a LiveWebrtcState>,
     pub runtime: &'a Arc<SessionRuntime>,
     pub session_factory: Option<&'a dyn RealtimeSessionFactory>,
+    /// Host-owned authority for strict channel-scoped execution identity.
+    /// Absence is fail-closed and is the stock composition.
+    #[cfg(feature = "experimental-gpt-live")]
+    pub experimental_live_open_authority:
+        Option<&'a Arc<dyn ExperimentalLiveOpenAuthorityProvider>>,
+}
+
+#[cfg(feature = "experimental-gpt-live")]
+fn experimental_live_open_authority_error_response(
+    id: Option<RpcId>,
+    authority_error: ExperimentalLiveOpenAuthorityError,
+) -> RpcResponse {
+    let code = match authority_error {
+        ExperimentalLiveOpenAuthorityError::InvalidExecutionIdentity => error::INVALID_PARAMS,
+        ExperimentalLiveOpenAuthorityError::ChannelBindingFailed => error::INTERNAL_ERROR,
+        ExperimentalLiveOpenAuthorityError::Unavailable
+        | ExperimentalLiveOpenAuthorityError::AccessDenied
+        | ExperimentalLiveOpenAuthorityError::DurableTargetUnavailable
+        | ExperimentalLiveOpenAuthorityError::BindingUseDenied
+        | ExperimentalLiveOpenAuthorityError::AdmissionFailed => {
+            meerkat_contracts::ErrorCode::CapabilityUnavailable.jsonrpc_code()
+        }
+    };
+    RpcResponse::error(id, code, authority_error.to_string())
+}
+
+#[cfg(feature = "experimental-gpt-live")]
+fn experimental_live_channel_open_error_response(
+    id: Option<RpcId>,
+    open_error: meerkat::session_runtime::live_orchestration::ExperimentalLiveChannelOpenError,
+) -> RpcResponse {
+    use meerkat::session_runtime::live_orchestration::ExperimentalLiveChannelOpenError;
+
+    match open_error {
+        ExperimentalLiveChannelOpenError::InvalidTransport => RpcResponse::error(
+            id,
+            error::INVALID_PARAMS,
+            "live/open execution_identity requires transport 'webrtc'",
+        ),
+        ExperimentalLiveChannelOpenError::Authority(authority_error) => {
+            experimental_live_open_authority_error_response(id, authority_error)
+        }
+        ExperimentalLiveChannelOpenError::Projection(projection_error) => RpcResponse::error(
+            id,
+            live_open_projection_error_code(&projection_error),
+            format!("failed to build session config: {projection_error}"),
+        ),
+        ExperimentalLiveChannelOpenError::Open(open_error) => {
+            live_open_error_response(id, open_error)
+        }
+        binding_cleanup @ ExperimentalLiveChannelOpenError::BindingCleanup { .. } => {
+            RpcResponse::error(id, error::INTERNAL_ERROR, binding_cleanup.to_string())
+        }
+    }
+}
+
+#[cfg(feature = "experimental-gpt-live")]
+pub(crate) struct ExperimentalLiveOpenPublication {
+    pub(crate) session_id: SessionId,
+    pub(crate) channel_id: LiveChannelId,
+    pub(crate) authority: Arc<dyn ExperimentalLiveOpenAuthorityProvider>,
+}
+
+pub(crate) struct LiveOpenHandlerResult {
+    pub(crate) response: RpcResponse,
+    #[cfg(feature = "experimental-gpt-live")]
+    pub(crate) experimental_publication: Option<ExperimentalLiveOpenPublication>,
+}
+
+impl From<RpcResponse> for LiveOpenHandlerResult {
+    fn from(response: RpcResponse) -> Self {
+        Self {
+            response,
+            #[cfg(feature = "experimental-gpt-live")]
+            experimental_publication: None,
+        }
+    }
 }
 
 pub async fn handle_live_open(
@@ -744,6 +879,14 @@ pub async fn handle_live_open(
     params: Option<&serde_json::value::RawValue>,
     ctx: LiveOpenHandlerContext<'_>,
 ) -> RpcResponse {
+    handle_live_open_routed(id, params, ctx).await.response
+}
+
+pub(crate) async fn handle_live_open_routed(
+    id: Option<RpcId>,
+    params: Option<&serde_json::value::RawValue>,
+    ctx: LiveOpenHandlerContext<'_>,
+) -> LiveOpenHandlerResult {
     let LiveOpenHandlerContext {
         host,
         live_ws,
@@ -752,11 +895,38 @@ pub async fn handle_live_open(
         live_webrtc,
         runtime,
         session_factory,
+        #[cfg(feature = "experimental-gpt-live")]
+        experimental_live_open_authority,
     } = ctx;
     let parsed: LiveOpenParams = match super::parse_params(params) {
         Ok(p) => p,
-        Err(resp) => return resp,
+        Err(resp) => return resp.into(),
     };
+    #[cfg(not(feature = "experimental-gpt-live"))]
+    if parsed.execution_identity.is_some() {
+        return RpcResponse::error(
+            id,
+            meerkat_contracts::ErrorCode::CapabilityUnavailable.jsonrpc_code(),
+            format!(
+                "live/open execution_identity requires negotiated capability '{}'",
+                meerkat_contracts::LIVE_EXECUTION_IDENTITY_V1_CAPABILITY
+            ),
+        )
+        .into();
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
+    if parsed.execution_identity.is_some() && experimental_live_open_authority.is_none() {
+        return RpcResponse::error(
+            id,
+            meerkat_contracts::ErrorCode::CapabilityUnavailable.jsonrpc_code(),
+            format!(
+                "live/open execution_identity requires negotiated capability '{}'",
+                meerkat_contracts::LIVE_EXECUTION_IDENTITY_V1_CAPABILITY
+            ),
+        )
+        .into();
+    }
     let session_id = match SessionId::parse(&parsed.session_id) {
         Ok(id) => id,
         Err(err) => {
@@ -764,7 +934,8 @@ pub async fn handle_live_open(
                 id,
                 error::INVALID_PARAMS,
                 format!("invalid session_id: {err}"),
-            );
+            )
+            .into();
         }
     };
 
@@ -775,8 +946,78 @@ pub async fn handle_live_open(
     // mint a candidate channel or ask machine authority to admit the open.
     let seed_window = match live_seed_window_from_params(id.clone(), parsed.seed_max_chars) {
         Ok(seed_window) => seed_window,
-        Err(response) => return *response,
+        Err(response) => return (*response).into(),
     };
+
+    #[cfg(feature = "experimental-gpt-live")]
+    if let Some(execution_identity) = parsed.execution_identity.as_ref() {
+        let Some(authority) = experimental_live_open_authority else {
+            return RpcResponse::error(
+                id,
+                meerkat_contracts::ErrorCode::CapabilityUnavailable.jsonrpc_code(),
+                format!(
+                    "live/open execution_identity requires negotiated capability '{}'",
+                    meerkat_contracts::LIVE_EXECUTION_IDENTITY_V1_CAPABILITY
+                ),
+            )
+            .into();
+        };
+        let result = match runtime
+            .open_live_channel_with_execution_identity(
+                host,
+                transport_ctx,
+                authority.as_ref(),
+                &session_id,
+                execution_identity,
+                parsed.turning_mode,
+                seed_window,
+                parsed.transport,
+            )
+            .await
+        {
+            Ok(result) => result,
+            Err(open_error) => {
+                return experimental_live_channel_open_error_response(id, open_error).into();
+            }
+        };
+        let channel_id = LiveChannelId::new(&result.channel_id);
+        return match serde_json::to_value(&result) {
+            Ok(value) => LiveOpenHandlerResult {
+                response: RpcResponse::success(id, value),
+                experimental_publication: Some(ExperimentalLiveOpenPublication {
+                    session_id,
+                    channel_id,
+                    authority: Arc::clone(authority),
+                }),
+            },
+            Err(serialize_error) => {
+                let cleanup = runtime
+                    .cleanup_experimental_live_channel_after_publication_failure(
+                        host,
+                        authority.as_ref(),
+                        &session_id,
+                        &channel_id,
+                    )
+                    .await;
+                match cleanup {
+                    Ok(_) => RpcResponse::error(
+                        id,
+                        error::INTERNAL_ERROR,
+                        format!("failed to serialize LiveOpenResult: {serialize_error}"),
+                    ),
+                    Err(cleanup_error) => RpcResponse::error(
+                        id,
+                        error::INTERNAL_ERROR,
+                        format!(
+                            "failed to serialize LiveOpenResult and cleanup failed: {cleanup_error}"
+                        ),
+                    ),
+                }
+                .into()
+            }
+        };
+    }
+
     match runtime
         .open_live_channel(
             host,
@@ -801,13 +1042,120 @@ pub async fn handle_live_open(
         },
         Err(open_error) => live_open_error_response(id, open_error),
     }
+    .into()
 }
 
 #[cfg(feature = "live-webrtc")]
 pub(crate) async fn handle_live_webrtc_answer(
     id: Option<RpcId>,
     params: Option<&serde_json::value::RawValue>,
-    live_webrtc: &Arc<LiveWebrtcState>,
+    answer_transport: &Arc<dyn LiveWebrtcAnswerTransport>,
+    runtime: &Arc<SessionRuntime>,
+    #[cfg(feature = "experimental-gpt-live")] experimental_live_open_authority: Option<
+        &dyn ExperimentalLiveOpenAuthorityProvider,
+    >,
+    #[cfg(feature = "experimental-gpt-live")] bound_channel_activator: Option<
+        Arc<dyn meerkat::experimental_gpt_live::ExperimentalLiveBoundChannelActivator>,
+    >,
+    #[cfg(feature = "experimental-gpt-live")] public_observation_publisher: Option<
+        Arc<dyn meerkat::experimental_gpt_live::ExperimentalLivePublicObservationPublisher>,
+    >,
+    #[cfg(feature = "experimental-gpt-live")] live_adapter_host: &Arc<LiveAdapterHost>,
+) -> LiveWebrtcAnswerHandlerResult {
+    let parsed: LiveWebrtcAnswerParams = match super::parse_params(params) {
+        Ok(parsed) => parsed,
+        Err(response) => return response.into(),
+    };
+    let channel_id = LiveChannelId::new(parsed.channel_id);
+    let coordinated = meerkat::surface::coordinate_live_webrtc_answer(
+        runtime.runtime_adapter(),
+        Arc::clone(answer_transport),
+        #[cfg(feature = "experimental-gpt-live")]
+        experimental_live_open_authority.and_then(|authority| {
+            authority.bound_ready_binder_for(
+                bound_channel_activator?,
+                Arc::clone(live_adapter_host),
+                public_observation_publisher?,
+            )
+        }),
+        #[cfg(not(feature = "experimental-gpt-live"))]
+        None,
+        channel_id.clone(),
+        parsed.token,
+        parsed.offer_sdp,
+    )
+    .await;
+    let coordinated = match coordinated {
+        Ok(answer) => answer,
+        Err(meerkat::surface::LiveWebrtcAnswerCoordinatorError::UnboundChannel) => {
+            return live_unbound_channel_request_error_response(
+                id,
+                runtime,
+                &channel_id,
+                meerkat_runtime::meerkat_machine::dsl::LiveChannelRequestPublicKind::WebrtcAnswer,
+            )
+            .await
+            .into();
+        }
+        Err(meerkat::surface::LiveWebrtcAnswerCoordinatorError::AdmissionRejected {
+            session_id,
+            authority,
+        }) => {
+            return live_webrtc_answer_admission_error_response_from_machine_authority(
+                id,
+                runtime,
+                &session_id,
+                &authority,
+                &channel_id,
+            )
+            .await
+            .into();
+        }
+        Err(meerkat::surface::LiveWebrtcAnswerCoordinatorError::TransportRejected {
+            source,
+            authority,
+            ..
+        }) => {
+            return live_channel_request_rejection_response_from_machine_authority(
+                id,
+                &authority,
+                meerkat_runtime::meerkat_machine::dsl::LiveChannelRequestPublicKind::WebrtcAnswer,
+                &channel_id,
+                Some(live_webrtc_answer_rejection_detail(&source)),
+            )
+            .into();
+        }
+        Err(error) => {
+            return RpcResponse::error(id, error::INTERNAL_ERROR, error.to_string()).into();
+        }
+    };
+    let result = LiveWebrtcAnswerResult {
+        answer_sdp: coordinated.answer_sdp,
+    };
+    let value = match serde_json::to_value(result) {
+        Ok(value) => value,
+        Err(serialization_error) => {
+            let _ = coordinated.delivery_custody.rejected().await;
+            return RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                format!("failed to serialize LiveWebrtcAnswerResult: {serialization_error}"),
+            )
+            .into();
+        }
+    };
+    let response = RpcResponse::success(id, value);
+    LiveWebrtcAnswerHandlerResult::accepted(
+        response,
+        LiveWebrtcAnswerDeliveryCustody::from_shared(coordinated.delivery_custody),
+    )
+}
+
+#[cfg(all(feature = "live-webrtc", any()))]
+async fn handle_live_webrtc_answer_legacy(
+    id: Option<RpcId>,
+    params: Option<&serde_json::value::RawValue>,
+    answer_transport: &Arc<dyn LiveWebrtcAnswerTransport>,
     runtime: &Arc<SessionRuntime>,
 ) -> LiveWebrtcAnswerHandlerResult {
     let parsed: LiveWebrtcAnswerParams = match super::parse_params(params) {
@@ -895,15 +1243,50 @@ pub(crate) async fn handle_live_webrtc_answer(
         .into();
     }
 
+    let runtime_binding = match runtime
+        .runtime_adapter()
+        .live_webrtc_runtime_binding(&session_id)
+        .await
+    {
+        Ok(binding) => binding,
+        Err(error) => {
+            return RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                format!("live WebRTC runtime binding authority unavailable: {error}"),
+            )
+            .into();
+        }
+    };
+    let Some(transport_seal) = admission.transport_seal else {
+        return live_webrtc_answer_malformed_admission_response(
+            id,
+            runtime,
+            &session_id,
+            &channel_id,
+            "admitted WebRTC answer omitted the generated transport seal".to_string(),
+        )
+        .await
+        .into();
+    };
+    let admitted_offer = LiveWebrtcAdmittedOffer::from_machine_admission(
+        channel_id.clone(),
+        session_id.clone(),
+        runtime_binding,
+        parsed.offer_sdp,
+        transport_seal,
+    );
+    let coordinator_binding = admitted_offer.binding_request();
+
     let (answer_result_tx, answer_result_rx) = tokio::sync::oneshot::channel();
     let (cleanup_decision_tx, cleanup_decision_rx) = tokio::sync::oneshot::channel();
     let (handler_liveness_tx, mut handler_liveness_rx) = tokio::sync::oneshot::channel::<()>();
-    let coordinator_live_webrtc = Arc::clone(live_webrtc);
+    let coordinator_answer_transport = Arc::clone(answer_transport);
     let coordinator_channel_id = channel_id.clone();
     let coordinator_runtime = Arc::clone(runtime);
     let coordinator_session_id = session_id.clone();
     let coordinator_response_id = id.clone();
-    let offer_sdp = parsed.offer_sdp;
+    let coordinator_offer = admitted_offer.clone();
 
     // Construction and cleanup run under one owned coordinator. If this RPC
     // future is dropped, liveness closes: the coordinator aborts negotiation,
@@ -912,13 +1295,10 @@ pub(crate) async fn handle_live_webrtc_answer(
     // If publication won the race, the exact sequence-keyed peer is rejected
     // through the same pending-answer path.
     let cleanup_task = tokio::spawn(async move {
-        let answer_live_webrtc = Arc::clone(&coordinator_live_webrtc);
-        let answer_channel_id = coordinator_channel_id.clone();
-        let mut answer_task = tokio::spawn(async move {
-            answer_live_webrtc
-                .answer_offer(answer_channel_id, offer_sdp)
-                .await
-        });
+        let answer_transport = Arc::clone(&coordinator_answer_transport);
+        let answer_offer = coordinator_offer.clone();
+        let mut answer_task =
+            tokio::spawn(async move { answer_transport.answer_admitted_offer(answer_offer).await });
         let (handler_gone, answer_joined) = tokio::select! {
             _ = &mut handler_liveness_rx => {
                 answer_task.abort();
@@ -929,11 +1309,8 @@ pub(crate) async fn handle_live_webrtc_answer(
 
         let cleanup_result = match answer_joined {
             Ok(Ok(answer)) if handler_gone => {
-                coordinator_live_webrtc
-                    .close_rejected_answer_peer(
-                        &coordinator_channel_id,
-                        answer.answer_observation_sequence,
-                    )
+                coordinator_answer_transport
+                    .reject_answer(&coordinator_binding, answer.answer_observation_sequence)
                     .await
             }
             Ok(Ok(answer)) => {
@@ -942,29 +1319,20 @@ pub(crate) async fn handle_live_webrtc_answer(
                     .send(LiveWebrtcAnswerCoordinatorResult::Answer(answer))
                     .is_err()
                 {
-                    coordinator_live_webrtc
-                        .close_rejected_answer_peer(
-                            &coordinator_channel_id,
-                            answer_observation_sequence,
-                        )
+                    coordinator_answer_transport
+                        .reject_answer(&coordinator_binding, answer_observation_sequence)
                         .await
                 } else {
                     match cleanup_decision_rx.await {
                         Ok(LiveWebrtcAnswerCleanupDisposition::Accept) => {
-                            coordinator_live_webrtc
-                                .release_answer_cleanup_obligation(
-                                    &coordinator_channel_id,
-                                    answer_observation_sequence,
-                                )
+                            coordinator_answer_transport
+                                .accept_answer(&coordinator_binding, answer_observation_sequence)
                                 .await;
                             Ok(())
                         }
                         Ok(LiveWebrtcAnswerCleanupDisposition::Reject) | Err(_) => {
-                            coordinator_live_webrtc
-                                .close_rejected_answer_peer(
-                                    &coordinator_channel_id,
-                                    answer_observation_sequence,
-                                )
+                            coordinator_answer_transport
+                                .reject_answer(&coordinator_binding, answer_observation_sequence)
                                 .await
                         }
                     }
@@ -1014,8 +1382,8 @@ pub(crate) async fn handle_live_webrtc_answer(
                 // Wait boundedly for exact absence. A non-Closed peer keeps
                 // exact registry custody, but the lifecycle mutex is not
                 // durable transport-fault state and must still be released.
-                coordinator_live_webrtc
-                    .wait_for_answer_construction_cleanup(&coordinator_channel_id)
+                coordinator_answer_transport
+                    .wait_for_construction_cleanup(&coordinator_binding)
                     .await
             }
         };
@@ -1157,7 +1525,10 @@ pub async fn handle_live_close(
     params: Option<&serde_json::value::RawValue>,
     host: &LiveAdapterHost,
     runtime: &Arc<SessionRuntime>,
-    #[cfg(feature = "live-webrtc")] live_webrtc: Option<&LiveWebrtcState>,
+    #[cfg(feature = "live-webrtc")] answer_transport: Option<&dyn LiveWebrtcAnswerTransport>,
+    #[cfg(feature = "experimental-gpt-live")] experimental_live_open_authority: Option<
+        &dyn ExperimentalLiveOpenAuthorityProvider,
+    >,
 ) -> RpcResponse {
     let parsed: LiveChannelParams = match super::parse_params(params) {
         Ok(p) => p,
@@ -1169,7 +1540,16 @@ pub async fn handle_live_close(
     // existing session gate, close could observe no peer, then an in-flight
     // answer could publish one before the semantic close committed.
     #[cfg(feature = "live-webrtc")]
-    let webrtc_close_authority = if live_webrtc.is_some() {
+    let webrtc_close_authority = if answer_transport.is_some() || {
+        #[cfg(feature = "experimental-gpt-live")]
+        {
+            experimental_live_open_authority.is_some()
+        }
+        #[cfg(not(feature = "experimental-gpt-live"))]
+        {
+            false
+        }
+    } {
         match runtime
             .runtime_adapter()
             .live_session_for_active_channel(&channel_id)
@@ -1202,16 +1582,48 @@ pub async fn handle_live_close(
     // one-shot physical shutdown and leaves semantic state active on failure;
     // retained physical custody stays visible in the WebRTC registries.
     #[cfg(feature = "live-webrtc")]
-    if let Some(live_webrtc) = live_webrtc
-        && let Err(close_error) = live_webrtc.close_peer_checked(&channel_id).await
-    {
-        let request = meerkat_runtime::meerkat_machine::dsl::LiveChannelRequestPublicKind::Close;
-        let detail = format!("WebRTC peer close failed before semantic live close: {close_error}");
-        let Some((session_id, lease)) = webrtc_close_authority else {
-            return live_unbound_channel_request_error_response(id, runtime, &channel_id, request)
-                .await;
+    if let Some(answer_transport) = answer_transport {
+        let close_result = match webrtc_close_authority.as_ref() {
+            Some((session_id, _lease)) => {
+                let runtime_binding = match runtime
+                    .runtime_adapter()
+                    .live_webrtc_runtime_binding(session_id)
+                    .await
+                {
+                    Ok(binding) => binding,
+                    Err(error) => {
+                        return RpcResponse::error(
+                            id,
+                            error::INTERNAL_ERROR,
+                            format!("live WebRTC runtime binding authority unavailable: {error}"),
+                        );
+                    }
+                };
+                answer_transport
+                    .close_binding(&meerkat_live::LiveWebrtcBindingRequest {
+                        channel_id: channel_id.clone(),
+                        session_id: session_id.clone(),
+                        runtime_binding,
+                    })
+                    .await
+            }
+            None => Ok(()),
         };
-        let response = match runtime
+        if let Err(close_error) = close_result {
+            let request =
+                meerkat_runtime::meerkat_machine::dsl::LiveChannelRequestPublicKind::Close;
+            let detail =
+                format!("WebRTC peer close failed before semantic live close: {close_error}");
+            let Some((session_id, lease)) = webrtc_close_authority else {
+                return live_unbound_channel_request_error_response(
+                    id,
+                    runtime,
+                    &channel_id,
+                    request,
+                )
+                .await;
+            };
+            let response = match runtime
             .runtime_adapter()
             .resolve_live_channel_request_rejection_reason_result(
                 &session_id,
@@ -1234,22 +1646,32 @@ pub async fn handle_live_close(
                 format!("live WebRTC close rejection authority rejected result: {error}"),
             ),
         };
-        // Exact WebRTC custody remains in its registries when the one-shot
-        // close cannot reach typed Closed. The lifecycle mutex is an exclusion
-        // witness, not durable transport-fault state, so always release it.
-        drop(lease);
-        return response;
+            // Exact WebRTC custody remains in its registries when the one-shot
+            // close cannot reach typed Closed. The lifecycle mutex is an exclusion
+            // witness, not durable transport-fault state, so always release it.
+            drop(lease);
+            return response;
+        }
     }
 
     match runtime.close_live_channel(host, &channel_id).await {
-        Ok(result) => match serde_json::to_value(result) {
-            Ok(body) => RpcResponse::success(id, body),
-            Err(error) => RpcResponse::error(
-                id,
-                error::INTERNAL_ERROR,
-                format!("live close authority projection failed: {error}"),
-            ),
-        },
+        Ok(result) => {
+            #[cfg(feature = "experimental-gpt-live")]
+            if let (Some(authority), Some((session_id, _lease))) = (
+                experimental_live_open_authority,
+                webrtc_close_authority.as_ref(),
+            ) {
+                authority.unbind_channel(&channel_id, session_id).await;
+            }
+            match serde_json::to_value(result) {
+                Ok(body) => RpcResponse::success(id, body),
+                Err(error) => RpcResponse::error(
+                    id,
+                    error::INTERNAL_ERROR,
+                    format!("live close authority projection failed: {error}"),
+                ),
+            }
+        }
         Err(verb_error) => live_verb_error_response(id, verb_error),
     }
 }
@@ -1447,11 +1869,13 @@ pub async fn handle_live_truncate(
     // Validate item_id is non-empty. content_index is `u32` and
     // audio_played_ms is `u64`, so the type system already rejects negatives
     // at deserialization (`>= 0` is satisfied by construction).
-    if parsed.item_id.is_empty() {
+    if parsed.output_id.as_deref().is_none_or(str::is_empty)
+        && parsed.item_id.as_deref().is_none_or(str::is_empty)
+    {
         return RpcResponse::error(
             id,
             error::INVALID_PARAMS,
-            "item_id must be non-empty".to_string(),
+            "output_id or legacy item_id must be non-empty".to_string(),
         );
     }
 
@@ -1465,9 +1889,11 @@ pub async fn handle_live_truncate(
             host,
             transport_ctx,
             &channel_id,
+            parsed.output_id.clone(),
             parsed.item_id.clone(),
             parsed.content_index,
             parsed.audio_played_ms,
+            parsed.reported_playback_prefix.clone(),
         )
         .await
     {
@@ -1680,6 +2106,7 @@ mod tests {
             session_id: "sess-123".into(),
             turning_mode: None,
             transport: None,
+            execution_identity: None,
             seed_max_chars: None,
         };
         assert_eq!(round_trip(&v), v);
@@ -1693,6 +2120,7 @@ mod tests {
             session_id: "sess-123".into(),
             turning_mode: Some(RealtimeTurningMode::ExplicitCommit),
             transport: None,
+            execution_identity: None,
             seed_max_chars: Some(24_000),
         };
         assert_eq!(round_trip(&v), v);
@@ -2034,9 +2462,11 @@ mod tests {
     fn live_truncate_params_roundtrip() {
         let v = LiveTruncateParams {
             channel_id: "live_1".into(),
-            item_id: "item_xyz".into(),
-            content_index: 3,
+            output_id: None,
+            item_id: Some("item_xyz".into()),
+            content_index: Some(3),
             audio_played_ms: 1_234,
+            reported_playback_prefix: Some("partial".into()),
         };
         assert_eq!(round_trip(&v), v);
     }
@@ -2046,9 +2476,11 @@ mod tests {
         // A7 / Rule 14: no flatten — every field is a sibling of channel_id.
         let v = LiveTruncateParams {
             channel_id: "live_1".into(),
-            item_id: "item_xyz".into(),
-            content_index: 0,
+            output_id: None,
+            item_id: Some("item_xyz".into()),
+            content_index: Some(0),
             audio_played_ms: 0,
+            reported_playback_prefix: None,
         };
         let json: serde_json::Value = serde_json::to_value(&v).unwrap();
         for key in ["channel_id", "item_id", "content_index", "audio_played_ms"] {

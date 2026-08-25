@@ -14,7 +14,7 @@ use chrono::{DateTime, Utc};
 
 use meerkat_core::{
     AuthError, AuthLease, AuthMetadata, AuthRefreshReason, BackendProfile, HttpAuthorizer,
-    Provider, ResolvedAuthKind,
+    ModelProfileWitness, Provider, ResolvedAuthKind, SessionLlmIdentity,
 };
 
 use meerkat_core::provider_matrix::anthropic::{AnthropicAuthMethod, AnthropicBackendKind};
@@ -174,6 +174,515 @@ pub struct ResolvedConnection {
     pub backend: NormalizedBackendKind,
     pub backend_profile: Arc<BackendProfile>,
     pub auth_lease: Arc<dyn AuthLease>,
+}
+
+/// Factory-resolved realtime construction target.
+///
+/// This binds one exact durable session LLM identity and its registry-minted
+/// capability witness to the resolved provider connection. Provider runtimes
+/// consume this target and may implement transport mechanics, but cannot
+/// substitute a model or infer catalog policy from a model-name string.
+#[derive(Clone)]
+pub struct ResolvedRealtimeTarget {
+    identity: SessionLlmIdentity,
+    profile: ModelProfileWitness,
+    connection: ResolvedConnection,
+}
+
+impl ResolvedRealtimeTarget {
+    /// Construct a target only when all three pieces name the same provider
+    /// and the witness names the exact session model.
+    pub fn new(
+        identity: SessionLlmIdentity,
+        profile: ModelProfileWitness,
+        connection: ResolvedConnection,
+    ) -> Option<Self> {
+        if !profile.matches_identity(&identity) || connection.provider != identity.provider {
+            return None;
+        }
+        Some(Self {
+            identity,
+            profile,
+            connection,
+        })
+    }
+
+    pub fn identity(&self) -> &SessionLlmIdentity {
+        &self.identity
+    }
+
+    pub fn profile(&self) -> &ModelProfileWitness {
+        &self.profile
+    }
+
+    pub fn connection(&self) -> &ResolvedConnection {
+        &self.connection
+    }
+
+    pub fn into_parts(self) -> (SessionLlmIdentity, ModelProfileWitness, ResolvedConnection) {
+        (self.identity, self.profile, self.connection)
+    }
+}
+
+impl std::fmt::Debug for ResolvedRealtimeTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedRealtimeTarget")
+            .field("identity", &self.identity)
+            .field("profile", &self.profile)
+            .field("connection", &self.connection)
+            .finish()
+    }
+}
+
+/// Structured host policy validated by the lower provider admission owner.
+/// It contains configuration facts only - never credentials or a target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExperimentalRealtimeQualificationPolicy {
+    realm: meerkat_core::RealmId,
+    factory_kind: String,
+    factory_version: String,
+    required_gate0_version: String,
+}
+
+impl ExperimentalRealtimeQualificationPolicy {
+    pub fn new(
+        realm: meerkat_core::RealmId,
+        factory_kind: impl Into<String>,
+        factory_version: impl Into<String>,
+        required_gate0_version: impl Into<String>,
+    ) -> Result<Self, ExperimentalRealtimeAdmissionError> {
+        let policy = Self {
+            realm,
+            factory_kind: factory_kind.into(),
+            factory_version: factory_version.into(),
+            required_gate0_version: required_gate0_version.into(),
+        };
+        if !valid_experimental_component(&policy.factory_kind)
+            || !valid_experimental_component(&policy.factory_version)
+            || !valid_experimental_component(&policy.required_gate0_version)
+        {
+            return Err(ExperimentalRealtimeAdmissionError::InvalidPolicy);
+        }
+        Ok(policy)
+    }
+
+    pub fn realm(&self) -> &meerkat_core::RealmId {
+        &self.realm
+    }
+}
+
+fn valid_experimental_component(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+fn valid_experimental_digest(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+#[derive(Debug)]
+struct ExperimentalRealtimeAdmissionAuthorityInner;
+
+/// Lower-layer owner of compiled Gate0 qualification and exact target
+/// admission. Provider crates accept only carriers minted by this owner.
+#[derive(Clone)]
+pub struct ExperimentalRealtimeAdmissionAuthority {
+    inner: Arc<ExperimentalRealtimeAdmissionAuthorityInner>,
+    policy: ExperimentalRealtimeQualificationPolicy,
+    protocol_digest: String,
+}
+
+impl std::fmt::Debug for ExperimentalRealtimeAdmissionAuthority {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ExperimentalRealtimeAdmissionAuthority")
+            .field("policy", &self.policy)
+            .field("protocol_digest", &self.protocol_digest)
+            .field("authority", &"[OPAQUE]")
+            .finish()
+    }
+}
+
+impl ExperimentalRealtimeAdmissionAuthority {
+    /// Construct only when operator policy exactly matches this compiled
+    /// artifact's Gate0 witness.
+    pub fn from_compiled_gate0_policy(
+        policy: ExperimentalRealtimeQualificationPolicy,
+    ) -> Result<Self, ExperimentalRealtimeAdmissionError> {
+        if !cfg!(feature = "experimental-gpt-live") {
+            return Err(ExperimentalRealtimeAdmissionError::FeatureNotCompiled);
+        }
+        if option_env!("MEERKAT_EXPERIMENTAL_LIVE_GATE0_STATUS") != Some("qualified") {
+            return Err(ExperimentalRealtimeAdmissionError::Gate0Unavailable);
+        }
+        if option_env!("MEERKAT_EXPERIMENTAL_LIVE_GATE0_FACTORY_KIND")
+            != Some(policy.factory_kind.as_str())
+            || option_env!("MEERKAT_EXPERIMENTAL_LIVE_GATE0_FACTORY_VERSION")
+                != Some(policy.factory_version.as_str())
+            || option_env!("MEERKAT_EXPERIMENTAL_LIVE_GATE0_QUALIFICATION_VERSION")
+                != Some(policy.required_gate0_version.as_str())
+            || option_env!("MEERKAT_EXPERIMENTAL_LIVE_GATE0_BUILD_VERSION")
+                != Some(env!("CARGO_PKG_VERSION"))
+        {
+            return Err(ExperimentalRealtimeAdmissionError::Gate0PolicyMismatch);
+        }
+        let protocol_digest = option_env!("MEERKAT_EXPERIMENTAL_LIVE_GATE0_PROTOCOL_DIGEST")
+            .filter(|digest| valid_experimental_digest(digest))
+            .ok_or(ExperimentalRealtimeAdmissionError::Gate0Unavailable)?
+            .to_ascii_lowercase();
+        Ok(Self {
+            inner: Arc::new(ExperimentalRealtimeAdmissionAuthorityInner),
+            policy,
+            protocol_digest,
+        })
+    }
+
+    pub fn qualify(
+        &self,
+        realm: &meerkat_core::RealmId,
+        factory_kind: &str,
+        factory_version: &str,
+    ) -> Result<ExperimentalRealtimeQualificationWitness, ExperimentalRealtimeAdmissionError> {
+        if realm != &self.policy.realm
+            || factory_kind != self.policy.factory_kind
+            || factory_version != self.policy.factory_version
+        {
+            return Err(ExperimentalRealtimeAdmissionError::QualificationMismatch);
+        }
+        Ok(ExperimentalRealtimeQualificationWitness {
+            authority: Arc::clone(&self.inner),
+            realm: realm.clone(),
+            factory_kind: factory_kind.to_string(),
+            factory_version: factory_version.to_string(),
+            protocol_digest: self.protocol_digest.clone(),
+        })
+    }
+
+    pub fn admit_target(
+        &self,
+        qualification: ExperimentalRealtimeQualificationWitness,
+        target: ResolvedRealtimeTarget,
+        binding_use: meerkat_core::AuthBindingUseWitness,
+    ) -> Result<AdmittedExperimentalRealtimeTarget, ExperimentalRealtimeAdmissionError> {
+        if !Arc::ptr_eq(&self.inner, &qualification.authority)
+            || qualification.realm != self.policy.realm
+            || qualification.factory_kind != self.policy.factory_kind
+            || qualification.factory_version != self.policy.factory_version
+            || qualification.protocol_digest != self.protocol_digest
+        {
+            return Err(ExperimentalRealtimeAdmissionError::QualificationMismatch);
+        }
+        if target.identity().auth_binding.as_ref() != Some(binding_use.auth_binding()) {
+            return Err(ExperimentalRealtimeAdmissionError::BindingUseMismatch);
+        }
+        if !target.profile().matches_identity(target.identity())
+            || target.profile().profile().release_stage
+                != meerkat_core::ModelReleaseStage::Experimental
+            || !target.profile().profile().realtime
+        {
+            return Err(ExperimentalRealtimeAdmissionError::TargetNotExperimentalRealtime);
+        }
+        Ok(AdmittedExperimentalRealtimeTarget {
+            target,
+            retention: ExperimentalRealtimeAdmissionRetention {
+                qualification,
+                binding_use,
+            },
+        })
+    }
+}
+
+/// Side-effect-free compiled/operator/realm/factory qualification minted by
+/// the lower admission authority.
+pub struct ExperimentalRealtimeQualificationWitness {
+    authority: Arc<ExperimentalRealtimeAdmissionAuthorityInner>,
+    realm: meerkat_core::RealmId,
+    factory_kind: String,
+    factory_version: String,
+    protocol_digest: String,
+}
+
+impl std::fmt::Debug for ExperimentalRealtimeQualificationWitness {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ExperimentalRealtimeQualificationWitness")
+            .field("realm", &self.realm)
+            .field("factory_kind", &self.factory_kind)
+            .field("factory_version", &self.factory_version)
+            .field("protocol_digest", &self.protocol_digest)
+            .field("authority", &"[OPAQUE]")
+            .finish()
+    }
+}
+
+/// Exact authority retained by the concrete provider factory for its entire
+/// lifetime. It is deliberately non-serializable and exposes no raw target.
+pub struct ExperimentalRealtimeAdmissionRetention {
+    qualification: ExperimentalRealtimeQualificationWitness,
+    binding_use: meerkat_core::AuthBindingUseWitness,
+}
+
+impl std::fmt::Debug for ExperimentalRealtimeAdmissionRetention {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ExperimentalRealtimeAdmissionRetention")
+            .field("qualification", &self.qualification)
+            .field("auth_binding", self.binding_use.auth_binding())
+            .finish()
+    }
+}
+
+/// Only provider construction input for pre-release realtime factories.
+pub struct AdmittedExperimentalRealtimeTarget {
+    target: ResolvedRealtimeTarget,
+    retention: ExperimentalRealtimeAdmissionRetention,
+}
+
+impl AdmittedExperimentalRealtimeTarget {
+    pub fn identity(&self) -> &SessionLlmIdentity {
+        self.target.identity()
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        ResolvedRealtimeTarget,
+        ExperimentalRealtimeAdmissionRetention,
+    ) {
+        (self.target, self.retention)
+    }
+}
+
+impl std::fmt::Debug for AdmittedExperimentalRealtimeTarget {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AdmittedExperimentalRealtimeTarget")
+            .field("identity", self.target.identity())
+            .field("admission", &"[OPAQUE]")
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ExperimentalRealtimeAdmissionError {
+    #[error("experimental realtime support is not compiled")]
+    FeatureNotCompiled,
+    #[error("compiled experimental realtime Gate0 evidence is unavailable")]
+    Gate0Unavailable,
+    #[error("operator policy does not match compiled Gate0 evidence")]
+    Gate0PolicyMismatch,
+    #[error("experimental realtime policy is invalid")]
+    InvalidPolicy,
+    #[error("experimental realtime qualification does not match its owner")]
+    QualificationMismatch,
+    #[error("experimental realtime target does not match binding-use authority")]
+    BindingUseMismatch,
+    #[error("target is not exact experimental realtime registry evidence")]
+    TargetNotExperimentalRealtime,
+}
+
+#[cfg(test)]
+mod experimental_realtime_admission_tests {
+    use super::*;
+    use meerkat_core::{
+        ActingOnBehalfOf, AuthBindingRef, AuthBindingUseRequest, AuthGrant, AuthMetadata,
+        BindingId, BindingOrigin, Config, GrantAction, GrantScope, ModelRegistry, PrincipalKind,
+        PrincipalRef, RealmId, authorize_explicit_auth_binding_use,
+    };
+    use std::collections::BTreeSet;
+
+    const FACTORY_KIND: &str = "private-live";
+    const FACTORY_VERSION: &str = "v1";
+
+    fn realm(value: &str) -> RealmId {
+        RealmId::parse(value).expect("valid test realm")
+    }
+
+    fn binding(realm_name: &str, binding_name: &str) -> AuthBindingRef {
+        AuthBindingRef {
+            realm: realm(realm_name),
+            binding: BindingId::parse(binding_name).expect("valid test binding"),
+            profile: None,
+            origin: BindingOrigin::Configured,
+        }
+    }
+
+    fn authority(realm_name: &str, digest_byte: &str) -> ExperimentalRealtimeAdmissionAuthority {
+        ExperimentalRealtimeAdmissionAuthority {
+            inner: Arc::new(ExperimentalRealtimeAdmissionAuthorityInner),
+            policy: ExperimentalRealtimeQualificationPolicy::new(
+                realm(realm_name),
+                FACTORY_KIND,
+                FACTORY_VERSION,
+                "gate0-v1",
+            )
+            .expect("valid policy"),
+            protocol_digest: digest_byte.repeat(32),
+        }
+    }
+
+    fn binding_use_witness(auth_binding: AuthBindingRef) -> meerkat_core::AuthBindingUseWitness {
+        let principal = PrincipalRef::new(PrincipalKind::Human, "alice").expect("principal");
+        let target =
+            PrincipalRef::new(PrincipalKind::PersonalAgent, "agent").expect("durable target");
+        let request =
+            AuthBindingUseRequest::new(principal.clone(), target.clone(), auth_binding.clone());
+        let grant = AuthGrant {
+            principal: principal.clone(),
+            scope: GrantScope::AuthBinding {
+                realm_id: auth_binding.realm,
+                binding_id: auth_binding.binding,
+                profile_id: auth_binding.profile,
+            },
+            actions: BTreeSet::from([GrantAction::UseAuthBinding]),
+            acting_on_behalf_of: Some(ActingOnBehalfOf::new(principal, target)),
+        };
+        authorize_explicit_auth_binding_use(&request, &[grant])
+            .into_result()
+            .expect("exact binding-use grant")
+    }
+
+    fn target(model: &str, auth_binding: AuthBindingRef) -> ResolvedRealtimeTarget {
+        let registry = ModelRegistry::from_config(&Config::default(), meerkat_models::canonical())
+            .expect("canonical registry");
+        let profile = registry
+            .profile_witness_for_provider(Provider::OpenAI, model)
+            .expect("canonical model profile");
+        let identity = SessionLlmIdentity {
+            model: model.to_string(),
+            provider: Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: Some(auth_binding),
+        };
+        let connection = ResolvedConnection {
+            provider: Provider::OpenAI,
+            backend: NormalizedBackendKind::OpenAi(OpenAiBackendKind::ChatGptBackend),
+            backend_profile: Arc::new(BackendProfile {
+                id: "test-chatgpt".to_string(),
+                provider: Provider::OpenAI,
+                backend_kind: OpenAiBackendKind::ChatGptBackend.as_str().to_string(),
+                base_url: None,
+                options: serde_json::Value::Null,
+                server: None,
+            }),
+            auth_lease: Arc::new(StaticLease::empty_lease(AuthMetadata::default(), "test")),
+        };
+        ResolvedRealtimeTarget::new(identity, profile, connection).expect("exact target")
+    }
+
+    #[test]
+    fn qualification_rejects_wrong_realm_and_factory() {
+        let authority = authority("voice", "ab");
+        assert!(matches!(
+            authority.qualify(&realm("other"), FACTORY_KIND, FACTORY_VERSION),
+            Err(ExperimentalRealtimeAdmissionError::QualificationMismatch)
+        ));
+        assert!(matches!(
+            authority.qualify(&realm("voice"), "other-live", FACTORY_VERSION),
+            Err(ExperimentalRealtimeAdmissionError::QualificationMismatch)
+        ));
+        assert!(matches!(
+            authority.qualify(&realm("voice"), FACTORY_KIND, "v2"),
+            Err(ExperimentalRealtimeAdmissionError::QualificationMismatch)
+        ));
+    }
+
+    #[test]
+    fn admission_rejects_foreign_authority_and_protocol_digest() {
+        let owner = authority("voice", "ab");
+        let foreign = authority("voice", "ab");
+        let binding = binding("voice", "chatgpt");
+        let foreign_witness = foreign
+            .qualify(&realm("voice"), FACTORY_KIND, FACTORY_VERSION)
+            .expect("foreign qualification");
+        assert!(matches!(
+            owner.admit_target(
+                foreign_witness,
+                target("gpt-live-1-codex", binding.clone()),
+                binding_use_witness(binding.clone()),
+            ),
+            Err(ExperimentalRealtimeAdmissionError::QualificationMismatch)
+        ));
+
+        let mut stale_digest = owner
+            .qualify(&realm("voice"), FACTORY_KIND, FACTORY_VERSION)
+            .expect("owned qualification");
+        stale_digest.protocol_digest = "cd".repeat(32);
+        assert!(matches!(
+            owner.admit_target(
+                stale_digest,
+                target("gpt-live-1-codex", binding.clone()),
+                binding_use_witness(binding),
+            ),
+            Err(ExperimentalRealtimeAdmissionError::QualificationMismatch)
+        ));
+    }
+
+    #[test]
+    fn admission_rejects_binding_witness_mismatch() {
+        let owner = authority("voice", "ab");
+        let qualification = owner
+            .qualify(&realm("voice"), FACTORY_KIND, FACTORY_VERSION)
+            .expect("qualification");
+        assert!(matches!(
+            owner.admit_target(
+                qualification,
+                target("gpt-live-1-codex", binding("voice", "chatgpt")),
+                binding_use_witness(binding("voice", "other")),
+            ),
+            Err(ExperimentalRealtimeAdmissionError::BindingUseMismatch)
+        ));
+    }
+
+    #[test]
+    fn admission_rejects_stable_and_nonrealtime_targets() {
+        for model in ["gpt-realtime-2", "gpt-5.3-codex"] {
+            let owner = authority("voice", "ab");
+            let qualification = owner
+                .qualify(&realm("voice"), FACTORY_KIND, FACTORY_VERSION)
+                .expect("qualification");
+            let binding = binding("voice", "chatgpt");
+            assert!(
+                matches!(
+                    owner.admit_target(
+                        qualification,
+                        target(model, binding.clone()),
+                        binding_use_witness(binding),
+                    ),
+                    Err(ExperimentalRealtimeAdmissionError::TargetNotExperimentalRealtime)
+                ),
+                "model {model} must not cross experimental realtime admission"
+            );
+        }
+    }
+
+    #[test]
+    fn admitted_carrier_retains_lower_authority_until_provider_consumes_it() {
+        let owner = authority("voice", "ab");
+        let authority_liveness = Arc::downgrade(&owner.inner);
+        let qualification = owner
+            .qualify(&realm("voice"), FACTORY_KIND, FACTORY_VERSION)
+            .expect("qualification");
+        let binding = binding("voice", "chatgpt");
+        let admitted = owner
+            .admit_target(
+                qualification,
+                target("gpt-live-1-codex", binding.clone()),
+                binding_use_witness(binding),
+            )
+            .expect("admitted target");
+        drop(owner);
+        assert!(authority_liveness.upgrade().is_some());
+
+        let (_target, retention) = admitted.into_parts();
+        assert!(authority_liveness.upgrade().is_some());
+        drop(retention);
+        assert!(authority_liveness.upgrade().is_none());
+    }
 }
 
 impl std::fmt::Debug for ResolvedConnection {

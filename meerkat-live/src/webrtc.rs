@@ -26,6 +26,7 @@ use meerkat_contracts::{LiveInputChunkWire, WireLiveAdapterObservation};
 use meerkat_core::live_adapter::{
     LiveAdapterErrorCode, LiveAdapterObservation, LiveConfigRejectionReason, LiveInputChunk,
 };
+use meerkat_core::types::SessionId;
 use opus::{Application, Channels, Decoder, Encoder};
 use rubato::audioadapter_buffers::direct::InterleavedSlice;
 use rubato::{Fft, FixedSync, Resampler};
@@ -180,6 +181,12 @@ pub enum LiveWebrtcError {
     MissingLocalDescription,
     #[error("WebRTC peer close failed: {detail}")]
     PeerClose { detail: String },
+    #[error("remote WebRTC signaling failed: {reason}")]
+    RemoteSignaling { reason: &'static str },
+    #[error("remote WebRTC signaling requires an exact runtime binding")]
+    RuntimeBindingUnavailable,
+    #[error("live WebRTC answer admission seal rejected transport material: {reason}")]
+    AdmissionSeal { reason: &'static str },
     /// A fallible answer-construction step failed and the mandatory physical
     /// cleanup also failed. The original phase remains visible in `operation`;
     /// the close failure is the reason code because physical custody could not
@@ -210,6 +217,9 @@ impl LiveWebrtcError {
             Self::Json(_) => "json_frame",
             Self::MissingLocalDescription => "missing_local_description",
             Self::PeerClose { .. } => "peer_close",
+            Self::RemoteSignaling { .. } => "remote_signaling",
+            Self::RuntimeBindingUnavailable => "runtime_binding_unavailable",
+            Self::AdmissionSeal { .. } => "answer_admission_seal",
             Self::ConstructionCleanup { .. } => "peer_close",
         }
     }
@@ -873,6 +883,147 @@ fn observation_requires_generated_close(observation: &LiveAdapterObservation) ->
 pub struct LiveWebrtcAnswerAccepted {
     pub answer_sdp: String,
     pub answer_observation_sequence: u64,
+    pub bound_ready: Option<crate::provider_webrtc::ProviderWebrtcBoundReadyReceipt>,
+}
+
+/// Provider-neutral answer request passed only after token admission.
+#[derive(Clone)]
+pub struct LiveWebrtcAdmittedOffer {
+    channel_id: LiveChannelId,
+    session_id: SessionId,
+    runtime_binding: Option<crate::provider_webrtc::LiveWebrtcRuntimeBinding>,
+    offer_sdp: String,
+    admission: crate::provider_webrtc::LiveWebrtcAnswerAdmissionSeal,
+}
+
+impl std::fmt::Debug for LiveWebrtcAdmittedOffer {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LiveWebrtcAdmittedOffer")
+            .field("channel_id", &"[REDACTED]")
+            .field("session_id", &"[REDACTED]")
+            .field("runtime_binding", &"[REDACTED]")
+            .field("offer_sdp", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl LiveWebrtcAdmittedOffer {
+    /// Bind transport material to the exact generated machine admission.
+    #[must_use]
+    pub fn from_machine_admission(
+        channel_id: LiveChannelId,
+        session_id: SessionId,
+        runtime_binding: Option<crate::provider_webrtc::LiveWebrtcRuntimeBinding>,
+        offer_sdp: String,
+        admission: crate::provider_webrtc::LiveWebrtcAnswerAdmissionSeal,
+    ) -> Self {
+        Self {
+            channel_id,
+            session_id,
+            runtime_binding,
+            offer_sdp,
+            admission,
+        }
+    }
+
+    /// Consume the one-use generated admission and lower into the neutral
+    /// provider offer. No provider broker can receive SDP before this step.
+    pub fn into_provider_offer(
+        self,
+    ) -> Result<crate::provider_webrtc::ProviderWebrtcOffer, LiveWebrtcError> {
+        self.admission
+            .consume_for(&self.channel_id, &self.session_id)
+            .map_err(|error| LiveWebrtcError::AdmissionSeal {
+                reason: error.reason_code(),
+            })?;
+        let runtime = self
+            .runtime_binding
+            .ok_or(LiveWebrtcError::RuntimeBindingUnavailable)?;
+        let binding = crate::provider_webrtc::ProviderWebrtcBinding::new(
+            self.channel_id,
+            self.session_id,
+            crate::provider_webrtc::LiveRuntimeBindingGeneration::new(runtime.generation),
+            crate::provider_webrtc::LiveRuntimeBindingFence::new(runtime.fence),
+        );
+        Ok(crate::provider_webrtc::ProviderWebrtcOffer::new(
+            binding,
+            self.offer_sdp,
+        ))
+    }
+
+    /// Consume the one-use generated admission for Meerkat's local WebRTC
+    /// materializer.
+    fn into_local_offer(self) -> Result<(LiveChannelId, String), LiveWebrtcError> {
+        self.admission
+            .consume_for(&self.channel_id, &self.session_id)
+            .map_err(|error| LiveWebrtcError::AdmissionSeal {
+                reason: error.reason_code(),
+            })?;
+        Ok((self.channel_id, self.offer_sdp))
+    }
+
+    #[must_use]
+    pub fn binding_request(&self) -> LiveWebrtcBindingRequest {
+        LiveWebrtcBindingRequest {
+            channel_id: self.channel_id.clone(),
+            session_id: self.session_id.clone(),
+            runtime_binding: self.runtime_binding,
+        }
+    }
+}
+
+/// Exact machine-projected transport binding used only for cleanup after an
+/// answer attempt or lifecycle close. It carries no answer authority and no
+/// SDP payload.
+#[derive(Clone)]
+pub struct LiveWebrtcBindingRequest {
+    pub channel_id: LiveChannelId,
+    pub session_id: SessionId,
+    pub runtime_binding: Option<crate::provider_webrtc::LiveWebrtcRuntimeBinding>,
+}
+
+impl std::fmt::Debug for LiveWebrtcBindingRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LiveWebrtcBindingRequest")
+            .field("channel_id", &"[REDACTED]")
+            .field("session_id", &"[REDACTED]")
+            .field("runtime_binding", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// One answer/cleanup strategy behind the existing machine-owned one-use
+/// signaling path. Implementations own physical transport only.
+#[async_trait::async_trait]
+pub trait LiveWebrtcAnswerTransport: Send + Sync {
+    async fn answer_admitted_offer(
+        &self,
+        offer: LiveWebrtcAdmittedOffer,
+    ) -> Result<LiveWebrtcAnswerAccepted, LiveWebrtcError>;
+
+    async fn reject_answer(
+        &self,
+        binding: &LiveWebrtcBindingRequest,
+        answer_observation_sequence: u64,
+    ) -> Result<(), LiveWebrtcError>;
+
+    async fn accept_answer(
+        &self,
+        binding: &LiveWebrtcBindingRequest,
+        answer_observation_sequence: u64,
+    );
+
+    async fn wait_for_construction_cleanup(
+        &self,
+        binding: &LiveWebrtcBindingRequest,
+    ) -> Result<(), LiveWebrtcError>;
+
+    async fn close_binding(
+        &self,
+        binding: &LiveWebrtcBindingRequest,
+    ) -> Result<(), LiveWebrtcError>;
 }
 
 #[cfg(test)]
@@ -1188,6 +1339,7 @@ impl LiveWebrtcState {
         Ok(LiveWebrtcAnswerAccepted {
             answer_sdp,
             answer_observation_sequence,
+            bound_ready: None,
         })
     }
 
@@ -1509,6 +1661,50 @@ impl LiveWebrtcState {
     #[cfg(test)]
     fn published_peer_lifecycle_count(&self) -> usize {
         self.published_peer_lifecycle.len()
+    }
+}
+
+#[async_trait::async_trait]
+impl LiveWebrtcAnswerTransport for LiveWebrtcState {
+    async fn answer_admitted_offer(
+        &self,
+        offer: LiveWebrtcAdmittedOffer,
+    ) -> Result<LiveWebrtcAnswerAccepted, LiveWebrtcError> {
+        let (channel_id, offer_sdp) = offer.into_local_offer()?;
+        self.answer_offer(channel_id, offer_sdp).await
+    }
+
+    async fn reject_answer(
+        &self,
+        binding: &LiveWebrtcBindingRequest,
+        answer_observation_sequence: u64,
+    ) -> Result<(), LiveWebrtcError> {
+        self.close_rejected_answer_peer(&binding.channel_id, answer_observation_sequence)
+            .await
+    }
+
+    async fn accept_answer(
+        &self,
+        binding: &LiveWebrtcBindingRequest,
+        answer_observation_sequence: u64,
+    ) {
+        self.release_answer_cleanup_obligation(&binding.channel_id, answer_observation_sequence)
+            .await;
+    }
+
+    async fn wait_for_construction_cleanup(
+        &self,
+        binding: &LiveWebrtcBindingRequest,
+    ) -> Result<(), LiveWebrtcError> {
+        self.wait_for_answer_construction_cleanup(&binding.channel_id)
+            .await
+    }
+
+    async fn close_binding(
+        &self,
+        binding: &LiveWebrtcBindingRequest,
+    ) -> Result<(), LiveWebrtcError> {
+        self.close_peer_checked(&binding.channel_id).await
     }
 }
 
@@ -2868,9 +3064,49 @@ mod tests {
             Ok(())
         }
 
+        async fn admit_assistant_playback_target(
+            &self,
+            _session_id: &SessionId,
+            channel_id: &LiveChannelId,
+            _provider_turn_ref: &str,
+            _response_id: &str,
+            _provider_item_id: &str,
+            content_index: u32,
+        ) -> Result<crate::LiveAssistantOutputAddress, LiveProjectionError> {
+            Ok(crate::LiveAssistantOutputAddress {
+                channel_id: channel_id.clone(),
+                output_id: "failing-sink-output".to_string(),
+                content_index,
+            })
+        }
+
+        async fn complete_assistant_playback(
+            &self,
+            _session_id: &SessionId,
+            _channel_id: &LiveChannelId,
+            _interaction_id: meerkat_core::InteractionId,
+            _response_id: &str,
+            _provider_item_id: &str,
+            _content_index: u32,
+            _stop_reason: StopReason,
+            _usage: meerkat_core::TurnUsage,
+        ) -> Result<(), LiveProjectionError> {
+            Ok(())
+        }
+
+        async fn fail_assistant_output_publication(
+            &self,
+            _session_id: &SessionId,
+            _address: &crate::LiveAssistantOutputAddress,
+        ) -> Result<(), LiveProjectionError> {
+            Ok(())
+        }
+
         async fn truncate_assistant_transcript(
             &self,
             _session_id: &SessionId,
+            _channel_id: &LiveChannelId,
+            _interaction_id: Option<meerkat_core::InteractionId>,
             _provider_item_id: Option<&str>,
             _previous_item_id: Option<&str>,
             _content_index: Option<u32>,

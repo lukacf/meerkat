@@ -119,6 +119,10 @@ default = ["runtime-adapter"]
 # feature is retained only to keep the cfg-gates compiling. The dep expression
 # is empty because the dep is always present.
 runtime-adapter = []
+# Shared production bridge for committed Mob turns into the experimental live
+# context outbox. This remains opt-in with the experimental provider surface;
+# ordinary runtime-backed Mob builds retain the trait's zero-effect default.
+experimental-gpt-live = ["runtime-adapter", "meerkat-session/live", "meerkat-runtime/live"]
 # ATIF trajectory export vocabulary, re-exported for hosts that assemble mob
 # member trajectories. Off by default: nothing inside this crate consumes it,
 # so a host that does not export trajectories does not compile it.

@@ -402,6 +402,16 @@ pub enum LiveSeedProjectionError {
 pub struct RealtimeSessionOpenProjection {
     pub open_config: RealtimeSessionOpenConfig,
     pub seed_status: LiveSeedProjectionStatus,
+    owner_session_id: SessionId,
+}
+
+impl RealtimeSessionOpenProjection {
+    /// Apply a legacy per-open System overlay while retaining the durable
+    /// session's canonical drift witness and projection-owner seal.
+    #[doc(hidden)]
+    pub fn append_ephemeral_system_overlay(&mut self, content: String) {
+        self.open_config.append_ephemeral_system_overlay(content);
+    }
 }
 
 /// Typed failure at the live-open projection boundary. Surfaces classify seed
@@ -415,6 +425,32 @@ pub enum RealtimeSessionOpenProjectionError {
     Seed(#[from] LiveSeedProjectionError),
     #[error(transparent)]
     Llm(#[from] meerkat_llm_core::LlmError),
+    #[error(
+        "live open projection belongs to session {projection_session_id}, not requested session {requested_session_id}"
+    )]
+    SessionMismatch {
+        requested_session_id: SessionId,
+        projection_session_id: SessionId,
+    },
+}
+
+/// Typed failure for the shared strict execution-identity open flow.
+#[cfg(feature = "experimental-gpt-live")]
+#[derive(Debug, thiserror::Error)]
+pub enum ExperimentalLiveChannelOpenError {
+    #[error("live/open execution_identity requires transport 'webrtc'")]
+    InvalidTransport,
+    #[error(transparent)]
+    Authority(#[from] crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityError),
+    #[error(transparent)]
+    Projection(#[from] RealtimeSessionOpenProjectionError),
+    #[error(transparent)]
+    Open(#[from] crate::session_runtime::errors::LiveOpenError),
+    #[error("experimental live channel binding failed: {binding}; cleanup failed: {cleanup}")]
+    BindingCleanup {
+        binding: crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityError,
+        cleanup: String,
+    },
 }
 
 fn realtime_projection_messages_full(session: &Session) -> Result<Vec<Message>, SessionError> {
@@ -645,7 +681,7 @@ mod orchestrator {
     };
     use meerkat_llm_core::realtime_session::{RealtimeSessionFactory, RealtimeSessionOpenConfig};
     use meerkat_runtime::{MeerkatMachine, SessionLlmReconfigureRequest, SessionServiceRuntimeExt};
-    use meerkat_session::PersistentSessionService;
+    use meerkat_session::{PersistentSessionService, SessionAgentBuilder};
 
     use super::{
         LiveChannelCloseFailure, LiveChannelRefreshFailure, LiveConfigPropagationReport,
@@ -678,10 +714,13 @@ mod orchestrator {
     /// Borrows the resolved infrastructure from a calling surface
     /// (RPC, REST, embedded examples) and exposes the W2-A
     /// load-bearing methods that previously lived on
-    /// `meerkat-rpc::SessionRuntime`.
-    pub struct LiveOrchestrator<'a> {
+    /// `meerkat-rpc::SessionRuntime`. The builder parameter keeps the
+    /// persistent service concrete without limiting the pipeline to the
+    /// facade's [`FactoryAgentBuilder`]; the default preserves existing
+    /// facade and RPC source compatibility.
+    pub struct LiveOrchestrator<'a, B: SessionAgentBuilder + 'static = FactoryAgentBuilder> {
         /// Persistent session service.
-        pub service: &'a Arc<PersistentSessionService<FactoryAgentBuilder>>,
+        pub service: &'a Arc<PersistentSessionService<B>>,
         /// Staged session registry.
         pub staged_sessions: &'a Arc<StagedSessionRegistry>,
         /// Service-owned capacity ledger for staged sessions.
@@ -777,9 +816,16 @@ mod orchestrator {
     /// item to truncate and how much of its audio the client actually
     /// played — one typed carrier for the three cursor facts.
     pub struct LiveTruncateCursor {
-        pub item_id: String,
-        pub content_index: u32,
+        /// Opaque generated assistant output address for experimental live.
+        pub output_id: Option<String>,
+        /// Legacy provider item address retained for stock realtime channels.
+        pub item_id: Option<String>,
+        pub content_index: Option<u32>,
         pub audio_played_ms: u64,
+        /// Exact playback-path transcript prefix reported by the caller. When
+        /// absent, SessionDocument classifies coverage as `Unmeasured` and no
+        /// canonical assistant replacement is authorized.
+        pub reported_playback_prefix: Option<String>,
     }
 
     /// Surface hook carrying the SESSION-OWNED half of the S10
@@ -797,8 +843,8 @@ mod orchestrator {
         ) -> Result<(), LiveIngressError>;
     }
 
-    impl LiveOrchestrator<'_> {
-        fn recovery_context(&self) -> RecoveryContext<'_> {
+    impl<B: SessionAgentBuilder + 'static> LiveOrchestrator<'_, B> {
+        fn recovery_context(&self) -> RecoveryContext<'_, B> {
             RecoveryContext {
                 service: self.service,
                 runtime_adapter: self.runtime_adapter,
@@ -1095,6 +1141,7 @@ mod orchestrator {
             Ok(RealtimeSessionOpenProjection {
                 open_config,
                 seed_status: seed_projection.status,
+                owner_session_id: session_id.clone(),
             })
         }
 
@@ -1819,6 +1866,104 @@ mod orchestrator {
             Ok(())
         }
 
+        /// Strict channel-scoped execution-identity open shared by every
+        /// surface. Host authority runs before canonical projection or any
+        /// machine/channel/provider effect. The admitted identity and one-use
+        /// factory then travel through the ordinary S5-S12 pipeline, and the
+        /// opaque transport is bound before the result may be published.
+        #[cfg(feature = "experimental-gpt-live")]
+        #[allow(clippy::too_many_arguments)]
+        pub async fn open_live_channel_with_execution_identity(
+            &self,
+            host: &LiveAdapterHost,
+            transport_ctx: LiveTransportContext<'_>,
+            authority: &dyn crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider,
+            session_id: &SessionId,
+            execution_identity: &meerkat_contracts::WireLiveExecutionIdentityOverrideV1,
+            turning_mode: Option<RealtimeTurningMode>,
+            seed_window: Option<LiveSeedWindow>,
+            requested_transport: Option<LiveOpenTransport>,
+        ) -> Result<LiveOpenResult, super::ExperimentalLiveChannelOpenError> {
+            if requested_transport != Some(LiveOpenTransport::Webrtc) {
+                return Err(super::ExperimentalLiveChannelOpenError::InvalidTransport);
+            }
+            let pending = authority
+                .prepare_open(session_id, execution_identity)
+                .await
+                .map_err(super::ExperimentalLiveChannelOpenError::Authority)?;
+            let turning_mode = turning_mode.unwrap_or(RealtimeTurningMode::ProviderManaged);
+            let mut projection = self
+                .live_open_projection_for_session(session_id, turning_mode, seed_window)
+                .await
+                .map_err(super::ExperimentalLiveChannelOpenError::Projection)?;
+            pending.apply_execution_identity(&mut projection);
+            let canonical_seed_cursor = projection.open_config.canonical_message_cursor();
+            let result = self
+                .open_live_channel_from_projection(
+                    host,
+                    transport_ctx,
+                    pending.session_factory(),
+                    session_id,
+                    projection,
+                    requested_transport,
+                )
+                .await
+                .map_err(super::ExperimentalLiveChannelOpenError::Open)?;
+            let channel_id = LiveChannelId::new(&result.channel_id);
+            let _stage_authority = match self
+                .runtime_adapter
+                .stage_experimental_live_execution(session_id, &channel_id, canonical_seed_cursor)
+                .await
+            {
+                Ok(authority) => authority,
+                Err(_) => {
+                    let binding = crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityError::ChannelBindingFailed;
+                    authority.unbind_channel(&channel_id, session_id).await;
+                    if let Err(cleanup) = self
+                        .close_live_channel(host, &channel_id, Some(session_id))
+                        .await
+                    {
+                        return Err(super::ExperimentalLiveChannelOpenError::BindingCleanup {
+                            binding,
+                            cleanup: cleanup.to_string(),
+                        });
+                    }
+                    return Err(super::ExperimentalLiveChannelOpenError::Authority(binding));
+                }
+            };
+            if let Err(binding) = pending.bind_opened(&result).await {
+                authority.unbind_channel(&channel_id, session_id).await;
+                if let Err(cleanup) = self
+                    .close_live_channel(host, &channel_id, Some(session_id))
+                    .await
+                {
+                    return Err(super::ExperimentalLiveChannelOpenError::BindingCleanup {
+                        binding,
+                        cleanup: cleanup.to_string(),
+                    });
+                }
+                return Err(super::ExperimentalLiveChannelOpenError::Authority(binding));
+            }
+            Ok(result)
+        }
+
+        /// Retire a bound experimental channel that cannot be published by
+        /// its surface. Provider registration is removed before the canonical
+        /// semantic close, so no answer can race a failed response handoff.
+        #[cfg(feature = "experimental-gpt-live")]
+        pub async fn cleanup_experimental_live_channel_after_publication_failure(
+            &self,
+            host: &LiveAdapterHost,
+            authority: &dyn crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider,
+            session_id: &SessionId,
+            channel_id: &LiveChannelId,
+        ) -> Result<(), LiveChannelVerbError> {
+            authority.unbind_channel(channel_id, session_id).await;
+            self.close_live_channel(host, channel_id, Some(session_id))
+                .await
+                .map(|_| ())
+        }
+
         /// The full `live/open` pipeline, S1-S12 (order-preserving
         /// extraction of the RPC `handle_live_open` body). Returns the wire
         /// `LiveOpenResult`; surfaces serialize. This compatibility entry
@@ -1890,6 +2035,135 @@ mod orchestrator {
                 .live_open_projection_for_session(session_id, turning_mode, seed_window)
                 .await
                 .map_err(LiveOpenError::OpenConfig)?;
+            self.open_live_channel_from_projection(
+                host,
+                transport_ctx,
+                session_factory,
+                session_id,
+                prepared_projection,
+                requested_transport,
+            )
+            .await
+        }
+
+        /// Continue the shared `live/open` pipeline from a typed projection.
+        ///
+        /// This seam exists for composed surfaces that must apply a legacy,
+        /// provider-neutral projection transform before any effectful live
+        /// admission. The projection remains bound to the exact session that
+        /// minted it, and this method still owns the lifecycle lease plus every
+        /// S5-S12 identity, admission, provider, cleanup, ingress, and transport
+        /// fence. It accepts no provider/model strings and makes no admission
+        /// inference.
+        ///
+        /// New strict execution-identity paths should mint their projection
+        /// through the upstream model/auth resolver instead of mutating this
+        /// compatibility projection.
+        #[doc(hidden)]
+        #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+        pub async fn open_live_channel_from_projection(
+            &self,
+            host: &LiveAdapterHost,
+            transport_ctx: LiveTransportContext<'_>,
+            session_factory: &dyn RealtimeSessionFactory,
+            session_id: &SessionId,
+            prepared_projection: RealtimeSessionOpenProjection,
+            requested_transport: Option<LiveOpenTransport>,
+        ) -> Result<LiveOpenResult, LiveOpenError> {
+            self.open_live_channel_from_projection_with_candidate(
+                host,
+                transport_ctx,
+                session_factory,
+                session_id,
+                prepared_projection,
+                requested_transport,
+                None,
+            )
+            .await
+        }
+
+        /// Recovery-only variant whose channel identity is sealed by generated
+        /// ambiguity authority rather than minted by the surface.
+        #[cfg(feature = "experimental-gpt-live")]
+        #[allow(clippy::too_many_arguments)]
+        pub(crate) async fn open_live_channel_from_projection_for_recovery(
+            &self,
+            host: &LiveAdapterHost,
+            transport_ctx: LiveTransportContext<'_>,
+            session_factory: &dyn RealtimeSessionFactory,
+            session_id: &SessionId,
+            prepared_projection: RealtimeSessionOpenProjection,
+            requested_transport: Option<LiveOpenTransport>,
+            recovery: &meerkat_runtime::live_execution::LiveContextAmbiguityRecoveryAuthority,
+        ) -> Result<LiveOpenResult, LiveOpenError> {
+            if recovery.session_id() != session_id {
+                return Err(LiveOpenError::SessionStateFault(SessionError::Unsupported(
+                    "live-context recovery belongs to another session".to_string(),
+                )));
+            }
+            self.open_live_channel_from_projection_with_candidate(
+                host,
+                transport_ctx,
+                session_factory,
+                session_id,
+                prepared_projection,
+                requested_transport,
+                Some(recovery.replacement_channel_id().clone()),
+            )
+            .await
+        }
+
+        /// Result-delivery recovery variant whose channel identity is sealed
+        /// by distinct generated ambiguity authority. It intentionally does
+        /// not reinterpret the result as a canonical context append.
+        #[cfg(feature = "experimental-gpt-live")]
+        #[allow(clippy::too_many_arguments)]
+        pub(crate) async fn open_live_channel_from_projection_for_result_recovery(
+            &self,
+            host: &LiveAdapterHost,
+            transport_ctx: LiveTransportContext<'_>,
+            session_factory: &dyn RealtimeSessionFactory,
+            session_id: &SessionId,
+            prepared_projection: RealtimeSessionOpenProjection,
+            requested_transport: Option<LiveOpenTransport>,
+            recovery: &meerkat_runtime::live_execution::LiveDelegationResultAmbiguityRecoveryAuthority,
+        ) -> Result<LiveOpenResult, LiveOpenError> {
+            if recovery.session_id() != session_id {
+                return Err(LiveOpenError::SessionStateFault(SessionError::Unsupported(
+                    "live-result recovery belongs to another session".to_string(),
+                )));
+            }
+            self.open_live_channel_from_projection_with_candidate(
+                host,
+                transport_ctx,
+                session_factory,
+                session_id,
+                prepared_projection,
+                requested_transport,
+                Some(recovery.replacement_channel_id().clone()),
+            )
+            .await
+        }
+
+        #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+        async fn open_live_channel_from_projection_with_candidate(
+            &self,
+            host: &LiveAdapterHost,
+            transport_ctx: LiveTransportContext<'_>,
+            session_factory: &dyn RealtimeSessionFactory,
+            session_id: &SessionId,
+            prepared_projection: RealtimeSessionOpenProjection,
+            requested_transport: Option<LiveOpenTransport>,
+            sealed_candidate_channel_id: Option<LiveChannelId>,
+        ) -> Result<LiveOpenResult, LiveOpenError> {
+            if prepared_projection.owner_session_id != *session_id {
+                return Err(LiveOpenError::OpenConfig(
+                    RealtimeSessionOpenProjectionError::SessionMismatch {
+                        requested_session_id: session_id.clone(),
+                        projection_session_id: prepared_projection.owner_session_id,
+                    },
+                ));
+            }
             let seed_status = prepared_projection.seed_status;
             let prepared_open_config = prepared_projection.open_config;
             let live_open_identity = prepared_open_config.llm_identity.clone();
@@ -1906,7 +2180,8 @@ mod orchestrator {
 
             // S5 — generated machine open admission with a random candidate
             // channel id.
-            let candidate_channel_id = LiveChannelId::random_uuid();
+            let candidate_channel_id =
+                sealed_candidate_channel_id.unwrap_or_else(LiveChannelId::random_uuid);
             let open_authority = self
                 .runtime_adapter
                 .resolve_live_open_admission(session_id, &candidate_channel_id, &live_open_identity)
@@ -1967,7 +2242,13 @@ mod orchestrator {
                 let open_config = &prepared_open_config;
                 // S7 — B19: refuse models that lack realtime capability
                 // before reaching the factory.
-                if let Err(precheck_err) = self.precheck_live_open(session_id).await {
+                // The typed projection is the identity MeerkatMachine records
+                // for this channel. Ordinary opens project the durable
+                // identity unchanged; an admitted execution-identity open
+                // projects its sealed per-open identity here. Re-reading the
+                // durable text model would reject a valid modality switch and
+                // would make machine admission disagree with S7.
+                if let Err(precheck_err) = precheck_identity(&open_config.llm_identity) {
                     self.close_live_channel_after_open_failure(host, session_id, &channel_id)
                         .await;
                     return Err(LiveOpenError::Precheck(precheck_err));
@@ -2465,6 +2746,15 @@ mod orchestrator {
             };
             Self::check_session_pin(channel_id, &session_id, expected_session)?;
 
+            self.service
+                .resolve_live_assistant_playback_on_channel_close(&session_id, channel_id.clone())
+                .await
+                .map_err(|error| LiveChannelVerbError::HostCommit {
+                    message: format!(
+                        "failed to resolve pending assistant playback before close: {error}"
+                    ),
+                })?;
+
             let observation = match host.reserve_channel_close_observation(channel_id).await {
                 Ok(observation) => observation,
                 Err(error) => {
@@ -2495,6 +2785,13 @@ mod orchestrator {
                 .map_err(|error| LiveChannelVerbError::HostCommit {
                     message: error.to_string(),
                 })?;
+            host.fail_playback_waiters_for_channel(
+                channel_id,
+                "live channel closed before playback terminal settlement",
+            )
+            .await;
+            self.runtime_adapter
+                .retire_live_assistant_output_handles(&session_id, channel_id);
             Ok(live_close_result_from_machine_authority(&authority))
         }
 
@@ -2640,6 +2937,117 @@ mod orchestrator {
             }
         }
 
+        async fn dispatch_playback_terminal(
+            &self,
+            host: &LiveAdapterHost,
+            channel_id: &LiveChannelId,
+            session_id: &SessionId,
+            command_kind: LiveCommandPublicKind,
+            command: LiveAdapterCommand,
+            reservation: meerkat_runtime::meerkat_machine::LiveAssistantOutputTerminalReservation,
+            authority_context: &'static str,
+        ) -> Result<(), LiveChannelVerbError> {
+            let (acceptance, settlement) = match host
+                .send_playback_terminal_observed(channel_id, command)
+                .await
+            {
+                Ok(accepted) => accepted,
+                Err(error @ LiveAdapterHostError::PlaybackTerminalAcceptedButReceiptFailed(_)) => {
+                    let burn = self
+                        .runtime_adapter
+                        .commit_live_assistant_output_terminal(reservation)
+                        .map_err(|commit| commit.to_string());
+                    host.fail_playback_waiters_for_channel(
+                        channel_id,
+                        "playback terminal receipt failed after adapter acceptance",
+                    )
+                    .await;
+                    let close = self
+                        .close_live_channel(host, channel_id, Some(session_id))
+                        .await
+                        .map(|_| ())
+                        .map_err(|close| close.to_string());
+                    return Err(LiveChannelVerbError::ResultProjection {
+                        message: format!(
+                            "{error}; ambiguous terminal cleanup burn={burn:?}, close={close:?}"
+                        ),
+                    });
+                }
+                Err(error) => {
+                    return Err(self
+                        .record_command_rejection(session_id, channel_id, command_kind, &error)
+                        .await);
+                }
+            };
+            let acceptance_result = self
+                .runtime_adapter
+                .resolve_live_command_result(session_id, &acceptance)
+                .await
+                .map_err(|error| LiveChannelVerbError::ResultAuthority {
+                    message: format!("{authority_context}: {error}"),
+                })
+                .and_then(|authority| {
+                    if authority.command == command_kind {
+                        Ok(())
+                    } else {
+                        Err(LiveChannelVerbError::ResultProjection {
+                            message: format!(
+                                "LiveCommandResultResolved emitted command {:?} for expected {:?}",
+                                authority.command, command_kind
+                            ),
+                        })
+                    }
+                });
+            let settlement_result = match acceptance_result {
+                Ok(()) => match tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    settlement.settle(),
+                )
+                .await
+                {
+                    Ok(result) => result.map_err(|error| LiveChannelVerbError::ResultProjection {
+                        message: error.to_string(),
+                    }),
+                    Err(_) => Err(LiveChannelVerbError::ResultProjection {
+                        message: "playback terminal projection did not settle before timeout"
+                            .to_string(),
+                    }),
+                },
+                Err(error) => Err(error),
+            };
+            if let Err(primary) = settlement_result {
+                // Queue acceptance makes a missing settlement ambiguous. Burn
+                // the address, then force the exact channel close path to
+                // resolve the durable target as Unmeasured. Never release it
+                // for a second terminal attempt.
+                let burn = self
+                    .runtime_adapter
+                    .commit_live_assistant_output_terminal(reservation)
+                    .map_err(|error| error.to_string());
+                host.fail_playback_waiters_for_channel(
+                    channel_id,
+                    "playback terminal became ambiguous after command acceptance",
+                )
+                .await;
+                let close = self
+                    .close_live_channel(host, channel_id, Some(session_id))
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string());
+                return Err(LiveChannelVerbError::ResultProjection {
+                    message: format!(
+                        "{primary}; ambiguous terminal cleanup burn={burn:?}, close={close:?}"
+                    ),
+                });
+            }
+            self.runtime_adapter
+                .commit_live_assistant_output_terminal(reservation)
+                .map_err(|error| LiveChannelVerbError::ResultAuthority {
+                    message: error.to_string(),
+                })?;
+            Ok(())
+        }
+
         /// `live/send_input`: frame-level input by session-id addressing —
         /// stays a LOCAL RPC verb (DL10); extracted for shim parity only,
         /// NO bridge verb consumes it.
@@ -2746,19 +3154,79 @@ mod orchestrator {
             expected_session: Option<&SessionId>,
             cursor: LiveTruncateCursor,
         ) -> Result<LiveTruncateResult, LiveChannelVerbError> {
-            self.dispatch_live_command(
-                host,
-                channel_id,
-                expected_session,
-                LiveCommandPublicKind::TruncateAssistantOutput,
-                LiveAdapterCommand::TruncateAssistantOutput {
-                    item_id: cursor.item_id,
-                    content_index: cursor.content_index,
-                    audio_played_ms: cursor.audio_played_ms,
-                },
-                "live truncate authority rejected result",
-            )
-            .await?;
+            let session_id = self
+                .runtime_adapter
+                .live_session_for_status_channel(channel_id)
+                .await
+                .ok_or_else(|| LiveChannelVerbError::ResultAuthority {
+                    message: "assistant output channel is not bound".to_string(),
+                })?;
+            Self::check_session_pin(channel_id, &session_id, expected_session)?;
+            let (interaction_id, item_id, content_index, reservation) = if let Some(output_id) =
+                cursor.output_id.as_deref()
+            {
+                let reservation = self
+                    .runtime_adapter
+                    .reserve_live_assistant_output_handle(&session_id, channel_id, output_id)
+                    .await
+                    .map_err(|error| LiveChannelVerbError::ResultAuthority {
+                        message: error.to_string(),
+                    })?;
+                let handle = reservation.handle();
+                let (response_id, item_id, content_index) =
+                    handle
+                        .__target()
+                        .ok_or_else(|| LiveChannelVerbError::ResultAuthority {
+                            message: "assistant output handle has no admitted target".to_string(),
+                        })?;
+                let _ = response_id;
+                (
+                    handle.interaction_id(),
+                    item_id,
+                    content_index,
+                    Some(reservation),
+                )
+            } else {
+                (
+                    meerkat_core::InteractionId::new(),
+                    cursor
+                        .item_id
+                        .ok_or_else(|| LiveChannelVerbError::ResultAuthority {
+                            message: "legacy live truncate requires item_id".to_string(),
+                        })?,
+                    cursor.content_index.unwrap_or(0),
+                    None,
+                )
+            };
+            let command = LiveAdapterCommand::TruncateAssistantOutput {
+                interaction_id,
+                item_id,
+                content_index,
+                audio_played_ms: cursor.audio_played_ms,
+                reported_playback_prefix: cursor.reported_playback_prefix,
+            };
+            if let Some(reservation) = reservation {
+                self.dispatch_playback_terminal(
+                    host,
+                    channel_id,
+                    &session_id,
+                    LiveCommandPublicKind::TruncateAssistantOutput,
+                    command,
+                    reservation,
+                    "live truncate authority rejected result",
+                )
+                .await?;
+            } else {
+                self.dispatch_live_command(
+                    host,
+                    channel_id,
+                    expected_session,
+                    LiveCommandPublicKind::TruncateAssistantOutput,
+                    command,
+                    "live truncate authority rejected result",
+                )
+                .await?;
+            }
             #[cfg(feature = "live-webrtc")]
             if let Some(state) = transport_ctx.webrtc {
                 state.discard_output_audio(channel_id).await;
@@ -2766,6 +3234,55 @@ mod orchestrator {
             #[cfg(not(feature = "live-webrtc"))]
             let _ = transport_ctx;
             Ok(LiveTruncateResult::truncated())
+        }
+
+        /// Resolve one opaque experimental assistant output and report exact
+        /// playback completion. Provider response/item identities never cross
+        /// the public command boundary.
+        pub async fn complete_live_playback(
+            &self,
+            host: &LiveAdapterHost,
+            channel_id: &LiveChannelId,
+            expected_session: Option<&SessionId>,
+            output_id: &str,
+        ) -> Result<meerkat_contracts::LivePlaybackCompleteResult, LiveChannelVerbError> {
+            let session_id = self
+                .runtime_adapter
+                .live_session_for_status_channel(channel_id)
+                .await
+                .ok_or_else(|| LiveChannelVerbError::ResultAuthority {
+                    message: "assistant output channel is not bound".to_string(),
+                })?;
+            Self::check_session_pin(channel_id, &session_id, expected_session)?;
+            let reservation = self
+                .runtime_adapter
+                .reserve_live_assistant_output_handle(&session_id, channel_id, output_id)
+                .await
+                .map_err(|error| LiveChannelVerbError::ResultAuthority {
+                    message: error.to_string(),
+                })?;
+            let handle = reservation.handle();
+            let (_response_id, item_id, content_index) =
+                handle
+                    .__target()
+                    .ok_or_else(|| LiveChannelVerbError::ResultAuthority {
+                        message: "assistant output handle has no admitted target".to_string(),
+                    })?;
+            self.dispatch_playback_terminal(
+                host,
+                channel_id,
+                &session_id,
+                LiveCommandPublicKind::CompleteAssistantPlayback,
+                LiveAdapterCommand::CompleteAssistantPlayback {
+                    interaction_id: handle.interaction_id(),
+                    item_id,
+                    content_index,
+                },
+                reservation,
+                "live playback_complete authority rejected result",
+            )
+            .await?;
+            Ok(meerkat_contracts::LivePlaybackCompleteResult::completed())
         }
 
         /// Bridge control-verb dispatch (DL10's closed verb set): one
@@ -2802,9 +3319,11 @@ mod orchestrator {
                         channel_id,
                         expected_session,
                         LiveTruncateCursor {
-                            item_id,
-                            content_index,
+                            output_id: None,
+                            item_id: Some(item_id),
+                            content_index: Some(content_index),
                             audio_played_ms,
+                            reported_playback_prefix: None,
                         },
                     )
                     .await

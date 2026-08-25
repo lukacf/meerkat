@@ -129,6 +129,7 @@ rust_test(
     deps = [
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
+        "//meerkat-models:meerkat_models",
     ] + all_crate_deps(
         package_name = "meerkat-llm-core",
         normal = True,

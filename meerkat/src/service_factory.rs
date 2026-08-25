@@ -766,6 +766,88 @@ impl SessionAgent for FactoryAgent {
         Ok(outcome)
     }
 
+    fn staged_realtime_assistant_segment_text(
+        &self,
+        response_id: &str,
+        item_id: &str,
+        content_index: u32,
+    ) -> Option<String> {
+        self.agent.session().staged_realtime_assistant_segment_text(
+            response_id,
+            item_id,
+            content_index,
+        )
+    }
+
+    fn staged_realtime_assistant_segment_is_final(
+        &self,
+        response_id: &str,
+        item_id: &str,
+        content_index: u32,
+    ) -> bool {
+        self.agent
+            .session()
+            .staged_realtime_assistant_segment_is_final(response_id, item_id, content_index)
+    }
+
+    fn admit_live_assistant_playback_target(
+        &mut self,
+        channel_id: &meerkat_core::LiveChannelId,
+        interaction_id: meerkat_core::InteractionId,
+        response_id: &str,
+        item_id: &str,
+        content_index: u32,
+    ) -> Result<meerkat_core::LiveAssistantPlaybackTarget, meerkat_core::error::AgentError> {
+        self.agent
+            .session_mut()
+            .admit_live_assistant_playback_target(
+                channel_id,
+                interaction_id,
+                response_id,
+                item_id,
+                content_index,
+            )
+    }
+
+    fn live_assistant_playback_target(
+        &self,
+        channel_id: &meerkat_core::LiveChannelId,
+        item_id: &str,
+        content_index: u32,
+    ) -> Option<meerkat_core::LiveAssistantPlaybackTarget> {
+        self.agent
+            .session()
+            .live_assistant_playback_target(channel_id, item_id, content_index)
+    }
+
+    fn live_assistant_playback_target_for_channel(
+        &self,
+        channel_id: &meerkat_core::LiveChannelId,
+    ) -> Option<meerkat_core::LiveAssistantPlaybackTarget> {
+        self.agent
+            .session()
+            .live_assistant_playback_target_for_channel(channel_id)
+    }
+
+    fn resolve_live_assistant_playback_target(
+        &mut self,
+        channel_id: &meerkat_core::LiveChannelId,
+        interaction_id: meerkat_core::InteractionId,
+        response_id: &str,
+        item_id: &str,
+        content_index: u32,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        self.agent
+            .session_mut()
+            .resolve_live_assistant_playback_target(
+                channel_id,
+                interaction_id,
+                response_id,
+                item_id,
+                content_index,
+            )
+    }
+
     fn transient_turn_context_state(&self) -> meerkat_core::TransientTurnContextStateHandle {
         self.agent.transient_turn_context_state()
     }

@@ -36,6 +36,8 @@
 //! can be exercised in deterministic unit tests with a recorder fake.
 
 use std::collections::HashMap;
+#[cfg(feature = "test-support")]
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -52,42 +54,9 @@ use meerkat_core::types::{SessionId, StopReason, ToolCall, ToolName, ToolResult,
 use meerkat_core::{
     RealtimeTranscriptApplyOutcome, RealtimeTranscriptEvent, RealtimeUserContentApplyOutcome,
 };
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, oneshot};
 
-/// Opaque channel identifier for a live adapter session.
-///
-/// G41: contents are a v4 UUID minted at `LiveAdapterHost::open_channel` time
-/// (via [`Self::random_uuid`]). The previous `live_{N}` `AtomicU64` shape
-/// collided across `rkat-rpc` restarts and across instances sharing a host.
-/// The newtype wraps `String` (not `Uuid`) so external callers — handlers
-/// that round-trip the value through wire types and CLI surfaces that already
-/// store opaque channel ids as strings — do not need a dependency on `uuid`.
-/// `Self::new` is preserved for callers that already hold a serialized id
-/// (test setup, deserialized wire frames).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct LiveChannelId(String);
-
-impl LiveChannelId {
-    #[must_use]
-    pub fn new(id: impl Into<String>) -> Self {
-        Self(id.into())
-    }
-
-    /// Mint a fresh, globally-unique channel id (v4 UUID, hyphenated).
-    ///
-    /// G41: replaces the prior process-monotonic `live_{N}` shape so that
-    /// channel ids are durable identifiers rather than process-local
-    /// infrastructure handles.
-    #[must_use]
-    pub fn random_uuid() -> Self {
-        Self(uuid::Uuid::new_v4().to_string())
-    }
-
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
+pub use meerkat_core::live_execution::LiveChannelId;
 
 /// Typed evidence that a live refresh command was accepted onto the adapter
 /// command queue.
@@ -135,6 +104,7 @@ pub enum LiveCommandAcceptanceKind {
     CommitInput,
     Interrupt,
     TruncateAssistantOutput,
+    CompleteAssistantPlayback,
 }
 
 /// Typed evidence that a live adapter command was accepted onto the adapter
@@ -179,6 +149,43 @@ impl LiveCommandQueueAcceptance {
             channel_id,
             kind,
             acceptance_sequence,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct LivePlaybackTerminalKey {
+    interaction_id: meerkat_core::InteractionId,
+    item_id: String,
+    content_index: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LivePlaybackTerminalFollowup {
+    None,
+    TurnCompleted,
+    TurnInterrupted,
+}
+
+struct PendingLivePlaybackTerminal {
+    followup: LivePlaybackTerminalFollowup,
+    response_id: Option<String>,
+    settlement_tx: oneshot::Sender<Result<(), LiveAdapterHostError>>,
+}
+
+/// One exact adapter-terminal settlement. Queue acceptance alone is not
+/// enough: public success waits until the provider observation has crossed
+/// the projection sink and SessionDocument terminal authority.
+pub struct LivePlaybackTerminalSettlement {
+    settlement_rx: oneshot::Receiver<Result<(), LiveAdapterHostError>>,
+}
+
+impl LivePlaybackTerminalSettlement {
+    pub async fn settle(self) -> Result<(), LiveAdapterHostError> {
+        self.settlement_rx.await.unwrap_or_else(|_| {
+            Err(LiveAdapterHostError::PlaybackTerminalSettlementFailed(
+                "playback terminal settlement owner stopped".to_string(),
+            ))
         })
     }
 }
@@ -379,12 +386,6 @@ impl LiveChannelStatusCommitAuthority {
     }
 }
 
-impl std::fmt::Display for LiveChannelId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Projection sink — the host's escape hatch into canonical Meerkat semantics
 // ---------------------------------------------------------------------------
@@ -405,6 +406,9 @@ pub enum ObservationOutcome {
     TranscriptAppended,
     /// Assistant transcript was truncated (barge-in projection).
     TranscriptTruncated,
+    /// Sanitized address for one generated assistant output. Provider turn,
+    /// response, item, and interaction identities remain server-internal.
+    AssistantOutputAvailable(LiveAssistantOutputAddress),
     /// A tool call was dispatched and its result was submitted back to the adapter.
     ToolCallDispatched {
         provider_call_id: String,
@@ -443,6 +447,15 @@ pub enum ObservationOutcome {
     /// Public receipt synthesized from the reducer result only after the
     /// projection sink has durably committed canonical user content.
     UserContentCommitted { observation: LiveAdapterObservation },
+}
+
+/// Public-safe, channel-scoped address of one assistant output. `output_id`
+/// is opaque and one-use at the playback terminal boundary.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LiveAssistantOutputAddress {
+    pub channel_id: LiveChannelId,
+    pub output_id: String,
+    pub content_index: u32,
 }
 
 /// Why a tool call observation was not dispatched. Distinguishes "no
@@ -713,6 +726,41 @@ pub trait LiveProjectionSink: Send + Sync {
         response_id: Option<&str>,
     ) -> Result<(), LiveProjectionError>;
 
+    /// Admit the exact foreground assistant response/item as a one-use
+    /// playback target. The sink must use the interaction already sealed at
+    /// Assistant TurnStarted and return only a public-safe opaque address.
+    async fn admit_assistant_playback_target(
+        &self,
+        session_id: &SessionId,
+        channel_id: &LiveChannelId,
+        provider_turn_ref: &str,
+        response_id: &str,
+        provider_item_id: &str,
+        content_index: u32,
+    ) -> Result<LiveAssistantOutputAddress, LiveProjectionError>;
+
+    /// Resolve a playback-complete terminal through session authority.
+    async fn complete_assistant_playback(
+        &self,
+        session_id: &SessionId,
+        channel_id: &LiveChannelId,
+        interaction_id: meerkat_core::InteractionId,
+        response_id: &str,
+        provider_item_id: &str,
+        content_index: u32,
+        stop_reason: StopReason,
+        usage: meerkat_core::TurnUsage,
+    ) -> Result<(), LiveProjectionError>;
+
+    /// Revoke an admitted output after sanitized handle publication failed.
+    /// The sink resolves `Unmeasured`, discards staged assistant content, and
+    /// leaves channel close to the generated host lifecycle.
+    async fn fail_assistant_output_publication(
+        &self,
+        session_id: &SessionId,
+        address: &LiveAssistantOutputAddress,
+    ) -> Result<(), LiveProjectionError>;
+
     /// Project an assistant transcript truncation (barge-in side effect).
     ///
     /// `response_id` and `content_index` are the provider-supplied identity
@@ -723,6 +771,8 @@ pub trait LiveProjectionSink: Send + Sync {
     async fn truncate_assistant_transcript(
         &self,
         session_id: &SessionId,
+        channel_id: &LiveChannelId,
+        interaction_id: Option<meerkat_core::InteractionId>,
         provider_item_id: Option<&str>,
         previous_item_id: Option<&str>,
         content_index: Option<u32>,
@@ -956,9 +1006,51 @@ impl LiveProjectionSink for NoOpProjectionSink {
         Ok(())
     }
 
+    async fn admit_assistant_playback_target(
+        &self,
+        _session_id: &SessionId,
+        _channel_id: &LiveChannelId,
+        _provider_turn_ref: &str,
+        _response_id: &str,
+        _provider_item_id: &str,
+        _content_index: u32,
+    ) -> Result<LiveAssistantOutputAddress, LiveProjectionError> {
+        Err(LiveProjectionError::Rejected(
+            "assistant playback target authority is not composed".to_string(),
+        ))
+    }
+
+    async fn complete_assistant_playback(
+        &self,
+        _session_id: &SessionId,
+        _channel_id: &LiveChannelId,
+        _interaction_id: meerkat_core::InteractionId,
+        _response_id: &str,
+        _provider_item_id: &str,
+        _content_index: u32,
+        _stop_reason: StopReason,
+        _usage: meerkat_core::TurnUsage,
+    ) -> Result<(), LiveProjectionError> {
+        Err(LiveProjectionError::Rejected(
+            "assistant playback terminal authority is not composed".to_string(),
+        ))
+    }
+
+    async fn fail_assistant_output_publication(
+        &self,
+        _session_id: &SessionId,
+        _address: &LiveAssistantOutputAddress,
+    ) -> Result<(), LiveProjectionError> {
+        Err(LiveProjectionError::Rejected(
+            "assistant output publication failure authority is not composed".to_string(),
+        ))
+    }
+
     async fn truncate_assistant_transcript(
         &self,
         _session_id: &SessionId,
+        _channel_id: &LiveChannelId,
+        _interaction_id: Option<meerkat_core::InteractionId>,
         _provider_item_id: Option<&str>,
         _previous_item_id: Option<&str>,
         _content_index: Option<u32>,
@@ -1071,6 +1163,7 @@ struct ChannelState {
     /// `next_observation_raw` — must come before `adapter_for` so the
     /// synthetic obs survives a concurrent `close_channel`.
     pending_synthetic_obs: Option<LiveAdapterObservation>,
+    playback_terminal_waiters: HashMap<LivePlaybackTerminalKey, PendingLivePlaybackTerminal>,
 }
 
 /// Non-forgeable generated-authority handoff for materializing a live channel.
@@ -1382,6 +1475,12 @@ pub enum LiveAdapterHostError {
     AdapterError(#[from] LiveAdapterError),
     #[error("projection sink error: {0}")]
     ProjectionError(#[from] LiveProjectionError),
+    #[error("a playback terminal is already pending for this output")]
+    PlaybackTerminalAlreadyPending,
+    #[error("playback terminal did not settle: {0}")]
+    PlaybackTerminalSettlementFailed(String),
+    #[error("playback terminal command was accepted but its host receipt failed: {0}")]
+    PlaybackTerminalAcceptedButReceiptFailed(String),
 }
 
 impl LiveAdapterHostError {
@@ -1410,6 +1509,11 @@ impl LiveAdapterHostError {
             Self::UnsupportedCommand(_) => "unsupported_command",
             Self::AdapterError(_) => "adapter_error",
             Self::ProjectionError(_) => "projection_error",
+            Self::PlaybackTerminalAlreadyPending => "playback_terminal_already_pending",
+            Self::PlaybackTerminalSettlementFailed(_) => "playback_terminal_settlement_failed",
+            Self::PlaybackTerminalAcceptedButReceiptFailed(_) => {
+                "playback_terminal_accepted_but_receipt_failed"
+            }
         }
     }
 }
@@ -1422,6 +1526,7 @@ impl LiveAdapterHostError {
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum ObservationRouting {
+    AdmitAssistantOutput,
     AppendTranscript,
     /// Pass-through of a structured [`RealtimeTranscriptEvent`] from the
     /// provider adapter. Routed to [`LiveProjectionSink::append_realtime_transcript`]
@@ -1608,6 +1713,8 @@ struct HostInner {
     /// N80: O(1) reverse lookup so `open_channel` does not linear-scan the
     /// `channels` map under the host mutex when binding by `SessionId`.
     by_session: HashMap<SessionId, LiveChannelId>,
+    #[cfg(feature = "test-support")]
+    fail_next_command_receipt: HashSet<LiveChannelId>,
 }
 
 impl LiveAdapterHost {
@@ -1624,6 +1731,8 @@ impl LiveAdapterHost {
             inner: Mutex::new(HostInner {
                 channels: IndexMap::new(),
                 by_session: HashMap::new(),
+                #[cfg(feature = "test-support")]
+                fail_next_command_receipt: HashSet::new(),
             }),
             projection_sink,
             tool_dispatcher: std::sync::Mutex::new(None),
@@ -1754,6 +1863,7 @@ impl LiveAdapterHost {
                 physical_close_confirmed: true,
                 retire_at: None,
                 pending_synthetic_obs: None,
+                playback_terminal_waiters: HashMap::new(),
             },
         );
         inner.by_session.insert(session_id, channel_id.clone());
@@ -1796,6 +1906,9 @@ impl LiveAdapterHost {
             LiveAdapterCommand::TruncateAssistantOutput { .. } => {
                 Ok(LiveCommandAcceptanceKind::TruncateAssistantOutput)
             }
+            LiveAdapterCommand::CompleteAssistantPlayback { .. } => {
+                Ok(LiveCommandAcceptanceKind::CompleteAssistantPlayback)
+            }
             LiveAdapterCommand::Refresh { .. } => Err(LiveAdapterHostError::UnsupportedCommand(
                 "refresh commands must use LiveAdapterHost::enqueue_refresh",
             )),
@@ -1811,6 +1924,10 @@ impl LiveAdapterHost {
         kind: LiveCommandAcceptanceKind,
     ) -> Result<LiveCommandQueueAcceptance, LiveAdapterHostError> {
         let mut inner = self.inner.lock().await;
+        #[cfg(feature = "test-support")]
+        if inner.fail_next_command_receipt.remove(channel_id) {
+            return Err(LiveAdapterHostError::ChannelNotFound(channel_id.clone()));
+        }
         let channel = inner
             .channels
             .get_mut(channel_id)
@@ -1822,6 +1939,17 @@ impl LiveAdapterHost {
             channel.command_acceptance_sequence,
         )
         .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))
+    }
+
+    /// Force one post-send command receipt failure in non-shipping fixtures.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub async fn __fail_next_command_receipt_for_test(&self, channel_id: LiveChannelId) {
+        self.inner
+            .lock()
+            .await
+            .fail_next_command_receipt
+            .insert(channel_id);
     }
 
     /// Send a command to the adapter on a channel.
@@ -1861,6 +1989,143 @@ impl LiveAdapterHost {
         adapter.send_command(command).await?;
         self.record_command_queue_acceptance(channel_id, acceptance_kind)
             .await
+    }
+
+    /// Dispatch one exact playback terminal and retain a settlement waiter
+    /// until its provider observation has committed through the projection
+    /// sink. This keeps queue acceptance distinct from semantic terminality.
+    pub async fn send_playback_terminal_observed(
+        &self,
+        channel_id: &LiveChannelId,
+        command: LiveAdapterCommand,
+    ) -> Result<(LiveCommandQueueAcceptance, LivePlaybackTerminalSettlement), LiveAdapterHostError>
+    {
+        let (key, followup) = match &command {
+            LiveAdapterCommand::TruncateAssistantOutput {
+                interaction_id,
+                item_id,
+                content_index,
+                reported_playback_prefix,
+                ..
+            } => (
+                LivePlaybackTerminalKey {
+                    interaction_id: *interaction_id,
+                    item_id: item_id.clone(),
+                    content_index: *content_index,
+                },
+                if reported_playback_prefix.is_some() {
+                    LivePlaybackTerminalFollowup::TurnCompleted
+                } else {
+                    LivePlaybackTerminalFollowup::TurnInterrupted
+                },
+            ),
+            LiveAdapterCommand::CompleteAssistantPlayback {
+                interaction_id,
+                item_id,
+                content_index,
+            } => (
+                LivePlaybackTerminalKey {
+                    interaction_id: *interaction_id,
+                    item_id: item_id.clone(),
+                    content_index: *content_index,
+                },
+                LivePlaybackTerminalFollowup::None,
+            ),
+            _ => {
+                return Err(LiveAdapterHostError::UnsupportedCommand(
+                    "playback settlement requires a terminal playback command",
+                ));
+            }
+        };
+        let acceptance_kind = Self::command_acceptance_kind(&command)?;
+        let adapter = self
+            .adapter_for(channel_id, /* require_ready = */ false)
+            .await?;
+        let (settlement_tx, settlement_rx) = oneshot::channel();
+        {
+            let mut inner = self.inner.lock().await;
+            let channel = inner
+                .channels
+                .get_mut(channel_id)
+                .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))?;
+            if channel.playback_terminal_waiters.contains_key(&key) {
+                return Err(LiveAdapterHostError::PlaybackTerminalAlreadyPending);
+            }
+            channel.playback_terminal_waiters.insert(
+                key.clone(),
+                PendingLivePlaybackTerminal {
+                    followup,
+                    response_id: None,
+                    settlement_tx,
+                },
+            );
+        }
+        if let Err(error) = adapter.send_command(command).await {
+            self.fail_exact_playback_terminal_waiter(channel_id, &key, error.clone().into())
+                .await;
+            return Err(error.into());
+        }
+        let acceptance = match self
+            .record_command_queue_acceptance(channel_id, acceptance_kind)
+            .await
+        {
+            Ok(acceptance) => acceptance,
+            Err(error) => {
+                let ambiguous = LiveAdapterHostError::PlaybackTerminalAcceptedButReceiptFailed(
+                    error.to_string(),
+                );
+                self.fail_exact_playback_terminal_waiter(channel_id, &key, ambiguous.clone())
+                    .await;
+                return Err(ambiguous);
+            }
+        };
+        Ok((acceptance, LivePlaybackTerminalSettlement { settlement_rx }))
+    }
+
+    async fn fail_exact_playback_terminal_waiter(
+        &self,
+        channel_id: &LiveChannelId,
+        key: &LivePlaybackTerminalKey,
+        error: LiveAdapterHostError,
+    ) {
+        let waiter = self
+            .inner
+            .lock()
+            .await
+            .channels
+            .get_mut(channel_id)
+            .and_then(|channel| channel.playback_terminal_waiters.remove(key));
+        if let Some(waiter) = waiter {
+            let _ = waiter.settlement_tx.send(Err(error));
+        }
+    }
+
+    /// Fail every unsettled playback terminal for a retiring external pump.
+    /// Callers still own the generated Unmeasured close path before resource
+    /// retirement.
+    pub async fn fail_playback_waiters_for_channel(
+        &self,
+        channel_id: &LiveChannelId,
+        reason: impl Into<String>,
+    ) {
+        let waiters = self
+            .inner
+            .lock()
+            .await
+            .channels
+            .get_mut(channel_id)
+            .map(|channel| {
+                std::mem::take(&mut channel.playback_terminal_waiters)
+                    .into_values()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let reason = reason.into();
+        for waiter in waiters {
+            let _ = waiter.settlement_tx.send(Err(
+                LiveAdapterHostError::PlaybackTerminalSettlementFailed(reason.clone()),
+            ));
+        }
     }
 
     /// Enqueue a refresh command and return typed queue-acceptance evidence.
@@ -2059,8 +2324,30 @@ impl LiveAdapterHost {
 
         let session_id = self.channel_session(channel_id).await?;
 
-        match (routing, observation) {
+        let result = match (routing, observation) {
             (ObservationRouting::Noop, _) => Ok(ObservationOutcome::Noop),
+
+            (
+                ObservationRouting::AdmitAssistantOutput,
+                LiveAdapterObservation::AssistantOutputStarted {
+                    provider_turn_ref,
+                    response_id,
+                    provider_item_id,
+                    content_index,
+                },
+            ) => self
+                .projection_sink
+                .admit_assistant_playback_target(
+                    &session_id,
+                    channel_id,
+                    provider_turn_ref,
+                    response_id,
+                    provider_item_id,
+                    *content_index,
+                )
+                .await
+                .map(ObservationOutcome::AssistantOutputAvailable)
+                .map_err(Into::into),
 
             (ObservationRouting::UpdateStatus(status), _) => {
                 Ok(ObservationOutcome::StatusUpdated(status))
@@ -2179,25 +2466,54 @@ impl LiveAdapterHost {
             (
                 ObservationRouting::AppendTranscript,
                 LiveAdapterObservation::AssistantTranscriptTruncated {
+                    interaction_id,
                     provider_item_id,
                     previous_item_id,
                     content_index,
                     response_id,
                     text,
                 },
-            ) => {
-                self.projection_sink
-                    .truncate_assistant_transcript(
-                        &session_id,
-                        provider_item_id.as_deref(),
-                        previous_item_id.as_deref(),
-                        *content_index,
-                        response_id.as_deref(),
-                        text.as_deref(),
-                    )
-                    .await?;
-                Ok(ObservationOutcome::TranscriptTruncated)
-            }
+            ) => self
+                .projection_sink
+                .truncate_assistant_transcript(
+                    &session_id,
+                    channel_id,
+                    *interaction_id,
+                    provider_item_id.as_deref(),
+                    previous_item_id.as_deref(),
+                    *content_index,
+                    response_id.as_deref(),
+                    text.as_deref(),
+                )
+                .await
+                .map(|()| ObservationOutcome::TranscriptTruncated)
+                .map_err(Into::into),
+
+            (
+                ObservationRouting::AppendTranscript,
+                LiveAdapterObservation::AssistantPlaybackCompleted {
+                    interaction_id,
+                    provider_item_id,
+                    content_index,
+                    response_id,
+                    stop_reason,
+                    usage,
+                },
+            ) => self
+                .projection_sink
+                .complete_assistant_playback(
+                    &session_id,
+                    channel_id,
+                    *interaction_id,
+                    response_id,
+                    provider_item_id,
+                    *content_index,
+                    *stop_reason,
+                    usage.clone(),
+                )
+                .await
+                .map(|()| ObservationOutcome::TranscriptAppended)
+                .map_err(Into::into),
 
             (
                 ObservationRouting::AppendTranscript,
@@ -2217,8 +2533,9 @@ impl LiveAdapterHost {
                         usage.clone(),
                         response_id.as_deref(),
                     )
-                    .await?;
-                Ok(ObservationOutcome::TranscriptAppended)
+                    .await
+                    .map(|()| ObservationOutcome::TranscriptAppended)
+                    .map_err(Into::into)
             }
 
             // P1#2: structured realtime transcript events flow through the
@@ -2311,12 +2628,12 @@ impl LiveAdapterHost {
             (
                 ObservationRouting::SignalInterrupt,
                 LiveAdapterObservation::TurnInterrupted { response_id },
-            ) => {
-                self.projection_sink
-                    .signal_turn_interrupt(&session_id, response_id.as_deref())
-                    .await?;
-                Ok(ObservationOutcome::InterruptSignalled)
-            }
+            ) => self
+                .projection_sink
+                .signal_turn_interrupt(&session_id, response_id.as_deref())
+                .await
+                .map(|()| ObservationOutcome::InterruptSignalled)
+                .map_err(Into::into),
 
             (
                 ObservationRouting::TerminalError,
@@ -2357,6 +2674,94 @@ impl LiveAdapterHost {
             // any mismatch here is a bug in classification, not a runtime
             // condition we should panic on.)
             _ => Ok(ObservationOutcome::Noop),
+        };
+        self.settle_playback_terminal_observation(channel_id, observation, &result)
+            .await;
+        result
+    }
+
+    async fn settle_playback_terminal_observation(
+        &self,
+        channel_id: &LiveChannelId,
+        observation: &LiveAdapterObservation,
+        result: &Result<ObservationOutcome, LiveAdapterHostError>,
+    ) {
+        let projected_error = result.as_ref().err().cloned();
+        let mut settled = None;
+        {
+            let mut inner = self.inner.lock().await;
+            let Some(channel) = inner.channels.get_mut(channel_id) else {
+                return;
+            };
+            match observation {
+                LiveAdapterObservation::AssistantPlaybackCompleted {
+                    interaction_id,
+                    provider_item_id,
+                    content_index,
+                    ..
+                } => {
+                    let key = LivePlaybackTerminalKey {
+                        interaction_id: *interaction_id,
+                        item_id: provider_item_id.clone(),
+                        content_index: *content_index,
+                    };
+                    settled = channel.playback_terminal_waiters.remove(&key);
+                }
+                LiveAdapterObservation::AssistantTranscriptTruncated {
+                    interaction_id: Some(interaction_id),
+                    provider_item_id: Some(item_id),
+                    content_index: Some(content_index),
+                    response_id: Some(response_id),
+                    ..
+                } => {
+                    let key = LivePlaybackTerminalKey {
+                        interaction_id: *interaction_id,
+                        item_id: item_id.clone(),
+                        content_index: *content_index,
+                    };
+                    if projected_error.is_some() {
+                        settled = channel.playback_terminal_waiters.remove(&key);
+                    } else if let Some(waiter) = channel.playback_terminal_waiters.get_mut(&key) {
+                        waiter.response_id = Some(response_id.clone());
+                    }
+                }
+                LiveAdapterObservation::TurnCompleted {
+                    response_id: Some(response_id),
+                    ..
+                } => {
+                    let key = channel
+                        .playback_terminal_waiters
+                        .iter()
+                        .find_map(|(key, waiter)| {
+                            (waiter.followup == LivePlaybackTerminalFollowup::TurnCompleted
+                                && waiter.response_id.as_deref() == Some(response_id.as_str()))
+                            .then_some(key.clone())
+                        });
+                    if let Some(key) = key {
+                        settled = channel.playback_terminal_waiters.remove(&key);
+                    }
+                }
+                LiveAdapterObservation::TurnInterrupted {
+                    response_id: Some(response_id),
+                } => {
+                    let key = channel
+                        .playback_terminal_waiters
+                        .iter()
+                        .find_map(|(key, waiter)| {
+                            (waiter.followup == LivePlaybackTerminalFollowup::TurnInterrupted
+                                && waiter.response_id.as_deref() == Some(response_id.as_str()))
+                            .then_some(key.clone())
+                        });
+                    if let Some(key) = key {
+                        settled = channel.playback_terminal_waiters.remove(&key);
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(waiter) = settled {
+            let settlement = projected_error.map_or(Ok(()), Err);
+            let _ = waiter.settlement_tx.send(settlement);
         }
     }
 
@@ -2943,6 +3348,17 @@ impl LiveAdapterHost {
         Ok(())
     }
 
+    pub async fn fail_assistant_output_publication(
+        &self,
+        address: &LiveAssistantOutputAddress,
+    ) -> Result<(), LiveAdapterHostError> {
+        let session_id = self.channel_session(&address.channel_id).await?;
+        self.projection_sink
+            .fail_assistant_output_publication(&session_id, address)
+            .await?;
+        Ok(())
+    }
+
     pub fn classify_observation(observation: &LiveAdapterObservation) -> ObservationRouting {
         match observation {
             LiveAdapterObservation::Ready => {
@@ -2960,10 +3376,16 @@ impl LiveAdapterHost {
                 ObservationRouting::AppendTranscript
             }
             LiveAdapterObservation::AssistantAudioChunk { .. } => ObservationRouting::Noop,
+            LiveAdapterObservation::AssistantOutputStarted { .. } => {
+                ObservationRouting::AdmitAssistantOutput
+            }
             LiveAdapterObservation::AssistantTranscriptFinal { .. } => {
                 ObservationRouting::AppendTranscript
             }
             LiveAdapterObservation::AssistantTranscriptTruncated { .. } => {
+                ObservationRouting::AppendTranscript
+            }
+            LiveAdapterObservation::AssistantPlaybackCompleted { .. } => {
                 ObservationRouting::AppendTranscript
             }
             // P1#2: structured realtime events flow through the typed
@@ -5288,6 +5710,20 @@ mod tests {
         assert_eq!(acceptance.acceptance_sequence(), 1);
     }
 
+    #[test]
+    fn complete_assistant_playback_has_distinct_command_acceptance_kind() {
+        let command = LiveAdapterCommand::CompleteAssistantPlayback {
+            interaction_id: meerkat_core::InteractionId(uuid::Uuid::nil()),
+            item_id: "assistant-item".to_string(),
+            content_index: 0,
+        };
+
+        assert_eq!(
+            LiveAdapterHost::command_acceptance_kind(&command).unwrap(),
+            LiveCommandAcceptanceKind::CompleteAssistantPlayback
+        );
+    }
+
     #[tokio::test]
     async fn rejected_live_command_does_not_mint_acceptance_evidence() {
         let host = LiveAdapterHost::new(Arc::new(NoOpProjectionSink));
@@ -5318,6 +5754,182 @@ mod tests {
             channel.command_acceptance_sequence, 0,
             "rejected command must not mint authority evidence that WebRTC could use to discard output"
         );
+    }
+
+    #[tokio::test]
+    async fn playback_terminal_settlement_waits_for_exact_successful_projection() {
+        let sink = Arc::new(RecordingProjectionSink::default());
+        let host = LiveAdapterHost::new(Arc::clone(&sink) as _);
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(test_session_id())
+            .await
+            .unwrap();
+        host.attach_adapter(&ch, Arc::new(StubAdapter::new()))
+            .await
+            .unwrap();
+        let interaction = meerkat_core::InteractionId::new();
+        let (_, complete) = host
+            .send_playback_terminal_observed(
+                &ch,
+                LiveAdapterCommand::CompleteAssistantPlayback {
+                    interaction_id: interaction,
+                    item_id: "item-complete".to_string(),
+                    content_index: 0,
+                },
+            )
+            .await
+            .unwrap();
+        let complete_task = tokio::spawn(complete.settle());
+        tokio::task::yield_now().await;
+        assert!(
+            !complete_task.is_finished(),
+            "queue acceptance must not settle playback complete"
+        );
+        host.apply_observation(
+            &ch,
+            &LiveAdapterObservation::AssistantPlaybackCompleted {
+                interaction_id: interaction,
+                provider_item_id: "item-complete".to_string(),
+                content_index: 0,
+                response_id: "response-complete".to_string(),
+                stop_reason: StopReason::EndTurn,
+                usage: meerkat_core::TurnUsage::host_declared(
+                    meerkat_core::Provider::Other,
+                    "playback-test",
+                    Usage::default(),
+                ),
+            },
+        )
+        .await
+        .unwrap();
+        complete_task.await.unwrap().unwrap();
+
+        let prefix_interaction = meerkat_core::InteractionId::new();
+        let (_, prefix) = host
+            .send_playback_terminal_observed(
+                &ch,
+                LiveAdapterCommand::TruncateAssistantOutput {
+                    interaction_id: prefix_interaction,
+                    item_id: "item-prefix".to_string(),
+                    content_index: 0,
+                    audio_played_ms: 250,
+                    reported_playback_prefix: Some("played prefix".to_string()),
+                },
+            )
+            .await
+            .unwrap();
+        let prefix_task = tokio::spawn(prefix.settle());
+        host.apply_observation(
+            &ch,
+            &LiveAdapterObservation::AssistantTranscriptTruncated {
+                interaction_id: Some(prefix_interaction),
+                provider_item_id: Some("item-prefix".to_string()),
+                previous_item_id: None,
+                content_index: Some(0),
+                response_id: Some("response-prefix".to_string()),
+                text: Some("played prefix".to_string()),
+            },
+        )
+        .await
+        .unwrap();
+        tokio::task::yield_now().await;
+        assert!(
+            !prefix_task.is_finished(),
+            "prefix replacement is not canonical until matching turn completion"
+        );
+        host.apply_observation(
+            &ch,
+            &LiveAdapterObservation::TurnCompleted {
+                response_id: Some("response-prefix".to_string()),
+                stop_reason: StopReason::EndTurn,
+                usage: meerkat_core::TurnUsage::host_declared(
+                    meerkat_core::Provider::Other,
+                    "playback-test",
+                    Usage::default(),
+                ),
+            },
+        )
+        .await
+        .unwrap();
+        prefix_task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn playback_terminal_projection_failure_fails_exact_settlement() {
+        let sink = Arc::new(RecordingProjectionSink::default());
+        sink.reject_playback_terminal.store(true, Ordering::SeqCst);
+        let host = LiveAdapterHost::new(Arc::clone(&sink) as _);
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(test_session_id())
+            .await
+            .unwrap();
+        host.attach_adapter(&ch, Arc::new(StubAdapter::new()))
+            .await
+            .unwrap();
+        let interaction = meerkat_core::InteractionId::new();
+        let (_, settlement) = host
+            .send_playback_terminal_observed(
+                &ch,
+                LiveAdapterCommand::CompleteAssistantPlayback {
+                    interaction_id: interaction,
+                    item_id: "item-rejected".to_string(),
+                    content_index: 0,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            host.apply_observation(
+                &ch,
+                &LiveAdapterObservation::AssistantPlaybackCompleted {
+                    interaction_id: interaction,
+                    provider_item_id: "item-rejected".to_string(),
+                    content_index: 0,
+                    response_id: "response-rejected".to_string(),
+                    stop_reason: StopReason::EndTurn,
+                    usage: meerkat_core::TurnUsage::host_declared(
+                        meerkat_core::Provider::Other,
+                        "playback-test",
+                        Usage::default(),
+                    ),
+                },
+            )
+            .await
+            .is_err()
+        );
+        assert!(settlement.settle().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn playback_terminal_post_send_receipt_race_is_typed_ambiguous() {
+        let host = Arc::new(LiveAdapterHost::new(Arc::new(NoOpProjectionSink)));
+        let ch = host
+            .open_channel_with_generated_test_machine_authority(test_session_id())
+            .await
+            .unwrap();
+        host.attach_adapter(
+            &ch,
+            Arc::new(RemoveChannelAfterSendAdapter {
+                host: Arc::downgrade(&host),
+                channel_id: ch.clone(),
+            }),
+        )
+        .await
+        .unwrap();
+        let result = host
+            .send_playback_terminal_observed(
+                &ch,
+                LiveAdapterCommand::CompleteAssistantPlayback {
+                    interaction_id: meerkat_core::InteractionId::new(),
+                    item_id: "item-race".to_string(),
+                    content_index: 0,
+                },
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(LiveAdapterHostError::PlaybackTerminalAcceptedButReceiptFailed(_))
+        ));
     }
 
     // ---------------------------------------------------------------------
@@ -5423,6 +6035,39 @@ mod tests {
             Err(LiveAdapterError::TransportError {
                 message: "command queue rejected".into(),
             })
+        }
+
+        async fn next_observation(
+            &self,
+        ) -> Result<Option<LiveAdapterObservation>, LiveAdapterError> {
+            Ok(None)
+        }
+
+        fn status(&self) -> LiveAdapterStatus {
+            LiveAdapterStatus::Ready
+        }
+
+        async fn close(&self) -> Result<(), LiveAdapterError> {
+            Ok(())
+        }
+    }
+
+    struct RemoveChannelAfterSendAdapter {
+        host: std::sync::Weak<LiveAdapterHost>,
+        channel_id: LiveChannelId,
+    }
+
+    #[async_trait]
+    impl LiveAdapter for RemoveChannelAfterSendAdapter {
+        async fn send_command(&self, _command: LiveAdapterCommand) -> Result<(), LiveAdapterError> {
+            if let Some(host) = self.host.upgrade() {
+                host.inner
+                    .lock()
+                    .await
+                    .channels
+                    .shift_remove(&self.channel_id);
+            }
+            Ok(())
         }
 
         async fn next_observation(
@@ -5600,6 +6245,7 @@ mod tests {
         >,
         terminal_errors: StdMutex<Vec<(SessionId, LiveAdapterErrorCode, String)>>,
         realtime_events: StdMutex<Vec<(SessionId, RealtimeTranscriptEvent)>>,
+        reject_playback_terminal: AtomicBool,
     }
 
     #[async_trait]
@@ -5686,15 +6332,65 @@ mod tests {
             Ok(())
         }
 
+        async fn admit_assistant_playback_target(
+            &self,
+            _session_id: &SessionId,
+            channel_id: &LiveChannelId,
+            _provider_turn_ref: &str,
+            _response_id: &str,
+            _provider_item_id: &str,
+            content_index: u32,
+        ) -> Result<LiveAssistantOutputAddress, LiveProjectionError> {
+            Ok(LiveAssistantOutputAddress {
+                channel_id: channel_id.clone(),
+                output_id: "recording-output".to_string(),
+                content_index,
+            })
+        }
+
+        async fn complete_assistant_playback(
+            &self,
+            _session_id: &SessionId,
+            _channel_id: &LiveChannelId,
+            _interaction_id: meerkat_core::InteractionId,
+            _response_id: &str,
+            _provider_item_id: &str,
+            _content_index: u32,
+            _stop_reason: StopReason,
+            _usage: meerkat_core::TurnUsage,
+        ) -> Result<(), LiveProjectionError> {
+            if self.reject_playback_terminal.load(Ordering::SeqCst) {
+                return Err(LiveProjectionError::Rejected(
+                    "scripted playback terminal rejection".to_string(),
+                ));
+            }
+            Ok(())
+        }
+
+        async fn fail_assistant_output_publication(
+            &self,
+            _session_id: &SessionId,
+            _address: &LiveAssistantOutputAddress,
+        ) -> Result<(), LiveProjectionError> {
+            Ok(())
+        }
+
         async fn truncate_assistant_transcript(
             &self,
             session_id: &SessionId,
+            _channel_id: &LiveChannelId,
+            _interaction_id: Option<meerkat_core::InteractionId>,
             provider_item_id: Option<&str>,
             previous_item_id: Option<&str>,
             content_index: Option<u32>,
             response_id: Option<&str>,
             text: Option<&str>,
         ) -> Result<(), LiveProjectionError> {
+            if self.reject_playback_terminal.load(Ordering::SeqCst) {
+                return Err(LiveProjectionError::Rejected(
+                    "scripted playback terminal rejection".to_string(),
+                ));
+            }
             self.truncations.lock().unwrap().push((
                 session_id.clone(),
                 provider_item_id.map(|s| s.to_string()),

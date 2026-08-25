@@ -201,6 +201,286 @@ impl std::fmt::Display for DurableTailStopReason {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum LiveAssistantPlaybackTerminalDisposition {
+    #[default]
+    #[serde(rename = "Unmeasured")]
+    Unmeasured,
+    #[serde(rename = "PlaybackComplete")]
+    PlaybackComplete,
+    #[serde(rename = "TruncateToReportedPrefix")]
+    TruncateToReportedPrefix,
+}
+impl LiveAssistantPlaybackTerminalDisposition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unmeasured => "Unmeasured",
+            Self::PlaybackComplete => "PlaybackComplete",
+            Self::TruncateToReportedPrefix => "TruncateToReportedPrefix",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveAssistantPlaybackTerminalDisposition {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Unmeasured" => Ok(Self::Unmeasured),
+            "PlaybackComplete" => Ok(Self::PlaybackComplete),
+            "TruncateToReportedPrefix" => Ok(Self::TruncateToReportedPrefix),
+            other => Err(format!(
+                "invalid LiveAssistantPlaybackTerminalDisposition value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveAssistantPlaybackTerminalDisposition {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveAssistantPlaybackTerminalDisposition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum LiveAssistantPlaybackTerminalObservation {
+    #[default]
+    #[serde(rename = "Unmeasured")]
+    Unmeasured,
+    #[serde(rename = "PlaybackComplete")]
+    PlaybackComplete,
+    #[serde(rename = "ReportedPrefix")]
+    ReportedPrefix,
+}
+impl LiveAssistantPlaybackTerminalObservation {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unmeasured => "Unmeasured",
+            Self::PlaybackComplete => "PlaybackComplete",
+            Self::ReportedPrefix => "ReportedPrefix",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveAssistantPlaybackTerminalObservation {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Unmeasured" => Ok(Self::Unmeasured),
+            "PlaybackComplete" => Ok(Self::PlaybackComplete),
+            "ReportedPrefix" => Ok(Self::ReportedPrefix),
+            other => Err(format!(
+                "invalid LiveAssistantPlaybackTerminalObservation value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveAssistantPlaybackTerminalObservation {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveAssistantPlaybackTerminalObservation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum LiveContextCommittedRowDisposition {
+    #[default]
+    #[serde(rename = "MirrorParentText")]
+    MirrorParentText,
+    #[serde(rename = "AlreadyPresentInLiveChannel")]
+    AlreadyPresentInLiveChannel,
+    #[serde(rename = "ExcludedFromLiveContext")]
+    ExcludedFromLiveContext,
+}
+impl LiveContextCommittedRowDisposition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::MirrorParentText => "MirrorParentText",
+            Self::AlreadyPresentInLiveChannel => "AlreadyPresentInLiveChannel",
+            Self::ExcludedFromLiveContext => "ExcludedFromLiveContext",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveContextCommittedRowDisposition {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "MirrorParentText" => Ok(Self::MirrorParentText),
+            "AlreadyPresentInLiveChannel" => Ok(Self::AlreadyPresentInLiveChannel),
+            "ExcludedFromLiveContext" => Ok(Self::ExcludedFromLiveContext),
+            other => Err(format!(
+                "invalid LiveContextCommittedRowDisposition value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveContextCommittedRowDisposition {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveContextCommittedRowDisposition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum LiveContextCommittedRowKind {
+    #[default]
+    #[serde(rename = "UserText")]
+    UserText,
+    #[serde(rename = "AssistantText")]
+    AssistantText,
+    #[serde(rename = "NonText")]
+    NonText,
+}
+impl LiveContextCommittedRowKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::UserText => "UserText",
+            Self::AssistantText => "AssistantText",
+            Self::NonText => "NonText",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveContextCommittedRowKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "UserText" => Ok(Self::UserText),
+            "AssistantText" => Ok(Self::AssistantText),
+            "NonText" => Ok(Self::NonText),
+            other => Err(format!(
+                "invalid LiveContextCommittedRowKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveContextCommittedRowKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveContextCommittedRowKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum LiveContextCommittedTextProvenance {
+    #[default]
+    #[serde(rename = "ParentSessionServiceTurn")]
+    ParentSessionServiceTurn,
+    #[serde(rename = "LiveRealtimeTranscript")]
+    LiveRealtimeTranscript,
+    #[serde(rename = "ExecutorTrace")]
+    ExecutorTrace,
+}
+impl LiveContextCommittedTextProvenance {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ParentSessionServiceTurn => "ParentSessionServiceTurn",
+            Self::LiveRealtimeTranscript => "LiveRealtimeTranscript",
+            Self::ExecutorTrace => "ExecutorTrace",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveContextCommittedTextProvenance {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "ParentSessionServiceTurn" => Ok(Self::ParentSessionServiceTurn),
+            "LiveRealtimeTranscript" => Ok(Self::LiveRealtimeTranscript),
+            "ExecutorTrace" => Ok(Self::ExecutorTrace),
+            other => Err(format!(
+                "invalid LiveContextCommittedTextProvenance value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveContextCommittedTextProvenance {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveContextCommittedTextProvenance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum LiveSessionAuthorityKind {
     #[default]
     #[serde(rename = "LiveAuthoritative")]
@@ -289,6 +569,62 @@ impl std::convert::TryFrom<String> for LiveSessionAuthorityReason {
     }
 }
 impl std::fmt::Display for LiveSessionAuthorityReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum LiveTranscriptReconciliation {
+    #[default]
+    #[serde(rename = "Provisional")]
+    Provisional,
+    #[serde(rename = "Committed")]
+    Committed,
+    #[serde(rename = "Missing")]
+    Missing,
+}
+impl LiveTranscriptReconciliation {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Provisional => "Provisional",
+            Self::Committed => "Committed",
+            Self::Missing => "Missing",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveTranscriptReconciliation {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Provisional" => Ok(Self::Provisional),
+            "Committed" => Ok(Self::Committed),
+            "Missing" => Ok(Self::Missing),
+            other => Err(format!(
+                "invalid LiveTranscriptReconciliation value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveTranscriptReconciliation {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveTranscriptReconciliation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -1617,6 +1953,14 @@ pub struct State {
     pub session_pending_initial_prompt_present: std::collections::BTreeMap<SessionId, bool>,
     pub session_pending_tool_results_count: std::collections::BTreeMap<SessionId, u64>,
     pub session_lifecycle_terminal: std::collections::BTreeMap<SessionId, SessionDocumentLifecycle>,
+    pub session_live_channel_id: std::collections::BTreeMap<SessionId, String>,
+    pub session_live_interaction_id: std::collections::BTreeMap<SessionId, String>,
+    pub session_live_transcript_reconciliation:
+        std::collections::BTreeMap<SessionId, LiveTranscriptReconciliation>,
+    pub session_live_provisional_transcript_present: std::collections::BTreeMap<SessionId, bool>,
+    pub session_live_assistant_playback_response_id: std::collections::BTreeMap<SessionId, String>,
+    pub session_live_assistant_playback_item_id: std::collections::BTreeMap<SessionId, String>,
+    pub session_live_assistant_playback_content_index: std::collections::BTreeMap<SessionId, u64>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -1789,6 +2133,84 @@ pub mod inputs {
         pub all_discarded_assistant_items_are_skipped_or_materialized: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdmitLiveInteractionTranscript {
+        pub session_id: SessionId,
+        pub channel_id: String,
+        pub interaction_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct StageLiveProvisionalUserTranscript {
+        pub session_id: SessionId,
+        pub channel_id: String,
+        pub interaction_id: String,
+        pub provisional_has_content: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ReconcileLiveFinalUserTranscript {
+        pub session_id: SessionId,
+        pub channel_id: String,
+        pub interaction_id: String,
+        pub reconciliation: LiveTranscriptReconciliation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CompleteLiveInteractionTranscript {
+        pub session_id: SessionId,
+        pub channel_id: String,
+        pub interaction_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdmitLiveAssistantPlaybackTarget {
+        pub session_id: SessionId,
+        pub channel_id: String,
+        pub interaction_id: String,
+        pub response_id: String,
+        pub item_id: String,
+        pub content_index: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverLiveAssistantPlaybackTarget {
+        pub session_id: SessionId,
+        pub channel_id: String,
+        pub interaction_id: String,
+        pub response_id: String,
+        pub item_id: String,
+        pub content_index: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveLiveAssistantPlaybackOnChannelClose {
+        pub session_id: SessionId,
+        pub channel_id: String,
+        pub interaction_id: String,
+        pub response_id: String,
+        pub item_id: String,
+        pub content_index: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveLiveAssistantPlaybackTerminal {
+        pub session_id: SessionId,
+        pub channel_id: String,
+        pub interaction_id: String,
+        pub response_id: String,
+        pub item_id: String,
+        pub content_index: u64,
+        pub authoritative_assistant_chars: u64,
+        pub authoritative_text_digest: String,
+        pub authoritative_assistant_final: bool,
+        pub observation: LiveAssistantPlaybackTerminalObservation,
+        pub reported_prefix_chars: u64,
+        pub reported_prefix_digest: String,
+        pub reported_prefix_matches_authoritative: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyLiveContextCommittedRow {
+        pub session_id: SessionId,
+        pub canonical_row_sequence: u64,
+        pub row_kind: LiveContextCommittedRowKind,
+        pub provenance: LiveContextCommittedTextProvenance,
+        pub content_digest: String,
+        pub store_commit_authority: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AuthorizeSessionMetadataPersist {
         pub schema_version: u64,
         pub model_present: bool,
@@ -1899,6 +2321,15 @@ pub enum Input {
     ResolveRealtimeAssistantTurnInterrupted(inputs::ResolveRealtimeAssistantTurnInterrupted),
     ResolveRealtimeMaterializeCandidate(inputs::ResolveRealtimeMaterializeCandidate),
     RestoreRealtimeTranscriptState(inputs::RestoreRealtimeTranscriptState),
+    AdmitLiveInteractionTranscript(inputs::AdmitLiveInteractionTranscript),
+    StageLiveProvisionalUserTranscript(inputs::StageLiveProvisionalUserTranscript),
+    ReconcileLiveFinalUserTranscript(inputs::ReconcileLiveFinalUserTranscript),
+    CompleteLiveInteractionTranscript(inputs::CompleteLiveInteractionTranscript),
+    AdmitLiveAssistantPlaybackTarget(inputs::AdmitLiveAssistantPlaybackTarget),
+    RecoverLiveAssistantPlaybackTarget(inputs::RecoverLiveAssistantPlaybackTarget),
+    ResolveLiveAssistantPlaybackOnChannelClose(inputs::ResolveLiveAssistantPlaybackOnChannelClose),
+    ResolveLiveAssistantPlaybackTerminal(inputs::ResolveLiveAssistantPlaybackTerminal),
+    ClassifyLiveContextCommittedRow(inputs::ClassifyLiveContextCommittedRow),
     AuthorizeSessionMetadataPersist(inputs::AuthorizeSessionMetadataPersist),
     AuthorizeSessionBuildStatePersist(inputs::AuthorizeSessionBuildStatePersist),
     RestoreSessionBuildState(inputs::RestoreSessionBuildState),
@@ -1960,6 +2391,29 @@ impl Input {
                 InputKind::ResolveRealtimeMaterializeCandidate
             }
             Self::RestoreRealtimeTranscriptState(_) => InputKind::RestoreRealtimeTranscriptState,
+            Self::AdmitLiveInteractionTranscript(_) => InputKind::AdmitLiveInteractionTranscript,
+            Self::StageLiveProvisionalUserTranscript(_) => {
+                InputKind::StageLiveProvisionalUserTranscript
+            }
+            Self::ReconcileLiveFinalUserTranscript(_) => {
+                InputKind::ReconcileLiveFinalUserTranscript
+            }
+            Self::CompleteLiveInteractionTranscript(_) => {
+                InputKind::CompleteLiveInteractionTranscript
+            }
+            Self::AdmitLiveAssistantPlaybackTarget(_) => {
+                InputKind::AdmitLiveAssistantPlaybackTarget
+            }
+            Self::RecoverLiveAssistantPlaybackTarget(_) => {
+                InputKind::RecoverLiveAssistantPlaybackTarget
+            }
+            Self::ResolveLiveAssistantPlaybackOnChannelClose(_) => {
+                InputKind::ResolveLiveAssistantPlaybackOnChannelClose
+            }
+            Self::ResolveLiveAssistantPlaybackTerminal(_) => {
+                InputKind::ResolveLiveAssistantPlaybackTerminal
+            }
+            Self::ClassifyLiveContextCommittedRow(_) => InputKind::ClassifyLiveContextCommittedRow,
             Self::AuthorizeSessionMetadataPersist(_) => InputKind::AuthorizeSessionMetadataPersist,
             Self::AuthorizeSessionBuildStatePersist(_) => {
                 InputKind::AuthorizeSessionBuildStatePersist
@@ -2008,6 +2462,15 @@ pub enum InputKind {
     ResolveRealtimeAssistantTurnInterrupted,
     ResolveRealtimeMaterializeCandidate,
     RestoreRealtimeTranscriptState,
+    AdmitLiveInteractionTranscript,
+    StageLiveProvisionalUserTranscript,
+    ReconcileLiveFinalUserTranscript,
+    CompleteLiveInteractionTranscript,
+    AdmitLiveAssistantPlaybackTarget,
+    RecoverLiveAssistantPlaybackTarget,
+    ResolveLiveAssistantPlaybackOnChannelClose,
+    ResolveLiveAssistantPlaybackTerminal,
+    ClassifyLiveContextCommittedRow,
     AuthorizeSessionMetadataPersist,
     AuthorizeSessionBuildStatePersist,
     RestoreSessionBuildState,
@@ -2094,6 +2557,72 @@ pub mod effects {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RealtimeTranscriptSnapshotRestoreAuthorized {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveInteractionTranscriptAdmitted {
+        pub session_id: SessionId,
+        pub channel_id: String,
+        pub interaction_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveProvisionalUserTranscriptStaged {
+        pub session_id: SessionId,
+        pub channel_id: String,
+        pub interaction_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveFinalUserTranscriptReconciled {
+        pub session_id: SessionId,
+        pub channel_id: String,
+        pub interaction_id: String,
+        pub reconciliation: LiveTranscriptReconciliation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveInteractionTranscriptCompleted {
+        pub session_id: SessionId,
+        pub channel_id: String,
+        pub interaction_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveAssistantPlaybackTargetAdmitted {
+        pub session_id: SessionId,
+        pub channel_id: String,
+        pub interaction_id: String,
+        pub response_id: String,
+        pub item_id: String,
+        pub content_index: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveAssistantPlaybackTargetRecovered {
+        pub session_id: SessionId,
+        pub channel_id: String,
+        pub interaction_id: String,
+        pub response_id: String,
+        pub item_id: String,
+        pub content_index: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveAssistantPlaybackTerminalResolved {
+        pub session_id: SessionId,
+        pub channel_id: String,
+        pub interaction_id: String,
+        pub response_id: String,
+        pub item_id: String,
+        pub content_index: u64,
+        pub disposition: LiveAssistantPlaybackTerminalDisposition,
+        pub canonical_chars: Option<u64>,
+        pub canonical_text_digest: Option<String>,
+        pub biological_hearing_claimed: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveContextCommittedRowClassified {
+        pub session_id: SessionId,
+        pub canonical_row_sequence: u64,
+        pub row_kind: LiveContextCommittedRowKind,
+        pub provenance: LiveContextCommittedTextProvenance,
+        pub disposition: LiveContextCommittedRowDisposition,
+        pub content_digest: String,
+        pub store_commit_authority: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SessionMetadataPersistAuthorized {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SessionBuildStatePersistAuthorized {}
@@ -2178,6 +2707,14 @@ pub enum Effect {
     RealtimeTranscriptSnapshotRestoreAuthorized(
         effects::RealtimeTranscriptSnapshotRestoreAuthorized,
     ),
+    LiveInteractionTranscriptAdmitted(effects::LiveInteractionTranscriptAdmitted),
+    LiveProvisionalUserTranscriptStaged(effects::LiveProvisionalUserTranscriptStaged),
+    LiveFinalUserTranscriptReconciled(effects::LiveFinalUserTranscriptReconciled),
+    LiveInteractionTranscriptCompleted(effects::LiveInteractionTranscriptCompleted),
+    LiveAssistantPlaybackTargetAdmitted(effects::LiveAssistantPlaybackTargetAdmitted),
+    LiveAssistantPlaybackTargetRecovered(effects::LiveAssistantPlaybackTargetRecovered),
+    LiveAssistantPlaybackTerminalResolved(effects::LiveAssistantPlaybackTerminalResolved),
+    LiveContextCommittedRowClassified(effects::LiveContextCommittedRowClassified),
     SessionMetadataPersistAuthorized(effects::SessionMetadataPersistAuthorized),
     SessionBuildStatePersistAuthorized(effects::SessionBuildStatePersistAuthorized),
     SessionBuildStateRestoreAuthorized(effects::SessionBuildStateRestoreAuthorized),
@@ -2211,6 +2748,14 @@ pub enum EffectKind {
     RealtimeUserContentBlobRecoveryResolved,
     RealtimeUserContentBlobFinalizeResolved,
     RealtimeTranscriptSnapshotRestoreAuthorized,
+    LiveInteractionTranscriptAdmitted,
+    LiveProvisionalUserTranscriptStaged,
+    LiveFinalUserTranscriptReconciled,
+    LiveInteractionTranscriptCompleted,
+    LiveAssistantPlaybackTargetAdmitted,
+    LiveAssistantPlaybackTargetRecovered,
+    LiveAssistantPlaybackTerminalResolved,
+    LiveContextCommittedRowClassified,
     SessionMetadataPersistAuthorized,
     SessionBuildStatePersistAuthorized,
     SessionBuildStateRestoreAuthorized,
@@ -2296,6 +2841,17 @@ pub enum TransitionId {
     ResolveRealtimeMaterializeAssistant,
     ResolveRealtimeMaterializeAssistantMissingCompletion,
     AuthorizeRestoreRealtimeTranscriptState,
+    AdmitLiveInteractionTranscript,
+    StageLiveProvisionalUserTranscript,
+    ReconcileLiveFinalUserTranscript,
+    CompleteLiveInteractionTranscript,
+    AdmitLiveAssistantPlaybackTarget,
+    RecoverLiveAssistantPlaybackTarget,
+    ResolveLiveAssistantPlaybackOnChannelClose,
+    ResolveLiveAssistantPlaybackComplete,
+    ResolveLiveAssistantPlaybackReportedPrefix,
+    ResolveLiveAssistantPlaybackUnmeasured,
+    ClassifyLiveContextCommittedRow,
     AuthorizeSessionMetadataPersist,
     AuthorizeSessionBuildStatePersist,
     RestoreSessionBuildState,
@@ -2406,5 +2962,12 @@ pub fn initial_state() -> State {
         session_pending_initial_prompt_present: Default::default(),
         session_pending_tool_results_count: Default::default(),
         session_lifecycle_terminal: Default::default(),
+        session_live_channel_id: Default::default(),
+        session_live_interaction_id: Default::default(),
+        session_live_transcript_reconciliation: Default::default(),
+        session_live_provisional_transcript_present: Default::default(),
+        session_live_assistant_playback_response_id: Default::default(),
+        session_live_assistant_playback_item_id: Default::default(),
+        session_live_assistant_playback_content_index: Default::default(),
     }
 }

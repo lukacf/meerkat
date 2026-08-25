@@ -65,6 +65,7 @@ meerkat-providers = { workspace = true, default-features = false }
 [dev-dependencies]
 tempfile = { workspace = true }
 uuid = { workspace = true }
+meerkat-runtime = { workspace = true, features = ["test-support"] }
 tracing-subscriber = { workspace = true }
 meerkat-core = { workspace = true, features = [
     "jsonschema",
@@ -136,6 +137,22 @@ openai = [
     "meerkat-providers/openai",
 ]
 openai-realtime = ["openai", "meerkat-client/openai-realtime", "meerkat-openai/realtime"]
+# Pre-release live execution path. This is deliberately separate from public
+# OpenAI Realtime and off by default. Runtime admission additionally requires
+# explicit operator, realm, and Gate0 qualification evidence.
+experimental-gpt-live = [
+    "openai",
+    "live-webrtc",
+    "session-store",
+    "meerkat-llm-core/experimental-gpt-live",
+    "meerkat-openai/experimental-gpt-live",
+]
+# Non-shipping direct Gate0 target materialization. This does not configure the
+# production experimental admission owner or advertise a live capability.
+experimental-gpt-live-gate0-harness = [
+    "experimental-gpt-live",
+    "meerkat-openai/experimental-gpt-live-gate0-harness",
+]
 gemini = ["meerkat-client/gemini", "dep:meerkat-gemini", "meerkat-providers/gemini"]
 all-providers = ["anthropic", "openai", "gemini"]
 native-keyring = ["meerkat-providers/native-keyring"]
@@ -189,7 +206,7 @@ skills = [
 ]
 # Live-channel orchestration (LiveAdapterHost wiring + realtime open/refresh
 # helpers shared by RPC, Rust SDK, REST, etc.). Pulls in `meerkat-live`.
-live = ["dep:meerkat-live", "meerkat-runtime/live"]
+live = ["dep:meerkat-live", "meerkat-runtime/live", "meerkat-session/live"]
 # WebRTC live transport (phase 6b, DEC-P6B-L8): the webrtc bootstrap branch
 # of the extracted open pipeline compiles only under this feature; the
 # member host never enables it (a `transport=webrtc` request degrades typed
@@ -199,7 +216,10 @@ live-webrtc = ["live", "meerkat-live/webrtc"]
 # `meerkat::test_fixtures::realtime::ScriptedRealtimeSessionFactory` for the
 # cross-host live batteries (facade tests, meerkat-mob/tests, integration
 # rows). Test-support only — never enable in production compositions.
-test-realtime-fixtures = []
+test-realtime-fixtures = [
+    "meerkat-openai/test-realtime-fixtures",
+    "meerkat-live/test-support",
+]
 
 [package.metadata.cargo-machete]
 ignored = ["which"]  # dev-dependency used in e2e tests

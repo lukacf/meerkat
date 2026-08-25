@@ -701,6 +701,26 @@ pub fn session_document_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string_enum("RealtimeTranscriptRoleKind", &["User", "Assistant"]),
             NamedTypeBinding::string_enum("RealtimeTranscriptLaneKind", &["Display", "Spoken"]),
             NamedTypeBinding::string_enum(
+                "LiveContextCommittedRowKind",
+                &["UserText", "AssistantText", "NonText"],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveContextCommittedTextProvenance",
+                &[
+                    "ParentSessionServiceTurn",
+                    "LiveRealtimeTranscript",
+                    "ExecutorTrace",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveContextCommittedRowDisposition",
+                &[
+                    "MirrorParentText",
+                    "AlreadyPresentInLiveChannel",
+                    "ExcludedFromLiveContext",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
                 "RealtimeTranscriptStopReasonKind",
                 &["Cancelled", "ToolUse", "Other"],
             ),
@@ -735,6 +755,18 @@ pub fn session_document_schema_metadata() -> MachineSchemaMetadata {
                     "CommitVerifiedBeforeCurrent",
                     "ClearInvalidBeforeCurrent",
                 ],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveTranscriptReconciliation",
+                &["Provisional", "Committed", "Missing"],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveAssistantPlaybackTerminalObservation",
+                &["Unmeasured", "PlaybackComplete", "ReportedPrefix"],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveAssistantPlaybackTerminalDisposition",
+                &["Unmeasured", "PlaybackComplete", "TruncateToReportedPrefix"],
             ),
             NamedTypeBinding::string_enum(
                 "RealtimeUserContentBlobFinalizeDisposition",
@@ -1089,6 +1121,59 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             // WAVE G1 fold (#51): machine-owned staged realtime transcript item
             // role/lane classifiers carried on the RealtimeTranscriptAppended effect.
             NamedTypeBinding::string_enum("RealtimeTranscriptRoleKind", &["User", "Assistant"]),
+            NamedTypeBinding::string_enum(
+                "LiveDelegationReconciliation",
+                &["Provisional", "Confirmed", "MaterialConflict", "Missing"],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveContextAppendObservation",
+                &["Delivered", "Rejected", "Ambiguous"],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveContextRowDisposition",
+                &[
+                    "MirrorParentText",
+                    "AlreadyPresentInLiveChannel",
+                    "ExcludedFromLiveContext",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveDelegationResultDisposition",
+                &["OpenTurn", "DeferredContext"],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveDelegationResultDeliveryObservation",
+                &["Delivered", "Rejected", "Ambiguous"],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveDelegationWorkerPhase",
+                &[
+                    "StartAuthorized",
+                    "Running",
+                    "CancelAuthorized",
+                    "Terminal",
+                    "RetirementAuthorized",
+                    "Retired",
+                    "Failed",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveDelegationCancellationReason",
+                &[
+                    "Abandoned",
+                    "Superseded",
+                    "TranscriptConflict",
+                    "TranscriptMissing",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveDelegationCancellationOutcome",
+                &["Cancelled", "AlreadyTerminal", "Failed"],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveDelegationWorkerTerminalKind",
+                &["Completed", "Cancelled", "Failed"],
+            ),
             // Durable-tail recovery authorization vocabulary. The class
             // mirrors SessionDocumentMachine's classification (same wire
             // strings); the disposition is this machine's verdict.
@@ -1499,6 +1584,7 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                     "CommitInput",
                     "Interrupt",
                     "TruncateAssistantOutput",
+                    "CompleteAssistantPlayback",
                 ],
             ),
             NamedTypeBinding::string_enum(

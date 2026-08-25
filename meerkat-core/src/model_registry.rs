@@ -5,7 +5,10 @@ use crate::config::{
     Config, ConfigError, CustomModelConfig, SelfHostedApiStyle, SelfHostedConfig,
     SelfHostedTransport,
 };
-use crate::model_profile::{ModelCatalog, ModelProfile, catalog::ModelTier};
+use crate::model_profile::{
+    ModelCatalog, ModelProfile,
+    catalog::{ModelReleaseStage, ModelTier},
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -25,6 +28,7 @@ pub struct ModelRegistryEntry {
     pub display_name: String,
     pub provider: Provider,
     pub tier: ModelTier,
+    pub release_stage: ModelReleaseStage,
     pub context_window: Option<u32>,
     pub max_output_tokens: Option<u32>,
     pub self_hosted: Option<SelfHostedServerRef>,
@@ -259,6 +263,7 @@ impl ModelRegistry {
                         display_name: entry.display_name.to_string(),
                         provider,
                         tier: entry.tier,
+                        release_stage: entry.release_stage,
                         context_window: entry.context_window,
                         max_output_tokens: entry.max_output_tokens,
                         self_hosted: None,
@@ -431,6 +436,7 @@ fn append_custom_models(
         let vision = model.vision.unwrap_or(false);
         let profile = ModelProfile {
             provider: model.provider,
+            release_stage: ModelReleaseStage::OperatorDefined,
             model_family: model_id.clone(),
             supports_temperature: true,
             supports_thinking: false,
@@ -458,6 +464,7 @@ fn append_custom_models(
                     .unwrap_or_else(|| model_id.clone()),
                 provider: model.provider,
                 tier: ModelTier::Supported,
+                release_stage: ModelReleaseStage::OperatorDefined,
                 context_window: model.context_window,
                 max_output_tokens: model.max_output_tokens,
                 self_hosted: None,
@@ -538,6 +545,7 @@ fn append_self_hosted(
             );
         let profile = ModelProfile {
             provider: Provider::SelfHosted,
+            release_stage: ModelReleaseStage::OperatorDefined,
             model_family: model.family.clone(),
             supports_temperature: model.supports_temperature,
             supports_thinking: model.supports_thinking,
@@ -562,6 +570,7 @@ fn append_self_hosted(
                 display_name: model.display_name.clone(),
                 provider: Provider::SelfHosted,
                 tier: model.tier,
+                release_stage: ModelReleaseStage::OperatorDefined,
                 context_window: model.context_window,
                 max_output_tokens: model.max_output_tokens,
                 self_hosted: Some(self_hosted),

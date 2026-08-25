@@ -107,16 +107,19 @@ pub use image_generation::{
 };
 pub use jobs::*;
 pub use live::{
-    LiveChannelParams, LiveCloseResult, LiveCloseStatus, LiveCommitInputParams,
-    LiveCommitInputResult, LiveCommitInputStatus, LiveInputChunkWire, LiveInterruptResult,
-    LiveInterruptStatus, LiveOpenParams, LiveOpenResult, LiveOpenTransport, LiveRefreshResult,
-    LiveRefreshStatus, LiveSendInputErrorData, LiveSendInputParams, LiveSendInputResult,
-    LiveSendInputStatus, LiveStatusResult, LiveTruncateParams, LiveTruncateResult,
-    LiveTruncateStatus, LiveWebrtcAnswerParams, LiveWebrtcAnswerResult, WireLiveAdapterErrorCode,
-    WireLiveAdapterObservation, WireLiveAdapterStatus, WireLiveChannelCapabilities,
-    WireLiveConfigRejectionReason, WireLiveContinuityMode, WireLiveDegradationReason,
-    WireLiveResponseModality, WireLiveTransportBootstrap, WireProvider,
-    WireRealtimeTranscriptEvent,
+    LIVE_EXECUTION_IDENTITY_V1_CAPABILITY, LiveAssistantOutputAvailableParams, LiveChannelParams,
+    LiveCloseResult, LiveCloseStatus, LiveCommitInputParams, LiveCommitInputResult,
+    LiveCommitInputStatus, LiveInputChunkWire, LiveInterruptResult, LiveInterruptStatus,
+    LiveOpenParams, LiveOpenResult, LiveOpenTransport, LivePlaybackCompleteParams,
+    LivePlaybackCompleteResult, LivePlaybackCompleteStatus, LiveRefreshResult, LiveRefreshStatus,
+    LiveSendInputErrorData, LiveSendInputParams, LiveSendInputResult, LiveSendInputStatus,
+    LiveStatusResult, LiveTruncateParams, LiveTruncateResult, LiveTruncateStatus,
+    LiveWebrtcAnswerParams, LiveWebrtcAnswerResult, WireLiveAdapterErrorCode,
+    WireLiveAdapterObservation, WireLiveAdapterStatus, WireLiveAuthBindingRef,
+    WireLiveChannelCapabilities, WireLiveConfigRejectionReason, WireLiveContinuityMode,
+    WireLiveDegradationReason, WireLiveExecutionIdentityOverrideV1,
+    WireLiveExecutionIdentityVersion, WireLiveIdentityOverride, WireLiveResponseModality,
+    WireLiveTransportBootstrap, WireProvider, WireRealtimeTranscriptEvent,
 };
 pub use mcp_live::{
     McpAddParams, McpLiveOpResponse, McpLiveOpStatus, McpLiveOperation, McpReloadParams,
@@ -193,7 +196,7 @@ pub use mob::{
 };
 pub use models::{
     CatalogModelEntry, ModelsCatalogResponse, ProviderCatalog, WireModelBetaHeader,
-    WireModelProfile, WireModelTier, WireResolvedModelCapabilities,
+    WireModelProfile, WireModelReleaseStage, WireModelTier, WireResolvedModelCapabilities,
 };
 pub use params::{CommsParams, CoreCreateParams, HookParams, SkillsParams, StructuredOutputParams};
 pub use portable_spec::{

@@ -158,6 +158,19 @@ pub use meerkat_core::{
 
 mod agent_builder;
 pub use agent_builder::AgentBuilder;
+mod experimental_live_admission;
+pub use experimental_live_admission::{
+    ExperimentalLiveAdmissionError, ExperimentalLiveAdmissionOwner,
+    ExperimentalLiveAdmissionWitness, ExperimentalLiveCapabilityQualification,
+    ExperimentalLiveFactoryIdentity, ExperimentalLiveFactoryResolutionError,
+    ExperimentalLiveGate0QualificationVersion, ExperimentalLiveOperatorConfig,
+};
+#[cfg(all(not(target_arch = "wasm32"), feature = "experimental-gpt-live"))]
+#[doc(hidden)]
+pub mod experimental_gpt_live;
+#[cfg(feature = "experimental-gpt-live-gate0-harness")]
+#[doc(hidden)]
+pub mod gpt_live_gate0;
 mod job_delivery;
 pub use job_delivery::{
     AppliedRuntimeJobDelivery, BlockedRuntimeJobDelivery, JobDeliveryApplication,
@@ -289,6 +302,8 @@ mod factory;
 #[cfg(not(target_arch = "wasm32"))]
 mod host_auth;
 mod model_fallback;
+#[cfg(not(target_arch = "wasm32"))]
+pub use factory::ExperimentalLiveTargetPreparation;
 pub use factory::{
     AgentBuildConfig, AgentFactory, BuildAgentError, CreateSessionModelResolution,
     CreateSessionModelResolutionError, CreateSessionModelResolutionRequest, DynAgent,

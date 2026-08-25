@@ -6626,6 +6626,9 @@ pub struct LiveWebrtcAnswerAdmissionAuthority {
     pub rejection: Option<dsl::LiveWebrtcAnswerAdmissionRejection>,
     pub public_error_class: Option<dsl::LiveChannelRequestRejectionPublicErrorClass>,
     pub sequence: u64,
+    /// Opaque one-use transport seal present only for an admitted generated
+    /// effect. RPC consumes it while constructing the provider answer offer.
+    pub transport_seal: Option<meerkat_live::LiveWebrtcAnswerAdmissionSeal>,
 }
 
 /// Generated authority output for the public `live/webrtc/answer` success
@@ -6641,6 +6644,468 @@ pub struct LiveWebrtcAnswerResultAuthority {
     pub answered: bool,
     pub sequence: u64,
     pub answer_observation_sequence: u64,
+}
+
+/// Generated admission of one exact provider foreground turn to one Meerkat
+/// interaction. Constructed only after typed sideband TurnStarted evidence is
+/// fenced to the active execution binding.
+#[derive(Debug, Clone)]
+#[cfg(feature = "live")]
+pub struct LiveProviderTurnStartedAuthority {
+    binding: crate::live_execution::LiveDelegationRuntimeBinding,
+    interaction_id: meerkat_core::InteractionId,
+    provider_turn_ref: String,
+}
+
+#[cfg(feature = "live")]
+impl LiveProviderTurnStartedAuthority {
+    #[must_use]
+    pub fn binding(&self) -> &crate::live_execution::LiveDelegationRuntimeBinding {
+        &self.binding
+    }
+
+    #[must_use]
+    pub const fn interaction_id(&self) -> meerkat_core::InteractionId {
+        self.interaction_id
+    }
+
+    #[must_use]
+    pub fn provider_turn_ref(&self) -> &str {
+        &self.provider_turn_ref
+    }
+}
+
+/// Opaque one-use address for one exact assistant output turn.
+///
+/// The handle is minted only from a generated `LiveAssistantTurnStarted`
+/// effect after a typed role-bearing provider observation freezes the current
+/// foreground InteractionId. Clones share two-phase reservation and terminal
+/// state, so pre-acceptance failures can release exact custody while stale,
+/// cross-channel, concurrent, or replayed commands still fail closed.
+#[derive(Clone)]
+#[cfg(feature = "live")]
+pub struct LiveAssistantOutputHandle {
+    binding: crate::live_execution::LiveDelegationRuntimeBinding,
+    interaction_id: meerkat_core::InteractionId,
+    assistant_turn_ref: String,
+    output_id: String,
+    target: Arc<StdMutex<Option<(String, String, u32)>>>,
+    terminal_reserved: Arc<std::sync::atomic::AtomicBool>,
+    terminal_consumed: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(feature = "live")]
+impl std::fmt::Debug for LiveAssistantOutputHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LiveAssistantOutputHandle")
+            .field("binding", &self.binding)
+            .field("interaction_id", &self.interaction_id)
+            .field("assistant_turn_ref", &"<opaque>")
+            .field("output_id", &self.output_id)
+            .field(
+                "target_bound",
+                &self
+                    .target
+                    .lock()
+                    .map(|target| target.is_some())
+                    .unwrap_or(false),
+            )
+            .field(
+                "terminal_reserved",
+                &self
+                    .terminal_reserved
+                    .load(std::sync::atomic::Ordering::Acquire),
+            )
+            .field(
+                "terminal_consumed",
+                &self
+                    .terminal_consumed
+                    .load(std::sync::atomic::Ordering::Acquire),
+            )
+            .finish()
+    }
+}
+
+#[cfg(feature = "live")]
+impl LiveAssistantOutputHandle {
+    #[must_use]
+    pub fn binding(&self) -> &crate::live_execution::LiveDelegationRuntimeBinding {
+        &self.binding
+    }
+
+    #[must_use]
+    pub const fn interaction_id(&self) -> meerkat_core::InteractionId {
+        self.interaction_id
+    }
+
+    #[must_use]
+    pub fn output_id(&self) -> &str {
+        &self.output_id
+    }
+
+    #[doc(hidden)]
+    pub fn __bind_target(
+        &self,
+        response_id: &str,
+        item_id: &str,
+        content_index: u32,
+    ) -> Result<(), crate::live_execution::LiveExecutionAuthorityError> {
+        if response_id.trim().is_empty() || item_id.trim().is_empty() {
+            return Err(
+                crate::live_execution::LiveExecutionAuthorityError::AssistantOutputMismatch,
+            );
+        }
+        let mut target = self
+            .target
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let candidate = (response_id.to_string(), item_id.to_string(), content_index);
+        match target.as_ref() {
+            None => *target = Some(candidate),
+            Some(existing) if existing == &candidate => {}
+            Some(_) => {
+                return Err(
+                    crate::live_execution::LiveExecutionAuthorityError::AssistantOutputMismatch,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[doc(hidden)]
+    pub fn __target(&self) -> Option<(String, String, u32)> {
+        self.target
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __assistant_turn_ref(&self) -> &str {
+        &self.assistant_turn_ref
+    }
+
+    /// Reserve terminal authority only for the exact channel-scoped output.
+    ///
+    /// Reservation is deliberately distinct from terminal consumption: a
+    /// transport rejection before queue acceptance releases the reservation,
+    /// leaving the same exact handle eligible for a later terminal attempt.
+    #[doc(hidden)]
+    pub(crate) fn __reserve_for_playback_terminal(
+        &self,
+        binding: &crate::live_execution::LiveDelegationRuntimeBinding,
+        interaction_id: meerkat_core::InteractionId,
+        assistant_turn_ref: &str,
+    ) -> Result<(), crate::live_execution::LiveExecutionAuthorityError> {
+        if self.binding != *binding
+            || self.interaction_id != interaction_id
+            || self.assistant_turn_ref != assistant_turn_ref
+        {
+            return Err(
+                crate::live_execution::LiveExecutionAuthorityError::AssistantOutputMismatch,
+            );
+        }
+        if self
+            .terminal_consumed
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(
+                crate::live_execution::LiveExecutionAuthorityError::AssistantOutputAlreadyConsumed,
+            );
+        }
+        self.terminal_reserved
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .map_err(|_| {
+                crate::live_execution::LiveExecutionAuthorityError::AssistantOutputAlreadyReserved
+            })?;
+        if self
+            .terminal_consumed
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            self.terminal_reserved
+                .store(false, std::sync::atomic::Ordering::Release);
+            return Err(
+                crate::live_execution::LiveExecutionAuthorityError::AssistantOutputAlreadyConsumed,
+            );
+        }
+        Ok(())
+    }
+
+    fn commit_playback_terminal(
+        &self,
+    ) -> Result<(), crate::live_execution::LiveExecutionAuthorityError> {
+        if !self
+            .terminal_reserved
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(
+                crate::live_execution::LiveExecutionAuthorityError::AssistantOutputMismatch,
+            );
+        }
+        self.terminal_consumed
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .map_err(|_| {
+                crate::live_execution::LiveExecutionAuthorityError::AssistantOutputAlreadyConsumed
+            })?;
+        self.terminal_reserved
+            .store(false, std::sync::atomic::Ordering::Release);
+        Ok(())
+    }
+
+    fn release_playback_terminal(&self) {
+        if !self
+            .terminal_consumed
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            self.terminal_reserved
+                .store(false, std::sync::atomic::Ordering::Release);
+        }
+    }
+}
+
+/// Two-phase custody of one assistant-output terminal dispatch.
+///
+/// Dropping an uncommitted reservation releases it. The output address is
+/// removed and becomes permanently terminal only after the caller proves the
+/// corresponding command or SessionDocument terminal was accepted.
+#[cfg(feature = "live")]
+pub struct LiveAssistantOutputTerminalReservation {
+    handle: LiveAssistantOutputHandle,
+    finalized: bool,
+    _lifecycle_lease: crate::member_live::MemberLiveLifecycleLease,
+}
+
+/// Opaque custody proving one exact provider binding is still current while
+/// its public observation is written and flushed.
+///
+/// The contained session lifecycle lease prevents a close/replacement from
+/// crossing the writer settlement boundary. Surfaces cannot reconstruct this
+/// proof from copied channel, generation, or fence values.
+#[cfg(feature = "live")]
+pub struct LiveBindingPublicationCustody {
+    binding: meerkat_live::ProviderWebrtcBinding,
+    _lifecycle_lease: crate::member_live::MemberLiveLifecycleLease,
+}
+
+#[cfg(feature = "live")]
+impl std::fmt::Debug for LiveBindingPublicationCustody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LiveBindingPublicationCustody")
+            .field("binding", &self.binding)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Total result of acquiring exact live observation publication custody.
+#[derive(Debug)]
+#[cfg(feature = "live")]
+pub enum LiveBindingPublicationAdmission {
+    Current(LiveBindingPublicationCustody),
+    Stale,
+}
+
+#[cfg(feature = "live")]
+impl std::fmt::Debug for LiveAssistantOutputTerminalReservation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LiveAssistantOutputTerminalReservation")
+            .field("handle", &self.handle)
+            .field("finalized", &self.finalized)
+            .finish()
+    }
+}
+
+#[cfg(feature = "live")]
+impl LiveAssistantOutputTerminalReservation {
+    #[must_use]
+    pub fn handle(&self) -> &LiveAssistantOutputHandle {
+        &self.handle
+    }
+
+    /// Explicitly release terminal custody after a pre-acceptance failure.
+    pub fn release(mut self) {
+        self.handle.release_playback_terminal();
+        self.finalized = true;
+    }
+
+    fn commit(
+        mut self,
+    ) -> Result<LiveAssistantOutputHandle, crate::live_execution::LiveExecutionAuthorityError> {
+        self.handle.commit_playback_terminal()?;
+        self.finalized = true;
+        Ok(self.handle.clone())
+    }
+}
+
+#[cfg(feature = "live")]
+impl Drop for LiveAssistantOutputTerminalReservation {
+    fn drop(&mut self) {
+        if !self.finalized {
+            self.handle.release_playback_terminal();
+        }
+    }
+}
+
+/// Generated proof that the exact typed provider turn which opened an
+/// interaction has finished. This is the safe-boundary trigger for draining
+/// deferred canonical context.
+#[derive(Debug, Clone)]
+#[cfg(feature = "live")]
+pub struct LiveProviderTurnFinishedAuthority {
+    binding: crate::live_execution::LiveDelegationRuntimeBinding,
+    interaction_id: meerkat_core::InteractionId,
+    provider_turn_ref: String,
+}
+
+/// Generated pending custody for one strict experimental live execution.
+/// The marker binds pre-answer context rows to exact session/channel/runtime
+/// identity and the canonical seed cursor that the provider must acknowledge.
+#[derive(Debug, Clone)]
+#[cfg(feature = "live")]
+pub struct ExperimentalLiveExecutionStageAuthority {
+    binding: crate::live_execution::LiveDelegationRuntimeBinding,
+    canonical_seed_cursor: u64,
+}
+
+#[cfg(feature = "live")]
+impl ExperimentalLiveExecutionStageAuthority {
+    #[must_use]
+    pub fn binding(&self) -> &crate::live_execution::LiveDelegationRuntimeBinding {
+        &self.binding
+    }
+
+    #[must_use]
+    pub const fn canonical_seed_cursor(&self) -> u64 {
+        self.canonical_seed_cursor
+    }
+}
+
+#[cfg(feature = "live")]
+impl LiveProviderTurnFinishedAuthority {
+    #[must_use]
+    pub fn binding(&self) -> &crate::live_execution::LiveDelegationRuntimeBinding {
+        &self.binding
+    }
+
+    #[must_use]
+    pub const fn interaction_id(&self) -> meerkat_core::InteractionId {
+        self.interaction_id
+    }
+
+    #[must_use]
+    pub fn provider_turn_ref(&self) -> &str {
+        &self.provider_turn_ref
+    }
+}
+
+/// Atomic generated authority for an answered WebRTC transport whose exact
+/// runtime binding and acknowledged canonical seed cursor committed in the
+/// same MeerkatMachine transition.
+#[cfg(feature = "live")]
+pub struct LiveWebrtcAnswerExecutionBindingAuthority {
+    answer: LiveWebrtcAnswerResultAuthority,
+    binding: crate::live_execution::LiveDelegationRuntimeBinding,
+    rollback: LiveWebrtcAnswerExecutionRollbackAuthority,
+}
+
+#[cfg(feature = "live")]
+impl std::fmt::Debug for LiveWebrtcAnswerExecutionBindingAuthority {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LiveWebrtcAnswerExecutionBindingAuthority")
+            .field("answer", &self.answer)
+            .field("binding", &"[REDACTED]")
+            .field("rollback", &"[SEALED]")
+            .finish()
+    }
+}
+
+#[cfg(feature = "live")]
+impl LiveWebrtcAnswerExecutionBindingAuthority {
+    pub(crate) fn new(
+        answer: LiveWebrtcAnswerResultAuthority,
+        binding: crate::live_execution::LiveDelegationRuntimeBinding,
+    ) -> Self {
+        Self {
+            rollback: LiveWebrtcAnswerExecutionRollbackAuthority {
+                binding: binding.clone(),
+            },
+            answer,
+            binding,
+        }
+    }
+
+    #[must_use]
+    pub fn answer(&self) -> &LiveWebrtcAnswerResultAuthority {
+        &self.answer
+    }
+
+    #[must_use]
+    pub fn binding(&self) -> &crate::live_execution::LiveDelegationRuntimeBinding {
+        &self.binding
+    }
+
+    /// Commit publication custody and relinquish the rollback capability.
+    #[must_use]
+    pub fn commit(
+        self,
+    ) -> (
+        LiveWebrtcAnswerResultAuthority,
+        crate::live_execution::LiveDelegationRuntimeBinding,
+    ) {
+        (self.answer, self.binding)
+    }
+
+    /// Retain the exact one-use capability required to close generated state
+    /// if answer publication is rejected or the publication custody is dropped.
+    #[must_use]
+    pub fn into_rollback(self) -> LiveWebrtcAnswerExecutionRollbackAuthority {
+        self.rollback
+    }
+}
+
+/// One-use exact authority to close the channel bound by an atomic accepted
+/// WebRTC answer. It is intentionally non-Clone.
+#[cfg(feature = "live")]
+pub struct LiveWebrtcAnswerExecutionRollbackAuthority {
+    binding: crate::live_execution::LiveDelegationRuntimeBinding,
+}
+
+#[cfg(feature = "live")]
+impl std::fmt::Debug for LiveWebrtcAnswerExecutionRollbackAuthority {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LiveWebrtcAnswerExecutionRollbackAuthority")
+            .field("binding", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[cfg(feature = "live")]
+impl LiveWebrtcAnswerExecutionRollbackAuthority {
+    #[must_use]
+    pub fn binding(&self) -> &crate::live_execution::LiveDelegationRuntimeBinding {
+        &self.binding
+    }
+
+    #[must_use]
+    pub fn authorizes(
+        &self,
+        session_id: &SessionId,
+        channel_id: &meerkat_live::LiveChannelId,
+    ) -> bool {
+        self.binding.session_id() == session_id && self.binding.channel_id() == channel_id
+    }
 }
 
 /// Generated authority output for a WebSocket transport token issued by
@@ -6780,6 +7245,24 @@ pub struct MeerkatMachineShared {
     /// `LiveTransportUnavailable`. Shell composition slot, NOT machine
     /// state — no catalog delta.
     member_live_host: StdRwLock<Option<Arc<dyn crate::member_live::MemberLiveHost>>>,
+    /// Provider-neutral host for generated canonical context appends.
+    #[cfg(feature = "live")]
+    live_context_mirror_host:
+        StdRwLock<Option<Arc<dyn crate::live_context_mirror::LiveContextMirrorHost>>>,
+    /// Sealed committed-row custody retained across generated unsafe turn
+    /// boundaries. Keys are session-scoped canonical row sequences.
+    #[cfg(feature = "live")]
+    live_context_queued_rows:
+        StdMutex<HashMap<(SessionId, u64), crate::live_execution::LiveContextQueuedRow>>,
+    /// Process-local custody of generated assistant-output handles. Semantic
+    /// identity was frozen by the generated Assistant TurnStarted transition;
+    /// these maps provide only exact host addressability.
+    #[cfg(feature = "live")]
+    live_assistant_output_by_turn: StdMutex<
+        HashMap<(SessionId, meerkat_core::LiveChannelId, String), LiveAssistantOutputHandle>,
+    >,
+    #[cfg(feature = "live")]
+    live_assistant_output_by_id: StdMutex<HashMap<String, LiveAssistantOutputHandle>>,
     /// Count of live bridge commands that reached this member's drain arms
     /// (ADJ-P6B seam S3b). Deterministic lanes pin zero-bridge-traffic
     /// gates against it; mechanical observability, not machine state.
@@ -7251,6 +7734,30 @@ impl MeerkatMachine {
     /// Resolve the injected member live host, if composed.
     pub(crate) fn member_live_host(&self) -> Option<Arc<dyn crate::member_live::MemberLiveHost>> {
         self.member_live_host
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Install provider mechanics for generated canonical context delivery.
+    #[cfg(feature = "live")]
+    pub fn set_live_context_mirror_host(
+        &self,
+        host: Arc<dyn crate::live_context_mirror::LiveContextMirrorHost>,
+    ) {
+        *self
+            .shared
+            .live_context_mirror_host
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(host);
+    }
+
+    #[cfg(feature = "live")]
+    fn live_context_mirror_host(
+        &self,
+    ) -> Option<Arc<dyn crate::live_context_mirror::LiveContextMirrorHost>> {
+        self.shared
+            .live_context_mirror_host
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
@@ -8135,6 +8642,14 @@ impl MeerkatMachine {
                 llm_reconfigure_host: StdRwLock::new(None),
                 member_observation_host: StdRwLock::new(None),
                 member_live_host: StdRwLock::new(None),
+                #[cfg(feature = "live")]
+                live_context_mirror_host: StdRwLock::new(None),
+                #[cfg(feature = "live")]
+                live_context_queued_rows: StdMutex::new(HashMap::new()),
+                #[cfg(feature = "live")]
+                live_assistant_output_by_turn: StdMutex::new(HashMap::new()),
+                #[cfg(feature = "live")]
+                live_assistant_output_by_id: StdMutex::new(HashMap::new()),
                 live_commands_served: std::sync::atomic::AtomicU64::new(0),
                 member_incarnation_slots: StdRwLock::new(HashMap::new()),
                 auth_lease: StdRwLock::new(auth_lease),
@@ -8200,6 +8715,14 @@ impl MeerkatMachine {
                 llm_reconfigure_host: StdRwLock::new(None),
                 member_observation_host: StdRwLock::new(None),
                 member_live_host: StdRwLock::new(None),
+                #[cfg(feature = "live")]
+                live_context_mirror_host: StdRwLock::new(None),
+                #[cfg(feature = "live")]
+                live_context_queued_rows: StdMutex::new(HashMap::new()),
+                #[cfg(feature = "live")]
+                live_assistant_output_by_turn: StdMutex::new(HashMap::new()),
+                #[cfg(feature = "live")]
+                live_assistant_output_by_id: StdMutex::new(HashMap::new()),
                 live_commands_served: std::sync::atomic::AtomicU64::new(0),
                 member_incarnation_slots: StdRwLock::new(HashMap::new()),
                 auth_lease: StdRwLock::new(auth_lease),
@@ -8265,6 +8788,14 @@ impl MeerkatMachine {
                 llm_reconfigure_host: StdRwLock::new(None),
                 member_observation_host: StdRwLock::new(None),
                 member_live_host: StdRwLock::new(None),
+                #[cfg(feature = "live")]
+                live_context_mirror_host: StdRwLock::new(None),
+                #[cfg(feature = "live")]
+                live_context_queued_rows: StdMutex::new(HashMap::new()),
+                #[cfg(feature = "live")]
+                live_assistant_output_by_turn: StdMutex::new(HashMap::new()),
+                #[cfg(feature = "live")]
+                live_assistant_output_by_id: StdMutex::new(HashMap::new()),
                 live_commands_served: std::sync::atomic::AtomicU64::new(0),
                 member_incarnation_slots: StdRwLock::new(HashMap::new()),
                 auth_lease: StdRwLock::new(auth_lease),

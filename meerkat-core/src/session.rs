@@ -4367,6 +4367,137 @@ impl Session {
         )
     }
 
+    /// Observe one exact staged spoken segment for generated playback-prefix
+    /// authorization. The returned text is not canonical transcript and must
+    /// not be surfaced as such.
+    #[must_use]
+    pub fn staged_realtime_assistant_segment_text(
+        &self,
+        response_id: &str,
+        item_id: &str,
+        content_index: u32,
+    ) -> Option<String> {
+        realtime_transcript_revision::realtime_assistant_segment_text(
+            self.realtime_transcript.state(),
+            response_id,
+            item_id,
+            content_index,
+        )
+    }
+
+    #[must_use]
+    pub fn staged_realtime_assistant_segment_is_final(
+        &self,
+        response_id: &str,
+        item_id: &str,
+        content_index: u32,
+    ) -> bool {
+        realtime_transcript_revision::realtime_assistant_segment_is_final(
+            self.realtime_transcript.state(),
+            response_id,
+            item_id,
+            content_index,
+        )
+    }
+
+    /// Admit or replay the exact foreground assistant playback target. The
+    /// interaction must already have been sealed by foreground turn
+    /// causality; neither this session nor terminal callers mint one.
+    pub fn admit_live_assistant_playback_target(
+        &mut self,
+        channel_id: &crate::LiveChannelId,
+        interaction_id: crate::InteractionId,
+        response_id: &str,
+        item_id: &str,
+        content_index: u32,
+    ) -> Result<crate::LiveAssistantPlaybackTarget, crate::error::AgentError> {
+        if let Some(existing) = realtime_transcript_revision::live_assistant_playback_target(
+            self.realtime_transcript.state(),
+            channel_id.as_str(),
+            item_id,
+            content_index,
+        ) {
+            if existing.response_id() == response_id {
+                return Ok(existing);
+            }
+            return Err(crate::error::AgentError::ConfigError(
+                "live assistant playback target response identity mismatch".to_string(),
+            ));
+        }
+        let _ = self.append_realtime_transcript_event(
+            RealtimeTranscriptEvent::AssistantPlaybackTargetAdmitted {
+                channel_id: channel_id.to_string(),
+                interaction_id,
+                response_id: response_id.to_string(),
+                item_id: item_id.to_string(),
+                content_index,
+            },
+        );
+        realtime_transcript_revision::live_assistant_playback_target(
+            self.realtime_transcript.state(),
+            channel_id.as_str(),
+            item_id,
+            content_index,
+        )
+        .ok_or_else(|| {
+            crate::error::AgentError::InternalError(
+                "live assistant playback target admission did not persist exact identity"
+                    .to_string(),
+            )
+        })
+    }
+
+    /// Consume the exact one-use assistant playback target after generated
+    /// SessionDocument terminal authority has resolved it.
+    pub fn resolve_live_assistant_playback_target(
+        &mut self,
+        channel_id: &crate::LiveChannelId,
+        interaction_id: crate::InteractionId,
+        response_id: &str,
+        item_id: &str,
+        content_index: u32,
+    ) -> Result<(), crate::error::AgentError> {
+        let _ = self.append_realtime_transcript_event(
+            RealtimeTranscriptEvent::AssistantPlaybackTargetResolved {
+                channel_id: channel_id.to_string(),
+                interaction_id,
+                response_id: response_id.to_string(),
+                item_id: item_id.to_string(),
+                content_index,
+            },
+        );
+        Ok(())
+    }
+
+    /// Resolve the exact durable assistant playback target for a surface
+    /// terminal report. No identity is minted by this read.
+    #[must_use]
+    pub fn live_assistant_playback_target(
+        &self,
+        channel_id: &crate::LiveChannelId,
+        item_id: &str,
+        content_index: u32,
+    ) -> Option<crate::LiveAssistantPlaybackTarget> {
+        realtime_transcript_revision::live_assistant_playback_target(
+            self.realtime_transcript.state(),
+            channel_id.as_str(),
+            item_id,
+            content_index,
+        )
+    }
+
+    /// Return the one active assistant playback target for an exact channel.
+    #[must_use]
+    pub fn live_assistant_playback_target_for_channel(
+        &self,
+        channel_id: &crate::LiveChannelId,
+    ) -> Option<crate::LiveAssistantPlaybackTarget> {
+        realtime_transcript_revision::live_assistant_playback_target_for_channel(
+            self.realtime_transcript.state(),
+            channel_id.as_str(),
+        )
+    }
+
     /// Durable session-scoped bindings used to make live non-text input retry
     /// safe across provider reconnects and lost public receipts.
     #[must_use]
@@ -13708,7 +13839,7 @@ mod tests {
         // item (no prior delta), the staged item's lane MUST be promoted to
         // Spoken so the materializer commits as `AssistantBlock::Transcript`.
         // Without the explicit promotion, the lane stays `Display` (the
-        // default) and the heard audio transcript persists as
+        // default) and the playback-path audio transcript persists as
         // `AssistantBlock::Text`.
         let mut session = Session::new();
 
@@ -13717,7 +13848,7 @@ mod tests {
                 response_id: "resp_a".to_string(),
                 item_id: "item_a".to_string(),
                 content_index: 0,
-                text: "what was actually heard".to_string(),
+                text: "reported playback prefix".to_string(),
             },
         );
 
@@ -13736,7 +13867,7 @@ mod tests {
                 assert_eq!(assistant.blocks.len(), 1);
                 match &assistant.blocks[0] {
                     AssistantBlock::Transcript { text, source, .. } => {
-                        assert_eq!(text, "what was actually heard");
+                        assert_eq!(text, "reported playback prefix");
                         assert_eq!(*source, crate::types::TranscriptSource::Spoken);
                     }
                     other => unreachable!(
@@ -13822,7 +13953,7 @@ mod tests {
                 response_id: "resp_a".to_string(),
                 item_id: "item_a".to_string(),
                 content_index: 0,
-                text: "what was actually heard".to_string(),
+                text: "reported playback prefix".to_string(),
             },
         );
 
@@ -13854,7 +13985,7 @@ mod tests {
                 assert_eq!(assistant.blocks.len(), 1);
                 match &assistant.blocks[0] {
                     AssistantBlock::Transcript { text, source, .. } => {
-                        assert_eq!(text, "what was actually heard");
+                        assert_eq!(text, "reported playback prefix");
                         assert_eq!(*source, crate::types::TranscriptSource::Spoken);
                     }
                     other => unreachable!(

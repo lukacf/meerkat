@@ -35,6 +35,7 @@ rust_library(
     crate_root = "src/lib.rs",
     crate_features = [
         "__meerkat-generated-authority-bridge",
+        "test-support",
     ],
     edition = "2024",
     rustc_flags = [
@@ -70,6 +71,7 @@ rust_library(
     crate_root = "src/lib.rs",
     crate_features = [
         "__meerkat-generated-authority-bridge",
+        "test-support",
     ],
     edition = "2024",
     rustc_flags = [
@@ -113,6 +115,7 @@ rust_test(
     crate_root = "src/lib.rs",
     crate_features = [
         "__meerkat-generated-authority-bridge",
+        "test-support",
     ],
     edition = "2024",
     rustc_flags = [

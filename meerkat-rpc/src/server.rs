@@ -32,6 +32,84 @@ use crate::transport::{
     JsonlFrameAdmission, JsonlTransport, TransportError, TransportWriter,
 };
 
+struct ExperimentalLiveRpcNotification {
+    binding: meerkat_live::ProviderWebrtcBinding,
+    notification: RpcNotification,
+    delivery_tx: Option<oneshot::Sender<bool>>,
+}
+
+impl ExperimentalLiveRpcNotification {
+    fn new(
+        binding: meerkat_live::ProviderWebrtcBinding,
+        notification: RpcNotification,
+        delivery_tx: oneshot::Sender<bool>,
+    ) -> Self {
+        Self {
+            binding,
+            notification,
+            delivery_tx: Some(delivery_tx),
+        }
+    }
+
+    fn settle(&mut self, delivered: bool) {
+        if let Some(delivery_tx) = self.delivery_tx.take() {
+            let _ = delivery_tx.send(delivered);
+        }
+    }
+}
+
+impl Drop for ExperimentalLiveRpcNotification {
+    fn drop(&mut self) {
+        self.settle(false);
+    }
+}
+
+#[cfg(feature = "experimental-gpt-live")]
+struct ExperimentalLiveRpcObservationPublisher {
+    tx: mpsc::Sender<ExperimentalLiveRpcNotification>,
+}
+
+#[cfg(feature = "experimental-gpt-live")]
+#[async_trait::async_trait]
+impl meerkat::experimental_gpt_live::ExperimentalLivePublicObservationPublisher
+    for ExperimentalLiveRpcObservationPublisher
+{
+    async fn publish(
+        &self,
+        observation: meerkat::experimental_gpt_live::ExperimentalLivePublicObservation,
+    ) -> Result<(), meerkat::experimental_gpt_live::ExperimentalLivePublicObservationDeliveryError>
+    {
+        use meerkat::experimental_gpt_live::ExperimentalLivePublicObservationDeliveryError;
+
+        let binding = observation.binding().clone();
+        if observation.output().channel_id != *binding.channel_id() {
+            return Err(ExperimentalLivePublicObservationDeliveryError::Rejected);
+        }
+        let output = observation.into_output();
+        let params = meerkat_contracts::LiveAssistantOutputAvailableParams {
+            channel_id: output.channel_id.to_string(),
+            output_id: output.output_id,
+            content_index: output.content_index,
+        };
+        let notification = RpcNotification::try_new("live/assistant_output_available", &params)
+            .map_err(|_| ExperimentalLivePublicObservationDeliveryError::Rejected)?;
+        let (delivery_tx, delivery_rx) = oneshot::channel();
+        self.tx
+            .send(ExperimentalLiveRpcNotification::new(
+                binding,
+                notification,
+                delivery_tx,
+            ))
+            .await
+            .map_err(|_| ExperimentalLivePublicObservationDeliveryError::Closed)?;
+        match delivery_rx.await {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(ExperimentalLivePublicObservationDeliveryError::Rejected),
+            Err(_) => Err(ExperimentalLivePublicObservationDeliveryError::Closed),
+        }
+    }
+}
+
 /// Conservative multiplier from retained JSON request bytes to peak dispatch
 /// memory. Dispatch can temporarily hold the raw params alongside parsed
 /// handler input and an encoded response. `live/send_input` additionally holds
@@ -791,6 +869,7 @@ pub struct RpcServer<R, W> {
     transport: JsonlTransport<R, W>,
     router: MethodRouter,
     notification_rx: mpsc::Receiver<RpcNotification>,
+    experimental_live_notification_rx: mpsc::Receiver<ExperimentalLiveRpcNotification>,
     /// Channel for responses from concurrently dispatched requests.
     response_rx: mpsc::Receiver<AdmittedRpcResponse>,
     response_tx: mpsc::Sender<AdmittedRpcResponse>,
@@ -851,6 +930,10 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
     ) -> Self {
         let (notification_tx, notification_rx) = mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
         let notification_sink = NotificationSink::new(notification_tx);
+        let (experimental_live_notification_tx, experimental_live_notification_rx) =
+            mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
+        #[cfg(not(feature = "experimental-gpt-live"))]
+        drop(experimental_live_notification_tx);
         let transport = JsonlTransport::new(reader, writer);
         let (response_tx, response_rx) = mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
         let (callback_request_tx, callback_request_rx) =
@@ -862,12 +945,19 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
         // can build CallbackToolDispatchers that route through this server.
         runtime.set_callback_channel(callback_request_tx.clone(), callback_id_counter.clone());
 
-        let router = MethodRouter::new(runtime, config_store, notification_sink)
+        let router = MethodRouter::new(Arc::clone(&runtime), config_store, notification_sink)
             .with_skill_runtime(skill_runtime);
+        #[cfg(feature = "experimental-gpt-live")]
+        let router = router.with_experimental_live_public_observation_publisher(Arc::new(
+            ExperimentalLiveRpcObservationPublisher {
+                tx: experimental_live_notification_tx,
+            },
+        ));
         Self {
             transport,
             router,
             notification_rx,
+            experimental_live_notification_rx,
             response_rx,
             response_tx,
             callback_request_rx,
@@ -933,6 +1023,27 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
         self
     }
 
+    /// Inject a provider-neutral remote answer strategy behind the existing
+    /// machine-owned WebRTC token/result path.
+    #[cfg(feature = "live-webrtc")]
+    pub fn with_live_webrtc_answer_transport(
+        mut self,
+        transport: Arc<dyn meerkat_live::LiveWebrtcAnswerTransport>,
+    ) -> Self {
+        self.router = self.router.with_live_webrtc_answer_transport(transport);
+        self
+    }
+
+    /// Install the host-owned strict execution-identity admission authority.
+    #[cfg(feature = "experimental-gpt-live")]
+    pub fn with_experimental_live_open_authority(
+        mut self,
+        authority: Arc<dyn meerkat::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider>,
+    ) -> Self {
+        self.router = self.router.with_experimental_live_open_authority(authority);
+        self
+    }
+
     #[cfg(feature = "mob")]
     /// Create a new RPC server with an optional skill runtime and explicit mob state.
     ///
@@ -951,6 +1062,10 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
     ) -> Self {
         let (notification_tx, notification_rx) = mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
         let notification_sink = NotificationSink::new(notification_tx);
+        let (experimental_live_notification_tx, experimental_live_notification_rx) =
+            mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
+        #[cfg(not(feature = "experimental-gpt-live"))]
+        drop(experimental_live_notification_tx);
         let transport = JsonlTransport::new(reader, writer);
         let (response_tx, response_rx) = mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
         let (long_running_tx, long_running_rx) = mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
@@ -968,13 +1083,24 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
         });
         let callback_id_counter = runtime.callback_id_counter();
 
-        let router =
-            MethodRouter::new_with_mob_state(runtime, config_store, notification_sink, mob_state)
-                .with_skill_runtime(skill_runtime);
+        let router = MethodRouter::new_with_mob_state(
+            Arc::clone(&runtime),
+            config_store,
+            notification_sink,
+            mob_state,
+        )
+        .with_skill_runtime(skill_runtime);
+        #[cfg(feature = "experimental-gpt-live")]
+        let router = router.with_experimental_live_public_observation_publisher(Arc::new(
+            ExperimentalLiveRpcObservationPublisher {
+                tx: experimental_live_notification_tx,
+            },
+        ));
         Self {
             transport,
             router,
             notification_rx,
+            experimental_live_notification_rx,
             response_rx,
             response_tx,
             callback_request_rx,
@@ -1169,7 +1295,7 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
                                 {
                                     let mut admitted = error.0;
                                     if let Err(settlement_error) =
-                                        admitted.routed.settle_delivery(false)
+                                        admitted.routed.settle_delivery(false).await
                                     {
                                         tracing::error!(
                                             error = %settlement_error,
@@ -1263,6 +1389,10 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
                     self.transport.write_notification(&notification).await?;
                 }
 
+                Some(notification) = self.experimental_live_notification_rx.recv() => {
+                    self.write_experimental_live_notification(notification).await?;
+                }
+
                 // Send callback requests to the client.
                 Some(envelope) = self.callback_request_rx.recv() => {
                     let (request, response_tx, _outbound_permit) = envelope.into_parts();
@@ -1288,7 +1418,8 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
         // reject their own delivery custody; responses already queued here are
         // rejected synchronously so an accepted WebRTC peer cannot outlive the
         // connection that failed to deliver its answer.
-        self.reject_queued_responses();
+        self.reject_queued_responses().await;
+        self.reject_queued_experimental_live_notifications();
         connection_result?;
 
         // Graceful shutdown: close all sessions (unless this is a shared TCP
@@ -1353,7 +1484,7 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
             .write_response(&admitted.routed.response)
             .await;
         let delivered = write_result.is_ok();
-        if let Err(settlement_error) = admitted.routed.settle_delivery(delivered) {
+        if let Err(settlement_error) = admitted.routed.settle_delivery(delivered).await {
             tracing::error!(
                 delivered,
                 error = %settlement_error,
@@ -1363,15 +1494,61 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
         write_result.map_err(ServerError::from)
     }
 
-    fn reject_queued_responses(&mut self) {
+    async fn reject_queued_responses(&mut self) {
         self.response_rx.close();
         while let Ok(mut admitted) = self.response_rx.try_recv() {
-            if let Err(settlement_error) = admitted.routed.settle_delivery(false) {
+            if let Err(settlement_error) = admitted.routed.settle_delivery(false).await {
                 tracing::error!(
                     error = %settlement_error,
                     "failed to reject queued RPC response during connection shutdown"
                 );
             }
+        }
+    }
+
+    async fn write_experimental_live_notification(
+        &mut self,
+        mut admitted: ExperimentalLiveRpcNotification,
+    ) -> Result<(), ServerError> {
+        let runtime = self.router.runtime().runtime_adapter();
+        let publication_custody = match runtime
+            .acquire_live_binding_publication_custody(&admitted.binding)
+            .await
+        {
+            Ok(meerkat_runtime::meerkat_machine::LiveBindingPublicationAdmission::Current(
+                custody,
+            )) => custody,
+            Ok(meerkat_runtime::meerkat_machine::LiveBindingPublicationAdmission::Stale) => {
+                admitted.settle(false);
+                return Ok(());
+            }
+            Err(_) => {
+                admitted.settle(false);
+                return Ok(());
+            }
+        };
+        self.write_current_experimental_live_notification(admitted, publication_custody)
+            .await
+    }
+
+    async fn write_current_experimental_live_notification<C>(
+        &mut self,
+        mut admitted: ExperimentalLiveRpcNotification,
+        publication_custody: C,
+    ) -> Result<(), ServerError> {
+        let write_result = self
+            .transport
+            .write_notification(&admitted.notification)
+            .await;
+        admitted.settle(write_result.is_ok());
+        drop(publication_custody);
+        write_result.map_err(ServerError::from)
+    }
+
+    fn reject_queued_experimental_live_notifications(&mut self) {
+        self.experimental_live_notification_rx.close();
+        while let Ok(mut admitted) = self.experimental_live_notification_rx.try_recv() {
+            admitted.settle(false);
         }
     }
 
@@ -2191,6 +2368,80 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "experimental-gpt-live")]
+    fn test_experimental_live_open_response(
+        request: &RpcRequest,
+        request_permit: RpcRequestAdmissionPermit,
+    ) -> (AdmittedRpcResponse, tokio::sync::oneshot::Receiver<bool>) {
+        let (custody, settled_rx) = crate::router::test_experimental_live_open_delivery_custody();
+        (
+            AdmittedRpcResponse {
+                routed: RoutedRpcResponse::with_experimental_live_open(
+                    RpcResponse::success(
+                        request.id.clone(),
+                        serde_json::json!({"channel_id": "strict-live-channel"}),
+                    ),
+                    Some(custody),
+                ),
+                _request_permit: request_permit,
+            },
+            settled_rx,
+        )
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
+    fn test_experimental_live_open_request(id: i64) -> RpcRequest {
+        RpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(RpcId::Num(id)),
+            method: "live/open".to_string(),
+            params: Some(raw_params(serde_json::json!({
+                "session_id": meerkat_core::SessionId::new().to_string(),
+                "transport": "webrtc",
+                "execution_identity": {
+                    "version": "v1",
+                    "model": "gpt-live-1-codex",
+                    "provider": "openai"
+                }
+            }))),
+        }
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
+    fn test_experimental_live_binding(
+        channel: &str,
+        generation: u64,
+        fence: u64,
+    ) -> meerkat_live::ProviderWebrtcBinding {
+        meerkat_live::ProviderWebrtcBinding::new(
+            meerkat_live::LiveChannelId::new(channel),
+            meerkat_core::SessionId::new(),
+            meerkat_live::LiveRuntimeBindingGeneration::new(generation),
+            meerkat_live::LiveRuntimeBindingFence::new(fence),
+        )
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
+    fn test_experimental_live_notification(
+        binding: meerkat_live::ProviderWebrtcBinding,
+    ) -> (
+        ExperimentalLiveRpcNotification,
+        tokio::sync::oneshot::Receiver<bool>,
+    ) {
+        let params = meerkat_contracts::LiveAssistantOutputAvailableParams {
+            channel_id: binding.channel_id().to_string(),
+            output_id: "opaque-output-1".to_string(),
+            content_index: 2,
+        };
+        let notification = RpcNotification::try_new("live/assistant_output_available", &params)
+            .expect("test live output notification should serialize");
+        let (delivery_tx, delivery_rx) = tokio::sync::oneshot::channel();
+        (
+            ExperimentalLiveRpcNotification::new(binding, notification, delivery_tx),
+            delivery_rx,
+        )
+    }
+
     #[cfg(feature = "live-webrtc")]
     #[tokio::test]
     async fn webrtc_answer_dropped_before_delivery_rejects_custody() {
@@ -2306,12 +2557,263 @@ mod tests {
             .try_send(admitted)
             .expect("queue answer before connection shutdown");
 
-        server.reject_queued_responses();
+        server.reject_queued_responses().await;
         assert!(
             !tokio::time::timeout(tokio::time::Duration::from_secs(2), settled_rx)
                 .await
                 .expect("queued delivery custody should settle")
                 .expect("delivery observation sender should remain live")
+        );
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
+    #[tokio::test]
+    async fn experimental_live_open_custody_waits_for_successful_response_write() {
+        let temp = tempfile::tempdir().expect("test tempdir");
+        let (runtime, config_store) = build_test_runtime(&temp);
+        let output = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let started = Arc::new(Semaphore::new(0));
+        let release = Arc::new(Semaphore::new(0));
+        let writer = GateWriter {
+            output,
+            started: Arc::clone(&started),
+            release: Arc::clone(&release),
+        };
+        let reader = BufReader::new(std::io::Cursor::new(Vec::new()));
+        let mut server = RpcServer::new(reader, writer, runtime, config_store);
+        server.rpc_request_admission = RpcRequestAdmission::new(
+            RPC_PROCESS_REQUEST_MEMORY_BUDGET_BYTES,
+            RPC_PROCESS_MAX_INFLIGHT_REQUESTS,
+        );
+        let request = test_experimental_live_open_request(44);
+        let permit = server
+            .rpc_request_admission
+            .admit(&request)
+            .expect("strict live/open request admission");
+        let (admitted, mut settled_rx) = test_experimental_live_open_response(&request, permit);
+
+        let write_task =
+            tokio::spawn(async move { server.write_admitted_response(admitted).await });
+        let started_permit =
+            tokio::time::timeout(tokio::time::Duration::from_secs(2), started.acquire())
+                .await
+                .expect("strict live/open response writer should start")
+                .expect("response writer start semaphore open");
+        started_permit.forget();
+        assert!(matches!(
+            settled_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+
+        release.add_permits(1);
+        write_task
+            .await
+            .expect("response write task should join")
+            .expect("strict live/open response write should succeed");
+        assert!(
+            tokio::time::timeout(tokio::time::Duration::from_secs(2), settled_rx)
+                .await
+                .expect("successful strict live/open custody should settle")
+                .expect("delivery observation sender should remain live")
+        );
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
+    #[tokio::test]
+    async fn experimental_live_open_write_failure_rejects_delivery_custody() {
+        let temp = tempfile::tempdir().expect("test tempdir");
+        let (runtime, config_store) = build_test_runtime(&temp);
+        let reader = BufReader::new(std::io::Cursor::new(Vec::new()));
+        let mut server = RpcServer::new(reader, FailingWriter, runtime, config_store);
+        server.rpc_request_admission = RpcRequestAdmission::new(
+            RPC_PROCESS_REQUEST_MEMORY_BUDGET_BYTES,
+            RPC_PROCESS_MAX_INFLIGHT_REQUESTS,
+        );
+        let request = test_experimental_live_open_request(45);
+        let permit = server
+            .rpc_request_admission
+            .admit(&request)
+            .expect("strict live/open request admission");
+        let (admitted, settled_rx) = test_experimental_live_open_response(&request, permit);
+
+        server
+            .write_admitted_response(admitted)
+            .await
+            .expect_err("broken writer must fail strict live/open delivery");
+        assert!(
+            !tokio::time::timeout(tokio::time::Duration::from_secs(2), settled_rx)
+                .await
+                .expect("failed strict live/open custody should settle")
+                .expect("delivery observation sender should remain live")
+        );
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
+    #[tokio::test]
+    async fn experimental_live_open_connection_shutdown_rejects_queued_delivery_custody() {
+        let temp = tempfile::tempdir().expect("test tempdir");
+        let (runtime, config_store) = build_test_runtime(&temp);
+        let output = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let reader = BufReader::new(std::io::Cursor::new(Vec::new()));
+        let mut server = RpcServer::new(reader, SharedBufferWriter(output), runtime, config_store);
+        server.rpc_request_admission = RpcRequestAdmission::new(
+            RPC_PROCESS_REQUEST_MEMORY_BUDGET_BYTES,
+            RPC_PROCESS_MAX_INFLIGHT_REQUESTS,
+        );
+        let request = test_experimental_live_open_request(46);
+        let permit = server
+            .rpc_request_admission
+            .admit(&request)
+            .expect("strict live/open request admission");
+        let (admitted, settled_rx) = test_experimental_live_open_response(&request, permit);
+        server
+            .response_tx
+            .try_send(admitted)
+            .expect("queue strict live/open before connection shutdown");
+
+        server.reject_queued_responses().await;
+        assert!(
+            !tokio::time::timeout(tokio::time::Duration::from_secs(2), settled_rx)
+                .await
+                .expect("queued strict live/open custody should settle")
+                .expect("delivery observation sender should remain live")
+        );
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
+    #[tokio::test]
+    async fn experimental_live_output_custody_waits_for_actual_notification_write() {
+        let temp = tempfile::tempdir().expect("test tempdir");
+        let (runtime, config_store) = build_test_runtime(&temp);
+        let output = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let started = Arc::new(Semaphore::new(0));
+        let release = Arc::new(Semaphore::new(0));
+        let writer = GateWriter {
+            output: Arc::clone(&output),
+            started: Arc::clone(&started),
+            release: Arc::clone(&release),
+        };
+        let reader = BufReader::new(std::io::Cursor::new(Vec::new()));
+        let mut server = RpcServer::new(reader, writer, runtime, config_store);
+        let binding = test_experimental_live_binding("output-write", 3, 7);
+        let (admitted, mut settled_rx) = test_experimental_live_notification(binding);
+
+        let write_task = tokio::spawn(async move {
+            server
+                .write_current_experimental_live_notification(admitted, ())
+                .await
+        });
+        let started_permit =
+            tokio::time::timeout(tokio::time::Duration::from_secs(2), started.acquire())
+                .await
+                .expect("output notification writer should start")
+                .expect("output notification writer semaphore should remain open");
+        started_permit.forget();
+        assert!(matches!(
+            settled_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+
+        release.add_permits(1);
+        write_task
+            .await
+            .expect("output notification write task should join")
+            .expect("output notification write should succeed");
+        assert!(
+            tokio::time::timeout(tokio::time::Duration::from_secs(2), settled_rx)
+                .await
+                .expect("output notification custody should settle")
+                .expect("output notification settlement sender should remain live")
+        );
+        let wire = String::from_utf8(output.lock().expect("output lock").clone())
+            .expect("output notification should be utf8");
+        assert!(wire.contains("live/assistant_output_available"));
+        assert!(wire.contains("opaque-output-1"));
+        for private_key in ["provider_turn", "response_id", "item_id", "delta"] {
+            assert!(
+                !wire.contains(private_key),
+                "public output notification must not expose {private_key}: {wire}"
+            );
+        }
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
+    #[tokio::test]
+    async fn experimental_live_output_write_failure_rejects_delivery_custody() {
+        let temp = tempfile::tempdir().expect("test tempdir");
+        let (runtime, config_store) = build_test_runtime(&temp);
+        let reader = BufReader::new(std::io::Cursor::new(Vec::new()));
+        let mut server = RpcServer::new(reader, FailingWriter, runtime, config_store);
+        let binding = test_experimental_live_binding("output-write-failure", 5, 11);
+        let (admitted, settled_rx) = test_experimental_live_notification(binding);
+
+        server
+            .write_current_experimental_live_notification(admitted, ())
+            .await
+            .expect_err("broken writer must reject output notification delivery");
+        assert!(
+            !tokio::time::timeout(tokio::time::Duration::from_secs(2), settled_rx)
+                .await
+                .expect("failed output notification custody should settle")
+                .expect("output notification settlement sender should remain live")
+        );
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
+    #[tokio::test]
+    async fn experimental_live_output_connection_shutdown_rejects_queued_custody() {
+        let temp = tempfile::tempdir().expect("test tempdir");
+        let (runtime, config_store) = build_test_runtime(&temp);
+        let output = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let reader = BufReader::new(std::io::Cursor::new(Vec::new()));
+        let mut server = RpcServer::new(reader, SharedBufferWriter(output), runtime, config_store);
+        let binding = test_experimental_live_binding("output-queued-shutdown", 7, 13);
+        let (admitted, settled_rx) = test_experimental_live_notification(binding);
+        let (queued_tx, queued_rx) = mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
+        queued_tx
+            .try_send(admitted)
+            .expect("queue output notification before shutdown");
+        drop(queued_tx);
+        server.experimental_live_notification_rx = queued_rx;
+
+        server.reject_queued_experimental_live_notifications();
+        assert!(
+            !tokio::time::timeout(tokio::time::Duration::from_secs(2), settled_rx)
+                .await
+                .expect("queued output notification custody should settle")
+                .expect("output notification settlement sender should remain live")
+        );
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
+    #[tokio::test]
+    async fn experimental_live_output_stale_binding_is_rejected_before_write() {
+        let temp = tempfile::tempdir().expect("test tempdir");
+        let (runtime, config_store) = build_test_runtime(&temp);
+        let output = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let reader = BufReader::new(std::io::Cursor::new(Vec::new()));
+        let mut server = RpcServer::new(
+            reader,
+            SharedBufferWriter(Arc::clone(&output)),
+            runtime,
+            config_store,
+        );
+        let binding = test_experimental_live_binding("stale-output", 17, 19);
+        let (admitted, settled_rx) = test_experimental_live_notification(binding);
+
+        server
+            .write_experimental_live_notification(admitted)
+            .await
+            .expect("stale output notification is a local rejection, not a connection error");
+        assert!(
+            !tokio::time::timeout(tokio::time::Duration::from_secs(2), settled_rx)
+                .await
+                .expect("stale output notification custody should settle")
+                .expect("output notification settlement sender should remain live")
+        );
+        assert!(
+            output.lock().expect("output lock").is_empty(),
+            "a stale exact binding must be rejected before transport write"
         );
     }
 

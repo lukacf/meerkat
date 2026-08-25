@@ -3881,6 +3881,387 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AbandonLiveOpenAdmissionStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `StageExperimentalLiveExecutionIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `StageExperimentalLiveExecutionAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `StageExperimentalLiveExecutionRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BindLiveExecutionChannelIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BindLiveExecutionChannelAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BindLiveExecutionChannelRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveLiveProviderTurnStartedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveLiveProviderTurnStartedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveLiveProviderTurnStartedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveLiveAssistantTurnStartedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveLiveAssistantTurnStartedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveLiveAssistantTurnStartedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitLiveInteractionIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitLiveInteractionAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitLiveInteractionRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitLiveDelegationIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitLiveDelegationAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitLiveDelegationRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitLiveInteractionDelegationIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitLiveInteractionDelegationAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitLiveInteractionDelegationRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveDelegationWorkerStartIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveDelegationWorkerStartAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveDelegationWorkerStartRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveDelegationWorkerStartIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveDelegationWorkerStartAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveDelegationWorkerStartRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileLiveDelegationTranscriptConfirmedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileLiveDelegationTranscriptConfirmedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileLiveDelegationTranscriptConfirmedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileLiveDelegationTranscriptMaterialConflictIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileLiveDelegationTranscriptMaterialConflictAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileLiveDelegationTranscriptMaterialConflictRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileLiveDelegationTranscriptMissingIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileLiveDelegationTranscriptMissingAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileLiveDelegationTranscriptMissingRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveDelegationTranscriptTerminalCancellationIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveDelegationTranscriptTerminalCancellationAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveDelegationTranscriptTerminalCancellationRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbandonLiveInteractionWithDelegationCancellationIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbandonLiveInteractionWithDelegationCancellationAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbandonLiveInteractionWithDelegationCancellationRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbandonLiveInteractionWithDelegationCancellationRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbandonLiveInteractionWithDelegationCancellationStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SupersedeLiveInteractionWithDelegationCancellationIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SupersedeLiveInteractionWithDelegationCancellationAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SupersedeLiveInteractionWithDelegationCancellationRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SupersedeCompletedLiveInteractionDelegationWithCancellationIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SupersedeCompletedLiveInteractionDelegationWithCancellationAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SupersedeCompletedLiveInteractionDelegationWithCancellationRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SupersedeLiveInteractionWithoutDelegationCancellationIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SupersedeLiveInteractionWithoutDelegationCancellationAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SupersedeLiveInteractionWithoutDelegationCancellationRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SupersedeLiveInteractionWithoutDelegationCancellationRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SupersedeLiveInteractionWithoutDelegationCancellationStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbandonLiveInteractionIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbandonLiveInteractionAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbandonLiveInteractionRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbandonLiveInteractionRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbandonLiveInteractionStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbandonLiveInteractionPreservingEarlierDelegationIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbandonLiveInteractionPreservingEarlierDelegationAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbandonLiveInteractionPreservingEarlierDelegationRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbandonLiveInteractionPreservingEarlierDelegationRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbandonLiveInteractionPreservingEarlierDelegationStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CompleteLiveInteractionIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CompleteLiveInteractionAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CompleteLiveInteractionRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveDelegationCancellationIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveDelegationCancellationAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveDelegationCancellationRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveDelegationCancellationRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveDelegationCancellationStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLiveDelegationWorkerTerminalIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLiveDelegationWorkerTerminalAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLiveDelegationWorkerTerminalRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLiveDelegationWorkerTerminalRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLiveDelegationWorkerTerminalStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveDelegationWorkerRetirementIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveDelegationWorkerRetirementAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveDelegationWorkerRetirementRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveDelegationWorkerRetirementRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveDelegationWorkerRetirementStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveDelegationWorkerRetirementIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveDelegationWorkerRetirementAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveDelegationWorkerRetirementRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveDelegationWorkerRetirementRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveDelegationWorkerRetirementStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveConsequentialEffectIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveConsequentialEffectAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveConsequentialEffectRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveDelegationResultReleaseIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveDelegationResultReleaseAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveDelegationResultReleaseRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveDelegationResultDeliveryIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveDelegationResultDeliveryAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveDelegationResultDeliveryRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveDelegationResultDeliveryIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveDelegationResultDeliveryAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveDelegationResultDeliveryRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveDelegationResultDeliveryAmbiguousIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveDelegationResultDeliveryAmbiguousAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveDelegationResultDeliveryAmbiguousRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BindLiveDelegationResultRecoveryChannelIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BindLiveDelegationResultRecoveryChannelAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BindLiveDelegationResultRecoveryChannelRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `EnqueueLiveContextRowIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `EnqueueLiveContextRowAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `EnqueueLiveContextRowRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdvanceLiveContextCanonicalCoverageIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdvanceLiveContextCanonicalCoverageAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdvanceLiveContextCanonicalCoverageRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveContextAppendIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveContextAppendAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveContextAppendRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveContextAppendDeliveredIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveContextAppendDeliveredAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveContextAppendDeliveredRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveContextAppendAmbiguousIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveContextAppendAmbiguousAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveContextAppendAmbiguousRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BindLiveContextRecoveryChannelIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BindLiveContextRecoveryChannelAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BindLiveContextRecoveryChannelRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveContextAppendRejectedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveContextAppendRejectedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveContextAppendRejectedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordLiveRefreshQueuedIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -4074,6 +4455,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `RecordLiveWebrtcAnswerAcceptedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLiveWebrtcAnswerAcceptedAndBindExecutionIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLiveWebrtcAnswerAcceptedAndBindExecutionAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLiveWebrtcAnswerAcceptedAndBindExecutionRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `RecordLiveWebsocketTokenIssuedIdle`
@@ -6466,6 +6856,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `LiveWebrtcAnswerResultResolved`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `LiveWebrtcAnswerAcceptedAndExecutionBound`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `LiveWebsocketTokenIssued`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -6476,6 +6869,99 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `LiveOpenAdmissionAbandoned`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveExecutionChannelBound`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExperimentalLiveExecutionStaged`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveInteractionAdmitted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveDelegationAdmitted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveInteractionDelegationAdmitted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveDelegationTranscriptReconciled`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveDelegationWorkerStartAuthorized`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveDelegationWorkerStartResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveDelegationCancellationAuthorized`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveDelegationCancellationResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveDelegationWorkerTerminalRecorded`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveDelegationWorkerRetirementAuthorized`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveDelegationWorkerRetirementResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveInteractionAbandoned`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveInteractionSupersededWithoutCancellation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveInteractionCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveProviderTurnStarted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveAssistantTurnStarted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveProviderTurnFinished`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveConsequentialEffectAuthorized`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveDelegationResultReleaseAuthorized`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveDelegationResultDeliveryAuthorized`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveDelegationResultDeliveryResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveDelegationResultAmbiguityRecoveryAuthorized`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveDelegationResultRecoveryChannelBound`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveContextAppendAuthorized`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveContextRowQueued`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveContextCanonicalCoverageAdvanced`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveContextAppendResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveContextAmbiguityRecoveryAuthorized`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveContextRecoveryChannelBound`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `SessionEventStreamOpenResolved`
@@ -6619,6 +7105,60 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `runtime_generation_requires_bound_runtime`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `live_execution_binding_is_complete_and_channel_scoped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `live_experimental_execution_custody_is_exact`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `live_active_interaction_is_exactly_channel_bound`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `live_provider_turn_occupancy_has_exact_interaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `live_assistant_turn_is_frozen_to_exact_foreground_interaction`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `live_pending_delegation_is_serialized_and_complete`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `live_delegation_operation_has_exact_join_identity`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `live_delegation_worker_binding_is_exact`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `live_delegation_terminal_is_worker_bound`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `live_delegation_result_eligibility_is_terminal_and_confirmed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `live_delegation_late_terminal_never_eligible`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `live_released_result_requires_confirmed_transcript`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `live_result_delivery_is_exact_and_terminal_once`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `live_result_recovery_is_exact_and_channel_scoped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `live_consequential_authority_requires_confirmed_transcript`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `live_pending_context_append_is_exact_and_channel_scoped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `live_context_outbox_is_exact_and_session_scoped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `live_context_recovery_is_exact_and_channel_scoped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `runtime_epoch_requires_registered_session`

@@ -3,6 +3,8 @@
 #![allow(clippy::multiple_crate_versions)]
 
 pub mod error;
+#[cfg(feature = "experimental-gpt-live")]
+pub mod experimental;
 pub mod protocol;
 pub mod sdk;
 pub mod transport;

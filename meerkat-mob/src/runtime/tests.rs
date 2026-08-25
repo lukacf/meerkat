@@ -20256,6 +20256,64 @@ async fn test_visible_mob_operator_tools_emit_identity_native_member_payloads() 
 }
 
 #[tokio::test]
+async fn delegation_execution_service_returns_exact_result_and_retires_member() {
+    let definition = MobDefinition::implicit("delegation-service-success", "claude-sonnet-4-5");
+    let (handle, service) = create_test_mob(definition).await;
+    service.set_return_exact_run_result(true);
+    let helper_id = AgentIdentity::from("delegation-service-helper");
+    let request = DelegationExecutionRequest::new(
+        helper_id.clone(),
+        "return this exact delegation result",
+        BoundedResultSpec::new("delegation-service-result", 256)
+            .expect("valid delegation result spec"),
+    );
+
+    let result = DelegationExecutionService::new(handle.clone())
+        .execute(request)
+        .await
+        .expect("delegation service succeeds");
+
+    assert!(!result.wired(), "a parentless delegation is not wired");
+    assert_eq!(
+        result.turn().result().result().text(),
+        "return this exact delegation result"
+    );
+    assert!(result.retirement_error().is_none());
+    assert!(
+        handle.get_member(&helper_id).await.unwrap().is_none(),
+        "delegation service must retire the helper after exact result capture"
+    );
+}
+
+#[tokio::test]
+async fn delegation_execution_service_retires_member_after_exact_turn_failure() {
+    let definition = MobDefinition::implicit("delegation-service-failure", "claude-sonnet-4-5");
+    let (handle, service) = create_test_mob(definition).await;
+    service.set_fail_start_turn(true);
+    let helper_id = AgentIdentity::from("delegation-service-failing-helper");
+    let request = DelegationExecutionRequest::new(
+        helper_id.clone(),
+        "fail this delegated turn",
+        BoundedResultSpec::new("delegation-service-failure", 256)
+            .expect("valid delegation result spec"),
+    );
+
+    let error = DelegationExecutionService::new(handle.clone())
+        .execute(request)
+        .await
+        .expect_err("the exact delegated turn must fail");
+
+    assert!(
+        matches!(error, DelegationExecutionError::Turn { .. }),
+        "post-admission turn failure must retain its typed stage: {error}"
+    );
+    assert!(
+        handle.get_member(&helper_id).await.unwrap().is_none(),
+        "delegation service must still attempt retirement after turn failure"
+    );
+}
+
+#[tokio::test]
 async fn test_spawn_helper_contract_aligns_with_retired_terminal_state() {
     let (handle, service) = create_test_mob(sample_definition()).await;
     service.set_return_exact_run_result(true);

@@ -7,7 +7,9 @@ use async_trait::async_trait;
 
 use meerkat_core::{ImageGenerationProviderProfile, Provider};
 
-use crate::provider_runtime::binding::{ResolvedConnection, ValidatedBinding};
+use crate::provider_runtime::binding::{
+    ResolvedConnection, ResolvedRealtimeTarget, ValidatedBinding,
+};
 use crate::provider_runtime::errors::{ProviderAuthError, ProviderClientError};
 use crate::provider_runtime::registry::ResolverEnvironment;
 use crate::realtime_session::RealtimeSessionFactory;
@@ -60,7 +62,7 @@ pub trait ProviderRuntime: Send + Sync {
     /// in-crate, so credential material never leaves the provider seam.
     fn build_realtime_session_factory(
         &self,
-        _connection: ResolvedConnection,
+        _target: ResolvedRealtimeTarget,
     ) -> Result<Arc<dyn RealtimeSessionFactory>, ProviderClientError> {
         Err(ProviderClientError::MissingFeature("realtime-session"))
     }
@@ -119,17 +121,38 @@ mod tests {
     #[test]
     fn realtime_session_factory_defaults_to_missing_feature() {
         use crate::provider_runtime::binding::StaticLease;
+        use meerkat_core::{Config, ModelRegistry, SessionLlmIdentity};
 
         let runtime: Arc<dyn ProviderRuntime> = Arc::new(MockRuntime);
+        let registry = ModelRegistry::from_config(&Config::default(), meerkat_models::canonical())
+            .expect("canonical model registry");
+        let entry = registry
+            .entries_for_provider(Provider::OpenAI)
+            .find(|entry| {
+                registry
+                    .profile_for_provider(Provider::OpenAI, &entry.id)
+                    .is_some_and(|profile| profile.realtime)
+            })
+            .expect("canonical realtime model");
+        let identity = SessionLlmIdentity {
+            model: entry.id.clone(),
+            provider: Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        };
+        let profile = registry
+            .profile_witness_for_provider(Provider::OpenAI, &entry.id)
+            .expect("registry witness");
         let connection = ResolvedConnection {
-            provider: Provider::Other,
+            provider: Provider::OpenAI,
             backend: NormalizedBackendKind::OpenAi(
                 meerkat_core::provider_matrix::OpenAiBackendKind::OpenAiApi,
             ),
             backend_profile: Arc::new(meerkat_core::BackendProfile {
                 id: "b".into(),
-                provider: Provider::Other,
-                backend_kind: "other_api".into(),
+                provider: Provider::OpenAI,
+                backend_kind: "openai_api".into(),
                 base_url: None,
                 options: serde_json::Value::Null,
                 server: None,
@@ -141,7 +164,9 @@ mod tests {
                 "test",
             )),
         };
-        let err = match runtime.build_realtime_session_factory(connection) {
+        let target = ResolvedRealtimeTarget::new(identity, profile, connection)
+            .expect("matching realtime target");
+        let err = match runtime.build_realtime_session_factory(target) {
             Ok(_) => panic!("default realtime session factory must fail closed"),
             Err(err) => err,
         };

@@ -87,7 +87,7 @@ mod context {
     use crate::factory::encode_llm_client_override_for_service;
     use crate::service_factory::FactoryAgentBuilder;
     use crate::session_runtime::errors::RecoveryError;
-    use meerkat_session::PersistentSessionService;
+    use meerkat_session::{PersistentSessionService, SessionAgentBuilder};
 
     /// Surface-agnostic wiring needed by the recovery helpers.
     ///
@@ -95,10 +95,10 @@ mod context {
     /// and `RecoveryContext::recovered_create_request*` need; surfaces
     /// build one per call (the values are short-lived borrows from
     /// `SessionRuntime`).
-    pub struct RecoveryContext<'a> {
+    pub struct RecoveryContext<'a, B: SessionAgentBuilder + 'static = FactoryAgentBuilder> {
         /// Persistent session service (loaded session lookup, archive
         /// authority).
-        pub service: &'a Arc<PersistentSessionService<FactoryAgentBuilder>>,
+        pub service: &'a Arc<PersistentSessionService<B>>,
         /// Runtime adapter used to register/unregister session bindings.
         pub runtime_adapter: &'a Arc<MeerkatMachine>,
         /// Realm id stamped onto rebuilt session build options.
@@ -118,7 +118,7 @@ mod context {
         pub config_runtime: Option<Arc<ConfigRuntime>>,
     }
 
-    impl RecoveryContext<'_> {
+    impl<B: SessionAgentBuilder + 'static> RecoveryContext<'_, B> {
         /// Load the persisted authoritative snapshot for `session_id`,
         /// honouring the durable archive flag (an archived session
         /// resolves to `None`).

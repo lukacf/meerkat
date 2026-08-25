@@ -21,7 +21,7 @@ mod support;
 
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use futures::{SinkExt as _, StreamExt as _};
@@ -533,6 +533,7 @@ async fn control_verbs_round_trip_and_mutate_the_scripted_adapter() {
                             item_id,
                             content_index: 0,
                             audio_played_ms: 250,
+                            ..
                         } if item_id == "item-1"
                     )
                 })
@@ -1162,12 +1163,15 @@ async fn local_branch_routes_through_injected_member_live_host() {
 struct LifecycleBarrierMemberLiveHost {
     calls: StdMutex<Vec<&'static str>>,
     active_channel: StdMutex<Option<String>>,
+    next_open_sequence: AtomicU64,
     open_started: AtomicBool,
     control_started: AtomicBool,
     panic_after_open_effect: AtomicBool,
     block_next_close: AtomicBool,
+    gate_next_close: AtomicBool,
     close_started: AtomicBool,
     release_open: tokio::sync::Notify,
+    release_close: tokio::sync::Notify,
     release_control: tokio::sync::Notify,
 }
 
@@ -1217,7 +1221,13 @@ impl meerkat_runtime::member_live::MemberLiveHost for LifecycleBarrierMemberLive
         self.open_started.store(true, Ordering::SeqCst);
         self.release_open.notified().await;
         if self.active_channel().is_none() {
-            self.seed_active_channel();
+            let sequence = self.next_open_sequence.fetch_add(1, Ordering::SeqCst) + 1;
+            let channel_id = if sequence == 1 {
+                "lifecycle-live-channel".to_string()
+            } else {
+                format!("lifecycle-live-channel-{sequence}")
+            };
+            self.seed_active_channel_named(&channel_id);
         }
         if self.panic_after_open_effect.load(Ordering::SeqCst) {
             self.record("open_panicked_after_effect");
@@ -1225,7 +1235,9 @@ impl meerkat_runtime::member_live::MemberLiveHost for LifecycleBarrierMemberLive
         }
         self.record("open_completed");
         let mut open = ScriptedMemberLiveHost::dummy_open_result();
-        open.channel_id = "lifecycle-live-channel".to_string();
+        open.channel_id = self
+            .active_channel()
+            .expect("completed lifecycle Open has an active channel");
         Ok(open)
     }
 
@@ -1238,6 +1250,10 @@ impl meerkat_runtime::member_live::MemberLiveHost for LifecycleBarrierMemberLive
         if self.block_next_close.swap(false, Ordering::SeqCst) {
             self.close_started.store(true, Ordering::SeqCst);
             std::future::pending::<()>().await;
+        }
+        if self.gate_next_close.swap(false, Ordering::SeqCst) {
+            self.close_started.store(true, Ordering::SeqCst);
+            self.release_close.notified().await;
         }
         let mut active = self
             .active_channel
@@ -1414,6 +1430,169 @@ async fn stop_drains_inflight_live_control_before_closing_the_channel() {
         gateway.calls(),
         vec!["control_started", "control_completed", "status", "close"],
         "Control completes before the lifecycle barrier closes its channel"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn respawn_replaces_live_channel_and_fences_delayed_predecessor_control() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let gateway = Arc::new(LifecycleBarrierMemberLiveHost::default());
+    let controlling =
+        lifecycle_live_fixture("xhl-live-respawn-replacement", Arc::clone(&gateway)).await;
+    let member = identity("lifecycle-live");
+    let predecessor_session = controlling.member_session_id(&member).await;
+
+    let open_a_handle = controlling.handle.clone();
+    let member_for_open_a = member.clone();
+    let open_a_task = tokio::spawn(async move {
+        open_a_handle
+            .member_live_open(MobControlPrincipal::Owner, member_for_open_a, None, None)
+            .await
+    });
+    wait_until("predecessor live Open reached its effect gate", || {
+        let gateway = Arc::clone(&gateway);
+        async move { gateway.open_started.load(Ordering::SeqCst) }
+    })
+    .await;
+    gateway.release_open.notify_one();
+    let channel_a = open_a_task
+        .await
+        .expect("predecessor Open task joins")
+        .expect("predecessor channel A opens")
+        .channel_id;
+    assert_eq!(channel_a, "lifecycle-live-channel");
+
+    gateway.gate_next_close.store(true, Ordering::SeqCst);
+    let respawn_handle = controlling.handle.clone();
+    let member_for_respawn = member.clone();
+    let mut respawn_task =
+        tokio::spawn(async move { respawn_handle.respawn(member_for_respawn, None).await });
+    wait_until(
+        "respawn reached the predecessor channel close barrier",
+        || {
+            let gateway = Arc::clone(&gateway);
+            async move { gateway.close_started.load(Ordering::SeqCst) }
+        },
+    )
+    .await;
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(75), &mut respawn_task)
+            .await
+            .is_err(),
+        "respawn must wait for channel A to close"
+    );
+    let events_before_close = controlling
+        .storage_events
+        .replay_all()
+        .await
+        .expect("read durable mob events while channel A close is held");
+    assert!(
+        events_before_close.iter().all(|event| !matches!(
+            &event.kind,
+            meerkat_mob::MobEventKind::MemberRetirementStarted {
+                agent_identity,
+                ..
+            } if agent_identity == &member
+        )),
+        "channel A must be quiesced and closed before retirement-start becomes durable"
+    );
+
+    gateway.release_close.notify_one();
+    let receipt = respawn_task
+        .await
+        .expect("respawn task joins")
+        .expect("production respawn replaces the member");
+    assert_eq!(receipt.identity, member);
+    let successor_session = controlling.member_session_id(&member).await;
+    assert_ne!(
+        predecessor_session, successor_session,
+        "respawn mints a fresh durable member session"
+    );
+    let events_after_respawn = controlling
+        .storage_events
+        .replay_all()
+        .await
+        .expect("read durable mob events after respawn");
+    assert!(
+        events_after_respawn.iter().any(|event| matches!(
+            &event.kind,
+            meerkat_mob::MobEventKind::MemberRetirementStarted {
+                agent_identity,
+                ..
+            } if agent_identity == &member
+        )),
+        "retirement-start becomes durable only after channel A closes"
+    );
+    assert_eq!(
+        gateway.active_channel(),
+        None,
+        "respawn closes A and must not automatically open successor channel B"
+    );
+    assert_eq!(
+        gateway
+            .calls()
+            .iter()
+            .filter(|call| **call == "open_started")
+            .count(),
+        1,
+        "only the caller's explicit predecessor Open has run"
+    );
+
+    let open_b_handle = controlling.handle.clone();
+    let member_for_open_b = member.clone();
+    let open_b_task = tokio::spawn(async move {
+        open_b_handle
+            .member_live_open(MobControlPrincipal::Owner, member_for_open_b, None, None)
+            .await
+    });
+    wait_until("successor live Open reached its effect gate", || {
+        let gateway = Arc::clone(&gateway);
+        async move {
+            gateway
+                .calls()
+                .iter()
+                .filter(|call| **call == "open_started")
+                .count()
+                == 2
+        }
+    })
+    .await;
+    gateway.release_open.notify_one();
+    let channel_b = open_b_task
+        .await
+        .expect("successor Open task joins")
+        .expect("explicit successor channel B opens")
+        .channel_id;
+    assert_ne!(channel_a, channel_b, "channel B must be distinct from A");
+    assert_eq!(
+        gateway.active_channel().as_deref(),
+        Some(channel_b.as_str())
+    );
+
+    let calls_before_stale_control = gateway.calls();
+    expect_rejected_cause(
+        controlling
+            .handle
+            .member_live_control(
+                MobControlPrincipal::Owner,
+                member,
+                channel_a,
+                BridgeLiveControlVerb::CommitInput,
+            )
+            .await,
+        &BridgeRejectionCause::LiveChannelNotFound,
+        "delayed channel A control after successor channel B opens",
+    );
+    assert_eq!(
+        gateway.calls(),
+        calls_before_stale_control,
+        "stale channel A control is rejected before the host records or publishes a mutation"
+    );
+    assert_eq!(
+        gateway.active_channel().as_deref(),
+        Some(channel_b.as_str()),
+        "stale channel A control cannot mutate successor channel B"
     );
 }
 

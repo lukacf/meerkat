@@ -206,6 +206,7 @@ pub mod bridge_protocol;
 mod builder;
 pub mod composition;
 pub mod conditions;
+mod delegation;
 mod disposal;
 mod edge_locks;
 mod event_pump;
@@ -302,6 +303,12 @@ pub use crate::roster::{MobMemberKickoffPhase, MobMemberKickoffSnapshot};
 pub use builder::MobBuilder;
 pub use builder::{
     ControllingAcceptorConfig, LocalMemberAcceptorMaterialSource, MemberAcceptorRegistration,
+};
+pub use delegation::{
+    DelegationCancellationHandle, DelegationExecutionError, DelegationExecutionHandle,
+    DelegationExecutionOutcome, DelegationExecutionRequest, DelegationExecutionService,
+    DelegationMemberOptions, DelegationParentContext, DelegationTerminalizedExecution,
+    DelegationTurnTerminal, LiveDelegationTerminalEvidence,
 };
 pub use event_router::{MobEventRouterConfig, MobEventRouterHandle};
 pub use flow_frame_engine::{FlowFrameKernel, FlowFrameMutator};

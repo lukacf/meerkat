@@ -5164,6 +5164,54 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         self.export_realtime_session_authority_snapshot(id).await
     }
 
+    /// Export one exact current canonical boundary for live-context catch-up.
+    ///
+    /// This is used only after a provider has acknowledged seed cursor K and
+    /// generated execution binding has committed. It closes the interval
+    /// between the original open projection and answer-ready without keeping
+    /// a second pending-message ledger: rows after K are re-derived from the
+    /// current store-owned session and its exact authority token.
+    #[cfg(feature = "live")]
+    pub async fn export_live_context_committed_boundary(
+        &self,
+        id: &SessionId,
+    ) -> Result<
+        (
+            meerkat_core::lifecycle::core_executor::BoundSessionCommit,
+            String,
+        ),
+        SessionError,
+    > {
+        let _mutation_guard = self.realtime_transcript_mutation_guard(id).await?;
+        let session = self
+            .load_committed_runtime_session_for_body(id, "live context answer-ready catch-up")
+            .await?
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let authority = self
+            .runtime_store
+            .load_session_boundary_authority(&Self::runtime_id_for_session(id))
+            .await
+            .map_err(|error| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "failed to load live context catch-up authority for session {id}: {error}"
+                )))
+            })?
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let _ = PreparedRuntimeBoundaryIdentity::from_runtime_authority(&authority, id)?;
+        let authority_token = match authority {
+            RuntimeSessionAuthority::WholeBlob(authority) => authority.blob_sha256().to_string(),
+            RuntimeSessionAuthority::HeadCanonical(authority) => {
+                authority.committed_head_token().to_string()
+            }
+        };
+        let committed = BoundSessionCommit::sealed(Arc::new(session)).map_err(|error| {
+            SessionError::Agent(AgentError::InternalError(format!(
+                "failed to seal live context catch-up boundary for session {id}: {error}"
+            )))
+        })?;
+        Ok((committed, authority_token))
+    }
+
     async fn export_realtime_session_authority_snapshot(
         &self,
         id: &SessionId,
@@ -5464,6 +5512,109 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         event: meerkat_core::RealtimeTranscriptEvent,
     ) -> Result<meerkat_core::RealtimeTranscriptApplyOutcome, SessionError> {
         let _mutation_guard = self.realtime_transcript_mutation_guard(id).await?;
+        self.append_realtime_transcript_event_guarded(id, event)
+            .await
+    }
+
+    /// Persist the one-use assistant playback correlation before releasing it
+    /// to any terminal surface.
+    pub async fn admit_live_assistant_playback_target(
+        &self,
+        id: &SessionId,
+        channel_id: meerkat_core::LiveChannelId,
+        interaction_id: meerkat_core::InteractionId,
+        response_id: String,
+        item_id: String,
+        content_index: u32,
+    ) -> Result<meerkat_core::LiveAssistantPlaybackTarget, SessionError> {
+        let _mutation_guard = self.realtime_transcript_mutation_guard(id).await?;
+        let target = self
+            .inner
+            .admit_live_assistant_playback_target(
+                id,
+                channel_id,
+                interaction_id,
+                response_id,
+                item_id,
+                content_index,
+            )
+            .await?;
+        if let Err(error) = self.persist_full_session(id).await {
+            let _ = self.discard_live_session_unfenced(id).await;
+            return Err(error);
+        }
+        Ok(target)
+    }
+
+    /// Resolve an exact persisted playback target without minting identity.
+    pub async fn live_assistant_playback_target(
+        &self,
+        id: &SessionId,
+        channel_id: meerkat_core::LiveChannelId,
+        item_id: String,
+        content_index: u32,
+    ) -> Result<Option<meerkat_core::LiveAssistantPlaybackTarget>, SessionError> {
+        self.inner
+            .live_assistant_playback_target(id, channel_id, item_id, content_index)
+            .await
+    }
+
+    /// Persist realtime transcript ingress and classify any newly canonical
+    /// rows with authoritative live provenance before releasing the mutation
+    /// interval. Provider delivery starts only after that interval is dropped.
+    #[cfg(feature = "live")]
+    pub async fn append_realtime_transcript_event_with_machine(
+        &self,
+        machine: &MeerkatMachine,
+        id: &SessionId,
+        event: meerkat_core::RealtimeTranscriptEvent,
+    ) -> Result<meerkat_core::RealtimeTranscriptApplyOutcome, SessionError> {
+        let mutation_guard = self.realtime_transcript_mutation_guard(id).await?;
+        let outcome = self
+            .append_realtime_transcript_event_guarded(id, event)
+            .await?;
+        let committed_projection = if outcome.materialized_messages.is_empty() {
+            None
+        } else {
+            let session = self.inner.export_session(id).await?;
+            let authority = self
+                .observe_persisted_session_authority(id)
+                .await?
+                .ok_or_else(|| {
+                    SessionError::Agent(AgentError::InternalError(format!(
+                        "realtime transcript commit returned no store authority for session {id}"
+                    )))
+                })?;
+            let token = match &authority {
+                RuntimeSessionAuthority::WholeBlob(authority) => {
+                    authority.blob_sha256().to_string()
+                }
+                RuntimeSessionAuthority::HeadCanonical(authority) => {
+                    authority.committed_head_token().to_string()
+                }
+            };
+            let committed = BoundSessionCommit::sealed(Arc::new(session)).map_err(|error| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "failed to seal committed realtime transcript projection for session {id}: {error}"
+                )))
+            })?;
+            Some((committed, token))
+        };
+        drop(mutation_guard);
+        if let Some((committed, token)) = committed_projection {
+            machine
+                .enqueue_committed_live_transcript_boundary(id, &committed, &token)
+                .await
+                .map_err(runtime_driver_error_to_session_error)?;
+        }
+        Ok(outcome)
+    }
+
+    async fn append_realtime_transcript_event_guarded(
+        &self,
+        id: &SessionId,
+        event: meerkat_core::RealtimeTranscriptEvent,
+    ) -> Result<meerkat_core::RealtimeTranscriptApplyOutcome, SessionError> {
         let mut current = self.inner.export_session(id).await?;
         if let Some(user_content) = current.preflight_realtime_user_content_event(&event) {
             if matches!(
@@ -5559,6 +5710,113 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         self.ensure_prepared_realtime_user_content_blob(&prepared)
             .await?;
         Ok(outcome)
+    }
+
+    /// Persist canonical provider-final live user input before releasing the
+    /// SessionDocument-sealed commit evidence to runtime authority.
+    pub async fn commit_live_user_transcript_final(
+        &self,
+        id: &SessionId,
+        provisional: meerkat_core::ProvisionalLiveHandoff,
+        final_event: Option<meerkat_core::RealtimeTranscriptEvent>,
+    ) -> Result<meerkat_core::FinalLiveUserTranscriptCommitEvidence, SessionError> {
+        let _mutation_guard = self.realtime_transcript_mutation_guard(id).await?;
+        let evidence = self
+            .inner
+            .commit_live_user_transcript_final(id, provisional, final_event)
+            .await?;
+        if let Err(error) = self.persist_full_session(id).await {
+            let _ = self.discard_live_session_unfenced(id).await;
+            return Err(error);
+        }
+        Ok(evidence)
+    }
+
+    /// Persist close-specific Unmeasured target resolution before channel
+    /// terminality can retire the process-local output address.
+    pub async fn resolve_live_assistant_playback_on_channel_close(
+        &self,
+        id: &SessionId,
+        channel_id: meerkat_core::LiveChannelId,
+    ) -> Result<Option<meerkat_core::LiveAssistantPlaybackTruncationEvidence>, SessionError> {
+        let _mutation_guard = self.realtime_transcript_mutation_guard(id).await?;
+        let receipt = self
+            .inner
+            .resolve_live_assistant_playback_on_channel_close(id, channel_id)
+            .await?;
+        if receipt.is_some()
+            && let Err(error) = self.persist_full_session(id).await
+        {
+            let _ = self.discard_live_session_unfenced(id).await;
+            return Err(error);
+        }
+        Ok(receipt)
+    }
+
+    /// Persist an authorized canonical playback-prefix replacement before
+    /// releasing its SessionDocument-sealed classification receipt.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn commit_live_assistant_playback_truncation(
+        &self,
+        id: &SessionId,
+        channel_id: meerkat_core::LiveChannelId,
+        interaction_id: meerkat_core::InteractionId,
+        response_id: String,
+        item_id: String,
+        content_index: u32,
+        evidence: meerkat_core::LiveAssistantPlaybackEvidence,
+    ) -> Result<meerkat_core::LiveAssistantPlaybackTruncationEvidence, SessionError> {
+        let _mutation_guard = self.realtime_transcript_mutation_guard(id).await?;
+        let receipt = self
+            .inner
+            .commit_live_assistant_playback_truncation(
+                id,
+                channel_id,
+                interaction_id,
+                response_id,
+                item_id,
+                content_index,
+                evidence,
+            )
+            .await?;
+        if let Err(error) = self.persist_full_session(id).await {
+            let _ = self.discard_live_session_unfenced(id).await;
+            return Err(error);
+        }
+        Ok(receipt)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn commit_live_assistant_playback_complete(
+        &self,
+        id: &SessionId,
+        channel_id: meerkat_core::LiveChannelId,
+        interaction_id: meerkat_core::InteractionId,
+        response_id: String,
+        item_id: String,
+        content_index: u32,
+        stop_reason: meerkat_core::StopReason,
+        usage: meerkat_core::TurnUsage,
+    ) -> Result<meerkat_core::LiveAssistantPlaybackTruncationEvidence, SessionError> {
+        let _mutation_guard = self.realtime_transcript_mutation_guard(id).await?;
+        let receipt = self
+            .inner
+            .commit_live_assistant_playback_complete(
+                id,
+                channel_id,
+                interaction_id,
+                response_id,
+                item_id,
+                content_index,
+                stop_reason,
+                usage,
+            )
+            .await?;
+        if let Err(error) = self.persist_full_session(id).await {
+            let _ = self.discard_live_session_unfenced(id).await;
+            return Err(error);
+        }
+        Ok(receipt)
     }
 
     async fn prepare_realtime_user_content_blob(
@@ -6520,7 +6778,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .await
             .map_err(runtime_driver_error_to_session_error)?;
         let recovery_gate = self.recovery_gate_for_session(id).await;
-        let _turn_guard = recovery_gate.lock().await;
+        let turn_guard = recovery_gate.lock().await;
         // This live transcript is the just-finished turn awaiting its first
         // atomic runtime commit. Route on representation BEFORE exporting the
         // actor: WholeBlob retains the compatibility document, while
@@ -6558,6 +6816,12 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 "machine service-turn committed authority differs from the prepared boundary for session {id}"
             ))));
         }
+        let committed_authority_token = match committed_authority {
+            RuntimeSessionAuthority::WholeBlob(authority) => authority.blob_sha256().to_string(),
+            RuntimeSessionAuthority::HeadCanonical(authority) => {
+                authority.committed_head_token().to_string()
+            }
+        };
         if promotes_provisional_tail {
             let (committed_store_revision, committed_authority_token) = match committed_authority {
                 RuntimeSessionAuthority::WholeBlob(authority) => (
@@ -6578,7 +6842,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 .await;
         }
 
-        match staged_boundary.profile {
+        let acknowledgement = match staged_boundary.profile {
             RuntimeSessionPersistenceProfile::WholeBlobV1 => {
                 let authority = committed_authority.whole_blob().ok_or_else(|| {
                     SessionError::Agent(AgentError::InternalError(format!(
@@ -6599,7 +6863,23 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             profile => Err(SessionError::Agent(AgentError::InternalError(format!(
                 "unsupported committed machine service-turn persistence profile {profile} for session {id}"
             )))),
-        }
+        };
+        acknowledgement?;
+
+        // Provider I/O must not hold either the exact commit lease or the
+        // recovery gate. The committed boundary and store-issued authority
+        // token remain sealed inputs after those serialization guards drop.
+        drop(commit_lease);
+        drop(turn_guard);
+        #[cfg(feature = "live")]
+        protocol
+            .runtime_adapter
+            .enqueue_committed_parent_session_boundary(id, &committed, &committed_authority_token)
+            .await
+            .map_err(runtime_driver_error_to_session_error)?;
+        #[cfg(not(feature = "live"))]
+        let _ = (&committed, &committed_authority_token);
+        Ok(())
     }
 
     async fn start_turn_inner_with_admission(

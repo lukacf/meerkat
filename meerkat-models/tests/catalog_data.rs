@@ -174,8 +174,8 @@ fn catalog_matches_capability_table() {
         assert_eq!(entry.provider, caps.provider.as_str());
         assert_eq!(entry.display_name, caps.display_name);
         assert_eq!(entry.tier, caps.tier);
-        assert_eq!(entry.context_window, Some(caps.context_window));
-        assert_eq!(entry.max_output_tokens, Some(caps.max_output_tokens));
+        assert_eq!(entry.context_window, caps.context_window);
+        assert_eq!(entry.max_output_tokens, caps.max_output_tokens);
     }
 }
 
@@ -449,8 +449,8 @@ fn claude_haiku_45_is_cataloged_with_official_limits() {
         let caps = capabilities_for(Provider::Anthropic, model)
             .unwrap_or_else(|| panic!("{model} must be in the Anthropic catalog"));
         assert_eq!(caps.model_family, "claude-haiku-4");
-        assert_eq!(caps.context_window, 200_000);
-        assert_eq!(caps.max_output_tokens, 64_000);
+        assert_eq!(caps.context_window, Some(200_000));
+        assert_eq!(caps.max_output_tokens, Some(64_000));
         assert_eq!(caps.thinking, ThinkingSupport::AnthropicEnabledOnly);
         assert!(!caps.supports_compaction);
     }
@@ -462,8 +462,8 @@ fn claude_fable_5_is_cataloged_with_official_limits() {
         .expect("claude-fable-5 must be in the Anthropic catalog");
     assert_eq!(caps.provider, Provider::Anthropic);
     assert_eq!(caps.model_family, "claude-fable-5");
-    assert_eq!(caps.context_window, 1_000_000);
-    assert_eq!(caps.max_output_tokens, 128_000);
+    assert_eq!(caps.context_window, Some(1_000_000));
+    assert_eq!(caps.max_output_tokens, Some(128_000));
     assert!(
         caps.max_output_tokens_beta.is_none(),
         "Fable 5 is not listed for the output-300k batch beta"
@@ -491,8 +491,8 @@ fn claude_opus_5_capability_row_mirrors_the_claude_5_generation() {
         .expect("claude-opus-5 must be in the Anthropic catalog");
     assert_eq!(caps.provider, Provider::Anthropic);
     assert_eq!(caps.model_family, "claude-opus-5");
-    assert_eq!(caps.context_window, 1_000_000);
-    assert_eq!(caps.max_output_tokens, 128_000);
+    assert_eq!(caps.context_window, Some(1_000_000));
+    assert_eq!(caps.max_output_tokens, Some(128_000));
     assert!(
         caps.max_output_tokens_beta.is_none(),
         "Opus 5 is not listed for the output-300k batch beta"

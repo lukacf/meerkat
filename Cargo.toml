@@ -183,7 +183,7 @@ meerkat-machine-dsl = { version = "0.8.29", path = "meerkat-machine-dsl" }
 meerkat-machine-dsl-core = { version = "0.8.29", path = "meerkat-machine-dsl-core" }
 meerkat-store = { version = "0.8.29", path = "meerkat-store", default-features = false }
 meerkat-store-conformance = { version = "0.8.29", path = "meerkat-store-conformance" }
-oai-rt-rs = "0.4.0"
+oai-rt-rs = { version = "0.4.0", path = "third-party/oai-rt-rs" }
 
 [profile.dev]
 split-debuginfo = "off"

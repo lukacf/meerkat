@@ -36,8 +36,9 @@ mod live_pipeline {
     };
     use meerkat::test_fixtures::realtime::ScriptedRealtimeSessionFactory;
     use meerkat::{
-        AgentFactory, Config, CreateSessionRequest, FactoryAgentBuilder, PersistenceBundle,
-        PersistentSessionService, Session, StagedSessionRegistry,
+        AgentFactory, Config, CreateSessionRequest, FactoryAgent, FactoryAgentBuilder,
+        PersistenceBundle, PersistentSessionService, Session, SessionAgentBuilder,
+        StagedSessionRegistry,
     };
     use meerkat_client::TestClient;
     use meerkat_contracts::wire::supervisor_bridge::{
@@ -46,6 +47,7 @@ mod live_pipeline {
     use meerkat_contracts::{
         LiveCloseStatus, LiveCommitInputStatus, RealtimeTurningMode, WireLiveTransportBootstrap,
     };
+    use meerkat_core::AgentEvent;
     use meerkat_core::live_adapter::LiveAdapterCommand;
     use meerkat_core::service::{DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions};
     use meerkat_core::types::SessionId;
@@ -55,6 +57,54 @@ mod live_pipeline {
     use meerkat_store::MemoryBlobStore;
 
     const ADVERTISED_BASE: &str = "wss://advertised.example:7443";
+
+    struct NonFactorySessionAgentBuilder;
+
+    #[async_trait::async_trait]
+    impl SessionAgentBuilder for NonFactorySessionAgentBuilder {
+        type Agent = FactoryAgent;
+
+        async fn build_agent(
+            &self,
+            _req: &CreateSessionRequest,
+            _event_tx: tokio::sync::mpsc::Sender<AgentEvent>,
+        ) -> Result<Self::Agent, meerkat::SessionError> {
+            Err(meerkat::SessionError::Unsupported(
+                "type-level live orchestration fixture does not build agents".to_string(),
+            ))
+        }
+    }
+
+    #[test]
+    fn shared_live_pipeline_accepts_non_factory_session_agent_builders() {
+        fn assert_member_live_host<T: MemberLiveHost>() {}
+        fn assert_live_projection<T>()
+        where
+            T: meerkat_live::LiveProjectionSink
+                + meerkat_live::LiveChannelCloseFeedback
+                + meerkat_live::LiveChannelStatusFeedback
+                + meerkat_live::LiveWsTokenAuthority,
+        {
+        }
+        fn assert_send_sync<T: Send + Sync>() {}
+        fn accepts_orchestrator(
+            _orchestrator: Option<LiveOrchestrator<'static, NonFactorySessionAgentBuilder>>,
+        ) {
+        }
+        fn builds_projection(
+            service: Arc<PersistentSessionService<NonFactorySessionAgentBuilder>>,
+            machine: Arc<MeerkatMachine>,
+        ) -> ServiceLiveProjection<NonFactorySessionAgentBuilder> {
+            ServiceLiveProjection::new(service, machine)
+        }
+
+        assert_member_live_host::<ServiceMemberLiveHost<NonFactorySessionAgentBuilder>>();
+        assert_live_projection::<ServiceLiveProjection<NonFactorySessionAgentBuilder>>();
+        assert_send_sync::<ServiceMemberLiveHostConfig<NonFactorySessionAgentBuilder>>();
+        assert_send_sync::<ServiceLiveProjection<NonFactorySessionAgentBuilder>>();
+        accepts_orchestrator(None);
+        let _ = builds_projection;
+    }
 
     struct Fixture {
         service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
@@ -384,6 +434,145 @@ mod live_pipeline {
             .expect("post-failure open must re-admit cleanly");
     }
 
+    /// The compatibility projection seam is the same S5-S12 pipeline as the
+    /// canonical seed entry point: equal failures clean up equal machine state,
+    /// and both paths can subsequently re-admit without a shadow binding.
+    #[tokio::test]
+    async fn prepared_projection_and_seed_entry_share_failure_cleanup() {
+        let fx = build_fixture().await;
+        let seeded_session = create_realtime_session(&fx).await;
+        let projected_session = create_realtime_session(&fx).await;
+        let ingress = RecordingIngress::default();
+        let unsupported = ScriptedRealtimeSessionFactory::supporting_no_provider();
+
+        let seeded_error = orchestrator(&fx, Some(&ingress))
+            .open_live_channel_with_seed(
+                &fx.host,
+                transport_ctx(&fx),
+                Some(&unsupported),
+                &seeded_session,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect_err("seed entry must reject the unsupported provider");
+
+        let projection = orchestrator(&fx, Some(&ingress))
+            .live_open_projection_for_session(
+                &projected_session,
+                RealtimeTurningMode::ProviderManaged,
+                None,
+            )
+            .await
+            .expect("prepare projection");
+        let projected_error = orchestrator(&fx, Some(&ingress))
+            .open_live_channel_from_projection(
+                &fx.host,
+                transport_ctx(&fx),
+                &unsupported,
+                &projected_session,
+                projection,
+                None,
+            )
+            .await
+            .expect_err("prepared projection must reject the unsupported provider");
+
+        assert!(matches!(
+            seeded_error,
+            LiveOpenError::ProviderUnsupportedByFactory { .. }
+        ));
+        assert!(matches!(
+            projected_error,
+            LiveOpenError::ProviderUnsupportedByFactory { .. }
+        ));
+        for session_id in [&seeded_session, &projected_session] {
+            assert!(
+                fx.adapter
+                    .live_active_channel_for_session(session_id)
+                    .await
+                    .is_none(),
+                "both entry points must evict the failed S5 admission"
+            );
+        }
+
+        let good = ScriptedRealtimeSessionFactory::new();
+        orchestrator(&fx, Some(&ingress))
+            .open_live_channel(
+                &fx.host,
+                transport_ctx(&fx),
+                Some(&good),
+                &seeded_session,
+                None,
+                None,
+            )
+            .await
+            .expect("seed path must re-admit after cleanup");
+        let projection = orchestrator(&fx, Some(&ingress))
+            .live_open_projection_for_session(
+                &projected_session,
+                RealtimeTurningMode::ProviderManaged,
+                None,
+            )
+            .await
+            .expect("prepare second projection");
+        orchestrator(&fx, Some(&ingress))
+            .open_live_channel_from_projection(
+                &fx.host,
+                transport_ctx(&fx),
+                &good,
+                &projected_session,
+                projection,
+                None,
+            )
+            .await
+            .expect("projection path must re-admit after cleanup");
+    }
+
+    /// A prepared projection is sealed to its canonical session before S5.
+    #[tokio::test]
+    async fn prepared_projection_rejects_cross_session_use_before_admission() {
+        let fx = build_fixture().await;
+        let projection_owner = create_realtime_session(&fx).await;
+        let requested_session = create_realtime_session(&fx).await;
+        let factory = ScriptedRealtimeSessionFactory::new();
+        let ingress = RecordingIngress::default();
+        let projection = orchestrator(&fx, Some(&ingress))
+            .live_open_projection_for_session(
+                &projection_owner,
+                RealtimeTurningMode::ProviderManaged,
+                None,
+            )
+            .await
+            .expect("prepare projection");
+
+        let error = orchestrator(&fx, Some(&ingress))
+            .open_live_channel_from_projection(
+                &fx.host,
+                transport_ctx(&fx),
+                &factory,
+                &requested_session,
+                projection,
+                None,
+            )
+            .await
+            .expect_err("a projection cannot be replayed against another session");
+        assert!(matches!(
+            error,
+            LiveOpenError::OpenConfig(
+                meerkat::session_runtime::live_orchestration::RealtimeSessionOpenProjectionError::SessionMismatch { .. }
+            )
+        ));
+        assert!(
+            fx.adapter
+                .live_active_channel_for_session(&requested_session)
+                .await
+                .is_none(),
+            "projection mismatch must fail before generated admission"
+        );
+        assert!(factory.opens().is_empty());
+    }
+
     /// T-L5: a second open on the same session is the typed AlreadyBound.
     #[tokio::test]
     async fn duplicate_open_rejects_already_bound() {
@@ -621,6 +810,7 @@ mod live_pipeline {
                     item_id,
                     content_index: 0,
                     audio_played_ms: 10,
+                    ..
                 } if item_id == "item-1"
             )),
             "bridge Truncate must map to TruncateAssistantOutput: {commands:?}"

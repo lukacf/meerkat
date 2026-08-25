@@ -524,11 +524,22 @@ impl ProviderRuntime for OpenAiProviderRuntime {
 
     fn build_realtime_session_factory(
         &self,
-        connection: ResolvedConnection,
+        target: meerkat_llm_core::provider_runtime::ResolvedRealtimeTarget,
     ) -> Result<
         Arc<dyn meerkat_llm_core::realtime_session::RealtimeSessionFactory>,
         ProviderClientError,
     > {
+        if !target.profile().profile().realtime {
+            return Err(ProviderClientError::ClientInit(
+                "resolved model profile does not admit realtime transport".to_string(),
+            ));
+        }
+        if target.profile().profile().release_stage != meerkat_core::ModelReleaseStage::Stable {
+            return Err(ProviderClientError::ClientInit(
+                "experimental realtime models require their dedicated admitted factory".to_string(),
+            ));
+        }
+        let (_, _, connection) = target.into_parts();
         let secret = gate_realtime_connection(&connection)?;
         #[cfg(all(not(target_arch = "wasm32"), feature = "realtime"))]
         {
@@ -758,6 +769,40 @@ mod tests {
                 "openai:test",
             )),
         }
+    }
+
+    fn resolved_realtime_target(
+        connection: ResolvedConnection,
+    ) -> meerkat_llm_core::provider_runtime::ResolvedRealtimeTarget {
+        let registry = meerkat_core::ModelRegistry::from_config(
+            &meerkat_core::Config::default(),
+            meerkat_models::canonical(),
+        )
+        .expect("canonical model registry");
+        let model = registry
+            .entries_for_provider(Provider::OpenAI)
+            .find(|entry| {
+                entry.release_stage == meerkat_core::ModelReleaseStage::Stable
+                    && registry
+                        .profile_for_provider(Provider::OpenAI, &entry.id)
+                        .is_some_and(|profile| profile.realtime)
+            })
+            .map(|entry| entry.id.clone())
+            .expect("stable OpenAI realtime model");
+        let identity = meerkat_core::SessionLlmIdentity {
+            model: model.clone(),
+            provider: Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        };
+        let witness = registry
+            .profile_witness_for_provider(Provider::OpenAI, &model)
+            .expect("stable realtime witness");
+        meerkat_llm_core::provider_runtime::ResolvedRealtimeTarget::new(
+            identity, witness, connection,
+        )
+        .expect("matching target")
     }
 
     fn resolved_chatgpt_connection(
@@ -1106,8 +1151,8 @@ mod tests {
 
     #[test]
     fn realtime_session_factory_is_constructed_by_openai_runtime_gate() {
-        let result =
-            OpenAiProviderRuntime.build_realtime_session_factory(resolved_openai_connection());
+        let result = OpenAiProviderRuntime
+            .build_realtime_session_factory(resolved_realtime_target(resolved_openai_connection()));
 
         #[cfg(all(not(target_arch = "wasm32"), feature = "realtime"))]
         assert!(
@@ -1125,9 +1170,8 @@ mod tests {
     #[test]
     fn realtime_session_factory_rejects_provider_specific_unsupported_backends() {
         let chatgpt = expect_realtime_session_factory_error(
-            OpenAiProviderRuntime.build_realtime_session_factory(resolved_chatgpt_connection(
-                AuthMetadata::default(),
-                None,
+            OpenAiProviderRuntime.build_realtime_session_factory(resolved_realtime_target(
+                resolved_chatgpt_connection(AuthMetadata::default(), None),
             )),
         );
         assert!(matches!(
@@ -1136,8 +1180,9 @@ mod tests {
         ));
 
         let azure = expect_realtime_session_factory_error(
-            OpenAiProviderRuntime
-                .build_realtime_session_factory(resolved_azure_connection(serde_json::Value::Null)),
+            OpenAiProviderRuntime.build_realtime_session_factory(resolved_realtime_target(
+                resolved_azure_connection(serde_json::Value::Null),
+            )),
         );
         assert!(matches!(
             azure,
@@ -1153,7 +1198,8 @@ mod tests {
             ..backend("openai_api")
         });
         let err = expect_realtime_session_factory_error(
-            OpenAiProviderRuntime.build_realtime_session_factory(custom_url),
+            OpenAiProviderRuntime
+                .build_realtime_session_factory(resolved_realtime_target(custom_url)),
         );
         assert!(matches!(
             err,
@@ -1168,7 +1214,8 @@ mod tests {
             "openai:dynamic",
         ));
         let err = expect_realtime_session_factory_error(
-            OpenAiProviderRuntime.build_realtime_session_factory(dynamic_auth),
+            OpenAiProviderRuntime
+                .build_realtime_session_factory(resolved_realtime_target(dynamic_auth)),
         );
         assert!(matches!(
             err,

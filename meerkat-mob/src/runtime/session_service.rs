@@ -1431,6 +1431,25 @@ pub trait MobSessionService:
         authority: &meerkat_core::CommittedSessionBoundaryAuthority,
     ) -> Result<(), SessionError>;
 
+    /// Project the exact durable parent-session boundary after this caller's
+    /// runtime input reaches successful machine completion. Implementations
+    /// must derive both the sealed document and store-issued authority from
+    /// canonical session ownership; the Mob shell supplies neither.
+    #[cfg(feature = "experimental-gpt-live")]
+    async fn enqueue_committed_parent_session_boundary_after_runtime_turn(
+        &self,
+        _session_id: &SessionId,
+        _runtime_adapter: &meerkat_runtime::MeerkatMachine,
+    ) -> Result<usize, SessionError> {
+        if self.supports_persistent_sessions() {
+            return Err(SessionError::Unsupported(
+                "persistent MobSessionService wrappers must delegate committed parent-session boundary projection to canonical session ownership"
+                    .to_string(),
+            ));
+        }
+        Ok(0)
+    }
+
     /// Remove the service-side live actor while the owning runtime entry is in
     /// its generated post-stop unregister window.
     async fn discard_live_session_after_runtime_stop_terminalized(
@@ -2097,6 +2116,31 @@ where
             actor_witness_slot,
         )
         .await
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
+    async fn enqueue_committed_parent_session_boundary_after_runtime_turn(
+        &self,
+        session_id: &SessionId,
+        runtime_adapter: &meerkat_runtime::MeerkatMachine,
+    ) -> Result<usize, SessionError> {
+        let (committed, store_commit_authority) =
+            meerkat_session::PersistentSessionService::<B>::export_live_context_committed_boundary(
+                self, session_id,
+            )
+            .await?;
+        runtime_adapter
+            .enqueue_committed_parent_session_boundary(
+                session_id,
+                &committed,
+                &store_commit_authority,
+            )
+            .await
+            .map_err(|error| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to enqueue committed Mob parent-session boundary for {session_id}: {error}"
+                )))
+            })
     }
 
     #[cfg(feature = "runtime-adapter")]

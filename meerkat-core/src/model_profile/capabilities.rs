@@ -13,7 +13,7 @@
 //! synthesized semantic capabilities.
 
 use crate::Provider;
-use crate::model_profile::catalog::ModelTier;
+use crate::model_profile::catalog::{ModelReleaseStage, ModelTier};
 use serde::{Deserialize, Serialize};
 
 /// GPT-5.6 Responses execution mode.
@@ -146,14 +146,16 @@ pub struct ModelCapabilities {
     pub display_name: &'static str,
     /// Recommendation tier.
     pub tier: ModelTier,
+    /// Release maturity and admission class.
+    pub release_stage: ModelReleaseStage,
     /// Model family identifier (a stable grouping key for related model ids).
     pub model_family: &'static str,
 
     // ── Context / output ──────────────────────────────────────────────
     /// Maximum input context window in tokens (default, no beta).
-    pub context_window: u32,
+    pub context_window: Option<u32>,
     /// Maximum output tokens per response (default, no beta).
-    pub max_output_tokens: u32,
+    pub max_output_tokens: Option<u32>,
     /// Extended context window via beta header, if available.
     pub context_window_beta: Option<BetaValue<u32>>,
     /// Extended max output tokens via beta header, if available.

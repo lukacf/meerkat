@@ -36,6 +36,7 @@ rust_library(
     crate_features = [
         "oauth",
         "realtime",
+        "test-realtime-fixtures",
     ],
     edition = "2024",
     compile_data = [
@@ -71,6 +72,7 @@ rust_library(
     crate_features = [
         "oauth",
         "realtime",
+        "test-realtime-fixtures",
     ],
     edition = "2024",
     compile_data = [
@@ -114,6 +116,7 @@ rust_test(
     crate_features = [
         "oauth",
         "realtime",
+        "test-realtime-fixtures",
     ],
     edition = "2024",
     compile_data = [
@@ -169,6 +172,7 @@ rust_test(
     crate_features = [
         "oauth",
         "realtime",
+        "test-realtime-fixtures",
     ],
     edition = "2024",
     compile_data = [
@@ -227,6 +231,7 @@ rust_test(
     crate_features = [
         "oauth",
         "realtime",
+        "test-realtime-fixtures",
     ],
     edition = "2024",
     compile_data = [

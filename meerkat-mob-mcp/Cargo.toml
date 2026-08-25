@@ -20,6 +20,7 @@ path = "src/main.rs"
 meerkat-core = { workspace = true }
 meerkat-contracts = { workspace = true, features = ["schema"] }
 meerkat = { workspace = true, default-features = false }
+meerkat-live = { workspace = true, optional = true }
 meerkat-mob = { workspace = true }
 meerkat-runtime = { workspace = true }
 meerkat-session = { workspace = true }
@@ -34,6 +35,19 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }
 futures = { workspace = true }
+tokio-util = { workspace = true }
+
+[features]
+default = []
+experimental-gpt-live = [
+    "meerkat/experimental-gpt-live",
+    "meerkat-mob/experimental-gpt-live",
+    "dep:meerkat-live",
+]
+experimental-gpt-live-gate0-harness = [
+    "experimental-gpt-live",
+    "meerkat/experimental-gpt-live-gate0-harness",
+]
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }

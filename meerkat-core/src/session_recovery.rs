@@ -661,6 +661,11 @@ pub fn resolve_effective_turn_config(
         // carry it forward verbatim so a restricted session cannot escape its
         // gate by being recovered.
         tool_access_policy: metadata.tooling.tool_access_policy.clone(),
+        // Process-local dispatch admission is generated operation authority,
+        // not durable session metadata. Generic recovery cannot reconstruct
+        // it and therefore leaves it absent; an owning live-operation runtime
+        // must re-admit the exact operation before execution resumes.
+        tool_dispatch_admission: None,
         application_tool_policy: metadata.tooling.application_tool_policy.clone(),
         // Executable provider instances are host authority and must be
         // re-injected by the owning runtime after generic recovery lowering.

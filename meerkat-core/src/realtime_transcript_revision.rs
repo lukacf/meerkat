@@ -40,9 +40,10 @@ use crate::generated::session_document::{
     SessionDocumentMachineAuthority,
 };
 use crate::realtime_transcript::{
-    PendingRealtimeUserContentBlob, RealtimeTranscriptApplyOutcome, RealtimeTranscriptEvent,
-    RealtimeTranscriptMaterializedMessage, RealtimeTranscriptRole, RealtimeUserContentApplyOutcome,
-    RealtimeUserContentIdentity, RealtimeUserContentTombstone, TranscriptLane,
+    LiveAssistantPlaybackTarget, PendingRealtimeUserContentBlob, RealtimeTranscriptApplyOutcome,
+    RealtimeTranscriptEvent, RealtimeTranscriptMaterializedMessage, RealtimeTranscriptRole,
+    RealtimeUserContentApplyOutcome, RealtimeUserContentIdentity, RealtimeUserContentTombstone,
+    TranscriptLane,
 };
 use crate::types::{
     AssistantBlock, BlockAssistantMessage, ContentBlock, ContentInput, Message, StopReason,
@@ -325,6 +326,10 @@ pub struct SessionRealtimeTranscriptState {
     assistant_completions: BTreeMap<String, RealtimeAssistantCompletion>,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     discarded_assistant_response_ids: BTreeSet<String>,
+    /// Exact foreground assistant output correlation. A playback terminal
+    /// consumes this one-use target before canonical assistant materialization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    assistant_playback_target: Option<LiveAssistantPlaybackTarget>,
     /// Session-scoped idempotency bindings for committed non-text user input.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     user_content_identities: BTreeMap<String, RealtimeUserContentIdentity>,
@@ -348,6 +353,8 @@ struct RealtimeTranscriptItemState {
     response_id: Option<String>,
     #[serde(default)]
     content_segments: BTreeMap<u32, String>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    final_content_indices: BTreeSet<u32>,
     /// Typed non-text user content staged until canonical materialization.
     /// Cleared as soon as the user message materializes so inline image bytes
     /// never remain duplicated in durable transcript metadata.
@@ -379,6 +386,7 @@ impl RealtimeTranscriptItemState {
             previous_item_id,
             response_id,
             content_segments: BTreeMap::new(),
+            final_content_indices: BTreeSet::new(),
             user_content_segments: BTreeMap::new(),
             user_content_segment_fingerprints: BTreeMap::new(),
             skipped: false,
@@ -394,6 +402,7 @@ impl RealtimeTranscriptItemState {
             previous_item_id,
             response_id: None,
             content_segments: BTreeMap::new(),
+            final_content_indices: BTreeSet::new(),
             user_content_segments: BTreeMap::new(),
             user_content_segment_fingerprints: BTreeMap::new(),
             skipped: true,
@@ -771,6 +780,34 @@ pub fn apply_realtime_transcript_event(
             text,
             "AssistantTranscriptFinalText",
         )?,
+        RealtimeTranscriptEvent::AssistantPlaybackTargetAdmitted {
+            channel_id,
+            interaction_id,
+            response_id,
+            item_id,
+            content_index,
+        } => apply_assistant_playback_target_admitted(
+            state,
+            channel_id,
+            interaction_id,
+            response_id,
+            item_id,
+            content_index,
+        )?,
+        RealtimeTranscriptEvent::AssistantPlaybackTargetResolved {
+            channel_id,
+            interaction_id,
+            response_id,
+            item_id,
+            content_index,
+        } => apply_assistant_playback_target_resolved(
+            state,
+            channel_id,
+            interaction_id,
+            response_id,
+            item_id,
+            content_index,
+        )?,
         RealtimeTranscriptEvent::AssistantTurnCompleted {
             response_id,
             stop_reason,
@@ -781,6 +818,65 @@ pub fn apply_realtime_transcript_event(
         }
     };
     Ok(commit)
+}
+
+fn apply_assistant_playback_target_admitted(
+    state: &mut SessionRealtimeTranscriptState,
+    channel_id: String,
+    interaction_id: crate::InteractionId,
+    response_id: String,
+    item_id: String,
+    content_index: u32,
+) -> Result<RealtimeTranscriptApplyCommit, RealtimeTranscriptShellError> {
+    if channel_id.trim().is_empty() || response_id.trim().is_empty() || item_id.trim().is_empty() {
+        return Err(RealtimeTranscriptShellError {
+            op: "assistant_playback_target_identity_invalid",
+        });
+    }
+    let candidate = LiveAssistantPlaybackTarget::admitted(
+        channel_id,
+        interaction_id,
+        response_id,
+        item_id,
+        content_index,
+    );
+    match state.assistant_playback_target.as_ref() {
+        None => state.assistant_playback_target = Some(candidate),
+        Some(existing) if existing == &candidate => {}
+        Some(_) => {
+            return Err(RealtimeTranscriptShellError {
+                op: "assistant_playback_target_already_active",
+            });
+        }
+    }
+    Ok(RealtimeTranscriptApplyCommit::default())
+}
+
+fn apply_assistant_playback_target_resolved(
+    state: &mut SessionRealtimeTranscriptState,
+    channel_id: String,
+    interaction_id: crate::InteractionId,
+    response_id: String,
+    item_id: String,
+    content_index: u32,
+) -> Result<RealtimeTranscriptApplyCommit, RealtimeTranscriptShellError> {
+    let Some(active) = state.assistant_playback_target.as_ref() else {
+        return Err(RealtimeTranscriptShellError {
+            op: "assistant_playback_target_not_active",
+        });
+    };
+    if active.channel_id() != channel_id
+        || active.interaction_id() != interaction_id
+        || active.response_id() != response_id
+        || active.item_id() != item_id
+        || active.content_index() != content_index
+    {
+        return Err(RealtimeTranscriptShellError {
+            op: "assistant_playback_target_resolution_mismatch",
+        });
+    }
+    state.assistant_playback_target = None;
+    Ok(RealtimeTranscriptApplyCommit::default())
 }
 
 fn apply_item_observation_decision(
@@ -1460,6 +1556,9 @@ fn apply_assistant_text_replacement(
             }
             if decision.replace_assistant_segment {
                 item.content_segments.insert(content_index, text);
+                if op == "AssistantTranscriptFinalText" {
+                    item.final_content_indices.insert(content_index);
+                }
             }
             if decision.mark_item_ready {
                 item.ready = true;
@@ -1579,6 +1678,87 @@ pub fn in_flight_realtime_assistant_response_ids(
         }
     }
     out
+}
+
+/// Observe the exact unmaterialized spoken segment that a playback-prefix
+/// report would truncate. This is a mechanical same-actor read used only to
+/// feed raw facts into SessionDocument authority before canonical mutation.
+#[must_use]
+pub fn realtime_assistant_segment_text(
+    state: &SessionRealtimeTranscriptState,
+    response_id: &str,
+    item_id: &str,
+    content_index: u32,
+) -> Option<String> {
+    if response_id.trim().is_empty()
+        || item_id.trim().is_empty()
+        || state.discarded_assistant_response_ids.contains(response_id)
+    {
+        return None;
+    }
+    let item = state.items.get(item_id)?;
+    if item.role != RealtimeTranscriptRole::Assistant
+        || item.response_id.as_deref() != Some(response_id)
+        || item.materialized
+        || item.skipped
+        || item.lane != TranscriptLane::Spoken
+    {
+        return None;
+    }
+    item.content_segments.get(&content_index).cloned()
+}
+
+#[must_use]
+pub fn realtime_assistant_segment_is_final(
+    state: &SessionRealtimeTranscriptState,
+    response_id: &str,
+    item_id: &str,
+    content_index: u32,
+) -> bool {
+    state.items.get(item_id).is_some_and(|item| {
+        item.role == RealtimeTranscriptRole::Assistant
+            && item.response_id.as_deref() == Some(response_id)
+            && !item.materialized
+            && !item.skipped
+            && item.lane == TranscriptLane::Spoken
+            && item.final_content_indices.contains(&content_index)
+    })
+}
+
+/// Return the one active assistant playback target only when the caller's
+/// channel/item identity matches exactly. Surfaces use this read to derive the
+/// interaction carried to the adapter; they never mint one at terminal time.
+#[must_use]
+pub fn live_assistant_playback_target(
+    state: &SessionRealtimeTranscriptState,
+    channel_id: &str,
+    item_id: &str,
+    content_index: u32,
+) -> Option<LiveAssistantPlaybackTarget> {
+    state
+        .assistant_playback_target
+        .as_ref()
+        .filter(|target| {
+            target.channel_id() == channel_id
+                && target.item_id() == item_id
+                && target.content_index() == content_index
+        })
+        .cloned()
+}
+
+/// Return the one durable assistant playback target for an exact channel.
+/// Channel close uses this read to abandon staged output as Unmeasured before
+/// the generated channel terminal commits.
+#[must_use]
+pub fn live_assistant_playback_target_for_channel(
+    state: &SessionRealtimeTranscriptState,
+    channel_id: &str,
+) -> Option<LiveAssistantPlaybackTarget> {
+    state
+        .assistant_playback_target
+        .as_ref()
+        .filter(|target| target.channel_id() == channel_id)
+        .cloned()
 }
 
 fn materialize_realtime_transcript_ready_items(
@@ -2011,7 +2191,20 @@ fn realtime_transcript_state_identity_fields_valid(state: &SessionRealtimeTransc
                 .response_id
                 .as_ref()
                 .is_none_or(|response| !response.trim().is_empty())
-    })
+    }) && state
+        .assistant_playback_target
+        .as_ref()
+        .is_none_or(|target| {
+            !target.channel_id().trim().is_empty()
+                && !target.response_id().trim().is_empty()
+                && !target.item_id().trim().is_empty()
+                && state.items.get(target.item_id()).is_none_or(|item| {
+                    item.role == RealtimeTranscriptRole::Assistant
+                        && item.response_id.as_deref() == Some(target.response_id())
+                        && !item.materialized
+                        && !item.skipped
+                })
+        })
 }
 
 #[derive(Debug, Clone, Copy)]

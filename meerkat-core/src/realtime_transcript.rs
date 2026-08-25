@@ -210,8 +210,8 @@ pub enum RealtimeTranscriptEvent {
         content_index: u32,
         delta: String,
     },
-    /// Provider reported the assistant output item was truncated to the heard
-    /// transcript prefix.
+    /// Provider reported the assistant output item was truncated to a playback
+    /// transcript prefix. This is not evidence of biological hearing.
     AssistantTranscriptTruncated {
         response_id: String,
         item_id: String,
@@ -239,6 +239,27 @@ pub enum RealtimeTranscriptEvent {
         content_index: u32,
         text: String,
     },
+    /// Admit the exact channel/response/item identity of the foreground
+    /// assistant output before any playback terminal can resolve it. The
+    /// interaction identity is minted once by the session owner when this
+    /// target first appears and is reused for every later playback report.
+    AssistantPlaybackTargetAdmitted {
+        channel_id: String,
+        interaction_id: crate::InteractionId,
+        response_id: String,
+        item_id: String,
+        content_index: u32,
+    },
+    /// Consume the exact one-use playback target after generated terminal
+    /// authority has resolved it. Exact replay is rejected so stale browser
+    /// reports cannot affect a later assistant turn.
+    AssistantPlaybackTargetResolved {
+        channel_id: String,
+        interaction_id: crate::InteractionId,
+        response_id: String,
+        item_id: String,
+        content_index: u32,
+    },
     /// Provider turn reached a terminal boundary. The session decides which
     /// staged assistant items, if any, are now canonical.
     AssistantTurnCompleted {
@@ -248,6 +269,61 @@ pub enum RealtimeTranscriptEvent {
     },
     /// Provider turn was interrupted before terminal materialization.
     AssistantTurnInterrupted { response_id: String },
+}
+
+/// Durable session-owned correlation for one foreground assistant playback
+/// target. Fields are read-only outside core so surfaces can resolve but not
+/// manufacture the semantic identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveAssistantPlaybackTarget {
+    channel_id: String,
+    interaction_id: crate::InteractionId,
+    response_id: String,
+    item_id: String,
+    content_index: u32,
+}
+
+impl LiveAssistantPlaybackTarget {
+    pub(crate) fn admitted(
+        channel_id: String,
+        interaction_id: crate::InteractionId,
+        response_id: String,
+        item_id: String,
+        content_index: u32,
+    ) -> Self {
+        Self {
+            channel_id,
+            interaction_id,
+            response_id,
+            item_id,
+            content_index,
+        }
+    }
+
+    #[must_use]
+    pub fn channel_id(&self) -> &str {
+        &self.channel_id
+    }
+
+    #[must_use]
+    pub const fn interaction_id(&self) -> crate::InteractionId {
+        self.interaction_id
+    }
+
+    #[must_use]
+    pub fn response_id(&self) -> &str {
+        &self.response_id
+    }
+
+    #[must_use]
+    pub fn item_id(&self) -> &str {
+        &self.item_id
+    }
+
+    #[must_use]
+    pub const fn content_index(&self) -> u32 {
+        self.content_index
+    }
 }
 
 /// Typed staged-transcript append seam (#51).

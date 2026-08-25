@@ -4647,6 +4647,12 @@ fn generate_session_document_authority(machine: &MachineSchema) -> Result<String
         "RealtimeUserContentBlobStageDisposition",
         "RealtimeUserContentBlobRecoveryDisposition",
         "RealtimeUserContentBlobFinalizeDisposition",
+        "LiveTranscriptReconciliation",
+        "LiveAssistantPlaybackTerminalObservation",
+        "LiveAssistantPlaybackTerminalDisposition",
+        "LiveContextCommittedRowKind",
+        "LiveContextCommittedTextProvenance",
+        "LiveContextCommittedRowDisposition",
         "TranscriptEditKind",
         "ObservedSessionTailKind",
         "PendingContinuationDisposition",
@@ -4746,6 +4752,12 @@ fn session_document_default_variant(name: &str) -> Result<&'static str> {
         "RealtimeUserContentBlobStageDisposition" => Ok("RejectOccupied"),
         "RealtimeUserContentBlobRecoveryDisposition" => Ok("NoPending"),
         "RealtimeUserContentBlobFinalizeDisposition" => Ok("RejectMismatch"),
+        "LiveTranscriptReconciliation" => Ok("Provisional"),
+        "LiveAssistantPlaybackTerminalObservation" => Ok("Unmeasured"),
+        "LiveAssistantPlaybackTerminalDisposition" => Ok("Unmeasured"),
+        "LiveContextCommittedRowKind" => Ok("NonText"),
+        "LiveContextCommittedTextProvenance" => Ok("ExecutorTrace"),
+        "LiveContextCommittedRowDisposition" => Ok("ExcludedFromLiveContext"),
         "TranscriptEditKind" => Ok("Fork"),
         "ObservedSessionTailKind" => Ok("Empty"),
         "PendingContinuationDisposition" => Ok("NoPendingBoundary"),
@@ -5196,6 +5208,7 @@ fn render_session_document_type_ref(ty: &TypeRef) -> Result<String> {
         TypeRef::Bool => Ok("bool".to_string()),
         TypeRef::U32 => Ok("u32".to_string()),
         TypeRef::U64 => Ok("u64".to_string()),
+        TypeRef::String => Ok("String".to_string()),
         TypeRef::Enum(name) => Ok(name.as_str().to_string()),
         TypeRef::Named(name) if name.as_str() == SESSION_DOCUMENT_KEY_NAMED => {
             Ok(SESSION_DOCUMENT_KEY_TYPE.to_string())
@@ -5278,6 +5291,10 @@ fn render_session_document_update(
             render_session_document_owned_expr(key, binding_types, machine)?,
             render_session_document_owned_expr(value, binding_types, machine)?
         )),
+        Update::MapRemove { field, key } => Ok(format!(
+            "self.state.{field}.remove({});",
+            render_session_document_borrowed_key_expr(key, binding_types)?
+        )),
         other => bail!("unsupported SessionDocumentMachine update `{other:?}`"),
     }
 }
@@ -5334,12 +5351,22 @@ fn render_session_document_expr(
         Expr::Bool(value) => Ok(value.to_string()),
         Expr::U64(value) => Ok(value.to_string()),
         Expr::U64Max => Ok("u64::MAX".to_string()),
+        Expr::String(value) => Ok(format!("{value:?}.to_string()")),
         Expr::NamedVariant { enum_name, variant } => {
             Ok(format!("{}::{}", enum_name.as_str(), variant.as_str()))
         }
         Expr::CurrentPhase => Ok("self.state.lifecycle_phase".to_string()),
         Expr::Phase(phase) => Ok(format!("{}::{phase}", machine.state.phase.name)),
         Expr::Field(field) => Ok(format!("self.state.{field}")),
+        Expr::Binding(binding)
+            if matches!(binding_types.get(binding), Some(TypeRef::String))
+                || matches!(
+                    binding_types.get(binding),
+                    Some(TypeRef::Named(name)) if name.as_str() == SESSION_DOCUMENT_KEY_NAMED
+                ) =>
+        {
+            Ok(format!("{binding}.clone()"))
+        }
         Expr::Binding(binding) => Ok(binding.clone()),
         Expr::None => Ok("None".to_string()),
         Expr::Some(inner) => Ok(format!(
@@ -5356,6 +5383,16 @@ fn render_session_document_expr(
         Expr::Or(items) => {
             render_session_document_expr_joined(items, " || ", binding_types, machine)
         }
+        Expr::IfElse {
+            condition,
+            then_expr,
+            else_expr,
+        } => Ok(format!(
+            "if {} {{ {} }} else {{ {} }}",
+            render_session_document_expr(condition, binding_types, machine)?,
+            render_session_document_expr(then_expr, binding_types, machine)?,
+            render_session_document_expr(else_expr, binding_types, machine)?
+        )),
         Expr::Eq(left, right) => Ok(format!(
             "{} == {}",
             render_session_document_expr(left, binding_types, machine)?,
@@ -5366,8 +5403,33 @@ fn render_session_document_expr(
             render_session_document_expr(left, binding_types, machine)?,
             render_session_document_expr(right, binding_types, machine)?
         )),
+        Expr::Add(left, right) => Ok(format!(
+            "{} + {}",
+            render_session_document_expr(left, binding_types, machine)?,
+            render_session_document_expr(right, binding_types, machine)?
+        )),
+        Expr::Sub(left, right) => Ok(format!(
+            "{} - {}",
+            render_session_document_expr(left, binding_types, machine)?,
+            render_session_document_expr(right, binding_types, machine)?
+        )),
         Expr::Gt(left, right) => Ok(format!(
             "{} > {}",
+            render_session_document_expr(left, binding_types, machine)?,
+            render_session_document_expr(right, binding_types, machine)?
+        )),
+        Expr::Gte(left, right) => Ok(format!(
+            "{} >= {}",
+            render_session_document_expr(left, binding_types, machine)?,
+            render_session_document_expr(right, binding_types, machine)?
+        )),
+        Expr::Lt(left, right) => Ok(format!(
+            "{} < {}",
+            render_session_document_expr(left, binding_types, machine)?,
+            render_session_document_expr(right, binding_types, machine)?
+        )),
+        Expr::Lte(left, right) => Ok(format!(
+            "{} <= {}",
             render_session_document_expr(left, binding_types, machine)?,
             render_session_document_expr(right, binding_types, machine)?
         )),
@@ -5520,6 +5582,9 @@ fn render_session_document_owned_expr(
         {
             Ok(format!("{binding}.clone()"))
         }
+        Expr::Binding(binding) if matches!(binding_types.get(binding), Some(TypeRef::String)) => {
+            Ok(format!("{binding}.clone()"))
+        }
         Expr::Binding(binding) => Ok(binding.clone()),
         Expr::Bool(value) => Ok(value.to_string()),
         Expr::U64(value) => Ok(value.to_string()),
@@ -5542,7 +5607,9 @@ fn render_session_document_effect_field_expr(
     binding_types: &std::collections::BTreeMap<String, TypeRef>,
     machine: &MachineSchema,
 ) -> Result<String> {
-    if matches!(ty, TypeRef::Named(name) if name.as_str() == SESSION_DOCUMENT_KEY_NAMED) {
+    if matches!(ty, TypeRef::Named(name) if name.as_str() == SESSION_DOCUMENT_KEY_NAMED)
+        || matches!(ty, TypeRef::String)
+    {
         render_session_document_owned_expr(expr, binding_types, machine)
     } else {
         render_session_document_expr(expr, binding_types, machine)
@@ -5575,6 +5642,12 @@ fn session_document_type_is_copy(type_name: &str) -> bool {
             | "RealtimeUserContentBlobStageDisposition"
             | "RealtimeUserContentBlobRecoveryDisposition"
             | "RealtimeUserContentBlobFinalizeDisposition"
+            | "LiveTranscriptReconciliation"
+            | "LiveAssistantPlaybackTerminalObservation"
+            | "LiveAssistantPlaybackTerminalDisposition"
+            | "LiveContextCommittedRowKind"
+            | "LiveContextCommittedTextProvenance"
+            | "LiveContextCommittedRowDisposition"
             | "ObservedSessionTailKind"
             | "PendingContinuationDisposition"
             | "PendingContinuationPublicTerminal"
@@ -5628,6 +5701,14 @@ fn validate_session_document_authority_schema(machine: &MachineSchema) -> Result
         "ResolveRealtimeAssistantTurnInterrupted",
         "ResolveRealtimeMaterializeCandidate",
         "RestoreRealtimeTranscriptState",
+        "AdmitLiveInteractionTranscript",
+        "StageLiveProvisionalUserTranscript",
+        "ReconcileLiveFinalUserTranscript",
+        "CompleteLiveInteractionTranscript",
+        "AdmitLiveAssistantPlaybackTarget",
+        "RecoverLiveAssistantPlaybackTarget",
+        "ResolveLiveAssistantPlaybackOnChannelClose",
+        "ResolveLiveAssistantPlaybackTerminal",
         "AuthorizeSessionMetadataPersist",
         "AuthorizeSessionBuildStatePersist",
         "RestoreSessionBuildState",
@@ -5657,6 +5738,13 @@ fn validate_session_document_authority_schema(machine: &MachineSchema) -> Result
         "RealtimeUserContentBlobRecoveryResolved",
         "RealtimeUserContentBlobFinalizeResolved",
         "RealtimeTranscriptSnapshotRestoreAuthorized",
+        "LiveInteractionTranscriptAdmitted",
+        "LiveProvisionalUserTranscriptStaged",
+        "LiveFinalUserTranscriptReconciled",
+        "LiveInteractionTranscriptCompleted",
+        "LiveAssistantPlaybackTargetAdmitted",
+        "LiveAssistantPlaybackTargetRecovered",
+        "LiveAssistantPlaybackTerminalResolved",
         "SessionMetadataPersistAuthorized",
         "SessionBuildStatePersistAuthorized",
         "SessionBuildStateRestoreAuthorized",
@@ -5686,6 +5774,12 @@ fn validate_session_document_authority_schema(machine: &MachineSchema) -> Result
         "RealtimeUserContentBlobStageDisposition",
         "RealtimeUserContentBlobRecoveryDisposition",
         "RealtimeUserContentBlobFinalizeDisposition",
+        "LiveTranscriptReconciliation",
+        "LiveAssistantPlaybackTerminalObservation",
+        "LiveAssistantPlaybackTerminalDisposition",
+        "LiveContextCommittedRowKind",
+        "LiveContextCommittedTextProvenance",
+        "LiveContextCommittedRowDisposition",
         "TranscriptEditKind",
         "ObservedSessionTailKind",
         "PendingContinuationDisposition",

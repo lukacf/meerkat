@@ -5,6 +5,7 @@
 //! runtimes live in `meerkat-client/src/providers/*`. `meerkat-core` stays
 //! generic — no provider-specific fields or logic land here.
 
+pub mod binding_use;
 pub mod error;
 pub mod lease;
 pub mod lifecycle;
@@ -13,6 +14,11 @@ pub mod principal;
 pub mod status;
 pub mod token_store;
 
+pub use binding_use::{
+    AuthBindingUseDecision, AuthBindingUseDenial, AuthBindingUseGateError, AuthBindingUseRequest,
+    AuthBindingUseWitness, authorize_explicit_auth_binding_use,
+    authorize_then_materialize_auth_binding,
+};
 pub use error::{AuthError, AuthErrorKind};
 pub use lease::{
     AuthConstraints, AuthLease, AuthRefreshReason, HttpAuthorizationRequest, HttpAuthorizer,

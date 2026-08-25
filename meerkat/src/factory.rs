@@ -596,6 +596,10 @@ pub struct AgentBuildConfig {
     /// `SessionMetadata.tooling.tool_access_policy` so children can inherit
     /// it transitively.
     pub tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+    /// Process-local authority awaited at the outermost actual dispatcher.
+    /// It is not persisted; live delegation reconstructs it from generated
+    /// operation admission when rematerialization is supported.
+    pub tool_dispatch_admission: Option<Arc<dyn meerkat_core::ToolDispatchAdmission>>,
     /// Stable application consequence-policy binding for the member/session.
     pub application_tool_policy: meerkat_core::ApplicationToolPolicyBinding,
     /// Host-scoped registry containing in-process immutable policy providers.
@@ -725,6 +729,10 @@ impl std::fmt::Debug for AgentBuildConfig {
             .field("initial_tool_filter", &self.initial_tool_filter.is_some())
             .field("tool_access_policy", &self.tool_access_policy)
             .field(
+                "tool_dispatch_admission",
+                &self.tool_dispatch_admission.is_some(),
+            )
+            .field(
                 "session_comms_runtime_override",
                 &self.session_comms_runtime_override.is_some(),
             )
@@ -809,6 +817,7 @@ impl AgentBuildConfig {
             initial_tool_visibility_state: None,
             initial_tool_filter: None,
             tool_access_policy: None,
+            tool_dispatch_admission: None,
             application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
             tool_consequence_policy_registry: None,
             session_comms_runtime_override: None,
@@ -928,6 +937,7 @@ impl AgentBuildConfig {
         self.initial_metadata_entries = build.initial_metadata_entries.clone();
         self.initial_tool_filter = build.initial_tool_filter.clone();
         self.tool_access_policy = build.tool_access_policy.clone();
+        self.tool_dispatch_admission = build.tool_dispatch_admission.clone();
         self.application_tool_policy = build.application_tool_policy.clone();
         self.tool_consequence_policy_registry = build.tool_consequence_policy_registry.clone();
         self.shell_env = build.shell_env.clone();
@@ -1000,6 +1010,7 @@ impl AgentBuildConfig {
             initial_metadata_entries: self.initial_metadata_entries.clone(),
             initial_tool_filter: self.initial_tool_filter.clone(),
             tool_access_policy: self.tool_access_policy.clone(),
+            tool_dispatch_admission: self.tool_dispatch_admission.clone(),
             application_tool_policy: self.application_tool_policy.clone(),
             tool_consequence_policy_registry: self.tool_consequence_policy_registry.clone(),
             shell_env: self.shell_env.clone(),
@@ -2135,6 +2146,9 @@ pub struct AgentFactory {
     /// deterministic and off the canonical-seam-bypass path
     /// (dogma §65).
     provider_registry: Arc<meerkat_llm_core::provider_runtime::ProviderRuntimeRegistry>,
+    /// Off-by-default authority for pre-release live factories. This remains
+    /// provider-neutral and can mint only from an exact resolved target.
+    experimental_live_admission: crate::ExperimentalLiveAdmissionOwner,
     /// Default machine handle for generated-image planning/routing.
     pub image_generation_machine:
         Option<Arc<dyn meerkat_tools::builtin::image_generation::ImageGenerationMachine>>,
@@ -2161,6 +2175,10 @@ impl std::fmt::Debug for AgentFactory {
         d.field("custom_store", &self.custom_store.as_ref().map(|_| ".."));
         d.field("mob_tools", &self.mob_tools.is_some());
         d.field(
+            "experimental_live_admission",
+            &self.experimental_live_admission,
+        );
+        d.field(
             "image_generation_machine",
             &self.image_generation_machine.is_some(),
         );
@@ -2175,6 +2193,78 @@ struct ResolvedLlmClientPhase {
     llm_client: Option<Arc<dyn LlmClient>>,
     #[cfg(not(target_arch = "wasm32"))]
     auto_image_generation_executor: Option<Arc<dyn meerkat_llm_core::ImageGenerationExecutor>>,
+}
+
+/// Side-effect-free exact binding selection for one experimental live target.
+///
+/// The embedding host may inspect only the selected binding so its
+/// authenticated AccessView can authorize exact use. Realm resolution,
+/// registry evidence, lower Gate0 qualification, and provider materialization
+/// remain sealed inside this one-use value.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct ExperimentalLiveTargetPreparation {
+    preflight: crate::experimental_live_admission::ExperimentalLiveAdmissionPreflight,
+    binding_realm: RealmConnectionSet,
+    auth_binding: AuthBindingRef,
+}
+
+/// Structurally separate target preparation for the non-shipping direct
+/// Gate0 harness. It carries no capability qualification or production
+/// admission authority.
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    feature = "experimental-gpt-live-gate0-harness"
+))]
+#[doc(hidden)]
+pub struct Gate0CandidateTargetPreparation {
+    binding_realm: RealmConnectionSet,
+    auth_binding: AuthBindingRef,
+    identity: SessionLlmIdentity,
+    profile: meerkat_core::ModelProfileWitness,
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    feature = "experimental-gpt-live-gate0-harness"
+))]
+impl Gate0CandidateTargetPreparation {
+    pub fn auth_binding(&self) -> &AuthBindingRef {
+        &self.auth_binding
+    }
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    feature = "experimental-gpt-live-gate0-harness"
+))]
+impl std::fmt::Debug for Gate0CandidateTargetPreparation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Gate0CandidateTargetPreparation")
+            .field("provider", &self.identity.provider)
+            .field("model", &"<registry-validated>")
+            .field("binding", &"<redacted>")
+            .field("qualification", &"unqualified-candidate")
+            .finish()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ExperimentalLiveTargetPreparation {
+    pub fn auth_binding(&self) -> &AuthBindingRef {
+        &self.auth_binding
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::fmt::Debug for ExperimentalLiveTargetPreparation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ExperimentalLiveTargetPreparation")
+            .field("auth_binding", &self.auth_binding)
+            .field("preflight", &"[OPAQUE]")
+            .finish()
+    }
 }
 
 impl AgentFactory {
@@ -2521,28 +2611,274 @@ impl AgentFactory {
         config: &Config,
         identity: &SessionLlmIdentity,
     ) -> Result<Arc<dyn meerkat_client::RealtimeSessionFactory>, FactoryError> {
+        let target = self
+            .resolve_realtime_target_for_identity_in_realm(config, identity, None)
+            .await?;
+        self.provider_registry
+            .build_realtime_session_factory(target)
+            .map_err(FactoryError::ClientBuild)
+    }
+
+    /// Select an exact experimental live target and concrete auth binding
+    /// without reading credentials or accepting caller-composed authority.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn prepare_experimental_live_admission_for_identity(
+        &self,
+        config: &Config,
+        realm: &RealmId,
+        identity: &SessionLlmIdentity,
+        factory: &crate::ExperimentalLiveFactoryIdentity,
+    ) -> Result<ExperimentalLiveTargetPreparation, crate::ExperimentalLiveFactoryResolutionError>
+    {
+        // Admission facts are intentionally checked before binding selection
+        // and before any credential store or provider runtime is touched.
+        let registry = config
+            .model_registry(meerkat_models::canonical())
+            .map_err(|error| FactoryError::ClientCreationFailed(error.to_string()))?;
+        let profile = registry
+            .profile_witness_for_provider(identity.provider, &identity.model)
+            .ok_or_else(|| {
+                FactoryError::ClientCreationFailed(format!(
+                    "realtime target is not registered for {}:{}",
+                    identity.provider.as_str(),
+                    identity.model
+                ))
+            })?;
+        let qualification = self
+            .experimental_live_admission
+            .qualify_capability(realm, factory)?;
+        let (binding_realm, _binding_id, auth_binding) = Self::resolve_realm_binding_for_provider(
+            config,
+            identity.provider,
+            identity.auth_binding.as_ref(),
+            Some(realm),
+        )
+        .map_err(FactoryError::ConnectionTarget)?;
+        let mut selected_identity = identity.clone();
+        selected_identity.auth_binding = Some(auth_binding.clone());
+        let preflight = self.experimental_live_admission.preflight(
+            qualification,
+            selected_identity,
+            profile,
+        )?;
+        Ok(ExperimentalLiveTargetPreparation {
+            preflight,
+            binding_realm,
+            auth_binding,
+        })
+    }
+
+    /// Resolve only registry and exact binding selection for the structurally
+    /// separate non-shipping Gate0 candidate. No production capability or
+    /// qualification witness is consulted or minted.
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        feature = "experimental-gpt-live-gate0-harness"
+    ))]
+    #[doc(hidden)]
+    pub fn prepare_gate0_candidate_realtime_target(
+        &self,
+        config: &Config,
+        realm: &RealmId,
+        identity: &SessionLlmIdentity,
+    ) -> Result<Gate0CandidateTargetPreparation, FactoryError> {
+        let registry = config
+            .model_registry(meerkat_models::canonical())
+            .map_err(|error| FactoryError::ClientCreationFailed(error.to_string()))?;
+        let profile = registry
+            .profile_witness_for_provider(identity.provider, &identity.model)
+            .ok_or_else(|| {
+                FactoryError::ClientCreationFailed(format!(
+                    "Gate0 target is not registered for {}:{}",
+                    identity.provider.as_str(),
+                    identity.model
+                ))
+            })?;
+        let (binding_realm, _binding_id, auth_binding) = Self::resolve_realm_binding_for_provider(
+            config,
+            identity.provider,
+            identity.auth_binding.as_ref(),
+            Some(realm),
+        )
+        .map_err(FactoryError::ConnectionTarget)?;
+        let mut selected_identity = identity.clone();
+        selected_identity.auth_binding = Some(auth_binding.clone());
+        Ok(Gate0CandidateTargetPreparation {
+            binding_realm,
+            auth_binding,
+            identity: selected_identity,
+            profile,
+        })
+    }
+
+    /// Materialize one exact candidate only after the dedicated harness host
+    /// supplies binding-use policy and generated AuthMachine lease authority.
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        feature = "experimental-gpt-live-gate0-harness"
+    ))]
+    #[doc(hidden)]
+    pub async fn complete_gate0_candidate_realtime_target(
+        &self,
+        preparation: Gate0CandidateTargetPreparation,
+        binding_use: meerkat_core::AuthBindingUseWitness,
+        auth_lease: meerkat_core::handles::GeneratedAuthLeaseHandle,
+    ) -> Result<meerkat_openai::gpt_live_gate0::Gate0CandidateRealtimeTarget, FactoryError> {
+        if preparation.auth_binding != *binding_use.auth_binding() {
+            return Err(FactoryError::ClientCreationFailed(
+                "Gate0 binding-use witness mismatch".to_string(),
+            ));
+        }
+        let connection = self
+            .resolve_realtime_connection_for_selected_binding(
+                preparation.binding_realm,
+                preparation.auth_binding,
+                Some(auth_lease),
+            )
+            .await?;
+        let target = meerkat_providers::ResolvedRealtimeTarget::new(
+            preparation.identity,
+            preparation.profile,
+            connection,
+        )
+        .ok_or_else(|| {
+            FactoryError::ClientCreationFailed(
+                "Gate0 resolved connection does not match the registry target".to_string(),
+            )
+        })?;
+        meerkat_openai::gpt_live_gate0::Gate0CandidateRealtimeTarget::try_new(target, binding_use)
+            .map_err(|error| FactoryError::ClientCreationFailed(error.to_string()))
+    }
+
+    /// Materialize one prepared target only after the host supplies the
+    /// nonforgeable exact binding-use witness minted from authenticated state
+    /// and the generated AuthMachine lease for the same durable session.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn complete_experimental_live_admission(
+        &self,
+        preparation: ExperimentalLiveTargetPreparation,
+        binding_use_witness: meerkat_core::AuthBindingUseWitness,
+        auth_lease_handle: meerkat_core::handles::GeneratedAuthLeaseHandle,
+    ) -> Result<
+        crate::ExperimentalLiveAdmissionWitness,
+        crate::ExperimentalLiveFactoryResolutionError,
+    > {
+        if preparation.auth_binding != *binding_use_witness.auth_binding() {
+            return Err(crate::ExperimentalLiveAdmissionError::BindingUseWitnessMismatch.into());
+        }
+        let connection = self
+            .resolve_realtime_connection_for_selected_binding(
+                preparation.binding_realm,
+                preparation.auth_binding,
+                Some(auth_lease_handle),
+            )
+            .await?;
+        self.experimental_live_admission
+            .complete(preparation.preflight, connection, binding_use_witness)
+            .map_err(Into::into)
+    }
+
+    /// Revalidate capability advertisement against this factory's current
+    /// admission owner.
+    pub fn experimental_live_feature_capabilities(
+        &self,
+        realm: &RealmId,
+        factory: &crate::ExperimentalLiveFactoryIdentity,
+    ) -> Result<&'static [&'static str], crate::ExperimentalLiveAdmissionError> {
+        let qualification = self
+            .experimental_live_admission
+            .qualify_capability(realm, factory)?;
+        self.experimental_live_admission
+            .advertised_feature_capabilities(&qualification)
+    }
+
+    /// Consume an admission only after revalidating it against this factory's
+    /// current owner, realm, factory version, and Gate0 qualification.
+    #[cfg(feature = "experimental-gpt-live")]
+    pub(crate) fn consume_experimental_live_admission(
+        &self,
+        witness: crate::ExperimentalLiveAdmissionWitness,
+        realm: &RealmId,
+        factory: &crate::ExperimentalLiveFactoryIdentity,
+    ) -> Result<
+        meerkat_llm_core::provider_runtime::AdmittedExperimentalRealtimeTarget,
+        crate::ExperimentalLiveAdmissionError,
+    > {
+        self.experimental_live_admission
+            .validate_witness(&witness, realm, factory)?;
+        Ok(witness.into_provider_target())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn resolve_realtime_target_for_identity_in_realm(
+        &self,
+        config: &Config,
+        identity: &SessionLlmIdentity,
+        preferred_realm: Option<&RealmId>,
+    ) -> Result<meerkat_providers::ResolvedRealtimeTarget, FactoryError> {
         let (realm, _binding_id, auth_binding) = Self::resolve_realm_binding_for_provider(
             config,
             identity.provider,
             identity.auth_binding.as_ref(),
-            None,
+            preferred_realm,
         )
         .map_err(FactoryError::ConnectionTarget)?;
+        self.resolve_realtime_target_for_selected_binding(config, identity, realm, auth_binding)
+            .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn resolve_realtime_target_for_selected_binding(
+        &self,
+        config: &Config,
+        identity: &SessionLlmIdentity,
+        realm: RealmConnectionSet,
+        auth_binding: AuthBindingRef,
+    ) -> Result<meerkat_providers::ResolvedRealtimeTarget, FactoryError> {
+        let connection = self
+            .resolve_realtime_connection_for_selected_binding(realm, auth_binding, None)
+            .await?;
+        let registry = config
+            .model_registry(meerkat_models::canonical())
+            .map_err(|error| FactoryError::ClientCreationFailed(error.to_string()))?;
+        let profile = registry
+            .profile_witness_for_provider(identity.provider, &identity.model)
+            .ok_or_else(|| {
+                FactoryError::ClientCreationFailed(format!(
+                    "realtime target is not registered for {}:{}",
+                    identity.provider.as_str(),
+                    identity.model
+                ))
+            })?;
+        meerkat_providers::ResolvedRealtimeTarget::new(identity.clone(), profile, connection)
+            .ok_or_else(|| {
+                FactoryError::ClientCreationFailed(
+                    "resolved realtime target identity/profile/connection mismatch".to_string(),
+                )
+            })
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn resolve_realtime_connection_for_selected_binding(
+        &self,
+        realm: RealmConnectionSet,
+        auth_binding: AuthBindingRef,
+        auth_lease_handle: Option<meerkat_core::handles::GeneratedAuthLeaseHandle>,
+    ) -> Result<meerkat_providers::ResolvedConnection, FactoryError> {
         let mut env = meerkat_providers::ResolverEnvironment::with_process_env();
+        if let Some(auth_lease_handle) = auth_lease_handle {
+            env = env.with_auth_lease_handle(auth_lease_handle);
+        }
         if let Some(persistence) = self.resolution_provider_auth_persistence()? {
             env = env.with_provider_auth_persistence(persistence);
         }
         for (handle, resolver) in &self.external_auth_resolvers {
             env = env.with_external_resolver(handle.clone(), resolver.clone());
         }
-        let connection = self
-            .provider_registry
+        self.provider_registry
             .resolve(&realm, &auth_binding, &env)
             .await
-            .map_err(FactoryError::ProviderAuth)?;
-        self.provider_registry
-            .build_realtime_session_factory(connection)
-            .map_err(FactoryError::ClientBuild)
+            .map_err(FactoryError::ProviderAuth)
     }
 
     /// Build a fallback web-search executor for a provider whose active model
@@ -2698,6 +3034,7 @@ impl AgentFactory {
             skill_source: None,
             custom_store: None,
             provider_registry: Arc::new(build_provider_registry()),
+            experimental_live_admission: crate::ExperimentalLiveAdmissionOwner::default(),
             mob_tools: None,
             #[cfg(feature = "comms")]
             comms_runtime: None,
@@ -2749,8 +3086,34 @@ impl AgentFactory {
             provider_auth_persistence,
             external_auth_resolvers: BTreeMap::new(),
             provider_registry: Arc::new(build_provider_registry()),
+            experimental_live_admission: crate::ExperimentalLiveAdmissionOwner::default(),
             image_generation_machine: None,
         }
+    }
+
+    /// Attach explicit operator and realm policy for the compiled
+    /// experimental live factory. A build without matching Gate0 evidence
+    /// remains closed even after this call.
+    pub fn with_experimental_live_admission(
+        mut self,
+        operator: crate::ExperimentalLiveOperatorConfig,
+        admitted_realms: impl IntoIterator<Item = RealmId>,
+    ) -> Self {
+        self.experimental_live_admission =
+            crate::ExperimentalLiveAdmissionOwner::configured_for_current_build(
+                operator,
+                admitted_realms,
+            );
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_experimental_live_admission_owner_for_test(
+        mut self,
+        owner: crate::ExperimentalLiveAdmissionOwner,
+    ) -> Self {
+        self.experimental_live_admission = owner;
+        self
     }
 
     /// Attach one backend-opened provider-auth persistence capability.
@@ -3451,7 +3814,7 @@ impl AgentFactory {
                 detail: error.to_string(),
             })?
         };
-        registry
+        let registry_entry = registry
             .entry_for_provider(identity.provider, &identity.model)
             .ok_or_else(|| LlmIdentityPreflightError::ModelUnresolvable {
                 detail: format!(
@@ -3460,6 +3823,15 @@ impl AgentFactory {
                     identity.provider.as_str()
                 ),
             })?;
+        if registry_entry.release_stage == meerkat_core::ModelReleaseStage::Experimental {
+            return Err(LlmIdentityPreflightError::ModelUnresolvable {
+                detail: format!(
+                    "experimental model '{}:{}' is channel-scoped and cannot replace durable agent identity",
+                    identity.provider.as_str(),
+                    identity.model
+                ),
+            });
+        }
 
         if matches!(identity.provider, Provider::SelfHosted) {
             return self
@@ -3590,6 +3962,21 @@ impl AgentFactory {
         let registry = config
             .model_registry(meerkat_models::canonical())
             .map_err(|err| FactoryError::ClientCreationFailed(err.to_string()))?;
+        let registry_entry = registry
+            .entry_for_provider(identity.provider, &identity.model)
+            .ok_or_else(|| {
+                FactoryError::ClientCreationFailed(format!(
+                    "model '{}' is not registered for provider '{}'",
+                    identity.model,
+                    identity.provider.as_str()
+                ))
+            })?;
+        if registry_entry.release_stage == meerkat_core::ModelReleaseStage::Experimental {
+            return Err(FactoryError::ExperimentalModelRequiresLiveChannel {
+                provider: identity.provider.as_str(),
+                model: identity.model.clone(),
+            });
+        }
         if matches!(identity.provider, Provider::SelfHosted) {
             return self
                 .build_self_hosted_client_for_identity(
@@ -4572,6 +4959,25 @@ impl AgentFactory {
             .and_then(|metadata| metadata.self_hosted_server_id.clone());
         let (provider, resolved_self_hosted_server_id) =
             self.resolve_provider_from_registry(&registry, &build_config)?;
+        // Durable agent construction is the single fail-closed chokepoint for
+        // release-stage admission. This check deliberately precedes client
+        // overrides, binding selection, credential resolution, lease
+        // publication, and every provider/tool side effect. Experimental
+        // identities are channel-scoped and may only enter through the
+        // separately sealed live admission path.
+        if registry
+            .entry_for_provider(provider, &build_config.model)
+            .is_some_and(|entry| {
+                entry.release_stage == meerkat_core::ModelReleaseStage::Experimental
+            })
+        {
+            return Err(BuildAgentError::LlmClient(
+                FactoryError::ExperimentalModelRequiresLiveChannel {
+                    provider: provider.as_str(),
+                    model: build_config.model.clone(),
+                },
+            ));
+        }
         if let Some(client) = build_config.llm_client_override.as_ref() {
             let claimed_provider = client.provider();
             if !matches!(claimed_provider, Provider::Other) && claimed_provider != provider {
@@ -5875,6 +6281,7 @@ impl AgentFactory {
             .map(meerkat_core::ToolExecutionPolicy::resolve)
             .transpose()
             .map_err(|err| BuildAgentError::Config(format!("Tool access policy: {err}")))?;
+        let tool_dispatch_admission = build_config.tool_dispatch_admission.clone();
 
         let bound_consequence_policy = match &build_config.application_tool_policy {
             meerkat_core::ApplicationToolPolicyBinding::Unmanaged => None,
@@ -5914,7 +6321,8 @@ impl AgentFactory {
                 )
             }
         };
-        let provider_native_tool_policy = if bound_consequence_policy.is_some()
+        let provider_native_tool_policy = if tool_dispatch_admission.is_some()
+            || bound_consequence_policy.is_some()
             || tool_execution_policy
                 .as_ref()
                 .is_some_and(|policy| !policy.is_unrestricted())
@@ -6291,7 +6699,10 @@ impl AgentFactory {
         // reach the inner dispatcher. Provider-native server tools never
         // traverse the dispatcher and cannot be gated here; hosts that need
         // them gated must disable the native capability on gated builds.
-        if tool_execution_policy.is_some() || bound_consequence_policy.is_some() {
+        if tool_execution_policy.is_some()
+            || bound_consequence_policy.is_some()
+            || tool_dispatch_admission.is_some()
+        {
             let mut gate = meerkat_core::ExecutionPolicyGatedDispatcher::new(
                 tools,
                 tool_execution_policy
@@ -6299,6 +6710,9 @@ impl AgentFactory {
             );
             if let Some(policy) = bound_consequence_policy {
                 gate = gate.with_consequence_policy(policy);
+            }
+            if let Some(admission) = tool_dispatch_admission {
+                gate = gate.with_dispatch_admission(admission);
             }
             tools = Arc::new(gate);
         }
@@ -7874,6 +8288,80 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn materialize_preflight_rejects_experimental_live_model_as_durable_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let identity = SessionLlmIdentity {
+            model: "gpt-live-1-codex".to_string(),
+            provider: Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        };
+
+        let error = factory
+            .preflight_llm_identity(&Config::default(), &identity, &BTreeMap::new(), None, None)
+            .await
+            .expect_err("experimental live identity must not replace the durable agent model");
+
+        let LlmIdentityPreflightError::ModelUnresolvable { detail } = error else {
+            panic!("experimental identity must fail at model admission")
+        };
+        assert!(detail.contains("channel-scoped"));
+    }
+
+    struct CountingExperimentalOverride {
+        provider_calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl LlmClient for CountingExperimentalOverride {
+        fn stream<'a>(
+            &'a self,
+            _request: &'a LlmRequest,
+        ) -> Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
+            Box::pin(futures::stream::empty())
+        }
+
+        fn provider(&self) -> Provider {
+            self.provider_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Provider::OpenAI
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn durable_build_rejects_experimental_release_stage_before_override_use() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let provider_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut build = AgentBuildConfig::new("gpt-live-1-codex");
+        build.provider = Some(Provider::OpenAI);
+        build.llm_client_override = Some(Arc::new(CountingExperimentalOverride {
+            provider_calls: Arc::clone(&provider_calls),
+        }));
+
+        let error = match factory.build_agent(build, &Config::default()).await {
+            Ok(_) => panic!("experimental model must not enter durable build"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            BuildAgentError::LlmClient(FactoryError::ExperimentalModelRequiresLiveChannel { .. })
+        ));
+        assert_eq!(
+            provider_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "release-stage denial must happen before a client override is observed"
+        );
+    }
+
     #[cfg(all(feature = "openai", unix, not(target_arch = "wasm32")))]
     #[tokio::test]
     async fn materialize_preflight_executes_command_credential_through_canonical_resolver() {
@@ -8119,6 +8607,7 @@ mod tests {
         // tool — without the override this would resolve the native body.
         let profile = meerkat_core::model_profile::ModelProfile {
             provider: Provider::OpenAI,
+            release_stage: meerkat_core::ModelReleaseStage::Stable,
             model_family: "gpt-5".to_string(),
             supports_temperature: false,
             supports_thinking: false,

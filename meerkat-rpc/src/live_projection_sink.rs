@@ -43,8 +43,8 @@ use meerkat_core::RealtimeTranscriptEvent;
 use meerkat_core::live_adapter::LiveAdapterErrorCode;
 use meerkat_core::types::{AssistantBlock, ContentInput, SessionId, StopReason, Usage};
 use meerkat_live::{
-    LiveChannelCloseFeedback, LiveChannelCloseObservation, LiveChannelId,
-    LiveChannelStatusFeedback, LiveChannelStatusObservation, LiveProjectionError,
+    LiveAssistantOutputAddress, LiveChannelCloseFeedback, LiveChannelCloseObservation,
+    LiveChannelId, LiveChannelStatusFeedback, LiveChannelStatusObservation, LiveProjectionError,
     LiveProjectionSink, LiveTokenString, LiveTranscriptIdentity, LiveTranscriptIdentityError,
     LiveWsTokenAdmission, LiveWsTokenAdmissionPublicErrorClass, LiveWsTokenAdmissionRejection,
     LiveWsTokenAuthority, LiveWsTokenIssue,
@@ -568,8 +568,8 @@ impl LiveProjectionSink for SessionServiceProjectionSink {
         //   - looks up / creates the staged item via `observe_realtime_item`
         //     keyed on `(response_id, item_id)` so final-only providers get
         //     a freshly-staged item,
-        //   - promotes the item lane to `Spoken` (heard transcript always
-        //     materializes as `AssistantBlock::Transcript`),
+        //   - promotes the item lane to `Spoken` (the playback-path
+        //     transcript always materializes as `AssistantBlock::Transcript`),
         //   - REPLACES `content_segments[content_index]` with the
         //     authoritative text — overriding any partial / dropped delta
         //     accumulation,
@@ -609,9 +609,71 @@ impl LiveProjectionSink for SessionServiceProjectionSink {
             .map_err(|err| session_error_to_projection(err, session_id))
     }
 
+    async fn admit_assistant_playback_target(
+        &self,
+        session_id: &SessionId,
+        channel_id: &LiveChannelId,
+        provider_turn_ref: &str,
+        response_id: &str,
+        provider_item_id: &str,
+        content_index: u32,
+    ) -> Result<LiveAssistantOutputAddress, LiveProjectionError> {
+        self.runtime
+            .admit_live_assistant_playback_target(
+                session_id,
+                channel_id.clone(),
+                provider_turn_ref.to_string(),
+                response_id.to_string(),
+                provider_item_id.to_string(),
+                content_index,
+            )
+            .await
+            .map_err(|err| session_error_to_projection(err, session_id))
+    }
+
+    async fn complete_assistant_playback(
+        &self,
+        session_id: &SessionId,
+        channel_id: &LiveChannelId,
+        interaction_id: meerkat_core::InteractionId,
+        response_id: &str,
+        provider_item_id: &str,
+        content_index: u32,
+        stop_reason: StopReason,
+        usage: meerkat_core::TurnUsage,
+    ) -> Result<(), LiveProjectionError> {
+        self.runtime
+            .commit_live_assistant_playback_complete(
+                session_id,
+                channel_id.clone(),
+                interaction_id,
+                response_id.to_string(),
+                provider_item_id.to_string(),
+                content_index,
+                stop_reason,
+                usage,
+            )
+            .await
+            .map(|_receipt| ())
+            .map_err(|err| session_error_to_projection(err, session_id))
+    }
+
+    async fn fail_assistant_output_publication(
+        &self,
+        session_id: &SessionId,
+        address: &LiveAssistantOutputAddress,
+    ) -> Result<(), LiveProjectionError> {
+        self.runtime
+            .fail_assistant_output_publication(session_id, address)
+            .await
+            .map_err(|error| session_error_to_projection(error, session_id))
+    }
+
     async fn truncate_assistant_transcript(
         &self,
         session_id: &SessionId,
+        channel_id: &LiveChannelId,
+        interaction_id: Option<meerkat_core::InteractionId>,
         provider_item_id: Option<&str>,
         _previous_item_id: Option<&str>,
         content_index: Option<u32>,
@@ -634,16 +696,29 @@ impl LiveProjectionSink for SessionServiceProjectionSink {
                 "AssistantTranscriptTruncated missing provider_item_id from adapter".to_string(),
             ));
         };
-        let event = RealtimeTranscriptEvent::AssistantTranscriptTruncated {
-            response_id: response_id.to_string(),
-            item_id: item_id.to_string(),
-            content_index: content_index.unwrap_or(0),
-            text: text.unwrap_or_default().to_string(),
+        let Some(interaction_id) = interaction_id else {
+            return Err(LiveProjectionError::Rejected(
+                "AssistantTranscriptTruncated missing Meerkat interaction identity".to_string(),
+            ));
         };
+        let evidence = text.map_or(
+            meerkat_core::LiveAssistantPlaybackEvidence::Unmeasured,
+            |prefix| {
+                meerkat_core::LiveAssistantPlaybackEvidence::ReportedPrefix(prefix.to_string())
+            },
+        );
         self.runtime
-            .append_realtime_transcript_event(session_id, event)
+            .commit_live_assistant_playback_truncation(
+                session_id,
+                channel_id.clone(),
+                interaction_id,
+                response_id.to_string(),
+                item_id.to_string(),
+                content_index.unwrap_or(0),
+                evidence,
+            )
             .await
-            .map(|_outcome| ())
+            .map(|_receipt| ())
             .map_err(|err| session_error_to_projection(err, session_id))
     }
 
@@ -1124,9 +1199,46 @@ mod tests {
             ));
             Ok(())
         }
+        async fn admit_assistant_playback_target(
+            &self,
+            _session_id: &SessionId,
+            channel_id: &LiveChannelId,
+            _provider_turn_ref: &str,
+            _response_id: &str,
+            _provider_item_id: &str,
+            content_index: u32,
+        ) -> Result<meerkat_live::LiveAssistantOutputAddress, LiveProjectionError> {
+            Ok(meerkat_live::LiveAssistantOutputAddress {
+                channel_id: channel_id.clone(),
+                output_id: "rpc-recording-output".to_string(),
+                content_index,
+            })
+        }
+        async fn complete_assistant_playback(
+            &self,
+            _session_id: &SessionId,
+            _channel_id: &LiveChannelId,
+            _interaction_id: meerkat_core::InteractionId,
+            _response_id: &str,
+            _provider_item_id: &str,
+            _content_index: u32,
+            _stop_reason: StopReason,
+            _usage: meerkat_core::TurnUsage,
+        ) -> Result<(), LiveProjectionError> {
+            Ok(())
+        }
+        async fn fail_assistant_output_publication(
+            &self,
+            _session_id: &SessionId,
+            _address: &meerkat_live::LiveAssistantOutputAddress,
+        ) -> Result<(), LiveProjectionError> {
+            Ok(())
+        }
         async fn truncate_assistant_transcript(
             &self,
             session_id: &SessionId,
+            _channel_id: &LiveChannelId,
+            _interaction_id: Option<meerkat_core::InteractionId>,
             provider_item_id: Option<&str>,
             previous_item_id: Option<&str>,
             content_index: Option<u32>,
@@ -1398,6 +1510,7 @@ mod tests {
         let channel = open_test_channel(&host, session_id.clone()).await;
 
         let obs = LiveAdapterObservation::AssistantTranscriptTruncated {
+            interaction_id: Some(meerkat_core::InteractionId::new()),
             provider_item_id: Some("item_99".to_string()),
             previous_item_id: Some("item_98".to_string()),
             content_index: Some(0),
@@ -2221,7 +2334,7 @@ mod tests {
             Some("resp_42"),
             Some("item_7"),
             Some(0),
-            Some("partial heard prefix"),
+            Some("reported playback prefix"),
         )
         .unwrap();
 
@@ -2244,7 +2357,7 @@ mod tests {
                         assert_ne!(response_id, "");
                         assert_eq!(item_id, "item_7");
                         assert_eq!(*content_index, 0);
-                        assert_eq!(text, "partial heard prefix");
+                        assert_eq!(text, "reported playback prefix");
                     }
                     other => panic!("expected AssistantTranscriptTruncated, got {other:?}"),
                 }

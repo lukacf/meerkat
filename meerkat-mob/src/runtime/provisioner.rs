@@ -3755,6 +3755,10 @@ impl SessionBackend {
             has_handle = handle.is_some(),
             "SessionBackend::admit_runtime_input accepted input with completion"
         );
+        // Only the caller that obtained fresh acceptance owns the post-commit
+        // parent-session projection. In-flight and terminal dedup followers
+        // may observe the same completion but must never enqueue it again.
+        let owns_committed_parent_projection = outcome.is_accepted();
 
         if let Some(queued_context) = queued_context.as_mut() {
             let canonical_input_id = match &outcome {
@@ -3788,8 +3792,22 @@ impl SessionBackend {
 
         let completion = handle.wait().await;
         drop(queued_context);
-        let delivery_outcome = deferred_turn_outcome_from_completion(&completion);
-        let result = runtime_completion_to_mob_result(session_id, completion);
+        let mut delivery_outcome = deferred_turn_outcome_from_completion(&completion);
+        let committed_projection = enqueue_committed_parent_projection_after_runtime_completion(
+            self.session_service.as_ref(),
+            adapter.as_ref(),
+            session_id,
+            owns_committed_parent_projection,
+            &completion,
+        )
+        .await;
+        let mut result = runtime_completion_to_mob_result(session_id, completion);
+        if result.is_ok()
+            && let Err(error) = committed_projection
+        {
+            result = Err(error);
+            delivery_outcome = DeferredTurnEventOutcome::Failed;
+        }
         if let Some(delivery) = deferred_delivery {
             delivery.release(delivery_outcome);
         }
@@ -3902,6 +3920,7 @@ impl SessionBackend {
             // actor boundary. Native runtime-backed paths keep the stricter
             // synchronous admission result below.
             let adapter = Arc::clone(adapter);
+            let session_service = Arc::clone(&self.session_service);
             let state = Arc::clone(&state);
             let task_session_id = session_id.clone();
             let task_input_id = requested_input_id;
@@ -3941,21 +3960,36 @@ impl SessionBackend {
                         }
                     }
                     drop(operation_guard);
-                    Ok::<_, MobError>((handle, queued_context))
+                    Ok::<_, MobError>((handle, queued_context, outcome.is_accepted()))
                 }
                 .await;
 
                 let (result, delivery_outcome) = match admission {
-                    Ok((Some(handle), queued_context)) => {
+                    Ok((Some(handle), queued_context, owns_committed_parent_projection)) => {
                         let completion = handle.wait().await;
                         drop(queued_context);
-                        let delivery_outcome = deferred_turn_outcome_from_completion(&completion);
-                        (
-                            runtime_completion_to_exact_turn(&task_session_id, completion),
-                            delivery_outcome,
-                        )
+                        let mut delivery_outcome =
+                            deferred_turn_outcome_from_completion(&completion);
+                        let committed_projection =
+                            enqueue_committed_parent_projection_after_runtime_completion(
+                                session_service.as_ref(),
+                                adapter.as_ref(),
+                                &task_session_id,
+                                owns_committed_parent_projection,
+                                &completion,
+                            )
+                            .await;
+                        let mut result =
+                            runtime_completion_to_exact_turn(&task_session_id, completion);
+                        if result.is_ok()
+                            && let Err(error) = committed_projection
+                        {
+                            result = Err(error);
+                            delivery_outcome = DeferredTurnEventOutcome::Failed;
+                        }
+                        (result, delivery_outcome)
                     }
-                    Ok((None, mut queued_context)) => {
+                    Ok((None, mut queued_context, _)) => {
                         if let Some(queued_context) = queued_context.as_mut() {
                             queued_context.resolve_without_execution(None);
                         }
@@ -4015,6 +4049,7 @@ impl SessionBackend {
                     return Err(MobError::Internal(error));
                 }
             };
+            let owns_committed_parent_projection = outcome.is_accepted();
 
             if let Some(queued_context) = queued_context.as_mut() {
                 let canonical_input_id = match &outcome {
@@ -4055,11 +4090,29 @@ impl SessionBackend {
             };
 
             let completion_session_id = session_id.clone();
+            let completion_adapter = Arc::clone(adapter);
+            let completion_session_service = Arc::clone(&self.session_service);
             tokio::spawn(async move {
                 let completion = handle.wait().await;
                 drop(queued_context);
-                let delivery_outcome = deferred_turn_outcome_from_completion(&completion);
-                let result = runtime_completion_to_exact_turn(&completion_session_id, completion);
+                let mut delivery_outcome = deferred_turn_outcome_from_completion(&completion);
+                let committed_projection =
+                    enqueue_committed_parent_projection_after_runtime_completion(
+                        completion_session_service.as_ref(),
+                        completion_adapter.as_ref(),
+                        &completion_session_id,
+                        owns_committed_parent_projection,
+                        &completion,
+                    )
+                    .await;
+                let mut result =
+                    runtime_completion_to_exact_turn(&completion_session_id, completion);
+                if result.is_ok()
+                    && let Err(error) = committed_projection
+                {
+                    result = Err(error);
+                    delivery_outcome = DeferredTurnEventOutcome::Failed;
+                }
                 if let Some(delivery) = deferred_delivery {
                     delivery.release(delivery_outcome);
                 }
@@ -4101,6 +4154,50 @@ fn runtime_completion_to_mob_result(
     runtime_completion_to_exact_turn(session_id, completion)
         .and_then(super::handle::legacy_exact_turn_result)
         .map(drop)
+}
+
+#[cfg(feature = "runtime-adapter")]
+fn should_enqueue_committed_parent_projection(
+    owns_committed_parent_projection: bool,
+    completion: &Result<
+        meerkat_runtime::completion::CompletionOutcome,
+        meerkat_runtime::completion::CompletionWaitError,
+    >,
+) -> bool {
+    owns_committed_parent_projection
+        && deferred_turn_outcome_from_completion(completion) == DeferredTurnEventOutcome::Succeeded
+}
+
+#[cfg(feature = "runtime-adapter")]
+async fn enqueue_committed_parent_projection_after_runtime_completion(
+    session_service: &dyn MobSessionService,
+    runtime_adapter: &meerkat_runtime::MeerkatMachine,
+    session_id: &SessionId,
+    owns_committed_parent_projection: bool,
+    completion: &Result<
+        meerkat_runtime::completion::CompletionOutcome,
+        meerkat_runtime::completion::CompletionWaitError,
+    >,
+) -> Result<(), MobError> {
+    if !should_enqueue_committed_parent_projection(owns_committed_parent_projection, completion) {
+        return Ok(());
+    }
+    #[cfg(feature = "experimental-gpt-live")]
+    {
+        return session_service
+            .enqueue_committed_parent_session_boundary_after_runtime_turn(
+                session_id,
+                runtime_adapter,
+            )
+            .await
+            .map(drop)
+            .map_err(|error| session_turn_error_to_mob_error(session_id, error));
+    }
+    #[cfg(not(feature = "experimental-gpt-live"))]
+    {
+        let _ = (session_service, runtime_adapter, session_id);
+        Ok(())
+    }
 }
 
 #[cfg(feature = "runtime-adapter")]
@@ -6326,6 +6423,7 @@ mod tests {
         DeferredTurnEventOutcome, MemberSessionDisposalArc, MultiBackendProvisioner,
         RuntimeSessionDisposalTarget, RuntimeSessionState, SessionBackend,
         defer_turn_events_until_machine_completion, runtime_completion_to_mob_result,
+        should_enqueue_committed_parent_projection,
     };
     use crate::error::MobError;
     use meerkat_core::service::SessionError;
@@ -6676,6 +6774,26 @@ mod tests {
             }
             other => panic!("expected internal mob waiter error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn committed_parent_projection_requires_fresh_successful_runtime_completion() {
+        let success = Ok(meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult);
+        let failed = Ok(meerkat_runtime::completion::CompletionOutcome::Cancelled);
+        let uncommitted = Err(
+            meerkat_runtime::completion::CompletionWaitError::AuthorityUnavailable(
+                "turn did not commit".to_string(),
+            ),
+        );
+
+        assert!(should_enqueue_committed_parent_projection(true, &success));
+        assert!(!should_enqueue_committed_parent_projection(false, &success));
+        assert!(!should_enqueue_committed_parent_projection(true, &failed));
+        assert!(!should_enqueue_committed_parent_projection(false, &failed));
+        assert!(!should_enqueue_committed_parent_projection(
+            true,
+            &uncommitted
+        ));
     }
 
     #[test]

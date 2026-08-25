@@ -119,8 +119,10 @@ pub enum RealtimeSessionEvent {
     },
     /// The assistant output identified by `item_id` was truncated at
     /// `audio_played_ms` because the user barged in. `truncated_text` is the
-    /// heard prefix, or `None` if the provider has not yet re-projected it.
+    /// reported playback prefix, or `None` when playback coverage is
+    /// unmeasured. It is never a biological-hearing claim.
     AssistantTranscriptTruncated {
+        interaction_id: Option<meerkat_core::InteractionId>,
         response_id: Option<String>,
         item_id: String,
         /// Content segment index that was truncated. Some providers (OpenAI
@@ -191,11 +193,11 @@ pub trait RealtimeSession: Send {
     async fn interrupt(&mut self) -> Result<(), LlmError>;
 
     /// Truncate the assistant output for `item_id` to `audio_played_ms` so the
-    /// canonical session transcript reflects what the user actually heard
-    /// before barging in. The adapter is expected to eventually emit
+    /// canonical session transcript may reflect a reported playback prefix
+    /// before barge-in. The adapter is expected to eventually emit
     /// [`RealtimeSessionEvent::AssistantTranscriptTruncated`] with the
-    /// re-projected prefix (or a best-effort approximation if the provider
-    /// cannot supply exact text).
+    /// exact reported prefix. Providers that cannot supply exact prefix text
+    /// must emit `None` rather than an approximation.
     async fn truncate_assistant_output(
         &mut self,
         item_id: String,
@@ -229,6 +231,9 @@ pub struct RealtimeSessionOpenConfig {
     pub llm_identity: SessionLlmIdentity,
     pub visible_tools: Vec<ToolDef>,
     seed_messages: Vec<Message>,
+    /// Canonical committed message cursor at projection time. This remains the
+    /// full document count even when `seed_messages` is windowed.
+    canonical_message_cursor: u64,
     /// Take-once process memory custody spanning canonical image hydration
     /// through provider seed acknowledgement.
     ///
@@ -294,6 +299,7 @@ impl RealtimeSessionOpenConfig {
         visible_tools: Vec<ToolDef>,
         seed_messages: Vec<Message>,
     ) -> Result<Self, LlmError> {
+        let canonical_message_cursor = seed_messages.len() as u64;
         let seed_messages =
             meerkat_core::types::materialize_latest_system_prompt_versions(&seed_messages);
         let canonical_system_messages = Self::canonical_system_messages(&seed_messages);
@@ -303,6 +309,7 @@ impl RealtimeSessionOpenConfig {
             visible_tools,
             seed_messages,
             canonical_system_messages,
+            canonical_message_cursor,
         ))
     }
 
@@ -321,12 +328,14 @@ impl RealtimeSessionOpenConfig {
         let seed_messages =
             meerkat_core::types::materialize_latest_system_prompt_versions(&seed_messages);
         let canonical_system_messages = Self::canonical_system_messages(canonical_messages);
+        let canonical_message_cursor = canonical_messages.len() as u64;
         Ok(Self::new_with_projection(
             turning_mode,
             llm_identity,
             visible_tools,
             seed_messages,
             canonical_system_messages,
+            canonical_message_cursor,
         ))
     }
 
@@ -336,12 +345,14 @@ impl RealtimeSessionOpenConfig {
         visible_tools: Vec<ToolDef>,
         seed_messages: Vec<Message>,
         canonical_system_messages: Vec<String>,
+        canonical_message_cursor: u64,
     ) -> Self {
         Self {
             turning_mode,
             llm_identity,
             visible_tools,
             seed_messages,
+            canonical_message_cursor,
             open_projection_lease: RealtimeOpenProjectionLeaseSlot::default(),
             canonical_system_messages,
             user_content_identities: Vec::new(),
@@ -363,6 +374,7 @@ impl RealtimeSessionOpenConfig {
     ) -> Result<Self, LlmError> {
         let mut config = Self::new(turning_mode, llm_identity, visible_tools, Vec::new())?;
         config.canonical_system_messages = Self::canonical_system_messages(canonical_messages);
+        config.canonical_message_cursor = canonical_messages.len() as u64;
         Ok(config)
     }
 
@@ -400,6 +412,11 @@ impl RealtimeSessionOpenConfig {
         &self.seed_messages
     }
 
+    #[must_use]
+    pub const fn canonical_message_cursor(&self) -> u64 {
+        self.canonical_message_cursor
+    }
+
     /// Replace the canonical seed while atomically re-deriving its System
     /// drift witness.
     pub fn with_seed_messages(mut self, seed_messages: Vec<Message>) -> Result<Self, LlmError> {
@@ -408,6 +425,21 @@ impl RealtimeSessionOpenConfig {
         self.canonical_system_messages = Self::canonical_system_messages(&seed_messages);
         self.seed_messages = seed_messages;
         Ok(self)
+    }
+
+    /// Append a per-open System overlay without changing the canonical
+    /// durable-System drift witness.
+    ///
+    /// This is a narrow compatibility seam for surfaces that historically
+    /// accepted ephemeral instructions on live/open. The overlay reaches the
+    /// provider seed for this open only; refresh still compares against the
+    /// durable session's canonical System sequence.
+    #[doc(hidden)]
+    pub fn append_ephemeral_system_overlay(&mut self, content: String) {
+        self.seed_messages
+            .push(Message::System(meerkat_core::types::SystemMessage::new(
+                content,
+            )));
     }
 
     /// Builder-style durable user-content idempotency registry.

@@ -16,6 +16,7 @@ pub mod tokio {
 
 pub mod ephemeral;
 pub(crate) mod generated;
+mod live_transcript_authority;
 pub mod maintenance;
 pub mod staged_registry;
 pub(crate) mod turn_admission;

@@ -676,6 +676,150 @@ pub fn meerkat_mob_seam_composition() -> CompositionSchema {
                 machine: mi_id("mob"),
                 input_variant: iv_id("Destroy"),
             },
+            // GPT Live uses the existing mob/runtime seam. These entry points
+            // admit provider-neutral observations into MeerkatMachine; worker
+            // placement and execution remain MobMachine-owned through the
+            // existing spawn/submit/retire routes above.
+            EntryInput {
+                name: entry_input_id("bind_live_execution_channel"),
+                machine: mi_id("meerkat"),
+                input_variant: iv_id("BindLiveExecutionChannel"),
+            },
+            EntryInput {
+                name: entry_input_id("stage_experimental_live_execution"),
+                machine: mi_id("meerkat"),
+                input_variant: iv_id("StageExperimentalLiveExecution"),
+            },
+            EntryInput {
+                name: entry_input_id("observe_live_provider_turn_started"),
+                machine: mi_id("meerkat"),
+                input_variant: iv_id("ObserveLiveProviderTurnStarted"),
+            },
+            EntryInput {
+                name: entry_input_id("observe_live_assistant_turn_started"),
+                machine: mi_id("meerkat"),
+                input_variant: iv_id("ObserveLiveAssistantTurnStarted"),
+            },
+            EntryInput {
+                name: entry_input_id("admit_live_interaction"),
+                machine: mi_id("meerkat"),
+                input_variant: iv_id("AdmitLiveInteraction"),
+            },
+            EntryInput {
+                name: entry_input_id("admit_live_delegation"),
+                machine: mi_id("meerkat"),
+                input_variant: iv_id("AdmitLiveDelegation"),
+            },
+            EntryInput {
+                name: entry_input_id("admit_live_interaction_delegation"),
+                machine: mi_id("meerkat"),
+                input_variant: iv_id("AdmitLiveInteractionDelegation"),
+            },
+            EntryInput {
+                name: entry_input_id("reconcile_live_delegation_transcript"),
+                machine: mi_id("meerkat"),
+                input_variant: iv_id("ReconcileLiveDelegationTranscript"),
+            },
+            EntryInput {
+                name: entry_input_id("authorize_live_delegation_worker_start"),
+                machine: mi_id("meerkat"),
+                input_variant: iv_id("AuthorizeLiveDelegationWorkerStart"),
+            },
+            EntryInput {
+                name: entry_input_id("resolve_live_delegation_worker_start"),
+                machine: mi_id("meerkat"),
+                input_variant: iv_id("ResolveLiveDelegationWorkerStart"),
+            },
+            EntryInput {
+                name: entry_input_id("authorize_live_delegation_transcript_cancellation"),
+                machine: mi_id("meerkat"),
+                input_variant: iv_id("AuthorizeLiveDelegationTranscriptTerminalCancellation"),
+            },
+            EntryInput {
+                name: entry_input_id("supersede_live_interaction"),
+                machine: mi_id("meerkat"),
+                input_variant: iv_id("SupersedeLiveInteraction"),
+            },
+            EntryInput {
+                name: entry_input_id("resolve_live_delegation_cancellation"),
+                machine: mi_id("meerkat"),
+                input_variant: iv_id("ResolveLiveDelegationCancellation"),
+            },
+            EntryInput {
+                name: entry_input_id("record_live_delegation_worker_terminal"),
+                machine: mi_id("meerkat"),
+                input_variant: iv_id("RecordLiveDelegationWorkerTerminal"),
+            },
+            EntryInput {
+                name: entry_input_id("authorize_live_delegation_worker_retirement"),
+                machine: mi_id("meerkat"),
+                input_variant: iv_id("AuthorizeLiveDelegationWorkerRetirement"),
+            },
+            EntryInput {
+                name: entry_input_id("resolve_live_delegation_worker_retirement"),
+                machine: mi_id("meerkat"),
+                input_variant: iv_id("ResolveLiveDelegationWorkerRetirement"),
+            },
+            EntryInput {
+                name: entry_input_id("abandon_live_interaction"),
+                machine: mi_id("meerkat"),
+                input_variant: iv_id("AbandonLiveInteraction"),
+            },
+            EntryInput {
+                name: entry_input_id("complete_live_interaction"),
+                machine: mi_id("meerkat"),
+                input_variant: iv_id("CompleteLiveInteraction"),
+            },
+            EntryInput {
+                name: entry_input_id("authorize_live_consequential_effect"),
+                machine: mi_id("meerkat"),
+                input_variant: iv_id("AuthorizeLiveConsequentialEffect"),
+            },
+            EntryInput {
+                name: entry_input_id("authorize_live_delegation_result_release"),
+                machine: mi_id("meerkat"),
+                input_variant: iv_id("AuthorizeLiveDelegationResultRelease"),
+            },
+            EntryInput {
+                name: entry_input_id("authorize_live_delegation_result_delivery"),
+                machine: mi_id("meerkat"),
+                input_variant: iv_id("AuthorizeLiveDelegationResultDelivery"),
+            },
+            EntryInput {
+                name: entry_input_id("resolve_live_delegation_result_delivery"),
+                machine: mi_id("meerkat"),
+                input_variant: iv_id("ResolveLiveDelegationResultDelivery"),
+            },
+            EntryInput {
+                name: entry_input_id("bind_live_delegation_result_recovery_channel"),
+                machine: mi_id("meerkat"),
+                input_variant: iv_id("BindLiveDelegationResultRecoveryChannel"),
+            },
+            EntryInput {
+                name: entry_input_id("enqueue_live_context_row"),
+                machine: mi_id("meerkat"),
+                input_variant: iv_id("EnqueueLiveContextRow"),
+            },
+            EntryInput {
+                name: entry_input_id("advance_live_context_canonical_coverage"),
+                machine: mi_id("meerkat"),
+                input_variant: iv_id("AdvanceLiveContextCanonicalCoverage"),
+            },
+            EntryInput {
+                name: entry_input_id("authorize_live_context_append"),
+                machine: mi_id("meerkat"),
+                input_variant: iv_id("AuthorizeLiveContextAppend"),
+            },
+            EntryInput {
+                name: entry_input_id("resolve_live_context_append"),
+                machine: mi_id("meerkat"),
+                input_variant: iv_id("ResolveLiveContextAppend"),
+            },
+            EntryInput {
+                name: entry_input_id("bind_live_context_recovery_channel"),
+                machine: mi_id("meerkat"),
+                input_variant: iv_id("BindLiveContextRecoveryChannel"),
+            },
         ],
         routes: vec![
             route(

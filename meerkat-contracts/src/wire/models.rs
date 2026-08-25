@@ -14,10 +14,24 @@ pub enum WireModelTier {
     Supported,
 }
 
+/// Release maturity of a catalog model.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireModelReleaseStage {
+    #[default]
+    Stable,
+    Experimental,
+    OperatorDefined,
+}
+
 /// Runtime profile for a model — capabilities and parameter schema.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WireModelProfile {
+    /// Release maturity and admission class.
+    #[serde(default)]
+    pub release_stage: WireModelReleaseStage,
     /// Model family identifier (e.g., `"claude-opus-4"`, `"gpt-5"`).
     pub model_family: String,
     /// Whether the model accepts a `temperature` parameter.
@@ -105,6 +119,9 @@ pub struct CatalogModelEntry {
     pub display_name: String,
     /// Recommendation tier.
     pub tier: WireModelTier,
+    /// Release maturity and admission class.
+    #[serde(default)]
+    pub release_stage: WireModelReleaseStage,
     /// Maximum input context window in tokens.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u32>,

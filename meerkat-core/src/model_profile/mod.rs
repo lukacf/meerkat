@@ -20,7 +20,7 @@ use crate::Provider;
 use crate::model_profile::capabilities::{BetaHeader, ModelCapabilities, ThinkingSupport};
 use crate::model_profile::catalog::{
     CatalogEntry, ImageGenerationModelProfile, ImageGenerationModelRoute,
-    ImageGenerationProviderDefaults, ProviderDefaults,
+    ImageGenerationProviderDefaults, ModelReleaseStage, ProviderDefaults,
 };
 use serde::{Deserialize, Serialize};
 
@@ -34,6 +34,9 @@ use serde::{Deserialize, Serialize};
 pub struct ModelProfile {
     /// Provider that serves this model.
     pub provider: Provider,
+    /// Release maturity and admission class owned by the model catalog.
+    #[serde(default)]
+    pub release_stage: ModelReleaseStage,
     /// Model family identifier (a stable grouping key for related model ids).
     pub model_family: String,
     /// Whether the model accepts a `temperature` parameter.
@@ -97,6 +100,7 @@ impl From<&BetaHeader> for ModelBetaHeader {
 pub fn project_to_profile(caps: &ModelCapabilities) -> ModelProfile {
     ModelProfile {
         provider: caps.provider,
+        release_stage: caps.release_stage,
         model_family: caps.model_family.to_string(),
         supports_temperature: caps.supports_temperature,
         supports_thinking: caps.thinking != ThinkingSupport::None,

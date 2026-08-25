@@ -2375,6 +2375,7 @@ pub enum LiveCommandPublicKind {
     CommitInput,
     Interrupt,
     TruncateAssistantOutput,
+    CompleteAssistantPlayback,
 }
 
 /// Closed classifier for live command rejection observations. The live host
@@ -2554,6 +2555,92 @@ pub enum RealtimeTranscriptLaneKind {
     #[default]
     Display,
     Spoken,
+}
+
+/// Bridging copy of the catalog-owned live delegation reconciliation state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveDelegationReconciliation {
+    #[default]
+    Provisional,
+    Confirmed,
+    MaterialConflict,
+    Missing,
+}
+
+/// Bridging copy of the catalog-owned live delegation worker lifecycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveDelegationWorkerPhase {
+    #[default]
+    StartAuthorized,
+    Running,
+    CancelAuthorized,
+    Terminal,
+    RetirementAuthorized,
+    Retired,
+    Failed,
+}
+
+/// Bridging copy of the machine-derived live delegation cancellation reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveDelegationCancellationReason {
+    #[default]
+    Abandoned,
+    Superseded,
+    TranscriptConflict,
+    TranscriptMissing,
+}
+
+/// Bridging copy of the shell-observed cancellation outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveDelegationCancellationOutcome {
+    #[default]
+    Cancelled,
+    AlreadyTerminal,
+    Failed,
+}
+
+/// Bridging copy of the shell-observed worker terminal kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveDelegationWorkerTerminalKind {
+    #[default]
+    Completed,
+    Cancelled,
+    Failed,
+}
+
+/// Bridging copy of the catalog-owned context append observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveContextAppendObservation {
+    #[default]
+    Delivered,
+    Rejected,
+    Ambiguous,
+}
+
+/// Bridging copy of SessionDocument's generated committed-row disposition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveContextRowDisposition {
+    #[default]
+    MirrorParentText,
+    AlreadyPresentInLiveChannel,
+    ExcludedFromLiveContext,
+}
+
+/// Bridging copy of the catalog-owned delegation result disposition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveDelegationResultDisposition {
+    #[default]
+    OpenTurn,
+    DeferredContext,
+}
+
+/// Bridging copy of the catalog-owned delegation result delivery observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveDelegationResultDeliveryObservation {
+    #[default]
+    Delivered,
+    Rejected,
+    Ambiguous,
 }
 
 /// Typed mirror of the public runtime lifecycle projection. The shell passes

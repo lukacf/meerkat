@@ -185,6 +185,73 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `live_active_channel_by_session`: `Map<String, String>`
 - `live_channel_session_by_channel`: `Map<String, String>`
 - `live_channel_identity_by_channel`: `Map<String, SessionLlmIdentity>`
+- `live_execution_runtime_id_by_channel`: `Map<String, AgentRuntimeId>`
+- `live_execution_fence_by_channel`: `Map<String, FenceToken>`
+- `live_execution_generation_by_channel`: `Map<String, Generation>`
+- `live_experimental_staged_runtime_by_channel`: `Map<String, AgentRuntimeId>`
+- `live_experimental_staged_fence_by_channel`: `Map<String, FenceToken>`
+- `live_experimental_staged_generation_by_channel`: `Map<String, Generation>`
+- `live_experimental_staged_seed_cursor_by_channel`: `Map<String, u64>`
+- `live_experimental_execution_channels`: `Set<String>`
+- `live_interaction_channel_by_id`: `Map<String, String>`
+- `live_active_interaction_by_channel`: `Map<String, String>`
+- `live_provider_turn_by_channel`: `Map<String, String>`
+- `live_provider_interaction_by_turn`: `Map<String, String>`
+- `live_provider_turn_channel_by_ref`: `Map<String, String>`
+- `live_awaiting_assistant_interaction_by_channel`: `Map<String, String>`
+- `live_assistant_interaction_by_turn`: `Map<String, String>`
+- `live_assistant_turn_channel_by_ref`: `Map<String, String>`
+- `live_abandoned_interactions`: `Set<String>`
+- `live_delegation_interaction_by_channel`: `Map<String, String>`
+- `live_delegation_operation_by_channel`: `Map<String, OperationId>`
+- `live_delegation_provider_turn_by_channel`: `Map<String, String>`
+- `live_delegation_interaction_by_operation`: `Map<OperationId, String>`
+- `live_delegation_provider_turn_by_operation`: `Map<OperationId, String>`
+- `live_delegation_reconciliation_by_operation`: `Map<OperationId, LiveDelegationReconciliation>`
+- `live_delegation_worker_identity_by_operation`: `Map<OperationId, String>`
+- `live_delegation_worker_phase_by_operation`: `Map<OperationId, LiveDelegationWorkerPhase>`
+- `live_delegation_cancellation_reason_by_operation`: `Map<OperationId, LiveDelegationCancellationReason>`
+- `live_delegation_worker_terminal_by_operation`: `Map<OperationId, LiveDelegationWorkerTerminalKind>`
+- `live_delegation_result_eligible_operations`: `Set<OperationId>`
+- `live_delegation_late_terminal_operations`: `Set<OperationId>`
+- `live_consequential_effect_operation_by_authority`: `Map<String, OperationId>`
+- `live_result_released_operations`: `Set<OperationId>`
+- `live_result_release_disposition_by_operation`: `Map<OperationId, LiveDelegationResultDisposition>`
+- `live_result_delivery_channel_by_operation`: `Map<OperationId, String>`
+- `live_result_delivery_digest_by_operation`: `Map<OperationId, String>`
+- `live_result_delivery_observation_by_operation`: `Map<OperationId, LiveDelegationResultDeliveryObservation>`
+- `live_result_recovery_replacement_by_channel`: `Map<String, String>`
+- `live_result_recovery_source_by_replacement`: `Map<String, String>`
+- `live_result_recovery_session_by_channel`: `Map<String, String>`
+- `live_result_recovery_operation_by_channel`: `Map<String, OperationId>`
+- `live_result_recovery_digest_by_channel`: `Map<String, String>`
+- `live_result_recovery_seed_cursor_by_channel`: `Map<String, u64>`
+- `live_result_recovery_identity_by_channel`: `Map<String, SessionLlmIdentity>`
+- `live_result_recovery_runtime_id_by_channel`: `Map<String, AgentRuntimeId>`
+- `live_result_recovery_fence_by_channel`: `Map<String, FenceToken>`
+- `live_result_recovery_generation_by_channel`: `Map<String, Generation>`
+- `live_context_cursor_by_channel`: `Map<String, u64>`
+- `live_context_queued_session_by_append`: `Map<String, String>`
+- `live_context_queued_cursor_by_append`: `Map<String, u64>`
+- `live_context_queued_digest_by_append`: `Map<String, String>`
+- `live_context_queued_commit_token_by_append`: `Map<String, String>`
+- `live_context_queued_disposition_by_append`: `Map<String, LiveContextRowDisposition>`
+- `live_context_queued_append_by_cursor`: `Map<u64, String>`
+- `live_context_pending_append_by_channel`: `Map<String, String>`
+- `live_context_pending_channel_by_append`: `Map<String, String>`
+- `live_context_pending_previous_cursor_by_append`: `Map<String, u64>`
+- `live_context_pending_next_cursor_by_append`: `Map<String, u64>`
+- `live_context_delivered_append_ids`: `Set<String>`
+- `live_context_ambiguous_no_retry`: `Set<String>`
+- `live_context_recovery_replacement_by_channel`: `Map<String, String>`
+- `live_context_recovery_source_by_replacement`: `Map<String, String>`
+- `live_context_recovery_session_by_channel`: `Map<String, String>`
+- `live_context_recovery_append_by_channel`: `Map<String, String>`
+- `live_context_recovery_seed_cursor_by_channel`: `Map<String, u64>`
+- `live_context_recovery_identity_by_channel`: `Map<String, SessionLlmIdentity>`
+- `live_context_recovery_runtime_id_by_channel`: `Map<String, AgentRuntimeId>`
+- `live_context_recovery_fence_by_channel`: `Map<String, FenceToken>`
+- `live_context_recovery_generation_by_channel`: `Map<String, Generation>`
 - `live_refresh_result_sequence`: `u64`
 - `live_refresh_queue_acceptance_sequence_by_channel`: `Map<String, u64>`
 - `live_refresh_status_by_channel`: `Map<String, LiveRefreshPublicStatus>`
@@ -350,6 +417,35 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AcceptWithCompletion`(input_id: InputId, request_immediate_processing: Bool, interrupt_yielding: Bool, wake_if_idle: Bool)
 - `AcceptWithoutWake`(input_id: InputId)
 - `Recycle`
+- `BindLiveExecutionChannel`(session_id: String, channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, canonical_seed_cursor: u64)
+- `StageExperimentalLiveExecution`(session_id: String, channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, canonical_seed_cursor: u64)
+- `ObserveLiveProviderTurnStarted`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, provider_turn_ref: String)
+- `ObserveLiveAssistantTurnStarted`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, assistant_turn_ref: String)
+- `AdmitLiveInteraction`(session_id: String, channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String)
+- `AdmitLiveDelegation`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, provider_turn_correlation: String, delegation_identity_present: Bool, actionable_input_present: Bool, exact_join: Bool)
+- `AdmitLiveInteractionDelegation`(session_id: String, channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, provider_turn_correlation: String, delegation_identity_present: Bool, actionable_input_present: Bool, exact_join: Bool)
+- `ReconcileLiveDelegationTranscript`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, provider_turn_correlation: String, final_transcript_committed: Bool, normalized_digest_matches: Bool)
+- `AuthorizeLiveDelegationWorkerStart`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, provider_turn_correlation: String, worker_identity: String)
+- `ResolveLiveDelegationWorkerStart`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, worker_identity: String, started: Bool)
+- `AuthorizeLiveDelegationTranscriptTerminalCancellation`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, worker_identity: String)
+- `SupersedeLiveInteraction`(session_id: String, channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, superseding_interaction_id: String, operation_id: OperationId, worker_identity: String)
+- `ResolveLiveDelegationCancellation`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, worker_identity: String, outcome: LiveDelegationCancellationOutcome)
+- `RecordLiveDelegationWorkerTerminal`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, worker_identity: String, terminal: LiveDelegationWorkerTerminalKind)
+- `AuthorizeLiveDelegationWorkerRetirement`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, worker_identity: String)
+- `ResolveLiveDelegationWorkerRetirement`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, worker_identity: String, retired: Bool)
+- `AbandonLiveInteraction`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String)
+- `CompleteLiveInteraction`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, provider_turn_ref: String)
+- `AuthorizeLiveConsequentialEffect`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, authority_id: String)
+- `AuthorizeLiveDelegationResultRelease`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, provider_turn_correlation: String)
+- `AuthorizeLiveDelegationResultDelivery`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, provider_turn_correlation: String, result_digest: String, disposition: LiveDelegationResultDisposition)
+- `ResolveLiveDelegationResultDelivery`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, operation_id: OperationId, result_digest: String, replacement_channel_id: String, observation: LiveDelegationResultDeliveryObservation)
+- `BindLiveDelegationResultRecoveryChannel`(session_id: String, closing_channel_id: String, replacement_channel_id: String, answer_observation_sequence: u64, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, operation_id: OperationId, result_digest: String, canonical_seed_cursor: u64)
+- `AuthorizeLiveContextAppend`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, append_id: String, previous_cursor: u64, next_cursor: u64)
+- `EnqueueLiveContextRow`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, append_id: String, canonical_cursor: u64, content_digest: String, commit_authority_token: String, disposition: LiveContextRowDisposition)
+- `AdvanceLiveContextCanonicalCoverage`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, append_id: String, previous_cursor: u64, next_cursor: u64, disposition: LiveContextRowDisposition)
+- `ResolveLiveContextAppend`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, append_id: String, previous_cursor: u64, next_cursor: u64, replacement_channel_id: String, observation: LiveContextAppendObservation)
+- `BindLiveContextRecoveryChannel`(session_id: String, closing_channel_id: String, replacement_channel_id: String, answer_observation_sequence: u64, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, append_id: String, canonical_seed_cursor: u64)
+- `RecordLiveWebrtcAnswerAcceptedAndBindExecution`(session_id: String, channel_id: String, answer_observation_sequence: u64, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, canonical_seed_cursor: u64)
 - `RequestDeferredTools`(authorities: Map<ToolName, ToolVisibilityWitness>)
 
 ## Surface-only Inputs
@@ -760,10 +856,42 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `LiveWebrtcTokenIssued`(session_id: String, channel_id: String, token: String, expires_at_ms: u64, sequence: u64)
 - `LiveWebrtcAnswerAdmissionResolved`(session_id: String, channel_id: String, token: String, admitted: Bool, rejection: Option<LiveWebrtcAnswerAdmissionRejection>, public_error_class: Option<LiveChannelRequestRejectionPublicErrorClass>, sequence: u64)
 - `LiveWebrtcAnswerResultResolved`(channel_id: String, status: LiveWebrtcAnswerPublicStatus, answered: Bool, sequence: u64, answer_observation_sequence: u64)
+- `LiveWebrtcAnswerAcceptedAndExecutionBound`(session_id: String, channel_id: String, status: LiveWebrtcAnswerPublicStatus, answered: Bool, sequence: u64, answer_observation_sequence: u64, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, canonical_seed_cursor: u64)
 - `LiveWebsocketTokenIssued`(session_id: String, channel_id: String, token: String, expires_at_ms: u64, sequence: u64)
 - `LiveWebsocketTokenAdmissionResolved`(session_id: String, channel_id: String, token: String, admitted: Bool, rejection: Option<LiveWebsocketTokenAdmissionRejection>, public_error_class: Option<LiveWebsocketTokenAdmissionPublicErrorClass>, sequence: u64)
 - `LiveOpenAdmissionResolved`(session_id: String, channel_id: String, bound_llm_identity: Option<SessionLlmIdentity>, admitted: Bool, rejection: Option<LiveOpenAdmissionRejection>, sequence: u64)
 - `LiveOpenAdmissionAbandoned`(session_id: String, channel_id: String, sequence: u64)
+- `LiveExecutionChannelBound`(session_id: String, channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, canonical_seed_cursor: u64)
+- `ExperimentalLiveExecutionStaged`(session_id: String, channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, canonical_seed_cursor: u64)
+- `LiveInteractionAdmitted`(session_id: String, channel_id: String, interaction_id: String)
+- `LiveDelegationAdmitted`(channel_id: String, interaction_id: String, operation_id: OperationId, provider_turn_correlation: String)
+- `LiveInteractionDelegationAdmitted`(session_id: String, channel_id: String, interaction_id: String, operation_id: OperationId, provider_turn_correlation: String)
+- `LiveDelegationTranscriptReconciled`(channel_id: String, interaction_id: String, operation_id: OperationId, reconciliation: LiveDelegationReconciliation, cancellation_required: Bool)
+- `LiveDelegationWorkerStartAuthorized`(channel_id: String, interaction_id: String, operation_id: OperationId, worker_identity: String)
+- `LiveDelegationWorkerStartResolved`(channel_id: String, interaction_id: String, operation_id: OperationId, worker_identity: String, started: Bool)
+- `LiveDelegationCancellationAuthorized`(channel_id: String, interaction_id: String, operation_id: OperationId, worker_identity: String, reason: LiveDelegationCancellationReason, superseding_interaction_id: Option<String>)
+- `LiveDelegationCancellationResolved`(channel_id: String, interaction_id: String, operation_id: OperationId, worker_identity: String, outcome: LiveDelegationCancellationOutcome)
+- `LiveDelegationWorkerTerminalRecorded`(channel_id: String, interaction_id: String, operation_id: OperationId, worker_identity: String, terminal: LiveDelegationWorkerTerminalKind, late: Bool, result_eligible: Bool)
+- `LiveDelegationWorkerRetirementAuthorized`(channel_id: String, interaction_id: String, operation_id: OperationId, worker_identity: String)
+- `LiveDelegationWorkerRetirementResolved`(channel_id: String, interaction_id: String, operation_id: OperationId, worker_identity: String, retired: Bool)
+- `LiveInteractionAbandoned`(channel_id: String, interaction_id: String)
+- `LiveInteractionSupersededWithoutCancellation`(channel_id: String, interaction_id: String, operation_id: OperationId, superseding_interaction_id: String)
+- `LiveInteractionCompleted`(channel_id: String, interaction_id: String)
+- `LiveProviderTurnStarted`(channel_id: String, interaction_id: String, provider_turn_ref: String)
+- `LiveAssistantTurnStarted`(channel_id: String, interaction_id: String, assistant_turn_ref: String)
+- `LiveProviderTurnFinished`(channel_id: String, interaction_id: String, provider_turn_ref: String)
+- `LiveConsequentialEffectAuthorized`(channel_id: String, interaction_id: String, operation_id: OperationId, authority_id: String)
+- `LiveDelegationResultReleaseAuthorized`(channel_id: String, interaction_id: String, operation_id: OperationId, provider_turn_correlation: String, disposition: LiveDelegationResultDisposition)
+- `LiveDelegationResultDeliveryAuthorized`(channel_id: String, interaction_id: String, operation_id: OperationId, provider_turn_correlation: String, result_digest: String, disposition: LiveDelegationResultDisposition)
+- `LiveDelegationResultDeliveryResolved`(channel_id: String, operation_id: OperationId, result_digest: String, disposition: LiveDelegationResultDisposition, observation: LiveDelegationResultDeliveryObservation, retry_allowed: Bool, recovery_required: Bool)
+- `LiveDelegationResultAmbiguityRecoveryAuthorized`(session_id: String, closing_channel_id: String, replacement_channel_id: String, interaction_id: String, operation_id: OperationId, provider_turn_correlation: String, result_digest: String, disposition: LiveDelegationResultDisposition, canonical_seed_cursor: u64, llm_identity: SessionLlmIdentity, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
+- `LiveDelegationResultRecoveryChannelBound`(session_id: String, closing_channel_id: String, replacement_channel_id: String, operation_id: OperationId, result_digest: String, canonical_seed_cursor: u64, status: LiveWebrtcAnswerPublicStatus, answered: Bool, sequence: u64, answer_observation_sequence: u64, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
+- `LiveContextAppendAuthorized`(channel_id: String, append_id: String, previous_cursor: u64, next_cursor: u64)
+- `LiveContextRowQueued`(session_id: String, channel_id: String, append_id: String, canonical_cursor: u64, disposition: LiveContextRowDisposition)
+- `LiveContextCanonicalCoverageAdvanced`(channel_id: String, append_id: String, previous_cursor: u64, next_cursor: u64, disposition: LiveContextRowDisposition)
+- `LiveContextAppendResolved`(channel_id: String, append_id: String, cursor: u64, observation: LiveContextAppendObservation, retry_allowed: Bool)
+- `LiveContextAmbiguityRecoveryAuthorized`(session_id: String, closing_channel_id: String, replacement_channel_id: String, append_id: String, canonical_seed_cursor: u64, llm_identity: SessionLlmIdentity, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
+- `LiveContextRecoveryChannelBound`(session_id: String, closing_channel_id: String, replacement_channel_id: String, append_id: String, canonical_seed_cursor: u64, status: LiveWebrtcAnswerPublicStatus, answered: Bool, sequence: u64, answer_observation_sequence: u64, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
 - `SessionEventStreamOpenResolved`(stream_id: String, session_id: String, opened: Bool, sequence: u64)
 - `SessionEventStreamTerminalResolved`(stream_id: String, session_id: String, reason: RpcEventStreamTerminalReason, error_code: Option<RpcEventStreamTerminalErrorCode>, detail: Option<String>, sequence: u64)
 - `SessionEventStreamCloseResolved`(stream_id: String, closed: Bool, already_closed: Bool, sequence: u64)
@@ -1040,6 +1168,24 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ## Invariants
 - `fence_requires_bound_runtime`
 - `runtime_generation_requires_bound_runtime`
+- `live_execution_binding_is_complete_and_channel_scoped`
+- `live_experimental_execution_custody_is_exact`
+- `live_active_interaction_is_exactly_channel_bound`
+- `live_provider_turn_occupancy_has_exact_interaction`
+- `live_assistant_turn_is_frozen_to_exact_foreground_interaction`
+- `live_pending_delegation_is_serialized_and_complete`
+- `live_delegation_operation_has_exact_join_identity`
+- `live_delegation_worker_binding_is_exact`
+- `live_delegation_terminal_is_worker_bound`
+- `live_delegation_result_eligibility_is_terminal_and_confirmed`
+- `live_delegation_late_terminal_never_eligible`
+- `live_released_result_requires_confirmed_transcript`
+- `live_result_delivery_is_exact_and_terminal_once`
+- `live_result_recovery_is_exact_and_channel_scoped`
+- `live_consequential_authority_requires_confirmed_transcript`
+- `live_pending_context_append_is_exact_and_channel_scoped`
+- `live_context_outbox_is_exact_and_session_scoped`
+- `live_context_recovery_is_exact_and_channel_scoped`
 - `runtime_epoch_requires_registered_session`
 - `runtime_binding_identity_is_typed`
 - `running_has_current_run`
@@ -13358,6 +13504,1715 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `LiveOpenAdmissionAbandoned`
 - To: `Stopped`
 
+### `StageExperimentalLiveExecutionIdle`
+- From: `Idle`
+- On: `StageExperimentalLiveExecution`(session_id, channel_id, runtime_id, fence_token, generation, canonical_seed_cursor)
+- Guards:
+  - `channel_binding_matches`
+  - `runtime_incarnation_matches`
+  - `fence_incarnation_matches`
+  - `generation_incarnation_matches`
+  - `execution_not_bound`
+  - `experimental_stage_absent`
+- Emits: `ExperimentalLiveExecutionStaged`
+- To: `Idle`
+
+### `StageExperimentalLiveExecutionAttached`
+- From: `Attached`
+- On: `StageExperimentalLiveExecution`(session_id, channel_id, runtime_id, fence_token, generation, canonical_seed_cursor)
+- Guards:
+  - `channel_binding_matches`
+  - `runtime_incarnation_matches`
+  - `fence_incarnation_matches`
+  - `generation_incarnation_matches`
+  - `execution_not_bound`
+  - `experimental_stage_absent`
+- Emits: `ExperimentalLiveExecutionStaged`
+- To: `Attached`
+
+### `StageExperimentalLiveExecutionRunning`
+- From: `Running`
+- On: `StageExperimentalLiveExecution`(session_id, channel_id, runtime_id, fence_token, generation, canonical_seed_cursor)
+- Guards:
+  - `channel_binding_matches`
+  - `runtime_incarnation_matches`
+  - `fence_incarnation_matches`
+  - `generation_incarnation_matches`
+  - `execution_not_bound`
+  - `experimental_stage_absent`
+- Emits: `ExperimentalLiveExecutionStaged`
+- To: `Running`
+
+### `BindLiveExecutionChannelIdle`
+- From: `Idle`
+- On: `BindLiveExecutionChannel`(session_id, channel_id, runtime_id, fence_token, generation, canonical_seed_cursor)
+- Guards:
+  - `channel_binding_matches`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `execution_binding_absent`
+  - `channel_is_not_pending_recovery_replacement`
+  - `channel_is_not_staged_experimental`
+- Emits: `LiveExecutionChannelBound`
+- To: `Idle`
+
+### `BindLiveExecutionChannelAttached`
+- From: `Attached`
+- On: `BindLiveExecutionChannel`(session_id, channel_id, runtime_id, fence_token, generation, canonical_seed_cursor)
+- Guards:
+  - `channel_binding_matches`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `execution_binding_absent`
+  - `channel_is_not_pending_recovery_replacement`
+  - `channel_is_not_staged_experimental`
+- Emits: `LiveExecutionChannelBound`
+- To: `Attached`
+
+### `BindLiveExecutionChannelRunning`
+- From: `Running`
+- On: `BindLiveExecutionChannel`(session_id, channel_id, runtime_id, fence_token, generation, canonical_seed_cursor)
+- Guards:
+  - `channel_binding_matches`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `execution_binding_absent`
+  - `channel_is_not_pending_recovery_replacement`
+  - `channel_is_not_staged_experimental`
+- Emits: `LiveExecutionChannelBound`
+- To: `Running`
+
+### `ObserveLiveProviderTurnStartedIdle`
+- From: `Idle`
+- On: `ObserveLiveProviderTurnStarted`(channel_id, runtime_id, fence_token, generation, interaction_id, provider_turn_ref)
+- Guards:
+  - `identities_present`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `interaction_unique`
+  - `channel_has_no_active_provider_turn`
+- Emits: `LiveProviderTurnStarted`
+- To: `Idle`
+
+### `ObserveLiveProviderTurnStartedAttached`
+- From: `Attached`
+- On: `ObserveLiveProviderTurnStarted`(channel_id, runtime_id, fence_token, generation, interaction_id, provider_turn_ref)
+- Guards:
+  - `identities_present`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `interaction_unique`
+  - `channel_has_no_active_provider_turn`
+- Emits: `LiveProviderTurnStarted`
+- To: `Attached`
+
+### `ObserveLiveProviderTurnStartedRunning`
+- From: `Running`
+- On: `ObserveLiveProviderTurnStarted`(channel_id, runtime_id, fence_token, generation, interaction_id, provider_turn_ref)
+- Guards:
+  - `identities_present`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `interaction_unique`
+  - `channel_has_no_active_provider_turn`
+- Emits: `LiveProviderTurnStarted`
+- To: `Running`
+
+### `ObserveLiveAssistantTurnStartedIdle`
+- From: `Idle`
+- On: `ObserveLiveAssistantTurnStarted`(channel_id, runtime_id, fence_token, generation, assistant_turn_ref)
+- Guards:
+  - `identity_present`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `foreground_interaction_exists`
+  - `assistant_turn_is_new`
+- Emits: `LiveAssistantTurnStarted`
+- To: `Idle`
+
+### `ObserveLiveAssistantTurnStartedAttached`
+- From: `Attached`
+- On: `ObserveLiveAssistantTurnStarted`(channel_id, runtime_id, fence_token, generation, assistant_turn_ref)
+- Guards:
+  - `identity_present`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `foreground_interaction_exists`
+  - `assistant_turn_is_new`
+- Emits: `LiveAssistantTurnStarted`
+- To: `Attached`
+
+### `ObserveLiveAssistantTurnStartedRunning`
+- From: `Running`
+- On: `ObserveLiveAssistantTurnStarted`(channel_id, runtime_id, fence_token, generation, assistant_turn_ref)
+- Guards:
+  - `identity_present`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `foreground_interaction_exists`
+  - `assistant_turn_is_new`
+- Emits: `LiveAssistantTurnStarted`
+- To: `Running`
+
+### `AdmitLiveInteractionIdle`
+- From: `Idle`
+- On: `AdmitLiveInteraction`(session_id, channel_id, runtime_id, fence_token, generation, interaction_id)
+- Guards:
+  - `identity_present`
+  - `channel_binding_matches`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `interaction_unique`
+  - `channel_has_no_active_interaction`
+- Emits: `LiveInteractionAdmitted`
+- To: `Idle`
+
+### `AdmitLiveInteractionAttached`
+- From: `Attached`
+- On: `AdmitLiveInteraction`(session_id, channel_id, runtime_id, fence_token, generation, interaction_id)
+- Guards:
+  - `identity_present`
+  - `channel_binding_matches`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `interaction_unique`
+  - `channel_has_no_active_interaction`
+- Emits: `LiveInteractionAdmitted`
+- To: `Attached`
+
+### `AdmitLiveInteractionRunning`
+- From: `Running`
+- On: `AdmitLiveInteraction`(session_id, channel_id, runtime_id, fence_token, generation, interaction_id)
+- Guards:
+  - `identity_present`
+  - `channel_binding_matches`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `interaction_unique`
+  - `channel_has_no_active_interaction`
+- Emits: `LiveInteractionAdmitted`
+- To: `Running`
+
+### `AdmitLiveDelegationIdle`
+- From: `Idle`
+- On: `AdmitLiveDelegation`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_correlation, delegation_identity_present, actionable_input_present, exact_join)
+- Guards:
+  - `provider_turn_present`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `interaction_is_active`
+  - `interaction_not_abandoned`
+  - `one_pending_delegation`
+  - `exact_actionable_join`
+  - `operation_not_known`
+- Emits: `LiveDelegationAdmitted`
+- To: `Idle`
+
+### `AdmitLiveDelegationAttached`
+- From: `Attached`
+- On: `AdmitLiveDelegation`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_correlation, delegation_identity_present, actionable_input_present, exact_join)
+- Guards:
+  - `provider_turn_present`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `interaction_is_active`
+  - `interaction_not_abandoned`
+  - `one_pending_delegation`
+  - `exact_actionable_join`
+  - `operation_not_known`
+- Emits: `LiveDelegationAdmitted`
+- To: `Attached`
+
+### `AdmitLiveDelegationRunning`
+- From: `Running`
+- On: `AdmitLiveDelegation`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_correlation, delegation_identity_present, actionable_input_present, exact_join)
+- Guards:
+  - `provider_turn_present`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `interaction_is_active`
+  - `interaction_not_abandoned`
+  - `one_pending_delegation`
+  - `exact_actionable_join`
+  - `operation_not_known`
+- Emits: `LiveDelegationAdmitted`
+- To: `Running`
+
+### `AdmitLiveInteractionDelegationIdle`
+- From: `Idle`
+- On: `AdmitLiveInteractionDelegation`(session_id, channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_correlation, delegation_identity_present, actionable_input_present, exact_join)
+- Guards:
+  - `identities_present`
+  - `channel_binding_matches`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `channel_has_no_active_interaction_or_delegation`
+  - `exact_actionable_join`
+  - `identities_are_fresh`
+- Emits: `LiveInteractionDelegationAdmitted`
+- To: `Idle`
+
+### `AdmitLiveInteractionDelegationAttached`
+- From: `Attached`
+- On: `AdmitLiveInteractionDelegation`(session_id, channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_correlation, delegation_identity_present, actionable_input_present, exact_join)
+- Guards:
+  - `identities_present`
+  - `channel_binding_matches`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `channel_has_no_active_interaction_or_delegation`
+  - `exact_actionable_join`
+  - `identities_are_fresh`
+- Emits: `LiveInteractionDelegationAdmitted`
+- To: `Attached`
+
+### `AdmitLiveInteractionDelegationRunning`
+- From: `Running`
+- On: `AdmitLiveInteractionDelegation`(session_id, channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_correlation, delegation_identity_present, actionable_input_present, exact_join)
+- Guards:
+  - `identities_present`
+  - `channel_binding_matches`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `channel_has_no_active_interaction_or_delegation`
+  - `exact_actionable_join`
+  - `identities_are_fresh`
+- Emits: `LiveInteractionDelegationAdmitted`
+- To: `Running`
+
+### `AuthorizeLiveDelegationWorkerStartIdle`
+- From: `Idle`
+- On: `AuthorizeLiveDelegationWorkerStart`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_correlation, worker_identity)
+- Guards:
+  - `worker_identity_present`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_operation_join`
+  - `worker_unbound`
+- Emits: `LiveDelegationWorkerStartAuthorized`
+- To: `Idle`
+
+### `AuthorizeLiveDelegationWorkerStartAttached`
+- From: `Attached`
+- On: `AuthorizeLiveDelegationWorkerStart`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_correlation, worker_identity)
+- Guards:
+  - `worker_identity_present`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_operation_join`
+  - `worker_unbound`
+- Emits: `LiveDelegationWorkerStartAuthorized`
+- To: `Attached`
+
+### `AuthorizeLiveDelegationWorkerStartRunning`
+- From: `Running`
+- On: `AuthorizeLiveDelegationWorkerStart`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_correlation, worker_identity)
+- Guards:
+  - `worker_identity_present`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_operation_join`
+  - `worker_unbound`
+- Emits: `LiveDelegationWorkerStartAuthorized`
+- To: `Running`
+
+### `ResolveLiveDelegationWorkerStartIdle`
+- From: `Idle`
+- On: `ResolveLiveDelegationWorkerStart`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, worker_identity, started)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_worker_start_authority`
+- Emits: `LiveDelegationWorkerStartResolved`
+- To: `Idle`
+
+### `ResolveLiveDelegationWorkerStartAttached`
+- From: `Attached`
+- On: `ResolveLiveDelegationWorkerStart`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, worker_identity, started)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_worker_start_authority`
+- Emits: `LiveDelegationWorkerStartResolved`
+- To: `Attached`
+
+### `ResolveLiveDelegationWorkerStartRunning`
+- From: `Running`
+- On: `ResolveLiveDelegationWorkerStart`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, worker_identity, started)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_worker_start_authority`
+- Emits: `LiveDelegationWorkerStartResolved`
+- To: `Running`
+
+### `ReconcileLiveDelegationTranscriptConfirmedIdle`
+- From: `Idle`
+- On: `ReconcileLiveDelegationTranscript`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_correlation, final_transcript_committed, normalized_digest_matches)
+- Guards:
+  - `canonical_commit_matches_provisional`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_operation_join`
+  - `still_provisional`
+- Emits: `LiveDelegationTranscriptReconciled`
+- To: `Idle`
+
+### `ReconcileLiveDelegationTranscriptConfirmedAttached`
+- From: `Attached`
+- On: `ReconcileLiveDelegationTranscript`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_correlation, final_transcript_committed, normalized_digest_matches)
+- Guards:
+  - `canonical_commit_matches_provisional`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_operation_join`
+  - `still_provisional`
+- Emits: `LiveDelegationTranscriptReconciled`
+- To: `Attached`
+
+### `ReconcileLiveDelegationTranscriptConfirmedRunning`
+- From: `Running`
+- On: `ReconcileLiveDelegationTranscript`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_correlation, final_transcript_committed, normalized_digest_matches)
+- Guards:
+  - `canonical_commit_matches_provisional`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_operation_join`
+  - `still_provisional`
+- Emits: `LiveDelegationTranscriptReconciled`
+- To: `Running`
+
+### `ReconcileLiveDelegationTranscriptMaterialConflictIdle`
+- From: `Idle`
+- On: `ReconcileLiveDelegationTranscript`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_correlation, final_transcript_committed, normalized_digest_matches)
+- Guards:
+  - `canonical_commit_conflicts_with_provisional`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_operation_join`
+  - `still_provisional`
+- Emits: `LiveDelegationTranscriptReconciled`
+- To: `Idle`
+
+### `ReconcileLiveDelegationTranscriptMaterialConflictAttached`
+- From: `Attached`
+- On: `ReconcileLiveDelegationTranscript`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_correlation, final_transcript_committed, normalized_digest_matches)
+- Guards:
+  - `canonical_commit_conflicts_with_provisional`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_operation_join`
+  - `still_provisional`
+- Emits: `LiveDelegationTranscriptReconciled`
+- To: `Attached`
+
+### `ReconcileLiveDelegationTranscriptMaterialConflictRunning`
+- From: `Running`
+- On: `ReconcileLiveDelegationTranscript`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_correlation, final_transcript_committed, normalized_digest_matches)
+- Guards:
+  - `canonical_commit_conflicts_with_provisional`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_operation_join`
+  - `still_provisional`
+- Emits: `LiveDelegationTranscriptReconciled`
+- To: `Running`
+
+### `ReconcileLiveDelegationTranscriptMissingIdle`
+- From: `Idle`
+- On: `ReconcileLiveDelegationTranscript`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_correlation, final_transcript_committed, normalized_digest_matches)
+- Guards:
+  - `canonical_transcript_terminally_missing`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_operation_join`
+  - `still_provisional`
+- Emits: `LiveDelegationTranscriptReconciled`
+- To: `Idle`
+
+### `ReconcileLiveDelegationTranscriptMissingAttached`
+- From: `Attached`
+- On: `ReconcileLiveDelegationTranscript`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_correlation, final_transcript_committed, normalized_digest_matches)
+- Guards:
+  - `canonical_transcript_terminally_missing`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_operation_join`
+  - `still_provisional`
+- Emits: `LiveDelegationTranscriptReconciled`
+- To: `Attached`
+
+### `ReconcileLiveDelegationTranscriptMissingRunning`
+- From: `Running`
+- On: `ReconcileLiveDelegationTranscript`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_correlation, final_transcript_committed, normalized_digest_matches)
+- Guards:
+  - `canonical_transcript_terminally_missing`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_operation_join`
+  - `still_provisional`
+- Emits: `LiveDelegationTranscriptReconciled`
+- To: `Running`
+
+### `AuthorizeLiveDelegationTranscriptTerminalCancellationIdle`
+- From: `Idle`
+- On: `AuthorizeLiveDelegationTranscriptTerminalCancellation`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, worker_identity)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_worker_is_cancellable`
+  - `transcript_is_nonconfirmed_terminal`
+- Emits: `LiveDelegationCancellationAuthorized`
+- To: `Idle`
+
+### `AuthorizeLiveDelegationTranscriptTerminalCancellationAttached`
+- From: `Attached`
+- On: `AuthorizeLiveDelegationTranscriptTerminalCancellation`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, worker_identity)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_worker_is_cancellable`
+  - `transcript_is_nonconfirmed_terminal`
+- Emits: `LiveDelegationCancellationAuthorized`
+- To: `Attached`
+
+### `AuthorizeLiveDelegationTranscriptTerminalCancellationRunning`
+- From: `Running`
+- On: `AuthorizeLiveDelegationTranscriptTerminalCancellation`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, worker_identity)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_worker_is_cancellable`
+  - `transcript_is_nonconfirmed_terminal`
+- Emits: `LiveDelegationCancellationAuthorized`
+- To: `Running`
+
+### `AbandonLiveInteractionWithDelegationCancellationIdle`
+- From: `Idle`
+- On: `AbandonLiveInteraction`(channel_id, runtime_id, fence_token, generation, interaction_id)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `interaction_is_active`
+  - `exact_running_worker_exists`
+- Emits: `LiveDelegationCancellationAuthorized`
+- To: `Idle`
+
+### `AbandonLiveInteractionWithDelegationCancellationAttached`
+- From: `Attached`
+- On: `AbandonLiveInteraction`(channel_id, runtime_id, fence_token, generation, interaction_id)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `interaction_is_active`
+  - `exact_running_worker_exists`
+- Emits: `LiveDelegationCancellationAuthorized`
+- To: `Attached`
+
+### `AbandonLiveInteractionWithDelegationCancellationRunning`
+- From: `Running`
+- On: `AbandonLiveInteraction`(channel_id, runtime_id, fence_token, generation, interaction_id)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `interaction_is_active`
+  - `exact_running_worker_exists`
+- Emits: `LiveDelegationCancellationAuthorized`
+- To: `Running`
+
+### `AbandonLiveInteractionWithDelegationCancellationRetired`
+- From: `Retired`
+- On: `AbandonLiveInteraction`(channel_id, runtime_id, fence_token, generation, interaction_id)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `interaction_is_active`
+  - `exact_running_worker_exists`
+- Emits: `LiveDelegationCancellationAuthorized`
+- To: `Retired`
+
+### `AbandonLiveInteractionWithDelegationCancellationStopped`
+- From: `Stopped`
+- On: `AbandonLiveInteraction`(channel_id, runtime_id, fence_token, generation, interaction_id)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `interaction_is_active`
+  - `exact_running_worker_exists`
+- Emits: `LiveDelegationCancellationAuthorized`
+- To: `Stopped`
+
+### `SupersedeLiveInteractionWithDelegationCancellationIdle`
+- From: `Idle`
+- On: `SupersedeLiveInteraction`(session_id, channel_id, runtime_id, fence_token, generation, interaction_id, superseding_interaction_id, operation_id, worker_identity)
+- Guards:
+  - `superseding_identity_present`
+  - `channel_binding_matches`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_active_worker`
+  - `superseding_interaction_unique`
+- Emits: `LiveDelegationCancellationAuthorized`
+- To: `Idle`
+
+### `SupersedeLiveInteractionWithDelegationCancellationAttached`
+- From: `Attached`
+- On: `SupersedeLiveInteraction`(session_id, channel_id, runtime_id, fence_token, generation, interaction_id, superseding_interaction_id, operation_id, worker_identity)
+- Guards:
+  - `superseding_identity_present`
+  - `channel_binding_matches`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_active_worker`
+  - `superseding_interaction_unique`
+- Emits: `LiveDelegationCancellationAuthorized`
+- To: `Attached`
+
+### `SupersedeLiveInteractionWithDelegationCancellationRunning`
+- From: `Running`
+- On: `SupersedeLiveInteraction`(session_id, channel_id, runtime_id, fence_token, generation, interaction_id, superseding_interaction_id, operation_id, worker_identity)
+- Guards:
+  - `superseding_identity_present`
+  - `channel_binding_matches`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_active_worker`
+  - `superseding_interaction_unique`
+- Emits: `LiveDelegationCancellationAuthorized`
+- To: `Running`
+
+### `SupersedeCompletedLiveInteractionDelegationWithCancellationIdle`
+- From: `Idle`
+- On: `SupersedeLiveInteraction`(session_id, channel_id, runtime_id, fence_token, generation, interaction_id, superseding_interaction_id, operation_id, worker_identity)
+- Guards:
+  - `superseding_identity_present`
+  - `channel_binding_matches`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `superseding_interaction_is_active`
+  - `exact_completed_turn_worker_is_pending`
+- Emits: `LiveDelegationCancellationAuthorized`
+- To: `Idle`
+
+### `SupersedeCompletedLiveInteractionDelegationWithCancellationAttached`
+- From: `Attached`
+- On: `SupersedeLiveInteraction`(session_id, channel_id, runtime_id, fence_token, generation, interaction_id, superseding_interaction_id, operation_id, worker_identity)
+- Guards:
+  - `superseding_identity_present`
+  - `channel_binding_matches`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `superseding_interaction_is_active`
+  - `exact_completed_turn_worker_is_pending`
+- Emits: `LiveDelegationCancellationAuthorized`
+- To: `Attached`
+
+### `SupersedeCompletedLiveInteractionDelegationWithCancellationRunning`
+- From: `Running`
+- On: `SupersedeLiveInteraction`(session_id, channel_id, runtime_id, fence_token, generation, interaction_id, superseding_interaction_id, operation_id, worker_identity)
+- Guards:
+  - `superseding_identity_present`
+  - `channel_binding_matches`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `superseding_interaction_is_active`
+  - `exact_completed_turn_worker_is_pending`
+- Emits: `LiveDelegationCancellationAuthorized`
+- To: `Running`
+
+### `SupersedeLiveInteractionWithoutDelegationCancellationIdle`
+- From: `Idle`
+- On: `SupersedeLiveInteraction`(session_id, channel_id, runtime_id, fence_token, generation, interaction_id, superseding_interaction_id, operation_id, worker_identity)
+- Guards:
+  - `superseding_identity_present`
+  - `channel_binding_matches`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_active_terminal_worker`
+  - `superseding_interaction_unique`
+- Emits: `LiveInteractionSupersededWithoutCancellation`
+- To: `Idle`
+
+### `SupersedeLiveInteractionWithoutDelegationCancellationAttached`
+- From: `Attached`
+- On: `SupersedeLiveInteraction`(session_id, channel_id, runtime_id, fence_token, generation, interaction_id, superseding_interaction_id, operation_id, worker_identity)
+- Guards:
+  - `superseding_identity_present`
+  - `channel_binding_matches`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_active_terminal_worker`
+  - `superseding_interaction_unique`
+- Emits: `LiveInteractionSupersededWithoutCancellation`
+- To: `Attached`
+
+### `SupersedeLiveInteractionWithoutDelegationCancellationRunning`
+- From: `Running`
+- On: `SupersedeLiveInteraction`(session_id, channel_id, runtime_id, fence_token, generation, interaction_id, superseding_interaction_id, operation_id, worker_identity)
+- Guards:
+  - `superseding_identity_present`
+  - `channel_binding_matches`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_active_terminal_worker`
+  - `superseding_interaction_unique`
+- Emits: `LiveInteractionSupersededWithoutCancellation`
+- To: `Running`
+
+### `SupersedeLiveInteractionWithoutDelegationCancellationRetired`
+- From: `Retired`
+- On: `SupersedeLiveInteraction`(session_id, channel_id, runtime_id, fence_token, generation, interaction_id, superseding_interaction_id, operation_id, worker_identity)
+- Guards:
+  - `superseding_identity_present`
+  - `channel_binding_matches`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_active_terminal_worker`
+  - `superseding_interaction_unique`
+- Emits: `LiveInteractionSupersededWithoutCancellation`
+- To: `Retired`
+
+### `SupersedeLiveInteractionWithoutDelegationCancellationStopped`
+- From: `Stopped`
+- On: `SupersedeLiveInteraction`(session_id, channel_id, runtime_id, fence_token, generation, interaction_id, superseding_interaction_id, operation_id, worker_identity)
+- Guards:
+  - `superseding_identity_present`
+  - `channel_binding_matches`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_active_terminal_worker`
+  - `superseding_interaction_unique`
+- Emits: `LiveInteractionSupersededWithoutCancellation`
+- To: `Stopped`
+
+### `AbandonLiveInteractionIdle`
+- From: `Idle`
+- On: `AbandonLiveInteraction`(channel_id, runtime_id, fence_token, generation, interaction_id)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `interaction_is_active`
+  - `pending_delegation_absent_or_owned`
+  - `no_cancellable_worker`
+- Emits: `LiveInteractionAbandoned`
+- To: `Idle`
+
+### `AbandonLiveInteractionAttached`
+- From: `Attached`
+- On: `AbandonLiveInteraction`(channel_id, runtime_id, fence_token, generation, interaction_id)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `interaction_is_active`
+  - `pending_delegation_absent_or_owned`
+  - `no_cancellable_worker`
+- Emits: `LiveInteractionAbandoned`
+- To: `Attached`
+
+### `AbandonLiveInteractionRunning`
+- From: `Running`
+- On: `AbandonLiveInteraction`(channel_id, runtime_id, fence_token, generation, interaction_id)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `interaction_is_active`
+  - `pending_delegation_absent_or_owned`
+  - `no_cancellable_worker`
+- Emits: `LiveInteractionAbandoned`
+- To: `Running`
+
+### `AbandonLiveInteractionRetired`
+- From: `Retired`
+- On: `AbandonLiveInteraction`(channel_id, runtime_id, fence_token, generation, interaction_id)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `interaction_is_active`
+  - `pending_delegation_absent_or_owned`
+  - `no_cancellable_worker`
+- Emits: `LiveInteractionAbandoned`
+- To: `Retired`
+
+### `AbandonLiveInteractionStopped`
+- From: `Stopped`
+- On: `AbandonLiveInteraction`(channel_id, runtime_id, fence_token, generation, interaction_id)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `interaction_is_active`
+  - `pending_delegation_absent_or_owned`
+  - `no_cancellable_worker`
+- Emits: `LiveInteractionAbandoned`
+- To: `Stopped`
+
+### `AbandonLiveInteractionPreservingEarlierDelegationIdle`
+- From: `Idle`
+- On: `AbandonLiveInteraction`(channel_id, runtime_id, fence_token, generation, interaction_id)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `interaction_is_active`
+  - `earlier_delegation_is_pending`
+- Emits: `LiveInteractionAbandoned`
+- To: `Idle`
+
+### `AbandonLiveInteractionPreservingEarlierDelegationAttached`
+- From: `Attached`
+- On: `AbandonLiveInteraction`(channel_id, runtime_id, fence_token, generation, interaction_id)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `interaction_is_active`
+  - `earlier_delegation_is_pending`
+- Emits: `LiveInteractionAbandoned`
+- To: `Attached`
+
+### `AbandonLiveInteractionPreservingEarlierDelegationRunning`
+- From: `Running`
+- On: `AbandonLiveInteraction`(channel_id, runtime_id, fence_token, generation, interaction_id)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `interaction_is_active`
+  - `earlier_delegation_is_pending`
+- Emits: `LiveInteractionAbandoned`
+- To: `Running`
+
+### `AbandonLiveInteractionPreservingEarlierDelegationRetired`
+- From: `Retired`
+- On: `AbandonLiveInteraction`(channel_id, runtime_id, fence_token, generation, interaction_id)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `interaction_is_active`
+  - `earlier_delegation_is_pending`
+- Emits: `LiveInteractionAbandoned`
+- To: `Retired`
+
+### `AbandonLiveInteractionPreservingEarlierDelegationStopped`
+- From: `Stopped`
+- On: `AbandonLiveInteraction`(channel_id, runtime_id, fence_token, generation, interaction_id)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `interaction_is_active`
+  - `earlier_delegation_is_pending`
+- Emits: `LiveInteractionAbandoned`
+- To: `Stopped`
+
+### `CompleteLiveInteractionIdle`
+- From: `Idle`
+- On: `CompleteLiveInteraction`(channel_id, runtime_id, fence_token, generation, provider_turn_ref)
+- Guards:
+  - `provider_turn_present`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `provider_turn_is_exact`
+- Emits: `LiveProviderTurnFinished`
+- To: `Idle`
+
+### `CompleteLiveInteractionAttached`
+- From: `Attached`
+- On: `CompleteLiveInteraction`(channel_id, runtime_id, fence_token, generation, provider_turn_ref)
+- Guards:
+  - `provider_turn_present`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `provider_turn_is_exact`
+- Emits: `LiveProviderTurnFinished`
+- To: `Attached`
+
+### `CompleteLiveInteractionRunning`
+- From: `Running`
+- On: `CompleteLiveInteraction`(channel_id, runtime_id, fence_token, generation, provider_turn_ref)
+- Guards:
+  - `provider_turn_present`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `provider_turn_is_exact`
+- Emits: `LiveProviderTurnFinished`
+- To: `Running`
+
+### `ResolveLiveDelegationCancellationIdle`
+- From: `Idle`
+- On: `ResolveLiveDelegationCancellation`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, worker_identity, outcome)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_cancel_authority`
+- Emits: `LiveDelegationCancellationResolved`
+- To: `Idle`
+
+### `ResolveLiveDelegationCancellationAttached`
+- From: `Attached`
+- On: `ResolveLiveDelegationCancellation`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, worker_identity, outcome)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_cancel_authority`
+- Emits: `LiveDelegationCancellationResolved`
+- To: `Attached`
+
+### `ResolveLiveDelegationCancellationRunning`
+- From: `Running`
+- On: `ResolveLiveDelegationCancellation`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, worker_identity, outcome)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_cancel_authority`
+- Emits: `LiveDelegationCancellationResolved`
+- To: `Running`
+
+### `ResolveLiveDelegationCancellationRetired`
+- From: `Retired`
+- On: `ResolveLiveDelegationCancellation`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, worker_identity, outcome)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_cancel_authority`
+- Emits: `LiveDelegationCancellationResolved`
+- To: `Retired`
+
+### `ResolveLiveDelegationCancellationStopped`
+- From: `Stopped`
+- On: `ResolveLiveDelegationCancellation`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, worker_identity, outcome)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_cancel_authority`
+- Emits: `LiveDelegationCancellationResolved`
+- To: `Stopped`
+
+### `RecordLiveDelegationWorkerTerminalIdle`
+- From: `Idle`
+- On: `RecordLiveDelegationWorkerTerminal`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, worker_identity, terminal)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_worker_binding`
+  - `terminal_not_recorded`
+  - `worker_started_or_cancelling`
+- Emits: `LiveDelegationWorkerTerminalRecorded`
+- To: `Idle`
+
+### `RecordLiveDelegationWorkerTerminalAttached`
+- From: `Attached`
+- On: `RecordLiveDelegationWorkerTerminal`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, worker_identity, terminal)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_worker_binding`
+  - `terminal_not_recorded`
+  - `worker_started_or_cancelling`
+- Emits: `LiveDelegationWorkerTerminalRecorded`
+- To: `Attached`
+
+### `RecordLiveDelegationWorkerTerminalRunning`
+- From: `Running`
+- On: `RecordLiveDelegationWorkerTerminal`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, worker_identity, terminal)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_worker_binding`
+  - `terminal_not_recorded`
+  - `worker_started_or_cancelling`
+- Emits: `LiveDelegationWorkerTerminalRecorded`
+- To: `Running`
+
+### `RecordLiveDelegationWorkerTerminalRetired`
+- From: `Retired`
+- On: `RecordLiveDelegationWorkerTerminal`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, worker_identity, terminal)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_worker_binding`
+  - `terminal_not_recorded`
+  - `worker_started_or_cancelling`
+- Emits: `LiveDelegationWorkerTerminalRecorded`
+- To: `Retired`
+
+### `RecordLiveDelegationWorkerTerminalStopped`
+- From: `Stopped`
+- On: `RecordLiveDelegationWorkerTerminal`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, worker_identity, terminal)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_worker_binding`
+  - `terminal_not_recorded`
+  - `worker_started_or_cancelling`
+- Emits: `LiveDelegationWorkerTerminalRecorded`
+- To: `Stopped`
+
+### `AuthorizeLiveDelegationWorkerRetirementIdle`
+- From: `Idle`
+- On: `AuthorizeLiveDelegationWorkerRetirement`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, worker_identity)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_terminal_worker`
+- Emits: `LiveDelegationWorkerRetirementAuthorized`
+- To: `Idle`
+
+### `AuthorizeLiveDelegationWorkerRetirementAttached`
+- From: `Attached`
+- On: `AuthorizeLiveDelegationWorkerRetirement`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, worker_identity)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_terminal_worker`
+- Emits: `LiveDelegationWorkerRetirementAuthorized`
+- To: `Attached`
+
+### `AuthorizeLiveDelegationWorkerRetirementRunning`
+- From: `Running`
+- On: `AuthorizeLiveDelegationWorkerRetirement`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, worker_identity)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_terminal_worker`
+- Emits: `LiveDelegationWorkerRetirementAuthorized`
+- To: `Running`
+
+### `AuthorizeLiveDelegationWorkerRetirementRetired`
+- From: `Retired`
+- On: `AuthorizeLiveDelegationWorkerRetirement`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, worker_identity)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_terminal_worker`
+- Emits: `LiveDelegationWorkerRetirementAuthorized`
+- To: `Retired`
+
+### `AuthorizeLiveDelegationWorkerRetirementStopped`
+- From: `Stopped`
+- On: `AuthorizeLiveDelegationWorkerRetirement`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, worker_identity)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_terminal_worker`
+- Emits: `LiveDelegationWorkerRetirementAuthorized`
+- To: `Stopped`
+
+### `ResolveLiveDelegationWorkerRetirementIdle`
+- From: `Idle`
+- On: `ResolveLiveDelegationWorkerRetirement`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, worker_identity, retired)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_retirement_authority`
+- Emits: `LiveDelegationWorkerRetirementResolved`
+- To: `Idle`
+
+### `ResolveLiveDelegationWorkerRetirementAttached`
+- From: `Attached`
+- On: `ResolveLiveDelegationWorkerRetirement`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, worker_identity, retired)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_retirement_authority`
+- Emits: `LiveDelegationWorkerRetirementResolved`
+- To: `Attached`
+
+### `ResolveLiveDelegationWorkerRetirementRunning`
+- From: `Running`
+- On: `ResolveLiveDelegationWorkerRetirement`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, worker_identity, retired)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_retirement_authority`
+- Emits: `LiveDelegationWorkerRetirementResolved`
+- To: `Running`
+
+### `ResolveLiveDelegationWorkerRetirementRetired`
+- From: `Retired`
+- On: `ResolveLiveDelegationWorkerRetirement`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, worker_identity, retired)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_retirement_authority`
+- Emits: `LiveDelegationWorkerRetirementResolved`
+- To: `Retired`
+
+### `ResolveLiveDelegationWorkerRetirementStopped`
+- From: `Stopped`
+- On: `ResolveLiveDelegationWorkerRetirement`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, worker_identity, retired)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_retirement_authority`
+- Emits: `LiveDelegationWorkerRetirementResolved`
+- To: `Stopped`
+
+### `AuthorizeLiveConsequentialEffectIdle`
+- From: `Idle`
+- On: `AuthorizeLiveConsequentialEffect`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, authority_id)
+- Guards:
+  - `authority_present`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `interaction_is_admitted_and_not_abandoned`
+  - `operation_join_is_exact`
+  - `transcript_confirmed`
+  - `authority_unique`
+- Emits: `LiveConsequentialEffectAuthorized`
+- To: `Idle`
+
+### `AuthorizeLiveConsequentialEffectAttached`
+- From: `Attached`
+- On: `AuthorizeLiveConsequentialEffect`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, authority_id)
+- Guards:
+  - `authority_present`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `interaction_is_admitted_and_not_abandoned`
+  - `operation_join_is_exact`
+  - `transcript_confirmed`
+  - `authority_unique`
+- Emits: `LiveConsequentialEffectAuthorized`
+- To: `Attached`
+
+### `AuthorizeLiveConsequentialEffectRunning`
+- From: `Running`
+- On: `AuthorizeLiveConsequentialEffect`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, authority_id)
+- Guards:
+  - `authority_present`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `interaction_is_admitted_and_not_abandoned`
+  - `operation_join_is_exact`
+  - `transcript_confirmed`
+  - `authority_unique`
+- Emits: `LiveConsequentialEffectAuthorized`
+- To: `Running`
+
+### `AuthorizeLiveDelegationResultReleaseIdle`
+- From: `Idle`
+- On: `AuthorizeLiveDelegationResultRelease`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_correlation)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `interaction_release_window_matches`
+  - `exact_operation_join`
+  - `transcript_confirmed`
+  - `worker_result_is_eligible`
+  - `result_not_released`
+- Emits: `LiveDelegationResultReleaseAuthorized`
+- To: `Idle`
+
+### `AuthorizeLiveDelegationResultReleaseAttached`
+- From: `Attached`
+- On: `AuthorizeLiveDelegationResultRelease`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_correlation)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `interaction_release_window_matches`
+  - `exact_operation_join`
+  - `transcript_confirmed`
+  - `worker_result_is_eligible`
+  - `result_not_released`
+- Emits: `LiveDelegationResultReleaseAuthorized`
+- To: `Attached`
+
+### `AuthorizeLiveDelegationResultReleaseRunning`
+- From: `Running`
+- On: `AuthorizeLiveDelegationResultRelease`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_correlation)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `interaction_release_window_matches`
+  - `exact_operation_join`
+  - `transcript_confirmed`
+  - `worker_result_is_eligible`
+  - `result_not_released`
+- Emits: `LiveDelegationResultReleaseAuthorized`
+- To: `Running`
+
+### `AuthorizeLiveDelegationResultDeliveryIdle`
+- From: `Idle`
+- On: `AuthorizeLiveDelegationResultDelivery`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_correlation, result_digest, disposition)
+- Guards:
+  - `result_digest_present`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `experimental_execution_is_bound`
+  - `exact_released_operation_join`
+  - `transcript_and_terminal_still_authorize_result`
+  - `delivery_not_started_or_resolved`
+- Emits: `LiveDelegationResultDeliveryAuthorized`
+- To: `Idle`
+
+### `AuthorizeLiveDelegationResultDeliveryAttached`
+- From: `Attached`
+- On: `AuthorizeLiveDelegationResultDelivery`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_correlation, result_digest, disposition)
+- Guards:
+  - `result_digest_present`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `experimental_execution_is_bound`
+  - `exact_released_operation_join`
+  - `transcript_and_terminal_still_authorize_result`
+  - `delivery_not_started_or_resolved`
+- Emits: `LiveDelegationResultDeliveryAuthorized`
+- To: `Attached`
+
+### `AuthorizeLiveDelegationResultDeliveryRunning`
+- From: `Running`
+- On: `AuthorizeLiveDelegationResultDelivery`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_correlation, result_digest, disposition)
+- Guards:
+  - `result_digest_present`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `experimental_execution_is_bound`
+  - `exact_released_operation_join`
+  - `transcript_and_terminal_still_authorize_result`
+  - `delivery_not_started_or_resolved`
+- Emits: `LiveDelegationResultDeliveryAuthorized`
+- To: `Running`
+
+### `ResolveLiveDelegationResultDeliveryIdle`
+- From: `Idle`
+- On: `ResolveLiveDelegationResultDelivery`(channel_id, runtime_id, fence_token, generation, operation_id, result_digest, replacement_channel_id, observation)
+- Guards:
+  - `non_ambiguous_observation`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `pending_delivery_matches`
+- Emits: `LiveDelegationResultDeliveryResolved`
+- To: `Idle`
+
+### `ResolveLiveDelegationResultDeliveryAttached`
+- From: `Attached`
+- On: `ResolveLiveDelegationResultDelivery`(channel_id, runtime_id, fence_token, generation, operation_id, result_digest, replacement_channel_id, observation)
+- Guards:
+  - `non_ambiguous_observation`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `pending_delivery_matches`
+- Emits: `LiveDelegationResultDeliveryResolved`
+- To: `Attached`
+
+### `ResolveLiveDelegationResultDeliveryRunning`
+- From: `Running`
+- On: `ResolveLiveDelegationResultDelivery`(channel_id, runtime_id, fence_token, generation, operation_id, result_digest, replacement_channel_id, observation)
+- Guards:
+  - `non_ambiguous_observation`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `pending_delivery_matches`
+- Emits: `LiveDelegationResultDeliveryResolved`
+- To: `Running`
+
+### `ResolveLiveDelegationResultDeliveryAmbiguousIdle`
+- From: `Idle`
+- On: `ResolveLiveDelegationResultDelivery`(channel_id, runtime_id, fence_token, generation, operation_id, result_digest, replacement_channel_id, observation)
+- Guards:
+  - `ambiguous_observation_and_fresh_replacement`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `pending_delivery_matches`
+  - `recovery_facts_present`
+- Emits: `LiveDelegationResultAmbiguityRecoveryAuthorized`
+- To: `Idle`
+
+### `ResolveLiveDelegationResultDeliveryAmbiguousAttached`
+- From: `Attached`
+- On: `ResolveLiveDelegationResultDelivery`(channel_id, runtime_id, fence_token, generation, operation_id, result_digest, replacement_channel_id, observation)
+- Guards:
+  - `ambiguous_observation_and_fresh_replacement`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `pending_delivery_matches`
+  - `recovery_facts_present`
+- Emits: `LiveDelegationResultAmbiguityRecoveryAuthorized`
+- To: `Attached`
+
+### `ResolveLiveDelegationResultDeliveryAmbiguousRunning`
+- From: `Running`
+- On: `ResolveLiveDelegationResultDelivery`(channel_id, runtime_id, fence_token, generation, operation_id, result_digest, replacement_channel_id, observation)
+- Guards:
+  - `ambiguous_observation_and_fresh_replacement`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `pending_delivery_matches`
+  - `recovery_facts_present`
+- Emits: `LiveDelegationResultAmbiguityRecoveryAuthorized`
+- To: `Running`
+
+### `BindLiveDelegationResultRecoveryChannelIdle`
+- From: `Idle`
+- On: `BindLiveDelegationResultRecoveryChannel`(session_id, closing_channel_id, replacement_channel_id, answer_observation_sequence, runtime_id, fence_token, generation, operation_id, result_digest, canonical_seed_cursor)
+- Guards:
+  - `answer_observation_sequence_present`
+  - `recovery_obligation_matches`
+  - `replacement_open_admission_matches`
+  - `runtime_incarnation_matches`
+  - `replacement_execution_binding_absent`
+  - `replacement_experimental_stage_matches`
+  - `answer_observation_sequence_advances`
+- Emits: `LiveDelegationResultRecoveryChannelBound`
+- To: `Idle`
+
+### `BindLiveDelegationResultRecoveryChannelAttached`
+- From: `Attached`
+- On: `BindLiveDelegationResultRecoveryChannel`(session_id, closing_channel_id, replacement_channel_id, answer_observation_sequence, runtime_id, fence_token, generation, operation_id, result_digest, canonical_seed_cursor)
+- Guards:
+  - `answer_observation_sequence_present`
+  - `recovery_obligation_matches`
+  - `replacement_open_admission_matches`
+  - `runtime_incarnation_matches`
+  - `replacement_execution_binding_absent`
+  - `replacement_experimental_stage_matches`
+  - `answer_observation_sequence_advances`
+- Emits: `LiveDelegationResultRecoveryChannelBound`
+- To: `Attached`
+
+### `BindLiveDelegationResultRecoveryChannelRunning`
+- From: `Running`
+- On: `BindLiveDelegationResultRecoveryChannel`(session_id, closing_channel_id, replacement_channel_id, answer_observation_sequence, runtime_id, fence_token, generation, operation_id, result_digest, canonical_seed_cursor)
+- Guards:
+  - `answer_observation_sequence_present`
+  - `recovery_obligation_matches`
+  - `replacement_open_admission_matches`
+  - `runtime_incarnation_matches`
+  - `replacement_execution_binding_absent`
+  - `replacement_experimental_stage_matches`
+  - `answer_observation_sequence_advances`
+- Emits: `LiveDelegationResultRecoveryChannelBound`
+- To: `Running`
+
+### `EnqueueLiveContextRowIdle`
+- From: `Idle`
+- On: `EnqueueLiveContextRow`(channel_id, runtime_id, fence_token, generation, append_id, canonical_cursor, content_digest, commit_authority_token, disposition)
+- Guards:
+  - `append_present`
+  - `commit_evidence_present`
+  - `channel_is_active_for_session`
+  - `experimental_context_custody_matches`
+  - `canonical_cursor_is_future`
+  - `canonical_cursor_is_unique`
+  - `append_identity_is_fresh`
+- Emits: `LiveContextRowQueued`
+- To: `Idle`
+
+### `EnqueueLiveContextRowAttached`
+- From: `Attached`
+- On: `EnqueueLiveContextRow`(channel_id, runtime_id, fence_token, generation, append_id, canonical_cursor, content_digest, commit_authority_token, disposition)
+- Guards:
+  - `append_present`
+  - `commit_evidence_present`
+  - `channel_is_active_for_session`
+  - `experimental_context_custody_matches`
+  - `canonical_cursor_is_future`
+  - `canonical_cursor_is_unique`
+  - `append_identity_is_fresh`
+- Emits: `LiveContextRowQueued`
+- To: `Attached`
+
+### `EnqueueLiveContextRowRunning`
+- From: `Running`
+- On: `EnqueueLiveContextRow`(channel_id, runtime_id, fence_token, generation, append_id, canonical_cursor, content_digest, commit_authority_token, disposition)
+- Guards:
+  - `append_present`
+  - `commit_evidence_present`
+  - `channel_is_active_for_session`
+  - `experimental_context_custody_matches`
+  - `canonical_cursor_is_future`
+  - `canonical_cursor_is_unique`
+  - `append_identity_is_fresh`
+- Emits: `LiveContextRowQueued`
+- To: `Running`
+
+### `AdvanceLiveContextCanonicalCoverageIdle`
+- From: `Idle`
+- On: `AdvanceLiveContextCanonicalCoverage`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor, disposition)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_canonical_outbox_head`
+  - `row_requires_no_provider_send`
+- Emits: `LiveContextCanonicalCoverageAdvanced`
+- To: `Idle`
+
+### `AdvanceLiveContextCanonicalCoverageAttached`
+- From: `Attached`
+- On: `AdvanceLiveContextCanonicalCoverage`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor, disposition)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_canonical_outbox_head`
+  - `row_requires_no_provider_send`
+- Emits: `LiveContextCanonicalCoverageAdvanced`
+- To: `Attached`
+
+### `AdvanceLiveContextCanonicalCoverageRunning`
+- From: `Running`
+- On: `AdvanceLiveContextCanonicalCoverage`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor, disposition)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_canonical_outbox_head`
+  - `row_requires_no_provider_send`
+- Emits: `LiveContextCanonicalCoverageAdvanced`
+- To: `Running`
+
+### `AuthorizeLiveContextAppendIdle`
+- From: `Idle`
+- On: `AuthorizeLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor)
+- Guards:
+  - `append_present`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `cursor_edge_is_next`
+  - `exact_canonical_outbox_head`
+  - `channel_has_no_pending_append`
+  - `safe_provider_turn_boundary`
+  - `channel_has_no_recovery_obligation`
+  - `append_identity_is_fresh`
+- Emits: `LiveContextAppendAuthorized`
+- To: `Idle`
+
+### `AuthorizeLiveContextAppendAttached`
+- From: `Attached`
+- On: `AuthorizeLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor)
+- Guards:
+  - `append_present`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `cursor_edge_is_next`
+  - `exact_canonical_outbox_head`
+  - `channel_has_no_pending_append`
+  - `safe_provider_turn_boundary`
+  - `channel_has_no_recovery_obligation`
+  - `append_identity_is_fresh`
+- Emits: `LiveContextAppendAuthorized`
+- To: `Attached`
+
+### `AuthorizeLiveContextAppendRunning`
+- From: `Running`
+- On: `AuthorizeLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor)
+- Guards:
+  - `append_present`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `cursor_edge_is_next`
+  - `exact_canonical_outbox_head`
+  - `channel_has_no_pending_append`
+  - `safe_provider_turn_boundary`
+  - `channel_has_no_recovery_obligation`
+  - `append_identity_is_fresh`
+- Emits: `LiveContextAppendAuthorized`
+- To: `Running`
+
+### `ResolveLiveContextAppendDeliveredIdle`
+- From: `Idle`
+- On: `ResolveLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor, replacement_channel_id, observation)
+- Guards:
+  - `append_present`
+  - `delivery_observed`
+  - `replacement_channel_absent`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `canonical_recovery_source_present`
+  - `pending_append_matches`
+  - `cursor_matches`
+  - `not_ambiguously_sent`
+  - `append_not_already_delivered`
+- Emits: `LiveContextAppendResolved`
+- To: `Idle`
+
+### `ResolveLiveContextAppendDeliveredAttached`
+- From: `Attached`
+- On: `ResolveLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor, replacement_channel_id, observation)
+- Guards:
+  - `append_present`
+  - `delivery_observed`
+  - `replacement_channel_absent`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `canonical_recovery_source_present`
+  - `pending_append_matches`
+  - `cursor_matches`
+  - `not_ambiguously_sent`
+  - `append_not_already_delivered`
+- Emits: `LiveContextAppendResolved`
+- To: `Attached`
+
+### `ResolveLiveContextAppendDeliveredRunning`
+- From: `Running`
+- On: `ResolveLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor, replacement_channel_id, observation)
+- Guards:
+  - `append_present`
+  - `delivery_observed`
+  - `replacement_channel_absent`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `canonical_recovery_source_present`
+  - `pending_append_matches`
+  - `cursor_matches`
+  - `not_ambiguously_sent`
+  - `append_not_already_delivered`
+- Emits: `LiveContextAppendResolved`
+- To: `Running`
+
+### `ResolveLiveContextAppendAmbiguousIdle`
+- From: `Idle`
+- On: `ResolveLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor, replacement_channel_id, observation)
+- Guards:
+  - `append_present`
+  - `ambiguity_observed`
+  - `replacement_channel_present`
+  - `replacement_channel_is_fresh`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `canonical_recovery_source_present`
+  - `pending_append_matches`
+  - `cursor_matches_without_advance`
+  - `ambiguity_not_recorded`
+  - `append_not_already_delivered`
+- Emits: `LiveContextAmbiguityRecoveryAuthorized`
+- To: `Idle`
+
+### `ResolveLiveContextAppendAmbiguousAttached`
+- From: `Attached`
+- On: `ResolveLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor, replacement_channel_id, observation)
+- Guards:
+  - `append_present`
+  - `ambiguity_observed`
+  - `replacement_channel_present`
+  - `replacement_channel_is_fresh`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `canonical_recovery_source_present`
+  - `pending_append_matches`
+  - `cursor_matches_without_advance`
+  - `ambiguity_not_recorded`
+  - `append_not_already_delivered`
+- Emits: `LiveContextAmbiguityRecoveryAuthorized`
+- To: `Attached`
+
+### `ResolveLiveContextAppendAmbiguousRunning`
+- From: `Running`
+- On: `ResolveLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor, replacement_channel_id, observation)
+- Guards:
+  - `append_present`
+  - `ambiguity_observed`
+  - `replacement_channel_present`
+  - `replacement_channel_is_fresh`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `canonical_recovery_source_present`
+  - `pending_append_matches`
+  - `cursor_matches_without_advance`
+  - `ambiguity_not_recorded`
+  - `append_not_already_delivered`
+- Emits: `LiveContextAmbiguityRecoveryAuthorized`
+- To: `Running`
+
+### `BindLiveContextRecoveryChannelIdle`
+- From: `Idle`
+- On: `BindLiveContextRecoveryChannel`(session_id, closing_channel_id, replacement_channel_id, answer_observation_sequence, runtime_id, fence_token, generation, append_id, canonical_seed_cursor)
+- Guards:
+  - `answer_observation_sequence_present`
+  - `recovery_obligation_matches`
+  - `replacement_open_admission_matches`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `replacement_execution_binding_absent`
+  - `replacement_experimental_stage_matches`
+  - `answer_observation_sequence_advances`
+- Emits: `LiveContextRecoveryChannelBound`
+- To: `Idle`
+
+### `BindLiveContextRecoveryChannelAttached`
+- From: `Attached`
+- On: `BindLiveContextRecoveryChannel`(session_id, closing_channel_id, replacement_channel_id, answer_observation_sequence, runtime_id, fence_token, generation, append_id, canonical_seed_cursor)
+- Guards:
+  - `answer_observation_sequence_present`
+  - `recovery_obligation_matches`
+  - `replacement_open_admission_matches`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `replacement_execution_binding_absent`
+  - `replacement_experimental_stage_matches`
+  - `answer_observation_sequence_advances`
+- Emits: `LiveContextRecoveryChannelBound`
+- To: `Attached`
+
+### `BindLiveContextRecoveryChannelRunning`
+- From: `Running`
+- On: `BindLiveContextRecoveryChannel`(session_id, closing_channel_id, replacement_channel_id, answer_observation_sequence, runtime_id, fence_token, generation, append_id, canonical_seed_cursor)
+- Guards:
+  - `answer_observation_sequence_present`
+  - `recovery_obligation_matches`
+  - `replacement_open_admission_matches`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `replacement_execution_binding_absent`
+  - `replacement_experimental_stage_matches`
+  - `answer_observation_sequence_advances`
+- Emits: `LiveContextRecoveryChannelBound`
+- To: `Running`
+
+### `ResolveLiveContextAppendRejectedIdle`
+- From: `Idle`
+- On: `ResolveLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor, replacement_channel_id, observation)
+- Guards:
+  - `append_present`
+  - `rejection_observed`
+  - `replacement_channel_absent`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `pending_append_matches`
+  - `cursor_has_not_advanced`
+- Emits: `LiveContextAppendResolved`
+- To: `Idle`
+
+### `ResolveLiveContextAppendRejectedAttached`
+- From: `Attached`
+- On: `ResolveLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor, replacement_channel_id, observation)
+- Guards:
+  - `append_present`
+  - `rejection_observed`
+  - `replacement_channel_absent`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `pending_append_matches`
+  - `cursor_has_not_advanced`
+- Emits: `LiveContextAppendResolved`
+- To: `Attached`
+
+### `ResolveLiveContextAppendRejectedRunning`
+- From: `Running`
+- On: `ResolveLiveContextAppend`(channel_id, runtime_id, fence_token, generation, append_id, previous_cursor, next_cursor, replacement_channel_id, observation)
+- Guards:
+  - `append_present`
+  - `rejection_observed`
+  - `replacement_channel_absent`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `pending_append_matches`
+  - `cursor_has_not_advanced`
+- Emits: `LiveContextAppendResolved`
+- To: `Running`
+
 ### `RecordLiveRefreshQueuedIdle`
 - From: `Idle`
 - On: `RecordLiveRefreshQueued`(channel_id, queue_acceptance_sequence)
@@ -14157,6 +16012,57 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `answer_observation_sequence_advances`
 - Emits: `LiveWebrtcAnswerResultResolved`
 - To: `Stopped`
+
+### `RecordLiveWebrtcAnswerAcceptedAndBindExecutionIdle`
+- From: `Idle`
+- On: `RecordLiveWebrtcAnswerAcceptedAndBindExecution`(session_id, channel_id, answer_observation_sequence, runtime_id, fence_token, generation, canonical_seed_cursor)
+- Guards:
+  - `identities_present`
+  - `answer_observation_sequence_present`
+  - `session_binding_matches`
+  - `channel_binding_matches`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `answer_observation_sequence_advances`
+  - `execution_binding_absent`
+  - `experimental_stage_matches`
+- Emits: `LiveWebrtcAnswerAcceptedAndExecutionBound`
+- To: `Idle`
+
+### `RecordLiveWebrtcAnswerAcceptedAndBindExecutionAttached`
+- From: `Attached`
+- On: `RecordLiveWebrtcAnswerAcceptedAndBindExecution`(session_id, channel_id, answer_observation_sequence, runtime_id, fence_token, generation, canonical_seed_cursor)
+- Guards:
+  - `identities_present`
+  - `answer_observation_sequence_present`
+  - `session_binding_matches`
+  - `channel_binding_matches`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `answer_observation_sequence_advances`
+  - `execution_binding_absent`
+  - `experimental_stage_matches`
+- Emits: `LiveWebrtcAnswerAcceptedAndExecutionBound`
+- To: `Attached`
+
+### `RecordLiveWebrtcAnswerAcceptedAndBindExecutionRunning`
+- From: `Running`
+- On: `RecordLiveWebrtcAnswerAcceptedAndBindExecution`(session_id, channel_id, answer_observation_sequence, runtime_id, fence_token, generation, canonical_seed_cursor)
+- Guards:
+  - `identities_present`
+  - `answer_observation_sequence_present`
+  - `session_binding_matches`
+  - `channel_binding_matches`
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `answer_observation_sequence_advances`
+  - `execution_binding_absent`
+  - `experimental_stage_matches`
+- Emits: `LiveWebrtcAnswerAcceptedAndExecutionBound`
+- To: `Running`
 
 ### `RecordLiveWebsocketTokenIssuedIdle`
 - From: `Idle`

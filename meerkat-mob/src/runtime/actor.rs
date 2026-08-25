@@ -3623,6 +3623,7 @@ struct DeferredResumeProvision {
     shell_env: Option<std::collections::HashMap<String, String>>,
     inherited_tool_filter: Option<meerkat_core::InheritedToolVisibilityAuthority>,
     tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+    tool_dispatch_admission: Option<Arc<dyn meerkat_core::ToolDispatchAdmission>>,
     web_search_override: meerkat_core::ToolCategoryOverride,
     application_tool_policy: meerkat_core::ApplicationToolPolicyBinding,
     tool_consequence_policy_registry: Option<Arc<meerkat_core::ToolConsequencePolicyRegistry>>,
@@ -3718,6 +3719,7 @@ impl DeferredResumeProvision {
             shell_env,
             inherited_tool_filter,
             tool_access_policy,
+            tool_dispatch_admission,
             web_search_override,
             application_tool_policy,
             tool_consequence_policy_registry,
@@ -3767,6 +3769,7 @@ impl DeferredResumeProvision {
             resumed_session: stored_session,
         })
         .await?;
+        config.tool_dispatch_admission = tool_dispatch_admission;
         config.keep_alive = keep_alive;
         config.override_web_search = web_search_override;
         config.application_tool_policy = application_tool_policy;
@@ -24482,6 +24485,7 @@ impl MobActor {
             labels,
             launch_mode,
             tool_access_policy,
+            tool_dispatch_admission,
             tool_category_overrides,
             application_tool_policy,
             budget_limits,
@@ -24750,6 +24754,7 @@ impl MobActor {
                             shell_env,
                             inherited_tool_filter: inherited_tool_filter.clone(),
                             tool_access_policy: tool_access_policy.clone(),
+                            tool_dispatch_admission: tool_dispatch_admission.clone(),
                             web_search_override: tool_category_overrides.web_search,
                             application_tool_policy: application_tool_policy.clone(),
                             tool_consequence_policy_registry: self
@@ -24834,6 +24839,7 @@ impl MobActor {
                         },
                     )
                     .await?;
+                    config.tool_dispatch_admission = tool_dispatch_admission.clone();
                     config.keep_alive =
                         selected_runtime_mode == crate::MobRuntimeMode::AutonomousHost;
                     config.override_web_search = tool_category_overrides.web_search;
@@ -24929,6 +24935,7 @@ impl MobActor {
                 system_prompt_override,
             })
             .await?;
+            config.tool_dispatch_admission = tool_dispatch_admission.clone();
             tracing::debug!(
                 mob_id = %self.definition.id,
                 agent_identity = %agent_identity,
@@ -26224,6 +26231,7 @@ impl MobActor {
             labels,
             launch_mode,
             tool_access_policy,
+            tool_dispatch_admission,
             tool_category_overrides,
             application_tool_policy,
             budget_limits,
@@ -26246,6 +26254,12 @@ impl MobActor {
                 "enqueue_spawn_remote invoked without placement".to_string()
             ));
         };
+        if tool_dispatch_admission.is_some() {
+            fail!(MobError::WiringError(
+                "process-local tool dispatch admission cannot cross member-host placement"
+                    .to_string(),
+            ));
+        }
         if compaction_curator_override.is_some() {
             fail!(MobError::WiringError(
                 "compaction curator overrides are in-process host behavior and cannot be submitted to a remote member host"
@@ -27688,6 +27702,7 @@ impl MobActor {
             labels,
             launch_mode: _,
             tool_access_policy,
+            tool_dispatch_admission: _,
             tool_category_overrides,
             application_tool_policy,
             budget_limits,
@@ -38260,6 +38275,7 @@ impl MobActor {
             labels: replacement_labels,
             launch_mode: _,
             tool_access_policy: replacement_tool_access_policy,
+            tool_dispatch_admission: replacement_tool_dispatch_admission,
             tool_category_overrides: replacement_tool_category_overrides,
             application_tool_policy: replacement_application_tool_policy,
             budget_limits: replacement_budget_limits,
@@ -38482,6 +38498,7 @@ impl MobActor {
             system_prompt_override: replacement_system_prompt_override,
         })
         .await?;
+        config.tool_dispatch_admission = replacement_tool_dispatch_admission;
         config.keep_alive = replacement_runtime_mode == crate::MobRuntimeMode::AutonomousHost;
         config.override_web_search = replacement_tool_category_overrides.web_search;
         config.application_tool_policy = replacement_application_tool_policy;

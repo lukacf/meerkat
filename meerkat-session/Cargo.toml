@@ -14,7 +14,7 @@ categories.workspace = true
 
 [dependencies]
 meerkat-capabilities = { workspace = true }
-meerkat-core = { workspace = true }
+meerkat-core = { workspace = true, features = ["__meerkat-generated-authority-bridge"] }
 meerkat-models = { workspace = true }
 meerkat-contracts = { workspace = true }
 async-trait = { workspace = true }
@@ -48,6 +48,7 @@ meerkat-runtime = { workspace = true }
 [features]
 default = []
 session-store = ["dep:meerkat-store", "dep:meerkat-runtime"]
+live = ["session-store", "meerkat-runtime/live"]
 session-compaction = []
 
 [lints]

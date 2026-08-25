@@ -5,6 +5,7 @@
 //! as authorization truth.
 
 use crate::SurfaceMetadata;
+use crate::connection::{BindingId, ProfileId, RealmId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fmt;
@@ -111,6 +112,15 @@ pub enum GrantScope {
     Mob {
         mob_id: String,
     },
+    /// Exact realm credential binding authorized for use. The optional
+    /// profile is part of the scope so a grant for the binding's default auth
+    /// profile cannot authorize a caller-selected override profile.
+    AuthBinding {
+        realm_id: RealmId,
+        binding_id: BindingId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile_id: Option<ProfileId>,
+    },
     /// Product-neutral extension point. The typed namespace/id pair is policy
     /// input; labels/app context are still not authority.
     Application {
@@ -161,6 +171,12 @@ pub enum GrantAction {
     RequestApproval,
     DecideApproval,
     UseTool,
+    /// Use one exact realm credential binding on behalf of a durable target.
+    ///
+    /// The enforcement seam also requires an exact
+    /// [`ActingOnBehalfOf`] match. Binding existence alone never grants this
+    /// action.
+    UseAuthBinding,
     ManageRuntime,
 }
 

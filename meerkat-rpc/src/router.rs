@@ -4,6 +4,8 @@ use std::collections::HashMap;
 #[cfg(feature = "mob")]
 use std::path::PathBuf;
 use std::sync::Arc;
+#[cfg(feature = "experimental-gpt-live")]
+use std::sync::RwLock as StdRwLock;
 
 use futures::StreamExt;
 use tokio::sync::Mutex;
@@ -1051,10 +1053,110 @@ fn lower_session_fork_replace_request(
 }
 
 /// One routed response plus any custody that ends at transport delivery.
+#[cfg(feature = "experimental-gpt-live")]
+#[derive(Clone, Copy)]
+enum ExperimentalLiveOpenDeliveryDisposition {
+    Delivered,
+    Rejected,
+}
+
+/// Transport-delivery custody for one strict experimental live/open result.
+///
+/// The exact channel and token remain provisional until the JSON-RPC writer
+/// confirms delivery. Dropping this owner closes the decision channel, which
+/// the coordinator treats as rejection and routes through the same exact
+/// publication-failure cleanup used for serialization failure.
+#[cfg(feature = "experimental-gpt-live")]
+pub(crate) struct ExperimentalLiveOpenDeliveryCustody {
+    decision_tx: tokio::sync::oneshot::Sender<ExperimentalLiveOpenDeliveryDisposition>,
+    cleanup_task: tokio::task::JoinHandle<Result<(), String>>,
+}
+
+#[cfg(feature = "experimental-gpt-live")]
+impl ExperimentalLiveOpenDeliveryCustody {
+    fn new(
+        runtime: Arc<SessionRuntime>,
+        host: Arc<meerkat_live::LiveAdapterHost>,
+        publication: handlers::live::ExperimentalLiveOpenPublication,
+    ) -> Self {
+        let (decision_tx, decision_rx) = tokio::sync::oneshot::channel();
+        let cleanup_task = tokio::spawn(async move {
+            if matches!(
+                decision_rx.await,
+                Ok(ExperimentalLiveOpenDeliveryDisposition::Delivered)
+            ) {
+                return Ok(());
+            }
+            runtime
+                .cleanup_experimental_live_channel_after_publication_failure(
+                    &host,
+                    publication.authority.as_ref(),
+                    &publication.session_id,
+                    &publication.channel_id,
+                )
+                .await
+                .map_err(|error| error.to_string())
+        });
+        Self {
+            decision_tx,
+            cleanup_task,
+        }
+    }
+
+    async fn settle(
+        self,
+        disposition: ExperimentalLiveOpenDeliveryDisposition,
+    ) -> Result<(), String> {
+        self.decision_tx.send(disposition).map_err(|_| {
+            "experimental live/open cleanup coordinator stopped before delivery decision"
+                .to_string()
+        })?;
+        self.cleanup_task
+            .await
+            .map_err(|error| format!("experimental live/open cleanup task failed: {error}"))?
+    }
+
+    async fn delivered(self) -> Result<(), String> {
+        self.settle(ExperimentalLiveOpenDeliveryDisposition::Delivered)
+            .await
+    }
+
+    async fn rejected(self) -> Result<(), String> {
+        self.settle(ExperimentalLiveOpenDeliveryDisposition::Rejected)
+            .await
+    }
+}
+
+#[cfg(all(test, feature = "experimental-gpt-live"))]
+pub(crate) fn test_experimental_live_open_delivery_custody() -> (
+    ExperimentalLiveOpenDeliveryCustody,
+    tokio::sync::oneshot::Receiver<bool>,
+) {
+    let (decision_tx, decision_rx) = tokio::sync::oneshot::channel();
+    let (settled_tx, settled_rx) = tokio::sync::oneshot::channel();
+    let cleanup_task = tokio::spawn(async move {
+        let delivered = matches!(
+            decision_rx.await,
+            Ok(ExperimentalLiveOpenDeliveryDisposition::Delivered)
+        );
+        let _ = settled_tx.send(delivered);
+        Ok(())
+    });
+    (
+        ExperimentalLiveOpenDeliveryCustody {
+            decision_tx,
+            cleanup_task,
+        },
+        settled_rx,
+    )
+}
+
 pub(crate) struct RoutedRpcResponse {
     pub(crate) response: RpcResponse,
     #[cfg(feature = "live-webrtc")]
     live_webrtc_answer_delivery: Option<handlers::live::LiveWebrtcAnswerDeliveryCustody>,
+    #[cfg(feature = "experimental-gpt-live")]
+    experimental_live_open_delivery: Option<ExperimentalLiveOpenDeliveryCustody>,
 }
 
 impl RoutedRpcResponse {
@@ -1063,6 +1165,8 @@ impl RoutedRpcResponse {
             response,
             #[cfg(feature = "live-webrtc")]
             live_webrtc_answer_delivery: None,
+            #[cfg(feature = "experimental-gpt-live")]
+            experimental_live_open_delivery: None,
         }
     }
 
@@ -1079,16 +1183,39 @@ impl RoutedRpcResponse {
         Self {
             response,
             live_webrtc_answer_delivery: delivery,
+            #[cfg(feature = "experimental-gpt-live")]
+            experimental_live_open_delivery: None,
         }
     }
 
-    pub(crate) fn settle_delivery(&mut self, delivered: bool) -> Result<(), String> {
+    #[cfg(feature = "experimental-gpt-live")]
+    pub(crate) fn with_experimental_live_open(
+        response: RpcResponse,
+        custody: Option<ExperimentalLiveOpenDeliveryCustody>,
+    ) -> Self {
+        Self {
+            response,
+            #[cfg(feature = "live-webrtc")]
+            live_webrtc_answer_delivery: None,
+            experimental_live_open_delivery: custody,
+        }
+    }
+
+    pub(crate) async fn settle_delivery(&mut self, delivered: bool) -> Result<(), String> {
         #[cfg(feature = "live-webrtc")]
         if let Some(custody) = self.live_webrtc_answer_delivery.take() {
             if delivered {
-                custody.delivered()?;
+                custody.delivered().await?;
             } else {
-                custody.rejected()?;
+                custody.rejected().await?;
+            }
+        }
+        #[cfg(feature = "experimental-gpt-live")]
+        if let Some(custody) = self.experimental_live_open_delivery.take() {
+            if delivered {
+                custody.delivered().await?;
+            } else {
+                custody.rejected().await?;
             }
         }
         #[cfg(not(feature = "live-webrtc"))]
@@ -1120,6 +1247,33 @@ pub struct MethodRouter {
     live_ws_base_url: Option<String>,
     #[cfg(feature = "live-webrtc")]
     live_webrtc_state: Option<Arc<meerkat_live::LiveWebrtcState>>,
+    #[cfg(feature = "live-webrtc")]
+    live_webrtc_answer_transport: Option<Arc<dyn meerkat_live::LiveWebrtcAnswerTransport>>,
+    #[cfg(feature = "experimental-gpt-live")]
+    experimental_live_open_authority:
+        Option<Arc<dyn meerkat::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider>>,
+    #[cfg(feature = "experimental-gpt-live")]
+    experimental_live_public_observation_publisher:
+        Option<Arc<dyn meerkat::experimental_gpt_live::ExperimentalLivePublicObservationPublisher>>,
+    #[cfg(all(feature = "experimental-gpt-live", feature = "mob"))]
+    experimental_live_delegation_coordinator:
+        Arc<meerkat_mob_mcp::live_delegation::ExperimentalLiveDelegationCoordinator>,
+    #[cfg(all(
+        feature = "experimental-gpt-live",
+        feature = "mob",
+        feature = "live-webrtc"
+    ))]
+    experimental_live_context_mirror_host: Arc<
+        StdRwLock<
+            Option<
+                Arc<
+                    meerkat::surface::ExperimentalGptLiveContextMirrorHost<
+                        meerkat::FactoryAgentBuilder,
+                    >,
+                >,
+            >,
+        >,
+    >,
     live_session_factory: Option<Arc<dyn meerkat_client::realtime_session::RealtimeSessionFactory>>,
 }
 
@@ -1150,6 +1304,12 @@ impl MethodRouter {
         runtime.set_mob_tools(Arc::new(meerkat_mob_mcp::AgentMobToolSurfaceFactory::new(
             mob_state.clone(),
         )));
+        #[cfg(all(feature = "experimental-gpt-live", feature = "mob"))]
+        let experimental_live_delegation_coordinator =
+            meerkat_mob_mcp::live_delegation::compose_experimental_live_delegation_coordinator(
+                Arc::clone(&runtime_adapter),
+                Arc::clone(&mob_state),
+            );
         let schedule_runtime = runtime.clone();
         tokio::spawn(async move {
             if let Err(error) = schedule_runtime.ensure_schedule_host_started().await {
@@ -1187,6 +1347,20 @@ impl MethodRouter {
             live_ws_base_url: None,
             #[cfg(feature = "live-webrtc")]
             live_webrtc_state: None,
+            #[cfg(feature = "live-webrtc")]
+            live_webrtc_answer_transport: None,
+            #[cfg(feature = "experimental-gpt-live")]
+            experimental_live_open_authority: None,
+            #[cfg(feature = "experimental-gpt-live")]
+            experimental_live_public_observation_publisher: None,
+            #[cfg(all(feature = "experimental-gpt-live", feature = "mob"))]
+            experimental_live_delegation_coordinator,
+            #[cfg(all(
+                feature = "experimental-gpt-live",
+                feature = "mob",
+                feature = "live-webrtc"
+            ))]
+            experimental_live_context_mirror_host: Arc::new(StdRwLock::new(None)),
             live_session_factory: None,
         }
     }
@@ -1251,7 +1425,28 @@ impl MethodRouter {
             Some(state) => live_host.with_webrtc_cleanup_state(Arc::clone(state)),
             None => live_host,
         };
-        let live_host: Arc<dyn meerkat_runtime::member_live::MemberLiveHost> = Arc::new(live_host);
+        let live_host = Arc::new(live_host);
+        #[cfg(all(
+            feature = "experimental-gpt-live",
+            feature = "mob",
+            feature = "live-webrtc"
+        ))]
+        if let Some(authority) = self.experimental_live_open_authority.as_ref() {
+            let context_host = meerkat::surface::ExperimentalGptLiveContextMirrorHost::new(
+                Arc::clone(&self.runtime_adapter),
+                Arc::clone(&live_host),
+                Arc::clone(authority),
+                Arc::clone(&self.experimental_live_delegation_coordinator)
+                    as Arc<
+                        dyn meerkat::experimental_gpt_live::ExperimentalLiveBoundChannelActivator,
+                    >,
+            );
+            *self
+                .experimental_live_context_mirror_host
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(context_host);
+        }
+        let live_host: Arc<dyn meerkat_runtime::member_live::MemberLiveHost> = live_host;
         self.runtime_adapter
             .set_member_live_host(Arc::clone(&live_host));
         #[cfg(feature = "mob")]
@@ -1263,9 +1458,95 @@ impl MethodRouter {
     #[cfg(feature = "live-webrtc")]
     pub fn with_live_webrtc(mut self, state: Arc<meerkat_live::LiveWebrtcState>) -> Self {
         self.attach_live_host(Arc::clone(state.host()));
+        self.live_webrtc_answer_transport = Some(state.clone());
         self.live_webrtc_state = Some(state);
         self.sync_member_live_host();
         self
+    }
+
+    /// Replace only SDP answer construction/sideband custody while retaining
+    /// the existing machine-owned token and public-result path.
+    #[cfg(feature = "live-webrtc")]
+    pub fn with_live_webrtc_answer_transport(
+        mut self,
+        transport: Arc<dyn meerkat_live::LiveWebrtcAnswerTransport>,
+    ) -> Self {
+        self.live_webrtc_answer_transport = Some(transport);
+        self
+    }
+
+    /// Install the host-owned authority that may admit strict channel-scoped
+    /// execution identity requests. Capability advertisement must be wired
+    /// from the same configured authority by the embedding host.
+    #[cfg(feature = "experimental-gpt-live")]
+    pub fn with_experimental_live_open_authority(
+        mut self,
+        authority: Arc<dyn meerkat::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider>,
+    ) -> Self {
+        self.experimental_live_open_authority = Some(authority);
+        self.sync_member_live_host();
+        self
+    }
+
+    /// Install the connection-scoped publisher that acknowledges an
+    /// experimental assistant output only after the outer JSON-RPC writer has
+    /// flushed its sanitized notification.
+    #[cfg(feature = "experimental-gpt-live")]
+    pub(crate) fn with_experimental_live_public_observation_publisher(
+        mut self,
+        publisher: Arc<
+            dyn meerkat::experimental_gpt_live::ExperimentalLivePublicObservationPublisher,
+        >,
+    ) -> Self {
+        self.experimental_live_public_observation_publisher = Some(publisher);
+        self
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
+    fn experimental_live_bound_channel_activator(
+        &self,
+    ) -> Option<Arc<dyn meerkat::experimental_gpt_live::ExperimentalLiveBoundChannelActivator>>
+    {
+        #[cfg(feature = "mob")]
+        {
+            #[cfg(feature = "live-webrtc")]
+            if let Some(host) = self
+                .experimental_live_context_mirror_host
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+            {
+                return Some(Arc::clone(host)
+                    as Arc<
+                        dyn meerkat::experimental_gpt_live::ExperimentalLiveBoundChannelActivator,
+                    >);
+            }
+            Some(Arc::clone(&self.experimental_live_delegation_coordinator)
+                as Arc<
+                    dyn meerkat::experimental_gpt_live::ExperimentalLiveBoundChannelActivator,
+                >)
+        }
+        #[cfg(not(feature = "mob"))]
+        {
+            None
+        }
+    }
+
+    #[cfg(all(
+        feature = "experimental-gpt-live",
+        feature = "mob",
+        feature = "live-webrtc"
+    ))]
+    pub async fn pending_experimental_live_replacement_required(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<meerkat::surface::ExperimentalLiveReplacementRequired> {
+        let host = self
+            .experimental_live_context_mirror_host
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()?;
+        host.pending_replacement_required(session_id).await
     }
 
     fn live_enabled(&self) -> bool {
@@ -1544,6 +1825,12 @@ impl MethodRouter {
         runtime.set_mob_tools(Arc::new(meerkat_mob_mcp::AgentMobToolSurfaceFactory::new(
             mob_state.clone(),
         )));
+        #[cfg(feature = "experimental-gpt-live")]
+        let experimental_live_delegation_coordinator =
+            meerkat_mob_mcp::live_delegation::compose_experimental_live_delegation_coordinator(
+                Arc::clone(&runtime_adapter),
+                Arc::clone(&mob_state),
+            );
         let schedule_runtime = runtime.clone();
         tokio::spawn(async move {
             if let Err(error) = schedule_runtime.ensure_schedule_host_started().await {
@@ -1578,6 +1865,16 @@ impl MethodRouter {
             live_ws_base_url: None,
             #[cfg(feature = "live-webrtc")]
             live_webrtc_state: None,
+            #[cfg(feature = "live-webrtc")]
+            live_webrtc_answer_transport: None,
+            #[cfg(feature = "experimental-gpt-live")]
+            experimental_live_open_authority: None,
+            #[cfg(feature = "experimental-gpt-live")]
+            experimental_live_public_observation_publisher: None,
+            #[cfg(feature = "experimental-gpt-live")]
+            experimental_live_delegation_coordinator,
+            #[cfg(all(feature = "experimental-gpt-live", feature = "live-webrtc"))]
+            experimental_live_context_mirror_host: Arc::new(StdRwLock::new(None)),
             live_session_factory: None,
         }
     }
@@ -1585,7 +1882,23 @@ impl MethodRouter {
     /// Replace the default ephemeral runtime adapter with a custom one
     /// (e.g., persistent-backed for durable runtime semantics).
     pub fn with_runtime_adapter(mut self, adapter: Arc<meerkat_runtime::MeerkatMachine>) -> Self {
-        self.runtime_adapter = adapter;
+        self.runtime_adapter = Arc::clone(&adapter);
+        #[cfg(all(feature = "experimental-gpt-live", feature = "mob"))]
+        {
+            self.experimental_live_delegation_coordinator =
+                meerkat_mob_mcp::live_delegation::compose_experimental_live_delegation_coordinator(
+                    adapter,
+                    Arc::clone(&self.mob_state),
+                );
+            #[cfg(feature = "live-webrtc")]
+            {
+                *self
+                    .experimental_live_context_mirror_host
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            }
+        }
+        self.sync_member_live_host();
         self
     }
 
@@ -1690,7 +2003,7 @@ impl MethodRouter {
         let mut routed =
             Box::pin(self.dispatch_routed_with_request_context(request, request_context)).await?;
         let response_id = routed.response.id.clone();
-        if let Err(settlement_error) = routed.settle_delivery(true) {
+        if let Err(settlement_error) = routed.settle_delivery(true).await {
             return Some(RpcResponse::error(
                 response_id,
                 error::INTERNAL_ERROR,
@@ -2288,7 +2601,7 @@ impl MethodRouter {
             // configured. The handler owns transport selection; provider
             // setup remains shared.
             "live/open" if self.live_enabled() => {
-                handlers::live::handle_live_open(
+                let result = handlers::live::handle_live_open_routed(
                     id,
                     params,
                     handlers::live::LiveOpenHandlerContext {
@@ -2299,16 +2612,52 @@ impl MethodRouter {
                         live_webrtc: self.live_webrtc_state.as_deref(),
                         runtime: &self.runtime,
                         session_factory: self.live_session_factory.as_ref().map(Arc::as_ref),
+                        #[cfg(feature = "experimental-gpt-live")]
+                        experimental_live_open_authority: self
+                            .experimental_live_open_authority
+                            .as_ref(),
                     },
                 )
-                .await
+                .await;
+                #[cfg(feature = "experimental-gpt-live")]
+                {
+                    let handlers::live::LiveOpenHandlerResult {
+                        response,
+                        experimental_publication,
+                    } = result;
+                    let custody = experimental_publication.map(|publication| {
+                        ExperimentalLiveOpenDeliveryCustody::new(
+                            Arc::clone(&self.runtime),
+                            Arc::clone(&self.live_adapter_host),
+                            publication,
+                        )
+                    });
+                    return Some(RoutedRpcResponse::with_experimental_live_open(
+                        response, custody,
+                    ));
+                }
+                #[cfg(not(feature = "experimental-gpt-live"))]
+                result.response
             }
             #[cfg(feature = "live-webrtc")]
-            "live/webrtc/answer" if self.live_webrtc_state.is_some() => {
-                if let Some(state) = self.live_webrtc_state.as_ref() {
+            "live/webrtc/answer" if self.live_webrtc_answer_transport.is_some() => {
+                if let Some(answer_transport) = self.live_webrtc_answer_transport.as_ref() {
                     return Some(RoutedRpcResponse::with_live_webrtc_answer(
-                        handlers::live::handle_live_webrtc_answer(id, params, state, &self.runtime)
-                            .await,
+                        handlers::live::handle_live_webrtc_answer(
+                            id,
+                            params,
+                            answer_transport,
+                            &self.runtime,
+                            #[cfg(feature = "experimental-gpt-live")]
+                            self.experimental_live_open_authority.as_deref(),
+                            #[cfg(feature = "experimental-gpt-live")]
+                            self.experimental_live_bound_channel_activator(),
+                            #[cfg(feature = "experimental-gpt-live")]
+                            self.experimental_live_public_observation_publisher.clone(),
+                            #[cfg(feature = "experimental-gpt-live")]
+                            &self.live_adapter_host,
+                        )
+                        .await,
                     ));
                 }
                 RpcResponse::error(
@@ -2333,7 +2682,9 @@ impl MethodRouter {
                     &self.live_adapter_host,
                     &self.runtime,
                     #[cfg(feature = "live-webrtc")]
-                    self.live_webrtc_state.as_deref(),
+                    self.live_webrtc_answer_transport.as_deref(),
+                    #[cfg(feature = "experimental-gpt-live")]
+                    self.experimental_live_open_authority.as_deref(),
                 )
                 .await
             }
@@ -2420,6 +2771,15 @@ impl MethodRouter {
                     )
                     .await
                 }
+            }
+            "live/playback_complete" if self.live_enabled() => {
+                handlers::live::handle_live_playback_complete(
+                    id,
+                    params,
+                    &self.live_adapter_host,
+                    &self.runtime,
+                )
+                .await
             }
             // A7: no `live/playback_cursor` arm — playback is a client-side
             // fact (jitter buffers, end-of-stream silence trim). Clients
@@ -11432,6 +11792,208 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "live-webrtc")]
+    struct TestRemoteAnswerTransport {
+        calls: std::sync::atomic::AtomicUsize,
+        fail: bool,
+    }
+
+    #[cfg(feature = "live-webrtc")]
+    #[async_trait::async_trait]
+    impl meerkat_live::LiveWebrtcAnswerTransport for TestRemoteAnswerTransport {
+        async fn answer_admitted_offer(
+            &self,
+            offer: meerkat_live::LiveWebrtcAdmittedOffer,
+        ) -> Result<meerkat_live::LiveWebrtcAnswerAccepted, meerkat_live::LiveWebrtcError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let provider_offer = offer.into_provider_offer()?;
+            assert!(!provider_offer.offer_sdp().is_empty());
+            if self.fail {
+                return Err(meerkat_live::LiveWebrtcError::RemoteSignaling {
+                    reason: "test_failure",
+                });
+            }
+            Ok(meerkat_live::LiveWebrtcAnswerAccepted {
+                answer_sdp: "remote-answer".to_string(),
+                answer_observation_sequence: 41,
+                bound_ready: None,
+            })
+        }
+
+        async fn reject_answer(
+            &self,
+            _binding: &meerkat_live::LiveWebrtcBindingRequest,
+            _answer_observation_sequence: u64,
+        ) -> Result<(), meerkat_live::LiveWebrtcError> {
+            Ok(())
+        }
+
+        async fn accept_answer(
+            &self,
+            _binding: &meerkat_live::LiveWebrtcBindingRequest,
+            _answer_observation_sequence: u64,
+        ) {
+        }
+
+        async fn wait_for_construction_cleanup(
+            &self,
+            _binding: &meerkat_live::LiveWebrtcBindingRequest,
+        ) -> Result<(), meerkat_live::LiveWebrtcError> {
+            Ok(())
+        }
+
+        async fn close_binding(
+            &self,
+            _binding: &meerkat_live::LiveWebrtcBindingRequest,
+        ) -> Result<(), meerkat_live::LiveWebrtcError> {
+            Ok(())
+        }
+    }
+
+    #[cfg(feature = "live-webrtc")]
+    async fn router_with_remote_answer_transport(
+        transport: Arc<TestRemoteAnswerTransport>,
+    ) -> (MethodRouter, SessionId, meerkat_live::LiveChannelId) {
+        let (router, _notif_rx) = test_router().await;
+        let host = Arc::new(meerkat_live::LiveAdapterHost::new(Arc::new(
+            meerkat_live::NoOpProjectionSink,
+        )));
+        let close_feedback: Arc<dyn meerkat_live::LiveChannelCloseFeedback> = Arc::new(
+            crate::live_projection_sink::SessionServiceProjectionSink::new(Arc::clone(
+                &router.runtime,
+            )),
+        );
+        let status_feedback: Arc<dyn meerkat_live::LiveChannelStatusFeedback> = Arc::new(
+            crate::live_projection_sink::SessionServiceProjectionSink::new(Arc::clone(
+                &router.runtime,
+            )),
+        );
+        let local = Arc::new(meerkat_live::LiveWebrtcState::new(
+            host,
+            close_feedback,
+            status_feedback,
+        ));
+        let router = router
+            .with_live_webrtc(local)
+            .with_live_webrtc_answer_transport(transport);
+        let session_id = SessionId::new();
+        router
+            .runtime_adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register remote WebRTC session");
+        let channel_id = meerkat_live::LiveChannelId::random_uuid();
+        let identity = meerkat_core::SessionLlmIdentity {
+            model: "gpt-realtime-2".to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        };
+        router
+            .runtime_adapter
+            .resolve_live_open_admission(&session_id, &channel_id, &identity)
+            .await
+            .expect("machine admits remote fixture channel");
+        (router, session_id, channel_id)
+    }
+
+    #[cfg(feature = "live-webrtc")]
+    #[tokio::test]
+    async fn remote_answer_strategy_is_not_called_before_machine_token_admission() {
+        let transport = Arc::new(TestRemoteAnswerTransport {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            fail: false,
+        });
+        let (router, _session_id, channel_id) =
+            router_with_remote_answer_transport(Arc::clone(&transport)).await;
+
+        let response = router
+            .dispatch(make_request(
+                "live/webrtc/answer",
+                serde_json::json!({
+                    "channel_id": channel_id.to_string(),
+                    "token": "unknown-token",
+                    "offer_sdp": "secret-offer"
+                }),
+            ))
+            .await
+            .expect("answer rejection response");
+
+        assert!(response.error.is_some());
+        assert_eq!(transport.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[cfg(feature = "live-webrtc")]
+    #[tokio::test]
+    async fn admitted_remote_answer_uses_injected_strategy_and_machine_result_projection() {
+        let transport = Arc::new(TestRemoteAnswerTransport {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            fail: false,
+        });
+        let (router, session_id, channel_id) =
+            router_with_remote_answer_transport(Arc::clone(&transport)).await;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_millis() as u64;
+        router
+            .runtime_adapter
+            .record_live_webrtc_token_issued(&session_id, &channel_id, "remote-token", now, 60_000)
+            .await
+            .expect("record remote token");
+
+        let response = router
+            .dispatch(make_request(
+                "live/webrtc/answer",
+                serde_json::json!({
+                    "channel_id": channel_id.to_string(),
+                    "token": "remote-token",
+                    "offer_sdp": "secret-offer"
+                }),
+            ))
+            .await
+            .expect("answer response");
+
+        assert_eq!(result_value(&response)["answer_sdp"], "remote-answer");
+        assert_eq!(transport.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[cfg(feature = "live-webrtc")]
+    #[tokio::test]
+    async fn admitted_remote_answer_failure_is_machine_projected_without_success() {
+        let transport = Arc::new(TestRemoteAnswerTransport {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            fail: true,
+        });
+        let (router, session_id, channel_id) =
+            router_with_remote_answer_transport(Arc::clone(&transport)).await;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_millis() as u64;
+        router
+            .runtime_adapter
+            .record_live_webrtc_token_issued(&session_id, &channel_id, "failure-token", now, 60_000)
+            .await
+            .expect("record failure token");
+
+        let response = router
+            .dispatch(make_request(
+                "live/webrtc/answer",
+                serde_json::json!({
+                    "channel_id": channel_id.to_string(),
+                    "token": "failure-token",
+                    "offer_sdp": "secret-offer"
+                }),
+            ))
+            .await
+            .expect("failure response");
+
+        assert!(response.error.is_some());
+        assert_eq!(transport.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
     #[tokio::test]
     async fn catalog_methods_all_dispatch_and_unknown_methods_reject() {
         let (router, _notif_rx) = test_router().await;
@@ -11517,5 +12079,396 @@ mod tests {
             .expect("unknown method must produce a response");
         let err = response.error.expect("unknown method must be an error");
         assert_eq!(err.code, error::METHOD_NOT_FOUND);
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
+    struct ExperimentalAuthorityTestAdapter;
+
+    #[cfg(feature = "experimental-gpt-live")]
+    static STRICT_LIVE_OPEN_EFFECT_TEST_LOCK: tokio::sync::Mutex<()> =
+        tokio::sync::Mutex::const_new(());
+
+    #[cfg(feature = "experimental-gpt-live")]
+    #[async_trait]
+    impl meerkat_core::live_adapter::LiveAdapter for ExperimentalAuthorityTestAdapter {
+        async fn send_command(
+            &self,
+            _command: meerkat_core::live_adapter::LiveAdapterCommand,
+        ) -> Result<(), meerkat_core::live_adapter::LiveAdapterError> {
+            Ok(())
+        }
+
+        async fn next_observation(
+            &self,
+        ) -> Result<
+            Option<meerkat_core::live_adapter::LiveAdapterObservation>,
+            meerkat_core::live_adapter::LiveAdapterError,
+        > {
+            Ok(None)
+        }
+
+        fn status(&self) -> meerkat_core::live_adapter::LiveAdapterStatus {
+            meerkat_core::live_adapter::LiveAdapterStatus::Opening
+        }
+
+        async fn close(&self) -> Result<(), meerkat_core::live_adapter::LiveAdapterError> {
+            Ok(())
+        }
+
+        fn capabilities(&self) -> meerkat_core::live_adapter::LiveChannelCapabilities {
+            meerkat_core::live_adapter::LiveChannelCapabilities {
+                audio_in: true,
+                audio_out: true,
+                text_in: false,
+                text_out: false,
+                image_in: false,
+                video_in: false,
+                barge_in_supported: true,
+                transcript_supported: true,
+                provider_native_resume: false,
+            }
+        }
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
+    struct ExperimentalAuthorityTestPending {
+        log: Arc<tokio::sync::Mutex<Vec<&'static str>>>,
+        identity: meerkat_core::SessionLlmIdentity,
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
+    #[async_trait]
+    impl meerkat_client::realtime_session::RealtimeSessionFactory for ExperimentalAuthorityTestPending {
+        fn capabilities(&self) -> meerkat_contracts::RealtimeCapabilities {
+            meerkat_contracts::RealtimeCapabilities {
+                input_kinds: vec![meerkat_contracts::RealtimeInputKind::Audio],
+                output_kinds: vec![meerkat_contracts::RealtimeOutputKind::Audio],
+                turning_modes: vec![meerkat_contracts::RealtimeTurningMode::ProviderManaged],
+                audio_input_format: Some(meerkat_contracts::RealtimeAudioFormat::pcm(24_000, 1)),
+                audio_output_format: Some(meerkat_contracts::RealtimeAudioFormat::pcm(24_000, 1)),
+                ..meerkat_contracts::RealtimeCapabilities::default()
+            }
+        }
+
+        fn supports_provider(&self, provider: meerkat_core::Provider) -> bool {
+            provider == self.identity.provider
+        }
+
+        async fn open_session(
+            &self,
+            _open_config: &meerkat_client::realtime_session::RealtimeSessionOpenConfig,
+        ) -> Result<
+            Box<dyn meerkat_client::realtime_session::RealtimeSession>,
+            meerkat_client::LlmError,
+        > {
+            Err(meerkat_client::LlmError::InvalidRequest {
+                message: "test pending supports only the live adapter seam".to_string(),
+            })
+        }
+
+        async fn attach_external_session(
+            &self,
+            _target: &meerkat_client::realtime_session::RealtimeExternalSessionTarget,
+            _open_config: &meerkat_client::realtime_session::RealtimeSessionOpenConfig,
+        ) -> Result<
+            Box<dyn meerkat_client::realtime_session::RealtimeSession>,
+            meerkat_client::LlmError,
+        > {
+            Err(meerkat_client::LlmError::InvalidRequest {
+                message: "test pending supports only the live adapter seam".to_string(),
+            })
+        }
+
+        async fn open_live_adapter(
+            &self,
+            open_config: &meerkat_client::realtime_session::RealtimeSessionOpenConfig,
+        ) -> Result<Arc<dyn meerkat_core::live_adapter::LiveAdapter>, meerkat_client::LlmError>
+        {
+            assert_eq!(open_config.llm_identity, self.identity);
+            self.log.lock().await.push("factory");
+            Ok(Arc::new(ExperimentalAuthorityTestAdapter))
+        }
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
+    #[async_trait]
+    impl meerkat::experimental_gpt_live::ExperimentalLivePendingOpen
+        for ExperimentalAuthorityTestPending
+    {
+        fn apply_execution_identity(
+            &self,
+            projection: &mut meerkat::session_runtime::live_orchestration::RealtimeSessionOpenProjection,
+        ) {
+            projection.open_config.llm_identity = self.identity.clone();
+        }
+
+        fn session_factory(&self) -> &dyn meerkat_client::realtime_session::RealtimeSessionFactory {
+            self
+        }
+
+        async fn bind_opened(
+            self: Box<Self>,
+            opened: &meerkat_contracts::LiveOpenResult,
+        ) -> Result<(), meerkat::experimental_gpt_live::ExperimentalLiveOpenAuthorityError>
+        {
+            assert!(matches!(
+                opened.transport,
+                meerkat_contracts::WireLiveTransportBootstrap::Webrtc { .. }
+            ));
+            self.log.lock().await.push("bind");
+            Ok(())
+        }
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
+    struct ExperimentalAuthorityTestProvider {
+        log: Arc<tokio::sync::Mutex<Vec<&'static str>>>,
+        deny: bool,
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
+    #[async_trait]
+    impl meerkat::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider
+        for ExperimentalAuthorityTestProvider
+    {
+        async fn prepare_open(
+            &self,
+            _canonical_session_id: &SessionId,
+            _execution_identity: &meerkat_contracts::WireLiveExecutionIdentityOverrideV1,
+        ) -> Result<
+            Box<dyn meerkat::experimental_gpt_live::ExperimentalLivePendingOpen>,
+            meerkat::experimental_gpt_live::ExperimentalLiveOpenAuthorityError,
+        > {
+            self.log.lock().await.push("prepare");
+            if self.deny {
+                return Err(
+                    meerkat::experimental_gpt_live::ExperimentalLiveOpenAuthorityError::AccessDenied,
+                );
+            }
+            Ok(Box::new(ExperimentalAuthorityTestPending {
+                log: Arc::clone(&self.log),
+                identity: meerkat_core::SessionLlmIdentity {
+                    model: "gpt-realtime-2".to_string(),
+                    provider: meerkat_core::Provider::OpenAI,
+                    self_hosted_server_id: None,
+                    provider_params: None,
+                    auth_binding: None,
+                },
+            }))
+        }
+
+        async fn unbind_channel(
+            &self,
+            _channel_id: &meerkat_live::LiveChannelId,
+            _canonical_session_id: &SessionId,
+        ) {
+            self.log.lock().await.push("unbind");
+        }
+
+        async fn close_physical_if_bound(
+            &self,
+            _channel_id: &meerkat_live::LiveChannelId,
+            _canonical_session_id: &SessionId,
+        ) -> Result<
+            meerkat::experimental_gpt_live::ExperimentalLivePhysicalClose,
+            meerkat::experimental_gpt_live::ExperimentalLiveOpenAuthorityError,
+        > {
+            Ok(meerkat::experimental_gpt_live::ExperimentalLivePhysicalClose::NotBound)
+        }
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
+    fn attach_experimental_test_webrtc(router: MethodRouter) -> MethodRouter {
+        let host = Arc::new(meerkat_live::LiveAdapterHost::new(Arc::new(
+            meerkat_live::NoOpProjectionSink,
+        )));
+        let feedback = Arc::new(
+            crate::live_projection_sink::SessionServiceProjectionSink::new(Arc::clone(
+                &router.runtime,
+            )),
+        );
+        router.with_live_webrtc(Arc::new(meerkat_live::LiveWebrtcState::new(
+            host,
+            Arc::clone(&feedback) as Arc<dyn meerkat_live::LiveChannelCloseFeedback>,
+            feedback as Arc<dyn meerkat_live::LiveChannelStatusFeedback>,
+        )))
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
+    fn experimental_open_request(session_id: &SessionId) -> RpcRequest {
+        make_request(
+            "live/open",
+            serde_json::json!({
+                "session_id": session_id.to_string(),
+                "transport": "webrtc",
+                "execution_identity": {
+                    "version": "v1",
+                    "model": "gpt-live-1-codex",
+                    "provider": "openai"
+                }
+            }),
+        )
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
+    #[tokio::test]
+    async fn experimental_router_composes_shared_mob_delegation_activator() {
+        let (router, _notifications) = test_router().await;
+        assert!(
+            router.experimental_live_bound_channel_activator().is_some(),
+            "the shipping RPC composition must construct the shared Mob activator"
+        );
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
+    #[tokio::test]
+    async fn strict_live_open_absent_authority_fails_before_runtime_or_channel_effects() {
+        let (router, _notifications) = test_router().await;
+        let router = attach_experimental_test_webrtc(router);
+        let response = router
+            .dispatch(experimental_open_request(&SessionId::new()))
+            .await
+            .expect("live/open response");
+
+        assert_eq!(
+            error_code(&response),
+            meerkat_contracts::ErrorCode::CapabilityUnavailable.jsonrpc_code()
+        );
+        assert!(router.live_adapter_host.active_channels().await.is_empty());
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
+    #[tokio::test]
+    async fn strict_live_open_denial_has_zero_projection_factory_and_channel_effects() {
+        let (router, _notifications) = test_router().await;
+        let log = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let authority = Arc::new(ExperimentalAuthorityTestProvider {
+            log: Arc::clone(&log),
+            deny: true,
+        });
+        let router = attach_experimental_test_webrtc(router)
+            .with_experimental_live_open_authority(authority);
+        let response = router
+            .dispatch(experimental_open_request(&SessionId::new()))
+            .await
+            .expect("live/open response");
+
+        assert_eq!(
+            error_code(&response),
+            meerkat_contracts::ErrorCode::CapabilityUnavailable.jsonrpc_code()
+        );
+        assert_eq!(*log.lock().await, vec!["prepare"]);
+        assert!(router.live_adapter_host.active_channels().await.is_empty());
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
+    #[tokio::test]
+    async fn strict_live_open_shipping_call_graph_binds_only_after_shared_factory_open() {
+        let _effect_test_guard = STRICT_LIVE_OPEN_EFFECT_TEST_LOCK.lock().await;
+        let (router, _notifications) = test_router().await;
+        let create = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({
+                    "prompt": "durable text agent",
+                    "initial_turn": "deferred",
+                    "model": "claude-sonnet-4-5",
+                    "provider": "anthropic"
+                }),
+            ))
+            .await
+            .expect("session/create response");
+        assert!(create.error.is_none(), "session/create failed: {create:?}");
+        let session_id = SessionId::parse(
+            result_value(&create)["session_id"]
+                .as_str()
+                .expect("session_id"),
+        )
+        .expect("canonical session id");
+        let log = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let authority = Arc::new(ExperimentalAuthorityTestProvider {
+            log: Arc::clone(&log),
+            deny: false,
+        });
+        let router = attach_experimental_test_webrtc(router)
+            .with_experimental_live_open_authority(authority);
+        let response = router
+            .dispatch(experimental_open_request(&session_id))
+            .await
+            .expect("live/open response");
+
+        assert!(
+            response.error.is_none(),
+            "strict live/open failed: {response:?}"
+        );
+        assert_eq!(*log.lock().await, vec!["prepare", "factory", "bind"]);
+        let channel_id = meerkat_live::LiveChannelId::new(
+            result_value(&response)["channel_id"]
+                .as_str()
+                .expect("channel_id"),
+        );
+        let bound = router
+            .runtime_adapter
+            .live_channel_bound_llm_identity(&session_id, &channel_id)
+            .await
+            .expect("generated bound identity")
+            .expect("bound identity present");
+        assert_eq!(bound.model, "gpt-realtime-2");
+        assert_eq!(bound.provider, meerkat_core::Provider::OpenAI);
+    }
+
+    #[cfg(feature = "experimental-gpt-live")]
+    #[tokio::test]
+    async fn strict_live_open_transport_rejection_runs_exact_publication_cleanup() {
+        let _effect_test_guard = STRICT_LIVE_OPEN_EFFECT_TEST_LOCK.lock().await;
+        let (router, _notifications) = test_router().await;
+        let create = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({
+                    "prompt": "durable text agent",
+                    "initial_turn": "deferred",
+                    "model": "claude-sonnet-4-5",
+                    "provider": "anthropic"
+                }),
+            ))
+            .await
+            .expect("session/create response");
+        assert!(create.error.is_none(), "session/create failed: {create:?}");
+        let session_id = SessionId::parse(
+            result_value(&create)["session_id"]
+                .as_str()
+                .expect("session_id"),
+        )
+        .expect("canonical session id");
+        let log = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let authority = Arc::new(ExperimentalAuthorityTestProvider {
+            log: Arc::clone(&log),
+            deny: false,
+        });
+        let router = attach_experimental_test_webrtc(router)
+            .with_experimental_live_open_authority(authority);
+        let mut routed = router
+            .dispatch_for_transport(experimental_open_request(&session_id))
+            .await
+            .expect("strict live/open routed response");
+        assert!(
+            routed.response.error.is_none(),
+            "strict live/open failed: {:?}",
+            routed.response
+        );
+        assert_eq!(*log.lock().await, vec!["prepare", "factory", "bind"]);
+        assert_eq!(router.live_adapter_host.active_channels().await.len(), 1);
+
+        routed
+            .settle_delivery(false)
+            .await
+            .expect("publication rejection cleanup");
+
+        assert_eq!(
+            *log.lock().await,
+            vec!["prepare", "factory", "bind", "unbind"]
+        );
+        assert!(router.live_adapter_host.active_channels().await.is_empty());
     }
 }

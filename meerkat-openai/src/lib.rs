@@ -13,6 +13,14 @@ pub mod tokio {
 
 pub mod client;
 pub mod client_compatible;
+#[cfg(all(not(target_arch = "wasm32"), feature = "experimental-gpt-live"))]
+pub mod gpt_live;
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    feature = "experimental-gpt-live-gate0-harness"
+))]
+#[doc(hidden)]
+pub mod gpt_live_gate0;
 pub mod image_generation;
 #[cfg(all(not(target_arch = "wasm32"), feature = "realtime"))]
 pub mod live;
@@ -24,6 +32,13 @@ pub mod web_search;
 
 pub use client::{AzureOpenAiWireConfig, OpenAiClient};
 pub use client_compatible::{OpenAiCompatibleClient, OpenAiCompatibleClientOptions};
+#[cfg(all(not(target_arch = "wasm32"), feature = "experimental-gpt-live"))]
+pub use gpt_live::{
+    GptLiveAppendToken, GptLiveBrokerBootstrap, GptLiveBrokerError, GptLiveBrokerFactory,
+    GptLiveBrokerObservation, GptLiveBrokerOpenConfig, GptLiveBrokerSession,
+    GptLiveBrokerTerminalClass, GptLiveDelegationRef, GptLiveTranscriptItemRef, GptLiveTurnRef,
+    GptLiveTurnRole,
+};
 pub use image_generation::{
     OpenAiImageGenerationProfile, OpenAiImageOutputOptions, OpenAiImageProviderParams,
     OpenAiImagesApiEndpoint, OpenAiImagesApiPlan, OpenAiImagesApiRequestShape,

@@ -45789,3 +45789,52 @@ fn recovered_terminal_completion_batches_have_a_generated_disposition() {
         Reason::DirectedPublicationUnresolved,
     );
 }
+
+#[test]
+fn assistant_output_handle_is_exact_channel_scoped_and_two_phase_one_use() {
+    let session_id = meerkat_core::SessionId::new();
+    let channel_id = meerkat_core::LiveChannelId::new("assistant-output-channel");
+    let binding = crate::live_execution::LiveDelegationRuntimeBinding::new(
+        session_id,
+        channel_id,
+        crate::identifiers::LogicalRuntimeId::new("assistant-output-runtime"),
+        17,
+        3,
+    );
+    let interaction_id = meerkat_core::InteractionId::new();
+    let handle = LiveAssistantOutputHandle {
+        binding: binding.clone(),
+        interaction_id,
+        assistant_turn_ref: "assistant-turn-one".to_string(),
+        output_id: "opaque-output-one".to_string(),
+        target: Arc::new(StdMutex::new(None)),
+        terminal_reserved: Arc::new(AtomicBool::new(false)),
+        terminal_consumed: Arc::new(AtomicBool::new(false)),
+    };
+
+    assert_eq!(
+        handle.__reserve_for_playback_terminal(&binding, interaction_id, "wrong-assistant-turn",),
+        Err(crate::live_execution::LiveExecutionAuthorityError::AssistantOutputMismatch),
+        "cross-target terminal reservation is rejected without burning authority",
+    );
+    handle
+        .__reserve_for_playback_terminal(&binding, interaction_id, "assistant-turn-one")
+        .expect("the exact output reserves once");
+    assert_eq!(
+        handle.__reserve_for_playback_terminal(&binding, interaction_id, "assistant-turn-one"),
+        Err(crate::live_execution::LiveExecutionAuthorityError::AssistantOutputAlreadyReserved,),
+        "concurrent terminal dispatch cannot reserve the same output",
+    );
+    handle.release_playback_terminal();
+    handle
+        .__reserve_for_playback_terminal(&binding, interaction_id, "assistant-turn-one")
+        .expect("pre-acceptance failure releases the exact output for retry");
+    handle
+        .commit_playback_terminal()
+        .expect("successful terminal acceptance consumes the reservation");
+    assert_eq!(
+        handle.__reserve_for_playback_terminal(&binding, interaction_id, "assistant-turn-one"),
+        Err(crate::live_execution::LiveExecutionAuthorityError::AssistantOutputAlreadyConsumed,),
+        "committed terminal authority remains one-use across cloned handles",
+    );
+}

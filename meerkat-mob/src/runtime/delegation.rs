@@ -128,7 +128,7 @@ impl DelegationExecutionRequest {
         }
     }
 
-    /// Construct a machine-admitted GPT Live delegation request.
+    /// Construct a machine-admitted live delegation request.
     ///
     /// The admission is sealed by `meerkat-runtime` from the generated
     /// `LiveDelegationAdmitted` effect. This service cannot construct live
@@ -174,9 +174,9 @@ impl DelegationExecutionRequest {
         &self.source
     }
 
-    /// Bind exact durable work admission independently of the legacy live
-    /// delegation lifecycle. Responses bridge callers derive this carrier
-    /// from their sealed operation and interaction identities.
+    /// Bind exact stable delivery authority independently of the generated
+    /// live-delegation lifecycle. Callers derive this carrier from their own
+    /// sealed operation and interaction identities.
     #[must_use]
     pub fn with_delivery_identity(
         mut self,
@@ -737,8 +737,9 @@ impl DelegationExecutionService {
 
     /// Compatibility composition for synchronous callers such as MCP.
     ///
-    /// GPT Live uses [`Self::start`], machine-owned cancellation, explicit
-    /// terminal resolution, and separately authorized retirement instead.
+    /// Machine-admitted live callers use [`Self::start`], machine-owned
+    /// cancellation, explicit terminal resolution, and separately authorized
+    /// retirement instead.
     pub async fn execute(
         &self,
         request: DelegationExecutionRequest,

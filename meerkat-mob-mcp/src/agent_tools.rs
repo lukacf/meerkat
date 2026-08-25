@@ -1,6 +1,6 @@
 //! Agent-facing mob tool surface for delegation and orchestration.
 //!
-//! `AgentMobToolSurface` provides the 8 agent-internal mob tools (delegate,
+//! `AgentMobToolSurface` provides the agent-internal mob tools (delegate,
 //! mob_create, mob_destroy, mob_spawn_member, mob_retire_member,
 //! mob_check_member, mob_list_members, mob_list) composed into the tool
 //! gateway by `build_agent()`.
@@ -24,7 +24,7 @@ use meerkat_mob::{
     SpawnResult, runtime::MobSessionService,
 };
 use schemars::{JsonSchema, schema_for};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{future::Future, pin::Pin, sync::Arc};
 
@@ -52,6 +52,7 @@ const TOOL_CONCLUDE_OBJECTIVE: &str = "conclude_objective";
 const TOOL_MOB_CREATE: &str = "mob_create";
 const TOOL_MOB_DESTROY: &str = "mob_destroy";
 const TOOL_MOB_SPAWN_MEMBER: &str = "mob_spawn_member";
+const TOOL_FORK_OFF: &str = "fork_off";
 const TOOL_MOB_RETIRE_MEMBER: &str = "mob_retire_member";
 const TOOL_MOB_CHECK_MEMBER: &str = "mob_check_member";
 const TOOL_MOB_LIST_MEMBERS: &str = "mob_list_members";
@@ -352,6 +353,7 @@ impl AgentMobToolSurface {
          - mob_create: Create an explicit mob with full control over profiles, wiring, and flows\n\
          - mob_destroy: Destroy an explicit mob (cannot destroy implicit delegation mob)\n\
          - mob_spawn_member: Spawn a member into any mob\n\
+         - fork_off: Fork a durable member and run one exact child turn while retaining it\n\
          - mob_retire_member: Archive a member and its session\n\
          - mob_check_member: Check a member's execution status and output\n\
          - mob_list_members: List all members of a mob\n\
@@ -416,6 +418,21 @@ impl AgentMobToolSurface {
                 )
             }
             crate::MobMcpDestroyError::Mob(error) => Self::map_mob_error(call, error),
+        }
+    }
+
+    fn map_bounded_member_run_error(
+        call: ToolCallView<'_>,
+        error: meerkat_mob::BoundedMemberRunError,
+    ) -> ToolError {
+        match error {
+            meerkat_mob::BoundedMemberRunError::Admission(error) => {
+                Self::map_mob_error(call, error)
+            }
+            other => ToolError::execution_failed(format!(
+                "tool '{}' exact bounded child turn failed: {other}",
+                call.name
+            )),
         }
     }
 
@@ -1148,6 +1165,103 @@ impl AgentMobToolSurface {
         Self::encode_result(call, Self::spawn_result_payload(&mob_id, &spawn_result))
     }
 
+    async fn dispatch_fork_off(
+        &self,
+        call: ToolCallView<'_>,
+        objective_id: Option<meerkat_core::interaction::ObjectiveId>,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+        let args: ForkOffArgs = call
+            .parse_args()
+            .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
+        let (mob_id, source_identity) = self
+            .state
+            .member_for_bridge_session(&self.owner_bridge_session_id)
+            .await
+            .map_err(|error| Self::map_mob_error(call, error))?
+            .ok_or_else(|| {
+                ToolError::execution_failed(
+                    "fork_off requires the current session to be a durable mob member",
+                )
+            })?;
+        let audit_handle = self
+            .bound_handle(&mob_id)
+            .await
+            .map_err(|error| Self::map_mob_error(call, error))?;
+        let source_entry = audit_handle
+            .roster()
+            .await
+            .get_by_identity(&source_identity)
+            .cloned()
+            .ok_or_else(|| {
+                ToolError::execution_failed(
+                    "fork_off resolved the current session binding but its durable roster member is absent",
+                )
+            })?;
+        let authority = self.authority_context_snapshot();
+        let observations = meerkat_mob::SpawnMemberAdmissionObservations {
+            manage_scope_present: authority.can_manage_mob(mob_id.as_str()),
+            profile_scope_contains: authority
+                .spawn_profile_scope_contains(mob_id.as_str(), source_entry.role.as_str()),
+            ..meerkat_mob::SpawnMemberAdmissionObservations::default()
+        };
+        let admission = audit_handle
+            .resolve_spawn_member_admission(observations)
+            .await
+            .map_err(|error| Self::map_mob_error(call, error))?;
+        if matches!(admission, meerkat_mob::SpawnMemberAdmission::Denied) {
+            return Err(ToolError::access_denied(call.name));
+        }
+
+        let child_input = fork_off_child_input(&args.task, args.expected_output.as_deref());
+        let mut member = SpawnMemberSpec::new(source_entry.role, args.member_id);
+        member.initial_message = Some(ContentInput::Text(child_input));
+        member.override_profile = source_entry.effective_profile_override;
+        member.model_override = source_entry.effective_model_override;
+        member.objective_id = objective_id;
+        member.tool_access_policy = self
+            .resolve_child_tool_access_policy_boxed(call.name, member.tool_access_policy.take())
+            .await?;
+        let handle = audit_handle.clone();
+        let operation_source = source_identity.clone();
+        let outcome = meerkat_runtime::stack_relief::relieve_caller_stack(move || async move {
+            handle
+                .fork_member_then_run_bounded(
+                    &operation_source,
+                    member,
+                    args.message_count,
+                    args.result_label,
+                    args.max_text_bytes,
+                )
+                .await
+        })
+        .await
+        .map_err(|error| Self::map_bounded_member_run_error(call, error))?;
+        self.record_successful_operator_action_boxed(&audit_handle, call.name)
+            .await;
+        let identity = outcome.fork.agent_identity.to_string();
+        let bounded_result = outcome.turn.result().result().to_wire();
+        let result = ForkOffResult {
+            mob_id: mob_id.to_string(),
+            source_member_id: source_identity.to_string(),
+            agent_identity: identity.clone(),
+            member_ref: meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), &identity),
+            fork_session_id: outcome.fork.session_id.to_string(),
+            turn_session_id: outcome.turn.result().session_id().to_string(),
+            cache_inheritance: outcome.fork.cache_inheritance,
+            bounded_result,
+            usage: outcome.turn.result().usage().clone(),
+            turns: outcome.turn.result().turns(),
+            tool_calls: outcome.turn.result().tool_calls(),
+        };
+        let value = serde_json::to_value(result).map_err(|error| {
+            ToolError::execution_failed(format!(
+                "tool '{}' failed to encode durable fork result: {error}",
+                call.name
+            ))
+        })?;
+        Self::encode_result(call, value)
+    }
+
     #[inline(never)]
     fn ensure_spawn_member_scope_boxed<'a>(
         &'a self,
@@ -1573,6 +1687,11 @@ impl AgentMobToolSurface {
         dispatch_mob_spawn_member,
         objective_id: Option<meerkat_core::interaction::ObjectiveId>
     );
+    boxed_agent_dispatch!(
+        dispatch_fork_off_boxed,
+        dispatch_fork_off,
+        objective_id: Option<meerkat_core::interaction::ObjectiveId>
+    );
     boxed_agent_dispatch!(dispatch_mob_retire_member_boxed, dispatch_mob_retire_member);
     boxed_agent_dispatch!(dispatch_mob_check_member_boxed, dispatch_mob_check_member);
     boxed_agent_dispatch!(dispatch_mob_list_members_boxed, dispatch_mob_list_members);
@@ -1627,6 +1746,7 @@ impl AgentMobToolSurface {
                 self.dispatch_mob_spawn_member_boxed(call, objective_id)
                     .await
             }
+            TOOL_FORK_OFF => self.dispatch_fork_off_boxed(call, objective_id).await,
             TOOL_MOB_RETIRE_MEMBER => self.dispatch_mob_retire_member_boxed(call).await,
             TOOL_MOB_CHECK_MEMBER => self.dispatch_mob_check_member_boxed(call).await,
             TOOL_MOB_LIST_MEMBERS => self.dispatch_mob_list_members_boxed(call).await,
@@ -1958,6 +2078,13 @@ fn build_tool_defs_with_profile_support(
             typed_schema::<SpawnMemberArgs>(),
         ),
         tool_def(
+            TOOL_FORK_OFF,
+            "Delegate one task through a real durable transcript fork.\n\n\
+             Unlike delegate, the child starts from an exact committed prefix of an existing mob member's transcript. Unlike prompt-context fork_helper, this persists a real child session and provisions it through the ordinary resume path. The tool visibly commits the task and expected-output guidance as the child input, captures ordinary final assistant text under the caller's byte bound, and retains the child in the normal mob roster.\n\n\
+             The parent remains responsible for replying to the user. The child does not autonomously deliver across sessions. The returned bounded result is ordinary final text with explicit status and truncation, not a validated summary or report.",
+            typed_schema::<ForkOffArgs>(),
+        ),
+        tool_def(
             TOOL_MOB_RETIRE_MEMBER,
             "Retire a mob member and archive its session.\n\n\
              Retirement is graceful: the member's session is archived (preserving its history) \
@@ -2170,6 +2297,62 @@ struct DelegateArgs {
     #[serde(default)]
     #[schemars(with = "serde_json::Value")]
     tooling: Option<meerkat_mob::SpawnTooling>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct ForkOffArgs {
+    /// Stable identity for the child fork. The surface never allocates one.
+    member_id: String,
+    /// Caller-authored work to perform on the durable fork.
+    task: String,
+    /// Optional visible guidance for how the child should present its final
+    /// answer. This is prompt text, not a validated output schema.
+    #[serde(default)]
+    expected_output: Option<String>,
+    /// Optional committed transcript prefix length. Omit to fork the source's
+    /// exact current committed end.
+    #[serde(default)]
+    message_count: Option<usize>,
+    /// Label attached to the exact bounded final assistant text.
+    #[serde(default = "fork_off_default_result_label")]
+    result_label: String,
+    /// Maximum UTF-8 bytes returned, including any truncation marker.
+    #[serde(default = "fork_off_default_max_text_bytes")]
+    max_text_bytes: usize,
+}
+
+#[derive(Serialize)]
+struct ForkOffResult {
+    /// Authoritative mob resolved from the current durable session binding.
+    mob_id: String,
+    /// Authoritative source member resolved from the current session binding.
+    source_member_id: String,
+    agent_identity: String,
+    member_ref: meerkat_contracts::WireMemberRef,
+    fork_session_id: String,
+    turn_session_id: String,
+    cache_inheritance: meerkat_core::ForkCacheInheritance,
+    bounded_result: meerkat_contracts::MobBoundedHelperResult,
+    usage: meerkat_core::Usage,
+    turns: u32,
+    tool_calls: u32,
+}
+
+fn fork_off_default_result_label() -> String {
+    "fork_off_result".to_string()
+}
+
+const fn fork_off_default_max_text_bytes() -> usize {
+    16 * 1024
+}
+
+fn fork_off_child_input(task: &str, expected_output: Option<&str>) -> String {
+    let expected_output = expected_output.unwrap_or(
+        "Report the work performed and the final result clearly in your final assistant text.",
+    );
+    format!(
+        "DELEGATED DURABLE FORK\n\nTask:\n{task}\n\nExpected output guidance:\n{expected_output}\n\nInstructions:\n- This is a delegated durable transcript fork.\n- Perform the task, then report the work performed and the final result in your final assistant text.\n- The parent remains responsible for replying to the user.\n- Do not attempt autonomous cross-session delivery."
+    )
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -2489,6 +2672,7 @@ mod tests {
                 "mob_create",
                 "mob_destroy",
                 "mob_spawn_member",
+                "fork_off",
                 "mob_retire_member",
                 "mob_check_member",
                 "mob_list_members",
@@ -2514,6 +2698,7 @@ mod tests {
                 "mob_create",
                 "mob_destroy",
                 "mob_spawn_member",
+                "fork_off",
                 "mob_retire_member",
                 "mob_check_member",
                 "mob_list_members",
@@ -2547,6 +2732,58 @@ mod tests {
                 "{forbidden} must never appear in the agent-facing roster"
             );
         }
+    }
+
+    #[test]
+    fn fork_off_commits_caller_task_and_guidance_visibly() {
+        let input = fork_off_child_input("Inspect the ledger", Some("Return a concise finding"));
+
+        assert!(input.contains("DELEGATED DURABLE FORK"));
+        assert!(input.contains("Task:\nInspect the ledger"));
+        assert!(input.contains("Expected output guidance:\nReturn a concise finding"));
+        assert!(input.contains("parent remains responsible for replying to the user"));
+        assert!(input.contains("Do not attempt autonomous cross-session delivery"));
+    }
+
+    #[test]
+    fn fork_off_schema_keeps_source_authority_out_of_llm_arguments() {
+        let definitions = build_tool_defs();
+        let definition = definitions
+            .iter()
+            .find(|definition| definition.name == "fork_off")
+            .expect("fork_off tool definition");
+        let required = definition.input_schema["required"]
+            .as_array()
+            .expect("fork_off required fields");
+        for field in ["member_id", "task"] {
+            assert!(
+                required.iter().any(|entry| entry == field),
+                "fork_off schema must require {field}"
+            );
+        }
+        let properties = definition.input_schema["properties"]
+            .as_object()
+            .expect("fork_off properties");
+        for forbidden in ["mob_id", "source_member_id", "profile"] {
+            assert!(
+                !properties.contains_key(forbidden),
+                "fork_off must infer {forbidden} from the current durable session binding"
+            );
+        }
+    }
+
+    #[test]
+    fn fork_off_common_case_uses_bounded_result_defaults() {
+        let args: ForkOffArgs = serde_json::from_value(serde_json::json!({
+            "member_id": "analysis-fork",
+            "task": "Inspect the ledger"
+        }))
+        .expect("minimal fork_off args");
+
+        assert_eq!(args.result_label, "fork_off_result");
+        assert_eq!(args.max_text_bytes, 16 * 1024);
+        assert_eq!(args.message_count, None);
+        assert_eq!(args.expected_output, None);
     }
 
     #[test]

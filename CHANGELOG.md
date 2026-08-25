@@ -28,6 +28,19 @@ them.
 
 ## [Unreleased]
 
+### Added
+
+- `MobStorage::created_definition` reads the latest durable `MobCreated`
+  definition without building or actuating a mob, allowing hosts to compare an
+  edited composition against the event-log authority before resume.
+
+### Fixed
+
+- Mob resume now recognizes a structurally valid legacy runtime alias at any
+  generation when its embedded durable identity matches the requested member.
+  Exact mob and role checks remain required, and malformed generations or
+  different identities continue to fail closed.
+
 ## [0.8.28] - 2026-08-24
 
 ### Added

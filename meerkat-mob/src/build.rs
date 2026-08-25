@@ -765,45 +765,66 @@ fn resumed_member_segment_matches_current_or_legacy(current: &str, stored: &str)
     if current == stored {
         return true;
     }
-    let current_identity = if let Some(encoded) = current.strip_prefix("mk--") {
-        let Some(decoded) = decode_legacy_member_alias_segment(encoded) else {
-            return false;
-        };
-        if stored == decoded {
-            return true;
-        }
-        decoded
-    } else {
-        current.to_string()
+    let Some((current_identity, current_is_runtime_alias)) =
+        durable_identity_from_member_segment(current)
+    else {
+        return false;
     };
-    mobkit_generation_zero_identity_runtime_alias(&current_identity)
-        .is_some_and(|alias| stored == alias)
+    let Some((stored_identity, stored_is_runtime_alias)) =
+        durable_identity_from_member_segment(stored)
+    else {
+        return false;
+    };
+    match (current_is_runtime_alias, stored_is_runtime_alias) {
+        (false, false) => current_identity == stored_identity,
+        // A stable identity may adopt a legacy alias at any generation, but
+        // two persisted runtime observations must name the same exact alias.
+        // Otherwise a typed binding from one run could incorrectly certify a
+        // comms name from another run merely because both embed the same
+        // durable identity.
+        (true, true) => decoded_member_segment(current) == decoded_member_segment(stored),
+        (true, false) => runtime_alias_identity_matches_stable(&current_identity, &stored_identity),
+        (false, true) => runtime_alias_identity_matches_stable(&stored_identity, &current_identity),
+    }
 }
 
-fn mobkit_generation_zero_identity_runtime_alias(current: &str) -> Option<String> {
-    let mut encoded = String::with_capacity(current.len() + 26);
-    encoded.push_str("mk--rt_c");
-    let canonical_identity = if current.contains(':') {
-        current.to_string()
-    } else {
-        format!("identity:{current}")
-    };
-    for character in canonical_identity.chars() {
-        match character {
-            '_' => encoded.push_str("__"),
-            ':' => encoded.push_str("_c"),
-            character if character.is_ascii_alphanumeric() || character == '-' => {
-                encoded.push(character);
-            }
-            character => {
-                encoded.push_str("_x");
-                encoded.push_str(&format!("{:x}", character as u32));
-                encoded.push('_');
-            }
+/// Recover the durable identity proved by one raw or comms-safe member segment.
+///
+/// MobKit previously persisted runtime aliases in typed member bindings. Those
+/// aliases carry one exact durable identity plus an incidental generation. The
+/// generation is not part of the durable member identity, but it must still be
+/// a canonical `u64` before the alias can authorize resume compatibility.
+fn durable_identity_from_member_segment(member: &str) -> Option<(String, bool)> {
+    let decoded = decoded_member_segment(member)?;
+
+    let durable_identity = if let Some(runtime_alias) = decoded.strip_prefix("rt:") {
+        let (identity, generation) = runtime_alias.rsplit_once(':')?;
+        if identity.is_empty() || generation.parse::<u64>().is_err() {
+            return None;
         }
+        return Some((identity.to_string(), true));
+    } else {
+        decoded.as_str()
+    };
+    if durable_identity.is_empty() {
+        return None;
     }
-    encoded.push_str("_c0");
-    Some(encoded)
+
+    Some((durable_identity.to_string(), false))
+}
+
+fn decoded_member_segment(member: &str) -> Option<String> {
+    if let Some(encoded) = member.strip_prefix("mk--") {
+        decode_legacy_member_alias_segment(encoded)
+    } else {
+        Some(member.to_string())
+    }
+}
+
+fn runtime_alias_identity_matches_stable(runtime_identity: &str, stable_identity: &str) -> bool {
+    runtime_identity == stable_identity
+        || (!stable_identity.contains(':')
+            && runtime_identity.strip_prefix("identity:") == Some(stable_identity))
 }
 
 fn split_member_comms_name(value: &str) -> Option<(&str, &str, &str)> {
@@ -3614,6 +3635,68 @@ mod tests {
     }
 
     #[test]
+    fn test_resumed_metadata_accepts_ob3_generation_two_runtime_binding() {
+        let stable_member = "mk--person_cfederico_x2e_gomez_x40_king_x2e_com";
+        let legacy_runtime_member = "mk--rt_cperson_cfederico_x2e_gomez_x40_king_x2e_com_c2";
+        let canonical_binding = meerkat_core::MobMemberBinding {
+            mob_id: "ob3".to_string(),
+            role: "personal".to_string(),
+            member: stable_member.to_string(),
+        };
+        let mut config = AgentBuildConfig::new("gpt-5.5");
+        config.comms_name = Some(format!("ob3/personal/{stable_member}"));
+        config.mob_member_binding = Some(canonical_binding.clone());
+        config.peer_meta = Some(PeerMeta::default().with_label("fixture", "current"));
+
+        let metadata = SessionMetadata {
+            schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+            model: "gpt-5.5".to_string(),
+            max_tokens: 16_384,
+            structured_output_retries: 2,
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            tooling: Default::default(),
+            keep_alive: false,
+            comms_name: Some(format!("ob3/personal/{legacy_runtime_member}")),
+            peer_meta: Some(
+                PeerMeta::default()
+                    .with_label("fixture", "stale")
+                    .with_label("agent_identity", legacy_runtime_member)
+                    .with_label("meerkat_id", legacy_runtime_member),
+            ),
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+            auth_binding: None,
+            mob_member_binding: Some(meerkat_core::MobMemberBinding {
+                mob_id: "ob3".to_string(),
+                role: "personal".to_string(),
+                member: legacy_runtime_member.to_string(),
+            }),
+        };
+
+        apply_resumed_session_metadata(&mut config, &metadata)
+            .expect("generation-two runtime binding proves the same durable identity");
+        assert_eq!(
+            config.comms_name.as_deref(),
+            Some("ob3/personal/mk--person_cfederico_x2e_gomez_x40_king_x2e_com")
+        );
+        assert_eq!(config.mob_member_binding, Some(canonical_binding));
+        let labels = &config.peer_meta.expect("canonical peer metadata").labels;
+        assert_eq!(labels.get("fixture").map(String::as_str), Some("current"));
+        assert_eq!(
+            labels.get("agent_identity").map(String::as_str),
+            Some(stable_member)
+        );
+        assert_eq!(
+            labels.get("meerkat_id").map(String::as_str),
+            Some(stable_member)
+        );
+    }
+
+    #[test]
     fn encoded_stable_identity_accepts_legacy_generation_zero_runtime_binding() {
         for (stable_member, legacy_member) in [
             ("mk--agent_calice", "mk--rt_cagent_calice_c0"),
@@ -3633,11 +3716,29 @@ mod tests {
     }
 
     #[test]
+    fn encoded_stable_identity_accepts_legacy_runtime_binding_at_any_generation() {
+        let stable_member = "mk--person_cfederico_x2e_gomez_x40_king_x2e_com";
+        for generation in [1_u64, 2, u64::MAX] {
+            let legacy_member =
+                format!("mk--rt_cperson_cfederico_x2e_gomez_x40_king_x2e_com_c{generation}");
+            assert!(
+                resumed_comms_name_matches_current_or_legacy(
+                    &format!("ob3/personal/{stable_member}"),
+                    &format!("ob3/personal/{legacy_member}"),
+                ),
+                "stable encoded member must prove its legacy generation-{generation} runtime binding"
+            );
+        }
+    }
+
+    #[test]
     fn encoded_stable_identity_rejects_unproven_legacy_runtime_binding() {
         let current = "homecore/identity/mk--agent_calice";
         for stored in [
             "homecore/identity/mk--rt_cagent_cbob_c0",
-            "homecore/identity/mk--rt_cagent_calice_c1",
+            "homecore/identity/mk--rt_cagent_cbob_c2",
+            "homecore/identity/mk--rt_cagent_calice_cnot-a-generation",
+            "homecore/identity/mk--rt_cagent_calice_c18446744073709551616",
             "other/identity/mk--rt_cagent_calice_c0",
             "homecore/worker/mk--rt_cagent_calice_c0",
             "homecore/identity/mk--agent_calice_x",
@@ -3650,14 +3751,17 @@ mod tests {
     }
 
     #[test]
-    fn test_identity_runtime_alias_rejects_wrong_mob_role_member_or_generation() {
+    fn test_identity_runtime_alias_rejects_wrong_mob_role_member_or_malformed_generation() {
         let current = "homecore/identity/parent-1";
         for stored in [
+            "homecore/identity/identity:parent-1",
             "other/identity/mk--rt_cidentity_cparent-1_c0",
             "homecore/worker/mk--rt_cidentity_cparent-1_c0",
             "homecore/identity/mk--rt_cidentity_cparent-2_c0",
             "homecore/identity/mk--rt_cworker_cparent-1_c0",
-            "homecore/identity/mk--rt_cidentity_cparent-1_c1",
+            "homecore/identity/mk--rt_cidentity_cparent-1_c-1",
+            "homecore/identity/mk--rt_cidentity_cparent-1_c18446744073709551616",
+            "homecore/identity/mk--rt_cidentity_cparent-1_c",
         ] {
             assert!(
                 !resumed_comms_name_matches_current_or_legacy(current, stored),
@@ -3667,22 +3771,27 @@ mod tests {
     }
 
     #[test]
-    fn generation_zero_runtime_alias_encodes_typed_colon_identity_once() {
+    fn member_segment_normalization_recovers_only_proven_durable_identity() {
         assert_eq!(
-            mobkit_generation_zero_identity_runtime_alias("domain:home-automation").as_deref(),
-            Some("mk--rt_cdomain_chome-automation_c0")
+            durable_identity_from_member_segment("mk--rt_cdomain_chome-automation_c10"),
+            Some(("domain:home-automation".to_string(), true))
         );
         assert_eq!(
-            mobkit_generation_zero_identity_runtime_alias("parent-1").as_deref(),
-            Some("mk--rt_cidentity_cparent-1_c0")
+            durable_identity_from_member_segment("rt:identity:parent-1:1"),
+            Some(("identity:parent-1".to_string(), true))
         );
         assert_eq!(
-            mobkit_generation_zero_identity_runtime_alias("agent:alice_smith").as_deref(),
-            Some("mk--rt_cagent_calice__smith_c0")
+            durable_identity_from_member_segment("parent-1"),
+            Some(("parent-1".to_string(), false))
         );
         assert_eq!(
-            mobkit_generation_zero_identity_runtime_alias("agent:alice.smith").as_deref(),
-            Some("mk--rt_cagent_calice_x2e_smith_c0")
+            durable_identity_from_member_segment("mk--agent_calice_x2e_smith"),
+            Some(("agent:alice.smith".to_string(), false))
+        );
+        assert!(durable_identity_from_member_segment("mk--rt_cagent_calice_c-1").is_none());
+        assert!(
+            durable_identity_from_member_segment("mk--rt_cagent_calice_c18446744073709551616")
+                .is_none()
         );
     }
 

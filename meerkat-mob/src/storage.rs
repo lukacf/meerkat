@@ -11,6 +11,10 @@ use crate::store::{
     MobIdentityStore, MobRunStore, MobRuntimeMetadataStore, MobSpecStore, RealmProfileStore,
     authority_validating_mob_run_store,
 };
+use crate::{
+    MobDefinition,
+    event::{MobEvent, MobEventKind},
+};
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 use std::sync::Arc;
@@ -156,6 +160,33 @@ impl MobStorage {
     /// Return whether the structural event log is empty.
     pub async fn is_event_log_empty(&self) -> Result<bool, crate::store::MobStoreError> {
         Ok(self.events.latest_cursor().await? == 0)
+    }
+
+    /// Read the definition that the persistent mob storage was created for.
+    ///
+    /// This is a pre-actuation read: it does not build a runtime, resume
+    /// members, or emit events. Reset starts a new structural epoch by
+    /// appending another `MobCreated`, so the last such event is authoritative.
+    pub async fn created_definition(
+        &self,
+    ) -> Result<Option<MobDefinition>, crate::store::MobStoreError> {
+        let (_, definition) = self.replay_with_created_definition().await?;
+        Ok(definition)
+    }
+
+    /// Replay structural events together with their authoritative definition.
+    ///
+    /// Runtime resume and the public pre-actuation read share this exact
+    /// selection path so neither can reinterpret the event log independently.
+    pub(crate) async fn replay_with_created_definition(
+        &self,
+    ) -> Result<(Vec<MobEvent>, Option<MobDefinition>), crate::store::MobStoreError> {
+        let events = self.events.replay_all().await?;
+        let definition = events.iter().rev().find_map(|event| match &event.kind {
+            MobEventKind::MobCreated { definition } => Some(*definition.clone()),
+            _ => None,
+        });
+        Ok((events, definition))
     }
 
     /// Create a storage bundle backed by a single SQLite database file.
@@ -539,6 +570,51 @@ mod tests {
                 .unwrap(),
             crate::IdentityStoredObservation::Valid(status)
         );
+    }
+
+    #[tokio::test]
+    async fn created_definition_reads_latest_epoch_without_mutating_storage() {
+        let storage = MobStorage::in_memory();
+        assert_eq!(storage.created_definition().await.unwrap(), None);
+
+        let first = MobDefinition::explicit("created-definition-test");
+        storage
+            .events
+            .append(NewMobEvent {
+                mob_id: first.id.clone(),
+                timestamp: None,
+                kind: MobEventKind::MobCreated {
+                    definition: Box::new(first),
+                },
+            })
+            .await
+            .unwrap();
+        storage
+            .events
+            .append(NewMobEvent {
+                mob_id: MobId::from("created-definition-test"),
+                timestamp: None,
+                kind: MobEventKind::MobCompleted,
+            })
+            .await
+            .unwrap();
+        let mut latest = MobDefinition::explicit("created-definition-test");
+        latest.image_generation_provider = Some(meerkat_core::Provider::OpenAI);
+        storage
+            .events
+            .append(NewMobEvent {
+                mob_id: latest.id.clone(),
+                timestamp: None,
+                kind: MobEventKind::MobCreated {
+                    definition: Box::new(latest.clone()),
+                },
+            })
+            .await
+            .unwrap();
+
+        let cursor_before = storage.events.latest_cursor().await.unwrap();
+        assert_eq!(storage.created_definition().await.unwrap(), Some(latest));
+        assert_eq!(storage.events.latest_cursor().await.unwrap(), cursor_before);
     }
 
     #[tokio::test]

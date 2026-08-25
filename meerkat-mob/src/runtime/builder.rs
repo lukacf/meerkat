@@ -7725,22 +7725,12 @@ impl MobBuilder {
             canonical_runtime_adapter_for_session_service(&session_service, runtime_adapter)?;
         // §8 check deferred until after definition recovery — the definition
         // comes from the event log, so we can't check profiles before replay.
-        let all_events = storage.events.replay_all().await?;
-
-        // Use the last MobCreated event — reset appends a fresh MobCreated
-        // to start a new epoch, so the latest one reflects the current definition.
-        let definition = all_events
-            .iter()
-            .rev()
-            .find_map(|event| match &event.kind {
-                MobEventKind::MobCreated { definition } => Some(*definition.clone()),
-                _ => None,
-            })
-            .ok_or_else(|| {
-                MobError::Internal(
-                    "cannot resume mob: no MobCreated event found in storage".to_string(),
-                )
-            })?;
+        let (all_events, definition) = storage.replay_with_created_definition().await?;
+        let definition = definition.ok_or_else(|| {
+            MobError::Internal(
+                "cannot resume mob: no MobCreated event found in storage".to_string(),
+            )
+        })?;
         MobSupervisorBridge::preflight_ingress_ownership(
             definition
                 .backend

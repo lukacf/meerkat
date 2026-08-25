@@ -21191,6 +21191,59 @@ impl MobActor {
                     let _ = reply_tx.send(result);
                 }
                 #[cfg(feature = "experimental-gpt-live")]
+                MobCommand::ValidateLiveDurableSourceAvailability {
+                    agent_identity,
+                    reply_tx,
+                } => {
+                    let result = async {
+                        let entry = self
+                            .roster
+                            .read()
+                            .await
+                            .get(&agent_identity)
+                            .cloned()
+                            .ok_or(super::LiveBridgeOperationStartError::Unavailable)?;
+                        let session_id = entry
+                            .bridge_session_id()
+                            .cloned()
+                            .ok_or(super::LiveBridgeOperationStartError::Rejected)?;
+                        let dsl_identity = mob_dsl::AgentIdentity::from_domain(&agent_identity);
+                        let dsl_runtime = self
+                            .dsl_authority
+                            .state()
+                            .identity_to_runtime
+                            .get(&dsl_identity);
+                        let dsl_session = self
+                            .dsl_authority
+                            .state()
+                            .member_session_bindings
+                            .get(&dsl_identity);
+                        if dsl_runtime.is_none_or(|runtime| {
+                            runtime.0 != entry.agent_runtime_id.to_string()
+                        }) || dsl_session.is_none_or(|session| {
+                            session.0 != session_id.to_string()
+                        }) || !dsl_runtime.is_some_and(|runtime| {
+                            self.dsl_authority.state().live_runtime_ids.contains(runtime)
+                        }) {
+                            return Err(super::LiveBridgeOperationStartError::Rejected);
+                        }
+                        let source = self
+                            .session_service
+                            .load_persisted_session(&session_id)
+                            .await
+                            .map_err(|_| super::LiveBridgeOperationStartError::Rejected)?;
+                        if source
+                            .as_ref()
+                            .is_none_or(|session| session.id() != &session_id)
+                        {
+                            return Err(super::LiveBridgeOperationStartError::Rejected);
+                        }
+                        Ok(())
+                    }
+                    .await;
+                    let _ = reply_tx.send(result);
+                }
+                #[cfg(feature = "experimental-gpt-live")]
                 MobCommand::StartLiveBridgeOperation {
                     agent_identity,
                     request,

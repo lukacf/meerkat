@@ -78,7 +78,8 @@ impl MobCommand {
 
             #[cfg(feature = "experimental-gpt-live")]
             Self::StartLiveBridgeOperation { .. }
-            | Self::ValidateLiveBridgeMemberEligibility { .. } => Some(ControlScope::Live),
+            | Self::ValidateLiveBridgeMemberEligibility { .. }
+            | Self::ValidateLiveDurableSourceAvailability { .. } => Some(ControlScope::Live),
 
             // ── Cancel ──
             Self::CancelAllWork { .. }
@@ -265,6 +266,12 @@ impl MobCommand {
             }
             #[cfg(feature = "experimental-gpt-live")]
             Self::ValidateLiveBridgeMemberEligibility { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(
+                    super::live_bridge_operation::LiveBridgeOperationStartError::Rejected,
+                ));
+            }
+            #[cfg(feature = "experimental-gpt-live")]
+            Self::ValidateLiveDurableSourceAvailability { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(
                     super::live_bridge_operation::LiveBridgeOperationStartError::Rejected,
                 ));

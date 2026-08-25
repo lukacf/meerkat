@@ -589,6 +589,15 @@ pub(super) enum MobCommand {
         agent_identity: AgentIdentity,
         reply_tx: oneshot::Sender<Result<(), super::LiveBridgeOperationStartError>>,
     },
+    /// Side-effect-free preflight for a durable member whose transcript is
+    /// the source of a separate live executor. Unlike direct bridge
+    /// eligibility, this validates only exact current source ownership and
+    /// availability; callback policy belongs to the forked executor.
+    #[cfg(feature = "experimental-gpt-live")]
+    ValidateLiveDurableSourceAvailability {
+        agent_identity: AgentIdentity,
+        reply_tx: oneshot::Sender<Result<(), super::LiveBridgeOperationStartError>>,
+    },
     /// Sender-aware peer communication between mob members.
     ///
     /// This is not work-lane ingress. The actor resolves the sender member's
@@ -1190,6 +1199,10 @@ impl MobCommand {
             #[cfg(feature = "experimental-gpt-live")]
             Self::ValidateLiveBridgeMemberEligibility { .. } => {
                 "ValidateLiveBridgeMemberEligibility"
+            }
+            #[cfg(feature = "experimental-gpt-live")]
+            Self::ValidateLiveDurableSourceAvailability { .. } => {
+                "ValidateLiveDurableSourceAvailability"
             }
             Self::SendPeerMessage { .. } => "SendPeerMessage",
             Self::DriveRouteInstalls { .. } => "DriveRouteInstalls",

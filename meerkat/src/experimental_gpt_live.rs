@@ -213,14 +213,17 @@ impl ExperimentalLiveSessionBindingAuthorization {
 
 #[async_trait]
 pub trait ExperimentalLiveSessionBindingAuthority: Send + Sync {
-    /// Preflight the exact current durable member before config, credential,
-    /// admission, channel, or provider work. Implementations must delegate to
-    /// the actor-owned member eligibility seam and perform no effects here.
-    async fn validate_live_bridge_member_eligibility(
+    /// Preflight the exact current durable transcript source before config,
+    /// credential, admission, channel, or provider work. Implementations must
+    /// delegate to the actor-owned source-availability seam and perform no
+    /// effects here. Direct same-member bridge eligibility is a stricter,
+    /// separate policy and must not be substituted for this durable-fork
+    /// topology check.
+    async fn validate_live_durable_source_availability(
         &self,
         _canonical_session_id: &meerkat_core::SessionId,
     ) -> Result<(), ExperimentalLiveOpenAuthorityError> {
-        Err(ExperimentalLiveOpenAuthorityError::MemberIneligible)
+        Err(ExperimentalLiveOpenAuthorityError::DurableTargetUnavailable)
     }
 
     async fn authorize_binding_use(
@@ -386,7 +389,7 @@ impl ExperimentalLiveOpenAuthorityProvider for ExperimentalGptLiveOpenAuthority 
         execution_identity: &meerkat_contracts::WireLiveExecutionIdentityOverrideV1,
     ) -> Result<Box<dyn ExperimentalLivePendingOpen>, ExperimentalLiveOpenAuthorityError> {
         self.binding_authority
-            .validate_live_bridge_member_eligibility(canonical_session_id)
+            .validate_live_durable_source_availability(canonical_session_id)
             .await?;
         let identity = Self::lower_execution_identity(execution_identity)?;
         let config = self
@@ -3712,7 +3715,7 @@ mod tests {
 
     #[async_trait]
     impl ExperimentalLiveSessionBindingAuthority for NeverBindingAuthority {
-        async fn validate_live_bridge_member_eligibility(
+        async fn validate_live_durable_source_availability(
             &self,
             _canonical_session_id: &meerkat_core::SessionId,
         ) -> Result<(), ExperimentalLiveOpenAuthorityError> {
@@ -3746,12 +3749,12 @@ mod tests {
 
     #[async_trait]
     impl ExperimentalLiveSessionBindingAuthority for RejectingEligibilityBindingAuthority {
-        async fn validate_live_bridge_member_eligibility(
+        async fn validate_live_durable_source_availability(
             &self,
             _canonical_session_id: &meerkat_core::SessionId,
         ) -> Result<(), ExperimentalLiveOpenAuthorityError> {
             self.eligibility_calls.fetch_add(1, AtomicOrdering::SeqCst);
-            Err(ExperimentalLiveOpenAuthorityError::MemberIneligible)
+            Err(ExperimentalLiveOpenAuthorityError::DurableTargetUnavailable)
         }
 
         async fn authorize_binding_use(
@@ -3768,12 +3771,12 @@ mod tests {
 
     #[async_trait]
     impl ExperimentalLiveSessionBindingAuthority for ExactAllowBindingAuthority {
-        async fn validate_live_bridge_member_eligibility(
+        async fn validate_live_durable_source_availability(
             &self,
             canonical_session_id: &meerkat_core::SessionId,
         ) -> Result<(), ExperimentalLiveOpenAuthorityError> {
             if canonical_session_id != &self.session_id {
-                return Err(ExperimentalLiveOpenAuthorityError::MemberIneligible);
+                return Err(ExperimentalLiveOpenAuthorityError::DurableTargetUnavailable);
             }
             Ok(())
         }
@@ -4402,7 +4405,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn member_eligibility_rejects_before_live_config_admission_or_binding_use() {
+    async fn durable_source_unavailability_rejects_before_live_config_admission_or_binding_use() {
         let config_reads = Arc::new(AtomicUsize::new(0));
         let eligibility_calls = Arc::new(AtomicUsize::new(0));
         let authorization_calls = Arc::new(AtomicUsize::new(0));
@@ -4440,10 +4443,13 @@ mod tests {
             )
             .await
         {
-            Ok(_) => panic!("ineligible member must not prepare a live open"),
+            Ok(_) => panic!("unavailable durable source must not prepare a live open"),
             Err(error) => error,
         };
-        assert_eq!(error, ExperimentalLiveOpenAuthorityError::MemberIneligible);
+        assert_eq!(
+            error,
+            ExperimentalLiveOpenAuthorityError::DurableTargetUnavailable
+        );
         assert_eq!(eligibility_calls.load(AtomicOrdering::SeqCst), 1);
         assert_eq!(config_reads.load(AtomicOrdering::SeqCst), 0);
         assert_eq!(authorization_calls.load(AtomicOrdering::SeqCst), 0);

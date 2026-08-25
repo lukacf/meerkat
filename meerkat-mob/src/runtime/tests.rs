@@ -3847,6 +3847,17 @@ impl SessionServiceControlExt for MockSessionService {
 
 #[async_trait]
 impl MobSessionService for MockSessionService {
+    #[cfg(feature = "experimental-gpt-live")]
+    async fn validate_live_bridge_member_eligibility(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<(), SessionError> {
+        Err(SessionError::Unsupported(
+            "mock durable source carries process-local callback tools and is ineligible for direct same-member live bridge execution"
+                .to_string(),
+        ))
+    }
+
     async fn materialize_session_resume_verdict(
         &self,
         session_id: &SessionId,
@@ -8234,6 +8245,36 @@ async fn create_test_mob(definition: MobDefinition) -> (MobHandle, Arc<MockSessi
         .expect("create mob");
 
     (handle, service)
+}
+
+#[cfg(feature = "experimental-gpt-live")]
+#[tokio::test]
+async fn callback_bearing_member_is_available_as_durable_fork_source_but_not_direct_bridge() {
+    let definition = with_unique_mob_id(sample_definition(), "live-durable-source-topology");
+    let (handle, _service) = create_test_mob(definition).await;
+    let identity = AgentIdentity::from("callback-bearing-personal-source");
+    let mut spec = SpawnMemberSpec::new(ProfileName::from("worker"), identity.clone());
+    spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    handle
+        .spawn_spec(spec)
+        .await
+        .expect("spawn callback-bearing durable source");
+    let member = handle
+        .member(&identity)
+        .await
+        .expect("current durable source member");
+
+    member
+        .validate_live_durable_source_availability()
+        .await
+        .expect("separate durable-fork executor may use the exact current source transcript");
+    assert_eq!(
+        member.validate_live_bridge_eligibility().await,
+        Err(super::LiveBridgeOperationStartError::Rejected),
+        "callback-bearing source must remain ineligible for direct same-member execution"
+    );
+
+    handle.shutdown().await.expect("shutdown test mob");
 }
 
 #[cfg(feature = "experimental-gpt-live")]

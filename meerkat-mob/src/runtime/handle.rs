@@ -12699,6 +12699,34 @@ impl MemberHandle {
             })?
     }
 
+    /// Preflight this exact current durable member as the transcript source
+    /// for a separate experimental live executor.
+    ///
+    /// This deliberately does not admit direct execution on the member and
+    /// therefore does not apply the callback-free direct-bridge policy. The
+    /// actor still atomically validates current roster, runtime, and canonical
+    /// bridge-session ownership. Direct same-member execution must continue to
+    /// use [`Self::validate_live_bridge_eligibility`].
+    #[cfg(feature = "experimental-gpt-live")]
+    pub async fn validate_live_durable_source_availability(
+        &self,
+    ) -> Result<(), super::LiveBridgeOperationStartError> {
+        self.mob
+            .send_actor_command(
+                |reply_tx| MobCommand::ValidateLiveDurableSourceAvailability {
+                    agent_identity: self.agent_identity.clone(),
+                    reply_tx,
+                },
+            )
+            .await
+            .map_err(|error| match error {
+                MobError::ActorCommandChannelClosed | MobError::ActorReplyChannelClosed => {
+                    super::LiveBridgeOperationStartError::Unavailable
+                }
+                _ => super::LiveBridgeOperationStartError::Rejected,
+            })?
+    }
+
     /// Start one machine-authorized, noncommitting bridge operation as this
     /// exact durable member. The Mob actor revalidates current incarnation,
     /// fence, session binding, and canonical revision before transferring

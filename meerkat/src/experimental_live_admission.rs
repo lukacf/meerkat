@@ -277,20 +277,27 @@ impl ExperimentalLiveAdmissionOwner {
         ExperimentalLiveAdmissionError,
     > {
         self.validate_qualification(qualification)?;
-        let (mode, capabilities) = self
+        let profile = self
             .operator
             .as_ref()
             .and_then(|operator| operator.execution_profiles.get(profile_id))
             .copied()
             .ok_or(ExperimentalLiveAdmissionError::ExecutionModeUnavailable)?;
-        if let Some(lower_qualification) = qualification.lower_qualification.as_ref() {
-            return meerkat_runtime::live_execution::LiveExecutionProfileSelection::from_experimental_qualification(
-                lower_qualification,
-                profile_id,
-                mode,
-                capabilities,
-            )
-            .map_err(|_| ExperimentalLiveAdmissionError::ExecutionModeUnavailable);
+        #[cfg(any(feature = "experimental-gpt-live", test))]
+        let (mode, capabilities) = profile;
+        #[cfg(not(any(feature = "experimental-gpt-live", test)))]
+        let _ = profile;
+        #[cfg(feature = "experimental-gpt-live")]
+        {
+            if let Some(lower_qualification) = qualification.lower_qualification.as_ref() {
+                return meerkat_runtime::live_execution::LiveExecutionProfileSelection::from_experimental_qualification(
+                    lower_qualification,
+                    profile_id,
+                    mode,
+                    capabilities,
+                )
+                .map_err(|_| ExperimentalLiveAdmissionError::ExecutionModeUnavailable);
+            }
         }
         #[cfg(test)]
         {

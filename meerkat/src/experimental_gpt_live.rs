@@ -5423,10 +5423,28 @@ mod tests {
             .record_live_webrtc_token_issued(&session_id, &channel_id, token, now_ms, 60_000)
             .await
             .expect("record fixture WebRTC token");
+        let execution_profile =
+            meerkat_runtime::live_execution::LiveExecutionProfileSelection::__test_new(
+                "test-function-bridge",
+                meerkat_core::LiveExecutionMode::FunctionBridge,
+                meerkat_core::LiveExecutionCapabilities {
+                    function_bridge: true,
+                    client_context: false,
+                },
+            )
+            .expect("construct exact fixture execution profile");
         runtime
+            .resolve_live_execution_profile_admission(&session_id, &channel_id, &execution_profile)
+            .await
+            .expect("resolve fixture live execution mode");
+        let stage = runtime
             .stage_experimental_live_execution(&session_id, &channel_id, 0)
             .await
             .expect("stage exact experimental execution seed cursor");
+        let _playback_readiness = runtime
+            .register_live_playback_owner(&stage, "test-playback-owner")
+            .await
+            .expect("register fixture playback owner readiness");
         let runtime_binding = runtime
             .live_webrtc_runtime_binding(&session_id)
             .await
@@ -5482,13 +5500,21 @@ mod tests {
         )
         .await;
 
-        assert!(matches!(
-            result,
-            Err(crate::surface::LiveWebrtcAnswerCoordinatorError::Settlement(
-                ref detail
-            )) if detail.contains("fixture activation failure")
-                && detail.contains("physical answer rejection failed after semantic rollback")
-        ));
+        let result_detail = result
+            .as_ref()
+            .err()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "unexpected success".to_string());
+        assert!(
+            matches!(
+                &result,
+                Err(crate::surface::LiveWebrtcAnswerCoordinatorError::Settlement(
+                    detail
+                )) if detail.contains("fixture activation failure")
+                    && detail.contains("physical answer rejection failed after semantic rollback")
+            ),
+            "unexpected coordinated answer result: {result_detail}"
+        );
         assert_eq!(activator.calls.load(AtomicOrdering::SeqCst), 1);
         assert!(
             activator

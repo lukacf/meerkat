@@ -7319,6 +7319,7 @@ impl MachineLifecycleCommit {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn new_with_binding_and_unregister_progress(
         runtime_state: RuntimeState,
         binding: MachineLifecycleBindingFacts,
@@ -7334,6 +7335,24 @@ impl MachineLifecycleCommit {
         )
     }
 
+    pub(crate) fn new_with_binding_unregister_progress_and_live_bridge(
+        runtime_state: RuntimeState,
+        binding: MachineLifecycleBindingFacts,
+        supervisor_authority: SupervisorAuthoritySnapshot,
+        unregister_progress: Option<MachineUnregisterProgressSnapshot>,
+        live_bridge_recovery: crate::live_execution::LiveBridgeRecoveryImage,
+    ) -> Self {
+        Self::new_with_binding_run_unregister_progress_and_live_bridge(
+            runtime_state,
+            binding,
+            MachineLifecycleRunFacts::default(),
+            supervisor_authority,
+            unregister_progress,
+            live_bridge_recovery,
+        )
+    }
+
+    #[cfg(test)]
     pub(crate) fn new_with_binding_run_and_unregister_progress(
         runtime_state: RuntimeState,
         binding: MachineLifecycleBindingFacts,
@@ -9265,6 +9284,54 @@ mod runtime_session_catalog_entry_tests {
 mod lifecycle_record_compatibility_tests {
     use super::*;
 
+    fn durable_live_bridge_evidence() -> crate::live_execution::LiveBridgeRecoveryImage {
+        serde_json::from_value(serde_json::json!({
+            "operations": [
+                {
+                    "operation_id": "op-in-flight",
+                    "channel_id": "channel-in-flight",
+                    "interaction_id": "interaction-in-flight",
+                    "provider_turn_ref": "turn-in-flight",
+                    "provider_delegation_ref": "delegation-in-flight",
+                    "provider_call_ref": "call-in-flight",
+                    "source_agent_identity": "executor-in-flight",
+                    "canonical_context_revision": "context-in-flight",
+                    "request_digest": "sha256:request-in-flight",
+                    "phase": "execution_running",
+                    "terminal": null,
+                    "result_digest": null,
+                    "cancellation_reason": "restart",
+                    "submission_output_kind": null,
+                    "submission_digest": null,
+                    "submission_state": null,
+                    "current_for_channel": false,
+                    "channel_revoked": true
+                },
+                {
+                    "operation_id": "op-ambiguous",
+                    "channel_id": "channel-ambiguous",
+                    "interaction_id": "interaction-ambiguous",
+                    "provider_turn_ref": "turn-ambiguous",
+                    "provider_delegation_ref": "delegation-ambiguous",
+                    "provider_call_ref": "call-ambiguous",
+                    "source_agent_identity": "executor-ambiguous",
+                    "canonical_context_revision": "context-ambiguous",
+                    "request_digest": "sha256:request-ambiguous",
+                    "phase": "execution_terminal",
+                    "terminal": "completed",
+                    "result_digest": "sha256:result-ambiguous",
+                    "cancellation_reason": "channel_close",
+                    "submission_output_kind": "success",
+                    "submission_digest": "sha256:submission-ambiguous",
+                    "submission_state": "submission_ambiguous",
+                    "current_for_channel": false,
+                    "channel_revoked": true
+                }
+            ]
+        }))
+        .expect("valid durable live bridge test image")
+    }
+
     fn operation_id(
         value: u128,
     ) -> meerkat_contracts::wire::supervisor_bridge::SupervisorRotationOperationId {
@@ -9495,6 +9562,48 @@ mod lifecycle_record_compatibility_tests {
         let decoded = decode_machine_lifecycle_store_record(&bytes).expect("decode v3 row");
         assert_eq!(decoded, expected);
         assert_eq!(decoded.run(), &MachineLifecycleRunFacts::default());
+    }
+
+    #[test]
+    fn completed_unregister_v5_round_trip_preserves_durable_live_bridge_evidence() {
+        let live_bridge_recovery = durable_live_bridge_evidence();
+        let snapshot = MachineLifecycleSnapshot::new_with_run_unregister_progress_and_live_bridge(
+            RuntimeState::Retired,
+            MachineLifecycleBindingFacts::default(),
+            MachineLifecycleRunFacts::default(),
+            SupervisorAuthoritySnapshot::UnboundNoReceipt,
+            None,
+            live_bridge_recovery.clone(),
+        );
+
+        let decoded = decode_machine_lifecycle_store_record(&encode_snapshot(&snapshot))
+            .expect("decode completed unregister v5 row");
+
+        assert_eq!(decoded.runtime_state(), RuntimeState::Retired);
+        assert_eq!(decoded.binding(), &MachineLifecycleBindingFacts::default());
+        assert_eq!(decoded.unregister_progress(), None);
+        assert_eq!(decoded.live_bridge_recovery(), &live_bridge_recovery);
+    }
+
+    #[test]
+    fn version_four_completed_unregister_remains_compatible_with_empty_bridge_image() {
+        let expected = snapshot(SupervisorAuthoritySnapshot::UnboundNoReceipt);
+        let mut value = encoded_value(&expected);
+        value["record_version"] = serde_json::json!(RUN_MACHINE_LIFECYCLE_STORE_RECORD_VERSION);
+        value
+            .as_object_mut()
+            .expect("lifecycle record object")
+            .remove("live_bridge_recovery");
+        let bytes = serde_json::to_vec(&value).expect("serialize v4 completed unregister row");
+
+        let decoded = decode_machine_lifecycle_store_record(&bytes)
+            .expect("decode v4 completed unregister row");
+
+        assert_eq!(decoded, expected);
+        assert_eq!(
+            decoded.live_bridge_recovery(),
+            &crate::live_execution::LiveBridgeRecoveryImage::default()
+        );
     }
 
     #[test]

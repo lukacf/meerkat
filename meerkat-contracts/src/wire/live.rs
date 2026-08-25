@@ -269,6 +269,13 @@ impl<T> From<WireLiveIdentityOverride<T>> for super::runtime::WireTurnMetadataOv
 #[serde(deny_unknown_fields)]
 pub struct WireLiveExecutionIdentityOverrideV1 {
     pub version: WireLiveExecutionIdentityVersion,
+    /// Stable host-registered execution profile selected for this channel.
+    ///
+    /// The profile definition owns provider mode, capability atoms, and any
+    /// approved top-level GPT Live session instructions. Callers select only
+    /// this catalog identity; they cannot supply provider instruction prose.
+    #[serde(deserialize_with = "deserialize_non_empty_live_identity_string")]
+    pub profile_id: String,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -293,6 +300,19 @@ pub struct WireLiveExecutionIdentityOverrideV1 {
         deserialize_with = "deserialize_present_live_identity_field"
     )]
     pub auth_binding: Option<WireLiveIdentityOverride<WireLiveAuthBindingRef>>,
+}
+
+fn deserialize_non_empty_live_identity_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if value.trim().is_empty() {
+        return Err(de::Error::custom(
+            "live execution identity string must be non-empty",
+        ));
+    }
+    Ok(value)
 }
 
 /// Request payload for `live/open`.

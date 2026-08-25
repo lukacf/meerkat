@@ -447,9 +447,123 @@ mod live_context_mirror_tests {
             .expect("authorize exact durable execution start");
     }
 
+    #[derive(Debug, Clone, Copy)]
+    enum TestLiveBridgeClosePath {
+        PlaybackOwnerLoss,
+        CloseCustodyRevocation,
+        CloseObservation,
+    }
+
+    async fn close_test_live_bridge_channel(
+        machine: &crate::MeerkatMachine,
+        admission: &crate::live_execution::LiveBridgeOperationAdmission,
+        path: TestLiveBridgeClosePath,
+    ) -> crate::live_execution::LiveBridgeRecoverySnapshot {
+        let channel_id = admission
+            .operation()
+            .domain_correlation()
+            .channel_id()
+            .to_string();
+        let input = match path {
+            TestLiveBridgeClosePath::PlaybackOwnerLoss => {
+                crate::meerkat_machine::dsl::MeerkatMachineInput::RevokeLivePlaybackOwner {
+                    session_id: admission.session_id().to_string(),
+                    channel_id,
+                    owner_id: "test-playback-owner".to_string(),
+                    readiness_id: "test-playback-readiness".to_string(),
+                }
+            }
+            TestLiveBridgeClosePath::CloseCustodyRevocation => {
+                crate::meerkat_machine::dsl::MeerkatMachineInput::RevokeLiveChannelCloseCustody {
+                    session_id: admission.session_id().to_string(),
+                    channel_id,
+                    pending_receipt: None,
+                    activation_receipt: Some("test-activation-receipt".to_string()),
+                }
+            }
+            TestLiveBridgeClosePath::CloseObservation => {
+                crate::meerkat_machine::dsl::MeerkatMachineInput::RecordLiveCloseClosed {
+                    session_id: admission.session_id().to_string(),
+                    channel_id,
+                    close_observation_sequence: 1,
+                }
+            }
+        };
+        machine
+            .apply_session_dsl_input(admission.session_id(), input, "test:close live bridge")
+            .await
+            .expect("generated close transition accepts exact test custody");
+        machine
+            .persist_live_bridge_recovery_state(admission.session_id(), "test:close live bridge")
+            .await
+            .expect("persist generated bridge close state");
+        let mut snapshots = machine
+            .live_bridge_recovery_snapshots(admission.session_id())
+            .await
+            .expect("read closed bridge recovery snapshot");
+        assert_eq!(snapshots.len(), 1);
+        snapshots.pop().expect("one retained bridge operation")
+    }
+
+    async fn assert_running_close_then_reconcile(
+        path: TestLiveBridgeClosePath,
+        terminal: meerkat_core::MeerkatExecutionTerminal,
+        result_digest: Option<&str>,
+    ) {
+        let (machine, admission) = admitted_live_bridge_operation().await;
+        authorize_test_live_bridge_execution_start(&machine, &admission).await;
+        let snapshot = close_test_live_bridge_channel(&machine, &admission, path).await;
+        assert_eq!(snapshot.terminal(), None);
+        assert_eq!(
+            snapshot.phase(),
+            meerkat_core::LiveBridgeOperationPhase::ExecutionRunning
+        );
+        assert_eq!(
+            snapshot.cancellation_reason(),
+            Some(meerkat_core::LiveBridgeCancellationReason::ChannelClose)
+        );
+
+        machine
+            .reconcile_revoked_live_bridge_execution_terminal(&snapshot, terminal, result_digest)
+            .await
+            .expect("reconcile exact physical executor terminal after close");
+        let settled = machine
+            .live_bridge_recovery_snapshots(admission.session_id())
+            .await
+            .expect("read reconciled close snapshot");
+        assert_eq!(settled[0].terminal(), Some(terminal));
+        assert_eq!(settled[0].result_digest(), result_digest);
+    }
+
+    async fn settle_test_live_bridge_for_retirement(
+        machine: &crate::MeerkatMachine,
+        admission: &crate::live_execution::LiveBridgeOperationAdmission,
+    ) {
+        authorize_test_live_bridge_execution_start(machine, admission).await;
+        machine
+            .record_live_bridge_execution_terminal(
+                admission,
+                meerkat_core::MeerkatExecutionTerminal::Completed,
+                Some("sha256:restart-retirement-result"),
+            )
+            .await
+            .expect("record restart-test executor terminal");
+        machine
+            .record_live_bridge_outcome_receipt(admission.session_id(), admission.operation())
+            .await
+            .expect("record restart-test outcome receipt");
+        close_test_live_bridge_channel(
+            machine,
+            admission,
+            TestLiveBridgeClosePath::CloseCustodyRevocation,
+        )
+        .await;
+    }
+
     #[tokio::test]
     async fn live_bridge_terminal_commit_backoff_retry_returns_exact_replay_receipt() {
         let (machine, admission) = admitted_live_bridge_operation().await;
+        authorize_test_live_bridge_execution_start(&machine, &admission).await;
         machine
             .shared
             .test_fail_next_typed_dsl_post_commit_dispatch
@@ -525,7 +639,7 @@ mod live_context_mirror_tests {
             .authorize_live_bridge_submission(
                 &terminal,
                 meerkat_core::LiveBridgeOutputKind::Success,
-                "sha256:provider-output",
+                "sha256:completed-output",
             )
             .await
             .expect("authorize exact provider submission");
@@ -682,6 +796,258 @@ mod live_context_mirror_tests {
             Some(meerkat_core::MeerkatExecutionTerminal::Failed)
         );
         assert_eq!(settled[0].submission_state(), None);
+    }
+
+    #[tokio::test]
+    async fn live_bridge_playback_owner_loss_keeps_running_terminal_reconcilable() {
+        assert_running_close_then_reconcile(
+            TestLiveBridgeClosePath::PlaybackOwnerLoss,
+            meerkat_core::MeerkatExecutionTerminal::Completed,
+            Some("sha256:playback-owner-late-result"),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn live_bridge_close_custody_loss_keeps_running_failure_reconcilable() {
+        assert_running_close_then_reconcile(
+            TestLiveBridgeClosePath::CloseCustodyRevocation,
+            meerkat_core::MeerkatExecutionTerminal::Failed,
+            None,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn live_bridge_close_observation_keeps_running_terminal_reconcilable() {
+        assert_running_close_then_reconcile(
+            TestLiveBridgeClosePath::CloseObservation,
+            meerkat_core::MeerkatExecutionTerminal::Completed,
+            Some("sha256:close-observation-late-result"),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn live_bridge_close_permanently_suppresses_authorized_provider_submission() {
+        let (machine, admission) = admitted_live_bridge_operation().await;
+        authorize_test_live_bridge_execution_start(&machine, &admission).await;
+        let terminal = machine
+            .record_live_bridge_execution_terminal(
+                &admission,
+                meerkat_core::MeerkatExecutionTerminal::Completed,
+                Some("sha256:provider-suppression-output"),
+            )
+            .await
+            .expect("record physical terminal before provider suppression");
+        machine
+            .authorize_live_bridge_submission(
+                &terminal,
+                meerkat_core::LiveBridgeOutputKind::Success,
+                "sha256:provider-suppression-output",
+            )
+            .await
+            .expect("authorize provider submission before close");
+
+        let snapshot = close_test_live_bridge_channel(
+            &machine,
+            &admission,
+            TestLiveBridgeClosePath::CloseCustodyRevocation,
+        )
+        .await;
+        assert_eq!(
+            snapshot.terminal(),
+            Some(meerkat_core::MeerkatExecutionTerminal::Completed)
+        );
+        assert_eq!(
+            snapshot.submission_state(),
+            Some(meerkat_core::LiveBridgeSubmissionState::CallAbandonedByClose)
+        );
+    }
+
+    #[tokio::test]
+    async fn live_bridge_retirement_waits_for_custody_then_prunes_effect_companions() {
+        let (machine, admission) = admitted_live_bridge_operation().await;
+        confirm_test_live_bridge_final_input(&machine, &admission).await;
+        let effect = machine
+            .authorize_live_bridge_effect(
+                &admission,
+                meerkat_core::LiveBridgeEffectKind::ToolDispatch,
+            )
+            .await
+            .expect("authorize one exact bridge effect");
+        let dispatch = machine
+            .consume_live_bridge_effect_authority(&effect)
+            .await
+            .expect("consume exact bridge effect authority");
+        machine
+            .record_live_bridge_effect_outcome(
+                &dispatch,
+                meerkat_core::LiveBridgeEffectOutcome::Committed,
+            )
+            .await
+            .expect("record exact terminal bridge effect outcome");
+        machine
+            .authorize_live_bridge_execution_start(&admission)
+            .await
+            .expect("authorize execution after effect settlement");
+        machine
+            .record_live_bridge_execution_terminal(
+                &admission,
+                meerkat_core::MeerkatExecutionTerminal::Completed,
+                Some("sha256:retirement-result"),
+            )
+            .await
+            .expect("record exact executor terminal");
+        machine
+            .record_live_bridge_outcome_receipt(admission.session_id(), admission.operation())
+            .await
+            .expect("record append-only outcome receipt");
+
+        let unsettled = machine
+            .retire_settled_live_bridge_operation(admission.session_id(), admission.operation())
+            .await
+            .expect_err("active operation custody must prevent early retirement");
+        assert!(matches!(
+            unsettled,
+            RuntimeDriverError::ValidationFailed { .. }
+        ));
+
+        close_test_live_bridge_channel(
+            &machine,
+            &admission,
+            TestLiveBridgeClosePath::CloseCustodyRevocation,
+        )
+        .await;
+        assert!(
+            machine
+                .retire_settled_live_bridge_operation(
+                    admission.session_id(),
+                    admission.operation(),
+                )
+                .await
+                .expect("machine retires the fully settled operation")
+        );
+        let state = machine
+            .session_dsl_state(admission.session_id())
+            .await
+            .expect("read compacted generated state");
+        assert!(state.live_bridge_channel_by_operation.is_empty());
+        assert!(state.live_bridge_effect_operation_by_authority.is_empty());
+        assert!(state.live_bridge_effect_kind_by_authority.is_empty());
+        assert!(state.live_bridge_consumed_effect_authorities.is_empty());
+        assert!(state.live_bridge_in_flight_effect_authorities.is_empty());
+        assert!(state.live_bridge_effect_outcome_by_authority.is_empty());
+        assert!(
+            !machine
+                .retire_settled_live_bridge_operation(
+                    admission.session_id(),
+                    admission.operation(),
+                )
+                .await
+                .expect("already-absent retirement retry converges")
+        );
+    }
+
+    #[tokio::test]
+    async fn live_bridge_retirement_waits_for_outcome_receipt_after_provider_suppression() {
+        let (machine, admission) = admitted_live_bridge_operation().await;
+        authorize_test_live_bridge_execution_start(&machine, &admission).await;
+        machine
+            .record_live_bridge_execution_terminal(
+                &admission,
+                meerkat_core::MeerkatExecutionTerminal::Failed,
+                None,
+            )
+            .await
+            .expect("record exact failed executor terminal");
+        close_test_live_bridge_channel(
+            &machine,
+            &admission,
+            TestLiveBridgeClosePath::PlaybackOwnerLoss,
+        )
+        .await;
+
+        let unsettled = machine
+            .retire_settled_live_bridge_operation(admission.session_id(), admission.operation())
+            .await
+            .expect_err("projection obligation must prevent early retirement");
+        assert!(matches!(
+            unsettled,
+            RuntimeDriverError::ValidationFailed { .. }
+        ));
+        machine
+            .record_live_bridge_outcome_receipt(admission.session_id(), admission.operation())
+            .await
+            .expect("record append-only outcome receipt after provider suppression");
+        assert!(
+            machine
+                .retire_settled_live_bridge_operation(
+                    admission.session_id(),
+                    admission.operation(),
+                )
+                .await
+                .expect("receipt closes the final retirement obligation")
+        );
+    }
+
+    #[tokio::test]
+    async fn live_bridge_retirement_converges_when_provider_terminal_precedes_outcome_receipt() {
+        let (machine, admission) = admitted_live_bridge_operation().await;
+        authorize_test_live_bridge_execution_start(&machine, &admission).await;
+        let terminal = machine
+            .record_live_bridge_execution_terminal(
+                &admission,
+                meerkat_core::MeerkatExecutionTerminal::Completed,
+                Some("sha256:provider-first-output"),
+            )
+            .await
+            .expect("record provider-first executor terminal");
+        let submission = machine
+            .authorize_live_bridge_submission(
+                &terminal,
+                meerkat_core::LiveBridgeOutputKind::Success,
+                "sha256:provider-first-output",
+            )
+            .await
+            .expect("authorize provider-first submission");
+        let attempt = machine
+            .claim_live_bridge_submission_attempt(&submission)
+            .await
+            .expect("claim provider-first submission");
+        machine
+            .record_live_bridge_submission_local_write(attempt)
+            .await
+            .expect("record provider-first local write");
+        machine
+            .resolve_live_bridge_submission(
+                &submission,
+                meerkat_core::LiveBridgeSubmissionObservation::ProviderProcessed,
+            )
+            .await
+            .expect("record provider-processed terminal");
+
+        let unsettled = machine
+            .retire_settled_live_bridge_operation(admission.session_id(), admission.operation())
+            .await
+            .expect_err("provider terminal alone cannot satisfy projection receipt");
+        assert!(matches!(
+            unsettled,
+            RuntimeDriverError::ValidationFailed { .. }
+        ));
+        machine
+            .record_live_bridge_outcome_receipt(admission.session_id(), admission.operation())
+            .await
+            .expect("record provider-first outcome receipt");
+        assert!(
+            machine
+                .retire_settled_live_bridge_operation(
+                    admission.session_id(),
+                    admission.operation(),
+                )
+                .await
+                .expect("provider-first and receipt-second facts retire")
+        );
     }
 
     #[cfg(all(not(target_arch = "wasm32"), feature = "sqlite-store"))]
@@ -1089,6 +1455,113 @@ mod live_context_mirror_tests {
     }
 
     #[tokio::test]
+    async fn live_bridge_retirement_converges_across_both_persistence_crash_windows() {
+        let before_store = std::sync::Arc::new(crate::store::InMemoryRuntimeStore::new());
+        let before_machine = crate::MeerkatMachine::persistent_without_blobs(before_store.clone());
+        let (before_machine, before_admission) =
+            admitted_live_bridge_operation_on(before_machine).await;
+        settle_test_live_bridge_for_retirement(&before_machine, &before_admission).await;
+        let before_session_id = before_admission.session_id().clone();
+        let before_operation = before_admission.operation().clone();
+        drop(before_machine);
+
+        let restarted_before =
+            crate::MeerkatMachine::persistent_without_blobs(before_store.clone());
+        restarted_before
+            .register_session(before_session_id.clone())
+            .await
+            .expect("recover terminal bridge before retirement");
+        let recovered = restarted_before
+            .live_bridge_recovery_snapshots(&before_session_id)
+            .await
+            .expect("read terminal bridge before retirement");
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].operation(), &before_operation);
+        let recovered_state = restarted_before
+            .session_dsl_state(&before_session_id)
+            .await
+            .expect("read recovered retirement facts");
+        let dsl_operation_id =
+            crate::meerkat_machine::dsl::OperationId::from_domain(before_operation.operation_id());
+        assert!(
+            recovered_state
+                .live_bridge_execution_started_operations
+                .contains(&dsl_operation_id)
+        );
+        assert!(
+            recovered_state
+                .live_bridge_outcome_receipt_required_operations
+                .contains(&dsl_operation_id)
+        );
+        assert!(
+            recovered_state
+                .live_bridge_outcome_receipt_operations
+                .contains(&dsl_operation_id)
+        );
+        assert!(
+            restarted_before
+                .retire_settled_live_bridge_operation(&before_session_id, &before_operation)
+                .await
+                .expect("retire recovered fully settled bridge")
+        );
+        drop(restarted_before);
+
+        let after_retirement = crate::MeerkatMachine::persistent_without_blobs(before_store);
+        after_retirement
+            .register_session(before_session_id.clone())
+            .await
+            .expect("recover bridge after retirement persistence");
+        assert!(
+            after_retirement
+                .live_bridge_recovery_snapshots(&before_session_id)
+                .await
+                .expect("read compacted recovery image")
+                .is_empty()
+        );
+        assert!(
+            !after_retirement
+                .retire_settled_live_bridge_operation(&before_session_id, &before_operation)
+                .await
+                .expect("post-restart already-absent retry converges")
+        );
+
+        let lost_ack_store = std::sync::Arc::new(crate::store::InMemoryRuntimeStore::new());
+        let lost_ack_machine =
+            crate::MeerkatMachine::persistent_without_blobs(lost_ack_store.clone());
+        let (lost_ack_machine, lost_ack_admission) =
+            admitted_live_bridge_operation_on(lost_ack_machine).await;
+        settle_test_live_bridge_for_retirement(&lost_ack_machine, &lost_ack_admission).await;
+        let lost_ack_session_id = lost_ack_admission.session_id().clone();
+        let lost_ack_operation = lost_ack_admission.operation().clone();
+        lost_ack_store.lose_next_machine_lifecycle_commit_acknowledgement();
+        let lost_ack = lost_ack_machine
+            .retire_settled_live_bridge_operation(&lost_ack_session_id, &lost_ack_operation)
+            .await
+            .expect_err("retirement acknowledgement loss must surface");
+        assert!(lost_ack.to_string().contains("lifecycle persist failed"));
+        drop(lost_ack_machine);
+
+        let restarted_lost_ack = crate::MeerkatMachine::persistent_without_blobs(lost_ack_store);
+        restarted_lost_ack
+            .register_session(lost_ack_session_id.clone())
+            .await
+            .expect("recover committed retirement after acknowledgement loss");
+        assert!(
+            restarted_lost_ack
+                .live_bridge_recovery_snapshots(&lost_ack_session_id)
+                .await
+                .expect("read committed retirement after acknowledgement loss")
+                .is_empty()
+        );
+        assert!(
+            !restarted_lost_ack
+                .retire_settled_live_bridge_operation(&lost_ack_session_id, &lost_ack_operation,)
+                .await
+                .expect("acknowledgement-loss retry converges as already absent")
+        );
+    }
+
+    #[tokio::test]
     async fn live_bridge_generated_admission_refuses_operation_beyond_durable_bound() {
         let (machine, session_id, channel_id) = bound_experimental_live_machine(0).await;
         let initial = machine
@@ -1225,6 +1698,112 @@ mod live_context_mirror_tests {
             after, before,
             "bounded refusal must not mutate generated truth"
         );
+    }
+
+    #[test]
+    fn live_bridge_generated_retirement_supports_more_than_128_sequential_operations() {
+        let initial = crate::meerkat_machine::dsl::MeerkatMachineState {
+            lifecycle_phase: crate::meerkat_machine::dsl::MeerkatPhase::Idle,
+            ..Default::default()
+        };
+        let mut authority =
+            crate::meerkat_machine::dsl::MeerkatMachineAuthority::recover_from_state(initial)
+                .expect("recover empty generated bridge authority");
+        for ordinal in 0..=crate::live_execution::MAX_DURABLE_LIVE_BRIDGE_OPERATIONS {
+            let operation_id = crate::meerkat_machine::dsl::OperationId(format!(
+                "00000000-0000-0000-0002-{ordinal:012}"
+            ));
+            let authority_id = format!("settled-effect:{ordinal}");
+            let mut state = authority.state().clone();
+            state
+                .live_bridge_channel_by_operation
+                .insert(operation_id.clone(), format!("retired-channel:{ordinal}"));
+            state.live_bridge_interaction_by_operation.insert(
+                operation_id.clone(),
+                format!("retired-interaction:{ordinal}"),
+            );
+            state
+                .live_bridge_provider_turn_by_operation
+                .insert(operation_id.clone(), format!("retired-turn:{ordinal}"));
+            state.live_bridge_provider_delegation_by_operation.insert(
+                operation_id.clone(),
+                format!("retired-delegation:{ordinal}"),
+            );
+            state
+                .live_bridge_provider_call_by_operation
+                .insert(operation_id.clone(), format!("retired-call:{ordinal}"));
+            state.live_bridge_agent_identity_by_operation.insert(
+                operation_id.clone(),
+                crate::meerkat_machine::dsl::AgentIdentity("retired-source".to_string()),
+            );
+            state.live_bridge_context_revision_by_operation.insert(
+                operation_id.clone(),
+                format!("sha256:retired-context:{ordinal}"),
+            );
+            state.live_bridge_request_digest_by_operation.insert(
+                operation_id.clone(),
+                format!("sha256:retired-request:{ordinal}"),
+            );
+            state.live_bridge_phase_by_operation.insert(
+                operation_id.clone(),
+                crate::meerkat_machine::dsl::LiveBridgeOperationPhase::ExecutionTerminal,
+            );
+            state.live_bridge_execution_terminal_by_operation.insert(
+                operation_id.clone(),
+                crate::meerkat_machine::dsl::MeerkatExecutionTerminal::Cancelled,
+            );
+            state.live_bridge_cancellation_reason_by_operation.insert(
+                operation_id.clone(),
+                crate::meerkat_machine::dsl::LiveBridgeCancellationReason::ChannelClose,
+            );
+            state
+                .live_bridge_effect_operation_by_authority
+                .insert(authority_id.clone(), operation_id.clone());
+            state.live_bridge_effect_kind_by_authority.insert(
+                authority_id.clone(),
+                crate::meerkat_machine::dsl::LiveBridgeEffectKind::ToolDispatch,
+            );
+            state
+                .live_bridge_consumed_effect_authorities
+                .insert(authority_id.clone());
+            state.live_bridge_effect_outcome_by_authority.insert(
+                authority_id,
+                crate::meerkat_machine::dsl::LiveBridgeEffectOutcome::Committed,
+            );
+            authority =
+                crate::meerkat_machine::dsl::MeerkatMachineAuthority::recover_from_state(state)
+                    .expect("recover one fully settled generated bridge operation");
+
+            let transition = crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                &mut authority,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::RetireSettledLiveBridgeOperation {
+                    operation_id: operation_id.clone(),
+                },
+            )
+            .expect("generated authority retires one fully settled bridge operation");
+            assert!(transition.effects().iter().any(|effect| matches!(
+                effect,
+                crate::meerkat_machine::dsl::MeerkatMachineEffect::LiveBridgeOperationRetirementResolved {
+                    operation_id: effect_operation_id,
+                    retired_now: true,
+                } if effect_operation_id == &operation_id
+            )));
+            let compacted = authority.state();
+            assert!(compacted.live_bridge_channel_by_operation.is_empty());
+            assert!(
+                compacted
+                    .live_bridge_effect_operation_by_authority
+                    .is_empty()
+            );
+            assert!(compacted.live_bridge_effect_kind_by_authority.is_empty());
+            assert!(compacted.live_bridge_consumed_effect_authorities.is_empty());
+            assert!(
+                compacted
+                    .live_bridge_in_flight_effect_authorities
+                    .is_empty()
+            );
+            assert!(compacted.live_bridge_effect_outcome_by_authority.is_empty());
+        }
     }
 
     fn insert_test_assistant_output_handle(
@@ -1569,18 +2148,19 @@ mod live_context_mirror_tests {
             "the exact committed row is not re-enqueued"
         );
 
-        let appends = host.appends.lock().expect("append record lock");
-        assert_eq!(appends.len(), 1, "one commit produces one provider append");
-        assert_eq!(appends[0].0, channel_id.to_string());
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&appends[0].1)
-                .expect("context payload is JSON"),
-            serde_json::json!({
-                "role": "user",
-                "text": "one exact external parent append",
-            })
-        );
-        drop(appends);
+        {
+            let appends = host.appends.lock().expect("append record lock");
+            assert_eq!(appends.len(), 1, "one commit produces one provider append");
+            assert_eq!(appends[0].0, channel_id.to_string());
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&appends[0].1)
+                    .expect("context payload is JSON"),
+                serde_json::json!({
+                    "role": "user",
+                    "text": "one exact external parent append",
+                })
+            );
+        }
 
         let state = machine
             .session_dsl_state(&session_id)
@@ -1630,18 +2210,19 @@ mod live_context_mirror_tests {
             .expect("answer-ready catch-up mirrors only the suffix after seed K");
         assert_eq!(rows, 1);
 
-        let appends = host.appends.lock().expect("append record lock");
-        assert_eq!(appends.len(), 1, "the acknowledged seed is never replayed");
-        assert_eq!(appends[0].0, channel_id.to_string());
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&appends[0].1)
-                .expect("context payload is JSON"),
-            serde_json::json!({
-                "role": "user",
-                "text": "committed while answer was pending",
-            })
-        );
-        drop(appends);
+        {
+            let appends = host.appends.lock().expect("append record lock");
+            assert_eq!(appends.len(), 1, "the acknowledged seed is never replayed");
+            assert_eq!(appends[0].0, channel_id.to_string());
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&appends[0].1)
+                    .expect("context payload is JSON"),
+                serde_json::json!({
+                    "role": "user",
+                    "text": "committed while answer was pending",
+                })
+            );
+        }
 
         let state = machine
             .session_dsl_state(&session_id)
@@ -1682,16 +2263,18 @@ mod live_context_mirror_tests {
             .await
             .expect("a later drain must not resend the ambiguous edge");
 
-        let sent = host.appends.lock().expect("append record lock");
-        assert_eq!(sent.len(), 1, "ambiguous delivery is never retried");
-        let stale_authority = sent[0].clone();
-        drop(sent);
-        let recoveries = host.recoveries.lock().expect("recovery record lock");
-        assert_eq!(recoveries.len(), 1);
-        assert_eq!(recoveries[0].0, channel_id.to_string());
-        assert_ne!(recoveries[0].1, channel_id.to_string());
-        assert_eq!(recoveries[0].2, 1);
-        drop(recoveries);
+        let stale_authority = {
+            let sent = host.appends.lock().expect("append record lock");
+            assert_eq!(sent.len(), 1, "ambiguous delivery is never retried");
+            sent[0].clone()
+        };
+        {
+            let recoveries = host.recoveries.lock().expect("recovery record lock");
+            assert_eq!(recoveries.len(), 1);
+            assert_eq!(recoveries[0].0, channel_id.to_string());
+            assert_ne!(recoveries[0].1, channel_id.to_string());
+            assert_eq!(recoveries[0].2, 1);
+        }
 
         let binding = machine
             .live_delegation_runtime_binding(&session_id, &channel_id)
@@ -2500,7 +3083,7 @@ impl MeerkatMachine {
         Ok(LivePlaybackOwnerReadinessAuthority {
             binding: stage.binding().clone(),
             pending_receipt: stage.pending_receipt().to_string(),
-            owner_id: owner_id.to_string(),
+            owner_id: owner_id.clone(),
             readiness_id: readiness_id.to_string(),
         })
     }
@@ -2605,7 +3188,7 @@ impl MeerkatMachine {
         Ok(LivePlaybackOwnerReadinessAuthority {
             binding: activation.binding().clone(),
             pending_receipt: pending_receipt.to_string(),
-            owner_id: owner_id.to_string(),
+            owner_id: owner_id.clone(),
             readiness_id: readiness_id.to_string(),
         })
     }
@@ -2818,6 +3401,8 @@ impl MeerkatMachine {
             )
             .await
             .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+        self.persist_live_bridge_recovery_state(session_id, "RevokeLiveChannelCloseCustody")
+            .await?;
         for effect in effects.iter() {
             if let crate::meerkat_machine::dsl::MeerkatMachineEffect::LiveChannelCloseCustodyRevoked {
                 session_id: effect_session,
@@ -2964,6 +3549,9 @@ impl MeerkatMachine {
         readiness: &LivePlaybackOwnerReadinessAuthority,
     ) -> Result<LiveChannelRevocationReceipt, RuntimeDriverError> {
         let binding = readiness.binding();
+        let _mutation_guard = self
+            .lock_current_durability_ready_session_mutation_gate(binding.session_id())
+            .await?;
         let (_, effects) = self
             .apply_session_dsl_input(
                 binding.session_id(),
@@ -2977,6 +3565,8 @@ impl MeerkatMachine {
             )
             .await
             .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+        self.persist_live_bridge_recovery_state(binding.session_id(), "RevokeLivePlaybackOwner")
+            .await?;
         if effects.as_slice().iter().any(|effect| {
             matches!(effect,
                 crate::meerkat_machine::dsl::MeerkatMachineEffect::LivePlaybackOwnerRevoked {
@@ -3282,6 +3872,96 @@ impl MeerkatMachine {
             ));
         }
         Ok(snapshots)
+    }
+
+    /// Record that the operation-derived append-only source receipt was
+    /// durably applied or already present. The caller supplies no receipt
+    /// prose or semantic digest: generated authority binds this mechanical
+    /// observation to the exact retained operation, and V5 recovery preserves
+    /// it until safe retirement.
+    #[cfg(feature = "live")]
+    pub async fn record_live_bridge_outcome_receipt(
+        &self,
+        session_id: &SessionId,
+        operation: &meerkat_core::exact_operation::ExactOperationIdentity<
+            meerkat_core::LiveBridgeOperationCorrelation,
+        >,
+    ) -> Result<(), RuntimeDriverError> {
+        let _mutation_guard = self
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await?;
+        let operation_id =
+            crate::meerkat_machine::dsl::OperationId::from_domain(operation.operation_id());
+        let (_, effects) = self
+            .apply_session_dsl_input_typed(
+                session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::RecordLiveBridgeOutcomeReceipt {
+                    operation_id: operation_id.clone(),
+                },
+                "RecordLiveBridgeOutcomeReceipt",
+            )
+            .await?;
+        self.persist_live_bridge_recovery_state(session_id, "RecordLiveBridgeOutcomeReceipt")
+            .await?;
+        if effects.as_slice().iter().any(|effect| {
+            matches!(
+                effect,
+                crate::meerkat_machine::dsl::MeerkatMachineEffect::LiveBridgeOutcomeReceiptRecorded {
+                    operation_id: effect_operation_id,
+                    ..
+                } if effect_operation_id == &operation_id
+            )
+        }) {
+            return Ok(());
+        }
+        Err(RuntimeDriverError::Internal(
+            "RecordLiveBridgeOutcomeReceipt emitted no exact receipt".to_string(),
+        ))
+    }
+
+    /// Ask generated authority to compact one fully settled bridge operation.
+    /// Runtime code neither classifies settlement nor removes fields. The
+    /// generated already-absent arm makes acknowledgement-loss and cold-restart
+    /// retries convergent without claiming a prior retirement occurred.
+    #[cfg(feature = "live")]
+    pub async fn retire_settled_live_bridge_operation(
+        &self,
+        session_id: &SessionId,
+        operation: &meerkat_core::exact_operation::ExactOperationIdentity<
+            meerkat_core::LiveBridgeOperationCorrelation,
+        >,
+    ) -> Result<bool, RuntimeDriverError> {
+        let _mutation_guard = self
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await?;
+        let operation_id =
+            crate::meerkat_machine::dsl::OperationId::from_domain(operation.operation_id());
+        let (_, effects) = self
+            .apply_session_dsl_input_typed(
+                session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::RetireSettledLiveBridgeOperation {
+                    operation_id: operation_id.clone(),
+                },
+                "RetireSettledLiveBridgeOperation",
+            )
+            .await?;
+        self.persist_live_bridge_recovery_state(session_id, "RetireSettledLiveBridgeOperation")
+            .await?;
+        effects
+            .as_slice()
+            .iter()
+            .find_map(|effect| match effect {
+                crate::meerkat_machine::dsl::MeerkatMachineEffect::LiveBridgeOperationRetirementResolved {
+                    operation_id: effect_operation_id,
+                    retired_now,
+                } if effect_operation_id == &operation_id => Some(*retired_now),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                RuntimeDriverError::Internal(
+                    "RetireSettledLiveBridgeOperation emitted no exact resolution".to_string(),
+                )
+            })
     }
 
     /// Fence one exact nonterminal bridge operation restored without live
@@ -4389,8 +5069,8 @@ impl MeerkatMachine {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&(
-                session_id.clone(),
-                channel_id.clone(),
+                session_id,
+                channel_id,
                 handle.__assistant_turn_ref().to_string(),
             ));
         Ok(handle)
@@ -5741,19 +6421,27 @@ impl MeerkatMachine {
             let runtime_id = state
                 .live_experimental_staged_runtime_by_channel
                 .get(channel)
-                .expect("complete staged runtime checked above");
+                .ok_or_else(|| RuntimeDriverError::ValidationFailed {
+                    reason: "complete staged live context lost its runtime identity".to_string(),
+                })?;
             let fence = state
                 .live_experimental_staged_fence_by_channel
                 .get(channel)
-                .expect("complete staged fence checked above");
+                .ok_or_else(|| RuntimeDriverError::ValidationFailed {
+                    reason: "complete staged live context lost its fence token".to_string(),
+                })?;
             let generation = state
                 .live_experimental_staged_generation_by_channel
                 .get(channel)
-                .expect("complete staged generation checked above");
+                .ok_or_else(|| RuntimeDriverError::ValidationFailed {
+                    reason: "complete staged live context lost its generation".to_string(),
+                })?;
             let cursor = *state
                 .live_experimental_staged_seed_cursor_by_channel
                 .get(channel)
-                .expect("complete staged seed cursor checked above");
+                .ok_or_else(|| RuntimeDriverError::ValidationFailed {
+                    reason: "complete staged live context lost its seed cursor".to_string(),
+                })?;
             (
                 crate::live_execution::LiveDelegationRuntimeBinding::new(
                     session_id.clone(),
@@ -5905,7 +6593,7 @@ impl MeerkatMachine {
                 return Ok(());
             };
 
-            if queued.row().provider_context().is_none() {
+            let Some(context) = queued.row().provider_context().map(ToString::to_string) else {
                 self.advance_live_context_canonical_coverage(&queued)
                     .await?;
                 self.shared
@@ -5914,7 +6602,7 @@ impl MeerkatMachine {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .remove(&key);
                 continue;
-            }
+            };
 
             if state
                 .live_provider_turn_by_channel
@@ -5926,11 +6614,6 @@ impl MeerkatMachine {
                 return Ok(());
             };
             let authority = self.authorize_queued_live_context_append(&queued).await?;
-            let context = queued
-                .row()
-                .provider_context()
-                .expect("mirrorable row checked above")
-                .to_string();
             let (returned_authority, outcome) = host
                 .append_context(authority, context)
                 .await

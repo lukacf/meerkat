@@ -883,7 +883,7 @@ mod tests {
         let isolated = ordinary
             .isolated_live_bridge_child()
             .expect("runtime authority mints isolated bridge child");
-        let run_id = RunId(Uuid::from_u128(0x1b1d_6e));
+        let run_id = RunId(Uuid::from_u128(0x001b_1d6e));
 
         start_running_conversation_turn(isolated.as_ref(), &run_id);
         isolated

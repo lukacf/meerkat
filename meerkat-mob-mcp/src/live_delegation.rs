@@ -134,6 +134,17 @@ fn accepted_terminal_blocks_operation_cancellation(
     custody.is_some()
 }
 
+fn fence_provider_delivery_for_accepted_terminal(
+    custody: Option<&PendingResponsesTerminalCustody>,
+    delivery_fenced: &std::sync::atomic::AtomicBool,
+) -> bool {
+    if !accepted_terminal_blocks_operation_cancellation(custody) {
+        return false;
+    }
+    delivery_fenced.store(true, std::sync::atomic::Ordering::Release);
+    true
+}
+
 fn provider_output_after_delivery_fence(
     terminal: LiveBridgeOperationTerminal,
     delivery_fenced: bool,
@@ -179,6 +190,137 @@ where
             Err(error) => return Err(error),
         }
     }
+}
+
+async fn retry_responses_outcome_custody_step<T, E, F, Fut>(
+    operation_id: &OperationId,
+    shutdown: &CancellationToken,
+    retry_step: &'static str,
+    mut append: F,
+) -> Option<T>
+where
+    E: std::fmt::Display,
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+{
+    let mut retry_delay = LIVE_DELEGATION_CLEANUP_RETRY_DELAY;
+    loop {
+        let attempt = tokio::select! {
+            () = shutdown.cancelled() => return None,
+            result = append() => result,
+        };
+        match attempt {
+            Ok(result) => return Some(result),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    %operation_id,
+                    retry_step,
+                    "durable executor terminal is preserved while append-only source-context projection remains pending"
+                );
+                tokio::select! {
+                    () = shutdown.cancelled() => return None,
+                    () = tokio::time::sleep(retry_delay) => {}
+                }
+                retry_delay = retry_delay
+                    .saturating_mul(2)
+                    .min(LIVE_DELEGATION_CLEANUP_RETRY_MAX_DELAY);
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LiveBridgeRetirementDisposition {
+    Retired,
+    AlreadyAbsent,
+    Unsettled,
+    Shutdown,
+}
+
+async fn retire_live_bridge_operation_after_persisted_fact(
+    runtime: &meerkat_runtime::MeerkatMachine,
+    session_id: &SessionId,
+    operation: &ExactOperationIdentity<meerkat_core::LiveBridgeOperationCorrelation>,
+    shutdown: &CancellationToken,
+) -> LiveBridgeRetirementDisposition {
+    let mut retry_delay = LIVE_DELEGATION_CLEANUP_RETRY_DELAY;
+    loop {
+        let retirement = tokio::select! {
+            () = shutdown.cancelled() => return LiveBridgeRetirementDisposition::Shutdown,
+            result = runtime.retire_settled_live_bridge_operation(session_id, operation) => result,
+        };
+        match retirement {
+            Ok(true) => return LiveBridgeRetirementDisposition::Retired,
+            Ok(false) => return LiveBridgeRetirementDisposition::AlreadyAbsent,
+            Err(meerkat_runtime::RuntimeDriverError::ValidationFailed { reason }) => {
+                tracing::debug!(
+                    %reason,
+                    operation_id = %operation.operation_id(),
+                    "live bridge operation retirement remains machine-ineligible"
+                );
+                return LiveBridgeRetirementDisposition::Unsettled;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    operation_id = %operation.operation_id(),
+                    "live bridge operation retirement reconciliation remains pending"
+                );
+                tokio::select! {
+                    () = shutdown.cancelled() => return LiveBridgeRetirementDisposition::Shutdown,
+                    () = tokio::time::sleep(retry_delay) => {}
+                }
+                retry_delay = retry_delay
+                    .saturating_mul(2)
+                    .min(LIVE_DELEGATION_CLEANUP_RETRY_MAX_DELAY);
+            }
+        }
+    }
+}
+
+async fn reconcile_responses_retirement_custody(
+    pending: &Mutex<PendingResponsesRetirementMap>,
+    session_id: &SessionId,
+    operation: &ExactOperationIdentity<meerkat_core::LiveBridgeOperationCorrelation>,
+    disposition: LiveBridgeRetirementDisposition,
+) {
+    let operation_id = operation.operation_id().clone();
+    let mut pending = pending.lock().await;
+    match disposition {
+        LiveBridgeRetirementDisposition::Unsettled => {
+            pending.insert(operation_id, (session_id.clone(), operation.clone()));
+        }
+        LiveBridgeRetirementDisposition::Retired
+        | LiveBridgeRetirementDisposition::AlreadyAbsent => {
+            pending.remove(&operation_id);
+        }
+        LiveBridgeRetirementDisposition::Shutdown => {}
+    }
+}
+
+async fn drive_responses_retirement_after_persisted_fact(
+    runtime: &meerkat_runtime::MeerkatMachine,
+    pending: &Mutex<PendingResponsesRetirementMap>,
+    session_id: &SessionId,
+    operation: &ExactOperationIdentity<meerkat_core::LiveBridgeOperationCorrelation>,
+    shutdown: &CancellationToken,
+) -> LiveBridgeRetirementDisposition {
+    // Reserve retirement-only custody before asking generated authority. This
+    // closes the race where channel-close settlement could happen between an
+    // ineligible observation and insertion of the process-local retry anchor.
+    reconcile_responses_retirement_custody(
+        pending,
+        session_id,
+        operation,
+        LiveBridgeRetirementDisposition::Unsettled,
+    )
+    .await;
+    let disposition =
+        retire_live_bridge_operation_after_persisted_fact(runtime, session_id, operation, shutdown)
+            .await;
+    reconcile_responses_retirement_custody(pending, session_id, operation, disposition).await;
+    disposition
 }
 
 enum LiveBridgeTerminalCommit {
@@ -239,6 +381,23 @@ struct PreparedResponsesExecution {
 
 type PreparedResponsesMap = std::collections::HashMap<OperationId, PreparedResponsesExecution>;
 type ActiveResponsesMap = std::collections::HashMap<OperationId, ActiveResponsesExecution>;
+type PendingResponsesRetirementMap = std::collections::HashMap<
+    OperationId,
+    (
+        SessionId,
+        ExactOperationIdentity<meerkat_core::LiveBridgeOperationCorrelation>,
+    ),
+>;
+
+struct ResponsesProjectionShutdown {
+    cancellation: CancellationToken,
+}
+
+impl Drop for ResponsesProjectionShutdown {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+    }
+}
 
 fn responses_executor_task(semantic_request: &str) -> String {
     render_bounded_delegation_task(semantic_request)
@@ -562,8 +721,10 @@ async fn release_bound_channel(
 pub struct ExperimentalLiveDelegationCoordinator {
     runtime: Arc<meerkat_runtime::MeerkatMachine>,
     mobs: Arc<crate::MobMcpState>,
+    responses_projection_shutdown: Arc<ResponsesProjectionShutdown>,
     responses_prepared: Arc<Mutex<PreparedResponsesMap>>,
     responses_active: Arc<Mutex<ActiveResponsesMap>>,
+    responses_pending_retirements: Arc<Mutex<PendingResponsesRetirementMap>>,
     active: Arc<Mutex<std::collections::HashMap<ActiveChannelKey, ActiveDelegation>>>,
     retained: Arc<Mutex<std::collections::HashMap<OperationId, Arc<RetainedDelegation>>>>,
     failed_start_cleanups:
@@ -620,8 +781,12 @@ impl ExperimentalLiveDelegationCoordinator {
         Self {
             runtime,
             mobs,
+            responses_projection_shutdown: Arc::new(ResponsesProjectionShutdown {
+                cancellation: CancellationToken::new(),
+            }),
             responses_prepared: Arc::new(Mutex::new(std::collections::HashMap::new())),
             responses_active: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            responses_pending_retirements: Arc::new(Mutex::new(std::collections::HashMap::new())),
             active: Arc::new(Mutex::new(std::collections::HashMap::new())),
             retained: Arc::new(Mutex::new(std::collections::HashMap::new())),
             failed_start_cleanups: Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -791,6 +956,20 @@ impl ExperimentalLiveDelegationCoordinator {
                             ),
                         };
                     }
+                    if let Err(error) = self
+                        .runtime
+                        .record_live_bridge_outcome_receipt(
+                            snapshot.session_id(),
+                            snapshot.operation(),
+                        )
+                        .await
+                    {
+                        return ExperimentalResponsesRestartDisposition::Broken {
+                            reason: format!(
+                                "durable executor outcome was projected but its machine receipt remains pending: {error}"
+                            ),
+                        };
+                    }
                     if matches!(
                         member,
                         DurableBoundedMemberState::Active { .. }
@@ -800,6 +979,20 @@ impl ExperimentalLiveDelegationCoordinator {
                         return ExperimentalResponsesRestartDisposition::Broken {
                             reason: format!(
                                 "durable executor outcome projected with retirement debt: {error}"
+                            ),
+                        };
+                    }
+                    if let Err(error) = self
+                        .runtime
+                        .retire_settled_live_bridge_operation(
+                            snapshot.session_id(),
+                            snapshot.operation(),
+                        )
+                        .await
+                    {
+                        return ExperimentalResponsesRestartDisposition::Broken {
+                            reason: format!(
+                                "durable executor outcome projected but bridge retirement remains pending: {error}"
                             ),
                         };
                     }
@@ -1116,8 +1309,10 @@ impl ExperimentalLiveDelegationCoordinator {
         let session_service = self.mobs.session_service();
         let source_session_id = admission.session_id().clone();
         let active = Arc::clone(&self.responses_active);
+        let pending_retirements = Arc::clone(&self.responses_pending_retirements);
         let task_admission = Arc::clone(&admission);
         let task_operation_id = operation_id.clone();
+        let projection_shutdown = self.responses_projection_shutdown.cancellation.clone();
         let (start_tx, start_rx) = oneshot::channel();
         let task = tokio::spawn(async move {
             let _ = start_rx.await;
@@ -1155,40 +1350,22 @@ impl ExperimentalLiveDelegationCoordinator {
                 .await
                 .err()
                 .map(|error| error.to_string());
-            let receipt_text = responses_executor_outcome_receipt(
-                &task_operation_id,
-                executor_terminal,
-                executor_output.as_deref(),
-            );
-            let projection = meerkat_core::service::AppendSystemContextRequest {
-                content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(receipt_text),
-                source: Some(format!("gpt-live-responses:{task_operation_id}")),
-                idempotency_key: Some(format!("gpt-live-responses-outcome:{task_operation_id}")),
-            };
-            if let Err(error) = session_service
-                .append_system_context(&source_session_id, projection)
-                .await
-            {
-                tracing::warn!(
-                    %error,
-                    operation_id = %task_operation_id,
-                    "durable executor terminal is preserved but append-only source-context projection failed"
-                );
-            }
-            let mut custody = task_terminal_custody.lock().await;
-            // The durable LiveBridge execution terminal records the ordinary
-            // executor's actual physical outcome. Cancellation/supersession
-            // fences provider delivery but never rewrites this fact.
+            // Retain the ordinary executor's actual physical outcome before
+            // attempting the idempotent source projection. A transient or
+            // ambiguous append cannot reopen cancellation or let local
+            // operation custody disappear.
             let bridge_terminal = ordinary_terminal;
-            let delivery_fenced = task_delivery_fenced.load(std::sync::atomic::Ordering::Acquire);
             let result_digest = live_bridge_execution_result_digest(&bridge_terminal);
-            *custody = Some(PendingResponsesTerminalCustody {
+            *task_terminal_custody.lock().await = Some(PendingResponsesTerminalCustody {
                 executor_terminal,
                 bridge_terminal: bridge_terminal.clone(),
                 result_digest: result_digest.clone(),
                 retirement_error: retirement_error.clone(),
             });
-            drop(custody);
+            // The durable LiveBridge execution terminal records the ordinary
+            // executor's actual physical outcome. Cancellation/supersession
+            // fences provider delivery but never rewrites or delays this fact.
+            let delivery_fenced = task_delivery_fenced.load(std::sync::atomic::Ordering::Acquire);
             let committed = record_live_bridge_terminal_across_revocation(
                 runtime.as_ref(),
                 task_admission.as_ref(),
@@ -1213,7 +1390,59 @@ impl ExperimentalLiveDelegationCoordinator {
                 )),
                 Err(error) => Err(error.to_string()),
             };
-            if terminal_committed && retirement_error.is_none() {
+            let _ = execution.completion.send(outcome);
+            if !terminal_committed {
+                return;
+            }
+
+            let receipt_text = responses_executor_outcome_receipt(
+                &task_operation_id,
+                executor_terminal,
+                executor_output.as_deref(),
+            );
+            let projection = meerkat_core::service::AppendSystemContextRequest {
+                content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(receipt_text),
+                source: Some(format!("gpt-live-responses:{task_operation_id}")),
+                idempotency_key: Some(format!("gpt-live-responses-outcome:{task_operation_id}")),
+            };
+            let Some(_append_status) = retry_responses_outcome_custody_step(
+                &task_operation_id,
+                &projection_shutdown,
+                "source-context-append",
+                || session_service.append_system_context(&source_session_id, projection.clone()),
+            )
+            .await
+            else {
+                return;
+            };
+            let Some(()) = retry_responses_outcome_custody_step(
+                &task_operation_id,
+                &projection_shutdown,
+                "machine-outcome-receipt",
+                || {
+                    runtime.record_live_bridge_outcome_receipt(
+                        task_admission.session_id(),
+                        task_admission.operation(),
+                    )
+                },
+            )
+            .await
+            else {
+                return;
+            };
+            let retirement_disposition = drive_responses_retirement_after_persisted_fact(
+                runtime.as_ref(),
+                pending_retirements.as_ref(),
+                task_admission.session_id(),
+                task_admission.operation(),
+                &projection_shutdown,
+            )
+            .await;
+            if retirement_disposition == LiveBridgeRetirementDisposition::Shutdown {
+                return;
+            }
+
+            if retirement_error.is_none() {
                 task_terminal_custody.lock().await.take();
                 active.lock().await.remove(&task_operation_id);
             } else if let Some(error) = retirement_error.as_deref() {
@@ -1223,7 +1452,6 @@ impl ExperimentalLiveDelegationCoordinator {
                     "durable executor terminal was preserved with unresolved ordinary retirement debt"
                 );
             }
-            let _ = execution.completion.send(outcome);
         });
         self.responses_active.lock().await.insert(
             operation_id,
@@ -1326,7 +1554,10 @@ impl ExperimentalLiveDelegationCoordinator {
                 continue;
             };
             let terminal_custody = terminal_custody.lock().await;
-            if accepted_terminal_blocks_operation_cancellation(terminal_custody.as_ref()) {
+            if fence_provider_delivery_for_accepted_terminal(
+                terminal_custody.as_ref(),
+                delivery_fenced.as_ref(),
+            ) {
                 let terminal = terminal_custody
                     .as_ref()
                     .map(|pending| pending.bridge_terminal.terminal());
@@ -1417,10 +1648,21 @@ impl ExperimentalLiveDelegationCoordinator {
         submission: &LiveBridgeSubmissionAuthority,
         observation: meerkat_core::LiveBridgeSubmissionObservation,
     ) -> Result<LiveBridgeSubmissionReceipt, String> {
-        self.runtime
+        let receipt = self
+            .runtime
             .resolve_live_bridge_submission(submission, observation)
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        let admission = submission.terminal().admission();
+        drive_responses_retirement_after_persisted_fact(
+            self.runtime.as_ref(),
+            self.responses_pending_retirements.as_ref(),
+            admission.session_id(),
+            admission.operation(),
+            &self.responses_projection_shutdown.cancellation,
+        )
+        .await;
+        Ok(receipt)
     }
 
     /// Reconcile a claimed submission whose process lost exact settlement.
@@ -1430,10 +1672,44 @@ impl ExperimentalLiveDelegationCoordinator {
         completion: &ExperimentalLiveBridgeExecutionCompletion,
     ) -> Result<LiveBridgeRecoveredSubmissionReceipt, String> {
         let admission = completion.terminal().admission();
-        self.runtime
+        let receipt = self
+            .runtime
             .recover_live_bridge_submission(admission.session_id(), admission.operation())
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        drive_responses_retirement_after_persisted_fact(
+            self.runtime.as_ref(),
+            self.responses_pending_retirements.as_ref(),
+            admission.session_id(),
+            admission.operation(),
+            &self.responses_projection_shutdown.cancellation,
+        )
+        .await;
+        Ok(receipt)
+    }
+
+    async fn settle_responses_retirement_debt_for_binding(&self, binding: &ProviderWebrtcBinding) {
+        let pending = self
+            .responses_pending_retirements
+            .lock()
+            .await
+            .values()
+            .filter(|(session_id, operation)| {
+                session_id == binding.session_id()
+                    && operation.domain_correlation().channel_id() == binding.channel_id()
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for (session_id, operation) in pending {
+            drive_responses_retirement_after_persisted_fact(
+                self.runtime.as_ref(),
+                self.responses_pending_retirements.as_ref(),
+                &session_id,
+                &operation,
+                &self.responses_projection_shutdown.cancellation,
+            )
+            .await;
+        }
     }
 
     async fn prepare_bound_channel(
@@ -2619,6 +2895,8 @@ impl ExperimentalLiveDelegationCoordinator {
                 .await;
             self.remove_retained_delegation(&retained).await;
         }
+        self.settle_responses_retirement_debt_for_binding(binding)
+            .await;
     }
 }
 
@@ -3110,6 +3388,212 @@ mod tests {
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
+    #[tokio::test]
+    async fn outcome_projection_retries_transient_append_until_exact_success() {
+        let operation_id = OperationId::new();
+        let shutdown = CancellationToken::new();
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let result = retry_responses_outcome_custody_step(
+            &operation_id,
+            &shutdown,
+            "test-transient-append",
+            {
+                let attempts = Arc::clone(&attempts);
+                move || {
+                    let attempts = Arc::clone(&attempts);
+                    async move {
+                        if attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                            Err("transient append failure")
+                        } else {
+                            Ok(meerkat_core::AppendSystemContextStatus::Applied)
+                        }
+                    }
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(
+            result,
+            Some(meerkat_core::AppendSystemContextStatus::Applied)
+        );
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn ambiguous_outcome_projection_replay_converges_as_duplicate_without_second_effect() {
+        let operation_id = OperationId::new();
+        let shutdown = CancellationToken::new();
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let committed_effects = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let result = retry_responses_outcome_custody_step(
+            &operation_id,
+            &shutdown,
+            "test-ambiguous-append",
+            {
+                let attempts = Arc::clone(&attempts);
+                let committed_effects = Arc::clone(&committed_effects);
+                move || {
+                    let attempts = Arc::clone(&attempts);
+                    let committed_effects = Arc::clone(&committed_effects);
+                    async move {
+                        let attempt = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        if attempt == 0 {
+                            committed_effects.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            Err("append committed but acknowledgement was lost")
+                        } else {
+                            Ok(meerkat_core::AppendSystemContextStatus::Duplicate)
+                        }
+                    }
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(
+            result,
+            Some(meerkat_core::AppendSystemContextStatus::Duplicate)
+        );
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(
+            committed_effects.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the stable append identity admits only one durable source-context effect"
+        );
+    }
+
+    #[tokio::test]
+    async fn projection_retry_shutdown_hands_unsettled_custody_to_restart_reconciliation() {
+        let operation_id = OperationId::new();
+        let shutdown = CancellationToken::new();
+        let attempted = Arc::new(tokio::sync::Notify::new());
+        let custody = Arc::new(Mutex::new(Some(PendingResponsesTerminalCustody {
+            executor_terminal: DurableExecutorTerminalKind::Completed,
+            bridge_terminal: LiveBridgeOperationTerminal::completed(
+                "durable executor result",
+                LIVE_DELEGATION_RESULT_BYTES,
+            )
+            .expect("test terminal"),
+            result_digest: Some("sha256:test-result".to_string()),
+            retirement_error: None,
+        })));
+        let retry_shutdown = shutdown.clone();
+        let retry_attempted = Arc::clone(&attempted);
+        let retry_custody = Arc::clone(&custody);
+        let retry = tokio::spawn(async move {
+            let result = retry_responses_outcome_custody_step(
+                &operation_id,
+                &retry_shutdown,
+                "test-shutdown-handoff",
+                move || {
+                    retry_attempted.notify_one();
+                    async { Err::<(), _>("projection remains unavailable") }
+                },
+            )
+            .await;
+            if result.is_some() {
+                retry_custody.lock().await.take();
+            }
+            result
+        });
+
+        attempted.notified().await;
+        shutdown.cancel();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), retry)
+            .await
+            .expect("shutdown must bound local projection retry")
+            .expect("projection retry task joins");
+        assert_eq!(result, None, "shutdown never fabricates projection success");
+        assert!(
+            custody.lock().await.is_some(),
+            "unsettled terminal custody remains available for durable restart reconciliation"
+        );
+    }
+
+    #[test]
+    fn projection_retry_shutdown_waits_for_last_coordinator_owner() {
+        let shutdown = Arc::new(ResponsesProjectionShutdown {
+            cancellation: CancellationToken::new(),
+        });
+        let observation = shutdown.cancellation.clone();
+        let second_owner = Arc::clone(&shutdown);
+
+        drop(shutdown);
+        assert!(
+            !observation.is_cancelled(),
+            "one coordinator clone cannot terminate shared projection custody"
+        );
+        drop(second_owner);
+        assert!(
+            observation.is_cancelled(),
+            "last coordinator owner hands pending projection to restart recovery"
+        );
+    }
+
+    #[tokio::test]
+    async fn retirement_debt_converges_for_receipt_first_and_provider_first_orderings() {
+        for channel in ["receipt-first", "provider-first"] {
+            let session_id = SessionId::new();
+            let binding = test_runtime_binding(session_id.clone(), channel, 1);
+            let admission = test_bridge_admission(session_id.clone(), binding, "personal-agent");
+            let pending = Mutex::new(PendingResponsesRetirementMap::new());
+
+            reconcile_responses_retirement_custody(
+                &pending,
+                &session_id,
+                admission.operation(),
+                LiveBridgeRetirementDisposition::Unsettled,
+            )
+            .await;
+            assert_eq!(pending.lock().await.len(), 1);
+
+            reconcile_responses_retirement_custody(
+                &pending,
+                &session_id,
+                admission.operation(),
+                LiveBridgeRetirementDisposition::Retired,
+            )
+            .await;
+            assert!(
+                pending.lock().await.is_empty(),
+                "the second persisted fact closes exact retirement debt regardless of ordering"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn close_after_projection_before_submission_keeps_only_exact_retirement_debt() {
+        let session_id = SessionId::new();
+        let binding = test_runtime_binding(session_id.clone(), "close-retirement-debt", 1);
+        let admission = test_bridge_admission(session_id.clone(), binding, "personal-agent");
+        let pending = Mutex::new(PendingResponsesRetirementMap::new());
+
+        reconcile_responses_retirement_custody(
+            &pending,
+            &session_id,
+            admission.operation(),
+            LiveBridgeRetirementDisposition::Unsettled,
+        )
+        .await;
+        let retained = pending
+            .lock()
+            .await
+            .get(admission.operation().operation_id())
+            .cloned()
+            .expect("projection-first operation retains retirement debt");
+        assert_eq!(retained.0, session_id);
+        assert_eq!(&retained.1, admission.operation());
+
+        reconcile_responses_retirement_custody(
+            &pending,
+            &session_id,
+            admission.operation(),
+            LiveBridgeRetirementDisposition::Retired,
+        )
+        .await;
+        assert!(pending.lock().await.is_empty());
+    }
+
     #[test]
     fn channel_shutdown_never_cancels_an_already_accepted_terminal() {
         let pending = PendingResponsesTerminalCustody {
@@ -3122,10 +3606,16 @@ mod tests {
             result_digest: Some("sha256:test-result".to_string()),
             retirement_error: None,
         };
+        let delivery_fenced = std::sync::atomic::AtomicBool::new(false);
 
         assert!(accepted_terminal_blocks_operation_cancellation(Some(
             &pending
         )));
+        assert!(fence_provider_delivery_for_accepted_terminal(
+            Some(&pending),
+            &delivery_fenced,
+        ));
+        assert!(delivery_fenced.load(std::sync::atomic::Ordering::Acquire));
         assert_eq!(
             pending.executor_terminal,
             DurableExecutorTerminalKind::Completed,
@@ -3147,6 +3637,12 @@ mod tests {
             "provider suppression leaves the accepted physical terminal intact"
         );
         assert!(!accepted_terminal_blocks_operation_cancellation(None));
+        let unaccepted_delivery = std::sync::atomic::AtomicBool::new(false);
+        assert!(!fence_provider_delivery_for_accepted_terminal(
+            None,
+            &unaccepted_delivery,
+        ));
+        assert!(!unaccepted_delivery.load(std::sync::atomic::Ordering::Acquire));
     }
 
     #[tokio::test]

@@ -2228,9 +2228,15 @@ mod store_authority_tests {
             "sha256:durable-tail-request".to_string(),
         );
         state.live_bridge_phase_by_operation.insert(
-            operation_id,
+            operation_id.clone(),
             crate::meerkat_machine::dsl::LiveBridgeOperationPhase::ExecutionRunning,
         );
+        state
+            .live_bridge_execution_started_operations
+            .insert(operation_id.clone());
+        state
+            .live_bridge_outcome_receipt_required_operations
+            .insert(operation_id);
         let live_bridge_recovery = crate::live_execution::LiveBridgeRecoveryImage::capture(&state)
             .expect("capture one durable live bridge operation");
         let seed = MachineLifecycleCommit::new_with_binding_run_unregister_progress_and_live_bridge(

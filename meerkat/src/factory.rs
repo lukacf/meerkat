@@ -2628,6 +2628,7 @@ impl AgentFactory {
         realm: &RealmId,
         identity: &SessionLlmIdentity,
         factory: &crate::ExperimentalLiveFactoryIdentity,
+        execution_profile_id: &str,
     ) -> Result<ExperimentalLiveTargetPreparation, crate::ExperimentalLiveFactoryResolutionError>
     {
         // Admission facts are intentionally checked before binding selection
@@ -2660,6 +2661,7 @@ impl AgentFactory {
             qualification,
             selected_identity,
             profile,
+            execution_profile_id,
         )?;
         Ok(ExperimentalLiveTargetPreparation {
             preflight,

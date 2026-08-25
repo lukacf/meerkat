@@ -14,6 +14,8 @@ const NATIVE_MOB_MACHINE_HELPERS: &[&str] = &[
     "meerkat_peer_endpoint_option_peer_id_matches",
     "meerkat_peer_endpoint_peer_id_matches",
     "meerkat_peer_endpoint_set_peer_ids_unique",
+    "meerkat_machine_live_bridge_authority_rows_without_operation",
+    "meerkat_machine_live_bridge_authorities_without_operation",
     "mob_machine_identity_has_session_binding",
     "mob_machine_remote_turn_custody_admits",
     "mob_machine_placed_completion_obligation_well_formed",

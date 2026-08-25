@@ -4370,6 +4370,66 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecordLiveBridgeEffectOutcomeExactReplayStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `RecordLiveBridgeOutcomeReceiptFreshIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLiveBridgeOutcomeReceiptFreshAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLiveBridgeOutcomeReceiptFreshRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLiveBridgeOutcomeReceiptFreshRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLiveBridgeOutcomeReceiptFreshStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLiveBridgeOutcomeReceiptExactReplayIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLiveBridgeOutcomeReceiptExactReplayAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLiveBridgeOutcomeReceiptExactReplayRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLiveBridgeOutcomeReceiptExactReplayRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLiveBridgeOutcomeReceiptExactReplayStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RetireSettledLiveBridgeOperationIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RetireSettledLiveBridgeOperationAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RetireSettledLiveBridgeOperationRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RetireSettledLiveBridgeOperationRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RetireSettledLiveBridgeOperationStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RetireSettledLiveBridgeOperationAlreadyAbsentIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RetireSettledLiveBridgeOperationAlreadyAbsentAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RetireSettledLiveBridgeOperationAlreadyAbsentRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RetireSettledLiveBridgeOperationAlreadyAbsentRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RetireSettledLiveBridgeOperationAlreadyAbsentStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CancelLiveBridgeOperationIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -7312,6 +7372,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `LiveBridgeEffectOutcomeRecorded`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `LiveBridgeOutcomeReceiptRecorded`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveBridgeOperationRetirementResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `LiveBridgeOperationCancellationAuthorized`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -7507,6 +7573,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `live_bridge_execution_and_provider_settlement_are_independent`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `live_bridge_started_execution_and_outcome_receipt_are_operation_scoped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `live_bridge_cancellation_provenance_is_operation_scoped`

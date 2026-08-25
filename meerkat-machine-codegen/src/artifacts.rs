@@ -9187,6 +9187,26 @@ impl<'a> MachineTlaCompiler<'a> {
             out,
             "    Cardinality(endpoints) = Cardinality({{ endpoint.peer_id : endpoint \\in endpoints }})"
         );
+        writeln!(
+            out,
+            "{}(rows, operation_by_authority, operation_id) ==",
+            prefix("meerkat_machine_live_bridge_authority_rows_without_operation")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    [authority_id \\in {{ candidate \\in DOMAIN rows : IF candidate \\in DOMAIN operation_by_authority THEN operation_by_authority[candidate] # operation_id ELSE TRUE }} |-> rows[authority_id]]"
+        );
+        writeln!(
+            out,
+            "{}(authorities, operation_by_authority, operation_id) ==",
+            prefix("meerkat_machine_live_bridge_authorities_without_operation")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    {{ authority_id \\in authorities : IF authority_id \\in DOMAIN operation_by_authority THEN operation_by_authority[authority_id] # operation_id ELSE TRUE }}"
+        );
     }
 
     fn render_mob_machine_native_helpers(&self, out: &mut String) {

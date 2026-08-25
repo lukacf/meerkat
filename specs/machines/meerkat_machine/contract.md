@@ -259,6 +259,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `live_bridge_effect_outcome_by_authority`: `Map<String, LiveBridgeEffectOutcome>`
 - `live_bridge_model_computation_authorized_operations`: `Set<OperationId>`
 - `live_bridge_read_snapshot_authorized_operations`: `Set<OperationId>`
+- `live_bridge_execution_started_operations`: `Set<OperationId>`
+- `live_bridge_outcome_receipt_required_operations`: `Set<OperationId>`
+- `live_bridge_outcome_receipt_operations`: `Set<OperationId>`
 - `live_bridge_execution_terminal_by_operation`: `Map<OperationId, MeerkatExecutionTerminal>`
 - `live_bridge_execution_result_digest_by_operation`: `Map<OperationId, String>`
 - `live_bridge_cancellation_reason_by_operation`: `Map<OperationId, LiveBridgeCancellationReason>`
@@ -487,6 +490,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AuthorizeLiveBridgeEffect`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, authority_id: String, kind: LiveBridgeEffectKind)
 - `ConsumeLiveBridgeEffectAuthority`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, operation_id: OperationId, authority_id: String, kind: LiveBridgeEffectKind)
 - `RecordLiveBridgeEffectOutcome`(channel_id: String, operation_id: OperationId, authority_id: String, kind: LiveBridgeEffectKind, outcome: LiveBridgeEffectOutcome)
+- `RecordLiveBridgeOutcomeReceipt`(operation_id: OperationId)
+- `RetireSettledLiveBridgeOperation`(operation_id: OperationId)
 - `CancelLiveBridgeOperation`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, reason: LiveBridgeCancellationReason)
 - `RecordLiveBridgeExecutionTerminal`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, terminal: MeerkatExecutionTerminal, result_digest: Option<String>)
 - `ReconcileRevokedLiveBridgeExecutionTerminal`(channel_id: String, interaction_id: String, operation_id: OperationId, request_digest: String, terminal: MeerkatExecutionTerminal, result_digest: Option<String>)
@@ -956,6 +961,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `LiveBridgeEffectAuthorityIssued`(channel_id: String, interaction_id: String, operation_id: OperationId, authority_id: String, kind: LiveBridgeEffectKind)
 - `LiveBridgeEffectDispatchAuthorized`(channel_id: String, operation_id: OperationId, authority_id: String, kind: LiveBridgeEffectKind)
 - `LiveBridgeEffectOutcomeRecorded`(channel_id: String, operation_id: OperationId, authority_id: String, kind: LiveBridgeEffectKind, outcome: LiveBridgeEffectOutcome, replay: Bool)
+- `LiveBridgeOutcomeReceiptRecorded`(operation_id: OperationId, replay: Bool)
+- `LiveBridgeOperationRetirementResolved`(operation_id: OperationId, retired_now: Bool)
 - `LiveBridgeOperationCancellationAuthorized`(channel_id: String, interaction_id: String, operation_id: OperationId, agent_identity: AgentIdentity, reason: LiveBridgeCancellationReason)
 - `LiveBridgeExecutionTerminalRecorded`(channel_id: String, interaction_id: String, operation_id: OperationId, terminal: MeerkatExecutionTerminal, result_digest: Option<String>, replay: Bool)
 - `LiveBridgeSubmissionAuthorized`(channel_id: String, interaction_id: String, operation_id: OperationId, provider_call_ref: String, output_kind: LiveBridgeOutputKind, output_digest: String, state: LiveBridgeSubmissionState)
@@ -1250,6 +1257,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `live_bridge_operation_identity_is_complete_and_direct`
 - `live_bridge_effect_authority_is_one_use_and_exact`
 - `live_bridge_execution_and_provider_settlement_are_independent`
+- `live_bridge_started_execution_and_outcome_receipt_are_operation_scoped`
 - `live_bridge_cancellation_provenance_is_operation_scoped`
 - `live_bridge_completed_terminal_has_exact_result_digest`
 - `live_experimental_execution_custody_is_exact`
@@ -15529,6 +15537,191 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `LiveBridgeEffectOutcomeRecorded`
 - To: `Stopped`
 
+### `RecordLiveBridgeOutcomeReceiptFreshIdle`
+- From: `Idle`
+- On: `RecordLiveBridgeOutcomeReceipt`(operation_id)
+- Guards:
+  - `started_operation_is_still_retained`
+- Emits: `LiveBridgeOutcomeReceiptRecorded`
+- To: `Idle`
+
+### `RecordLiveBridgeOutcomeReceiptFreshAttached`
+- From: `Attached`
+- On: `RecordLiveBridgeOutcomeReceipt`(operation_id)
+- Guards:
+  - `started_operation_is_still_retained`
+- Emits: `LiveBridgeOutcomeReceiptRecorded`
+- To: `Attached`
+
+### `RecordLiveBridgeOutcomeReceiptFreshRunning`
+- From: `Running`
+- On: `RecordLiveBridgeOutcomeReceipt`(operation_id)
+- Guards:
+  - `started_operation_is_still_retained`
+- Emits: `LiveBridgeOutcomeReceiptRecorded`
+- To: `Running`
+
+### `RecordLiveBridgeOutcomeReceiptFreshRetired`
+- From: `Retired`
+- On: `RecordLiveBridgeOutcomeReceipt`(operation_id)
+- Guards:
+  - `started_operation_is_still_retained`
+- Emits: `LiveBridgeOutcomeReceiptRecorded`
+- To: `Retired`
+
+### `RecordLiveBridgeOutcomeReceiptFreshStopped`
+- From: `Stopped`
+- On: `RecordLiveBridgeOutcomeReceipt`(operation_id)
+- Guards:
+  - `started_operation_is_still_retained`
+- Emits: `LiveBridgeOutcomeReceiptRecorded`
+- To: `Stopped`
+
+### `RecordLiveBridgeOutcomeReceiptExactReplayIdle`
+- From: `Idle`
+- On: `RecordLiveBridgeOutcomeReceipt`(operation_id)
+- Guards:
+  - `exact_receipt_is_already_recorded`
+- Emits: `LiveBridgeOutcomeReceiptRecorded`
+- To: `Idle`
+
+### `RecordLiveBridgeOutcomeReceiptExactReplayAttached`
+- From: `Attached`
+- On: `RecordLiveBridgeOutcomeReceipt`(operation_id)
+- Guards:
+  - `exact_receipt_is_already_recorded`
+- Emits: `LiveBridgeOutcomeReceiptRecorded`
+- To: `Attached`
+
+### `RecordLiveBridgeOutcomeReceiptExactReplayRunning`
+- From: `Running`
+- On: `RecordLiveBridgeOutcomeReceipt`(operation_id)
+- Guards:
+  - `exact_receipt_is_already_recorded`
+- Emits: `LiveBridgeOutcomeReceiptRecorded`
+- To: `Running`
+
+### `RecordLiveBridgeOutcomeReceiptExactReplayRetired`
+- From: `Retired`
+- On: `RecordLiveBridgeOutcomeReceipt`(operation_id)
+- Guards:
+  - `exact_receipt_is_already_recorded`
+- Emits: `LiveBridgeOutcomeReceiptRecorded`
+- To: `Retired`
+
+### `RecordLiveBridgeOutcomeReceiptExactReplayStopped`
+- From: `Stopped`
+- On: `RecordLiveBridgeOutcomeReceipt`(operation_id)
+- Guards:
+  - `exact_receipt_is_already_recorded`
+- Emits: `LiveBridgeOutcomeReceiptRecorded`
+- To: `Stopped`
+
+### `RetireSettledLiveBridgeOperationIdle`
+- From: `Idle`
+- On: `RetireSettledLiveBridgeOperation`(operation_id)
+- Guards:
+  - `operation_has_exact_execution_terminal`
+  - `started_execution_has_source_outcome_receipt`
+  - `provider_submission_is_terminal_or_permanently_suppressed`
+  - `all_effect_outcomes_are_recorded`
+  - `channel_operation_custody_is_closed`
+  - `operation_is_not_shared_with_unsettled_delegation_projection`
+- Emits: `LiveBridgeOperationRetirementResolved`
+- To: `Idle`
+
+### `RetireSettledLiveBridgeOperationAttached`
+- From: `Attached`
+- On: `RetireSettledLiveBridgeOperation`(operation_id)
+- Guards:
+  - `operation_has_exact_execution_terminal`
+  - `started_execution_has_source_outcome_receipt`
+  - `provider_submission_is_terminal_or_permanently_suppressed`
+  - `all_effect_outcomes_are_recorded`
+  - `channel_operation_custody_is_closed`
+  - `operation_is_not_shared_with_unsettled_delegation_projection`
+- Emits: `LiveBridgeOperationRetirementResolved`
+- To: `Attached`
+
+### `RetireSettledLiveBridgeOperationRunning`
+- From: `Running`
+- On: `RetireSettledLiveBridgeOperation`(operation_id)
+- Guards:
+  - `operation_has_exact_execution_terminal`
+  - `started_execution_has_source_outcome_receipt`
+  - `provider_submission_is_terminal_or_permanently_suppressed`
+  - `all_effect_outcomes_are_recorded`
+  - `channel_operation_custody_is_closed`
+  - `operation_is_not_shared_with_unsettled_delegation_projection`
+- Emits: `LiveBridgeOperationRetirementResolved`
+- To: `Running`
+
+### `RetireSettledLiveBridgeOperationRetired`
+- From: `Retired`
+- On: `RetireSettledLiveBridgeOperation`(operation_id)
+- Guards:
+  - `operation_has_exact_execution_terminal`
+  - `started_execution_has_source_outcome_receipt`
+  - `provider_submission_is_terminal_or_permanently_suppressed`
+  - `all_effect_outcomes_are_recorded`
+  - `channel_operation_custody_is_closed`
+  - `operation_is_not_shared_with_unsettled_delegation_projection`
+- Emits: `LiveBridgeOperationRetirementResolved`
+- To: `Retired`
+
+### `RetireSettledLiveBridgeOperationStopped`
+- From: `Stopped`
+- On: `RetireSettledLiveBridgeOperation`(operation_id)
+- Guards:
+  - `operation_has_exact_execution_terminal`
+  - `started_execution_has_source_outcome_receipt`
+  - `provider_submission_is_terminal_or_permanently_suppressed`
+  - `all_effect_outcomes_are_recorded`
+  - `channel_operation_custody_is_closed`
+  - `operation_is_not_shared_with_unsettled_delegation_projection`
+- Emits: `LiveBridgeOperationRetirementResolved`
+- To: `Stopped`
+
+### `RetireSettledLiveBridgeOperationAlreadyAbsentIdle`
+- From: `Idle`
+- On: `RetireSettledLiveBridgeOperation`(operation_id)
+- Guards:
+  - `operation_state_is_already_absent`
+- Emits: `LiveBridgeOperationRetirementResolved`
+- To: `Idle`
+
+### `RetireSettledLiveBridgeOperationAlreadyAbsentAttached`
+- From: `Attached`
+- On: `RetireSettledLiveBridgeOperation`(operation_id)
+- Guards:
+  - `operation_state_is_already_absent`
+- Emits: `LiveBridgeOperationRetirementResolved`
+- To: `Attached`
+
+### `RetireSettledLiveBridgeOperationAlreadyAbsentRunning`
+- From: `Running`
+- On: `RetireSettledLiveBridgeOperation`(operation_id)
+- Guards:
+  - `operation_state_is_already_absent`
+- Emits: `LiveBridgeOperationRetirementResolved`
+- To: `Running`
+
+### `RetireSettledLiveBridgeOperationAlreadyAbsentRetired`
+- From: `Retired`
+- On: `RetireSettledLiveBridgeOperation`(operation_id)
+- Guards:
+  - `operation_state_is_already_absent`
+- Emits: `LiveBridgeOperationRetirementResolved`
+- To: `Retired`
+
+### `RetireSettledLiveBridgeOperationAlreadyAbsentStopped`
+- From: `Stopped`
+- On: `RetireSettledLiveBridgeOperation`(operation_id)
+- Guards:
+  - `operation_state_is_already_absent`
+- Emits: `LiveBridgeOperationRetirementResolved`
+- To: `Stopped`
+
 ### `CancelLiveBridgeOperationIdle`
 - From: `Idle`
 - On: `CancelLiveBridgeOperation`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, reason)
@@ -15562,6 +15755,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `binding_atoms_match`
   - `exact_operation_is_nonterminal`
+  - `execution_start_was_recorded`
   - `terminal_result_shape_is_exact`
 - Emits: `LiveBridgeExecutionTerminalRecorded`
 - To: `Idle`
@@ -15572,6 +15766,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `binding_atoms_match`
   - `exact_operation_is_nonterminal`
+  - `execution_start_was_recorded`
   - `terminal_result_shape_is_exact`
 - Emits: `LiveBridgeExecutionTerminalRecorded`
 - To: `Attached`
@@ -15582,6 +15777,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `binding_atoms_match`
   - `exact_operation_is_nonterminal`
+  - `execution_start_was_recorded`
   - `terminal_result_shape_is_exact`
 - Emits: `LiveBridgeExecutionTerminalRecorded`
 - To: `Running`
@@ -15592,6 +15788,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `binding_atoms_match`
   - `exact_operation_and_terminal_match`
+  - `execution_start_was_recorded`
 - Emits: `LiveBridgeExecutionTerminalRecorded`
 - To: `Idle`
 
@@ -15601,6 +15798,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `binding_atoms_match`
   - `exact_operation_and_terminal_match`
+  - `execution_start_was_recorded`
 - Emits: `LiveBridgeExecutionTerminalRecorded`
 - To: `Attached`
 
@@ -15610,6 +15808,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `binding_atoms_match`
   - `exact_operation_and_terminal_match`
+  - `execution_start_was_recorded`
 - Emits: `LiveBridgeExecutionTerminalRecorded`
 - To: `Running`
 

@@ -3037,6 +3037,10 @@ mod orchestrator {
             }
         }
 
+        #[allow(
+            clippy::too_many_arguments,
+            reason = "this exact authority boundary carries command, reservation, and canonical live identity"
+        )]
         async fn dispatch_playback_terminal(
             &self,
             host: &LiveAdapterHost,

@@ -99,17 +99,46 @@ impl fmt::Debug for ExperimentalLiveGate0QualificationVersion {
 }
 
 /// Explicit operator intent for one experimental live factory.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ExperimentalLiveOperatorConfig {
     factory: ExperimentalLiveFactoryIdentity,
     required_gate0: ExperimentalLiveGate0QualificationVersion,
-    execution_profiles: BTreeMap<
-        String,
-        (
-            meerkat_core::LiveExecutionMode,
-            meerkat_core::LiveExecutionCapabilities,
-        ),
-    >,
+    execution_profiles: BTreeMap<String, ExperimentalLiveExecutionProfileDefinition>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct ExperimentalLiveExecutionProfileDefinition {
+    mode: meerkat_core::LiveExecutionMode,
+    capabilities: meerkat_core::LiveExecutionCapabilities,
+    gpt_live_session_instructions: Option<String>,
+}
+
+impl fmt::Debug for ExperimentalLiveOperatorConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExperimentalLiveOperatorConfig")
+            .field("factory", &self.factory)
+            .field("required_gate0", &self.required_gate0)
+            .field("execution_profiles", &self.execution_profiles)
+            .finish()
+    }
+}
+
+impl fmt::Debug for ExperimentalLiveExecutionProfileDefinition {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExperimentalLiveExecutionProfileDefinition")
+            .field("mode", &self.mode)
+            .field("capabilities", &self.capabilities)
+            .field(
+                "gpt_live_session_instructions",
+                &self
+                    .gpt_live_session_instructions
+                    .as_ref()
+                    .map(|_| "<catalog-bound>"),
+            )
+            .finish()
+    }
 }
 
 impl ExperimentalLiveOperatorConfig {
@@ -128,10 +157,41 @@ impl ExperimentalLiveOperatorConfig {
     /// composition. Surfaces may later name only `profile_id`; the selected
     /// mode and independently qualified capability atoms remain owned here.
     pub fn with_execution_profile(
+        self,
+        profile_id: impl Into<String>,
+        mode: meerkat_core::LiveExecutionMode,
+        capabilities: meerkat_core::LiveExecutionCapabilities,
+    ) -> Result<Self, ExperimentalLiveAdmissionError> {
+        self.with_execution_profile_definition(profile_id, mode, capabilities, None)
+    }
+
+    /// Add a provider-neutral execution profile with an approved, immutable
+    /// top-level GPT Live session instruction overlay.
+    ///
+    /// The host composition owns this semantic text. Live callers select only
+    /// the stable `profile_id`; MobKit and provider request parameters cannot
+    /// replace the text per open. Dynamic room or user context remains in the
+    /// canonical transcript projection rather than this profile.
+    pub fn with_execution_profile_session_instructions(
+        self,
+        profile_id: impl Into<String>,
+        mode: meerkat_core::LiveExecutionMode,
+        capabilities: meerkat_core::LiveExecutionCapabilities,
+        instructions: impl Into<String>,
+    ) -> Result<Self, ExperimentalLiveAdmissionError> {
+        let instructions = instructions.into();
+        if instructions.trim().is_empty() {
+            return Err(ExperimentalLiveAdmissionError::InvalidSessionInstructions);
+        }
+        self.with_execution_profile_definition(profile_id, mode, capabilities, Some(instructions))
+    }
+
+    fn with_execution_profile_definition(
         mut self,
         profile_id: impl Into<String>,
         mode: meerkat_core::LiveExecutionMode,
         capabilities: meerkat_core::LiveExecutionCapabilities,
+        gpt_live_session_instructions: Option<String>,
     ) -> Result<Self, ExperimentalLiveAdmissionError> {
         let profile_id = profile_id.into();
         let selected_available = match mode {
@@ -141,8 +201,14 @@ impl ExperimentalLiveOperatorConfig {
         if !valid_component(&profile_id) || !selected_available {
             return Err(ExperimentalLiveAdmissionError::ExecutionModeUnavailable);
         }
-        self.execution_profiles
-            .insert(profile_id, (mode, capabilities));
+        self.execution_profiles.insert(
+            profile_id,
+            ExperimentalLiveExecutionProfileDefinition {
+                mode,
+                capabilities,
+                gpt_live_session_instructions,
+            },
+        );
         Ok(self)
     }
 
@@ -283,10 +349,12 @@ impl ExperimentalLiveAdmissionOwner {
             .operator
             .as_ref()
             .and_then(|operator| operator.execution_profiles.get(profile_id))
-            .copied()
+            .cloned()
             .ok_or(ExperimentalLiveAdmissionError::ExecutionModeUnavailable)?;
         #[cfg(any(feature = "experimental-gpt-live", test))]
-        let (mode, capabilities) = profile;
+        let ExperimentalLiveExecutionProfileDefinition {
+            mode, capabilities, ..
+        } = profile;
         #[cfg(not(any(feature = "experimental-gpt-live", test)))]
         let _ = profile;
         #[cfg(feature = "experimental-gpt-live")]
@@ -303,12 +371,12 @@ impl ExperimentalLiveAdmissionOwner {
         }
         #[cfg(test)]
         {
-            return meerkat_runtime::live_execution::LiveExecutionProfileSelection::__test_new(
+            meerkat_runtime::live_execution::LiveExecutionProfileSelection::__test_new(
                 profile_id,
                 mode,
                 capabilities,
             )
-            .map_err(|_| ExperimentalLiveAdmissionError::ExecutionModeUnavailable);
+            .map_err(|_| ExperimentalLiveAdmissionError::ExecutionModeUnavailable)
         }
         #[cfg(not(test))]
         Err(ExperimentalLiveAdmissionError::LowerAuthorityUnavailable)
@@ -416,6 +484,7 @@ impl ExperimentalLiveAdmissionOwner {
         qualification: ExperimentalLiveCapabilityQualification,
         identity: SessionLlmIdentity,
         profile: ModelProfileWitness,
+        execution_profile_id: &str,
     ) -> Result<ExperimentalLiveAdmissionPreflight, ExperimentalLiveAdmissionError> {
         self.validate_qualification(&qualification)?;
         if !profile.matches_identity(&identity) {
@@ -427,12 +496,16 @@ impl ExperimentalLiveAdmissionOwner {
         if !profile.profile().realtime {
             return Err(ExperimentalLiveAdmissionError::TargetNotRealtime);
         }
-        let execution_profile = match identity.provider {
-            Provider::OpenAI if identity.model == "gpt-live-1-codex" => {
-                self.qualify_execution_profile(&qualification, GPT_LIVE_FUNCTION_BRIDGE_PROFILE_ID)?
-            }
-            _ => return Err(ExperimentalLiveAdmissionError::ExecutionModeUnavailable),
-        };
+        if identity.provider != Provider::OpenAI || identity.model != "gpt-live-1-codex" {
+            return Err(ExperimentalLiveAdmissionError::ExecutionModeUnavailable);
+        }
+        let execution_profile =
+            self.qualify_execution_profile(&qualification, execution_profile_id)?;
+        let gpt_live_session_instructions = self
+            .operator
+            .as_ref()
+            .and_then(|operator| operator.execution_profiles.get(execution_profile_id))
+            .and_then(|profile| profile.gpt_live_session_instructions.clone());
         Ok(ExperimentalLiveAdmissionPreflight {
             authority: qualification.authority,
             realm: qualification.realm,
@@ -444,6 +517,7 @@ impl ExperimentalLiveAdmissionOwner {
             identity,
             profile,
             execution_profile,
+            gpt_live_session_instructions,
         })
     }
 
@@ -486,6 +560,7 @@ impl ExperimentalLiveAdmissionOwner {
             protocol_digest: preflight.protocol_digest,
             target,
             execution_profile: preflight.execution_profile,
+            gpt_live_session_instructions: preflight.gpt_live_session_instructions,
         })
     }
 
@@ -622,6 +697,7 @@ pub(crate) struct ExperimentalLiveAdmissionPreflight {
     identity: SessionLlmIdentity,
     profile: ModelProfileWitness,
     execution_profile: meerkat_runtime::live_execution::LiveExecutionProfileSelection,
+    gpt_live_session_instructions: Option<String>,
     lower_qualification:
         Option<meerkat_llm_core::provider_runtime::ExperimentalRealtimeQualificationWitness>,
 }
@@ -639,6 +715,7 @@ pub struct ExperimentalLiveAdmissionWitness {
     protocol_digest: String,
     target: meerkat_llm_core::provider_runtime::AdmittedExperimentalRealtimeTarget,
     execution_profile: meerkat_runtime::live_execution::LiveExecutionProfileSelection,
+    gpt_live_session_instructions: Option<String>,
 }
 
 impl fmt::Debug for ExperimentalLiveAdmissionWitness {
@@ -677,6 +754,13 @@ impl ExperimentalLiveAdmissionWitness {
         &self,
     ) -> &meerkat_runtime::live_execution::LiveExecutionProfileSelection {
         &self.execution_profile
+    }
+
+    /// Approved host-catalog text for the top-level GPT Live call session.
+    /// Provider-specific lowering consumes it only after this admission
+    /// witness is minted; raw live/open parameters never enter this field.
+    pub(crate) fn gpt_live_session_instructions(&self) -> Option<&str> {
+        self.gpt_live_session_instructions.as_deref()
     }
 
     /// Consume the proof into the only lower-layer input accepted by the
@@ -732,6 +816,8 @@ pub enum ExperimentalLiveAdmissionError {
     LowerAuthorityUnavailable,
     #[error("the selected live execution mode is unavailable in this composition")]
     ExecutionModeUnavailable,
+    #[error("experimental live session instructions must be non-empty when configured")]
+    InvalidSessionInstructions,
     #[error(transparent)]
     LowerAdmission(#[from] meerkat_llm_core::provider_runtime::ExperimentalRealtimeAdmissionError),
     #[error("the admission witness is bound to a different realm")]
@@ -883,9 +969,11 @@ mod tests {
             let owner = ExperimentalLiveAdmissionOwner::for_test(
                 feature_compiled,
                 operator_configured.then(|| operator(selected_factory.clone())),
-                realm_admitted
-                    .then(|| BTreeSet::from([admitted_realm.clone()]))
-                    .unwrap_or_default(),
+                if realm_admitted {
+                    BTreeSet::from([admitted_realm.clone()])
+                } else {
+                    BTreeSet::default()
+                },
                 gate0_qualified.then(|| gate0(selected_factory.clone())),
             );
             let result = owner.qualify_capability(&admitted_realm, &selected_factory);
@@ -1002,7 +1090,12 @@ mod tests {
         let (stable_identity, _, _) = target_parts("gpt-realtime-2");
         assert_eq!(
             owner
-                .preflight(qualification, stable_identity, experimental_profile)
+                .preflight(
+                    qualification,
+                    stable_identity,
+                    experimental_profile,
+                    GPT_LIVE_FUNCTION_BRIDGE_PROFILE_ID,
+                )
                 .expect_err("profile/identity substitution must fail"),
             ExperimentalLiveAdmissionError::TargetProfileMismatch
         );
@@ -1015,6 +1108,7 @@ mod tests {
                     .expect("qualified"),
                 identity,
                 profile,
+                GPT_LIVE_FUNCTION_BRIDGE_PROFILE_ID,
             )
             .expect("valid preflight");
         let wrong_provider_connection = ResolvedConnection {
@@ -1139,6 +1233,80 @@ mod tests {
                 .qualify_capability(&admitted_realm, &selected_factory)
                 .expect_err("no Gate0 means no capability advertisement"),
             ExperimentalLiveAdmissionError::OperatorNotConfigured
+        );
+    }
+
+    #[test]
+    fn strict_profile_selection_carries_only_host_catalog_session_instructions() {
+        let admitted_realm = realm("voice-profile-guidance");
+        let selected_factory = factory("v1");
+        let catalog_instructions = "Converse using the host-approved channel role.";
+        let configured_operator = ExperimentalLiveOperatorConfig::new(
+            selected_factory.clone(),
+            qualification("gate0-v1"),
+        )
+        .with_execution_profile_session_instructions(
+            "voice-room-v1",
+            meerkat_core::LiveExecutionMode::FunctionBridge,
+            meerkat_core::LiveExecutionCapabilities {
+                function_bridge: true,
+                client_context: false,
+            },
+            catalog_instructions,
+        )
+        .expect("valid catalog profile guidance");
+        let debug = format!("{configured_operator:?}");
+        assert!(!debug.contains(catalog_instructions));
+        assert!(debug.contains("<catalog-bound>"));
+        let owner = ExperimentalLiveAdmissionOwner::for_test(
+            true,
+            Some(configured_operator),
+            BTreeSet::from([admitted_realm.clone()]),
+            Some(gate0(selected_factory.clone())),
+        );
+        let (identity, profile, _) = target_parts("gpt-live-1-codex");
+        let preflight = owner
+            .preflight(
+                owner
+                    .qualify_capability(&admitted_realm, &selected_factory)
+                    .expect("qualified"),
+                identity.clone(),
+                profile.clone(),
+                "voice-room-v1",
+            )
+            .expect("registered profile selected");
+        assert_eq!(preflight.execution_profile.profile_id(), "voice-room-v1");
+        assert_eq!(
+            preflight.gpt_live_session_instructions.as_deref(),
+            Some(catalog_instructions)
+        );
+
+        assert_eq!(
+            owner
+                .preflight(
+                    owner
+                        .qualify_capability(&admitted_realm, &selected_factory)
+                        .expect("qualified"),
+                    identity,
+                    profile,
+                    "caller-invented-profile",
+                )
+                .expect_err("unregistered profile must fail closed"),
+            ExperimentalLiveAdmissionError::ExecutionModeUnavailable
+        );
+        assert_eq!(
+            ExperimentalLiveOperatorConfig::new(selected_factory, qualification("gate0-v1"),)
+                .with_execution_profile_session_instructions(
+                    "blank-guidance",
+                    meerkat_core::LiveExecutionMode::FunctionBridge,
+                    meerkat_core::LiveExecutionCapabilities {
+                        function_bridge: true,
+                        client_context: false,
+                    },
+                    "   ",
+                )
+                .expect_err("blank profile guidance must fail"),
+            ExperimentalLiveAdmissionError::InvalidSessionInstructions
         );
     }
 

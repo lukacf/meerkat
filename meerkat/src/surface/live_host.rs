@@ -1613,12 +1613,16 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
         authority: &dyn crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider,
         recovery: meerkat_runtime::live_execution::LiveContextAmbiguityRecoveryAuthority,
     ) -> Result<ExperimentalLiveReplacementRequired, ExperimentalLiveContextRecoveryError> {
+        let profile_id = authority
+            .bound_execution_profile_id(recovery.closing_channel_id(), recovery.session_id())
+            .await?;
         self.close_live_channel(Some(authority), recovery.closing_channel_id())
             .await?;
 
         let identity = recovery.llm_identity();
         let execution_identity = WireLiveExecutionIdentityOverrideV1 {
             version: WireLiveExecutionIdentityVersion::V1,
+            profile_id,
             model: Some(identity.model.clone()),
             provider: Some(identity.provider.into()),
             self_hosted_server_id: identity.self_hosted_server_id.clone(),
@@ -1747,12 +1751,16 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
         authority: &dyn crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider,
         recovery: meerkat_runtime::live_execution::LiveDelegationResultAmbiguityRecoveryAuthority,
     ) -> Result<ExperimentalLiveReplacementRequired, ExperimentalLiveContextRecoveryError> {
+        let profile_id = authority
+            .bound_execution_profile_id(recovery.closing_channel_id(), recovery.session_id())
+            .await?;
         self.close_live_channel(Some(authority), recovery.closing_channel_id())
             .await?;
 
         let identity = recovery.llm_identity();
         let execution_identity = WireLiveExecutionIdentityOverrideV1 {
             version: WireLiveExecutionIdentityVersion::V1,
+            profile_id,
             model: Some(identity.model.clone()),
             provider: Some(identity.provider.into()),
             self_hosted_server_id: identity.self_hosted_server_id.clone(),

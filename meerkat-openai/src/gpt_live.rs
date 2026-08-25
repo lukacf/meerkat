@@ -109,6 +109,7 @@ pub struct GptLiveBrokerOpenConfig {
     offer_sdp: String,
     voice: String,
     responses: Option<GptLiveResponsesSessionConfig>,
+    session_instructions: Option<String>,
 }
 
 impl std::fmt::Debug for GptLiveBrokerOpenConfig {
@@ -118,6 +119,13 @@ impl std::fmt::Debug for GptLiveBrokerOpenConfig {
             .field("offer_sdp", &"<redacted>")
             .field("voice", &"<redacted>")
             .field("responses", &self.responses)
+            .field(
+                "session_instructions",
+                &self
+                    .session_instructions
+                    .as_ref()
+                    .map(|_| "<catalog-bound>"),
+            )
             .finish()
     }
 }
@@ -144,6 +152,7 @@ impl GptLiveBrokerOpenConfig {
             offer_sdp,
             voice,
             responses: None,
+            session_instructions: None,
         })
     }
 
@@ -154,6 +163,15 @@ impl GptLiveBrokerOpenConfig {
     #[must_use]
     pub fn with_responses_session(mut self, responses: GptLiveResponsesSessionConfig) -> Self {
         self.responses = Some(responses);
+        self
+    }
+
+    /// Lower host-catalog guidance into the verified top-level GPT Live call
+    /// session field. The experimental Meerkat admission witness is the only
+    /// shipping caller of this seam; raw live/open prose never reaches it.
+    #[must_use]
+    pub fn with_session_instructions(mut self, instructions: impl Into<String>) -> Self {
+        self.session_instructions = Some(instructions.into());
         self
     }
 }
@@ -569,7 +587,7 @@ impl GptLiveBrokerFactory {
                 delegation: config
                     .responses
                     .map(GptLiveResponsesSessionConfig::into_delegation),
-                instructions: None,
+                instructions: config.session_instructions,
                 extra: ExtraFields::new(),
             },
         }
@@ -1250,6 +1268,39 @@ mod tests {
             gpt_live_responses_bridge_parameters()
         );
         assert!(wire["session"]["instructions"].is_null());
+    }
+
+    #[test]
+    fn catalog_session_instructions_lower_only_to_top_level_call_session() {
+        let target = realtime_target(
+            ModelReleaseStage::Experimental,
+            OpenAiBackendKind::ChatGptBackend,
+        );
+        let factory = GptLiveBrokerFactory::from_target_with_transport(
+            target,
+            GptLiveTransport::try_new().expect("test transport"),
+        )
+        .expect("experimental ChatGPT target");
+        let responses = GptLiveResponsesSessionConfig::try_from_catalog_model(&responses_model())
+            .expect("catalog responses profile");
+        let request = factory.call_request(
+            GptLiveBrokerOpenConfig::new("PRIVATE_OFFER_SDP", "cove")
+                .expect("open config")
+                .with_responses_session(responses)
+                .with_session_instructions("Converse as the selected voice embodiment."),
+        );
+        let wire = serde_json::to_value(request).expect("serialize call request");
+
+        assert_eq!(
+            wire["session"]["instructions"],
+            "Converse as the selected voice embodiment."
+        );
+        assert!(
+            wire["session"]["delegation"]["responses"]
+                .get("instructions")
+                .is_none(),
+            "top-level channel guidance must not populate delegation.responses.instructions"
+        );
     }
 
     #[test]

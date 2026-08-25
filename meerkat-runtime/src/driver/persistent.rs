@@ -1132,11 +1132,12 @@ impl PersistentRuntimeDriver {
             ));
         }
         Ok(
-            MachineLifecycleCommit::new_with_binding_and_unregister_progress(
+            MachineLifecycleCommit::new_with_binding_unregister_progress_and_live_bridge(
                 Self::runtime_state_for_persistence_from_inner(&self.inner)?,
                 self.inner.machine_lifecycle_binding_facts(),
                 self.inner.supervisor_authority_snapshot(),
                 None,
+                Self::live_bridge_recovery_for_persistence_from_inner(&self.inner)?,
             ),
         )
     }
@@ -2681,6 +2682,66 @@ mod tests {
     use meerkat_core::lifecycle::InputId;
     use meerkat_core::types::SessionId;
 
+    fn durable_live_bridge_evidence() -> crate::live_execution::LiveBridgeRecoveryImage {
+        serde_json::from_value(serde_json::json!({
+            "operations": [
+                {
+                    "operation_id": "op-in-flight",
+                    "channel_id": "channel-in-flight",
+                    "interaction_id": "interaction-in-flight",
+                    "provider_turn_ref": "turn-in-flight",
+                    "provider_delegation_ref": "delegation-in-flight",
+                    "provider_call_ref": "call-in-flight",
+                    "source_agent_identity": "executor-in-flight",
+                    "canonical_context_revision": "context-in-flight",
+                    "request_digest": "sha256:request-in-flight",
+                    "phase": "execution_running",
+                    "terminal": null,
+                    "result_digest": null,
+                    "cancellation_reason": "restart",
+                    "submission_output_kind": null,
+                    "submission_digest": null,
+                    "submission_state": null,
+                    "current_for_channel": false,
+                    "channel_revoked": true
+                },
+                {
+                    "operation_id": "op-ambiguous",
+                    "channel_id": "channel-ambiguous",
+                    "interaction_id": "interaction-ambiguous",
+                    "provider_turn_ref": "turn-ambiguous",
+                    "provider_delegation_ref": "delegation-ambiguous",
+                    "provider_call_ref": "call-ambiguous",
+                    "source_agent_identity": "executor-ambiguous",
+                    "canonical_context_revision": "context-ambiguous",
+                    "request_digest": "sha256:request-ambiguous",
+                    "phase": "execution_terminal",
+                    "terminal": "completed",
+                    "result_digest": "sha256:result-ambiguous",
+                    "cancellation_reason": "channel_close",
+                    "submission_output_kind": "success",
+                    "submission_digest": "sha256:submission-ambiguous",
+                    "submission_state": "submission_ambiguous",
+                    "current_for_channel": false,
+                    "channel_revoked": true
+                }
+            ]
+        }))
+        .expect("valid durable live bridge test image")
+    }
+
+    fn apply_machine_input(
+        driver: &mut PersistentRuntimeDriver,
+        input: crate::meerkat_machine::dsl::MeerkatMachineInput,
+    ) {
+        let authority = driver.inner_ref().shared_dsl_authority();
+        let mut authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(&mut *authority, input)
+            .expect("generated test transition");
+    }
+
     fn make_prompt(text: &str) -> Input {
         Input::Prompt(crate::input::PromptInput {
             injected_context: Vec::new(),
@@ -2721,6 +2782,150 @@ mod tests {
             .recover_inputs_after_runtime_authority(recovery.unregister_progress.as_ref())
             .await
             .expect("registration-authorized input recovery must commit by exact batch CAS")
+    }
+
+    #[test]
+    fn completed_unregister_commit_preserves_captured_live_bridge_recovery_image() {
+        let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
+        let blob_store: Arc<dyn BlobStore> = Arc::new(meerkat_store::MemoryBlobStore::new());
+        let mut driver = PersistentRuntimeDriver::new(
+            LogicalRuntimeId::new("completed-unregister-live-bridge"),
+            store,
+            blob_store,
+        );
+        let session_id = crate::meerkat_machine::dsl::SessionId::from(
+            "completed-unregister-live-bridge".to_string(),
+        );
+        driver
+            .inner_mut()
+            .install_registered_authority_for_test(
+                session_id.clone(),
+                None,
+                None,
+                None,
+                None,
+                crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+            )
+            .expect("install registered test authority");
+
+        let live_bridge_recovery = durable_live_bridge_evidence();
+        let authority = driver.inner_ref().shared_dsl_authority();
+        let mut recovered_state = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .state()
+            .clone();
+        live_bridge_recovery
+            .restore_into(&mut recovered_state)
+            .expect("restore durable bridge evidence into registered authority");
+        let recovered = crate::meerkat_machine::dsl::MeerkatMachineAuthority::recover_from_state(
+            recovered_state,
+        )
+        .expect("bridge evidence satisfies generated invariants");
+        driver.inner_mut().replace_runtime_authority(recovered);
+        let captured_live_bridge_recovery = {
+            let authority = driver.inner_ref().shared_dsl_authority();
+            let authority = authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            crate::live_execution::LiveBridgeRecoveryImage::capture(authority.state())
+                .expect("capture canonical bridge evidence before unregister")
+        };
+
+        let (agent_runtime_id, fence_token, generation, runtime_epoch_id) = {
+            let authority = driver.inner_ref().shared_dsl_authority();
+            let authority = authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let state = authority.state();
+            (
+                state.active_runtime_id.clone(),
+                state.active_fence_token,
+                state.active_runtime_generation,
+                state.active_runtime_epoch_id.clone(),
+            )
+        };
+        apply_machine_input(
+            &mut driver,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::BeginUnregisterSession {
+                session_id: session_id.clone(),
+                agent_runtime_id: agent_runtime_id.clone(),
+                fence_token,
+                generation,
+                runtime_epoch_id: runtime_epoch_id.clone(),
+            },
+        );
+        let (runtime_pending, comms_pending, waiters_pending) = {
+            let authority = driver.inner_ref().shared_dsl_authority();
+            let authority = authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let state = authority.state();
+            (
+                state.unregister_runtime_loop_drain_pending,
+                state.unregister_comms_drain_exit_pending,
+                state.unregister_completion_waiter_drain_pending,
+            )
+        };
+        if runtime_pending {
+            apply_machine_input(
+                &mut driver,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::RuntimeLoopStoppedForUnregister {
+                    session_id: session_id.clone(),
+                    forced_abort: false,
+                },
+            );
+        }
+        if comms_pending {
+            apply_machine_input(
+                &mut driver,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::CommsDrainExitedForUnregister {
+                    session_id: session_id.clone(),
+                    forced_abort: false,
+                },
+            );
+        }
+        if waiters_pending {
+            apply_machine_input(
+                &mut driver,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::CompletionWaitersResolvedForUnregister {
+                    session_id: session_id.clone(),
+                },
+            );
+        }
+        apply_machine_input(
+            &mut driver,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::ResolveRuntimeOpsLifecycleDurability {
+                session_id: session_id.clone(),
+                agent_runtime_id: agent_runtime_id.clone(),
+                fence_token,
+                generation,
+                runtime_epoch_id: runtime_epoch_id.clone(),
+            },
+        );
+        apply_machine_input(
+            &mut driver,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::UnregisterSession {
+                session_id,
+                agent_runtime_id,
+                fence_token,
+                generation,
+                runtime_epoch_id,
+            },
+        );
+        driver.sync_control_projection_from_dsl_authority();
+
+        let commit = driver
+            .lifecycle_commit_for_completed_unregister()
+            .expect("completed unregister commit");
+
+        assert_eq!(commit.runtime_state(), RuntimeState::Idle);
+        assert_eq!(commit.snapshot().unregister_progress(), None);
+        assert_eq!(
+            commit.snapshot().live_bridge_recovery(),
+            &captured_live_bridge_recovery,
+            "completed unregister must retain in-flight and ambiguous executor evidence"
+        );
     }
 
     #[test]

@@ -261,6 +261,16 @@ struct LiveBridgeRecoveryOperation {
     canonical_context_revision: String,
     request_digest: String,
     phase: LiveBridgeOperationPhase,
+    #[serde(default)]
+    execution_started: Option<bool>,
+    // Older V5 rows predate the explicit projection obligation. Missing is
+    // distinct from explicit false so restore can retain conservative debt
+    // for a legacy terminal that may have been fabricated after execution
+    // started, while new pre-execution cancels encode false explicitly.
+    #[serde(default)]
+    outcome_receipt_required: Option<bool>,
+    #[serde(default)]
+    outcome_receipt_recorded: bool,
     terminal: Option<MeerkatExecutionTerminal>,
     result_digest: Option<String>,
     cancellation_reason: Option<LiveBridgeCancellationReason>,
@@ -297,6 +307,47 @@ impl LiveBridgeRecoveryImage {
         let mut operations = Vec::with_capacity(state.live_bridge_channel_by_operation.len());
         for (operation_id, channel_id) in &state.live_bridge_channel_by_operation {
             let key = operation_id.0.as_str();
+            let phase = state
+                .live_bridge_phase_by_operation
+                .get(operation_id)
+                .copied()
+                .map(bridge_phase_from_dsl)
+                .ok_or_else(|| format!("live bridge operation {key} is missing generated phase"))?;
+            let terminal = state
+                .live_bridge_execution_terminal_by_operation
+                .get(operation_id)
+                .copied()
+                .map(bridge_terminal_from_dsl);
+            let execution_started = state
+                .live_bridge_execution_started_operations
+                .contains(operation_id);
+            let outcome_receipt_required = state
+                .live_bridge_outcome_receipt_required_operations
+                .contains(operation_id);
+            let outcome_receipt_recorded = state
+                .live_bridge_outcome_receipt_operations
+                .contains(operation_id);
+            if (phase == LiveBridgeOperationPhase::ExecutionRunning
+                || matches!(
+                    terminal,
+                    Some(MeerkatExecutionTerminal::Completed | MeerkatExecutionTerminal::Failed)
+                ))
+                && !execution_started
+            {
+                return Err(format!(
+                    "live bridge operation {key} is missing generated execution-start evidence"
+                ));
+            }
+            if execution_started && !outcome_receipt_required {
+                return Err(format!(
+                    "live bridge operation {key} is missing its generated outcome-receipt obligation"
+                ));
+            }
+            if outcome_receipt_recorded && !outcome_receipt_required {
+                return Err(format!(
+                    "live bridge operation {key} records an outcome receipt without an obligation"
+                ));
+            }
             operations.push(LiveBridgeRecoveryOperation {
                 operation_id: operation_id.0.clone(),
                 channel_id: channel_id.clone(),
@@ -342,19 +393,11 @@ impl LiveBridgeRecoveryImage {
                     key,
                     "request digest",
                 )?,
-                phase: state
-                    .live_bridge_phase_by_operation
-                    .get(operation_id)
-                    .copied()
-                    .map(bridge_phase_from_dsl)
-                    .ok_or_else(|| {
-                        format!("live bridge operation {key} is missing generated phase")
-                    })?,
-                terminal: state
-                    .live_bridge_execution_terminal_by_operation
-                    .get(operation_id)
-                    .copied()
-                    .map(bridge_terminal_from_dsl),
+                phase,
+                execution_started: Some(execution_started),
+                outcome_receipt_required: Some(outcome_receipt_required),
+                outcome_receipt_recorded,
+                terminal,
                 result_digest: state
                     .live_bridge_execution_result_digest_by_operation
                     .get(operation_id)
@@ -402,6 +445,39 @@ impl LiveBridgeRecoveryImage {
     ) -> Result<(), String> {
         self.validate_bound()?;
         for operation in &self.operations {
+            let terminal_proves_execution = matches!(
+                operation.terminal,
+                Some(MeerkatExecutionTerminal::Completed | MeerkatExecutionTerminal::Failed)
+            );
+            if operation.execution_started == Some(false)
+                && (operation.phase == LiveBridgeOperationPhase::ExecutionRunning
+                    || terminal_proves_execution)
+            {
+                return Err(format!(
+                    "durable live bridge operation {} explicitly denies a proven execution start",
+                    operation.operation_id
+                ));
+            }
+            let execution_started = operation.execution_started.unwrap_or(matches!(
+                operation.phase,
+                LiveBridgeOperationPhase::ExecutionRunning
+                    | LiveBridgeOperationPhase::ExecutionTerminal
+            ));
+            let outcome_receipt_required = operation
+                .outcome_receipt_required
+                .unwrap_or(execution_started);
+            if execution_started && !outcome_receipt_required {
+                return Err(format!(
+                    "durable live bridge operation {} started without an outcome-receipt obligation",
+                    operation.operation_id
+                ));
+            }
+            if operation.outcome_receipt_recorded && !outcome_receipt_required {
+                return Err(format!(
+                    "durable live bridge operation {} records an outcome receipt without a matching obligation",
+                    operation.operation_id
+                ));
+            }
             let operation_id =
                 crate::meerkat_machine::dsl::OperationId(operation.operation_id.clone());
             if state
@@ -441,6 +517,21 @@ impl LiveBridgeRecoveryImage {
             state
                 .live_bridge_phase_by_operation
                 .insert(operation_id.clone(), bridge_phase_to_dsl(operation.phase));
+            if execution_started {
+                state
+                    .live_bridge_execution_started_operations
+                    .insert(operation_id.clone());
+            }
+            if outcome_receipt_required {
+                state
+                    .live_bridge_outcome_receipt_required_operations
+                    .insert(operation_id.clone());
+            }
+            if operation.outcome_receipt_recorded {
+                state
+                    .live_bridge_outcome_receipt_operations
+                    .insert(operation_id.clone());
+            }
             if let Some(terminal) = operation.terminal {
                 state
                     .live_bridge_execution_terminal_by_operation
@@ -4519,5 +4610,174 @@ mod tests {
         assert!(!rendered.contains("provider-turn-secret"));
         assert!(!rendered.contains("delegation-secret"));
         assert!(!rendered.contains("executor-input-secret"));
+    }
+
+    #[test]
+    fn legacy_v5_running_bridge_restores_execution_and_receipt_obligations() {
+        let image: LiveBridgeRecoveryImage = serde_json::from_value(serde_json::json!({
+            "operations": [{
+                "operation_id": "00000000-0000-0000-0000-000000000101",
+                "channel_id": "legacy-running-channel",
+                "interaction_id": "00000000-0000-0000-0000-000000000102",
+                "provider_turn_ref": "legacy-turn",
+                "provider_delegation_ref": "legacy-delegation",
+                "provider_call_ref": "legacy-call",
+                "source_agent_identity": "legacy-source",
+                "canonical_context_revision": "sha256:legacy-context",
+                "request_digest": "sha256:legacy-request",
+                "phase": "execution_running",
+                "terminal": null,
+                "result_digest": null,
+                "cancellation_reason": "restart",
+                "submission_output_kind": null,
+                "submission_digest": null,
+                "submission_state": null,
+                "current_for_channel": false,
+                "channel_revoked": true
+            }]
+        }))
+        .expect("decode legacy V5 bridge row without new fact fields");
+        let mut state = crate::meerkat_machine::dsl::MeerkatMachineState::default();
+        image
+            .restore_into(&mut state)
+            .expect("restore legacy running bridge image");
+        let operation_id = crate::meerkat_machine::dsl::OperationId(
+            "00000000-0000-0000-0000-000000000101".to_string(),
+        );
+        assert!(
+            state
+                .live_bridge_execution_started_operations
+                .contains(&operation_id)
+        );
+        assert!(
+            state
+                .live_bridge_outcome_receipt_required_operations
+                .contains(&operation_id)
+        );
+        assert!(
+            !state
+                .live_bridge_outcome_receipt_operations
+                .contains(&operation_id)
+        );
+        crate::meerkat_machine::dsl::MeerkatMachineAuthority::recover_from_state(state)
+            .expect("legacy running bridge restores as valid generated authority");
+    }
+
+    #[test]
+    fn legacy_v5_cancelled_terminal_retains_conservative_execution_debt() {
+        let image: LiveBridgeRecoveryImage = serde_json::from_value(serde_json::json!({
+            "operations": [{
+                "operation_id": "00000000-0000-0000-0000-000000000201",
+                "channel_id": "legacy-cancelled-channel",
+                "interaction_id": "00000000-0000-0000-0000-000000000202",
+                "provider_turn_ref": "legacy-turn",
+                "provider_delegation_ref": "legacy-delegation",
+                "provider_call_ref": "legacy-call",
+                "source_agent_identity": "legacy-source",
+                "canonical_context_revision": "sha256:legacy-context",
+                "request_digest": "sha256:legacy-request",
+                "phase": "execution_terminal",
+                "terminal": "cancelled",
+                "result_digest": null,
+                "cancellation_reason": "channel_close",
+                "submission_output_kind": null,
+                "submission_digest": null,
+                "submission_state": null,
+                "current_for_channel": false,
+                "channel_revoked": true
+            }]
+        }))
+        .expect("decode legacy V5 cancelled terminal");
+        let mut state = crate::meerkat_machine::dsl::MeerkatMachineState::default();
+        image
+            .restore_into(&mut state)
+            .expect("restore legacy cancelled terminal");
+        let operation_id = crate::meerkat_machine::dsl::OperationId(
+            "00000000-0000-0000-0000-000000000201".to_string(),
+        );
+        assert!(
+            state
+                .live_bridge_execution_started_operations
+                .contains(&operation_id)
+        );
+        assert!(
+            state
+                .live_bridge_outcome_receipt_required_operations
+                .contains(&operation_id)
+        );
+        let mut authority =
+            crate::meerkat_machine::dsl::MeerkatMachineAuthority::recover_from_state(state)
+                .expect("legacy cancelled terminal is valid generated authority");
+        crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            &mut authority,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::RetireSettledLiveBridgeOperation {
+                operation_id,
+            },
+        )
+        .expect_err("legacy terminal cannot retire before its conservative receipt debt closes");
+    }
+
+    #[test]
+    fn explicit_v5_preexecution_cancel_can_retire_without_outcome_receipt() {
+        let image: LiveBridgeRecoveryImage = serde_json::from_value(serde_json::json!({
+            "operations": [{
+                "operation_id": "00000000-0000-0000-0000-000000000301",
+                "channel_id": "explicit-cancelled-channel",
+                "interaction_id": "00000000-0000-0000-0000-000000000302",
+                "provider_turn_ref": "explicit-turn",
+                "provider_delegation_ref": "explicit-delegation",
+                "provider_call_ref": "explicit-call",
+                "source_agent_identity": "explicit-source",
+                "canonical_context_revision": "sha256:explicit-context",
+                "request_digest": "sha256:explicit-request",
+                "phase": "execution_terminal",
+                "execution_started": false,
+                "outcome_receipt_required": false,
+                "outcome_receipt_recorded": false,
+                "terminal": "cancelled",
+                "result_digest": null,
+                "cancellation_reason": "channel_close",
+                "submission_output_kind": null,
+                "submission_digest": null,
+                "submission_state": null,
+                "current_for_channel": false,
+                "channel_revoked": true
+            }]
+        }))
+        .expect("decode explicit pre-execution cancellation");
+        let mut state = crate::meerkat_machine::dsl::MeerkatMachineState::default();
+        image
+            .restore_into(&mut state)
+            .expect("restore explicit pre-execution cancellation");
+        let operation_id = crate::meerkat_machine::dsl::OperationId(
+            "00000000-0000-0000-0000-000000000301".to_string(),
+        );
+        assert!(
+            !state
+                .live_bridge_execution_started_operations
+                .contains(&operation_id)
+        );
+        assert!(
+            !state
+                .live_bridge_outcome_receipt_required_operations
+                .contains(&operation_id)
+        );
+        state.lifecycle_phase = crate::meerkat_machine::dsl::MeerkatPhase::Idle;
+        let mut authority =
+            crate::meerkat_machine::dsl::MeerkatMachineAuthority::recover_from_state(state)
+                .expect("explicit pre-execution cancellation is valid generated authority");
+        crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            &mut authority,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::RetireSettledLiveBridgeOperation {
+                operation_id,
+            },
+        )
+        .expect("explicit pre-execution cancellation can retire without an outcome receipt");
+        assert!(
+            authority
+                .state()
+                .live_bridge_channel_by_operation
+                .is_empty()
+        );
     }
 }

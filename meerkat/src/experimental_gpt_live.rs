@@ -118,6 +118,18 @@ pub trait ExperimentalLiveOpenAuthorityProvider: Send + Sync {
         execution_identity: &meerkat_contracts::WireLiveExecutionIdentityOverrideV1,
     ) -> Result<Box<dyn ExperimentalLivePendingOpen>, ExperimentalLiveOpenAuthorityError>;
 
+    /// Read the exact host-catalog profile bound to a current experimental
+    /// channel. Replacement signaling uses this before closing the old
+    /// transport so profile-owned conversation guidance cannot silently
+    /// revert to another profile.
+    async fn bound_execution_profile_id(
+        &self,
+        _channel_id: &meerkat_live::LiveChannelId,
+        _canonical_session_id: &meerkat_core::SessionId,
+    ) -> Result<String, ExperimentalLiveOpenAuthorityError> {
+        Err(ExperimentalLiveOpenAuthorityError::Unavailable)
+    }
+
     /// Exact cleanup for an open that was bound but could not be published,
     /// or for a later channel close. A stale session/channel pair is a no-op.
     async fn unbind_channel(
@@ -333,6 +345,9 @@ impl ExperimentalGptLiveOpenAuthority {
         use meerkat_contracts::WireLiveIdentityOverride;
         use meerkat_contracts::wire::WireProvider;
 
+        if execution_identity.profile_id.trim().is_empty() {
+            return Err(ExperimentalLiveOpenAuthorityError::InvalidExecutionIdentity);
+        }
         let model = execution_identity
             .model
             .clone()
@@ -404,6 +419,7 @@ impl ExperimentalLiveOpenAuthorityProvider for ExperimentalGptLiveOpenAuthority 
                 &self.realm,
                 &identity,
                 &self.factory_identity,
+                &execution_identity.profile_id,
             )
             .map_err(|_| ExperimentalLiveOpenAuthorityError::AdmissionFailed)?;
         let authorization = self
@@ -468,6 +484,17 @@ impl ExperimentalLiveOpenAuthorityProvider for ExperimentalGptLiveOpenAuthority 
         self.transport
             .unbind_channel(channel_id, canonical_session_id)
             .await;
+    }
+
+    async fn bound_execution_profile_id(
+        &self,
+        channel_id: &meerkat_live::LiveChannelId,
+        canonical_session_id: &meerkat_core::SessionId,
+    ) -> Result<String, ExperimentalLiveOpenAuthorityError> {
+        self.transport
+            .bound_execution_profile_id(channel_id, canonical_session_id)
+            .await
+            .ok_or(ExperimentalLiveOpenAuthorityError::ChannelBindingFailed)
     }
 
     async fn register_context_recovery_for_answer(
@@ -928,7 +955,7 @@ impl crate::surface::LiveWebrtcBoundReadyCustody for ExperimentalGptLiveBoundRea
                         }
                     }
                     Err(error) => {
-                        errors.push(format!("generated answer binding rollback failed: {error}"))
+                        errors.push(format!("generated answer binding rollback failed: {error}"));
                     }
                 }
             }
@@ -1161,6 +1188,7 @@ struct ExperimentalGptLiveWebrtcBroker {
     factory: GptLiveBrokerFactory,
     voice: String,
     responses: Option<GptLiveResponsesSessionConfig>,
+    session_instructions: Option<String>,
     initial_seed: Arc<Mutex<Option<ExperimentalGptLiveInitialSeed>>>,
 }
 
@@ -1177,6 +1205,13 @@ impl fmt::Debug for ExperimentalGptLiveWebrtcBroker {
             .field("factory", &"[OPAQUE]")
             .field("voice", &"[REDACTED]")
             .field("responses_qualified", &self.responses.is_some())
+            .field(
+                "session_instructions",
+                &self
+                    .session_instructions
+                    .as_ref()
+                    .map(|_| "[CATALOG-BOUND]"),
+            )
             .finish()
     }
 }
@@ -1186,6 +1221,7 @@ impl ExperimentalGptLiveWebrtcBroker {
     fn new(
         factory: GptLiveBrokerFactory,
         voice: impl Into<String>,
+        session_instructions: Option<String>,
         initial_seed: Arc<Mutex<Option<ExperimentalGptLiveInitialSeed>>>,
     ) -> Result<Self, ExperimentalGptLiveBridgeError> {
         let voice = voice.into();
@@ -1199,6 +1235,7 @@ impl ExperimentalGptLiveWebrtcBroker {
             // its catalog-bound Responses model. No shipping constructor can
             // populate this field in the unqualified tree.
             responses: None,
+            session_instructions,
             initial_seed,
         })
     }
@@ -1226,9 +1263,12 @@ impl ProviderWebrtcBroker for ExperimentalGptLiveWebrtcBroker {
             .await
             .take()
             .ok_or(ProviderWebrtcBrokerError::Rejected)?;
-        let config = GptLiveBrokerOpenConfig::new(offer.offer_sdp(), self.voice.clone())
+        let mut config = GptLiveBrokerOpenConfig::new(offer.offer_sdp(), self.voice.clone())
             .map_err(map_broker_error)?
             .with_responses_session(responses);
+        if let Some(instructions) = self.session_instructions.clone() {
+            config = config.with_session_instructions(instructions);
+        }
         let bootstrap = self.factory.open(config).await.map_err(map_broker_error)?;
         let (answer_sdp, session) = bootstrap.into_parts();
         session
@@ -1300,9 +1340,10 @@ impl ExperimentalGptLiveActivationGate {
                 return None;
             }
             if self.committed.load(Ordering::Acquire) {
-                if let Some(prepared) = self.prepared.lock().await.as_ref().cloned() {
-                    return Some(prepared);
-                }
+                let Some(prepared) = self.prepared.lock().await.as_ref().cloned() else {
+                    continue;
+                };
+                return Some(prepared);
             }
             let changed = self.changed.notified();
             if self.cancelled.load(Ordering::Acquire) {
@@ -1376,6 +1417,7 @@ struct RegisteredExperimentalGptLiveChannel {
     broker: Arc<dyn ProviderWebrtcBroker>,
     adapter: Arc<ExperimentalGptLiveDeferredAdapter>,
     identity: meerkat_core::SessionLlmIdentity,
+    execution_profile_id: String,
 }
 
 /// Opaque one-use provider custody prepared from one exact per-open admission.
@@ -1410,6 +1452,9 @@ impl ExperimentalGptLivePendingChannel {
         canonical_session_id: meerkat_core::SessionId,
         voice: impl Into<String>,
     ) -> Result<Self, ExperimentalGptLiveBridgeError> {
+        let session_instructions = admission
+            .gpt_live_session_instructions()
+            .map(ToString::to_string);
         let execution_profile = admission.execution_profile().clone();
         let target = admission_owner
             .consume_experimental_live_admission(admission, realm, factory_identity)
@@ -1421,6 +1466,7 @@ impl ExperimentalGptLivePendingChannel {
         let broker = ExperimentalGptLiveWebrtcBroker::new(
             provider_factory,
             voice,
+            session_instructions,
             Arc::clone(&initial_seed),
         )?;
         let adapter = Arc::new(ExperimentalGptLiveDeferredAdapter::new(identity.clone()));
@@ -1430,6 +1476,7 @@ impl ExperimentalGptLivePendingChannel {
                 broker: Arc::new(broker),
                 adapter,
                 identity,
+                execution_profile_id: execution_profile.profile_id().to_string(),
             },
             initial_seed,
             adapter_taken: AtomicBool::new(false),
@@ -1451,6 +1498,9 @@ impl ExperimentalGptLivePendingChannel {
         call_url: &str,
         sideband_base_url: &str,
     ) -> Result<Self, ExperimentalGptLiveBridgeError> {
+        let session_instructions = admission
+            .gpt_live_session_instructions()
+            .map(ToString::to_string);
         let execution_profile = admission.execution_profile().clone();
         let target = admission_owner
             .consume_experimental_live_admission(admission, realm, factory_identity)
@@ -1466,6 +1516,7 @@ impl ExperimentalGptLivePendingChannel {
         let broker = ExperimentalGptLiveWebrtcBroker::new(
             provider_factory,
             voice,
+            session_instructions,
             Arc::clone(&initial_seed),
         )?;
         let adapter = Arc::new(ExperimentalGptLiveDeferredAdapter::new(identity.clone()));
@@ -1475,6 +1526,7 @@ impl ExperimentalGptLivePendingChannel {
                 broker: Arc::new(broker),
                 adapter,
                 identity,
+                execution_profile_id: execution_profile.profile_id().to_string(),
             },
             initial_seed,
             adapter_taken: AtomicBool::new(false),
@@ -2171,6 +2223,19 @@ impl ExperimentalGptLiveWebrtcTransport {
         Ok(())
     }
 
+    async fn bound_execution_profile_id(
+        &self,
+        channel_id: &meerkat_live::LiveChannelId,
+        session_id: &meerkat_core::SessionId,
+    ) -> Option<String> {
+        self.registered_by_channel
+            .lock()
+            .await
+            .get(channel_id)
+            .filter(|registration| registration.session_id == *session_id)
+            .map(|registration| registration.execution_profile_id.clone())
+    }
+
     /// Remove exact provider custody during open rollback or after physical
     /// close. A stale session cannot unbind another channel.
     pub async fn unbind_channel(
@@ -2682,6 +2747,10 @@ impl ExperimentalGptLiveWebrtcTransport {
         retirement_tx
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "this exact activation boundary carries independent runtime, provider, and publication authorities"
+    )]
     async fn prepare_bound_channel_activation(
         &self,
         provider_binding: &ProviderWebrtcBinding,
@@ -3132,9 +3201,8 @@ async fn retire_pending_deliveries(
     let mut pending_deliveries = pending_deliveries.lock().await;
     let retired_attempts = pending_deliveries
         .iter()
-        .filter_map(|(attempt, pending)| {
-            (pending.channel_id() == channel_id).then(|| attempt.clone())
-        })
+        .filter(|(_, pending)| pending.channel_id() == channel_id)
+        .map(|(attempt, _)| attempt.clone())
         .collect::<Vec<_>>();
     for attempt in retired_attempts {
         if let Some(pending) = pending_deliveries.remove(&attempt) {
@@ -4250,6 +4318,7 @@ mod tests {
                     }),
                     adapter,
                     identity: self.identity.clone(),
+                    execution_profile_id: crate::GPT_LIVE_FUNCTION_BRIDGE_PROFILE_ID.to_string(),
                 },
                 initial_seed,
                 adapter_taken: AtomicBool::new(false),
@@ -4435,6 +4504,7 @@ mod tests {
                 &meerkat_core::SessionId::new(),
                 &meerkat_contracts::WireLiveExecutionIdentityOverrideV1 {
                     version: meerkat_contracts::WireLiveExecutionIdentityVersion::V1,
+                    profile_id: crate::GPT_LIVE_FUNCTION_BRIDGE_PROFILE_ID.to_string(),
                     model: Some("gpt-live-1-codex".to_string()),
                     provider: Some(meerkat_contracts::wire::WireProvider::OpenAi),
                     self_hosted_server_id: None,
@@ -4538,6 +4608,7 @@ mod tests {
                 &meerkat_core::SessionId::new(),
                 &meerkat_contracts::WireLiveExecutionIdentityOverrideV1 {
                     version: meerkat_contracts::WireLiveExecutionIdentityVersion::V1,
+                    profile_id: crate::GPT_LIVE_FUNCTION_BRIDGE_PROFILE_ID.to_string(),
                     model: Some("gpt-live-1-codex".to_string()),
                     provider: Some(meerkat_contracts::wire::WireProvider::OpenAi),
                     self_hosted_server_id: None,
@@ -4701,6 +4772,7 @@ mod tests {
                 &session_id,
                 &meerkat_contracts::WireLiveExecutionIdentityOverrideV1 {
                     version: meerkat_contracts::WireLiveExecutionIdentityVersion::V1,
+                    profile_id: crate::GPT_LIVE_FUNCTION_BRIDGE_PROFILE_ID.to_string(),
                     model: Some("gpt-live-1-codex".to_string()),
                     provider: Some(meerkat_contracts::wire::WireProvider::OpenAi),
                     self_hosted_server_id: None,
@@ -5477,6 +5549,7 @@ mod tests {
                 }),
                 adapter,
                 identity,
+                execution_profile_id: crate::GPT_LIVE_FUNCTION_BRIDGE_PROFILE_ID.to_string(),
             },
         );
         let activator = Arc::new(InspectingFailingActivator {
@@ -5679,6 +5752,7 @@ mod tests {
         );
         let execution_identity = meerkat_contracts::WireLiveExecutionIdentityOverrideV1 {
             version: meerkat_contracts::WireLiveExecutionIdentityVersion::V1,
+            profile_id: crate::GPT_LIVE_FUNCTION_BRIDGE_PROFILE_ID.to_string(),
             model: Some("gpt-live-1-codex".to_string()),
             provider: Some(meerkat_contracts::wire::WireProvider::OpenAi),
             self_hosted_server_id: None,
@@ -6126,6 +6200,7 @@ mod tests {
         );
         let execution_identity = meerkat_contracts::WireLiveExecutionIdentityOverrideV1 {
             version: meerkat_contracts::WireLiveExecutionIdentityVersion::V1,
+            profile_id: crate::GPT_LIVE_FUNCTION_BRIDGE_PROFILE_ID.to_string(),
             model: Some("gpt-live-1-codex".to_string()),
             provider: Some(meerkat_contracts::wire::WireProvider::OpenAi),
             self_hosted_server_id: None,

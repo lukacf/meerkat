@@ -12729,6 +12729,9 @@ pub struct State {
     pub live_bridge_model_computation_authorized_operations:
         std::collections::BTreeSet<OperationId>,
     pub live_bridge_read_snapshot_authorized_operations: std::collections::BTreeSet<OperationId>,
+    pub live_bridge_execution_started_operations: std::collections::BTreeSet<OperationId>,
+    pub live_bridge_outcome_receipt_required_operations: std::collections::BTreeSet<OperationId>,
+    pub live_bridge_outcome_receipt_operations: std::collections::BTreeSet<OperationId>,
     pub live_bridge_execution_terminal_by_operation:
         std::collections::BTreeMap<OperationId, MeerkatExecutionTerminal>,
     pub live_bridge_execution_result_digest_by_operation:
@@ -14483,6 +14486,14 @@ pub mod inputs {
         pub outcome: LiveBridgeEffectOutcome,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordLiveBridgeOutcomeReceipt {
+        pub operation_id: OperationId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RetireSettledLiveBridgeOperation {
+        pub operation_id: OperationId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CancelLiveBridgeOperation {
         pub channel_id: String,
         pub runtime_id: AgentRuntimeId,
@@ -15404,6 +15415,8 @@ pub enum Input {
     AuthorizeLiveBridgeEffect(inputs::AuthorizeLiveBridgeEffect),
     ConsumeLiveBridgeEffectAuthority(inputs::ConsumeLiveBridgeEffectAuthority),
     RecordLiveBridgeEffectOutcome(inputs::RecordLiveBridgeEffectOutcome),
+    RecordLiveBridgeOutcomeReceipt(inputs::RecordLiveBridgeOutcomeReceipt),
+    RetireSettledLiveBridgeOperation(inputs::RetireSettledLiveBridgeOperation),
     CancelLiveBridgeOperation(inputs::CancelLiveBridgeOperation),
     RecordLiveBridgeExecutionTerminal(inputs::RecordLiveBridgeExecutionTerminal),
     ReconcileRevokedLiveBridgeExecutionTerminal(
@@ -15862,6 +15875,10 @@ impl Input {
                 InputKind::ConsumeLiveBridgeEffectAuthority
             }
             Self::RecordLiveBridgeEffectOutcome(_) => InputKind::RecordLiveBridgeEffectOutcome,
+            Self::RecordLiveBridgeOutcomeReceipt(_) => InputKind::RecordLiveBridgeOutcomeReceipt,
+            Self::RetireSettledLiveBridgeOperation(_) => {
+                InputKind::RetireSettledLiveBridgeOperation
+            }
             Self::CancelLiveBridgeOperation(_) => InputKind::CancelLiveBridgeOperation,
             Self::RecordLiveBridgeExecutionTerminal(_) => {
                 InputKind::RecordLiveBridgeExecutionTerminal
@@ -16269,6 +16286,8 @@ pub enum InputKind {
     AuthorizeLiveBridgeEffect,
     ConsumeLiveBridgeEffectAuthority,
     RecordLiveBridgeEffectOutcome,
+    RecordLiveBridgeOutcomeReceipt,
+    RetireSettledLiveBridgeOperation,
     CancelLiveBridgeOperation,
     RecordLiveBridgeExecutionTerminal,
     ReconcileRevokedLiveBridgeExecutionTerminal,
@@ -17420,6 +17439,16 @@ pub mod effects {
         pub replay: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveBridgeOutcomeReceiptRecorded {
+        pub operation_id: OperationId,
+        pub replay: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveBridgeOperationRetirementResolved {
+        pub operation_id: OperationId,
+        pub retired_now: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LiveBridgeOperationCancellationAuthorized {
         pub channel_id: String,
         pub interaction_id: String,
@@ -17998,6 +18027,8 @@ pub enum Effect {
     LiveBridgeEffectAuthorityIssued(effects::LiveBridgeEffectAuthorityIssued),
     LiveBridgeEffectDispatchAuthorized(effects::LiveBridgeEffectDispatchAuthorized),
     LiveBridgeEffectOutcomeRecorded(effects::LiveBridgeEffectOutcomeRecorded),
+    LiveBridgeOutcomeReceiptRecorded(effects::LiveBridgeOutcomeReceiptRecorded),
+    LiveBridgeOperationRetirementResolved(effects::LiveBridgeOperationRetirementResolved),
     LiveBridgeOperationCancellationAuthorized(effects::LiveBridgeOperationCancellationAuthorized),
     LiveBridgeExecutionTerminalRecorded(effects::LiveBridgeExecutionTerminalRecorded),
     LiveBridgeSubmissionAuthorized(effects::LiveBridgeSubmissionAuthorized),
@@ -18228,6 +18259,8 @@ pub enum EffectKind {
     LiveBridgeEffectAuthorityIssued,
     LiveBridgeEffectDispatchAuthorized,
     LiveBridgeEffectOutcomeRecorded,
+    LiveBridgeOutcomeReceiptRecorded,
+    LiveBridgeOperationRetirementResolved,
     LiveBridgeOperationCancellationAuthorized,
     LiveBridgeExecutionTerminalRecorded,
     LiveBridgeSubmissionAuthorized,
@@ -20109,6 +20142,26 @@ pub enum TransitionId {
     RecordLiveBridgeEffectOutcomeExactReplayRunning,
     RecordLiveBridgeEffectOutcomeExactReplayRetired,
     RecordLiveBridgeEffectOutcomeExactReplayStopped,
+    RecordLiveBridgeOutcomeReceiptFreshIdle,
+    RecordLiveBridgeOutcomeReceiptFreshAttached,
+    RecordLiveBridgeOutcomeReceiptFreshRunning,
+    RecordLiveBridgeOutcomeReceiptFreshRetired,
+    RecordLiveBridgeOutcomeReceiptFreshStopped,
+    RecordLiveBridgeOutcomeReceiptExactReplayIdle,
+    RecordLiveBridgeOutcomeReceiptExactReplayAttached,
+    RecordLiveBridgeOutcomeReceiptExactReplayRunning,
+    RecordLiveBridgeOutcomeReceiptExactReplayRetired,
+    RecordLiveBridgeOutcomeReceiptExactReplayStopped,
+    RetireSettledLiveBridgeOperationIdle,
+    RetireSettledLiveBridgeOperationAttached,
+    RetireSettledLiveBridgeOperationRunning,
+    RetireSettledLiveBridgeOperationRetired,
+    RetireSettledLiveBridgeOperationStopped,
+    RetireSettledLiveBridgeOperationAlreadyAbsentIdle,
+    RetireSettledLiveBridgeOperationAlreadyAbsentAttached,
+    RetireSettledLiveBridgeOperationAlreadyAbsentRunning,
+    RetireSettledLiveBridgeOperationAlreadyAbsentRetired,
+    RetireSettledLiveBridgeOperationAlreadyAbsentStopped,
     CancelLiveBridgeOperationIdle,
     CancelLiveBridgeOperationAttached,
     CancelLiveBridgeOperationRunning,
@@ -21283,6 +21336,9 @@ pub fn initial_state() -> State {
         live_bridge_effect_outcome_by_authority: Default::default(),
         live_bridge_model_computation_authorized_operations: Default::default(),
         live_bridge_read_snapshot_authorized_operations: Default::default(),
+        live_bridge_execution_started_operations: Default::default(),
+        live_bridge_outcome_receipt_required_operations: Default::default(),
+        live_bridge_outcome_receipt_operations: Default::default(),
         live_bridge_execution_terminal_by_operation: Default::default(),
         live_bridge_execution_result_digest_by_operation: Default::default(),
         live_bridge_cancellation_reason_by_operation: Default::default(),

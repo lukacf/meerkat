@@ -3397,6 +3397,12 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_bridge_effect_outcome_by_authority: Map<String, Enum<LiveBridgeEffectOutcome>>,
             live_bridge_model_computation_authorized_operations: Set<OperationId>,
             live_bridge_read_snapshot_authorized_operations: Set<OperationId>,
+            // Monotonic operation-scoped proof that durable executor work
+            // crossed the generated start boundary. The source outcome
+            // receipt is required before any started operation can retire.
+            live_bridge_execution_started_operations: Set<OperationId>,
+            live_bridge_outcome_receipt_required_operations: Set<OperationId>,
+            live_bridge_outcome_receipt_operations: Set<OperationId>,
             live_bridge_execution_terminal_by_operation: Map<OperationId, Enum<MeerkatExecutionTerminal>>,
             live_bridge_execution_result_digest_by_operation: Map<OperationId, String>,
             live_bridge_cancellation_reason_by_operation: Map<OperationId, Enum<LiveBridgeCancellationReason>>,
@@ -3955,6 +3961,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_bridge_effect_outcome_by_authority = EmptyMap,
             live_bridge_model_computation_authorized_operations = EmptySet,
             live_bridge_read_snapshot_authorized_operations = EmptySet,
+            live_bridge_execution_started_operations = EmptySet,
+            live_bridge_outcome_receipt_required_operations = EmptySet,
+            live_bridge_outcome_receipt_operations = EmptySet,
             live_bridge_execution_terminal_by_operation = EmptyMap,
             live_bridge_execution_result_digest_by_operation = EmptyMap,
             live_bridge_cancellation_reason_by_operation = EmptyMap,
@@ -5272,6 +5281,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                 kind: Enum<LiveBridgeEffectKind>,
                 outcome: Enum<LiveBridgeEffectOutcome>,
             },
+            // Trusted runtime observation that the operation-derived,
+            // append-only source receipt was durably Applied or already
+            // present. The constrained append API exposes no sealed store
+            // receipt, so arbitrary caller text never enters this input.
+            RecordLiveBridgeOutcomeReceipt { operation_id: OperationId },
+            RetireSettledLiveBridgeOperation { operation_id: OperationId },
             CancelLiveBridgeOperation {
                 channel_id: String,
                 runtime_id: AgentRuntimeId,
@@ -6596,6 +6611,14 @@ macro_rules! meerkat_catalog_machine_dsl {
                 outcome: Enum<LiveBridgeEffectOutcome>,
                 replay: bool,
             },
+            LiveBridgeOutcomeReceiptRecorded {
+                operation_id: OperationId,
+                replay: bool,
+            },
+            LiveBridgeOperationRetirementResolved {
+                operation_id: OperationId,
+                retired_now: bool,
+            },
             LiveBridgeOperationCancellationAuthorized {
                 channel_id: String,
                 interaction_id: String,
@@ -7132,6 +7155,8 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition LiveBridgeEffectAuthorityIssued => local seam OwnerRealizationOnly,
         disposition LiveBridgeEffectDispatchAuthorized => external seam OwnerRealizationOnly,
         disposition LiveBridgeEffectOutcomeRecorded => local seam OwnerRealizationOnly,
+        disposition LiveBridgeOutcomeReceiptRecorded => local seam OwnerRealizationOnly,
+        disposition LiveBridgeOperationRetirementResolved => local seam OwnerRealizationOnly,
         disposition LiveBridgeOperationCancellationAuthorized => external seam OwnerRealizationOnly,
         disposition LiveBridgeExecutionTerminalRecorded => local seam OwnerRealizationOnly,
         disposition LiveBridgeSubmissionAuthorized => local seam OwnerRealizationOnly,
@@ -7784,6 +7809,30 @@ macro_rules! meerkat_catalog_machine_dsl {
                 == self.live_bridge_submission_state_by_operation.keys()
             && for_all(operation_id in self.live_bridge_submission_state_by_operation.keys(),
                 self.live_bridge_execution_terminal_by_operation.contains_key(operation_id))
+        }
+
+        invariant live_bridge_started_execution_and_outcome_receipt_are_operation_scoped {
+            for_all(operation_id in self.live_bridge_execution_started_operations,
+                self.live_bridge_channel_by_operation.contains_key(operation_id)
+                && self.live_bridge_outcome_receipt_required_operations.contains(operation_id)
+                && (self.live_bridge_phase_by_operation.get_copied(operation_id)
+                        == Some(LiveBridgeOperationPhase::ExecutionRunning)
+                    || self.live_bridge_phase_by_operation.get_copied(operation_id)
+                        == Some(LiveBridgeOperationPhase::ExecutionTerminal)))
+            && for_all(operation_id in self.live_bridge_channel_by_operation.keys(),
+                (self.live_bridge_phase_by_operation.get_copied(operation_id)
+                        != Some(LiveBridgeOperationPhase::ExecutionRunning)
+                    || self.live_bridge_execution_started_operations.contains(operation_id))
+                && ((self.live_bridge_execution_terminal_by_operation.get_copied(operation_id)
+                            != Some(MeerkatExecutionTerminal::Completed)
+                        && self.live_bridge_execution_terminal_by_operation.get_copied(operation_id)
+                            != Some(MeerkatExecutionTerminal::Failed))
+                    || self.live_bridge_execution_started_operations.contains(operation_id)))
+            && for_all(operation_id in self.live_bridge_outcome_receipt_required_operations,
+                self.live_bridge_channel_by_operation.contains_key(operation_id))
+            && for_all(operation_id in self.live_bridge_outcome_receipt_operations,
+                self.live_bridge_outcome_receipt_required_operations.contains(operation_id)
+                && self.live_bridge_channel_by_operation.contains_key(operation_id))
         }
 
         invariant live_bridge_cancellation_provenance_is_operation_scoped {
@@ -22690,17 +22739,45 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.live_experimental_staged_seed_cursor_by_channel.remove(channel_id);
                 self.live_experimental_execution_channels.remove(channel_id);
                 if self.live_bridge_operation_by_channel.contains_key(channel_id) {
+                    self.live_bridge_cancellation_reason_by_operation.insert(
+                        self.live_bridge_operation_by_channel.get_cloned(channel_id).get("value"),
+                        LiveBridgeCancellationReason::ChannelClose
+                    );
                     if !self.live_bridge_execution_terminal_by_operation.contains_key(
                         self.live_bridge_operation_by_channel.get_cloned(channel_id).get("value")
                     ) {
-                        self.live_bridge_execution_terminal_by_operation.insert(
+                        if self.live_bridge_phase_by_operation.get_copied(
+                                self.live_bridge_operation_by_channel.get_cloned(channel_id).get("value"))
+                                != Some(LiveBridgeOperationPhase::ExecutionRunning) {
+                            self.live_bridge_execution_terminal_by_operation.insert(
+                                self.live_bridge_operation_by_channel.get_cloned(channel_id).get("value"),
+                                MeerkatExecutionTerminal::Cancelled
+                            );
+                            self.live_bridge_phase_by_operation.insert(
+                                self.live_bridge_operation_by_channel.get_cloned(channel_id).get("value"),
+                                LiveBridgeOperationPhase::ExecutionTerminal
+                            );
+                        }
+                    }
+                    if self.live_bridge_submission_state_by_operation.get_copied(
+                        self.live_bridge_operation_by_channel.get_cloned(channel_id).get("value"))
+                            == Some(LiveBridgeSubmissionState::SubmissionAuthorized) {
+                        self.live_bridge_submission_state_by_operation.insert(
                             self.live_bridge_operation_by_channel.get_cloned(channel_id).get("value"),
-                            MeerkatExecutionTerminal::Cancelled
+                            LiveBridgeSubmissionState::CallAbandonedByClose
                         );
-                        self.live_bridge_phase_by_operation.insert(
-                            self.live_bridge_operation_by_channel.get_cloned(channel_id).get("value"),
-                            LiveBridgeOperationPhase::ExecutionTerminal
-                        );
+                    } else {
+                        if self.live_bridge_submission_state_by_operation.get_copied(
+                            self.live_bridge_operation_by_channel.get_cloned(channel_id).get("value"))
+                                == Some(LiveBridgeSubmissionState::SubmissionAttemptClaimed)
+                            || self.live_bridge_submission_state_by_operation.get_copied(
+                                self.live_bridge_operation_by_channel.get_cloned(channel_id).get("value"))
+                                    == Some(LiveBridgeSubmissionState::LocalWriteCompletedAwaitingProof) {
+                            self.live_bridge_submission_state_by_operation.insert(
+                                self.live_bridge_operation_by_channel.get_cloned(channel_id).get("value"),
+                                LiveBridgeSubmissionState::SubmissionAmbiguous
+                            );
+                        }
                     }
                     self.live_bridge_operation_by_channel.remove(channel_id);
                 }
@@ -22762,14 +22839,38 @@ macro_rules! meerkat_catalog_machine_dsl {
                     if !self.live_bridge_execution_terminal_by_operation.contains_key(
                         self.live_bridge_operation_by_channel.get_cloned(channel_id).get("value")
                     ) {
-                        self.live_bridge_execution_terminal_by_operation.insert(
+                        if self.live_bridge_phase_by_operation.get_copied(
+                                self.live_bridge_operation_by_channel.get_cloned(channel_id).get("value"))
+                                != Some(LiveBridgeOperationPhase::ExecutionRunning) {
+                            self.live_bridge_execution_terminal_by_operation.insert(
+                                self.live_bridge_operation_by_channel.get_cloned(channel_id).get("value"),
+                                MeerkatExecutionTerminal::Cancelled
+                            );
+                            self.live_bridge_phase_by_operation.insert(
+                                self.live_bridge_operation_by_channel.get_cloned(channel_id).get("value"),
+                                LiveBridgeOperationPhase::ExecutionTerminal
+                            );
+                        }
+                    }
+                    if self.live_bridge_submission_state_by_operation.get_copied(
+                        self.live_bridge_operation_by_channel.get_cloned(channel_id).get("value"))
+                            == Some(LiveBridgeSubmissionState::SubmissionAuthorized) {
+                        self.live_bridge_submission_state_by_operation.insert(
                             self.live_bridge_operation_by_channel.get_cloned(channel_id).get("value"),
-                            MeerkatExecutionTerminal::Cancelled
+                            LiveBridgeSubmissionState::CallAbandonedByClose
                         );
-                        self.live_bridge_phase_by_operation.insert(
-                            self.live_bridge_operation_by_channel.get_cloned(channel_id).get("value"),
-                            LiveBridgeOperationPhase::ExecutionTerminal
-                        );
+                    } else {
+                        if self.live_bridge_submission_state_by_operation.get_copied(
+                            self.live_bridge_operation_by_channel.get_cloned(channel_id).get("value"))
+                                == Some(LiveBridgeSubmissionState::SubmissionAttemptClaimed)
+                            || self.live_bridge_submission_state_by_operation.get_copied(
+                                self.live_bridge_operation_by_channel.get_cloned(channel_id).get("value"))
+                                    == Some(LiveBridgeSubmissionState::LocalWriteCompletedAwaitingProof) {
+                            self.live_bridge_submission_state_by_operation.insert(
+                                self.live_bridge_operation_by_channel.get_cloned(channel_id).get("value"),
+                                LiveBridgeSubmissionState::SubmissionAmbiguous
+                            );
+                        }
                     }
                     self.live_bridge_operation_by_channel.remove(channel_id);
                 }
@@ -24541,6 +24642,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                     operation_id,
                     LiveBridgeOperationPhase::ExecutionRunning
                 );
+                self.live_bridge_execution_started_operations.insert(operation_id);
+                self.live_bridge_outcome_receipt_required_operations.insert(operation_id);
             }
             to Idle
             emit LiveBridgeExecutionStartAuthorized {
@@ -24707,6 +24810,190 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
+        // The source-session append API returns only Applied/AlreadyPresent,
+        // not a sealed store receipt. This trusted runtime observation records
+        // that mechanical completion under the operation identity already
+        // minted and bound by the generated machine. No receipt prose or
+        // caller-selected semantic digest enters machine state.
+        transition RecordLiveBridgeOutcomeReceiptFresh {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RecordLiveBridgeOutcomeReceipt { operation_id }
+            guard "started_operation_is_still_retained" {
+                self.live_bridge_channel_by_operation.contains_key(operation_id)
+                && self.live_bridge_outcome_receipt_required_operations.contains(operation_id)
+                && !self.live_bridge_outcome_receipt_operations.contains(operation_id)
+            }
+            update {
+                self.live_bridge_outcome_receipt_operations.insert(operation_id);
+            }
+            to Idle
+            emit LiveBridgeOutcomeReceiptRecorded {
+                operation_id: operation_id,
+                replay: false
+            }
+        }
+
+        transition RecordLiveBridgeOutcomeReceiptExactReplay {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RecordLiveBridgeOutcomeReceipt { operation_id }
+            guard "exact_receipt_is_already_recorded" {
+                self.live_bridge_channel_by_operation.contains_key(operation_id)
+                && self.live_bridge_outcome_receipt_required_operations.contains(operation_id)
+                && self.live_bridge_outcome_receipt_operations.contains(operation_id)
+            }
+            to Idle
+            emit LiveBridgeOutcomeReceiptRecorded {
+                operation_id: operation_id,
+                replay: true
+            }
+        }
+
+        // A bridge operation may leave the bounded recovery image only after
+        // every semantic obligation is terminal. The runtime may request this
+        // transition, but it cannot select a weaker settlement rule or remove
+        // any generated field itself.
+        transition RetireSettledLiveBridgeOperation {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RetireSettledLiveBridgeOperation { operation_id }
+            guard "operation_has_exact_execution_terminal" {
+                self.live_bridge_channel_by_operation.contains_key(operation_id)
+                && self.live_bridge_phase_by_operation.get_copied(operation_id)
+                    == Some(LiveBridgeOperationPhase::ExecutionTerminal)
+                && self.live_bridge_execution_terminal_by_operation.contains_key(operation_id)
+            }
+            guard "started_execution_has_source_outcome_receipt" {
+                !self.live_bridge_outcome_receipt_required_operations.contains(operation_id)
+                || self.live_bridge_outcome_receipt_operations.contains(operation_id)
+            }
+            guard "provider_submission_is_terminal_or_permanently_suppressed" {
+                self.live_bridge_submission_state_by_operation.get_copied(operation_id)
+                    == Some(LiveBridgeSubmissionState::ProviderProcessed)
+                || self.live_bridge_submission_state_by_operation.get_copied(operation_id)
+                    == Some(LiveBridgeSubmissionState::ProviderRejected)
+                || self.live_bridge_submission_state_by_operation.get_copied(operation_id)
+                    == Some(LiveBridgeSubmissionState::SubmissionAmbiguous)
+                || self.live_bridge_submission_state_by_operation.get_copied(operation_id)
+                    == Some(LiveBridgeSubmissionState::CallExpired)
+                || self.live_bridge_submission_state_by_operation.get_copied(operation_id)
+                    == Some(LiveBridgeSubmissionState::CallAbandonedByClose)
+                || (self.live_bridge_cancellation_reason_by_operation.contains_key(operation_id)
+                    && !self.live_bridge_submission_state_by_operation.contains_key(operation_id))
+            }
+            guard "all_effect_outcomes_are_recorded" {
+                for_all(authority_id in self.live_bridge_effect_operation_by_authority.keys(),
+                    self.live_bridge_effect_operation_by_authority.get_cloned(authority_id)
+                            != Some(operation_id)
+                        || (self.live_bridge_consumed_effect_authorities.contains(authority_id)
+                            && !self.live_bridge_in_flight_effect_authorities.contains(authority_id)
+                            && self.live_bridge_effect_outcome_by_authority.contains_key(authority_id)))
+            }
+            guard "channel_operation_custody_is_closed" {
+                self.live_bridge_operation_by_channel.get_cloned(
+                    self.live_bridge_channel_by_operation.get_cloned(operation_id).get("value"))
+                    != Some(operation_id)
+            }
+            guard "operation_is_not_shared_with_unsettled_delegation_projection" {
+                !self.live_delegation_reconciliation_by_operation.contains_key(operation_id)
+                && !self.live_result_released_operations.contains(operation_id)
+                && !self.live_result_delivery_channel_by_operation.contains_key(operation_id)
+                && !self.live_result_delivery_observation_by_operation.contains_key(operation_id)
+                && for_all(channel_id in self.live_result_recovery_operation_by_channel.keys(),
+                    self.live_result_recovery_operation_by_channel.get_cloned(channel_id)
+                        != Some(operation_id))
+                && for_all(authority_id in self.live_consequential_effect_operation_by_authority.keys(),
+                    self.live_consequential_effect_operation_by_authority.get_cloned(authority_id)
+                        != Some(operation_id))
+            }
+            update {
+                self.live_bridge_effect_kind_by_authority =
+                    meerkat_machine_live_bridge_authority_rows_without_operation(
+                        self.live_bridge_effect_kind_by_authority,
+                        self.live_bridge_effect_operation_by_authority,
+                        operation_id);
+                self.live_bridge_consumed_effect_authorities =
+                    meerkat_machine_live_bridge_authorities_without_operation(
+                        self.live_bridge_consumed_effect_authorities,
+                        self.live_bridge_effect_operation_by_authority,
+                        operation_id);
+                self.live_bridge_in_flight_effect_authorities =
+                    meerkat_machine_live_bridge_authorities_without_operation(
+                        self.live_bridge_in_flight_effect_authorities,
+                        self.live_bridge_effect_operation_by_authority,
+                        operation_id);
+                self.live_bridge_effect_outcome_by_authority =
+                    meerkat_machine_live_bridge_authority_rows_without_operation(
+                        self.live_bridge_effect_outcome_by_authority,
+                        self.live_bridge_effect_operation_by_authority,
+                        operation_id);
+                self.live_bridge_effect_operation_by_authority =
+                    meerkat_machine_live_bridge_authority_rows_without_operation(
+                        self.live_bridge_effect_operation_by_authority,
+                        self.live_bridge_effect_operation_by_authority,
+                        operation_id);
+                self.live_bridge_channel_by_operation.remove(operation_id);
+                self.live_bridge_interaction_by_operation.remove(operation_id);
+                self.live_bridge_provider_turn_by_operation.remove(operation_id);
+                self.live_bridge_provider_delegation_by_operation.remove(operation_id);
+                self.live_bridge_provider_call_by_operation.remove(operation_id);
+                self.live_bridge_agent_identity_by_operation.remove(operation_id);
+                self.live_bridge_context_revision_by_operation.remove(operation_id);
+                self.live_bridge_request_digest_by_operation.remove(operation_id);
+                self.live_bridge_phase_by_operation.remove(operation_id);
+                self.live_bridge_model_computation_authorized_operations.remove(operation_id);
+                self.live_bridge_read_snapshot_authorized_operations.remove(operation_id);
+                self.live_bridge_execution_started_operations.remove(operation_id);
+                self.live_bridge_outcome_receipt_required_operations.remove(operation_id);
+                self.live_bridge_outcome_receipt_operations.remove(operation_id);
+                self.live_bridge_execution_terminal_by_operation.remove(operation_id);
+                self.live_bridge_execution_result_digest_by_operation.remove(operation_id);
+                self.live_bridge_cancellation_reason_by_operation.remove(operation_id);
+                self.live_bridge_submission_output_kind_by_operation.remove(operation_id);
+                self.live_bridge_submission_digest_by_operation.remove(operation_id);
+                self.live_bridge_submission_state_by_operation.remove(operation_id);
+            }
+            to Idle
+            emit LiveBridgeOperationRetirementResolved {
+                operation_id: operation_id,
+                retired_now: true
+            }
+        }
+
+        // Idempotent convergence after an acknowledgement loss or process
+        // restart. This says only that no retained operation state remains;
+        // it does not fabricate evidence that a prior retirement occurred.
+        transition RetireSettledLiveBridgeOperationAlreadyAbsent {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RetireSettledLiveBridgeOperation { operation_id }
+            guard "operation_state_is_already_absent" {
+                !self.live_bridge_channel_by_operation.contains_key(operation_id)
+                && !self.live_bridge_interaction_by_operation.contains_key(operation_id)
+                && !self.live_bridge_provider_turn_by_operation.contains_key(operation_id)
+                && !self.live_bridge_provider_delegation_by_operation.contains_key(operation_id)
+                && !self.live_bridge_provider_call_by_operation.contains_key(operation_id)
+                && !self.live_bridge_agent_identity_by_operation.contains_key(operation_id)
+                && !self.live_bridge_context_revision_by_operation.contains_key(operation_id)
+                && !self.live_bridge_request_digest_by_operation.contains_key(operation_id)
+                && !self.live_bridge_phase_by_operation.contains_key(operation_id)
+                && !self.live_bridge_execution_started_operations.contains(operation_id)
+                && !self.live_bridge_outcome_receipt_required_operations.contains(operation_id)
+                && !self.live_bridge_outcome_receipt_operations.contains(operation_id)
+                && !self.live_bridge_execution_terminal_by_operation.contains_key(operation_id)
+                && !self.live_bridge_execution_result_digest_by_operation.contains_key(operation_id)
+                && !self.live_bridge_cancellation_reason_by_operation.contains_key(operation_id)
+                && !self.live_bridge_submission_output_kind_by_operation.contains_key(operation_id)
+                && !self.live_bridge_submission_digest_by_operation.contains_key(operation_id)
+                && !self.live_bridge_submission_state_by_operation.contains_key(operation_id)
+                && for_all(authority_id in self.live_bridge_effect_operation_by_authority.keys(),
+                    self.live_bridge_effect_operation_by_authority.get_cloned(authority_id)
+                        != Some(operation_id))
+            }
+            to Idle
+            emit LiveBridgeOperationRetirementResolved {
+                operation_id: operation_id,
+                retired_now: false
+            }
+        }
+
         // Cancellation addresses only the exact operation. The durable member
         // identity is emitted for attribution, never for retirement.
         transition CancelLiveBridgeOperation {
@@ -24767,6 +25054,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.live_bridge_interaction_by_operation.get_cloned(operation_id) == Some(interaction_id)
                 && !self.live_bridge_execution_terminal_by_operation.contains_key(operation_id)
             }
+            guard "execution_start_was_recorded" {
+                self.live_bridge_execution_started_operations.contains(operation_id)
+            }
             guard "terminal_result_shape_is_exact" {
                 (terminal == MeerkatExecutionTerminal::Completed
                     && result_digest != None
@@ -24823,6 +25113,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                     || (terminal != MeerkatExecutionTerminal::Completed
                         && result_digest == None
                         && !self.live_bridge_execution_result_digest_by_operation.contains_key(operation_id)))
+            }
+            guard "execution_start_was_recorded" {
+                self.live_bridge_execution_started_operations.contains(operation_id)
             }
             to Idle
             emit LiveBridgeExecutionTerminalRecorded {
@@ -25814,6 +26107,11 @@ macro_rules! meerkat_catalog_machine_dsl {
                     channel_id,
                     LiveClosePublicStatus::Closed
                 );
+                self.live_execution_phase_by_channel.insert(
+                    channel_id,
+                    LiveExecutionChannelPhase::Revoked
+                );
+                self.live_revoked_execution_channels.insert(channel_id);
                 self.live_active_channel_by_session.remove(session_id);
                 self.live_channel_session_by_channel.remove(channel_id);
                 self.live_channel_identity_by_channel.remove(channel_id);
@@ -25842,14 +26140,38 @@ macro_rules! meerkat_catalog_machine_dsl {
                     if !self.live_bridge_execution_terminal_by_operation.contains_key(
                         self.live_bridge_operation_by_channel.get_cloned(channel_id).get("value")
                     ) {
-                        self.live_bridge_execution_terminal_by_operation.insert(
+                        if self.live_bridge_phase_by_operation.get_copied(
+                                self.live_bridge_operation_by_channel.get_cloned(channel_id).get("value"))
+                                != Some(LiveBridgeOperationPhase::ExecutionRunning) {
+                            self.live_bridge_execution_terminal_by_operation.insert(
+                                self.live_bridge_operation_by_channel.get_cloned(channel_id).get("value"),
+                                MeerkatExecutionTerminal::Cancelled
+                            );
+                            self.live_bridge_phase_by_operation.insert(
+                                self.live_bridge_operation_by_channel.get_cloned(channel_id).get("value"),
+                                LiveBridgeOperationPhase::ExecutionTerminal
+                            );
+                        }
+                    }
+                    if self.live_bridge_submission_state_by_operation.get_copied(
+                        self.live_bridge_operation_by_channel.get_cloned(channel_id).get("value"))
+                            == Some(LiveBridgeSubmissionState::SubmissionAuthorized) {
+                        self.live_bridge_submission_state_by_operation.insert(
                             self.live_bridge_operation_by_channel.get_cloned(channel_id).get("value"),
-                            MeerkatExecutionTerminal::Cancelled
+                            LiveBridgeSubmissionState::CallAbandonedByClose
                         );
-                        self.live_bridge_phase_by_operation.insert(
-                            self.live_bridge_operation_by_channel.get_cloned(channel_id).get("value"),
-                            LiveBridgeOperationPhase::ExecutionTerminal
-                        );
+                    } else {
+                        if self.live_bridge_submission_state_by_operation.get_copied(
+                            self.live_bridge_operation_by_channel.get_cloned(channel_id).get("value"))
+                                == Some(LiveBridgeSubmissionState::SubmissionAttemptClaimed)
+                            || self.live_bridge_submission_state_by_operation.get_copied(
+                                self.live_bridge_operation_by_channel.get_cloned(channel_id).get("value"))
+                                    == Some(LiveBridgeSubmissionState::LocalWriteCompletedAwaitingProof) {
+                            self.live_bridge_submission_state_by_operation.insert(
+                                self.live_bridge_operation_by_channel.get_cloned(channel_id).get("value"),
+                                LiveBridgeSubmissionState::SubmissionAmbiguous
+                            );
+                        }
                     }
                     self.live_bridge_operation_by_channel.remove(channel_id);
                 }
@@ -30789,6 +31111,33 @@ macro_rules! meerkat_catalog_machine_dsl {
             endpoints
                 .iter()
                 .all(|endpoint| peer_ids.insert(endpoint.peer_id.0.clone()))
+        }
+
+        fn meerkat_machine_live_bridge_authority_rows_without_operation<V: Clone>(
+            rows: &std::collections::BTreeMap<String, V>,
+            operation_by_authority: &std::collections::BTreeMap<String, OperationId>,
+            operation_id: &OperationId,
+        ) -> std::collections::BTreeMap<String, V> {
+            rows.iter()
+                .filter(|(authority_id, _)| {
+                    operation_by_authority.get(*authority_id) != Some(operation_id)
+                })
+                .map(|(authority_id, value)| (authority_id.clone(), value.clone()))
+                .collect()
+        }
+
+        fn meerkat_machine_live_bridge_authorities_without_operation(
+            authorities: &std::collections::BTreeSet<String>,
+            operation_by_authority: &std::collections::BTreeMap<String, OperationId>,
+            operation_id: &OperationId,
+        ) -> std::collections::BTreeSet<String> {
+            authorities
+                .iter()
+                .filter(|authority_id| {
+                    operation_by_authority.get(*authority_id) != Some(operation_id)
+                })
+                .cloned()
+                .collect()
         }
     }
     };

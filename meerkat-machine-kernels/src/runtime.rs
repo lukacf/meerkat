@@ -1302,6 +1302,16 @@ impl GeneratedMachineKernel {
             "meerkat_machine_session_id_matches_string" => {
                 self.eval_meerkat_machine_session_id_matches_string(args, transition_name)
             }
+            "meerkat_machine_live_bridge_authority_rows_without_operation" => self
+                .eval_meerkat_machine_live_bridge_authority_rows_without_operation(
+                    args,
+                    transition_name,
+                ),
+            "meerkat_machine_live_bridge_authorities_without_operation" => self
+                .eval_meerkat_machine_live_bridge_authorities_without_operation(
+                    args,
+                    transition_name,
+                ),
             "mob_machine_external_peer_identity_absent" => {
                 self.eval_mob_machine_external_peer_identity_absent(args, transition_name)
             }
@@ -1375,6 +1385,61 @@ impl GeneratedMachineKernel {
             }
         };
         Ok(KernelValue::Bool(matches))
+    }
+
+    fn eval_meerkat_machine_live_bridge_authority_rows_without_operation(
+        &self,
+        args: Vec<KernelValue>,
+        transition_name: &TransitionId,
+    ) -> Result<KernelValue, TransitionRefusal> {
+        let [rows, operation_by_authority, operation_id]: [KernelValue; 3] =
+            args.try_into().map_err(|_| {
+                self.eval_error(
+                    transition_name,
+                    "meerkat_machine_live_bridge_authority_rows_without_operation expects three args",
+                )
+            })?;
+        let rows = rows
+            .into_map()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        let operation_by_authority = operation_by_authority
+            .into_map()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        Ok(KernelValue::Map(
+            rows.into_iter()
+                .filter(|(authority_id, _)| {
+                    operation_by_authority.get(authority_id) != Some(&operation_id)
+                })
+                .collect(),
+        ))
+    }
+
+    fn eval_meerkat_machine_live_bridge_authorities_without_operation(
+        &self,
+        args: Vec<KernelValue>,
+        transition_name: &TransitionId,
+    ) -> Result<KernelValue, TransitionRefusal> {
+        let [authorities, operation_by_authority, operation_id]: [KernelValue; 3] =
+            args.try_into().map_err(|_| {
+                self.eval_error(
+                    transition_name,
+                    "meerkat_machine_live_bridge_authorities_without_operation expects three args",
+                )
+            })?;
+        let authorities = authorities
+            .into_set()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        let operation_by_authority = operation_by_authority
+            .into_map()
+            .map_err(|error| self.eval_error(transition_name, error))?;
+        Ok(KernelValue::Set(
+            authorities
+                .into_iter()
+                .filter(|authority_id| {
+                    operation_by_authority.get(authority_id) != Some(&operation_id)
+                })
+                .collect(),
+        ))
     }
 
     fn eval_mob_machine_next_respawn_generation(
@@ -4314,6 +4379,74 @@ mod tests {
                 )
                 .expect("absent current session"),
             KernelValue::Bool(false)
+        );
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn meerkat_live_bridge_retirement_filter_helpers_are_operation_scoped() {
+        let kernel = GeneratedMachineKernel::new(meerkat_machine());
+        let transition = transition_id("RetireSettledLiveBridgeOperation");
+        let retired = named_string("OperationId", "operation.retired");
+        let retained = named_string("OperationId", "operation.retained");
+        let retired_authority = KernelValue::String("authority.retired".to_string());
+        let retained_authority = KernelValue::String("authority.retained".to_string());
+        let unowned_authority = KernelValue::String("authority.unowned".to_string());
+        let operation_by_authority = KernelValue::Map(BTreeMap::from([
+            (retired_authority.clone(), retired.clone()),
+            (retained_authority.clone(), retained),
+        ]));
+        let rows = KernelValue::Map(BTreeMap::from([
+            (
+                retired_authority.clone(),
+                KernelValue::String("drop".to_string()),
+            ),
+            (
+                retained_authority.clone(),
+                KernelValue::String("keep".to_string()),
+            ),
+            (
+                unowned_authority.clone(),
+                KernelValue::String("keep-unowned".to_string()),
+            ),
+        ]));
+
+        assert_eq!(
+            kernel
+                .eval_native_helper(
+                    "meerkat_machine_live_bridge_authority_rows_without_operation",
+                    vec![rows, operation_by_authority.clone(), retired.clone()],
+                    &transition,
+                )
+                .expect("filter operation-owned authority rows"),
+            KernelValue::Map(BTreeMap::from([
+                (
+                    retained_authority.clone(),
+                    KernelValue::String("keep".to_string())
+                ),
+                (
+                    unowned_authority.clone(),
+                    KernelValue::String("keep-unowned".to_string())
+                ),
+            ]))
+        );
+        assert_eq!(
+            kernel
+                .eval_native_helper(
+                    "meerkat_machine_live_bridge_authorities_without_operation",
+                    vec![
+                        KernelValue::Set(BTreeSet::from([
+                            retired_authority,
+                            retained_authority.clone(),
+                            unowned_authority.clone(),
+                        ])),
+                        operation_by_authority,
+                        retired,
+                    ],
+                    &transition,
+                )
+                .expect("filter operation-owned authority set"),
+            KernelValue::Set(BTreeSet::from([retained_authority, unowned_authority]))
         );
     }
 

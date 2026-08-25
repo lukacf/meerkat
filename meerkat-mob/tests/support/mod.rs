@@ -3657,6 +3657,16 @@ impl ControllingMob {
             }
             ControllingMobRestartMode::ActorAlreadyFailStopped => {}
         }
+        if mode == ControllingMobRestartMode::ActorAlreadyFailStopped {
+            // This fixture reconstructs a new process in the current process.
+            // Fail-stop has already ended the actor, so it cannot run graceful
+            // bridge shutdown. Retire the process-local supervisor transport
+            // explicitly, exactly as process exit would, before the successor
+            // claims the same participant name.
+            handle
+                .retire_supervisor_transport_for_process_exit_test()
+                .await;
+        }
         drop(handle);
 
         let distinct_callback_reservation = if let Some(previous) = distinct_from_callback {

@@ -4133,6 +4133,18 @@ impl MobHandle {
         self.supervisor_bridge.routable_supervisor_spec().await
     }
 
+    /// Retire process-local supervisor transport before a test reconstructs
+    /// this mob as a fresh process over the same durable stores.
+    ///
+    /// Actor fail-stop deliberately does not run graceful mob shutdown. A
+    /// real process exit still destroys its process-global inproc registry,
+    /// so same-process cold-restart fixtures must establish that boundary
+    /// explicitly instead of racing the last `Arc` drop.
+    #[cfg(feature = "test-support")]
+    pub async fn retire_supervisor_transport_for_process_exit_test(&self) {
+        self.supervisor_bridge.shutdown().await;
+    }
+
     /// Typed member machine projection (ADJ-P5-18: a denial or transport
     /// failure is an `Err`, never a defaulted projection).
     async fn member_machine_projection(

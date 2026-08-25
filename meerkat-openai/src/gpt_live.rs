@@ -41,13 +41,6 @@ const GPT_LIVE_RESPONSES_BRIDGE_DESCRIPTION: &str =
     dead_code,
     reason = "FunctionBridge remains closed until Gate 0 qualifies raw Responses events"
 )]
-const GPT_LIVE_RESPONSES_BRIDGE_INSTRUCTIONS: &str =
-    "Use invoke_meerkat when the request requires the channel-bound Meerkat agent.";
-
-#[allow(
-    dead_code,
-    reason = "FunctionBridge remains closed until Gate 0 qualifies raw Responses events"
-)]
 fn gpt_live_responses_bridge_parameters() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -61,9 +54,9 @@ fn gpt_live_responses_bridge_parameters() -> serde_json::Value {
 
 /// Catalog-bound configuration for the server-owned Responses bridge.
 ///
-/// The caller supplies only a registry-minted model witness. Instructions,
-/// tool identity, description, and arguments schema are fixed by this profile;
-/// no caller or operator prose can enter the provider session through it.
+/// The caller supplies only a registry-minted model witness. Tool identity,
+/// description, and arguments schema are fixed by this profile; no caller or
+/// operator prose can enter the provider session through it.
 #[derive(Clone)]
 pub struct GptLiveResponsesSessionConfig {
     responses: ResponsesConfig,
@@ -83,7 +76,7 @@ impl GptLiveResponsesSessionConfig {
         Ok(Self {
             responses: ResponsesConfig {
                 model: model.model().to_string(),
-                instructions: Some(GPT_LIVE_RESPONSES_BRIDGE_INSTRUCTIONS.to_string()),
+                instructions: None,
                 tools: vec![FunctionTool::new(
                     GPT_LIVE_RESPONSES_BRIDGE_TOOL,
                     GPT_LIVE_RESPONSES_BRIDGE_DESCRIPTION,
@@ -105,7 +98,6 @@ impl std::fmt::Debug for GptLiveResponsesSessionConfig {
         formatter
             .debug_struct("GptLiveResponsesSessionConfig")
             .field("model", &"<catalog-bound>")
-            .field("instructions", &"<catalog-owned-redacted>")
             .field("tool", &GPT_LIVE_RESPONSES_BRIDGE_TOOL)
             .finish()
     }
@@ -1212,8 +1204,7 @@ mod tests {
         let debug = format!("{config:?}");
         assert!(!debug.contains("sdp-secret"));
         assert!(!debug.contains("voice-secret"));
-        assert!(debug.contains("catalog-owned-redacted"));
-        assert!(!debug.contains(GPT_LIVE_RESPONSES_BRIDGE_INSTRUCTIONS));
+        assert!(debug.contains(GPT_LIVE_RESPONSES_BRIDGE_TOOL));
     }
 
     #[test]
@@ -1238,6 +1229,11 @@ mod tests {
 
         assert_eq!(wire["session"]["delegation"]["type"], "responses");
         assert_ne!(wire["session"]["delegation"]["type"], "client");
+        assert!(
+            wire["session"]["delegation"]["responses"]
+                .get("instructions")
+                .is_none()
+        );
         assert_eq!(
             wire["session"]["delegation"]["responses"]["tools"]
                 .as_array()

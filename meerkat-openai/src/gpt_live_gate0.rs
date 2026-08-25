@@ -55,19 +55,15 @@ pub struct Gate0ResponsesCandidateConfig {
 }
 
 impl Gate0ResponsesCandidateConfig {
-    pub fn try_new(
-        bridge_model: impl Into<String>,
-        candidate_instructions: impl Into<String>,
-    ) -> Result<Self, Gate0CandidateError> {
+    pub fn try_new(bridge_model: impl Into<String>) -> Result<Self, Gate0CandidateError> {
         let bridge_model = bridge_model.into();
-        let candidate_instructions = candidate_instructions.into();
-        if bridge_model.trim().is_empty() || candidate_instructions.trim().is_empty() {
+        if bridge_model.trim().is_empty() {
             return Err(Gate0CandidateError::InvalidResponsesConfiguration);
         }
         Ok(Self {
             responses: ResponsesConfig {
                 model: bridge_model,
-                instructions: Some(candidate_instructions),
+                instructions: None,
                 tools: vec![FunctionTool::new(
                     GATE0_RESPONSES_BRIDGE_TOOL,
                     GATE0_RESPONSES_BRIDGE_DESCRIPTION,
@@ -95,14 +91,6 @@ impl Gate0ResponsesCandidateConfig {
     }
 
     #[must_use]
-    pub fn candidate_instructions_present(&self) -> bool {
-        self.responses
-            .instructions
-            .as_ref()
-            .is_some_and(|instructions| !instructions.trim().is_empty())
-    }
-
-    #[must_use]
     pub fn tool_count(&self) -> usize {
         self.responses.tools.len()
     }
@@ -119,18 +107,14 @@ impl Gate0ResponsesCandidateConfig {
     }
 
     /// Proves that the actual candidate delegation serializes to the exact
-    /// model/instructions/single-tool allow-list, with no extra authority or
+    /// model/single-tool allow-list, with no extra authority or
     /// provider fields at any level.
     #[must_use]
     pub fn exact_authority_free_shape(&self) -> bool {
-        let Some(instructions) = self.responses.instructions.as_ref() else {
-            return false;
-        };
         let expected = serde_json::json!({
             "type": "responses",
             "responses": {
                 "model": &self.responses.model,
-                "instructions": instructions,
                 "tools": [{
                     "type": "function",
                     "name": GATE0_RESPONSES_BRIDGE_TOOL,
@@ -155,7 +139,6 @@ impl std::fmt::Debug for Gate0ResponsesCandidateConfig {
         formatter
             .debug_struct("Gate0ResponsesCandidateConfig")
             .field("bridge_model", &"<redacted>")
-            .field("candidate_instructions", &"<redacted>")
             .field("tool_count", &self.tool_count())
             .field("qualification", &"live-unqualified")
             .finish()
@@ -820,11 +803,8 @@ mod tests {
     }
 
     fn candidate_config() -> Gate0ResponsesCandidateConfig {
-        Gate0ResponsesCandidateConfig::try_new(
-            "bridge-model-private",
-            "candidate-instructions-private",
-        )
-        .expect("valid candidate Responses configuration")
+        Gate0ResponsesCandidateConfig::try_new("bridge-model-private")
+            .expect("valid candidate Responses configuration")
     }
 
     #[test]
@@ -837,7 +817,6 @@ mod tests {
         );
         assert_eq!(config.delegation_type(), "responses");
         assert!(config.bridge_model_present());
-        assert!(config.candidate_instructions_present());
         assert_eq!(config.tool_count(), 1);
         assert_eq!(config.tool_name(), Some(GATE0_RESPONSES_BRIDGE_TOOL));
         assert!(config.strict_arguments_schema());
@@ -846,10 +825,7 @@ mod tests {
         let wire = serde_json::to_value(config.delegation()).expect("serialize delegation");
         assert_eq!(wire["type"], "responses");
         assert_eq!(wire["responses"]["model"], "bridge-model-private");
-        assert_eq!(
-            wire["responses"]["instructions"],
-            "candidate-instructions-private"
-        );
+        assert!(wire["responses"].get("instructions").is_none());
         assert_eq!(wire["responses"]["tools"].as_array().unwrap().len(), 1);
         assert_eq!(
             wire["responses"]["tools"][0]["name"],
@@ -866,7 +842,6 @@ mod tests {
         let config = candidate_config();
         let config_debug = format!("{config:?}");
         assert!(!config_debug.contains("bridge-model-private"));
-        assert!(!config_debug.contains("candidate-instructions-private"));
         assert!(config_debug.contains("live-unqualified"));
 
         let raw = r#"{"type":"private.responses.call","call_id":"provider-secret","arguments":"conversation-secret"}"#;

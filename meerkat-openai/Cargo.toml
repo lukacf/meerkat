@@ -36,10 +36,9 @@ tokio = { workspace = true }
 reqwest = { workspace = true }
 base64 = { workspace = true }
 sha2 = { workspace = true, optional = true }
-# Keep the experimental protocol source attached to this publishable provider
-# crate. A downstream workspace consuming Meerkat by path does not inherit the
-# Meerkat workspace's root-level crates.io patch.
-oai-rt-rs = { version = "0.4.0", path = "../third-party/oai-rt-rs", optional = true }
+# Development integration stays on the workspace-owned immutable source pin.
+# A coordinated release replaces this with the published protocol dependency.
+oai-rt-rs = { workspace = true, optional = true }
 # Pinned to the tokio-tungstenite major used by oai-rt-rs so the typed
 # `tungstenite::Error` discriminants can be matched when classifying
 # realtime websocket faults (no error-string parsing).

@@ -153,7 +153,6 @@ filegroup(
         "//test-fixtures/mcp-test-server:package_runfiles",
         "//test-fixtures/surface-build-fixtures:package_runfiles",
         "//tests/integration:package_runfiles",
-        "//third-party/oai-rt-rs:package_runfiles",
         "//xtask:package_runfiles",
     ],
     visibility = ["//visibility:public"],

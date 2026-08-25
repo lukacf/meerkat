@@ -608,7 +608,6 @@ rust_test(
         "//test-fixtures/mcp-test-server:package_runfiles",
         "//test-fixtures/surface-build-fixtures:package_runfiles",
         "//tests/integration:package_runfiles",
-        "//third-party/oai-rt-rs:package_runfiles",
         "//xtask:cargo_manifest",
         "tests/rustfmt_host.sh",
         "@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin",

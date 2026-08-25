@@ -183,7 +183,9 @@ meerkat-machine-dsl = { version = "0.8.29", path = "meerkat-machine-dsl" }
 meerkat-machine-dsl-core = { version = "0.8.29", path = "meerkat-machine-dsl-core" }
 meerkat-store = { version = "0.8.29", path = "meerkat-store", default-features = false }
 meerkat-store-conformance = { version = "0.8.29", path = "meerkat-store-conformance" }
-oai-rt-rs = { version = "0.4.0", path = "third-party/oai-rt-rs" }
+# Development-only immutable binding for the coordinated GPT Live feature.
+# Replace it with the published protocol crate during the follow-on release.
+oai-rt-rs = { version = "0.4.0", git = "https://github.com/lukacf/oai-rt-rs.git", rev = "e3b8fa99da062919a0f85f7f42f0a74e7a9f829d" }
 
 [profile.dev]
 split-debuginfo = "off"
@@ -279,14 +281,6 @@ type_complexity = "allow"
 multiple_crate_versions = "allow"
 cargo_common_metadata = "allow"
 redundant_feature_names = "allow"
-
-# Interim pin until an oai-rt-rs release ships reqwest with
-# default-features = false: the published 0.4.0 enables reqwest's default-tls
-# (native-tls -> openssl-sys) via feature unification, which dynamically links
-# libssl.so.3/libcrypto.so.3 into every Linux release binary and breaks
-# OpenSSL 1.1 distros (Debian Bullseye). See third-party/oai-rt-rs/Cargo.toml.
-[patch.crates-io]
-oai-rt-rs = { path = "third-party/oai-rt-rs" }
 
 [workspace.metadata.release]
 shared-version = true

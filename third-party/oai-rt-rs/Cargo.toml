@@ -49,10 +49,6 @@ repository = "https://github.com/lukacf/oai-rt-rs"
 name = "oai_rt_rs"
 path = "src/lib.rs"
 
-[features]
-default = []
-experimental-gpt-live = []
-
 [dependencies.async-trait]
 version = "0.1"
 

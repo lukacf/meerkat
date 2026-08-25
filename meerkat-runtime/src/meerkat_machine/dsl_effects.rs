@@ -381,6 +381,7 @@ impl MeerkatMachine {
 
     /// Typed variant for recovery-owned callers that must distinguish a
     /// temporarily unavailable session authority from a semantic refusal.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(super) async fn apply_session_dsl_input_typed(
         &self,
         session_id: &SessionId,

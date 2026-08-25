@@ -5,6 +5,8 @@
 //! can turn those effects into unforgeable reconciliation and consequential
 //! dispatch witnesses without exposing a public minting constructor.
 
+#![cfg_attr(target_arch = "wasm32", allow(dead_code))]
+
 use meerkat_core::exact_operation::ExactOperationIdentity;
 pub use meerkat_core::{
     CanonicalContextRevision, LiveBridgeCancellationReason, LiveBridgeEffectKind,

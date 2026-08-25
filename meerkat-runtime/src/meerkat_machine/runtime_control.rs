@@ -4676,6 +4676,7 @@ impl MeerkatMachine {
     }
 
     /// Bind and authorize the durable worker for one exact admitted delegation.
+    #[allow(clippy::too_many_arguments)]
     pub async fn authorize_live_delegation_worker_start(
         &self,
         session_id: &SessionId,
@@ -5157,6 +5158,7 @@ impl MeerkatMachine {
     /// `Confirmed` is derived only from exact digest equality with sealed
     /// SessionDocument canonical-commit evidence. Callers cannot provide a
     /// classification or copied generated effect.
+    #[allow(clippy::too_many_arguments)]
     pub async fn reconcile_live_delegation_transcript(
         &self,
         session_id: &SessionId,
@@ -6248,20 +6250,19 @@ impl MeerkatMachine {
             {
                 return Ok(crate::live_execution::LiveContextAppendResolution::Resolved(receipt));
             }
-            if let Some(replacement_channel_id) = replacement_channel_id.as_ref() {
-                if let Some(recovery) = crate::live_execution::LiveContextAmbiguityRecoveryAuthority::from_generated_effect(
+            if let Some(replacement_channel_id) = replacement_channel_id.as_ref()
+                && let Some(recovery) = crate::live_execution::LiveContextAmbiguityRecoveryAuthority::from_generated_effect(
                     authority,
                     replacement_channel_id,
                     effect,
                 )
                 .map_err(|error| RuntimeDriverError::Internal(error.to_string()))?
-                {
-                    return Ok(
-                        crate::live_execution::LiveContextAppendResolution::AmbiguityRecovery(
-                            recovery,
-                        ),
-                    );
-                }
+            {
+                return Ok(
+                    crate::live_execution::LiveContextAppendResolution::AmbiguityRecovery(
+                        recovery,
+                    ),
+                );
             }
         }
         Err(RuntimeDriverError::Internal(
@@ -7011,20 +7012,19 @@ impl MeerkatMachine {
                     ),
                 );
             }
-            if let Some(replacement_channel_id) = replacement_channel_id.as_ref() {
-                if let Some(recovery) = crate::live_execution::LiveDelegationResultAmbiguityRecoveryAuthority::from_generated_effect(
+            if let Some(replacement_channel_id) = replacement_channel_id.as_ref()
+                && let Some(recovery) = crate::live_execution::LiveDelegationResultAmbiguityRecoveryAuthority::from_generated_effect(
                     authority,
                     replacement_channel_id,
                     effect,
                 )
                 .map_err(|error| RuntimeDriverError::Internal(error.to_string()))?
-                {
-                    return Ok(
-                        crate::live_execution::LiveDelegationResultDeliveryResolution::AmbiguityRecovery(
-                            recovery,
-                        ),
-                    );
-                }
+            {
+                return Ok(
+                    crate::live_execution::LiveDelegationResultDeliveryResolution::AmbiguityRecovery(
+                        recovery,
+                    ),
+                );
             }
         }
         Err(RuntimeDriverError::Internal(

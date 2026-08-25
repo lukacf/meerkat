@@ -480,6 +480,7 @@ impl DelegationExecutionService {
 
     /// Start one delegation through existing MobMachine and exact-turn
     /// authorities. Worker terminality and retirement remain separate.
+    #[allow(clippy::result_large_err)]
     pub async fn start(
         &self,
         request: DelegationExecutionRequest,
@@ -589,7 +590,7 @@ impl DelegationExecutionService {
         spec.inherited_tool_filter = member.inherited_tool_filter;
         spec.override_profile = member.override_profile;
         spec.tool_access_policy = member.tool_access_policy;
-        spec.objective_id = member.objective_id.clone();
+        spec.objective_id = member.objective_id;
         spec.tool_dispatch_admission = live_admission
             .as_ref()
             .map(meerkat_runtime::live_execution::LiveDelegationExecutionAdmission::tool_dispatch_admission);

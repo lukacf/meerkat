@@ -4629,7 +4629,7 @@ fn generate_session_document_authority(machine: &MachineSchema) -> Result<String
     )?;
     writeln!(
         &mut out,
-        "#![allow(dead_code, unused_parens, unused_variables, clippy::bool_comparison, clippy::field_reassign_with_default, clippy::nonminimal_bool, clippy::partialeq_to_none, clippy::redundant_clone, clippy::redundant_field_names, clippy::too_many_arguments)]"
+        "#![allow(dead_code, unused_parens, unused_variables, clippy::bool_comparison, clippy::cmp_owned, clippy::collapsible_else_if, clippy::field_reassign_with_default, clippy::nonminimal_bool, clippy::partialeq_to_none, clippy::redundant_clone, clippy::redundant_field_names, clippy::too_many_arguments)]"
     )?;
     writeln!(&mut out)?;
     writeln!(&mut out, "use std::{{collections::BTreeMap, fmt}};")?;

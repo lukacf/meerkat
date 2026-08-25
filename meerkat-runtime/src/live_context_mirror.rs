@@ -1,5 +1,7 @@
 //! Sealed bridge from exact committed session rows into generated live-context authority.
 
+#![cfg_attr(target_arch = "wasm32", allow(dead_code))]
+
 use meerkat_core::generated::session_document::{
     LiveContextCommittedRowDisposition, LiveContextCommittedRowKind,
     LiveContextCommittedTextProvenance, SessionDocumentEffect, SessionDocumentKey,

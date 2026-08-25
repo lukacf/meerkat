@@ -78,6 +78,7 @@ pub(crate) fn seal_final_live_user_transcript_commit(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn seal_live_assistant_playback_truncation(
     session_id: SessionId,
     channel_id: LiveChannelId,
@@ -351,7 +352,7 @@ pub(crate) fn commit_live_assistant_playback_truncation(
     match observe_live_assistant_playback_terminal(
         agent,
         session_id,
-        channel_id.clone(),
+        channel_id,
         interaction_id,
         response_id,
         item_id,
@@ -683,7 +684,7 @@ fn observe_live_assistant_playback_terminal(
             LiveAssistantPlaybackEvidence::PlaybackComplete,
             LiveAssistantPlaybackTruncationDisposition::PlaybackComplete,
         ) => {
-            let (stop_reason, usage) = completion.clone().ok_or_else(|| {
+            let (stop_reason, usage) = completion.ok_or_else(|| {
                 meerkat_core::error::AgentError::InternalError(
                     "playback-complete terminal omitted completion facts".to_string(),
                 )
@@ -717,7 +718,7 @@ fn observe_live_assistant_playback_terminal(
                         .to_string(),
                 ));
             }
-            if let Some((stop_reason, usage)) = completion.clone() {
+            if let Some((stop_reason, usage)) = completion {
                 let _ = agent.append_realtime_transcript_event(
                     RealtimeTranscriptEvent::AssistantTurnCompleted {
                         response_id: response_id.clone(),

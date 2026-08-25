@@ -5873,14 +5873,30 @@ struct MachineLifecycleSnapshotStoreWire {
 #[serde(deny_unknown_fields)]
 struct MachineLifecycleObservationStoreWireV5 {
     record_version: u16,
+    #[allow(
+        clippy::option_option,
+        reason = "serde distinguishes a missing phase from an explicitly absent observed phase"
+    )]
     #[serde(default, deserialize_with = "deserialize_present_nullable")]
     runtime_state: Option<Option<RuntimeState>>,
     binding: MachineLifecycleBindingFactsStoreWire,
+    #[allow(
+        clippy::option_option,
+        reason = "serde distinguishes a missing run id from an explicitly absent run id"
+    )]
     #[serde(default, deserialize_with = "deserialize_present_nullable")]
     current_run_id: Option<Option<RunId>>,
+    #[allow(
+        clippy::option_option,
+        reason = "serde distinguishes a missing pre-run phase from an explicitly absent phase"
+    )]
     #[serde(default, deserialize_with = "deserialize_present_nullable")]
     pre_run_phase: Option<Option<MachineLifecyclePreRunPhase>>,
     supervisor_authority: SupervisorAuthoritySnapshotStoreWire,
+    #[allow(
+        clippy::option_option,
+        reason = "serde distinguishes a missing v5 field from explicit null progress"
+    )]
     #[serde(default, deserialize_with = "deserialize_present_nullable")]
     unregister_progress: Option<Option<MachineUnregisterProgressSnapshotStoreWire>>,
     live_bridge_recovery: crate::live_execution::LiveBridgeRecoveryImage,

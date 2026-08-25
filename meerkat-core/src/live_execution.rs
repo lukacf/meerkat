@@ -810,7 +810,7 @@ pub(crate) extern "Rust" fn session_generated_live_user_transcript_commit_build(
 /// session owner observed before canonical mutation.
 #[cfg(all(meerkat_internal_generated_authority_bridge, not(test)))]
 #[doc(hidden)]
-#[allow(improper_ctypes_definitions, unsafe_code)]
+#[allow(clippy::too_many_arguments, improper_ctypes_definitions, unsafe_code)]
 #[unsafe(export_name = concat!(
     "__meerkat_core_session_generated_live_playback_truncation_build_v1_",
     env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")

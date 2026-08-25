@@ -5,6 +5,8 @@
 //! an operator selected one exact factory version, the durable realm admits
 //! it, and this build carries matching Gate0 qualification evidence.
 
+#![cfg_attr(target_arch = "wasm32", allow(dead_code))]
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;

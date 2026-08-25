@@ -12134,6 +12134,7 @@ mod tests {
     struct ExperimentalAuthorityTestPending {
         log: Arc<tokio::sync::Mutex<Vec<&'static str>>>,
         identity: meerkat_core::SessionLlmIdentity,
+        execution_profile: meerkat_runtime::live_execution::LiveExecutionProfileSelection,
     }
 
     #[cfg(feature = "experimental-gpt-live")]
@@ -12206,6 +12207,12 @@ mod tests {
             self
         }
 
+        fn execution_profile(
+            &self,
+        ) -> &meerkat_runtime::live_execution::LiveExecutionProfileSelection {
+            &self.execution_profile
+        }
+
         async fn bind_opened(
             self: Box<Self>,
             opened: &meerkat_contracts::LiveOpenResult,
@@ -12254,6 +12261,16 @@ mod tests {
                     provider_params: None,
                     auth_binding: None,
                 },
+                execution_profile:
+                    meerkat_runtime::live_execution::LiveExecutionProfileSelection::__test_new(
+                        meerkat::GPT_LIVE_FUNCTION_BRIDGE_PROFILE_ID,
+                        meerkat_core::LiveExecutionMode::FunctionBridge,
+                        meerkat_core::LiveExecutionCapabilities {
+                            function_bridge: true,
+                            client_context: false,
+                        },
+                    )
+                    .expect("qualified test execution profile"),
             }))
         }
 

@@ -335,6 +335,7 @@ fn live_open_error_response(id: Option<RpcId>, error: LiveOpenError) -> RpcRespo
         LiveOpenError::RealtimeFactoryMissing
         | LiveOpenError::AdmissionAuthority(_)
         | LiveOpenError::AdmissionRejectedChannelCollision { .. }
+        | LiveOpenError::AdmissionRejectedRevokedChannel { .. }
         | LiveOpenError::AdmissionRejectedNoReason
         | LiveOpenError::MissingHostHandoff
         | LiveOpenError::HostOpenSessionAlreadyBound { .. }
@@ -813,6 +814,7 @@ fn experimental_live_open_authority_error_response(
         ExperimentalLiveOpenAuthorityError::Unavailable
         | ExperimentalLiveOpenAuthorityError::AccessDenied
         | ExperimentalLiveOpenAuthorityError::DurableTargetUnavailable
+        | ExperimentalLiveOpenAuthorityError::MemberIneligible
         | ExperimentalLiveOpenAuthorityError::BindingUseDenied
         | ExperimentalLiveOpenAuthorityError::AdmissionFailed => {
             meerkat_contracts::ErrorCode::CapabilityUnavailable.jsonrpc_code()
@@ -844,6 +846,13 @@ fn experimental_live_channel_open_error_response(
         ),
         ExperimentalLiveChannelOpenError::Open(open_error) => {
             live_open_error_response(id, open_error)
+        }
+        execution_profile @ ExperimentalLiveChannelOpenError::ExecutionProfile(_) => {
+            RpcResponse::error(
+                id,
+                meerkat_contracts::ErrorCode::CapabilityUnavailable.jsonrpc_code(),
+                execution_profile.to_string(),
+            )
         }
         binding_cleanup @ ExperimentalLiveChannelOpenError::BindingCleanup { .. } => {
             RpcResponse::error(id, error::INTERNAL_ERROR, binding_cleanup.to_string())

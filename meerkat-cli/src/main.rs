@@ -11037,6 +11037,7 @@ async fn run_agent(
 
         let mut build = SessionBuildOptions {
             tool_access_policy: None,
+            tool_dispatch_admission: None,
             application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
             tool_consequence_policy_registry: None,
             custom_models: std::collections::BTreeMap::new(),

@@ -5236,6 +5236,7 @@ async fn create_session_inner(
         };
     let mut build = SessionBuildOptions {
         tool_access_policy: None,
+        tool_dispatch_admission: None,
         application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
         tool_consequence_policy_registry: None,
         custom_models: std::collections::BTreeMap::new(),
@@ -6387,6 +6388,7 @@ async fn continue_session_inner(
         let auth_binding_override = req.auth_binding.clone().map(Into::into);
         let mut build = SessionBuildOptions {
             tool_access_policy: None,
+            tool_dispatch_admission: None,
             application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
             tool_consequence_policy_registry: None,
             custom_models: std::collections::BTreeMap::new(),

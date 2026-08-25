@@ -335,6 +335,7 @@ impl McpScheduleContext {
                     initial_metadata_entries: std::collections::BTreeMap::new(),
                     initial_tool_filter: None,
                     tool_access_policy: None,
+                    tool_dispatch_admission: None,
                     application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
                     tool_consequence_policy_registry: None,
                     shell_env: None,

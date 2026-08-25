@@ -239,12 +239,13 @@ pub use runtime::{
     AdaptiveLayerResultDigest, AdaptiveLayerRetention, AdaptiveLayerRunStart,
     AdaptiveLayerSetupFault, AdaptiveLayerSetupFaultObservation, AdaptiveLayerSnapshot,
     AdaptivePlanningDecisionKind, AdaptiveRunLimits, AdaptiveRunPhaseView, AdaptiveRunSnapshot,
-    AdaptiveStopReasonView, AuthorizedSessionResume, BoundedFlowResult, BoundedHelperResult,
-    BoundedHelperResultStatus, BoundedHelperRunOutcome, BoundedMemberRunError, BoundedResultSpec,
-    BoundedTurnFailure, BoundedTurnResult, BoundedTurnWaitError, ControllingAcceptorConfig,
-    CurrentMobAdmission, DEFAULT_BOUNDED_HELPER_RESULT_BYTES, DelegationCancellationHandle,
-    DelegationExecutionError, DelegationExecutionHandle, DelegationExecutionOutcome,
-    DelegationExecutionRequest, DelegationExecutionService, DelegationMemberOptions,
+    AdaptiveStopReasonView, AuthorizedSessionResume, BOUNDED_DELEGATION_REPORT_INSTRUCTION_V1,
+    BoundedFlowResult, BoundedHelperResult, BoundedHelperResultStatus, BoundedHelperRunOutcome,
+    BoundedMemberRunError, BoundedResultSpec, BoundedTurnFailure, BoundedTurnResult,
+    BoundedTurnWaitError, ControllingAcceptorConfig, CurrentMobAdmission,
+    DEFAULT_BOUNDED_HELPER_RESULT_BYTES, DelegationCancellationHandle, DelegationExecutionError,
+    DelegationExecutionHandle, DelegationExecutionOutcome, DelegationExecutionRequest,
+    DelegationExecutionService, DelegationExecutionSource, DelegationMemberOptions,
     DelegationParentContext, DelegationTerminalizedExecution, DelegationTurnTerminal,
     ExternalPeerBindingSpec, FlowRunHandle, FlowRunWaitError, FlowTargetProvisioner,
     ForkMemberBoundedRunOutcome, ForkMemberResult, HELPER_RESULT_TRUNCATION_MARKER, HelperOptions,
@@ -265,7 +266,7 @@ pub use runtime::{
     SpawnPolicy, SpawnResult, SpawnSource, SpawnSpec, SpawnSystemPromptOverride,
     SpawnToolAdmission, SupervisorRotationReport, WorkBoundedTurnResult, WorkDeliveryReceipt,
     WorkTurnHandle, materialize_nonpersistent_session_resume_verdict, mob_error_wire_code,
-    profile_to_wire, stored_realm_profile_to_wire,
+    profile_to_wire, render_bounded_delegation_task, stored_realm_profile_to_wire,
 };
 #[cfg(feature = "experimental-gpt-live")]
 pub use runtime::{

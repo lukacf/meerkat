@@ -667,6 +667,7 @@ pub struct FinalLiveUserTranscriptCommitEvidence {
     interaction_id: InteractionId,
     disposition: FinalLiveUserTranscriptDisposition,
     normalized_final_input_digest: Option<NormalizedLiveUserInputDigest>,
+    committed_message_count: Option<usize>,
 }
 
 impl std::fmt::Debug for FinalLiveUserTranscriptCommitEvidence {
@@ -705,6 +706,13 @@ impl FinalLiveUserTranscriptCommitEvidence {
     pub fn normalized_final_input_digest(&self) -> Option<&NormalizedLiveUserInputDigest> {
         self.normalized_final_input_digest.as_ref()
     }
+
+    /// Exact canonical transcript boundary observed by the SessionDocument
+    /// owner immediately after committing the final user transcript.
+    #[must_use]
+    pub const fn committed_message_count(&self) -> Option<usize> {
+        self.committed_message_count
+    }
 }
 
 #[cfg(all(meerkat_internal_generated_authority_bridge, not(test)))]
@@ -727,7 +735,7 @@ unsafe extern "Rust" {
 #[doc(hidden)]
 #[allow(improper_ctypes_definitions, unsafe_code)]
 #[unsafe(export_name = concat!(
-    "__meerkat_core_session_generated_live_user_transcript_commit_build_v1_",
+    "__meerkat_core_session_generated_live_user_transcript_commit_build_v2_",
     env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
 ))]
 pub(crate) extern "Rust" fn session_generated_live_user_transcript_commit_build(
@@ -736,6 +744,7 @@ pub(crate) extern "Rust" fn session_generated_live_user_transcript_commit_build(
     channel_id: LiveChannelId,
     interaction_id: InteractionId,
     normalized_final_input_digest: Option<NormalizedLiveUserInputDigest>,
+    committed_message_count: Option<usize>,
     effect: &crate::generated::session_document::SessionDocumentEffect,
 ) -> Result<FinalLiveUserTranscriptCommitEvidence, FinalLiveUserTranscriptCommitError> {
     #[allow(unsafe_code)]
@@ -766,11 +775,17 @@ pub(crate) extern "Rust" fn session_generated_live_user_transcript_commit_build(
         ));
     }
 
-    let disposition = match (reconciliation, normalized_final_input_digest.as_ref()) {
-        (LiveTranscriptReconciliation::Committed, Some(_)) => {
+    let disposition = match (
+        reconciliation,
+        normalized_final_input_digest.as_ref(),
+        committed_message_count,
+    ) {
+        (LiveTranscriptReconciliation::Committed, Some(_), Some(message_count))
+            if message_count > 0 =>
+        {
             FinalLiveUserTranscriptDisposition::Committed
         }
-        (LiveTranscriptReconciliation::Missing, None) => {
+        (LiveTranscriptReconciliation::Missing, None, None) => {
             FinalLiveUserTranscriptDisposition::Missing
         }
         _ => {
@@ -786,6 +801,7 @@ pub(crate) extern "Rust" fn session_generated_live_user_transcript_commit_build(
         interaction_id,
         disposition,
         normalized_final_input_digest,
+        committed_message_count,
     })
 }
 

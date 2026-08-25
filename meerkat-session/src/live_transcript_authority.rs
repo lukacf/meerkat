@@ -44,12 +44,13 @@ pub(crate) fn seal_final_live_user_transcript_commit(
     channel_id: LiveChannelId,
     interaction_id: InteractionId,
     normalized_final_input_digest: Option<NormalizedLiveUserInputDigest>,
+    committed_message_count: Option<usize>,
     effect: &SessionDocumentEffect,
 ) -> Result<FinalLiveUserTranscriptCommitEvidence, FinalLiveUserTranscriptCommitError> {
     #[allow(improper_ctypes_definitions, unsafe_code)]
     unsafe extern "Rust" {
         #[link_name = concat!(
-            "__meerkat_core_session_generated_live_user_transcript_commit_build_v1_",
+            "__meerkat_core_session_generated_live_user_transcript_commit_build_v2_",
             env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
         )]
         fn core_session_generated_live_user_transcript_commit_build(
@@ -58,6 +59,7 @@ pub(crate) fn seal_final_live_user_transcript_commit(
             channel_id: LiveChannelId,
             interaction_id: InteractionId,
             normalized_final_input_digest: Option<NormalizedLiveUserInputDigest>,
+            committed_message_count: Option<usize>,
             effect: &SessionDocumentEffect,
         ) -> Result<FinalLiveUserTranscriptCommitEvidence, FinalLiveUserTranscriptCommitError>;
     }
@@ -70,6 +72,7 @@ pub(crate) fn seal_final_live_user_transcript_commit(
             channel_id,
             interaction_id,
             normalized_final_input_digest,
+            committed_message_count,
             effect,
         )
     }
@@ -165,6 +168,7 @@ impl PreparedLiveUserTranscriptCommit {
     fn finish(
         mut self,
         normalized_final_input_digest: Option<NormalizedLiveUserInputDigest>,
+        committed_message_count: Option<usize>,
     ) -> Result<FinalLiveUserTranscriptCommitEvidence, meerkat_core::error::AgentError> {
         let reconciliation = if normalized_final_input_digest.is_some() {
             LiveTranscriptReconciliation::Committed
@@ -198,6 +202,7 @@ impl PreparedLiveUserTranscriptCommit {
             self.channel_id,
             self.interaction_id,
             normalized_final_input_digest,
+            committed_message_count,
             effect,
         )
         .map_err(|error| meerkat_core::error::AgentError::InternalError(error.to_string()))
@@ -294,7 +299,7 @@ pub(crate) fn commit_final_live_user_transcript(
 ) -> Result<FinalLiveUserTranscriptCommitEvidence, meerkat_core::error::AgentError> {
     let prepared = PreparedLiveUserTranscriptCommit::prepare(session_id, &provisional)?;
     let Some(final_event) = final_event else {
-        return prepared.finish(None);
+        return prepared.finish(None, None);
     };
     let RealtimeTranscriptEvent::UserTranscriptFinal { item_id, text, .. } = &final_event else {
         return Err(meerkat_core::error::AgentError::ConfigError(
@@ -325,7 +330,8 @@ pub(crate) fn commit_final_live_user_transcript(
             "live final-user transcript did not become canonical in this commit".to_string(),
         ));
     }
-    prepared.finish(Some(digest))
+    let committed_message_count = agent.snapshot().message_count;
+    prepared.finish(Some(digest), Some(committed_message_count))
 }
 
 /// Classify one exact playback-prefix observation through SessionDocument
@@ -1109,9 +1115,13 @@ mod tests {
         let session_id = session();
         let evidence = PreparedLiveUserTranscriptCommit::prepare(&session_id, &provisional())
             .expect("prepare")
-            .finish(Some(
-                NormalizedLiveUserInputDigest::derive("normalized final input").expect("digest"),
-            ))
+            .finish(
+                Some(
+                    NormalizedLiveUserInputDigest::derive("normalized final input")
+                        .expect("digest"),
+                ),
+                Some(3),
+            )
             .expect("seal evidence");
 
         assert_eq!(evidence.session_id(), &session_id);
@@ -1121,6 +1131,7 @@ mod tests {
             FinalLiveUserTranscriptDisposition::Committed
         );
         assert!(evidence.normalized_final_input_digest().is_some());
+        assert_eq!(evidence.committed_message_count(), Some(3));
     }
 
     #[test]
@@ -1128,7 +1139,7 @@ mod tests {
         let session_id = session();
         let evidence = PreparedLiveUserTranscriptCommit::prepare(&session_id, &provisional())
             .expect("prepare")
-            .finish(None)
+            .finish(None, None)
             .expect("seal missing evidence");
 
         assert_eq!(
@@ -1136,6 +1147,7 @@ mod tests {
             FinalLiveUserTranscriptDisposition::Missing
         );
         assert!(evidence.normalized_final_input_digest().is_none());
+        assert_eq!(evidence.committed_message_count(), None);
     }
 
     #[test]
@@ -1178,10 +1190,49 @@ mod tests {
                     NormalizedLiveUserInputDigest::derive("normalized final input")
                         .expect("digest")
                 ),
+                Some(1),
                 &effects[0],
             ),
             Err(FinalLiveUserTranscriptCommitError::Transition(_))
         ));
+    }
+
+    #[test]
+    fn committed_live_user_evidence_freezes_the_exact_message_boundary() {
+        let mut agent = PlaybackTestAgent::new();
+        let session_id = agent.session_id();
+        let evidence = commit_final_live_user_transcript(
+            &mut agent,
+            &session_id,
+            provisional(),
+            Some(RealtimeTranscriptEvent::UserTranscriptFinal {
+                item_id: "turn-private".to_string(),
+                previous_item_id: None,
+                content_index: 0,
+                text: "normalized final input".to_string(),
+            }),
+        )
+        .expect("commit exact final live input");
+
+        let committed_boundary = evidence
+            .committed_message_count()
+            .expect("committed evidence carries exact boundary");
+        assert_eq!(committed_boundary, 1);
+
+        agent
+            .append_realtime_transcript_event(RealtimeTranscriptEvent::UserTranscriptFinal {
+                item_id: "later-ordinary-turn".to_string(),
+                previous_item_id: Some("turn-private".to_string()),
+                content_index: 0,
+                text: "later context must not enter the voice executor fork".to_string(),
+            })
+            .expect("append a later canonical turn");
+        assert_eq!(agent.snapshot().message_count, 2);
+        assert_eq!(
+            evidence.committed_message_count(),
+            Some(committed_boundary),
+            "later canonical appends cannot move the sealed fork boundary"
+        );
     }
 
     #[test]

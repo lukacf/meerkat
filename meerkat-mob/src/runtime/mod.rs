@@ -307,10 +307,11 @@ pub use builder::{
     ControllingAcceptorConfig, LocalMemberAcceptorMaterialSource, MemberAcceptorRegistration,
 };
 pub use delegation::{
-    DelegationCancellationHandle, DelegationExecutionError, DelegationExecutionHandle,
-    DelegationExecutionOutcome, DelegationExecutionRequest, DelegationExecutionService,
+    BOUNDED_DELEGATION_REPORT_INSTRUCTION_V1, DelegationCancellationHandle,
+    DelegationExecutionError, DelegationExecutionHandle, DelegationExecutionOutcome,
+    DelegationExecutionRequest, DelegationExecutionService, DelegationExecutionSource,
     DelegationMemberOptions, DelegationParentContext, DelegationTerminalizedExecution,
-    DelegationTurnTerminal, LiveDelegationTerminalEvidence,
+    DelegationTurnTerminal, LiveDelegationTerminalEvidence, render_bounded_delegation_task,
 };
 pub use event_router::{MobEventRouterConfig, MobEventRouterHandle};
 pub use flow_frame_engine::{FlowFrameKernel, FlowFrameMutator};

@@ -14,9 +14,10 @@ use crate::storage::MobStorage;
 use crate::store::{
     ExternalBindingOverlayRecord, ExternalBindingOverlayStatus, InMemoryMobEventStore,
     InMemoryMobIdentityStatusStore, InMemoryMobIdentityStore, InMemoryMobRunStore,
-    InMemoryMobRuntimeMetadataStore, InMemoryMobSpecStore, MobEventStore, MobIdentityStatusStore,
-    MobIdentityStore, MobMemberEventCursorRecord, MobRunStore, MobRuntimeMetadataStore,
-    MobStoreError, RealmProfileStore, SupervisorAuthorityRecord, private, terminal_event_identity,
+    InMemoryMobRuntimeMetadataStore, InMemoryMobSpecStore, MobDeliveryIdentity, MobEventStore,
+    MobIdentityStatusStore, MobIdentityStore, MobMemberEventCursorRecord, MobRunStore,
+    MobRuntimeMetadataStore, MobStoreError, RealmProfileStore, SupervisorAuthorityRecord, private,
+    terminal_event_identity,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use crate::store::{SqliteMobEventStore, SqliteMobStores};
@@ -20460,6 +20461,103 @@ async fn delegation_execution_service_returns_exact_result_and_retires_member() 
 }
 
 #[tokio::test]
+async fn delegation_execution_service_runs_on_a_real_durable_fork_and_retires_only_the_child() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_return_exact_run_result(true);
+    let source_identity = AgentIdentity::from("delegation-durable-source");
+    let source = handle
+        .spawn(ProfileName::from("worker"), source_identity.clone(), None)
+        .await
+        .expect("spawn durable delegation source");
+    let source_session_id = source
+        .bridge_session_id()
+        .expect("source bridge session")
+        .clone();
+    let mut evolved_source = service
+        .persisted_session_clone(&source_session_id)
+        .await
+        .expect("persisted source session");
+    evolved_source.push(Message::User(meerkat_core::UserMessage::text(
+        "committed source context",
+    )));
+    let committed_boundary = evolved_source.messages().len();
+    evolved_source.push(Message::User(meerkat_core::UserMessage::text(
+        "later context outside the sealed live boundary",
+    )));
+    service.replace_live_session(evolved_source).await;
+    let child_identity = AgentIdentity::from("delegation-durable-child");
+    let interaction_id = InteractionId::new();
+    let delivery_identity = MobDeliveryIdentity::new(
+        "bridge-operation:durable-delegation-test",
+        interaction_id.to_string(),
+    )
+    .expect("valid stable delegation delivery identity");
+    let expected_work_ref = WorkRef::for_delivery(
+        &handle.definition().id,
+        &child_identity,
+        &delivery_identity.idempotency_key,
+    );
+    let request = DelegationExecutionRequest::new(
+        child_identity.clone(),
+        "ordinary bounded child task",
+        BoundedResultSpec::new("delegation-durable-result", 256)
+            .expect("valid durable delegation result spec"),
+    )
+    .with_durable_fork(source_identity.clone(), Some(committed_boundary))
+    .with_delivery_identity(delivery_identity, interaction_id);
+
+    let delegation_service = DelegationExecutionService::new(handle.clone());
+    let execution = delegation_service
+        .start(request)
+        .await
+        .expect("durable-fork delegation starts");
+    assert_eq!(execution.work_receipt().work_ref, expected_work_ref);
+    let child_session_id = handle
+        .get_member(&child_identity)
+        .await
+        .expect("child roster lookup")
+        .and_then(|member| member.member_ref.bridge_session_id().cloned())
+        .expect("forked child bridge session");
+    let child_session = service
+        .persisted_session_clone(&child_session_id)
+        .await
+        .expect("persisted forked child");
+    let child_transcript =
+        serde_json::to_string(child_session.messages()).expect("serialize forked child transcript");
+    assert!(child_transcript.contains("committed source context"));
+    assert!(!child_transcript.contains("later context outside the sealed live boundary"));
+
+    let terminalized = execution.await_terminal().await;
+    let result_text = match terminalized.terminal() {
+        DelegationTurnTerminal::Completed(turn) => turn.result().result().text(),
+        terminal => panic!("durable child must complete: {terminal:?}"),
+    };
+
+    assert_eq!(result_text, "ordinary bounded child task");
+    delegation_service
+        .retire_terminalized(&terminalized)
+        .await
+        .expect("retire durable child");
+    assert!(
+        handle
+            .get_member(&child_identity)
+            .await
+            .expect("child roster lookup")
+            .is_none(),
+        "ordinary delegation retirement removes only the forked child"
+    );
+    assert_eq!(
+        handle
+            .get_member(&source_identity)
+            .await
+            .expect("source roster lookup")
+            .and_then(|member| member.member_ref.bridge_session_id().cloned()),
+        Some(source_session_id),
+        "durable delegation must not perturb the canonical source binding"
+    );
+}
+
+#[tokio::test]
 async fn delegation_execution_service_retires_member_after_exact_turn_failure() {
     let definition = MobDefinition::implicit("delegation-service-failure", "claude-sonnet-4-5");
     let (handle, service) = create_test_mob(definition).await;
@@ -20484,6 +20582,50 @@ async fn delegation_execution_service_retires_member_after_exact_turn_failure() 
     assert!(
         handle.get_member(&helper_id).await.unwrap().is_none(),
         "delegation service must still attempt retirement after turn failure"
+    );
+}
+
+#[tokio::test]
+async fn delegation_execution_service_rejects_delivery_correlation_mismatch_before_spawn() {
+    let definition = MobDefinition::implicit("delegation-delivery-mismatch", "claude-sonnet-4-5");
+    let (handle, _service) = create_test_mob(definition).await;
+    let helper_id = AgentIdentity::from("delegation-mismatched-delivery-helper");
+    let delivery_interaction = InteractionId::new();
+    let request_interaction = InteractionId::new();
+    let request = DelegationExecutionRequest::new(
+        helper_id.clone(),
+        "must never be admitted",
+        BoundedResultSpec::new("delegation-delivery-mismatch", 256)
+            .expect("valid delegation result spec"),
+    )
+    .with_delivery_identity(
+        MobDeliveryIdentity::new(
+            "bridge-operation:delivery-mismatch-test",
+            delivery_interaction.to_string(),
+        )
+        .expect("valid delivery identity"),
+        request_interaction,
+    );
+
+    let error = match DelegationExecutionService::new(handle.clone())
+        .start(request)
+        .await
+    {
+        Ok(_) => panic!("mismatched typed correlation must fail closed"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        DelegationExecutionError::WorkAdmission { .. }
+    ));
+    assert!(
+        handle
+            .get_member(&helper_id)
+            .await
+            .expect("helper roster lookup")
+            .is_none(),
+        "correlation mismatch must fail before member admission"
     );
 }
 

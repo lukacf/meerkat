@@ -9,19 +9,50 @@ use std::sync::Arc;
 
 use meerkat_core::agent::CommsRuntime;
 use meerkat_core::comms::{CommsCommand, PeerId, PeerName, PeerRoute, TrustedPeerDescriptor};
-use meerkat_core::interaction::ObjectiveId;
+use meerkat_core::interaction::{InteractionId, ObjectiveId};
 use meerkat_core::service::SessionServiceCommsExt;
 use meerkat_core::types::HandlingMode;
 use serde::Serialize;
 
 use crate::machines::mob_machine::HostId;
 use crate::profile::Profile;
-use crate::{AgentIdentity, MobError, MobRuntimeMode, ProfileName, WorkOrigin, WorkSpec};
+use crate::{
+    AgentIdentity, MobDeliveryIdentity, MobError, MobRuntimeMode, ProfileName, WorkOrigin, WorkSpec,
+};
 
 use super::{
     BoundedResultSpec, BoundedTurnWaitError, MobHandle, SpawnMemberSpec, SpawnResult,
     WorkBoundedTurnResult, WorkDeliveryReceipt, WorkTurnHandle,
 };
+
+/// Visible best-effort reporting convention for bounded delegated work.
+///
+/// This is deliberately prompt text rather than a structured-result contract.
+/// Callers receive ordinary [`super::BoundedHelperResult`] text and must not
+/// infer validation or success beyond its typed terminal/truncation status.
+pub const BOUNDED_DELEGATION_REPORT_INSTRUCTION_V1: &str = "MEERKAT_BOUNDED_DELEGATION_REPORT_V1\nAfter doing the requested work, end with a clear, concise report of the work performed and the final result. This is a loose best-effort completion report, not a structured schema or success guarantee.";
+
+#[must_use]
+pub fn render_bounded_delegation_task(task: &str) -> String {
+    format!("{task}\n\n{BOUNDED_DELEGATION_REPORT_INSTRUCTION_V1}")
+}
+
+/// Canonical context source for one delegated worker.
+///
+/// `DurableFork` persists a real transcript fork through
+/// [`MobHandle::fork_member`]. It is intentionally distinct from the legacy
+/// prompt-context `MemberLaunchMode::Fork`, which creates a fresh session and
+/// renders history into text.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DelegationExecutionSource {
+    #[default]
+    Fresh,
+    DurableFork {
+        source_identity: AgentIdentity,
+        message_count: Option<usize>,
+    },
+}
 
 /// Mob-owned construction options for one delegated helper member.
 ///
@@ -73,6 +104,8 @@ pub struct DelegationExecutionRequest {
     pub result_spec: BoundedResultSpec,
     pub member: DelegationMemberOptions,
     pub parent: Option<DelegationParentContext>,
+    source: DelegationExecutionSource,
+    delivery_identity: Option<(MobDeliveryIdentity, InteractionId)>,
     live_admission: Option<meerkat_runtime::live_execution::LiveDelegationExecutionAdmission>,
 }
 
@@ -89,6 +122,8 @@ impl DelegationExecutionRequest {
             result_spec,
             member: DelegationMemberOptions::default(),
             parent: None,
+            source: DelegationExecutionSource::Fresh,
+            delivery_identity: None,
             live_admission: None,
         }
     }
@@ -111,8 +146,45 @@ impl DelegationExecutionRequest {
             result_spec,
             member: DelegationMemberOptions::default(),
             parent: None,
+            source: DelegationExecutionSource::Fresh,
+            delivery_identity: None,
             live_admission: Some(admission),
         }
+    }
+
+    /// Execute on a real durable fork of `source_identity`.
+    ///
+    /// `message_count=None` selects the exact committed transcript end while
+    /// the persistent session owner holds its mutation guard.
+    #[must_use]
+    pub fn with_durable_fork(
+        mut self,
+        source_identity: AgentIdentity,
+        message_count: Option<usize>,
+    ) -> Self {
+        self.source = DelegationExecutionSource::DurableFork {
+            source_identity,
+            message_count,
+        };
+        self
+    }
+
+    #[must_use]
+    pub fn source(&self) -> &DelegationExecutionSource {
+        &self.source
+    }
+
+    /// Bind exact durable work admission independently of the legacy live
+    /// delegation lifecycle. Responses bridge callers derive this carrier
+    /// from their sealed operation and interaction identities.
+    #[must_use]
+    pub fn with_delivery_identity(
+        mut self,
+        identity: MobDeliveryIdentity,
+        interaction_id: InteractionId,
+    ) -> Self {
+        self.delivery_identity = Some((identity, interaction_id));
+        self
     }
 }
 
@@ -418,6 +490,8 @@ impl DelegationExecutionService {
             result_spec,
             member,
             parent,
+            source,
+            delivery_identity,
             live_admission,
         } = request;
 
@@ -448,8 +522,65 @@ impl DelegationExecutionService {
                 })
             })
             .transpose()?;
+        let explicit_delivery_identity = delivery_identity
+            .as_ref()
+            .map(|(identity, interaction_id)| {
+                identity
+                    .validate()
+                    .map_err(|error| DelegationExecutionError::WorkAdmission {
+                        error: MobError::Internal(format!(
+                            "delegation delivery identity rejected: {error}"
+                        )),
+                        retirement_error: None,
+                    })?;
+                if identity.correlation_id != interaction_id.to_string() {
+                    return Err(DelegationExecutionError::WorkAdmission {
+                        error: MobError::Internal(
+                            "delegation delivery identity does not match its typed interaction"
+                                .to_string(),
+                        ),
+                        retirement_error: None,
+                    });
+                }
+                Ok(identity.clone())
+            })
+            .transpose()?;
+        if live_delivery_identity.is_some() && explicit_delivery_identity.is_some() {
+            return Err(DelegationExecutionError::WorkAdmission {
+                error: MobError::Internal(
+                    "delegation cannot carry both live and explicit delivery authority".to_string(),
+                ),
+                retirement_error: None,
+            });
+        }
+        let exact_delivery_identity = live_delivery_identity.or(explicit_delivery_identity);
+        let delivery_interaction_id = live_admission
+            .as_ref()
+            .map(meerkat_runtime::live_execution::LiveDelegationExecutionAdmission::interaction_id)
+            .or_else(|| {
+                delivery_identity
+                    .as_ref()
+                    .map(|(_, interaction_id)| *interaction_id)
+            });
 
-        let mut spec = SpawnMemberSpec::new(ProfileName::from("delegate"), identity.clone());
+        let role = match &source {
+            DelegationExecutionSource::Fresh => ProfileName::from("delegate"),
+            DelegationExecutionSource::DurableFork {
+                source_identity, ..
+            } => {
+                let roster = self.handle.roster().await;
+                roster
+                    .get_by_identity(source_identity)
+                    .map(|entry| entry.role.clone())
+                    .ok_or_else(|| {
+                        DelegationExecutionError::Spawn(MobError::ForkSourceUnavailable {
+                            source_member_id: source_identity.to_string(),
+                            cause: crate::error::ForkSourceUnavailableCause::NoSession,
+                        })
+                    })?
+            }
+        };
+        let mut spec = SpawnMemberSpec::new(role, identity.clone());
         spec.initial_message = None;
         spec.runtime_mode = Some(MobRuntimeMode::TurnDriven);
         spec.auto_wire_parent = false;
@@ -463,11 +594,28 @@ impl DelegationExecutionService {
             .as_ref()
             .map(meerkat_runtime::live_execution::LiveDelegationExecutionAdmission::tool_dispatch_admission);
 
-        let spawn = self
-            .handle
-            .spawn_spec(spec)
-            .await
-            .map_err(DelegationExecutionError::Spawn)?;
+        let spawn = match source {
+            DelegationExecutionSource::Fresh => self
+                .handle
+                .spawn_spec(spec)
+                .await
+                .map_err(DelegationExecutionError::Spawn)?,
+            DelegationExecutionSource::DurableFork {
+                source_identity,
+                message_count,
+            } => {
+                // Reuse the durable-fork constituent of
+                // `fork_member_then_run_bounded`, while retaining a started
+                // turn handle so generated callers can keep terminal custody
+                // and retirement as separate lifecycle steps.
+                let fork = self
+                    .handle
+                    .fork_member(&source_identity, spec, message_count)
+                    .await
+                    .map_err(DelegationExecutionError::Spawn)?;
+                SpawnResult::new(fork.agent_identity, fork.agent_runtime_id, fork.fence_token)
+            }
+        };
 
         let wired = match parent.as_ref() {
             Some(parent) => self.wire_parent(&identity, parent).await,
@@ -478,10 +626,10 @@ impl DelegationExecutionService {
         if let Some(objective_id) = member.objective_id {
             work = work.with_objective_id(objective_id);
         }
-        if let Some(admission) = live_admission.as_ref() {
-            work = work.with_interaction_id(admission.interaction_id());
+        if let Some(interaction_id) = delivery_interaction_id {
+            work = work.with_interaction_id(interaction_id);
         }
-        let turn_result = if let Some(delivery_identity) = live_delivery_identity {
+        let turn_result = if let Some(delivery_identity) = exact_delivery_identity {
             self.handle
                 .start_work_for_identity_with_delivery_identity_bounded(
                     identity.clone(),

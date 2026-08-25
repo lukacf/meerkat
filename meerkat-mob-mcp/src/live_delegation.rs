@@ -26,18 +26,19 @@ use meerkat_live::{
 use meerkat_mob::{
     AgentIdentity, BoundedResultSpec, DelegationCancellationHandle, DelegationExecutionHandle,
     DelegationExecutionRequest, DelegationExecutionService, DelegationTerminalizedExecution,
-    DelegationTurnTerminal, LiveBridgeExecutionSnapshot, LiveBridgeOperationTerminal,
-    MobDeliveryIdentity, render_bounded_delegation_task,
+    DelegationTurnTerminal, DurableBoundedMemberState, DurableBoundedWorkState,
+    LiveBridgeExecutionSnapshot, LiveBridgeOperationTerminal, MobDeliveryIdentity,
+    render_bounded_delegation_task,
 };
 use meerkat_runtime::live_execution::{
     LiveBridgeExecutionTerminalReceipt, LiveBridgeOperationAdmission,
-    LiveBridgeRecoveredSubmissionReceipt, LiveBridgeSubmissionAttemptAuthority,
-    LiveBridgeSubmissionAuthority, LiveBridgeSubmissionReceipt,
-    LiveDelegationCancellationDirective, LiveDelegationCancellationOutcome,
-    LiveDelegationExecutionAdmission, LiveDelegationResultDeliveryAuthority,
-    LiveDelegationResultDeliveryObservation, LiveDelegationResultDeliveryResolution,
-    LiveDelegationResultReleaseAuthority, LiveDelegationWorkerTerminalKind,
-    LiveHandoffReconciliationReceipt,
+    LiveBridgeRecoveredSubmissionReceipt, LiveBridgeRecoveredTerminalReceipt,
+    LiveBridgeSubmissionAttemptAuthority, LiveBridgeSubmissionAuthority,
+    LiveBridgeSubmissionReceipt, LiveDelegationCancellationDirective,
+    LiveDelegationCancellationOutcome, LiveDelegationExecutionAdmission,
+    LiveDelegationResultDeliveryAuthority, LiveDelegationResultDeliveryObservation,
+    LiveDelegationResultDeliveryResolution, LiveDelegationResultReleaseAuthority,
+    LiveDelegationWorkerTerminalKind, LiveHandoffReconciliationReceipt,
 };
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, oneshot};
@@ -53,6 +54,8 @@ const LIVE_BRIDGE_EXECUTION_RESULT_DIGEST_DOMAIN: &[u8] =
     b"meerkat.live-bridge-execution-result.v1\0";
 const LIVE_BRIDGE_SUBMISSION_OUTPUT_DIGEST_DOMAIN: &[u8] =
     b"meerkat.live-bridge-submission-output.v1\0";
+const RESPONSES_RESTART_OBSERVE_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(50);
 
 type ActiveChannelKey = (SessionId, meerkat_core::LiveChannelId);
 
@@ -178,6 +181,54 @@ where
     }
 }
 
+enum LiveBridgeTerminalCommit {
+    Active(LiveBridgeExecutionTerminalReceipt),
+    Revoked(LiveBridgeRecoveredTerminalReceipt),
+}
+
+async fn record_live_bridge_terminal_across_revocation(
+    runtime: &meerkat_runtime::MeerkatMachine,
+    admission: &LiveBridgeOperationAdmission,
+    terminal: meerkat_core::MeerkatExecutionTerminal,
+    result_digest: Option<&str>,
+) -> Result<LiveBridgeTerminalCommit, meerkat_runtime::RuntimeDriverError> {
+    let channel_id = admission.operation().domain_correlation().channel_id();
+    if runtime
+        .live_channel_is_active_for_session(admission.session_id(), channel_id)
+        .await
+    {
+        match record_live_bridge_terminal_with_typed_recovery(|| {
+            runtime.record_live_bridge_execution_terminal(admission, terminal, result_digest)
+        })
+        .await
+        {
+            Ok(receipt) => return Ok(LiveBridgeTerminalCommit::Active(receipt)),
+            Err(error) => {
+                if runtime
+                    .live_channel_is_active_for_session(admission.session_id(), channel_id)
+                    .await
+                {
+                    return Err(error);
+                }
+            }
+        }
+    }
+
+    let snapshots = runtime
+        .live_bridge_recovery_snapshots(admission.session_id())
+        .await?;
+    let snapshot = snapshots
+        .iter()
+        .find(|snapshot| snapshot.operation() == admission.operation())
+        .ok_or_else(|| meerkat_runtime::RuntimeDriverError::ValidationFailed {
+            reason: "revoked live bridge lost its durable operation snapshot".to_string(),
+        })?;
+    runtime
+        .reconcile_revoked_live_bridge_execution_terminal(snapshot, terminal, result_digest)
+        .await
+        .map(LiveBridgeTerminalCommit::Revoked)
+}
+
 struct PreparedResponsesExecution {
     admission: Arc<LiveBridgeOperationAdmission>,
     mob_handle: meerkat_mob::MobHandle,
@@ -217,6 +268,35 @@ fn responses_executor_outcome_receipt(
 pub struct ExperimentalLiveBridgeExecutionCompletion {
     terminal: LiveBridgeExecutionTerminalReceipt,
     output: Option<String>,
+}
+
+/// Read-only restart reconciliation outcome for one durable Responses bridge
+/// operation. This carries no provider send or work admission authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ExperimentalResponsesRestartDisposition {
+    NoExecutorBeforeFinalInput,
+    InFlight,
+    OutcomeProjected { completed: bool },
+    Broken { reason: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExperimentalResponsesRestartReport {
+    operation_id: OperationId,
+    disposition: ExperimentalResponsesRestartDisposition,
+}
+
+impl ExperimentalResponsesRestartReport {
+    #[must_use]
+    pub fn operation_id(&self) -> &OperationId {
+        &self.operation_id
+    }
+
+    #[must_use]
+    pub fn disposition(&self) -> &ExperimentalResponsesRestartDisposition {
+        &self.disposition
+    }
 }
 
 impl ExperimentalLiveBridgeExecutionCompletion {
@@ -514,6 +594,25 @@ pub fn compose_experimental_live_delegation_coordinator(
 }
 
 impl ExperimentalLiveDelegationCoordinator {
+    fn classify_absent_responses_executor(
+        member: DurableBoundedMemberState,
+        phase: meerkat_core::LiveBridgeOperationPhase,
+    ) -> ExperimentalResponsesRestartDisposition {
+        match member {
+            DurableBoundedMemberState::Absent
+                if phase == meerkat_core::LiveBridgeOperationPhase::PreFinalInference =>
+            {
+                ExperimentalResponsesRestartDisposition::NoExecutorBeforeFinalInput
+            }
+            DurableBoundedMemberState::Absent => ExperimentalResponsesRestartDisposition::Broken {
+                reason: "final-input bridge operation has no durable executor child".to_string(),
+            },
+            _ => ExperimentalResponsesRestartDisposition::Broken {
+                reason: "durable executor child exists without stable work admission".to_string(),
+            },
+        }
+    }
+
     pub fn new(
         runtime: Arc<meerkat_runtime::MeerkatMachine>,
         mobs: Arc<crate::MobMcpState>,
@@ -540,6 +639,265 @@ impl ExperimentalLiveDelegationCoordinator {
     #[must_use]
     pub const fn responses_executor_available(&self) -> bool {
         true
+    }
+
+    async fn reconcile_one_responses_snapshot(
+        &self,
+        mob_handle: &meerkat_mob::MobHandle,
+        snapshot: &meerkat_runtime::live_execution::LiveBridgeRecoverySnapshot,
+        observe_until: tokio::time::Instant,
+    ) -> ExperimentalResponsesRestartDisposition {
+        let operation_id = snapshot.operation().operation_id();
+        let child_identity = AgentIdentity::from(format!("live-executor:{operation_id}"));
+        let interaction_id = snapshot.operation().domain_correlation().interaction_id();
+        let delivery_identity =
+            match MobDeliveryIdentity::new(operation_id.to_string(), interaction_id.to_string()) {
+                Ok(identity) => identity,
+                Err(error) => {
+                    return ExperimentalResponsesRestartDisposition::Broken {
+                        reason: format!("recovered durable delivery identity is invalid: {error}"),
+                    };
+                }
+            };
+        let result_spec =
+            match BoundedResultSpec::new("gpt_live_responses", LIVE_DELEGATION_RESULT_BYTES) {
+                Ok(spec) => spec,
+                Err(error) => {
+                    return ExperimentalResponsesRestartDisposition::Broken {
+                        reason: format!(
+                            "recovered bounded result specification is invalid: {error}"
+                        ),
+                    };
+                }
+            };
+
+        loop {
+            let recovery = match mob_handle
+                .recover_bounded_work_for_identity_with_delivery_identity(
+                    &child_identity,
+                    &delivery_identity,
+                    &result_spec,
+                )
+                .await
+            {
+                Ok(recovery) => recovery,
+                Err(error) => {
+                    return ExperimentalResponsesRestartDisposition::Broken {
+                        reason: format!("durable executor recovery observation failed: {error}"),
+                    };
+                }
+            };
+            let (member, work) = recovery.into_parts();
+            match work {
+                DurableBoundedWorkState::Absent => {
+                    return Self::classify_absent_responses_executor(member, snapshot.phase());
+                }
+                DurableBoundedWorkState::Broken { reason, .. } => {
+                    return ExperimentalResponsesRestartDisposition::Broken { reason };
+                }
+                DurableBoundedWorkState::InFlight { .. } => {
+                    if tokio::time::Instant::now() >= observe_until {
+                        return ExperimentalResponsesRestartDisposition::InFlight;
+                    }
+                    tokio::time::sleep(RESPONSES_RESTART_OBSERVE_INTERVAL).await;
+                }
+                DurableBoundedWorkState::Terminal { result, .. } => {
+                    let (executor_terminal, executor_output, bridge_terminal) = match result {
+                        Ok(turn) => {
+                            let output = turn.result().text().to_string();
+                            let bridge_terminal = match LiveBridgeOperationTerminal::completed(
+                                &output,
+                                LIVE_DELEGATION_RESULT_BYTES,
+                            ) {
+                                Ok(terminal) => terminal,
+                                Err(error) => {
+                                    return ExperimentalResponsesRestartDisposition::Broken {
+                                        reason: format!(
+                                            "recovered executor result violates bridge bound: {error}"
+                                        ),
+                                    };
+                                }
+                            };
+                            (
+                                DurableExecutorTerminalKind::Completed,
+                                Some(output),
+                                bridge_terminal,
+                            )
+                        }
+                        Err(_error) => (
+                            DurableExecutorTerminalKind::Failed,
+                            None,
+                            LiveBridgeOperationTerminal::without_output(
+                                meerkat_core::MeerkatExecutionTerminal::Failed,
+                            )
+                            .expect("failure terminal has no output"),
+                        ),
+                    };
+                    let recovered_digest = live_bridge_execution_result_digest(&bridge_terminal);
+                    if let Some(committed_terminal) = snapshot.terminal()
+                        && committed_terminal != bridge_terminal.terminal()
+                    {
+                        return ExperimentalResponsesRestartDisposition::Broken {
+                            reason: "recovered executor terminal conflicts with committed bridge terminal"
+                                .to_string(),
+                        };
+                    }
+                    if let Some(committed_digest) = snapshot.result_digest()
+                        && recovered_digest.as_deref() != Some(committed_digest)
+                    {
+                        return ExperimentalResponsesRestartDisposition::Broken {
+                            reason:
+                                "recovered executor output conflicts with committed bridge digest"
+                                    .to_string(),
+                        };
+                    }
+                    if snapshot.terminal().is_none()
+                        && let Err(error) = self
+                            .runtime
+                            .reconcile_revoked_live_bridge_execution_terminal(
+                                snapshot,
+                                bridge_terminal.terminal(),
+                                recovered_digest.as_deref(),
+                            )
+                            .await
+                    {
+                        return ExperimentalResponsesRestartDisposition::Broken {
+                            reason: format!(
+                                "recovered executor terminal remains uncommitted: {error}"
+                            ),
+                        };
+                    }
+                    let receipt_text = responses_executor_outcome_receipt(
+                        operation_id,
+                        executor_terminal,
+                        executor_output.as_deref(),
+                    );
+                    let projection = meerkat_core::service::AppendSystemContextRequest {
+                        content: meerkat_core::lifecycle::run_primitive::CoreRenderable::text(
+                            receipt_text,
+                        ),
+                        source: Some(format!("gpt-live-responses:{operation_id}")),
+                        idempotency_key: Some(format!("gpt-live-responses-outcome:{operation_id}")),
+                    };
+                    if let Err(error) = self
+                        .mobs
+                        .session_service()
+                        .append_system_context(snapshot.session_id(), projection)
+                        .await
+                    {
+                        return ExperimentalResponsesRestartDisposition::Broken {
+                            reason: format!(
+                                "durable executor outcome projection remains pending: {error}"
+                            ),
+                        };
+                    }
+                    if matches!(
+                        member,
+                        DurableBoundedMemberState::Active { .. }
+                            | DurableBoundedMemberState::Retiring { .. }
+                    ) && let Err(error) = mob_handle.retire(child_identity.clone()).await
+                    {
+                        return ExperimentalResponsesRestartDisposition::Broken {
+                            reason: format!(
+                                "durable executor outcome projected with retirement debt: {error}"
+                            ),
+                        };
+                    }
+                    return ExperimentalResponsesRestartDisposition::OutcomeProjected {
+                        completed: executor_terminal == DurableExecutorTerminalKind::Completed,
+                    };
+                }
+                _ => {
+                    return ExperimentalResponsesRestartDisposition::Broken {
+                        reason: "durable executor recovery returned an unsupported work state"
+                            .to_string(),
+                    };
+                }
+            }
+        }
+    }
+
+    /// Reconcile Responses executor work whose process-local waiter was lost.
+    ///
+    /// Stale provider channels are abandoned before child observation, which
+    /// fences every output send and classifies an escaped write as ambiguous.
+    /// Work is never submitted, spawned, or retried here. An in-flight input
+    /// is observed only until `observation_bound` expires.
+    pub async fn reconcile_responses_after_restart(
+        &self,
+        observation_bound: std::time::Duration,
+    ) -> Result<Vec<ExperimentalResponsesRestartReport>, String> {
+        let handles = self
+            .mobs
+            .mob_handles_snapshot()
+            .await
+            .map_err(|error| error.to_string())?;
+        let mut recovered = Vec::new();
+        let mut seen_sessions = std::collections::HashSet::new();
+        let observe_until = tokio::time::Instant::now() + observation_bound;
+        for (_, mob_handle) in handles {
+            for member in mob_handle.list_members_including_retiring().await {
+                let source_identity = member.agent_identity;
+                let Some(session_id) = mob_handle.resolve_bridge_session_id(&source_identity).await
+                else {
+                    continue;
+                };
+                if !seen_sessions.insert(session_id.clone()) {
+                    continue;
+                }
+                let snapshots = self
+                    .runtime
+                    .live_bridge_recovery_snapshots(&session_id)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                for mut snapshot in snapshots {
+                    if snapshot.source_agent_identity() != source_identity.as_str() {
+                        continue;
+                    }
+                    let channel_id = snapshot
+                        .operation()
+                        .domain_correlation()
+                        .channel_id()
+                        .clone();
+                    if self
+                        .runtime
+                        .live_channel_is_active_for_session(&session_id, &channel_id)
+                        .await
+                    {
+                        self.runtime
+                            .abandon_live_open_admission(&session_id, &channel_id)
+                            .await
+                            .map_err(|error| {
+                                format!(
+                                    "failed to fence stale live channel '{}' before recovery: {error}",
+                                    channel_id
+                                )
+                            })?;
+                    } else if snapshot.terminal().is_none()
+                        && snapshot.cancellation_reason().is_none()
+                    {
+                        snapshot = self
+                            .runtime
+                            .fence_restored_live_bridge_operation_for_restart(&snapshot)
+                            .await
+                            .map_err(|error| {
+                                format!(
+                                    "failed to fence restored live bridge operation '{}' before executor observation: {error}",
+                                    snapshot.operation().operation_id()
+                                )
+                            })?;
+                    }
+                    let disposition = self
+                        .reconcile_one_responses_snapshot(&mob_handle, &snapshot, observe_until)
+                        .await;
+                    recovered.push(ExperimentalResponsesRestartReport {
+                        operation_id: snapshot.operation().operation_id().clone(),
+                        disposition,
+                    });
+                }
+            }
+        }
+        Ok(recovered)
     }
 
     /// Capture the exact durable-member Session clone before machine
@@ -692,6 +1050,11 @@ impl ExperimentalLiveDelegationCoordinator {
         let committed_message_count = evidence.committed_message_count().ok_or_else(|| {
             "committed final input is missing its exact transcript boundary".to_string()
         })?;
+        let _start_authority = self
+            .runtime
+            .authorize_live_bridge_execution_start(admission.as_ref())
+            .await
+            .map_err(|error| error.to_string())?;
 
         let execution = prepared
             .remove(&operation_id)
@@ -720,21 +1083,27 @@ impl ExperimentalLiveDelegationCoordinator {
                     meerkat_core::MeerkatExecutionTerminal::Failed,
                 )
                 .map_err(|terminal_error| terminal_error.to_string())?;
-                let receipt = record_live_bridge_terminal_with_typed_recovery(|| {
-                    self.runtime.record_live_bridge_execution_terminal(
-                        admission.as_ref(),
-                        terminal.terminal(),
-                        None,
-                    )
-                })
+                let committed = record_live_bridge_terminal_across_revocation(
+                    self.runtime.as_ref(),
+                    admission.as_ref(),
+                    terminal.terminal(),
+                    None,
+                )
                 .await
                 .map_err(|record_error| record_error.to_string())?;
-                let _ = execution
-                    .completion
-                    .send(Ok(ExperimentalLiveBridgeExecutionCompletion {
-                        terminal: receipt,
-                        output: None,
-                    }));
+                let waiter_outcome = match committed {
+                    LiveBridgeTerminalCommit::Active(receipt) => {
+                        Ok(ExperimentalLiveBridgeExecutionCompletion {
+                            terminal: receipt,
+                            output: None,
+                        })
+                    }
+                    LiveBridgeTerminalCommit::Revoked(receipt) => Err(format!(
+                        "provider channel was revoked; executor start failure was durably reconciled for operation {} without submission authority",
+                        receipt.operation().operation_id()
+                    )),
+                };
+                let _ = execution.completion.send(waiter_outcome);
                 return Err(format!("durable live executor fork failed: {error}"));
             }
         };
@@ -820,20 +1189,31 @@ impl ExperimentalLiveDelegationCoordinator {
                 retirement_error: retirement_error.clone(),
             });
             drop(custody);
-            let outcome = record_live_bridge_terminal_with_typed_recovery(|| {
-                runtime.record_live_bridge_execution_terminal(
-                    task_admission.as_ref(),
-                    bridge_terminal.terminal(),
-                    result_digest.as_deref(),
-                )
-            })
-            .await
-            .map(|receipt| ExperimentalLiveBridgeExecutionCompletion {
-                terminal: receipt,
-                output: provider_output_after_delivery_fence(bridge_terminal, delivery_fenced),
-            })
-            .map_err(|error| error.to_string());
-            if outcome.is_ok() && retirement_error.is_none() {
+            let committed = record_live_bridge_terminal_across_revocation(
+                runtime.as_ref(),
+                task_admission.as_ref(),
+                bridge_terminal.terminal(),
+                result_digest.as_deref(),
+            )
+            .await;
+            let terminal_committed = committed.is_ok();
+            let outcome = match committed {
+                Ok(LiveBridgeTerminalCommit::Active(receipt)) => {
+                    Ok(ExperimentalLiveBridgeExecutionCompletion {
+                        terminal: receipt,
+                        output: provider_output_after_delivery_fence(
+                            bridge_terminal,
+                            delivery_fenced,
+                        ),
+                    })
+                }
+                Ok(LiveBridgeTerminalCommit::Revoked(receipt)) => Err(format!(
+                    "provider channel was revoked; executor terminal was durably reconciled for operation {} without submission authority",
+                    receipt.operation().operation_id()
+                )),
+                Err(error) => Err(error.to_string()),
+            };
+            if terminal_committed && retirement_error.is_none() {
                 task_terminal_custody.lock().await.take();
                 active.lock().await.remove(&task_operation_id);
             } else if let Some(error) = retirement_error.as_deref() {
@@ -2930,5 +3310,24 @@ mod tests {
             .await;
         assert_eq!(outcome, Some(Err("partially realized")));
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn running_bridge_without_durable_child_is_broken_and_never_replayable() {
+        let disposition = ExperimentalLiveDelegationCoordinator::classify_absent_responses_executor(
+            DurableBoundedMemberState::Absent,
+            meerkat_core::LiveBridgeOperationPhase::ExecutionRunning,
+        );
+        assert!(matches!(
+            disposition,
+            ExperimentalResponsesRestartDisposition::Broken { .. }
+        ));
+        assert!(matches!(
+            ExperimentalLiveDelegationCoordinator::classify_absent_responses_executor(
+                DurableBoundedMemberState::Absent,
+                meerkat_core::LiveBridgeOperationPhase::PreFinalInference,
+            ),
+            ExperimentalResponsesRestartDisposition::NoExecutorBeforeFinalInput
+        ));
     }
 }

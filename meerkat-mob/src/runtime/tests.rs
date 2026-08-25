@@ -8247,6 +8247,25 @@ async fn create_test_mob(definition: MobDefinition) -> (MobHandle, Arc<MockSessi
     (handle, service)
 }
 
+async fn create_persistent_runtime_test_mob(
+    definition: MobDefinition,
+) -> (MobHandle, Arc<MockSessionService>) {
+    let service = Arc::new(MockSessionService::new());
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+    let adapter = Arc::new(meerkat_runtime::MeerkatMachine::persistent_without_blobs(
+        runtime_store,
+    ));
+    service.set_runtime_adapter(adapter);
+    let storage = MobStorage::in_memory();
+    let handle = MobBuilder::new(definition, storage.clone())
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create persistent-runtime test mob");
+    (handle, service)
+}
+
 #[cfg(feature = "experimental-gpt-live")]
 #[tokio::test]
 async fn callback_bearing_member_is_available_as_durable_fork_source_but_not_direct_bridge() {
@@ -20596,6 +20615,152 @@ async fn delegation_execution_service_runs_on_a_real_durable_fork_and_retires_on
         Some(source_session_id),
         "durable delegation must not perturb the canonical source binding"
     );
+}
+
+#[tokio::test]
+async fn durable_bounded_work_recovery_preserves_exact_terminal_after_child_retirement() {
+    let definition = with_unique_mob_id(sample_definition(), "durable-bounded-recovery-terminal");
+    let (handle, service) = create_persistent_runtime_test_mob(definition).await;
+    service.set_return_exact_run_result(true);
+    let source_identity = AgentIdentity::from("durable-recovery-source");
+    handle
+        .spawn(
+            ProfileName::from("worker"),
+            source_identity.clone(),
+            Some(ContentInput::Text("durable recovery context".to_string())),
+        )
+        .await
+        .expect("spawn durable recovery source");
+    let child_identity = AgentIdentity::from("durable-recovery-child");
+    let interaction_id = InteractionId::new();
+    let delivery_identity = MobDeliveryIdentity::new(
+        "bridge-operation:durable-recovery",
+        interaction_id.to_string(),
+    )
+    .expect("valid durable recovery identity");
+    let result_spec = BoundedResultSpec::new("durable-recovery", 256)
+        .expect("valid durable recovery result bound");
+    let request = DelegationExecutionRequest::new(
+        child_identity.clone(),
+        "recover this exact ordinary child result",
+        result_spec.clone(),
+    )
+    .with_durable_fork(source_identity, None)
+    .with_delivery_identity(delivery_identity.clone(), interaction_id);
+    let delegation_service = DelegationExecutionService::new(handle.clone());
+    let execution = delegation_service
+        .start(request)
+        .await
+        .expect("start durable recovery child");
+    let terminalized = execution.await_terminal().await;
+
+    let active = handle
+        .recover_bounded_work_for_identity_with_delivery_identity(
+            &child_identity,
+            &delivery_identity,
+            &result_spec,
+        )
+        .await
+        .expect("observe active child work after terminal waiter resolution");
+    assert!(matches!(
+        active.member(),
+        DurableBoundedMemberState::Active { .. }
+    ));
+    assert!(
+        matches!(
+            active.work(),
+            DurableBoundedWorkState::InFlight { .. } | DurableBoundedWorkState::Terminal { .. }
+        ),
+        "active child observation is read-only and may precede terminal receipt finalization"
+    );
+
+    delegation_service
+        .retire_terminalized(&terminalized)
+        .await
+        .expect("retire durable recovery child");
+    let retired = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let recovery = handle
+                .recover_bounded_work_for_identity_with_delivery_identity(
+                    &child_identity,
+                    &delivery_identity,
+                    &result_spec,
+                )
+                .await
+                .expect("recover retired child terminal");
+            if matches!(recovery.work(), DurableBoundedWorkState::Terminal { .. }) {
+                break recovery;
+            }
+            assert!(
+                matches!(recovery.work(), DurableBoundedWorkState::InFlight { .. }),
+                "retired child terminal recovery must converge through InFlight only"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("retired child terminal recovery converges within the bound");
+    assert!(matches!(
+        retired.member(),
+        DurableBoundedMemberState::Retired { .. }
+    ));
+    let DurableBoundedWorkState::Terminal { result, .. } = retired.work() else {
+        panic!("retired child must retain its exact terminal completion");
+    };
+    assert_eq!(
+        result
+            .as_ref()
+            .expect("retired exact bounded result")
+            .result()
+            .text(),
+        "recover this exact ordinary child result"
+    );
+}
+
+#[tokio::test]
+async fn durable_bounded_work_recovery_marks_retired_child_without_input_broken() {
+    let definition = with_unique_mob_id(sample_definition(), "durable-bounded-recovery-broken");
+    let (handle, _service) = create_test_mob(definition).await;
+    let child_identity = AgentIdentity::from("retired-without-work");
+    handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            child_identity.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn child without work");
+    handle
+        .retire(child_identity.clone())
+        .await
+        .expect("retire child without work");
+    let interaction_id = InteractionId::new();
+    let delivery_identity = MobDeliveryIdentity::new(
+        "bridge-operation:never-admitted",
+        interaction_id.to_string(),
+    )
+    .expect("valid absent delivery identity");
+    let result_spec =
+        BoundedResultSpec::new("never-admitted", 256).expect("valid absent result bound");
+
+    let recovery = handle
+        .recover_bounded_work_for_identity_with_delivery_identity(
+            &child_identity,
+            &delivery_identity,
+            &result_spec,
+        )
+        .await
+        .expect("observe retired child without work");
+    assert!(matches!(
+        recovery.member(),
+        DurableBoundedMemberState::Retired { .. }
+    ));
+    assert!(matches!(
+        recovery.work(),
+        DurableBoundedWorkState::Broken { input_id: None, .. }
+    ));
 }
 
 #[tokio::test]

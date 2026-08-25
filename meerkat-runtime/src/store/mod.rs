@@ -29,7 +29,8 @@ use crate::runtime_state::RuntimeState;
 const LEGACY_MACHINE_LIFECYCLE_STORE_RECORD_VERSION: u16 = 1;
 const SUPERVISOR_MACHINE_LIFECYCLE_STORE_RECORD_VERSION: u16 = 2;
 const UNREGISTER_MACHINE_LIFECYCLE_STORE_RECORD_VERSION: u16 = 3;
-pub(crate) const MACHINE_LIFECYCLE_STORE_RECORD_VERSION: u16 = 4;
+const RUN_MACHINE_LIFECYCLE_STORE_RECORD_VERSION: u16 = 4;
+pub(crate) const MACHINE_LIFECYCLE_STORE_RECORD_VERSION: u16 = 5;
 
 /// Maximum number of exact input-state rows admitted by one compare-and-swap
 /// boundary. Directed-terminal outbox batches share the same 256-row bound as
@@ -5380,6 +5381,7 @@ pub struct DecodedMachineLifecycleObservation {
     run: MachineLifecycleRunFacts,
     supervisor_authority: SupervisorAuthoritySnapshot,
     unregister_progress: Option<MachineUnregisterProgressSnapshot>,
+    live_bridge_recovery: crate::live_execution::LiveBridgeRecoveryImage,
 }
 
 impl DecodedMachineLifecycleObservation {
@@ -5411,6 +5413,10 @@ impl DecodedMachineLifecycleObservation {
     #[must_use]
     pub fn unregister_progress(&self) -> Option<&MachineUnregisterProgressSnapshot> {
         self.unregister_progress.as_ref()
+    }
+
+    pub(crate) fn live_bridge_recovery(&self) -> &crate::live_execution::LiveBridgeRecoveryImage {
+        &self.live_bridge_recovery
     }
 }
 
@@ -5610,6 +5616,7 @@ pub struct MachineLifecycleSnapshot {
     run: MachineLifecycleRunFacts,
     supervisor_authority: SupervisorAuthoritySnapshot,
     unregister_progress: Option<MachineUnregisterProgressSnapshot>,
+    live_bridge_recovery: crate::live_execution::LiveBridgeRecoveryImage,
 }
 
 /// Durable generated unregister-saga progress needed to resume an interrupted
@@ -5693,12 +5700,31 @@ impl MachineLifecycleSnapshot {
         supervisor_authority: SupervisorAuthoritySnapshot,
         unregister_progress: Option<MachineUnregisterProgressSnapshot>,
     ) -> Self {
+        Self::new_with_run_unregister_progress_and_live_bridge(
+            runtime_state,
+            binding,
+            run,
+            supervisor_authority,
+            unregister_progress,
+            crate::live_execution::LiveBridgeRecoveryImage::default(),
+        )
+    }
+
+    pub(crate) fn new_with_run_unregister_progress_and_live_bridge(
+        runtime_state: RuntimeState,
+        binding: MachineLifecycleBindingFacts,
+        run: MachineLifecycleRunFacts,
+        supervisor_authority: SupervisorAuthoritySnapshot,
+        unregister_progress: Option<MachineUnregisterProgressSnapshot>,
+        live_bridge_recovery: crate::live_execution::LiveBridgeRecoveryImage,
+    ) -> Self {
         Self {
             runtime_state,
             binding,
             run,
             supervisor_authority,
             unregister_progress,
+            live_bridge_recovery,
         }
     }
 
@@ -5723,6 +5749,10 @@ impl MachineLifecycleSnapshot {
 
     pub fn unregister_progress(&self) -> Option<&MachineUnregisterProgressSnapshot> {
         self.unregister_progress.as_ref()
+    }
+
+    pub(crate) fn live_bridge_recovery(&self) -> &crate::live_execution::LiveBridgeRecoveryImage {
+        &self.live_bridge_recovery
     }
 }
 
@@ -5836,6 +5866,24 @@ struct MachineLifecycleSnapshotStoreWire {
     pre_run_phase: Option<MachineLifecyclePreRunPhase>,
     supervisor_authority: SupervisorAuthoritySnapshotStoreWire,
     unregister_progress: Option<MachineUnregisterProgressSnapshotStoreWire>,
+    live_bridge_recovery: crate::live_execution::LiveBridgeRecoveryImage,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MachineLifecycleObservationStoreWireV5 {
+    record_version: u16,
+    #[serde(default, deserialize_with = "deserialize_present_nullable")]
+    runtime_state: Option<Option<RuntimeState>>,
+    binding: MachineLifecycleBindingFactsStoreWire,
+    #[serde(default, deserialize_with = "deserialize_present_nullable")]
+    current_run_id: Option<Option<RunId>>,
+    #[serde(default, deserialize_with = "deserialize_present_nullable")]
+    pre_run_phase: Option<Option<MachineLifecyclePreRunPhase>>,
+    supervisor_authority: SupervisorAuthoritySnapshotStoreWire,
+    #[serde(default, deserialize_with = "deserialize_present_nullable")]
+    unregister_progress: Option<Option<MachineUnregisterProgressSnapshotStoreWire>>,
+    live_bridge_recovery: crate::live_execution::LiveBridgeRecoveryImage,
 }
 
 #[derive(serde::Deserialize)]
@@ -6615,6 +6663,7 @@ impl From<&MachineLifecycleSnapshot> for MachineLifecycleSnapshotStoreWire {
             pre_run_phase: snapshot.run().pre_run_phase(),
             supervisor_authority: snapshot.supervisor_authority().into(),
             unregister_progress: snapshot.unregister_progress().map(Into::into),
+            live_bridge_recovery: snapshot.live_bridge_recovery().clone(),
         }
     }
 }
@@ -6667,7 +6716,7 @@ fn decode_machine_lifecycle_observation_v4(
 ) -> Result<DecodedMachineLifecycleObservation, RuntimeStoreError> {
     let record = serde_json::from_slice::<MachineLifecycleObservationStoreWireV4>(bytes)
         .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?;
-    if record.record_version != MACHINE_LIFECYCLE_STORE_RECORD_VERSION {
+    if record.record_version != RUN_MACHINE_LIFECYCLE_STORE_RECORD_VERSION {
         return Err(RuntimeStoreError::ReadFailed(format!(
             "unsupported machine lifecycle store record version {}",
             record.record_version
@@ -6687,6 +6736,40 @@ fn decode_machine_lifecycle_observation_v4(
         run: MachineLifecycleRunFacts::new(current_run_id, pre_run_phase),
         supervisor_authority: record.supervisor_authority.try_into()?,
         unregister_progress,
+        live_bridge_recovery: crate::live_execution::LiveBridgeRecoveryImage::default(),
+    })
+}
+
+fn decode_machine_lifecycle_observation_v5(
+    bytes: &[u8],
+) -> Result<DecodedMachineLifecycleObservation, RuntimeStoreError> {
+    let record = serde_json::from_slice::<MachineLifecycleObservationStoreWireV5>(bytes)
+        .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?;
+    if record.record_version != MACHINE_LIFECYCLE_STORE_RECORD_VERSION {
+        return Err(RuntimeStoreError::ReadFailed(format!(
+            "unsupported machine lifecycle store record version {}",
+            record.record_version
+        )));
+    }
+    let runtime_state = require_present_nullable(record.runtime_state, "runtime_state")?;
+    let current_run_id = require_present_nullable(record.current_run_id, "current_run_id")?;
+    let pre_run_phase = require_present_nullable(record.pre_run_phase, "pre_run_phase")?;
+    let unregister_progress =
+        require_present_nullable(record.unregister_progress, "unregister_progress")?
+            .map(Into::into);
+    validate_unregister_progress_snapshot(unregister_progress.as_ref())?;
+    record
+        .live_bridge_recovery
+        .validate_bound()
+        .map_err(RuntimeStoreError::ReadFailed)?;
+    Ok(DecodedMachineLifecycleObservation {
+        record_version: record.record_version,
+        runtime_state,
+        binding: record.binding.try_into()?,
+        run: MachineLifecycleRunFacts::new(current_run_id, pre_run_phase),
+        supervisor_authority: record.supervisor_authority.try_into()?,
+        unregister_progress,
+        live_bridge_recovery: record.live_bridge_recovery,
     })
 }
 
@@ -6701,6 +6784,7 @@ fn decoded_machine_lifecycle_from_snapshot(
         run: snapshot.run,
         supervisor_authority: snapshot.supervisor_authority,
         unregister_progress: snapshot.unregister_progress,
+        live_bridge_recovery: snapshot.live_bridge_recovery,
     }
 }
 
@@ -6745,7 +6829,7 @@ fn decode_machine_lifecycle_store_record(
                 .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?;
             MachineLifecycleSnapshot::try_from(record)
         }
-        MACHINE_LIFECYCLE_STORE_RECORD_VERSION => {
+        RUN_MACHINE_LIFECYCLE_STORE_RECORD_VERSION => {
             let record = decode_machine_lifecycle_observation_v4(bytes)?;
             let runtime_state = record.runtime_state.ok_or_else(|| {
                 RuntimeStoreError::ReadFailed(
@@ -6759,6 +6843,24 @@ fn decode_machine_lifecycle_store_record(
                     record.run,
                     record.supervisor_authority,
                     record.unregister_progress,
+                ),
+            )
+        }
+        MACHINE_LIFECYCLE_STORE_RECORD_VERSION => {
+            let record = decode_machine_lifecycle_observation_v5(bytes)?;
+            let runtime_state = record.runtime_state.ok_or_else(|| {
+                RuntimeStoreError::ReadFailed(
+                    "machine lifecycle runtime_state cannot be null for strict recovery".into(),
+                )
+            })?;
+            Ok(
+                MachineLifecycleSnapshot::new_with_run_unregister_progress_and_live_bridge(
+                    runtime_state,
+                    record.binding,
+                    record.run,
+                    record.supervisor_authority,
+                    record.unregister_progress,
+                    record.live_bridge_recovery,
                 ),
             )
         }
@@ -6800,6 +6902,7 @@ fn classify_machine_lifecycle_record(bytes: &[u8]) -> MachineLifecycleObservatio
         u64::from(LEGACY_MACHINE_LIFECYCLE_STORE_RECORD_VERSION),
         u64::from(SUPERVISOR_MACHINE_LIFECYCLE_STORE_RECORD_VERSION),
         u64::from(UNREGISTER_MACHINE_LIFECYCLE_STORE_RECORD_VERSION),
+        u64::from(RUN_MACHINE_LIFECYCLE_STORE_RECORD_VERSION),
         u64::from(MACHINE_LIFECYCLE_STORE_RECORD_VERSION),
     ];
     if !supported.contains(&record_version) {
@@ -6811,6 +6914,8 @@ fn classify_machine_lifecycle_record(bytes: &[u8]) -> MachineLifecycleObservatio
     }
 
     let decoded = if record_version == u64::from(MACHINE_LIFECYCLE_STORE_RECORD_VERSION) {
+        decode_machine_lifecycle_observation_v5(bytes)
+    } else if record_version == u64::from(RUN_MACHINE_LIFECYCLE_STORE_RECORD_VERSION) {
         decode_machine_lifecycle_observation_v4(bytes)
     } else {
         decode_machine_lifecycle_store_record(bytes).map(|snapshot| {
@@ -7220,13 +7325,32 @@ impl MachineLifecycleCommit {
         supervisor_authority: SupervisorAuthoritySnapshot,
         unregister_progress: Option<MachineUnregisterProgressSnapshot>,
     ) -> Self {
+        Self::new_with_binding_run_unregister_progress_and_live_bridge(
+            runtime_state,
+            binding,
+            run,
+            supervisor_authority,
+            unregister_progress,
+            crate::live_execution::LiveBridgeRecoveryImage::default(),
+        )
+    }
+
+    pub(crate) fn new_with_binding_run_unregister_progress_and_live_bridge(
+        runtime_state: RuntimeState,
+        binding: MachineLifecycleBindingFacts,
+        run: MachineLifecycleRunFacts,
+        supervisor_authority: SupervisorAuthoritySnapshot,
+        unregister_progress: Option<MachineUnregisterProgressSnapshot>,
+        live_bridge_recovery: crate::live_execution::LiveBridgeRecoveryImage,
+    ) -> Self {
         Self {
-            snapshot: MachineLifecycleSnapshot::new_with_run_and_unregister_progress(
+            snapshot: MachineLifecycleSnapshot::new_with_run_unregister_progress_and_live_bridge(
                 runtime_state,
                 binding,
                 run,
                 supervisor_authority,
                 unregister_progress,
+                live_bridge_recovery,
             ),
             expected_version: None,
         }

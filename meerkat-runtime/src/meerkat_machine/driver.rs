@@ -6569,6 +6569,18 @@ fn registered_runtime_authority_from_converged_record_id(
             "independent supervisor custody recovery",
         ),
     })?;
+    let mut recovered_state = authority.state().clone();
+    record
+        .live_bridge_recovery()
+        .restore_into(&mut recovered_state)
+        .map_err(|reason| RuntimeDriverError::RecoveryCorruption { reason })?;
+    authority =
+        crate::meerkat_machine::dsl::MeerkatMachineAuthority::recover_from_state(recovered_state)
+            .map_err(|error| RuntimeDriverError::RecoveryCorruption {
+            reason: format!(
+                "generated live bridge recovery image violates machine invariants: {error}"
+            ),
+        })?;
     Ok(ReconciledRuntimeAuthority {
         authority,
         unregister_progress: record.unregister_progress().cloned(),
@@ -6655,29 +6667,34 @@ async fn reconcile_runtime_authority_for_cold_recovery_id(
                     }
                     None => crate::store::MachineLifecycleExpectedVersion::Missing,
                 };
-                let (supervisor_authority, unregister_progress) = match &observed {
-                    crate::store::MachineLifecycleObservation::Decoded { record, .. } => (
-                        record.supervisor_authority().clone(),
-                        record.unregister_progress().cloned(),
-                    ),
-                    crate::store::MachineLifecycleObservation::Missing => (
-                        crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
-                        None,
-                    ),
-                    crate::store::MachineLifecycleObservation::Unsupported { .. }
-                    | crate::store::MachineLifecycleObservation::Malformed { .. } => {
-                        return Err(RuntimeDriverError::Internal(
+                let (supervisor_authority, unregister_progress, live_bridge_recovery) =
+                    match &observed {
+                        crate::store::MachineLifecycleObservation::Decoded { record, .. } => (
+                            record.supervisor_authority().clone(),
+                            record.unregister_progress().cloned(),
+                            record.live_bridge_recovery().clone(),
+                        ),
+                        crate::store::MachineLifecycleObservation::Missing => (
+                            crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+                            None,
+                            crate::live_execution::LiveBridgeRecoveryImage::default(),
+                        ),
+                        crate::store::MachineLifecycleObservation::Unsupported { .. }
+                        | crate::store::MachineLifecycleObservation::Malformed { .. } => {
+                            return Err(RuntimeDriverError::Internal(
                             "runtime-authority classifier selected normalization for unsafe opaque evidence"
                                 .to_string(),
                         ));
-                    }
-                };
+                        }
+                    };
                 let replacement =
-                    crate::store::MachineLifecycleCommit::new_with_binding_and_unregister_progress(
+                    crate::store::MachineLifecycleCommit::new_with_binding_run_unregister_progress_and_live_bridge(
                         RuntimeState::Idle,
                         crate::store::MachineLifecycleBindingFacts::default(),
+                        crate::store::MachineLifecycleRunFacts::default(),
                         supervisor_authority,
                         unregister_progress,
+                        live_bridge_recovery,
                     );
                 match store
                     .compare_and_swap_machine_lifecycle(runtime_id, expected, replacement)

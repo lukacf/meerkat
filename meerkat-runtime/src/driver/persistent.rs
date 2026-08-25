@@ -1072,11 +1072,13 @@ impl PersistentRuntimeDriver {
         supervisor_authority: crate::store::SupervisorAuthoritySnapshot,
     ) -> Result<MachineLifecycleCommit, RuntimeDriverError> {
         Ok(
-            MachineLifecycleCommit::new_with_binding_and_unregister_progress(
+            MachineLifecycleCommit::new_with_binding_run_unregister_progress_and_live_bridge(
                 Self::runtime_state_for_persistence_from_inner(&self.inner)?,
                 self.inner.machine_lifecycle_binding_facts(),
+                crate::store::MachineLifecycleRunFacts::default(),
                 supervisor_authority,
                 Self::unregister_progress_for_persistence_from_inner(&self.inner),
+                Self::live_bridge_recovery_for_persistence_from_inner(&self.inner)?,
             ),
         )
     }
@@ -1085,11 +1087,13 @@ impl PersistentRuntimeDriver {
         inner: &EphemeralRuntimeDriver,
     ) -> Result<MachineLifecycleCommit, RuntimeDriverError> {
         Ok(
-            MachineLifecycleCommit::new_with_binding_and_unregister_progress(
+            MachineLifecycleCommit::new_with_binding_run_unregister_progress_and_live_bridge(
                 Self::runtime_state_for_persistence_from_inner(inner)?,
                 inner.machine_lifecycle_binding_facts(),
+                crate::store::MachineLifecycleRunFacts::default(),
                 inner.supervisor_authority_snapshot(),
                 Self::unregister_progress_for_persistence_from_inner(inner),
+                Self::live_bridge_recovery_for_persistence_from_inner(inner)?,
             ),
         )
     }
@@ -1154,6 +1158,22 @@ impl PersistentRuntimeDriver {
                     state.unregister_runtime_loop_forced_abort,
                     state.unregister_comms_drain_forced_abort,
                 )
+            },
+        )
+    }
+
+    fn live_bridge_recovery_for_persistence_from_inner(
+        inner: &EphemeralRuntimeDriver,
+    ) -> Result<crate::live_execution::LiveBridgeRecoveryImage, RuntimeDriverError> {
+        let authority = inner.shared_dsl_authority();
+        let authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::live_execution::LiveBridgeRecoveryImage::capture(authority.state()).map_err(
+            |reason| {
+                RuntimeDriverError::Internal(format!(
+                    "generated live bridge recovery image is invalid: {reason}"
+                ))
             },
         )
     }

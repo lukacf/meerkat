@@ -346,6 +346,7 @@ pub struct LiveExecutionCapabilities {
 pub enum LiveBridgeOperationPhase {
     PreFinalInference,
     FinalInputAuthorized,
+    ExecutionRunning,
     CancellationAuthorized,
     ExecutionTerminal,
 }

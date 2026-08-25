@@ -3126,6 +3126,93 @@ impl std::fmt::Display for BoundedTurnFailure {
 
 impl std::error::Error for BoundedTurnFailure {}
 
+/// Durable member lifecycle observed while reconciling one caller-identified
+/// bounded work item.
+///
+/// This is an observation only. It carries no spawn, retirement, or work
+/// admission authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DurableBoundedMemberState {
+    Absent,
+    Active {
+        session_id: SessionId,
+    },
+    Retiring {
+        session_id: SessionId,
+    },
+    Retired {
+        session_id: SessionId,
+    },
+    Broken {
+        session_id: Option<SessionId>,
+        reason: String,
+    },
+}
+
+impl DurableBoundedMemberState {
+    #[must_use]
+    pub fn session_id(&self) -> Option<&SessionId> {
+        match self {
+            Self::Absent => None,
+            Self::Active { session_id }
+            | Self::Retiring { session_id }
+            | Self::Retired { session_id } => Some(session_id),
+            Self::Broken { session_id, .. } => session_id.as_ref(),
+        }
+    }
+}
+
+/// Exact durable work fact recovered by stable delivery identity.
+///
+/// `Terminal` is produced only from the runtime's persisted exact completion
+/// receipt and passes through the same bounded validation as the live waiter.
+/// `Absent` never means retryable. The caller decides whether absence is
+/// expected for the independently observed member lifecycle.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum DurableBoundedWorkState {
+    Absent,
+    InFlight {
+        input_id: meerkat_core::InputId,
+        phase: meerkat_runtime::InputLifecycleState,
+    },
+    Terminal {
+        input_id: meerkat_core::InputId,
+        result: Result<BoundedTurnResult, BoundedTurnFailure>,
+    },
+    Broken {
+        input_id: Option<meerkat_core::InputId>,
+        reason: String,
+    },
+}
+
+/// Read-only recovery projection for one deterministic child and one stable
+/// bounded work delivery.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct DurableBoundedWorkRecovery {
+    member: DurableBoundedMemberState,
+    work: DurableBoundedWorkState,
+}
+
+impl DurableBoundedWorkRecovery {
+    #[must_use]
+    pub fn member(&self) -> &DurableBoundedMemberState {
+        &self.member
+    }
+
+    #[must_use]
+    pub fn work(&self) -> &DurableBoundedWorkState {
+        &self.work
+    }
+
+    #[must_use]
+    pub fn into_parts(self) -> (DurableBoundedMemberState, DurableBoundedWorkState) {
+        (self.member, self.work)
+    }
+}
+
 /// A bounded wait failure paired with the admission receipt for the exact
 /// operation that failed.
 #[derive(Debug)]
@@ -9638,6 +9725,204 @@ impl MobHandle {
     // -----------------------------------------------------------------
     // Work lane
     // -----------------------------------------------------------------
+
+    async fn durable_bounded_member_state(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<DurableBoundedMemberState, MobError> {
+        let machine_state = self.machine_state_watch_rx.borrow().clone();
+        let lifecycle = Self::member_lifecycle_from_machine_state(identity, &machine_state);
+        let current_session =
+            Self::machine_bridge_session_id_for_identity(identity, &machine_state);
+
+        match lifecycle.status {
+            mob_dsl::MobMemberLifecycleStatus::Active => {
+                return Ok(current_session.map_or_else(
+                    || DurableBoundedMemberState::Broken {
+                        session_id: None,
+                        reason: "active member has no machine-owned bridge session".to_string(),
+                    },
+                    |session_id| DurableBoundedMemberState::Active { session_id },
+                ));
+            }
+            mob_dsl::MobMemberLifecycleStatus::Retiring => {
+                if let Some(session_id) = current_session {
+                    return Ok(DurableBoundedMemberState::Retiring { session_id });
+                }
+            }
+            mob_dsl::MobMemberLifecycleStatus::Broken => {
+                let diagnostic = self.restore_failure_for(identity).await;
+                return Ok(DurableBoundedMemberState::Broken {
+                    session_id: diagnostic
+                        .as_ref()
+                        .and_then(|diagnostic| diagnostic.bridge_session_id.clone()),
+                    reason: lifecycle
+                        .error
+                        .or_else(|| diagnostic.map(|diagnostic| diagnostic.reason))
+                        .unwrap_or_else(|| {
+                            "member restore failed without a diagnostic".to_string()
+                        }),
+                });
+            }
+            mob_dsl::MobMemberLifecycleStatus::Completed
+            | mob_dsl::MobMemberLifecycleStatus::Unknown => {}
+        }
+
+        let mut observed = DurableBoundedMemberState::Absent;
+        for event in self.events().replay_all().await? {
+            match event.kind {
+                crate::event::MobEventKind::MemberSpawned(spawned)
+                    if &spawned.agent_identity == identity =>
+                {
+                    observed = spawned
+                        .bridge_member_ref()
+                        .and_then(crate::event::MemberRef::bridge_session_id)
+                        .cloned()
+                        .map_or_else(
+                            || DurableBoundedMemberState::Broken {
+                                session_id: None,
+                                reason: "durable member spawn has no recoverable bridge session"
+                                    .to_string(),
+                            },
+                            |session_id| DurableBoundedMemberState::Active { session_id },
+                        );
+                }
+                crate::event::MobEventKind::MemberRetirementStarted {
+                    agent_identity,
+                    releasing,
+                    session_id,
+                    ..
+                } if &agent_identity == identity => {
+                    let retained_session = session_id
+                        .or(releasing)
+                        .or_else(|| observed.session_id().cloned());
+                    observed = retained_session.map_or_else(
+                        || DurableBoundedMemberState::Broken {
+                            session_id: None,
+                            reason: "durable member retirement has no recoverable bridge session"
+                                .to_string(),
+                        },
+                        |session_id| DurableBoundedMemberState::Retiring { session_id },
+                    );
+                }
+                crate::event::MobEventKind::MemberRetired { agent_identity, .. }
+                    if &agent_identity == identity =>
+                {
+                    observed = observed.session_id().cloned().map_or_else(
+                        || DurableBoundedMemberState::Broken {
+                            session_id: None,
+                            reason: "retired durable member lost its bridge session correlation"
+                                .to_string(),
+                        },
+                        |session_id| DurableBoundedMemberState::Retired { session_id },
+                    );
+                }
+                _ => {}
+            }
+        }
+        Ok(observed)
+    }
+
+    /// Recover one deterministic member's exact bounded work fact by the
+    /// caller's stable delivery identity.
+    ///
+    /// This method is strictly observational. It never spawns a member,
+    /// submits or retries work, registers a completion waiter, or mutates the
+    /// member lifecycle. `Absent` therefore carries no retry implication.
+    #[cfg(feature = "runtime-adapter")]
+    pub async fn recover_bounded_work_for_identity_with_delivery_identity(
+        &self,
+        identity: &AgentIdentity,
+        delivery_identity: &crate::store::MobDeliveryIdentity,
+        result_spec: &BoundedResultSpec,
+    ) -> Result<DurableBoundedWorkRecovery, MobError> {
+        delivery_identity.validate()?;
+        let member = self.durable_bounded_member_state(identity).await?;
+        let Some(session_id) = member.session_id().cloned() else {
+            let work = match &member {
+                DurableBoundedMemberState::Absent => DurableBoundedWorkState::Absent,
+                DurableBoundedMemberState::Broken { reason, .. } => {
+                    DurableBoundedWorkState::Broken {
+                        input_id: None,
+                        reason: reason.clone(),
+                    }
+                }
+                _ => DurableBoundedWorkState::Broken {
+                    input_id: None,
+                    reason: "durable member lifecycle lost its session correlation".to_string(),
+                },
+            };
+            return Ok(DurableBoundedWorkRecovery { member, work });
+        };
+        let Some(runtime) = self.runtime_adapter.as_ref() else {
+            return Ok(DurableBoundedWorkRecovery {
+                member,
+                work: DurableBoundedWorkState::Broken {
+                    input_id: None,
+                    reason: "runtime adapter is unavailable for durable work recovery".to_string(),
+                },
+            });
+        };
+        use meerkat_runtime::service_ext::SessionServiceRuntimeExt as _;
+        let stored = match runtime
+            .input_state_by_idempotency_key(&session_id, &delivery_identity.idempotency_key)
+            .await
+        {
+            Ok(stored) => stored,
+            Err(error) => {
+                return Ok(DurableBoundedWorkRecovery {
+                    member,
+                    work: DurableBoundedWorkState::Broken {
+                        input_id: None,
+                        reason: format!("durable work identity lookup failed: {error}"),
+                    },
+                });
+            }
+        };
+        let Some(stored) = stored else {
+            let work = if matches!(member, DurableBoundedMemberState::Retired { .. }) {
+                DurableBoundedWorkState::Broken {
+                    input_id: None,
+                    reason: "retired member has no input for the stable delivery identity"
+                        .to_string(),
+                }
+            } else {
+                DurableBoundedWorkState::Absent
+            };
+            return Ok(DurableBoundedWorkRecovery { member, work });
+        };
+        let input_id = stored.state.input_id.clone();
+        let completion = match runtime
+            .input_terminal_completion(&session_id, &input_id)
+            .await
+        {
+            Ok(Some(completion)) => completion,
+            Ok(None) => {
+                return Ok(DurableBoundedWorkRecovery {
+                    member,
+                    work: DurableBoundedWorkState::InFlight {
+                        input_id,
+                        phase: stored.seed.phase,
+                    },
+                });
+            }
+            Err(error) => {
+                return Ok(DurableBoundedWorkRecovery {
+                    member,
+                    work: DurableBoundedWorkState::Broken {
+                        input_id: Some(input_id),
+                        reason: format!("durable terminal completion lookup failed: {error}"),
+                    },
+                });
+            }
+        };
+        let result =
+            bounded_runtime_turn_result(completion, &session_id, session_id.clone(), result_spec);
+        Ok(DurableBoundedWorkRecovery {
+            member,
+            work: DurableBoundedWorkState::Terminal { input_id, result },
+        })
+    }
 
     /// Submit a unit of work to a mob member.
     ///

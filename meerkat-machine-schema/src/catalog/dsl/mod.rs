@@ -1188,6 +1188,7 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 &[
                     "PreFinalInference",
                     "FinalInputAuthorized",
+                    "ExecutionRunning",
                     "CancellationAuthorized",
                     "ExecutionTerminal",
                 ],

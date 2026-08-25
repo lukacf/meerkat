@@ -2535,6 +2535,27 @@ fn live_bridge_is_prefinal_fail_closed_and_submission_recovery_never_resends() {
     )
     .expect("final-input authority unlocks consequential effect selection");
 
+    let start = apply(
+        &mut authority,
+        mm::MeerkatMachineInput::AuthorizeLiveBridgeExecutionStart {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: INTERACTION.to_string(),
+            operation_id: bridge_operation_id(),
+            request_digest: "request-digest-without-text-equivalence".to_string(),
+        },
+    )
+    .expect("generated authority marks exact durable execution start");
+    assert!(start.effects().iter().any(|effect| matches!(
+        effect,
+        mm::MeerkatMachineEffect::LiveBridgeExecutionStartAuthorized {
+            phase: mm::LiveBridgeOperationPhase::ExecutionRunning,
+            ..
+        }
+    )));
+
     let terminal = apply(
         &mut authority,
         mm::MeerkatMachineInput::RecordLiveBridgeExecutionTerminal {
@@ -2653,6 +2674,119 @@ fn live_bridge_is_prefinal_fail_closed_and_submission_recovery_never_resends() {
         )
         .is_err(),
         "recovery never reissues transport authority"
+    );
+}
+
+#[test]
+fn revoked_running_bridge_reconciles_physical_terminal_without_submission_authority() {
+    let mut authority = opened_authority();
+    prepare_live_bridge_lineage(&mut authority);
+    admit_live_bridge(&mut authority);
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::ConfirmLiveBridgeFinalInput {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: INTERACTION.to_string(),
+            operation_id: bridge_operation_id(),
+            provider_turn_ref: PROVIDER_TURN.to_string(),
+        },
+    )
+    .expect("confirm exact final input");
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::AuthorizeLiveBridgeExecutionStart {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: INTERACTION.to_string(),
+            operation_id: bridge_operation_id(),
+            request_digest: "request-digest-without-text-equivalence".to_string(),
+        },
+    )
+    .expect("cross exact durable execution start boundary");
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::AbandonLiveOpenAdmission {
+            session_id: SESSION.to_string(),
+            channel_id: CHANNEL.to_string(),
+        },
+    )
+    .expect("revoke provider channel while physical execution remains running");
+    assert_eq!(
+        authority
+            .state()
+            .live_bridge_phase_by_operation
+            .get(&bridge_operation_id()),
+        Some(&mm::LiveBridgeOperationPhase::ExecutionRunning)
+    );
+    assert_eq!(
+        authority
+            .state()
+            .live_bridge_cancellation_reason_by_operation
+            .get(&bridge_operation_id()),
+        Some(&mm::LiveBridgeCancellationReason::ChannelClose)
+    );
+    assert!(
+        !authority
+            .state()
+            .live_bridge_execution_terminal_by_operation
+            .contains_key(&bridge_operation_id()),
+        "source cancellation must not fabricate a physical executor terminal"
+    );
+
+    let recovered = apply(
+        &mut authority,
+        mm::MeerkatMachineInput::ReconcileRevokedLiveBridgeExecutionTerminal {
+            channel_id: CHANNEL.to_string(),
+            interaction_id: INTERACTION.to_string(),
+            operation_id: bridge_operation_id(),
+            request_digest: "request-digest-without-text-equivalence".to_string(),
+            terminal: mm::MeerkatExecutionTerminal::Completed,
+            result_digest: Some("recovered-result-digest".to_string()),
+        },
+    )
+    .expect("reconcile exact late physical terminal");
+    assert!(recovered.effects().iter().any(|effect| matches!(
+        effect,
+        mm::MeerkatMachineEffect::LiveBridgeExecutionTerminalRecorded { replay: false, .. }
+    )));
+    let replay = apply(
+        &mut authority,
+        mm::MeerkatMachineInput::ReconcileRevokedLiveBridgeExecutionTerminal {
+            channel_id: CHANNEL.to_string(),
+            interaction_id: INTERACTION.to_string(),
+            operation_id: bridge_operation_id(),
+            request_digest: "request-digest-without-text-equivalence".to_string(),
+            terminal: mm::MeerkatExecutionTerminal::Completed,
+            result_digest: Some("recovered-result-digest".to_string()),
+        },
+    )
+    .expect("exact late terminal replay is idempotent");
+    assert!(replay.effects().iter().any(|effect| matches!(
+        effect,
+        mm::MeerkatMachineEffect::LiveBridgeExecutionTerminalRecorded { replay: true, .. }
+    )));
+    assert!(
+        apply(
+            &mut authority,
+            mm::MeerkatMachineInput::AuthorizeLiveBridgeSubmission {
+                channel_id: CHANNEL.to_string(),
+                runtime_id: runtime_id(),
+                fence_token: fence(),
+                generation: generation(),
+                interaction_id: INTERACTION.to_string(),
+                operation_id: bridge_operation_id(),
+                provider_call_ref: "opaque-call".to_string(),
+                output_kind: mm::LiveBridgeOutputKind::Success,
+                output_digest: "recovered-result-digest".to_string(),
+            },
+        )
+        .is_err(),
+        "late terminal reconciliation cannot mint provider submission authority"
     );
 }
 

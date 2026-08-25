@@ -163,12 +163,13 @@ mod live_context_mirror_tests {
         }
     }
 
-    async fn prepared_experimental_live_machine() -> (
+    async fn prepared_experimental_live_machine_on(
+        machine: crate::MeerkatMachine,
+    ) -> (
         crate::MeerkatMachine,
         SessionId,
         meerkat_live::LiveChannelId,
     ) {
-        let machine = crate::MeerkatMachine::ephemeral();
         let session_id = SessionId::new();
         machine
             .register_session(session_id.clone())
@@ -207,6 +208,14 @@ mod live_context_mirror_tests {
             .await
             .expect("admit exact live channel");
         (machine, session_id, channel_id)
+    }
+
+    async fn prepared_experimental_live_machine() -> (
+        crate::MeerkatMachine,
+        SessionId,
+        meerkat_live::LiveChannelId,
+    ) {
+        prepared_experimental_live_machine_on(crate::MeerkatMachine::ephemeral()).await
     }
 
     async fn stage_experimental_live_machine(
@@ -305,11 +314,31 @@ mod live_context_mirror_tests {
         (machine, session_id, channel_id)
     }
 
-    async fn admitted_live_bridge_operation() -> (
+    async fn bound_experimental_live_machine_on(
+        machine: crate::MeerkatMachine,
+        canonical_seed_cursor: u64,
+    ) -> (
+        crate::MeerkatMachine,
+        SessionId,
+        meerkat_live::LiveChannelId,
+    ) {
+        let (machine, session_id, channel_id) =
+            prepared_experimental_live_machine_on(machine).await;
+        stage_experimental_live_machine(&machine, &session_id, &channel_id, canonical_seed_cursor)
+            .await;
+        bind_experimental_live_machine(&machine, &session_id, &channel_id, canonical_seed_cursor)
+            .await;
+        (machine, session_id, channel_id)
+    }
+
+    async fn admitted_live_bridge_operation_on(
+        machine: crate::MeerkatMachine,
+    ) -> (
         crate::MeerkatMachine,
         crate::live_execution::LiveBridgeOperationAdmission,
     ) {
-        let (machine, session_id, channel_id) = bound_experimental_live_machine(0).await;
+        let (machine, session_id, channel_id) =
+            bound_experimental_live_machine_on(machine, 0).await;
         let state = machine
             .session_dsl_state(&session_id)
             .await
@@ -365,6 +394,59 @@ mod live_context_mirror_tests {
         (machine, admission)
     }
 
+    async fn admitted_live_bridge_operation() -> (
+        crate::MeerkatMachine,
+        crate::live_execution::LiveBridgeOperationAdmission,
+    ) {
+        admitted_live_bridge_operation_on(crate::MeerkatMachine::ephemeral()).await
+    }
+
+    async fn confirm_test_live_bridge_final_input(
+        machine: &crate::MeerkatMachine,
+        admission: &crate::live_execution::LiveBridgeOperationAdmission,
+    ) {
+        let binding = admission.binding();
+        let correlation = admission.operation().domain_correlation();
+        machine
+            .apply_session_dsl_input(
+                admission.session_id(),
+                crate::meerkat_machine::dsl::MeerkatMachineInput::ConfirmLiveBridgeFinalInput {
+                    channel_id: binding.channel_id().to_string(),
+                    runtime_id: crate::meerkat_machine::dsl::AgentRuntimeId::from_domain(
+                        binding.runtime_id(),
+                    ),
+                    fence_token: crate::meerkat_machine::dsl::FenceToken(binding.fence_token()),
+                    generation: crate::meerkat_machine::dsl::Generation(binding.generation()),
+                    interaction_id: correlation.interaction_id().to_string(),
+                    operation_id: crate::meerkat_machine::dsl::OperationId::from_domain(
+                        admission.operation().operation_id(),
+                    ),
+                    provider_turn_ref: correlation.provider().provider_turn_ref().to_string(),
+                },
+                "test:ConfirmLiveBridgeFinalInput",
+            )
+            .await
+            .expect("confirm exact final input");
+        machine
+            .persist_live_bridge_recovery_state(
+                admission.session_id(),
+                "test:ConfirmLiveBridgeFinalInput",
+            )
+            .await
+            .expect("persist exact final input");
+    }
+
+    async fn authorize_test_live_bridge_execution_start(
+        machine: &crate::MeerkatMachine,
+        admission: &crate::live_execution::LiveBridgeOperationAdmission,
+    ) {
+        confirm_test_live_bridge_final_input(machine, admission).await;
+        machine
+            .authorize_live_bridge_execution_start(admission)
+            .await
+            .expect("authorize exact durable execution start");
+    }
+
     #[tokio::test]
     async fn live_bridge_terminal_commit_backoff_retry_returns_exact_replay_receipt() {
         let (machine, admission) = admitted_live_bridge_operation().await;
@@ -382,6 +464,21 @@ mod live_context_mirror_tests {
             .await
             .expect_err("the injected post-commit failure must surface as recovery backoff");
         assert!(matches!(first, RuntimeDriverError::RecoveryBackoff { .. }));
+
+        let escaped = machine
+            .live_bridge_recovery_snapshots(admission.session_id())
+            .await
+            .expect("read durable bridge projection after escaped commit");
+        assert_eq!(escaped.len(), 1);
+        let escaped = &escaped[0];
+        assert_eq!(escaped.operation(), admission.operation());
+        assert_eq!(
+            escaped.terminal(),
+            Some(meerkat_core::MeerkatExecutionTerminal::Completed),
+            "read-only recovery must observe a commit whose receipt dispatch escaped"
+        );
+        assert_eq!(escaped.result_digest(), Some("sha256:terminal-result"));
+        assert_eq!(escaped.source_agent_identity(), "test-durable-member");
 
         let replay = machine
             .record_live_bridge_execution_terminal(
@@ -410,6 +507,724 @@ mod live_context_mirror_tests {
             mismatch,
             RuntimeDriverError::ValidationFailed { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn live_bridge_recovery_snapshot_fences_claimed_submission_without_resend_authority() {
+        let (machine, admission) = admitted_live_bridge_operation().await;
+        authorize_test_live_bridge_execution_start(&machine, &admission).await;
+        let terminal = machine
+            .record_live_bridge_execution_terminal(
+                &admission,
+                meerkat_core::MeerkatExecutionTerminal::Completed,
+                Some("sha256:completed-output"),
+            )
+            .await
+            .expect("record bridge terminal");
+        let submission = machine
+            .authorize_live_bridge_submission(
+                &terminal,
+                meerkat_core::LiveBridgeOutputKind::Success,
+                "sha256:provider-output",
+            )
+            .await
+            .expect("authorize exact provider submission");
+        let _escaped_attempt = machine
+            .claim_live_bridge_submission_attempt(&submission)
+            .await
+            .expect("consume the sole provider send attempt");
+
+        let channel_id = admission.operation().domain_correlation().channel_id();
+        machine
+            .abandon_live_open_admission(admission.session_id(), channel_id)
+            .await
+            .expect("restart abandons stale channel without provider IO");
+
+        let snapshots = machine
+            .live_bridge_recovery_snapshots(admission.session_id())
+            .await
+            .expect("read abandoned bridge snapshot");
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(
+            snapshots[0].submission_state(),
+            Some(meerkat_core::LiveBridgeSubmissionState::SubmissionAmbiguous),
+            "a consumed attempt is terminally ambiguous and cannot be resent"
+        );
+        assert_eq!(
+            snapshots[0].terminal(),
+            Some(meerkat_core::MeerkatExecutionTerminal::Completed),
+            "channel abandonment must not rewrite the physical executor terminal"
+        );
+    }
+
+    #[tokio::test]
+    async fn live_bridge_abandon_before_execution_start_records_physical_cancelled() {
+        let (machine, admission) = admitted_live_bridge_operation().await;
+        let channel_id = admission.operation().domain_correlation().channel_id();
+        machine
+            .abandon_live_open_admission(admission.session_id(), channel_id)
+            .await
+            .expect("abandon pre-execution bridge");
+
+        let snapshots = machine
+            .live_bridge_recovery_snapshots(admission.session_id())
+            .await
+            .expect("read pre-execution abandonment");
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(
+            snapshots[0].terminal(),
+            Some(meerkat_core::MeerkatExecutionTerminal::Cancelled)
+        );
+        assert_eq!(
+            snapshots[0].phase(),
+            meerkat_core::LiveBridgeOperationPhase::ExecutionTerminal
+        );
+    }
+
+    #[tokio::test]
+    async fn live_bridge_revoked_running_execution_reconciles_terminal_exactly_once() {
+        let (machine, admission) = admitted_live_bridge_operation().await;
+        authorize_test_live_bridge_execution_start(&machine, &admission).await;
+        let channel_id = admission.operation().domain_correlation().channel_id();
+        machine
+            .abandon_live_open_admission(admission.session_id(), channel_id)
+            .await
+            .expect("fence running bridge before recovery");
+
+        let snapshots = machine
+            .live_bridge_recovery_snapshots(admission.session_id())
+            .await
+            .expect("read fenced running bridge");
+        assert_eq!(snapshots.len(), 1);
+        let snapshot = &snapshots[0];
+        assert_eq!(snapshot.terminal(), None);
+        assert_eq!(
+            snapshot.phase(),
+            meerkat_core::LiveBridgeOperationPhase::ExecutionRunning
+        );
+        assert_eq!(snapshot.submission_state(), None);
+
+        let first = machine
+            .reconcile_revoked_live_bridge_execution_terminal(
+                snapshot,
+                meerkat_core::MeerkatExecutionTerminal::Completed,
+                Some("sha256:recovered-physical-result"),
+            )
+            .await
+            .expect("record exact recovered physical terminal");
+        assert!(!first.replayed());
+        let replay = machine
+            .reconcile_revoked_live_bridge_execution_terminal(
+                snapshot,
+                meerkat_core::MeerkatExecutionTerminal::Completed,
+                Some("sha256:recovered-physical-result"),
+            )
+            .await
+            .expect("exact recovery replay is idempotent");
+        assert!(replay.replayed());
+
+        let settled = machine
+            .live_bridge_recovery_snapshots(admission.session_id())
+            .await
+            .expect("read reconciled physical terminal");
+        assert_eq!(
+            settled[0].terminal(),
+            Some(meerkat_core::MeerkatExecutionTerminal::Completed)
+        );
+        assert_eq!(
+            settled[0].result_digest(),
+            Some("sha256:recovered-physical-result")
+        );
+        assert_eq!(settled[0].submission_state(), None);
+        assert!(
+            !machine
+                .live_channel_is_active_for_session(admission.session_id(), channel_id)
+                .await,
+            "terminal reconciliation must not reopen provider submission custody"
+        );
+    }
+
+    #[tokio::test]
+    async fn live_bridge_close_after_start_before_start_failure_reconciles_failed() {
+        let (machine, admission) = admitted_live_bridge_operation().await;
+        authorize_test_live_bridge_execution_start(&machine, &admission).await;
+        let channel_id = admission.operation().domain_correlation().channel_id();
+        machine
+            .abandon_live_open_admission(admission.session_id(), channel_id)
+            .await
+            .expect("close channel after execution start authority");
+        let snapshot = machine
+            .live_bridge_recovery_snapshots(admission.session_id())
+            .await
+            .expect("read start-failure recovery snapshot")
+            .pop()
+            .expect("one bridge operation");
+
+        let failed = machine
+            .reconcile_revoked_live_bridge_execution_terminal(
+                &snapshot,
+                meerkat_core::MeerkatExecutionTerminal::Failed,
+                None,
+            )
+            .await
+            .expect("reconcile executor start failure after channel close");
+        assert_eq!(
+            failed.terminal(),
+            meerkat_core::MeerkatExecutionTerminal::Failed
+        );
+        assert_eq!(failed.result_digest(), None);
+        let settled = machine
+            .live_bridge_recovery_snapshots(admission.session_id())
+            .await
+            .expect("read failed physical terminal");
+        assert_eq!(
+            settled[0].terminal(),
+            Some(meerkat_core::MeerkatExecutionTerminal::Failed)
+        );
+        assert_eq!(settled[0].submission_state(), None);
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "sqlite-store"))]
+    #[tokio::test]
+    async fn live_bridge_recovery_snapshot_and_terminal_survive_cold_restart() {
+        let dir = tempfile::TempDir::new().expect("temporary runtime store");
+        let path = dir.path().join("live-bridge-restart.sqlite3");
+        let (session_id, operation, ambiguous_session_id, ambiguous_operation) = {
+            let store = std::sync::Arc::new(
+                crate::store::SqliteRuntimeStore::new(path.clone())
+                    .expect("create sqlite runtime store"),
+            ) as std::sync::Arc<dyn crate::store::RuntimeStore>;
+            let machine = crate::MeerkatMachine::persistent_without_blobs(store);
+            let (machine, admission) = admitted_live_bridge_operation_on(machine).await;
+            authorize_test_live_bridge_execution_start(&machine, &admission).await;
+            machine
+                .abandon_live_open_admission(
+                    admission.session_id(),
+                    admission.operation().domain_correlation().channel_id(),
+                )
+                .await
+                .expect("fence running bridge before cold restart");
+            let (machine, ambiguous_admission) = admitted_live_bridge_operation_on(machine).await;
+            authorize_test_live_bridge_execution_start(&machine, &ambiguous_admission).await;
+            let terminal = machine
+                .record_live_bridge_execution_terminal(
+                    &ambiguous_admission,
+                    meerkat_core::MeerkatExecutionTerminal::Completed,
+                    Some("sha256:ambiguous-result"),
+                )
+                .await
+                .expect("record terminal before ambiguous submission");
+            let submission = machine
+                .authorize_live_bridge_submission(
+                    &terminal,
+                    meerkat_core::LiveBridgeOutputKind::Success,
+                    "sha256:ambiguous-result",
+                )
+                .await
+                .expect("authorize submission before restart");
+            let _attempt = machine
+                .claim_live_bridge_submission_attempt(&submission)
+                .await
+                .expect("durably claim provider send before close");
+            machine
+                .abandon_live_open_admission(
+                    ambiguous_admission.session_id(),
+                    ambiguous_admission
+                        .operation()
+                        .domain_correlation()
+                        .channel_id(),
+                )
+                .await
+                .expect("close claimed submission as ambiguous");
+            (
+                admission.session_id().clone(),
+                admission.operation().clone(),
+                ambiguous_admission.session_id().clone(),
+                ambiguous_admission.operation().clone(),
+            )
+        };
+
+        let restarted_store = std::sync::Arc::new(
+            crate::store::SqliteRuntimeStore::new(path).expect("reopen sqlite runtime store"),
+        ) as std::sync::Arc<dyn crate::store::RuntimeStore>;
+        let restarted = crate::MeerkatMachine::persistent_without_blobs(restarted_store);
+        restarted
+            .register_session(session_id.clone())
+            .await
+            .expect("recover persisted bridge session");
+        restarted
+            .register_session(ambiguous_session_id.clone())
+            .await
+            .expect("recover persisted ambiguous submission session");
+        let recovered = restarted
+            .live_bridge_recovery_snapshots(&session_id)
+            .await
+            .expect("read bridge snapshot after cold restart");
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].operation(), &operation);
+        assert_eq!(recovered[0].terminal(), None);
+        assert_eq!(
+            recovered[0].phase(),
+            meerkat_core::LiveBridgeOperationPhase::ExecutionRunning
+        );
+        assert_eq!(
+            recovered[0].cancellation_reason(),
+            Some(meerkat_core::LiveBridgeCancellationReason::ChannelClose)
+        );
+        let ambiguous = restarted
+            .live_bridge_recovery_snapshots(&ambiguous_session_id)
+            .await
+            .expect("read ambiguous bridge after cold restart");
+        assert_eq!(ambiguous.len(), 1);
+        assert_eq!(ambiguous[0].operation(), &ambiguous_operation);
+        assert_eq!(
+            ambiguous[0].terminal(),
+            Some(meerkat_core::MeerkatExecutionTerminal::Completed)
+        );
+        assert_eq!(
+            ambiguous[0].result_digest(),
+            Some("sha256:ambiguous-result")
+        );
+        assert_eq!(
+            ambiguous[0].submission_state(),
+            Some(meerkat_core::LiveBridgeSubmissionState::SubmissionAmbiguous)
+        );
+
+        let terminal = restarted
+            .reconcile_revoked_live_bridge_execution_terminal(
+                &recovered[0],
+                meerkat_core::MeerkatExecutionTerminal::Completed,
+                Some("sha256:cold-restart-result"),
+            )
+            .await
+            .expect("reconcile physical terminal after cold restart");
+        assert_eq!(terminal.operation(), &operation);
+        assert!(!terminal.replayed());
+        let settled = restarted
+            .live_bridge_recovery_snapshots(&session_id)
+            .await
+            .expect("read settled bridge after cold restart");
+        assert_eq!(
+            settled[0].result_digest(),
+            Some("sha256:cold-restart-result")
+        );
+        assert_eq!(settled[0].submission_state(), None);
+
+        drop(restarted);
+        let final_store = std::sync::Arc::new(
+            crate::store::SqliteRuntimeStore::new(dir.path().join("live-bridge-restart.sqlite3"))
+                .expect("reopen sqlite runtime store after terminal reconciliation"),
+        ) as std::sync::Arc<dyn crate::store::RuntimeStore>;
+        let final_machine = crate::MeerkatMachine::persistent_without_blobs(final_store);
+        final_machine
+            .register_session(session_id.clone())
+            .await
+            .expect("recover settled bridge session");
+        final_machine
+            .register_session(ambiguous_session_id.clone())
+            .await
+            .expect("recover ambiguous bridge session a second time");
+        let final_settled = final_machine
+            .live_bridge_recovery_snapshots(&session_id)
+            .await
+            .expect("read terminal bridge after second restart");
+        assert_eq!(
+            final_settled[0].result_digest(),
+            Some("sha256:cold-restart-result")
+        );
+        let final_ambiguous = final_machine
+            .live_bridge_recovery_snapshots(&ambiguous_session_id)
+            .await
+            .expect("read ambiguous bridge after second restart");
+        assert_eq!(
+            final_ambiguous[0].submission_state(),
+            Some(meerkat_core::LiveBridgeSubmissionState::SubmissionAmbiguous)
+        );
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "sqlite-store"))]
+    #[tokio::test]
+    async fn restored_running_bridge_is_restart_fenced_before_terminal_reconciliation() {
+        let dir = tempfile::TempDir::new().expect("temporary runtime store");
+        let path = dir.path().join("live-bridge-abrupt-restart.sqlite3");
+        let (session_id, operation) = {
+            let store = std::sync::Arc::new(
+                crate::store::SqliteRuntimeStore::new(path.clone())
+                    .expect("create sqlite runtime store"),
+            ) as std::sync::Arc<dyn crate::store::RuntimeStore>;
+            let machine = crate::MeerkatMachine::persistent_without_blobs(store);
+            let (machine, admission) = admitted_live_bridge_operation_on(machine).await;
+            authorize_test_live_bridge_execution_start(&machine, &admission).await;
+            (
+                admission.session_id().clone(),
+                admission.operation().clone(),
+            )
+        };
+
+        let restarted_store = std::sync::Arc::new(
+            crate::store::SqliteRuntimeStore::new(path.clone())
+                .expect("reopen sqlite runtime store after abrupt drop"),
+        ) as std::sync::Arc<dyn crate::store::RuntimeStore>;
+        let restarted = crate::MeerkatMachine::persistent_without_blobs(restarted_store);
+        restarted
+            .register_session(session_id.clone())
+            .await
+            .expect("recover abruptly dropped bridge session");
+        let recovered = restarted
+            .live_bridge_recovery_snapshots(&session_id)
+            .await
+            .expect("read abruptly dropped running bridge");
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].operation(), &operation);
+        assert_eq!(
+            recovered[0].phase(),
+            meerkat_core::LiveBridgeOperationPhase::ExecutionRunning
+        );
+        assert_eq!(recovered[0].terminal(), None);
+        assert_eq!(recovered[0].cancellation_reason(), None);
+        assert!(
+            !restarted
+                .live_channel_is_active_for_session(
+                    &session_id,
+                    operation.domain_correlation().channel_id(),
+                )
+                .await,
+            "cold recovery must not restore stale live binding atoms"
+        );
+
+        let fenced = restarted
+            .fence_restored_live_bridge_operation_for_restart(&recovered[0])
+            .await
+            .expect("fence restored bridge before child observation");
+        assert_eq!(
+            fenced.cancellation_reason(),
+            Some(meerkat_core::LiveBridgeCancellationReason::Restart)
+        );
+        assert_eq!(
+            fenced.phase(),
+            meerkat_core::LiveBridgeOperationPhase::ExecutionRunning
+        );
+        assert_eq!(fenced.terminal(), None);
+        assert_eq!(fenced.submission_state(), None);
+        let replayed_fence = restarted
+            .fence_restored_live_bridge_operation_for_restart(&fenced)
+            .await
+            .expect("exact restart fence replay is idempotent");
+        assert_eq!(replayed_fence, fenced);
+
+        restarted
+            .reconcile_revoked_live_bridge_execution_terminal(
+                &fenced,
+                meerkat_core::MeerkatExecutionTerminal::Completed,
+                Some("sha256:late-executor-result"),
+            )
+            .await
+            .expect("reconcile late executor terminal after restart fence");
+        let settled = restarted
+            .live_bridge_recovery_snapshots(&session_id)
+            .await
+            .expect("read restart-fenced terminal");
+        assert_eq!(
+            settled[0].terminal(),
+            Some(meerkat_core::MeerkatExecutionTerminal::Completed)
+        );
+        assert_eq!(
+            settled[0].result_digest(),
+            Some("sha256:late-executor-result")
+        );
+        assert_eq!(settled[0].submission_state(), None);
+        assert_eq!(
+            settled[0].cancellation_reason(),
+            Some(meerkat_core::LiveBridgeCancellationReason::Restart),
+            "late physical terminal must not reopen provider submission custody"
+        );
+
+        drop(restarted);
+        let final_store = std::sync::Arc::new(
+            crate::store::SqliteRuntimeStore::new(path)
+                .expect("reopen sqlite runtime store after late terminal"),
+        ) as std::sync::Arc<dyn crate::store::RuntimeStore>;
+        let final_machine = crate::MeerkatMachine::persistent_without_blobs(final_store);
+        final_machine
+            .register_session(session_id.clone())
+            .await
+            .expect("recover restart-fenced terminal session");
+        let final_snapshot = final_machine
+            .live_bridge_recovery_snapshots(&session_id)
+            .await
+            .expect("read restart-fenced terminal after second reopen");
+        assert_eq!(final_snapshot, settled);
+    }
+
+    #[tokio::test]
+    async fn live_bridge_external_authority_waits_for_durable_lifecycle_acknowledgement() {
+        let start_store = std::sync::Arc::new(crate::store::InMemoryRuntimeStore::new());
+        let start_machine = crate::MeerkatMachine::persistent_without_blobs(start_store.clone());
+        let (start_machine, start_admission) =
+            admitted_live_bridge_operation_on(start_machine).await;
+        confirm_test_live_bridge_final_input(&start_machine, &start_admission).await;
+        start_store.fail_next_machine_lifecycle_commit();
+        let start_error = start_machine
+            .authorize_live_bridge_execution_start(&start_admission)
+            .await
+            .expect_err("execution start authority must not escape before persistence");
+        assert!(start_error.to_string().contains("lifecycle persist failed"));
+        let start_session_id = start_admission.session_id().clone();
+        let start_operation = start_admission.operation().clone();
+        drop(start_machine);
+
+        let restarted_start = crate::MeerkatMachine::persistent_without_blobs(start_store.clone());
+        restarted_start
+            .register_session(start_session_id.clone())
+            .await
+            .expect("recover pre-start durable image");
+        let pre_start = restarted_start
+            .live_bridge_recovery_snapshots(&start_session_id)
+            .await
+            .expect("read pre-start durable image");
+        assert_eq!(pre_start[0].operation(), &start_operation);
+        assert_eq!(
+            pre_start[0].phase(),
+            meerkat_core::LiveBridgeOperationPhase::FinalInputAuthorized,
+            "a failed lifecycle commit must not make executor start recoverable as accepted"
+        );
+
+        let lost_start_store = std::sync::Arc::new(crate::store::InMemoryRuntimeStore::new());
+        let lost_start_machine =
+            crate::MeerkatMachine::persistent_without_blobs(lost_start_store.clone());
+        let (lost_start_machine, lost_start_admission) =
+            admitted_live_bridge_operation_on(lost_start_machine).await;
+        confirm_test_live_bridge_final_input(&lost_start_machine, &lost_start_admission).await;
+        lost_start_store.lose_next_machine_lifecycle_commit_acknowledgement();
+        let lost_start_error = lost_start_machine
+            .authorize_live_bridge_execution_start(&lost_start_admission)
+            .await
+            .expect_err("acknowledgement loss must not release execution start authority");
+        assert!(
+            lost_start_error
+                .to_string()
+                .contains("lifecycle persist failed")
+        );
+        let lost_start_session_id = lost_start_admission.session_id().clone();
+        drop(lost_start_machine);
+        let restarted_lost_start =
+            crate::MeerkatMachine::persistent_without_blobs(lost_start_store);
+        restarted_lost_start
+            .register_session(lost_start_session_id.clone())
+            .await
+            .expect("recover committed execution start marker");
+        let committed_start = restarted_lost_start
+            .live_bridge_recovery_snapshots(&lost_start_session_id)
+            .await
+            .expect("read committed execution start marker");
+        assert_eq!(
+            committed_start[0].phase(),
+            meerkat_core::LiveBridgeOperationPhase::ExecutionRunning,
+            "acknowledgement loss must preserve the no-replay marker even though no start authority escaped"
+        );
+
+        let submission_store = std::sync::Arc::new(crate::store::InMemoryRuntimeStore::new());
+        let submission_machine =
+            crate::MeerkatMachine::persistent_without_blobs(submission_store.clone());
+        let (submission_machine, submission_admission) =
+            admitted_live_bridge_operation_on(submission_machine).await;
+        authorize_test_live_bridge_execution_start(&submission_machine, &submission_admission)
+            .await;
+        let terminal = submission_machine
+            .record_live_bridge_execution_terminal(
+                &submission_admission,
+                meerkat_core::MeerkatExecutionTerminal::Completed,
+                Some("sha256:ack-lost-result"),
+            )
+            .await
+            .expect("record terminal before submission claim");
+        let submission = submission_machine
+            .authorize_live_bridge_submission(
+                &terminal,
+                meerkat_core::LiveBridgeOutputKind::Success,
+                "sha256:ack-lost-result",
+            )
+            .await
+            .expect("authorize provider submission");
+        submission_store.lose_next_machine_lifecycle_commit_acknowledgement();
+        let claim_error = submission_machine
+            .claim_live_bridge_submission_attempt(&submission)
+            .await
+            .expect_err("provider send claim must not escape after acknowledgement loss");
+        assert!(claim_error.to_string().contains("lifecycle persist failed"));
+        let submission_session_id = submission_admission.session_id().clone();
+        let submission_operation = submission_admission.operation().clone();
+        drop(submission_machine);
+
+        let restarted_submission =
+            crate::MeerkatMachine::persistent_without_blobs(submission_store);
+        restarted_submission
+            .register_session(submission_session_id.clone())
+            .await
+            .expect("recover committed submission claim");
+        let claimed = restarted_submission
+            .live_bridge_recovery_snapshots(&submission_session_id)
+            .await
+            .expect("read committed submission claim");
+        assert_eq!(
+            claimed[0].submission_state(),
+            Some(meerkat_core::LiveBridgeSubmissionState::SubmissionAttemptClaimed)
+        );
+        let recovered = restarted_submission
+            .recover_live_bridge_submission(&submission_session_id, &submission_operation)
+            .await
+            .expect("fence acknowledged-or-not submission as ambiguous");
+        assert_eq!(
+            recovered.state(),
+            meerkat_core::LiveBridgeSubmissionState::SubmissionAmbiguous
+        );
+        let replay = restarted_submission
+            .recover_live_bridge_submission(&submission_session_id, &submission_operation)
+            .await
+            .expect("exact ambiguity recovery replay converges");
+        assert_eq!(
+            replay.state(),
+            meerkat_core::LiveBridgeSubmissionState::SubmissionAmbiguous
+        );
+    }
+
+    #[tokio::test]
+    async fn live_bridge_generated_admission_refuses_operation_beyond_durable_bound() {
+        let (machine, session_id, channel_id) = bound_experimental_live_machine(0).await;
+        let initial = machine
+            .session_dsl_state(&session_id)
+            .await
+            .expect("read active channel state");
+        let runtime_id = initial.active_runtime_id.clone().expect("runtime id");
+        let fence_token = initial.active_fence_token.expect("runtime fence");
+        let generation = initial
+            .active_runtime_generation
+            .expect("runtime generation");
+        let interaction_id = meerkat_core::InteractionId::new();
+        let provider_turn_ref = "capacity-provider-turn".to_string();
+        machine
+            .apply_session_dsl_input(
+                &session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::ObserveLiveProviderTurnStarted {
+                    channel_id: channel_id.to_string(),
+                    runtime_id: runtime_id.clone(),
+                    fence_token,
+                    generation,
+                    interaction_id: interaction_id.to_string(),
+                    provider_turn_ref: provider_turn_ref.clone(),
+                },
+                "test:ObserveLiveProviderTurnStartedForCapacity",
+            )
+            .await
+            .expect("establish provider lineage for bounded admission");
+        let mut bounded = machine
+            .session_dsl_state(&session_id)
+            .await
+            .expect("read bounded base state");
+        for ordinal in 0..crate::live_execution::MAX_DURABLE_LIVE_BRIDGE_OPERATIONS {
+            let operation_id = crate::meerkat_machine::dsl::OperationId(format!(
+                "\"00000000-0000-0000-0000-{ordinal:012}\""
+            ));
+            let historical_channel = format!("historical-live-channel:{ordinal}");
+            bounded
+                .live_bridge_channel_by_operation
+                .insert(operation_id.clone(), historical_channel.clone());
+            bounded.live_bridge_interaction_by_operation.insert(
+                operation_id.clone(),
+                format!("00000000-0000-0000-0001-{ordinal:012}"),
+            );
+            bounded
+                .live_bridge_provider_turn_by_operation
+                .insert(operation_id.clone(), format!("historical-turn:{ordinal}"));
+            bounded.live_bridge_provider_delegation_by_operation.insert(
+                operation_id.clone(),
+                format!("historical-delegation:{ordinal}"),
+            );
+            bounded
+                .live_bridge_provider_call_by_operation
+                .insert(operation_id.clone(), format!("historical-call:{ordinal}"));
+            bounded.live_bridge_agent_identity_by_operation.insert(
+                operation_id.clone(),
+                crate::meerkat_machine::dsl::AgentIdentity("bounded-source".to_string()),
+            );
+            bounded.live_bridge_context_revision_by_operation.insert(
+                operation_id.clone(),
+                format!("sha256:historical-context:{ordinal}"),
+            );
+            bounded.live_bridge_request_digest_by_operation.insert(
+                operation_id.clone(),
+                format!("sha256:historical-request:{ordinal}"),
+            );
+            bounded.live_bridge_phase_by_operation.insert(
+                operation_id.clone(),
+                crate::meerkat_machine::dsl::LiveBridgeOperationPhase::ExecutionTerminal,
+            );
+            bounded.live_bridge_execution_terminal_by_operation.insert(
+                operation_id.clone(),
+                crate::meerkat_machine::dsl::MeerkatExecutionTerminal::Cancelled,
+            );
+            bounded.live_bridge_cancellation_reason_by_operation.insert(
+                operation_id,
+                crate::meerkat_machine::dsl::LiveBridgeCancellationReason::ChannelClose,
+            );
+            bounded
+                .live_revoked_execution_channels
+                .insert(historical_channel.clone());
+            bounded.live_execution_phase_by_channel.insert(
+                historical_channel,
+                crate::meerkat_machine::dsl::LiveExecutionChannelPhase::Revoked,
+            );
+        }
+        let bounded_authority =
+            crate::meerkat_machine::dsl::MeerkatMachineAuthority::recover_from_state(bounded)
+                .expect("128-operation generated state remains valid");
+        machine
+            .restore_session_dsl_state(&session_id, bounded_authority.snapshot())
+            .await;
+        let before = machine
+            .session_dsl_state(&session_id)
+            .await
+            .expect("read exact bounded state");
+        crate::live_execution::LiveBridgeRecoveryImage::capture(&before)
+            .expect("128 operations remain persistable");
+
+        let next_operation = meerkat_core::OperationId::new();
+        let refusal = machine
+            .apply_session_dsl_input(
+                &session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::AdmitLiveBridgeOperation {
+                    session_id: session_id.to_string(),
+                    channel_id: channel_id.to_string(),
+                    runtime_id,
+                    fence_token,
+                    generation,
+                    interaction_id: interaction_id.to_string(),
+                    operation_id: crate::meerkat_machine::dsl::OperationId::from_domain(
+                        &next_operation,
+                    ),
+                    provider_turn_ref,
+                    provider_delegation_ref: "capacity-delegation".to_string(),
+                    provider_call_ref: "capacity-call".to_string(),
+                    agent_identity: crate::meerkat_machine::dsl::AgentIdentity(
+                        "bounded-source".to_string(),
+                    ),
+                    canonical_context_revision: "sha256:capacity-context".to_string(),
+                    request_digest: "sha256:capacity-request".to_string(),
+                    structural_lineage_proven: true,
+                },
+                "test:AdmitLiveBridgeOperationBeyondCapacity",
+            )
+            .await
+            .expect_err("129th operation must be refused before mutation or effect");
+        assert!(refusal.contains("guard rejected"));
+        let after = machine
+            .session_dsl_state(&session_id)
+            .await
+            .expect("read state after bounded refusal");
+        assert_eq!(
+            after, before,
+            "bounded refusal must not mutate generated truth"
+        );
     }
 
     fn insert_test_assistant_output_handle(
@@ -2189,6 +3004,34 @@ impl MeerkatMachine {
     /// to the generated provider-turn and interaction facts; request text is
     /// represented only by its content-safe digest.
     #[cfg(feature = "live")]
+    async fn persist_live_bridge_recovery_state(
+        &self,
+        session_id: &SessionId,
+        context: &str,
+    ) -> Result<(), RuntimeDriverError> {
+        let driver = {
+            let sessions = self.sessions.read().await;
+            let entry = sessions
+                .get(session_id)
+                .ok_or(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                })?;
+            entry.require_durability_ready().map_err(|required| {
+                RuntimeDriverError::RecoveryRepairBlocked {
+                    evidence_digest: None,
+                    reason: required.to_string(),
+                }
+            })?;
+            std::sync::Arc::clone(&entry.driver)
+        };
+        driver
+            .lock()
+            .await
+            .persist_current_machine_lifecycle(context)
+            .await
+    }
+
+    #[cfg(feature = "live")]
     pub async fn admit_live_bridge_operation(
         &self,
         session_id: &SessionId,
@@ -2201,6 +3044,23 @@ impl MeerkatMachine {
             return Err(RuntimeDriverError::ValidationFailed {
                 reason: "live bridge durable identity and context revision must be present"
                     .to_string(),
+            });
+        }
+        let _mutation_guard = self
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await?;
+        let existing_operation_count = self
+            .session_dsl_state(session_id)
+            .await
+            .map_err(|error| RuntimeDriverError::Internal(error.to_string()))?
+            .live_bridge_channel_by_operation
+            .len();
+        if existing_operation_count >= crate::live_execution::MAX_DURABLE_LIVE_BRIDGE_OPERATIONS {
+            return Err(RuntimeDriverError::ValidationFailed {
+                reason: format!(
+                    "live bridge durable operation bound {} is exhausted; no operation was admitted",
+                    crate::live_execution::MAX_DURABLE_LIVE_BRIDGE_OPERATIONS
+                ),
             });
         }
         let binding = self
@@ -2243,6 +3103,8 @@ impl MeerkatMachine {
             )
             .await
             .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+        self.persist_live_bridge_recovery_state(session_id, "AdmitLiveBridgeOperation")
+            .await?;
         for effect in effects.as_slice() {
             if let Some(admission) =
                 crate::live_execution::LiveBridgeOperationAdmission::from_generated_effect(
@@ -2265,6 +3127,255 @@ impl MeerkatMachine {
             reason: "live bridge call was a replay or protocol drift and acquired no execution authority"
                 .to_string(),
         })
+    }
+
+    /// Return every durable generated bridge operation for one session.
+    ///
+    /// This is a read-only recovery projection. It neither reconstructs a
+    /// sealed admission nor authorizes provider output, execution, retry, or
+    /// effect dispatch.
+    #[cfg(feature = "live")]
+    pub async fn live_bridge_recovery_snapshots(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Vec<crate::live_execution::LiveBridgeRecoverySnapshot>, RuntimeDriverError> {
+        let state = self.session_dsl_state(session_id).await.map_err(|reason| {
+            RuntimeDriverError::ValidationFailed {
+                reason: reason.to_string(),
+            }
+        })?;
+        let mut snapshots = Vec::with_capacity(state.live_bridge_channel_by_operation.len());
+        for (dsl_operation_id, channel_id) in &state.live_bridge_channel_by_operation {
+            let required = |value: Option<String>, field: &str| {
+                value.ok_or_else(|| RuntimeDriverError::ValidationFailed {
+                    reason: format!(
+                        "durable live bridge operation is missing generated {field} correlation"
+                    ),
+                })
+            };
+            let operation_id: meerkat_core::OperationId = serde_json::from_str(&dsl_operation_id.0)
+                .map_err(|error| RuntimeDriverError::ValidationFailed {
+                    reason: format!("durable live bridge operation identity is corrupt: {error}"),
+                })?;
+            let interaction_id = required(
+                state
+                    .live_bridge_interaction_by_operation
+                    .get(dsl_operation_id)
+                    .cloned(),
+                "interaction",
+            )?;
+            let interaction_id = uuid::Uuid::parse_str(&interaction_id).map_err(|error| {
+                RuntimeDriverError::ValidationFailed {
+                    reason: format!("durable live bridge interaction identity is corrupt: {error}"),
+                }
+            })?;
+            let provider = meerkat_core::LiveBridgeProviderCorrelation::new(
+                required(
+                    state
+                        .live_bridge_provider_turn_by_operation
+                        .get(dsl_operation_id)
+                        .cloned(),
+                    "provider turn",
+                )?,
+                required(
+                    state
+                        .live_bridge_provider_delegation_by_operation
+                        .get(dsl_operation_id)
+                        .cloned(),
+                    "provider delegation",
+                )?,
+                required(
+                    state
+                        .live_bridge_provider_call_by_operation
+                        .get(dsl_operation_id)
+                        .cloned(),
+                    "provider call",
+                )?,
+            )
+            .map_err(|error| RuntimeDriverError::ValidationFailed {
+                reason: format!("durable live bridge provider correlation is corrupt: {error}"),
+            })?;
+            let correlation = meerkat_core::LiveBridgeOperationCorrelation::new(
+                meerkat_core::LiveChannelId::new(channel_id.clone()),
+                meerkat_core::InteractionId(interaction_id),
+                provider,
+            )
+            .map_err(|error| RuntimeDriverError::ValidationFailed {
+                reason: format!("durable live bridge operation correlation is corrupt: {error}"),
+            })?;
+            let operation =
+                meerkat_core::ExactOperationIdentity::for_domain(operation_id, correlation);
+            let agent_identity = state
+                .live_bridge_agent_identity_by_operation
+                .get(dsl_operation_id)
+                .cloned()
+                .ok_or_else(|| RuntimeDriverError::ValidationFailed {
+                    reason: "durable live bridge operation is missing generated source identity"
+                        .to_string(),
+                })?
+                .0;
+            let canonical_context_revision = required(
+                state
+                    .live_bridge_context_revision_by_operation
+                    .get(dsl_operation_id)
+                    .cloned(),
+                "context revision",
+            )?;
+            let request_digest = required(
+                state
+                    .live_bridge_request_digest_by_operation
+                    .get(dsl_operation_id)
+                    .cloned(),
+                "request digest",
+            )?;
+            let phase = state
+                .live_bridge_phase_by_operation
+                .get(dsl_operation_id)
+                .copied()
+                .map(crate::live_execution::bridge_phase_from_dsl)
+                .ok_or_else(|| RuntimeDriverError::ValidationFailed {
+                    reason: "durable live bridge operation is missing generated phase".to_string(),
+                })?;
+            let terminal = state
+                .live_bridge_execution_terminal_by_operation
+                .get(dsl_operation_id)
+                .copied()
+                .map(crate::live_execution::bridge_terminal_from_dsl);
+            let result_digest = state
+                .live_bridge_execution_result_digest_by_operation
+                .get(dsl_operation_id)
+                .cloned();
+            let cancellation_reason = state
+                .live_bridge_cancellation_reason_by_operation
+                .get(dsl_operation_id)
+                .copied()
+                .map(|reason| match reason {
+                    crate::meerkat_machine::dsl::LiveBridgeCancellationReason::BargeIn => {
+                        meerkat_core::LiveBridgeCancellationReason::BargeIn
+                    }
+                    crate::meerkat_machine::dsl::LiveBridgeCancellationReason::ChannelClose => {
+                        meerkat_core::LiveBridgeCancellationReason::ChannelClose
+                    }
+                    crate::meerkat_machine::dsl::LiveBridgeCancellationReason::Restart => {
+                        meerkat_core::LiveBridgeCancellationReason::Restart
+                    }
+                    crate::meerkat_machine::dsl::LiveBridgeCancellationReason::ProtocolDrift => {
+                        meerkat_core::LiveBridgeCancellationReason::ProtocolDrift
+                    }
+                });
+            let submission_state = state
+                .live_bridge_submission_state_by_operation
+                .get(dsl_operation_id)
+                .copied()
+                .map(crate::live_execution::bridge_submission_state_from_dsl);
+            snapshots.push(crate::live_execution::LiveBridgeRecoverySnapshot::new(
+                session_id.clone(),
+                operation,
+                agent_identity,
+                canonical_context_revision,
+                request_digest,
+                phase,
+                terminal,
+                result_digest,
+                cancellation_reason,
+                submission_state,
+            ));
+        }
+        Ok(snapshots)
+    }
+
+    /// Fence one exact nonterminal bridge operation restored without live
+    /// runtime binding atoms after a host restart.
+    ///
+    /// This records only restart cancellation provenance and channel
+    /// revocation. It returns a read-only snapshot and cannot mint execution,
+    /// cancellation, terminal, or provider submission authority.
+    #[cfg(feature = "live")]
+    pub async fn fence_restored_live_bridge_operation_for_restart(
+        &self,
+        snapshot: &crate::live_execution::LiveBridgeRecoverySnapshot,
+    ) -> Result<crate::live_execution::LiveBridgeRecoverySnapshot, RuntimeDriverError> {
+        let domain = snapshot.operation().domain_correlation();
+        self.apply_session_dsl_input_typed(
+            snapshot.session_id(),
+            crate::meerkat_machine::dsl::MeerkatMachineInput::FenceRestoredLiveBridgeOperationForRestart {
+                channel_id: domain.channel_id().to_string(),
+                interaction_id: domain.interaction_id().to_string(),
+                operation_id: crate::meerkat_machine::dsl::OperationId::from_domain(
+                    snapshot.operation().operation_id(),
+                ),
+                request_digest: snapshot.request_digest().to_string(),
+            },
+            "FenceRestoredLiveBridgeOperationForRestart",
+        )
+        .await?;
+        self.persist_live_bridge_recovery_state(
+            snapshot.session_id(),
+            "FenceRestoredLiveBridgeOperationForRestart",
+        )
+        .await?;
+        self.live_bridge_recovery_snapshots(snapshot.session_id())
+            .await?
+            .into_iter()
+            .find(|candidate| candidate.operation() == snapshot.operation())
+            .ok_or_else(|| RuntimeDriverError::RecoveryRepairBlocked {
+                evidence_digest: None,
+                reason:
+                    "restart-fenced live bridge operation disappeared from durable recovery truth"
+                        .to_string(),
+            })
+    }
+
+    /// Reconcile one exact physical executor terminal after its provider
+    /// channel has already been revoked. This updates generated bridge truth
+    /// idempotently and cannot authorize or dispatch provider output.
+    #[cfg(feature = "live")]
+    pub async fn reconcile_revoked_live_bridge_execution_terminal(
+        &self,
+        snapshot: &crate::live_execution::LiveBridgeRecoverySnapshot,
+        terminal: meerkat_core::MeerkatExecutionTerminal,
+        result_digest: Option<&str>,
+    ) -> Result<crate::live_execution::LiveBridgeRecoveredTerminalReceipt, RuntimeDriverError> {
+        let domain = snapshot.operation().domain_correlation();
+        let (_, effects) = self
+            .apply_session_dsl_input_typed(
+                snapshot.session_id(),
+                crate::meerkat_machine::dsl::MeerkatMachineInput::ReconcileRevokedLiveBridgeExecutionTerminal {
+                    channel_id: domain.channel_id().to_string(),
+                    interaction_id: domain.interaction_id().to_string(),
+                    operation_id: crate::meerkat_machine::dsl::OperationId::from_domain(
+                        snapshot.operation().operation_id(),
+                    ),
+                    request_digest: snapshot.request_digest().to_string(),
+                    terminal: crate::live_execution::bridge_terminal_to_dsl(terminal),
+                    result_digest: result_digest.map(str::to_string),
+                },
+                "ReconcileRevokedLiveBridgeExecutionTerminal",
+            )
+            .await?;
+        self.persist_live_bridge_recovery_state(
+            snapshot.session_id(),
+            "ReconcileRevokedLiveBridgeExecutionTerminal",
+        )
+        .await?;
+        for effect in effects.as_slice() {
+            if let Some(receipt) =
+                crate::live_execution::LiveBridgeRecoveredTerminalReceipt::from_generated_effect(
+                    snapshot,
+                    terminal,
+                    result_digest,
+                    effect,
+                )
+                .map_err(|error| RuntimeDriverError::ValidationFailed {
+                    reason: error.to_string(),
+                })?
+            {
+                return Ok(receipt);
+            }
+        }
+        Err(RuntimeDriverError::Internal(
+            "ReconcileRevokedLiveBridgeExecutionTerminal emitted no exact receipt".to_string(),
+        ))
     }
 
     /// Build one process-local tool gate bound to this exact generated bridge
@@ -2339,6 +3450,11 @@ impl MeerkatMachine {
             )
             .await
             .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+        self.persist_live_bridge_recovery_state(
+            admission.session_id(),
+            "ConfirmLiveBridgeFinalInput",
+        )
+        .await?;
         effects
             .as_slice()
             .iter()
@@ -2357,6 +3473,58 @@ impl MeerkatMachine {
                     "ConfirmLiveBridgeFinalInput emitted no exact authority".to_string(),
                 )
             })
+    }
+
+    /// Mark the exact bridge operation as having crossed into durable executor
+    /// start custody. The returned authority carries no retry or provider-send
+    /// capability; failure after this point is reconciled by stable delivery
+    /// identity and never replayed.
+    #[cfg(feature = "live")]
+    pub async fn authorize_live_bridge_execution_start(
+        &self,
+        admission: &crate::live_execution::LiveBridgeOperationAdmission,
+    ) -> Result<crate::live_execution::LiveBridgeExecutionStartAuthority, RuntimeDriverError> {
+        let binding = admission.binding();
+        let domain = admission.operation().domain_correlation();
+        let (_, effects) = self
+            .apply_session_dsl_input_typed(
+                admission.session_id(),
+                crate::meerkat_machine::dsl::MeerkatMachineInput::AuthorizeLiveBridgeExecutionStart {
+                    channel_id: binding.channel_id().to_string(),
+                    runtime_id: crate::meerkat_machine::dsl::AgentRuntimeId::from_domain(
+                        binding.runtime_id(),
+                    ),
+                    fence_token: crate::meerkat_machine::dsl::FenceToken(binding.fence_token()),
+                    generation: crate::meerkat_machine::dsl::Generation(binding.generation()),
+                    interaction_id: domain.interaction_id().to_string(),
+                    operation_id: crate::meerkat_machine::dsl::OperationId::from_domain(
+                        admission.operation().operation_id(),
+                    ),
+                    request_digest: admission.request_digest().as_str().to_string(),
+                },
+                "AuthorizeLiveBridgeExecutionStart",
+            )
+            .await?;
+        self.persist_live_bridge_recovery_state(
+            admission.session_id(),
+            "AuthorizeLiveBridgeExecutionStart",
+        )
+        .await?;
+        for effect in effects.as_slice() {
+            if let Some(authority) =
+                crate::live_execution::LiveBridgeExecutionStartAuthority::from_generated_effect(
+                    admission, effect,
+                )
+                .map_err(|error| RuntimeDriverError::ValidationFailed {
+                    reason: error.to_string(),
+                })?
+            {
+                return Ok(authority);
+            }
+        }
+        Err(RuntimeDriverError::Internal(
+            "AuthorizeLiveBridgeExecutionStart emitted no exact authority".to_string(),
+        ))
     }
 
     #[cfg(feature = "live")]
@@ -2540,6 +3708,11 @@ impl MeerkatMachine {
             )
             .await
             .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+        self.persist_live_bridge_recovery_state(
+            admission.session_id(),
+            "CancelLiveBridgeOperation",
+        )
+        .await?;
         for effect in effects.as_slice() {
             if let Some(authority) = crate::live_execution::LiveBridgeOperationCancellationAuthority::from_generated_effect(admission, reason, effect)
                 .map_err(|error| RuntimeDriverError::ValidationFailed { reason: error.to_string() })?
@@ -2581,6 +3754,11 @@ impl MeerkatMachine {
                 "RecordLiveBridgeExecutionTerminal",
             )
             .await?;
+        self.persist_live_bridge_recovery_state(
+            admission.session_id(),
+            "RecordLiveBridgeExecutionTerminal",
+        )
+        .await?;
         for effect in effects.as_slice() {
             if let Some(receipt) =
                 crate::live_execution::LiveBridgeExecutionTerminalReceipt::from_generated_effect(
@@ -2638,6 +3816,11 @@ impl MeerkatMachine {
             )
             .await
             .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+        self.persist_live_bridge_recovery_state(
+            admission.session_id(),
+            "AuthorizeLiveBridgeSubmission",
+        )
+        .await?;
         for effect in effects.as_slice() {
             if let Some(authority) =
                 crate::live_execution::LiveBridgeSubmissionAuthority::from_generated_effect(
@@ -2688,6 +3871,11 @@ impl MeerkatMachine {
             )
             .await
             .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+        self.persist_live_bridge_recovery_state(
+            admission.session_id(),
+            "ClaimLiveBridgeSubmissionAttempt",
+        )
+        .await?;
         for effect in effects.as_slice() {
             if let Some(authority) =
                 crate::live_execution::LiveBridgeSubmissionAttemptAuthority::from_generated_effect(
@@ -2734,6 +3922,11 @@ impl MeerkatMachine {
             )
             .await
             .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+        self.persist_live_bridge_recovery_state(
+            admission.session_id(),
+            "RecordLiveBridgeSubmissionLocalWrite",
+        )
+        .await?;
         for effect in effects.as_slice() {
             if let Some(receipt) =
                 crate::live_execution::LiveBridgeSubmissionReceipt::from_generated_effect(
@@ -2786,6 +3979,11 @@ impl MeerkatMachine {
             )
             .await
             .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+        self.persist_live_bridge_recovery_state(
+            admission.session_id(),
+            "ResolveLiveBridgeSubmission",
+        )
+        .await?;
         for effect in effects.as_slice() {
             if let Some(receipt) =
                 crate::live_execution::LiveBridgeSubmissionReceipt::from_generated_effect(
@@ -2826,6 +4024,8 @@ impl MeerkatMachine {
             )
             .await
             .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+        self.persist_live_bridge_recovery_state(session_id, "RecoverLiveBridgeSubmission")
+            .await?;
         for effect in effects.as_slice() {
             if let Some(receipt) =
                 crate::live_execution::LiveBridgeRecoveredSubmissionReceipt::from_generated_effect(
@@ -5944,8 +7144,9 @@ impl MeerkatMachine {
             "AbandonLiveOpenAdmission",
         )
         .await
-        .map(|_| ())
-        .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })
+        .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+        self.persist_live_bridge_recovery_state(session_id, "AbandonLiveOpenAdmission")
+            .await
     }
 
     #[cfg(feature = "live")]
@@ -6176,6 +7377,8 @@ impl MeerkatMachine {
             )
             .await
             .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+        self.persist_live_bridge_recovery_state(session_id, "RecordLiveCloseClosed")
+            .await?;
 
         let authority = effects.as_slice().iter().find_map(|effect| match effect {
             crate::meerkat_machine::dsl::MeerkatMachineEffect::LiveCloseResultResolved {

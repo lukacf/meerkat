@@ -165,7 +165,7 @@ impl LiveDelegationRuntimeBinding {
     }
 }
 
-fn bridge_phase_from_dsl(
+pub(crate) fn bridge_phase_from_dsl(
     phase: crate::meerkat_machine::dsl::LiveBridgeOperationPhase,
 ) -> LiveBridgeOperationPhase {
     match phase {
@@ -175,12 +175,345 @@ fn bridge_phase_from_dsl(
         crate::meerkat_machine::dsl::LiveBridgeOperationPhase::FinalInputAuthorized => {
             LiveBridgeOperationPhase::FinalInputAuthorized
         }
+        crate::meerkat_machine::dsl::LiveBridgeOperationPhase::ExecutionRunning => {
+            LiveBridgeOperationPhase::ExecutionRunning
+        }
         crate::meerkat_machine::dsl::LiveBridgeOperationPhase::CancellationAuthorized => {
             LiveBridgeOperationPhase::CancellationAuthorized
         }
         crate::meerkat_machine::dsl::LiveBridgeOperationPhase::ExecutionTerminal => {
             LiveBridgeOperationPhase::ExecutionTerminal
         }
+    }
+}
+
+pub(crate) const fn bridge_terminal_from_dsl(
+    terminal: crate::meerkat_machine::dsl::MeerkatExecutionTerminal,
+) -> MeerkatExecutionTerminal {
+    use crate::meerkat_machine::dsl::MeerkatExecutionTerminal as Dsl;
+    match terminal {
+        Dsl::Completed => MeerkatExecutionTerminal::Completed,
+        Dsl::Rejected => MeerkatExecutionTerminal::Rejected,
+        Dsl::Failed => MeerkatExecutionTerminal::Failed,
+        Dsl::TimedOut => MeerkatExecutionTerminal::TimedOut,
+        Dsl::Unrecoverable => MeerkatExecutionTerminal::Unrecoverable,
+        Dsl::Cancelled => MeerkatExecutionTerminal::Cancelled,
+        Dsl::Superseded => MeerkatExecutionTerminal::Superseded,
+    }
+}
+
+pub(crate) const fn bridge_submission_state_from_dsl(
+    state: crate::meerkat_machine::dsl::LiveBridgeSubmissionState,
+) -> LiveBridgeSubmissionState {
+    use crate::meerkat_machine::dsl::LiveBridgeSubmissionState as Dsl;
+    match state {
+        Dsl::SubmissionAuthorized => LiveBridgeSubmissionState::SubmissionAuthorized,
+        Dsl::SubmissionAttemptClaimed => LiveBridgeSubmissionState::SubmissionAttemptClaimed,
+        Dsl::LocalWriteCompletedAwaitingProof => {
+            LiveBridgeSubmissionState::LocalWriteCompletedAwaitingProof
+        }
+        Dsl::ProviderProcessed => LiveBridgeSubmissionState::ProviderProcessed,
+        Dsl::ProviderRejected => LiveBridgeSubmissionState::ProviderRejected,
+        Dsl::SubmissionAmbiguous => LiveBridgeSubmissionState::SubmissionAmbiguous,
+        Dsl::CallExpired => LiveBridgeSubmissionState::CallExpired,
+        Dsl::CallAbandonedByClose => LiveBridgeSubmissionState::CallAbandonedByClose,
+    }
+}
+
+pub(crate) const fn bridge_phase_to_dsl(
+    phase: LiveBridgeOperationPhase,
+) -> crate::meerkat_machine::dsl::LiveBridgeOperationPhase {
+    use crate::meerkat_machine::dsl::LiveBridgeOperationPhase as Dsl;
+    match phase {
+        LiveBridgeOperationPhase::PreFinalInference => Dsl::PreFinalInference,
+        LiveBridgeOperationPhase::FinalInputAuthorized => Dsl::FinalInputAuthorized,
+        LiveBridgeOperationPhase::ExecutionRunning => Dsl::ExecutionRunning,
+        LiveBridgeOperationPhase::CancellationAuthorized => Dsl::CancellationAuthorized,
+        LiveBridgeOperationPhase::ExecutionTerminal => Dsl::ExecutionTerminal,
+    }
+}
+
+pub(crate) const MAX_DURABLE_LIVE_BRIDGE_OPERATIONS: usize = 128;
+
+/// Canonical, payload-free durable image of generated live bridge authority.
+///
+/// The runtime lifecycle record persists this image alongside the generated
+/// lifecycle atoms. It contains only exact correlation, digests, and terminal
+/// facts needed to recover without replaying executor work or provider IO.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LiveBridgeRecoveryImage {
+    operations: Vec<LiveBridgeRecoveryOperation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LiveBridgeRecoveryOperation {
+    operation_id: String,
+    channel_id: String,
+    interaction_id: String,
+    provider_turn_ref: String,
+    provider_delegation_ref: String,
+    provider_call_ref: String,
+    source_agent_identity: String,
+    canonical_context_revision: String,
+    request_digest: String,
+    phase: LiveBridgeOperationPhase,
+    terminal: Option<MeerkatExecutionTerminal>,
+    result_digest: Option<String>,
+    cancellation_reason: Option<LiveBridgeCancellationReason>,
+    submission_output_kind: Option<LiveBridgeOutputKind>,
+    submission_digest: Option<String>,
+    submission_state: Option<LiveBridgeSubmissionState>,
+    current_for_channel: bool,
+    channel_revoked: bool,
+}
+
+impl LiveBridgeRecoveryImage {
+    pub(crate) fn validate_bound(&self) -> Result<(), String> {
+        if self.operations.len() > MAX_DURABLE_LIVE_BRIDGE_OPERATIONS {
+            return Err(format!(
+                "durable live bridge recovery image exceeds the hard operation bound of {MAX_DURABLE_LIVE_BRIDGE_OPERATIONS}"
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn capture(
+        state: &crate::meerkat_machine::dsl::MeerkatMachineState,
+    ) -> Result<Self, String> {
+        if state.live_bridge_channel_by_operation.len() > MAX_DURABLE_LIVE_BRIDGE_OPERATIONS {
+            return Err(format!(
+                "generated live bridge recovery image exceeds the hard operation bound of {MAX_DURABLE_LIVE_BRIDGE_OPERATIONS}"
+            ));
+        }
+        let required = |value: Option<String>, operation_id: &str, field: &str| {
+            value.ok_or_else(|| {
+                format!("live bridge operation {operation_id} is missing generated {field}")
+            })
+        };
+        let mut operations = Vec::with_capacity(state.live_bridge_channel_by_operation.len());
+        for (operation_id, channel_id) in &state.live_bridge_channel_by_operation {
+            let key = operation_id.0.as_str();
+            operations.push(LiveBridgeRecoveryOperation {
+                operation_id: operation_id.0.clone(),
+                channel_id: channel_id.clone(),
+                interaction_id: required(
+                    state.live_bridge_interaction_by_operation.get(operation_id).cloned(),
+                    key,
+                    "interaction",
+                )?,
+                provider_turn_ref: required(
+                    state.live_bridge_provider_turn_by_operation.get(operation_id).cloned(),
+                    key,
+                    "provider turn",
+                )?,
+                provider_delegation_ref: required(
+                    state
+                        .live_bridge_provider_delegation_by_operation
+                        .get(operation_id)
+                        .cloned(),
+                    key,
+                    "provider delegation",
+                )?,
+                provider_call_ref: required(
+                    state.live_bridge_provider_call_by_operation.get(operation_id).cloned(),
+                    key,
+                    "provider call",
+                )?,
+                source_agent_identity: state
+                    .live_bridge_agent_identity_by_operation
+                    .get(operation_id)
+                    .map(|value| value.0.clone())
+                    .ok_or_else(|| {
+                        format!(
+                            "live bridge operation {key} is missing generated source identity"
+                        )
+                    })?,
+                canonical_context_revision: required(
+                    state.live_bridge_context_revision_by_operation.get(operation_id).cloned(),
+                    key,
+                    "context revision",
+                )?,
+                request_digest: required(
+                    state.live_bridge_request_digest_by_operation.get(operation_id).cloned(),
+                    key,
+                    "request digest",
+                )?,
+                phase: state
+                    .live_bridge_phase_by_operation
+                    .get(operation_id)
+                    .copied()
+                    .map(bridge_phase_from_dsl)
+                    .ok_or_else(|| {
+                        format!("live bridge operation {key} is missing generated phase")
+                    })?,
+                terminal: state
+                    .live_bridge_execution_terminal_by_operation
+                    .get(operation_id)
+                    .copied()
+                    .map(bridge_terminal_from_dsl),
+                result_digest: state
+                    .live_bridge_execution_result_digest_by_operation
+                    .get(operation_id)
+                    .cloned(),
+                cancellation_reason: state
+                    .live_bridge_cancellation_reason_by_operation
+                    .get(operation_id)
+                    .copied()
+                    .map(|reason| match reason {
+                        crate::meerkat_machine::dsl::LiveBridgeCancellationReason::BargeIn => LiveBridgeCancellationReason::BargeIn,
+                        crate::meerkat_machine::dsl::LiveBridgeCancellationReason::ChannelClose => LiveBridgeCancellationReason::ChannelClose,
+                        crate::meerkat_machine::dsl::LiveBridgeCancellationReason::Restart => LiveBridgeCancellationReason::Restart,
+                        crate::meerkat_machine::dsl::LiveBridgeCancellationReason::ProtocolDrift => LiveBridgeCancellationReason::ProtocolDrift,
+                    }),
+                submission_output_kind: state
+                    .live_bridge_submission_output_kind_by_operation
+                    .get(operation_id)
+                    .copied()
+                    .map(|kind| match kind {
+                        crate::meerkat_machine::dsl::LiveBridgeOutputKind::Success => LiveBridgeOutputKind::Success,
+                        crate::meerkat_machine::dsl::LiveBridgeOutputKind::FailureProjection => LiveBridgeOutputKind::FailureProjection,
+                    }),
+                submission_digest: state
+                    .live_bridge_submission_digest_by_operation
+                    .get(operation_id)
+                    .cloned(),
+                submission_state: state
+                    .live_bridge_submission_state_by_operation
+                    .get(operation_id)
+                    .copied()
+                    .map(bridge_submission_state_from_dsl),
+                current_for_channel: state
+                    .live_bridge_operation_by_channel
+                    .get(channel_id)
+                    == Some(operation_id),
+                channel_revoked: state.live_revoked_execution_channels.contains(channel_id),
+            });
+        }
+        Ok(Self { operations })
+    }
+
+    pub(crate) fn restore_into(
+        &self,
+        state: &mut crate::meerkat_machine::dsl::MeerkatMachineState,
+    ) -> Result<(), String> {
+        self.validate_bound()?;
+        for operation in &self.operations {
+            let operation_id =
+                crate::meerkat_machine::dsl::OperationId(operation.operation_id.clone());
+            if state
+                .live_bridge_channel_by_operation
+                .insert(operation_id.clone(), operation.channel_id.clone())
+                .is_some()
+            {
+                return Err(format!(
+                    "durable live bridge image duplicates operation {}",
+                    operation.operation_id
+                ));
+            }
+            state
+                .live_bridge_interaction_by_operation
+                .insert(operation_id.clone(), operation.interaction_id.clone());
+            state
+                .live_bridge_provider_turn_by_operation
+                .insert(operation_id.clone(), operation.provider_turn_ref.clone());
+            state.live_bridge_provider_delegation_by_operation.insert(
+                operation_id.clone(),
+                operation.provider_delegation_ref.clone(),
+            );
+            state
+                .live_bridge_provider_call_by_operation
+                .insert(operation_id.clone(), operation.provider_call_ref.clone());
+            state.live_bridge_agent_identity_by_operation.insert(
+                operation_id.clone(),
+                crate::meerkat_machine::dsl::AgentIdentity(operation.source_agent_identity.clone()),
+            );
+            state.live_bridge_context_revision_by_operation.insert(
+                operation_id.clone(),
+                operation.canonical_context_revision.clone(),
+            );
+            state
+                .live_bridge_request_digest_by_operation
+                .insert(operation_id.clone(), operation.request_digest.clone());
+            state
+                .live_bridge_phase_by_operation
+                .insert(operation_id.clone(), bridge_phase_to_dsl(operation.phase));
+            if let Some(terminal) = operation.terminal {
+                state
+                    .live_bridge_execution_terminal_by_operation
+                    .insert(operation_id.clone(), bridge_terminal_to_dsl(terminal));
+            }
+            if let Some(result_digest) = &operation.result_digest {
+                state
+                    .live_bridge_execution_result_digest_by_operation
+                    .insert(operation_id.clone(), result_digest.clone());
+            }
+            if let Some(reason) = operation.cancellation_reason {
+                let reason = match reason {
+                    LiveBridgeCancellationReason::BargeIn => {
+                        crate::meerkat_machine::dsl::LiveBridgeCancellationReason::BargeIn
+                    }
+                    LiveBridgeCancellationReason::ChannelClose => {
+                        crate::meerkat_machine::dsl::LiveBridgeCancellationReason::ChannelClose
+                    }
+                    LiveBridgeCancellationReason::Restart => {
+                        crate::meerkat_machine::dsl::LiveBridgeCancellationReason::Restart
+                    }
+                    LiveBridgeCancellationReason::ProtocolDrift => {
+                        crate::meerkat_machine::dsl::LiveBridgeCancellationReason::ProtocolDrift
+                    }
+                };
+                state
+                    .live_bridge_cancellation_reason_by_operation
+                    .insert(operation_id.clone(), reason);
+            }
+            if let Some(kind) = operation.submission_output_kind {
+                let kind = match kind {
+                    LiveBridgeOutputKind::Success => {
+                        crate::meerkat_machine::dsl::LiveBridgeOutputKind::Success
+                    }
+                    LiveBridgeOutputKind::FailureProjection => {
+                        crate::meerkat_machine::dsl::LiveBridgeOutputKind::FailureProjection
+                    }
+                };
+                state
+                    .live_bridge_submission_output_kind_by_operation
+                    .insert(operation_id.clone(), kind);
+            }
+            if let Some(digest) = &operation.submission_digest {
+                state
+                    .live_bridge_submission_digest_by_operation
+                    .insert(operation_id.clone(), digest.clone());
+            }
+            if let Some(submission_state) = operation.submission_state {
+                state.live_bridge_submission_state_by_operation.insert(
+                    operation_id.clone(),
+                    bridge_submission_state_to_dsl(submission_state),
+                );
+            }
+            if operation.current_for_channel
+                && state
+                    .live_bridge_operation_by_channel
+                    .insert(operation.channel_id.clone(), operation_id.clone())
+                    .is_some()
+            {
+                return Err(format!(
+                    "durable live bridge image duplicates current channel {}",
+                    operation.channel_id
+                ));
+            }
+            if operation.channel_revoked {
+                state
+                    .live_revoked_execution_channels
+                    .insert(operation.channel_id.clone());
+                state.live_execution_phase_by_channel.insert(
+                    operation.channel_id.clone(),
+                    crate::meerkat_machine::dsl::LiveExecutionChannelPhase::Revoked,
+                );
+            }
+        }
+        Ok(())
     }
 }
 
@@ -478,6 +811,104 @@ pub(crate) fn bridge_submission_state_to_dsl(
     }
 }
 
+/// Read-only durable projection of one generated bridge operation.
+///
+/// This contains only correlation and lifecycle facts already owned by the
+/// generated machine. It carries no request payload, provider send authority,
+/// effect authority, or execution admission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveBridgeRecoverySnapshot {
+    session_id: SessionId,
+    operation: ExactOperationIdentity<LiveBridgeOperationCorrelation>,
+    source_agent_identity: String,
+    canonical_context_revision: String,
+    request_digest: String,
+    phase: LiveBridgeOperationPhase,
+    terminal: Option<MeerkatExecutionTerminal>,
+    result_digest: Option<String>,
+    cancellation_reason: Option<LiveBridgeCancellationReason>,
+    submission_state: Option<LiveBridgeSubmissionState>,
+}
+
+impl LiveBridgeRecoverySnapshot {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        session_id: SessionId,
+        operation: ExactOperationIdentity<LiveBridgeOperationCorrelation>,
+        source_agent_identity: String,
+        canonical_context_revision: String,
+        request_digest: String,
+        phase: LiveBridgeOperationPhase,
+        terminal: Option<MeerkatExecutionTerminal>,
+        result_digest: Option<String>,
+        cancellation_reason: Option<LiveBridgeCancellationReason>,
+        submission_state: Option<LiveBridgeSubmissionState>,
+    ) -> Self {
+        Self {
+            session_id,
+            operation,
+            source_agent_identity,
+            canonical_context_revision,
+            request_digest,
+            phase,
+            terminal,
+            result_digest,
+            cancellation_reason,
+            submission_state,
+        }
+    }
+
+    #[must_use]
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    #[must_use]
+    pub fn operation(&self) -> &ExactOperationIdentity<LiveBridgeOperationCorrelation> {
+        &self.operation
+    }
+
+    #[must_use]
+    pub fn source_agent_identity(&self) -> &str {
+        &self.source_agent_identity
+    }
+
+    #[must_use]
+    pub fn canonical_context_revision(&self) -> &str {
+        &self.canonical_context_revision
+    }
+
+    #[must_use]
+    pub fn request_digest(&self) -> &str {
+        &self.request_digest
+    }
+
+    #[must_use]
+    pub const fn phase(&self) -> LiveBridgeOperationPhase {
+        self.phase
+    }
+
+    #[must_use]
+    pub const fn terminal(&self) -> Option<MeerkatExecutionTerminal> {
+        self.terminal
+    }
+
+    #[must_use]
+    pub fn result_digest(&self) -> Option<&str> {
+        self.result_digest.as_deref()
+    }
+
+    #[must_use]
+    pub const fn cancellation_reason(&self) -> Option<LiveBridgeCancellationReason> {
+        self.cancellation_reason
+    }
+
+    #[must_use]
+    pub const fn submission_state(&self) -> Option<LiveBridgeSubmissionState> {
+        self.submission_state
+    }
+}
+
 /// Sealed generated admission for one Responses bridge operation executed by
 /// the channel-bound durable member.
 #[derive(Clone)]
@@ -613,6 +1044,121 @@ impl LiveBridgeOperationAdmission {
     #[must_use]
     pub const fn phase(&self) -> LiveBridgeOperationPhase {
         self.phase
+    }
+}
+
+/// Generated one-use boundary proving that the bridge operation crossed into
+/// durable executor start custody. It mints no retry or provider-send right.
+#[derive(Clone, Debug)]
+pub struct LiveBridgeExecutionStartAuthority {
+    admission: LiveBridgeOperationAdmission,
+}
+
+impl LiveBridgeExecutionStartAuthority {
+    pub(crate) fn from_generated_effect(
+        admission: &LiveBridgeOperationAdmission,
+        effect: &MeerkatMachineEffect,
+    ) -> Result<Option<Self>, LiveExecutionAuthorityError> {
+        let MeerkatMachineEffect::LiveBridgeExecutionStartAuthorized {
+            channel_id,
+            interaction_id,
+            operation_id,
+            request_digest,
+            phase,
+        } = effect
+        else {
+            return Ok(None);
+        };
+        let correlation = admission.operation().domain_correlation();
+        if channel_id != correlation.channel_id().as_str()
+            || interaction_id != &correlation.interaction_id().to_string()
+            || operation_id != &DslOperationId::from_domain(admission.operation().operation_id())
+            || request_digest != admission.request_digest().as_str()
+            || *phase != crate::meerkat_machine::dsl::LiveBridgeOperationPhase::ExecutionRunning
+        {
+            return Err(LiveExecutionAuthorityError::BridgeOperationMismatch);
+        }
+        Ok(Some(Self {
+            admission: admission.clone(),
+        }))
+    }
+
+    #[must_use]
+    pub fn admission(&self) -> &LiveBridgeOperationAdmission {
+        &self.admission
+    }
+}
+
+/// Generated receipt for an exact physical executor terminal recovered after
+/// the provider channel was revoked. It carries no submission authority.
+#[derive(Clone, Debug)]
+pub struct LiveBridgeRecoveredTerminalReceipt {
+    session_id: SessionId,
+    operation: ExactOperationIdentity<LiveBridgeOperationCorrelation>,
+    terminal: MeerkatExecutionTerminal,
+    result_digest: Option<String>,
+    replayed: bool,
+}
+
+impl LiveBridgeRecoveredTerminalReceipt {
+    pub(crate) fn from_generated_effect(
+        snapshot: &LiveBridgeRecoverySnapshot,
+        terminal: MeerkatExecutionTerminal,
+        result_digest: Option<&str>,
+        effect: &MeerkatMachineEffect,
+    ) -> Result<Option<Self>, LiveExecutionAuthorityError> {
+        let MeerkatMachineEffect::LiveBridgeExecutionTerminalRecorded {
+            channel_id,
+            interaction_id,
+            operation_id,
+            terminal: effect_terminal,
+            result_digest: effect_result_digest,
+            replay,
+        } = effect
+        else {
+            return Ok(None);
+        };
+        let correlation = snapshot.operation().domain_correlation();
+        if channel_id != correlation.channel_id().as_str()
+            || interaction_id != &correlation.interaction_id().to_string()
+            || operation_id != &DslOperationId::from_domain(snapshot.operation().operation_id())
+            || *effect_terminal != bridge_terminal_to_dsl(terminal)
+            || effect_result_digest.as_deref() != result_digest
+        {
+            return Err(LiveExecutionAuthorityError::BridgeOperationMismatch);
+        }
+        Ok(Some(Self {
+            session_id: snapshot.session_id().clone(),
+            operation: snapshot.operation().clone(),
+            terminal,
+            result_digest: result_digest.map(str::to_string),
+            replayed: *replay,
+        }))
+    }
+
+    #[must_use]
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    #[must_use]
+    pub fn operation(&self) -> &ExactOperationIdentity<LiveBridgeOperationCorrelation> {
+        &self.operation
+    }
+
+    #[must_use]
+    pub const fn terminal(&self) -> MeerkatExecutionTerminal {
+        self.terminal
+    }
+
+    #[must_use]
+    pub fn result_digest(&self) -> Option<&str> {
+        self.result_digest.as_deref()
+    }
+
+    #[must_use]
+    pub const fn replayed(&self) -> bool {
+        self.replayed
     }
 }
 

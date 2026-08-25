@@ -247,6 +247,7 @@ pub use runtime::{
     DelegationExecutionHandle, DelegationExecutionOutcome, DelegationExecutionRequest,
     DelegationExecutionService, DelegationExecutionSource, DelegationMemberOptions,
     DelegationParentContext, DelegationTerminalizedExecution, DelegationTurnTerminal,
+    DurableBoundedMemberState, DurableBoundedWorkRecovery, DurableBoundedWorkState,
     ExternalPeerBindingSpec, FlowRunHandle, FlowRunWaitError, FlowTargetProvisioner,
     ForkMemberBoundedRunOutcome, ForkMemberResult, HELPER_RESULT_TRUNCATION_MARKER, HelperOptions,
     HelperResult, HostBindReport, HostBindRequest, HostCapabilityReport, HostRevokeReport,

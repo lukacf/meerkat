@@ -1208,6 +1208,7 @@ struct ObservedPersistedLifecycle {
     binding: MachineLifecycleBindingFacts,
     supervisor_authority: SupervisorAuthoritySnapshot,
     unregister_progress: Option<crate::store::MachineUnregisterProgressSnapshot>,
+    live_bridge_recovery: crate::live_execution::LiveBridgeRecoveryImage,
 }
 
 fn observe_persisted_lifecycle(
@@ -1223,6 +1224,7 @@ fn observe_persisted_lifecycle(
             binding: MachineLifecycleBindingFacts::default(),
             supervisor_authority: SupervisorAuthoritySnapshot::UnboundNoReceipt,
             unregister_progress: None,
+            live_bridge_recovery: crate::live_execution::LiveBridgeRecoveryImage::default(),
         },
         MachineLifecycleObservation::Decoded { record, version } => {
             let (lifecycle, reassert_state) = match record.runtime_state() {
@@ -1260,6 +1262,7 @@ fn observe_persisted_lifecycle(
                 binding: record.binding().clone(),
                 supervisor_authority: record.supervisor_authority().clone(),
                 unregister_progress: record.unregister_progress().cloned(),
+                live_bridge_recovery: record.live_bridge_recovery().clone(),
             }
         }
         MachineLifecycleObservation::Unsupported { version, .. }
@@ -1271,8 +1274,23 @@ fn observe_persisted_lifecycle(
             binding: MachineLifecycleBindingFacts::default(),
             supervisor_authority: SupervisorAuthoritySnapshot::UnboundNoReceipt,
             unregister_progress: None,
+            live_bridge_recovery: crate::live_execution::LiveBridgeRecoveryImage::default(),
         },
     }
+}
+
+fn durable_tail_lifecycle_reassertion(
+    observed: &ObservedPersistedLifecycle,
+) -> MachineLifecycleCommit {
+    MachineLifecycleCommit::new_with_binding_run_unregister_progress_and_live_bridge(
+        observed.reassert_state,
+        observed.binding.clone(),
+        MachineLifecycleRunFacts::default(),
+        observed.supervisor_authority.clone(),
+        observed.unregister_progress.clone(),
+        observed.live_bridge_recovery.clone(),
+    )
+    .with_expected_version(observed.expected_version.clone())
 }
 
 /// Classify the highest durably committed boundary receipt for the candidate
@@ -1613,6 +1631,7 @@ pub async fn recover_durable_tail(
             binding: MachineLifecycleBindingFacts::default(),
             supervisor_authority: SupervisorAuthoritySnapshot::UnboundNoReceipt,
             unregister_progress: None,
+            live_bridge_recovery: crate::live_execution::LiveBridgeRecoveryImage::default(),
         },
         Err(error) => return Err(error.into()),
     };
@@ -1620,14 +1639,7 @@ pub async fn recover_durable_tail(
     // on the exact row version the machine judged. The expected version is a
     // first-apply CAS fence; the target record itself is the durable outcome
     // identity used by exact retry convergence.
-    let lifecycle = MachineLifecycleCommit::new_with_binding_run_and_unregister_progress(
-        observed.reassert_state,
-        observed.binding.clone(),
-        MachineLifecycleRunFacts::default(),
-        observed.supervisor_authority.clone(),
-        observed.unregister_progress.clone(),
-    )
-    .with_expected_version(observed.expected_version.clone());
+    let lifecycle = durable_tail_lifecycle_reassertion(&observed);
 
     let prior_recovery = match load_exact_committed_recovery(
         store,
@@ -2172,6 +2184,77 @@ mod store_authority_tests {
             orphan_tool_result_count: 0,
             messages_after_terminal: false,
         }
+    }
+
+    #[test]
+    fn durable_tail_lifecycle_reassertion_preserves_live_bridge_recovery_image() {
+        let mut state = crate::meerkat_machine::dsl::MeerkatMachineState::default();
+        let operation_id = crate::meerkat_machine::dsl::OperationId(
+            "\"00000000-0000-0000-0000-000000000001\"".to_string(),
+        );
+        let channel_id = "live:durable-tail-reassert".to_string();
+        state
+            .live_bridge_operation_by_channel
+            .insert(channel_id.clone(), operation_id.clone());
+        state
+            .live_bridge_channel_by_operation
+            .insert(operation_id.clone(), channel_id);
+        state.live_bridge_interaction_by_operation.insert(
+            operation_id.clone(),
+            "00000000-0000-0000-0000-000000000002".to_string(),
+        );
+        state.live_bridge_provider_turn_by_operation.insert(
+            operation_id.clone(),
+            "provider-turn:durable-tail".to_string(),
+        );
+        state.live_bridge_provider_delegation_by_operation.insert(
+            operation_id.clone(),
+            "provider-delegation:durable-tail".to_string(),
+        );
+        state.live_bridge_provider_call_by_operation.insert(
+            operation_id.clone(),
+            "provider-call:durable-tail".to_string(),
+        );
+        state.live_bridge_agent_identity_by_operation.insert(
+            operation_id.clone(),
+            crate::meerkat_machine::dsl::AgentIdentity("source:durable-tail".to_string()),
+        );
+        state.live_bridge_context_revision_by_operation.insert(
+            operation_id.clone(),
+            "sha256:durable-tail-context".to_string(),
+        );
+        state.live_bridge_request_digest_by_operation.insert(
+            operation_id.clone(),
+            "sha256:durable-tail-request".to_string(),
+        );
+        state.live_bridge_phase_by_operation.insert(
+            operation_id,
+            crate::meerkat_machine::dsl::LiveBridgeOperationPhase::ExecutionRunning,
+        );
+        let live_bridge_recovery = crate::live_execution::LiveBridgeRecoveryImage::capture(&state)
+            .expect("capture one durable live bridge operation");
+        let seed = MachineLifecycleCommit::new_with_binding_run_unregister_progress_and_live_bridge(
+            RuntimeState::Idle,
+            MachineLifecycleBindingFacts::default(),
+            MachineLifecycleRunFacts::default(),
+            SupervisorAuthoritySnapshot::UnboundNoReceipt,
+            None,
+            live_bridge_recovery.clone(),
+        );
+        let encoded = seed
+            .store_record()
+            .encode()
+            .expect("encode V5 lifecycle image");
+        let observed = observe_persisted_lifecycle(
+            MachineLifecycleObservation::from_raw_record(&encoded),
+            &RunId::new(),
+        );
+        let reassertion = durable_tail_lifecycle_reassertion(&observed);
+        assert_eq!(
+            reassertion.snapshot().live_bridge_recovery(),
+            &live_bridge_recovery,
+            "durable-tail lifecycle reassertion must not erase V5 bridge truth"
+        );
     }
 
     #[test]

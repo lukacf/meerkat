@@ -1337,13 +1337,20 @@ impl MeerkatMachine {
             }
         }
 
+        let live_bridge_recovery = match &expected_lifecycle {
+            crate::store::MachineLifecycleObservation::Decoded { record, .. } => {
+                record.live_bridge_recovery().clone()
+            }
+            _ => crate::live_execution::LiveBridgeRecoveryImage::default(),
+        };
         let expected = expected_lifecycle.expected_version();
-        let replacement =
-            crate::store::MachineLifecycleCommit::new_with_binding_and_unregister_progress(
+        let replacement = crate::store::MachineLifecycleCommit::new_with_binding_run_unregister_progress_and_live_bridge(
                 RuntimeState::Idle,
                 crate::store::MachineLifecycleBindingFacts::default(),
+                crate::store::MachineLifecycleRunFacts::default(),
                 crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
                 None,
+                live_bridge_recovery,
             );
         let durable_outcome = match store
             .compare_and_swap_machine_lifecycle_with_fence(

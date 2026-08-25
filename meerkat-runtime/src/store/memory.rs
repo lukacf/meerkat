@@ -489,6 +489,10 @@ pub struct InMemoryRuntimeStore {
     #[cfg(test)]
     machine_lifecycle_observe_errors_remaining: Arc<AtomicUsize>,
     #[cfg(test)]
+    machine_lifecycle_commit_errors_remaining: Arc<AtomicUsize>,
+    #[cfg(test)]
+    machine_lifecycle_commit_ack_losses_remaining: Arc<AtomicUsize>,
+    #[cfg(test)]
     direct_member_high_water_before: Arc<StdMutex<Option<InputStateBatchCasTestBlock>>>,
     /// Candidate bytes shipped into the snapshot byte-equality compare.
     /// Observability seam for the length-gate regression tests only.
@@ -515,6 +519,10 @@ impl InMemoryRuntimeStore {
             machine_lifecycle_cas_conflicts_remaining: Arc::new(AtomicUsize::new(0)),
             #[cfg(test)]
             machine_lifecycle_observe_errors_remaining: Arc::new(AtomicUsize::new(0)),
+            #[cfg(test)]
+            machine_lifecycle_commit_errors_remaining: Arc::new(AtomicUsize::new(0)),
+            #[cfg(test)]
+            machine_lifecycle_commit_ack_losses_remaining: Arc::new(AtomicUsize::new(0)),
             #[cfg(test)]
             direct_member_high_water_before: Arc::new(StdMutex::new(None)),
             #[cfg(test)]
@@ -611,6 +619,18 @@ impl InMemoryRuntimeStore {
     #[cfg(test)]
     pub(crate) fn fail_next_machine_lifecycle_observation(&self) {
         self.machine_lifecycle_observe_errors_remaining
+            .fetch_add(1, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_machine_lifecycle_commit(&self) {
+        self.machine_lifecycle_commit_errors_remaining
+            .fetch_add(1, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn lose_next_machine_lifecycle_commit_acknowledgement(&self) {
+        self.machine_lifecycle_commit_ack_losses_remaining
             .fetch_add(1, Ordering::SeqCst);
     }
 
@@ -3359,6 +3379,18 @@ impl RuntimeStore for InMemoryRuntimeStore {
         commit: MachineLifecycleCommit,
         input_states: &[InputStatePersistenceRecord],
     ) -> Result<(), RuntimeStoreError> {
+        #[cfg(test)]
+        if self
+            .machine_lifecycle_commit_errors_remaining
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err(RuntimeStoreError::WriteFailed(
+                "synthetic machine lifecycle commit failure".to_string(),
+            ));
+        }
         let runtime_state = commit.runtime_state();
         let record = commit.store_record().encode()?;
         let mut inner = self.inner.lock().await;
@@ -3376,6 +3408,19 @@ impl RuntimeStore for InMemoryRuntimeStore {
         inner.runtime_lifecycle.insert(rid.clone(), record);
         sync_runtime_session_catalog_lifecycle(&mut inner, &rid, runtime_state);
         apply_prepared_memory_input_state_mutations(&mut inner, &rid, prepared_input_mutations);
+
+        #[cfg(test)]
+        if self
+            .machine_lifecycle_commit_ack_losses_remaining
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err(RuntimeStoreError::WriteFailed(
+                "synthetic machine lifecycle commit acknowledgement loss".to_string(),
+            ));
+        }
 
         Ok(())
     }

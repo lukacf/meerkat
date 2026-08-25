@@ -1686,6 +1686,7 @@ pub enum LiveBridgeOperationPhase {
     #[default]
     PreFinalInference,
     FinalInputAuthorized,
+    ExecutionRunning,
     CancellationAuthorized,
     ExecutionTerminal,
 }
@@ -5236,6 +5237,15 @@ macro_rules! meerkat_catalog_machine_dsl {
                 operation_id: OperationId,
                 provider_turn_ref: String,
             },
+            AuthorizeLiveBridgeExecutionStart {
+                channel_id: String,
+                runtime_id: AgentRuntimeId,
+                fence_token: FenceToken,
+                generation: Generation,
+                interaction_id: String,
+                operation_id: OperationId,
+                request_digest: String,
+            },
             AuthorizeLiveBridgeEffect {
                 channel_id: String,
                 runtime_id: AgentRuntimeId,
@@ -5280,6 +5290,20 @@ macro_rules! meerkat_catalog_machine_dsl {
                 operation_id: OperationId,
                 terminal: Enum<MeerkatExecutionTerminal>,
                 result_digest: Option<String>,
+            },
+            ReconcileRevokedLiveBridgeExecutionTerminal {
+                channel_id: String,
+                interaction_id: String,
+                operation_id: OperationId,
+                request_digest: String,
+                terminal: Enum<MeerkatExecutionTerminal>,
+                result_digest: Option<String>,
+            },
+            FenceRestoredLiveBridgeOperationForRestart {
+                channel_id: String,
+                interaction_id: String,
+                operation_id: OperationId,
+                request_digest: String,
             },
             AuthorizeLiveBridgeSubmission {
                 channel_id: String,
@@ -6544,6 +6568,13 @@ macro_rules! meerkat_catalog_machine_dsl {
                 operation_id: OperationId,
                 phase: Enum<LiveBridgeOperationPhase>,
             },
+            LiveBridgeExecutionStartAuthorized {
+                channel_id: String,
+                interaction_id: String,
+                operation_id: OperationId,
+                request_digest: String,
+                phase: Enum<LiveBridgeOperationPhase>,
+            },
             LiveBridgeEffectAuthorityIssued {
                 channel_id: String,
                 interaction_id: String,
@@ -7097,6 +7128,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition LiveBridgeOperationReplayObserved => local seam OwnerRealizationOnly,
         disposition LiveBridgeProtocolDriftCloseAuthorized => external seam OwnerRealizationOnly,
         disposition LiveBridgeFinalInputAuthorized => local seam OwnerRealizationOnly,
+        disposition LiveBridgeExecutionStartAuthorized => external seam OwnerRealizationOnly,
         disposition LiveBridgeEffectAuthorityIssued => local seam OwnerRealizationOnly,
         disposition LiveBridgeEffectDispatchAuthorized => external seam OwnerRealizationOnly,
         disposition LiveBridgeEffectOutcomeRecorded => local seam OwnerRealizationOnly,
@@ -7752,6 +7784,17 @@ macro_rules! meerkat_catalog_machine_dsl {
                 == self.live_bridge_submission_state_by_operation.keys()
             && for_all(operation_id in self.live_bridge_submission_state_by_operation.keys(),
                 self.live_bridge_execution_terminal_by_operation.contains_key(operation_id))
+        }
+
+        invariant live_bridge_cancellation_provenance_is_operation_scoped {
+            for_all(operation_id in self.live_bridge_cancellation_reason_by_operation.keys(),
+                self.live_bridge_channel_by_operation.contains_key(operation_id)
+                && (self.live_bridge_phase_by_operation.get_copied(operation_id)
+                        == Some(LiveBridgeOperationPhase::CancellationAuthorized)
+                    || self.live_bridge_phase_by_operation.get_copied(operation_id)
+                        == Some(LiveBridgeOperationPhase::ExecutionRunning)
+                    || self.live_bridge_phase_by_operation.get_copied(operation_id)
+                        == Some(LiveBridgeOperationPhase::ExecutionTerminal)))
         }
 
         invariant live_bridge_completed_terminal_has_exact_result_digest {
@@ -22349,14 +22392,23 @@ macro_rules! meerkat_catalog_machine_dsl {
                     if !self.live_bridge_execution_terminal_by_operation.contains_key(
                         self.live_bridge_operation_by_channel.get_cloned(channel_id).get("value")
                     ) {
-                        self.live_bridge_execution_terminal_by_operation.insert(
-                            self.live_bridge_operation_by_channel.get_cloned(channel_id).get("value"),
-                            MeerkatExecutionTerminal::Cancelled
-                        );
-                        self.live_bridge_phase_by_operation.insert(
-                            self.live_bridge_operation_by_channel.get_cloned(channel_id).get("value"),
-                            LiveBridgeOperationPhase::ExecutionTerminal
-                        );
+                        if self.live_bridge_phase_by_operation.get_copied(
+                                self.live_bridge_operation_by_channel.get_cloned(channel_id).get("value"))
+                                == Some(LiveBridgeOperationPhase::ExecutionRunning) {
+                            self.live_bridge_cancellation_reason_by_operation.insert(
+                                self.live_bridge_operation_by_channel.get_cloned(channel_id).get("value"),
+                                LiveBridgeCancellationReason::ChannelClose
+                            );
+                        } else {
+                            self.live_bridge_execution_terminal_by_operation.insert(
+                                self.live_bridge_operation_by_channel.get_cloned(channel_id).get("value"),
+                                MeerkatExecutionTerminal::Cancelled
+                            );
+                            self.live_bridge_phase_by_operation.insert(
+                                self.live_bridge_operation_by_channel.get_cloned(channel_id).get("value"),
+                                LiveBridgeOperationPhase::ExecutionTerminal
+                            );
+                        }
                     }
                     if self.live_bridge_submission_state_by_operation.get_copied(
                         self.live_bridge_operation_by_channel.get_cloned(channel_id).get("value"))
@@ -24279,6 +24331,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 !self.live_bridge_operation_by_channel.contains_key(channel_id)
                 && !self.live_bridge_channel_by_operation.contains_key(operation_id)
             }
+            guard "durable_recovery_image_has_capacity" {
+                128 > self.live_bridge_channel_by_operation.len()
+            }
             update {
                 self.live_bridge_operation_by_channel.insert(channel_id, operation_id);
                 self.live_bridge_channel_by_operation.insert(operation_id, channel_id);
@@ -24451,6 +24506,49 @@ macro_rules! meerkat_catalog_machine_dsl {
                 interaction_id: interaction_id,
                 operation_id: operation_id,
                 phase: LiveBridgeOperationPhase::FinalInputAuthorized
+            }
+        }
+
+        // The generated machine marks execution as accepted before the host
+        // crosses the durable Mob start boundary. A crash after this authority
+        // but before stable work admission is deliberately repair-blocked and
+        // must never be interpreted as retry permission.
+        transition AuthorizeLiveBridgeExecutionStart {
+            per_phase [Idle, Attached, Running]
+            on input AuthorizeLiveBridgeExecutionStart {
+                channel_id, runtime_id, fence_token, generation,
+                interaction_id, operation_id, request_digest
+            }
+            guard "active_channel_binding_matches" {
+                self.live_execution_phase_by_channel.get_copied(channel_id)
+                    == Some(LiveExecutionChannelPhase::Active)
+                && self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+                && self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+                && self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+            }
+            guard "exact_final_input_operation_matches" {
+                self.live_bridge_operation_by_channel.get_cloned(channel_id) == Some(operation_id)
+                && self.live_bridge_channel_by_operation.get_cloned(operation_id) == Some(channel_id)
+                && self.live_bridge_interaction_by_operation.get_cloned(operation_id) == Some(interaction_id)
+                && self.live_bridge_request_digest_by_operation.get_cloned(operation_id) == Some(request_digest)
+                && self.live_bridge_phase_by_operation.get_copied(operation_id)
+                    == Some(LiveBridgeOperationPhase::FinalInputAuthorized)
+                && !self.live_bridge_execution_terminal_by_operation.contains_key(operation_id)
+                && !self.live_bridge_cancellation_reason_by_operation.contains_key(operation_id)
+            }
+            update {
+                self.live_bridge_phase_by_operation.insert(
+                    operation_id,
+                    LiveBridgeOperationPhase::ExecutionRunning
+                );
+            }
+            to Idle
+            emit LiveBridgeExecutionStartAuthorized {
+                channel_id: channel_id,
+                interaction_id: interaction_id,
+                operation_id: operation_id,
+                request_digest: request_digest,
+                phase: LiveBridgeOperationPhase::ExecutionRunning
             }
         }
 
@@ -24634,10 +24732,13 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {
                 self.live_bridge_cancellation_reason_by_operation.insert(operation_id, reason);
-                self.live_bridge_phase_by_operation.insert(
-                    operation_id,
-                    LiveBridgeOperationPhase::CancellationAuthorized
-                );
+                if self.live_bridge_phase_by_operation.get_copied(operation_id)
+                        != Some(LiveBridgeOperationPhase::ExecutionRunning) {
+                    self.live_bridge_phase_by_operation.insert(
+                        operation_id,
+                        LiveBridgeOperationPhase::CancellationAuthorized
+                    );
+                }
             }
             to Idle
             emit LiveBridgeOperationCancellationAuthorized {
@@ -24712,6 +24813,169 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.live_bridge_interaction_by_operation.get_cloned(operation_id) == Some(interaction_id)
                 && self.live_bridge_phase_by_operation.get_copied(operation_id)
                     == Some(LiveBridgeOperationPhase::ExecutionTerminal)
+                && self.live_bridge_execution_terminal_by_operation.get_copied(operation_id)
+                    == Some(terminal)
+                && ((terminal == MeerkatExecutionTerminal::Completed
+                        && result_digest != None
+                        && result_digest.get("value") != ""
+                        && self.live_bridge_execution_result_digest_by_operation.get_cloned(operation_id)
+                            == Some(result_digest.get("value")))
+                    || (terminal != MeerkatExecutionTerminal::Completed
+                        && result_digest == None
+                        && !self.live_bridge_execution_result_digest_by_operation.contains_key(operation_id)))
+            }
+            to Idle
+            emit LiveBridgeExecutionTerminalRecorded {
+                channel_id: channel_id,
+                interaction_id: interaction_id,
+                operation_id: operation_id,
+                terminal: terminal,
+                result_digest: result_digest,
+                replay: true
+            }
+        }
+
+        // A restarted host first revokes the provider channel. If execution
+        // had already crossed the generated start boundary, abandonment keeps
+        // cancellation provenance separate and leaves the physical terminal
+        // open for exact stable-delivery reconciliation here. This transition
+        // can never mint provider submission authority.
+        transition FenceRestoredLiveBridgeOperationForRestartFresh {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input FenceRestoredLiveBridgeOperationForRestart {
+                channel_id, interaction_id, operation_id, request_digest
+            }
+            guard "restored_unrevoked_nonterminal_operation_matches_exactly" {
+                self.live_bridge_operation_by_channel.get_cloned(channel_id) == Some(operation_id)
+                && self.live_bridge_channel_by_operation.get_cloned(operation_id) == Some(channel_id)
+                && self.live_bridge_interaction_by_operation.get_cloned(operation_id) == Some(interaction_id)
+                && self.live_bridge_request_digest_by_operation.get_cloned(operation_id) == Some(request_digest)
+                && (self.live_bridge_phase_by_operation.get_copied(operation_id)
+                        == Some(LiveBridgeOperationPhase::PreFinalInference)
+                    || self.live_bridge_phase_by_operation.get_copied(operation_id)
+                        == Some(LiveBridgeOperationPhase::FinalInputAuthorized)
+                    || self.live_bridge_phase_by_operation.get_copied(operation_id)
+                        == Some(LiveBridgeOperationPhase::ExecutionRunning))
+                && !self.live_bridge_execution_terminal_by_operation.contains_key(operation_id)
+                && !self.live_bridge_cancellation_reason_by_operation.contains_key(operation_id)
+                && !self.live_revoked_execution_channels.contains(channel_id)
+            }
+            guard "restored_channel_has_no_live_binding_atoms" {
+                !self.live_channel_session_by_channel.contains_key(channel_id)
+                && !self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                && !self.live_execution_phase_by_channel.contains_key(channel_id)
+                && !self.live_experimental_execution_channels.contains(channel_id)
+            }
+            update {
+                self.live_bridge_operation_by_channel.remove(channel_id);
+                self.live_bridge_cancellation_reason_by_operation.insert(
+                    operation_id,
+                    LiveBridgeCancellationReason::Restart
+                );
+                self.live_revoked_execution_channels.insert(channel_id);
+                self.live_execution_phase_by_channel.insert(
+                    channel_id,
+                    LiveExecutionChannelPhase::Revoked
+                );
+            }
+            to Idle
+        }
+
+        transition FenceRestoredLiveBridgeOperationForRestartExactReplay {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input FenceRestoredLiveBridgeOperationForRestart {
+                channel_id, interaction_id, operation_id, request_digest
+            }
+            guard "restart_fence_matches_exactly" {
+                !self.live_bridge_operation_by_channel.contains_key(channel_id)
+                && self.live_bridge_channel_by_operation.get_cloned(operation_id) == Some(channel_id)
+                && self.live_bridge_interaction_by_operation.get_cloned(operation_id) == Some(interaction_id)
+                && self.live_bridge_request_digest_by_operation.get_cloned(operation_id) == Some(request_digest)
+                && (self.live_bridge_phase_by_operation.get_copied(operation_id)
+                        == Some(LiveBridgeOperationPhase::PreFinalInference)
+                    || self.live_bridge_phase_by_operation.get_copied(operation_id)
+                        == Some(LiveBridgeOperationPhase::FinalInputAuthorized)
+                    || self.live_bridge_phase_by_operation.get_copied(operation_id)
+                        == Some(LiveBridgeOperationPhase::ExecutionRunning))
+                && !self.live_bridge_execution_terminal_by_operation.contains_key(operation_id)
+                && self.live_bridge_cancellation_reason_by_operation.get_copied(operation_id)
+                    == Some(LiveBridgeCancellationReason::Restart)
+                && self.live_revoked_execution_channels.contains(channel_id)
+                && self.live_execution_phase_by_channel.get_copied(channel_id)
+                    == Some(LiveExecutionChannelPhase::Revoked)
+            }
+            guard "restart_fence_has_no_live_binding_atoms" {
+                !self.live_channel_session_by_channel.contains_key(channel_id)
+                && !self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                && !self.live_experimental_execution_channels.contains(channel_id)
+            }
+            to Idle
+        }
+
+        transition ReconcileRevokedLiveBridgeExecutionTerminalFresh {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ReconcileRevokedLiveBridgeExecutionTerminal {
+                channel_id, interaction_id, operation_id, request_digest,
+                terminal, result_digest
+            }
+            guard "revoked_exact_operation_with_cancellation_provenance" {
+                self.live_revoked_execution_channels.contains(channel_id)
+                && self.live_bridge_channel_by_operation.get_cloned(operation_id) == Some(channel_id)
+                && self.live_bridge_interaction_by_operation.get_cloned(operation_id) == Some(interaction_id)
+                && self.live_bridge_request_digest_by_operation.get_cloned(operation_id) == Some(request_digest)
+                && self.live_bridge_phase_by_operation.get_copied(operation_id)
+                    == Some(LiveBridgeOperationPhase::ExecutionRunning)
+                && self.live_bridge_cancellation_reason_by_operation.contains_key(operation_id)
+                && !self.live_bridge_execution_terminal_by_operation.contains_key(operation_id)
+            }
+            guard "terminal_result_shape_is_exact" {
+                (terminal == MeerkatExecutionTerminal::Completed
+                    && result_digest != None
+                    && result_digest.get("value") != "")
+                || (terminal != MeerkatExecutionTerminal::Completed && result_digest == None)
+            }
+            update {
+                self.live_bridge_execution_terminal_by_operation.insert(operation_id, terminal);
+                if result_digest != None {
+                    self.live_bridge_execution_result_digest_by_operation.insert(
+                        operation_id,
+                        result_digest.get("value")
+                    );
+                }
+                self.live_bridge_phase_by_operation.insert(
+                    operation_id,
+                    LiveBridgeOperationPhase::ExecutionTerminal
+                );
+            }
+            to Idle
+            emit LiveBridgeExecutionTerminalRecorded {
+                channel_id: channel_id,
+                interaction_id: interaction_id,
+                operation_id: operation_id,
+                terminal: terminal,
+                result_digest: result_digest,
+                replay: false
+            }
+        }
+
+        transition ReconcileRevokedLiveBridgeExecutionTerminalExactReplay {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ReconcileRevokedLiveBridgeExecutionTerminal {
+                channel_id, interaction_id, operation_id, request_digest,
+                terminal, result_digest
+            }
+            guard "revoked_exact_operation_and_terminal_match" {
+                self.live_revoked_execution_channels.contains(channel_id)
+                && self.live_bridge_channel_by_operation.get_cloned(operation_id) == Some(channel_id)
+                && self.live_bridge_interaction_by_operation.get_cloned(operation_id) == Some(interaction_id)
+                && self.live_bridge_request_digest_by_operation.get_cloned(operation_id) == Some(request_digest)
+                && self.live_bridge_phase_by_operation.get_copied(operation_id)
+                    == Some(LiveBridgeOperationPhase::ExecutionTerminal)
+                && self.live_bridge_cancellation_reason_by_operation.contains_key(operation_id)
                 && self.live_bridge_execution_terminal_by_operation.get_copied(operation_id)
                     == Some(terminal)
                 && ((terminal == MeerkatExecutionTerminal::Completed
@@ -24973,6 +25237,29 @@ macro_rules! meerkat_catalog_machine_dsl {
                         self.live_bridge_channel_by_operation.get_cloned(operation_id).get("value")
                     );
                 }
+            }
+            to Idle
+            emit LiveBridgeSubmissionRecoveredAmbiguous {
+                channel_id: self.live_bridge_channel_by_operation.get_cloned(operation_id).get("value"),
+                operation_id: operation_id,
+                provider_call_ref: self.live_bridge_provider_call_by_operation
+                    .get_cloned(operation_id).get("value"),
+                output_digest: self.live_bridge_submission_digest_by_operation
+                    .get_cloned(operation_id).get("value"),
+                state: LiveBridgeSubmissionState::SubmissionAmbiguous,
+                retry_allowed: false
+            }
+        }
+
+        transition RecoverLiveBridgeSubmissionExactReplay {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RecoverLiveBridgeSubmission { operation_id }
+            guard "submission_is_already_ambiguously_recovered" {
+                self.live_bridge_submission_state_by_operation.get_copied(operation_id)
+                    == Some(LiveBridgeSubmissionState::SubmissionAmbiguous)
+                && self.live_bridge_channel_by_operation.contains_key(operation_id)
+                && self.live_bridge_provider_call_by_operation.contains_key(operation_id)
+                && self.live_bridge_submission_digest_by_operation.contains_key(operation_id)
             }
             to Idle
             emit LiveBridgeSubmissionRecoveredAmbiguous {

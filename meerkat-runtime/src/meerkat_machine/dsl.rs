@@ -2638,6 +2638,7 @@ pub enum LiveBridgeOperationPhase {
     #[default]
     PreFinalInference,
     FinalInputAuthorized,
+    ExecutionRunning,
     CancellationAuthorized,
     ExecutionTerminal,
 }

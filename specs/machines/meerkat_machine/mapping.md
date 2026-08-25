@@ -4313,6 +4313,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ConfirmLiveBridgeFinalInputRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `AuthorizeLiveBridgeExecutionStartIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveBridgeExecutionStartAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveBridgeExecutionStartRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AuthorizeLiveBridgeEffectIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -4388,6 +4397,66 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecordLiveBridgeExecutionTerminalExactReplayRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `FenceRestoredLiveBridgeOperationForRestartFreshIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `FenceRestoredLiveBridgeOperationForRestartFreshAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `FenceRestoredLiveBridgeOperationForRestartFreshRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `FenceRestoredLiveBridgeOperationForRestartFreshRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `FenceRestoredLiveBridgeOperationForRestartFreshStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `FenceRestoredLiveBridgeOperationForRestartExactReplayIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `FenceRestoredLiveBridgeOperationForRestartExactReplayAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `FenceRestoredLiveBridgeOperationForRestartExactReplayRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `FenceRestoredLiveBridgeOperationForRestartExactReplayRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `FenceRestoredLiveBridgeOperationForRestartExactReplayStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileRevokedLiveBridgeExecutionTerminalFreshIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileRevokedLiveBridgeExecutionTerminalFreshAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileRevokedLiveBridgeExecutionTerminalFreshRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileRevokedLiveBridgeExecutionTerminalFreshRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileRevokedLiveBridgeExecutionTerminalFreshStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileRevokedLiveBridgeExecutionTerminalExactReplayIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileRevokedLiveBridgeExecutionTerminalExactReplayAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileRevokedLiveBridgeExecutionTerminalExactReplayRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileRevokedLiveBridgeExecutionTerminalExactReplayRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReconcileRevokedLiveBridgeExecutionTerminalExactReplayStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AuthorizeLiveBridgeSubmissionIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -4437,6 +4506,21 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `RecoverLiveBridgeSubmissionStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverLiveBridgeSubmissionExactReplayIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverLiveBridgeSubmissionExactReplayAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverLiveBridgeSubmissionExactReplayRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverLiveBridgeSubmissionExactReplayRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverLiveBridgeSubmissionExactReplayStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `EnqueueLiveContextRowIdle`
@@ -7216,6 +7300,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `LiveBridgeFinalInputAuthorized`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `LiveBridgeExecutionStartAuthorized`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `LiveBridgeEffectAuthorityIssued`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -7420,6 +7507,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `live_bridge_execution_and_provider_settlement_are_independent`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `live_bridge_cancellation_provenance_is_operation_scoped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `live_bridge_completed_terminal_has_exact_result_digest`

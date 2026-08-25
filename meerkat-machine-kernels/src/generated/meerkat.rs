@@ -2967,6 +2967,8 @@ pub enum LiveBridgeOperationPhase {
     PreFinalInference,
     #[serde(rename = "FinalInputAuthorized")]
     FinalInputAuthorized,
+    #[serde(rename = "ExecutionRunning")]
+    ExecutionRunning,
     #[serde(rename = "CancellationAuthorized")]
     CancellationAuthorized,
     #[serde(rename = "ExecutionTerminal")]
@@ -2977,6 +2979,7 @@ impl LiveBridgeOperationPhase {
         match self {
             Self::PreFinalInference => "PreFinalInference",
             Self::FinalInputAuthorized => "FinalInputAuthorized",
+            Self::ExecutionRunning => "ExecutionRunning",
             Self::CancellationAuthorized => "CancellationAuthorized",
             Self::ExecutionTerminal => "ExecutionTerminal",
         }
@@ -2988,6 +2991,7 @@ impl std::convert::TryFrom<&str> for LiveBridgeOperationPhase {
         match value {
             "PreFinalInference" => Ok(Self::PreFinalInference),
             "FinalInputAuthorized" => Ok(Self::FinalInputAuthorized),
+            "ExecutionRunning" => Ok(Self::ExecutionRunning),
             "CancellationAuthorized" => Ok(Self::CancellationAuthorized),
             "ExecutionTerminal" => Ok(Self::ExecutionTerminal),
             other => Err(format!("invalid LiveBridgeOperationPhase value `{other}`")),
@@ -14440,6 +14444,16 @@ pub mod inputs {
         pub provider_turn_ref: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeLiveBridgeExecutionStart {
+        pub channel_id: String,
+        pub runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+        pub interaction_id: String,
+        pub operation_id: OperationId,
+        pub request_digest: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AuthorizeLiveBridgeEffect {
         pub channel_id: String,
         pub runtime_id: AgentRuntimeId,
@@ -14488,6 +14502,22 @@ pub mod inputs {
         pub operation_id: OperationId,
         pub terminal: MeerkatExecutionTerminal,
         pub result_digest: Option<String>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ReconcileRevokedLiveBridgeExecutionTerminal {
+        pub channel_id: String,
+        pub interaction_id: String,
+        pub operation_id: OperationId,
+        pub request_digest: String,
+        pub terminal: MeerkatExecutionTerminal,
+        pub result_digest: Option<String>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct FenceRestoredLiveBridgeOperationForRestart {
+        pub channel_id: String,
+        pub interaction_id: String,
+        pub operation_id: OperationId,
+        pub request_digest: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AuthorizeLiveBridgeSubmission {
@@ -15370,11 +15400,16 @@ pub enum Input {
     BindLiveDelegationResultRecoveryChannel(inputs::BindLiveDelegationResultRecoveryChannel),
     AdmitLiveBridgeOperation(inputs::AdmitLiveBridgeOperation),
     ConfirmLiveBridgeFinalInput(inputs::ConfirmLiveBridgeFinalInput),
+    AuthorizeLiveBridgeExecutionStart(inputs::AuthorizeLiveBridgeExecutionStart),
     AuthorizeLiveBridgeEffect(inputs::AuthorizeLiveBridgeEffect),
     ConsumeLiveBridgeEffectAuthority(inputs::ConsumeLiveBridgeEffectAuthority),
     RecordLiveBridgeEffectOutcome(inputs::RecordLiveBridgeEffectOutcome),
     CancelLiveBridgeOperation(inputs::CancelLiveBridgeOperation),
     RecordLiveBridgeExecutionTerminal(inputs::RecordLiveBridgeExecutionTerminal),
+    ReconcileRevokedLiveBridgeExecutionTerminal(
+        inputs::ReconcileRevokedLiveBridgeExecutionTerminal,
+    ),
+    FenceRestoredLiveBridgeOperationForRestart(inputs::FenceRestoredLiveBridgeOperationForRestart),
     AuthorizeLiveBridgeSubmission(inputs::AuthorizeLiveBridgeSubmission),
     ClaimLiveBridgeSubmissionAttempt(inputs::ClaimLiveBridgeSubmissionAttempt),
     RecordLiveBridgeSubmissionLocalWrite(inputs::RecordLiveBridgeSubmissionLocalWrite),
@@ -15819,6 +15854,9 @@ impl Input {
             }
             Self::AdmitLiveBridgeOperation(_) => InputKind::AdmitLiveBridgeOperation,
             Self::ConfirmLiveBridgeFinalInput(_) => InputKind::ConfirmLiveBridgeFinalInput,
+            Self::AuthorizeLiveBridgeExecutionStart(_) => {
+                InputKind::AuthorizeLiveBridgeExecutionStart
+            }
             Self::AuthorizeLiveBridgeEffect(_) => InputKind::AuthorizeLiveBridgeEffect,
             Self::ConsumeLiveBridgeEffectAuthority(_) => {
                 InputKind::ConsumeLiveBridgeEffectAuthority
@@ -15827,6 +15865,12 @@ impl Input {
             Self::CancelLiveBridgeOperation(_) => InputKind::CancelLiveBridgeOperation,
             Self::RecordLiveBridgeExecutionTerminal(_) => {
                 InputKind::RecordLiveBridgeExecutionTerminal
+            }
+            Self::ReconcileRevokedLiveBridgeExecutionTerminal(_) => {
+                InputKind::ReconcileRevokedLiveBridgeExecutionTerminal
+            }
+            Self::FenceRestoredLiveBridgeOperationForRestart(_) => {
+                InputKind::FenceRestoredLiveBridgeOperationForRestart
             }
             Self::AuthorizeLiveBridgeSubmission(_) => InputKind::AuthorizeLiveBridgeSubmission,
             Self::ClaimLiveBridgeSubmissionAttempt(_) => {
@@ -16221,11 +16265,14 @@ pub enum InputKind {
     BindLiveDelegationResultRecoveryChannel,
     AdmitLiveBridgeOperation,
     ConfirmLiveBridgeFinalInput,
+    AuthorizeLiveBridgeExecutionStart,
     AuthorizeLiveBridgeEffect,
     ConsumeLiveBridgeEffectAuthority,
     RecordLiveBridgeEffectOutcome,
     CancelLiveBridgeOperation,
     RecordLiveBridgeExecutionTerminal,
+    ReconcileRevokedLiveBridgeExecutionTerminal,
+    FenceRestoredLiveBridgeOperationForRestart,
     AuthorizeLiveBridgeSubmission,
     ClaimLiveBridgeSubmissionAttempt,
     RecordLiveBridgeSubmissionLocalWrite,
@@ -17341,6 +17388,14 @@ pub mod effects {
         pub phase: LiveBridgeOperationPhase,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveBridgeExecutionStartAuthorized {
+        pub channel_id: String,
+        pub interaction_id: String,
+        pub operation_id: OperationId,
+        pub request_digest: String,
+        pub phase: LiveBridgeOperationPhase,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LiveBridgeEffectAuthorityIssued {
         pub channel_id: String,
         pub interaction_id: String,
@@ -17939,6 +17994,7 @@ pub enum Effect {
     LiveBridgeOperationReplayObserved(effects::LiveBridgeOperationReplayObserved),
     LiveBridgeProtocolDriftCloseAuthorized(effects::LiveBridgeProtocolDriftCloseAuthorized),
     LiveBridgeFinalInputAuthorized(effects::LiveBridgeFinalInputAuthorized),
+    LiveBridgeExecutionStartAuthorized(effects::LiveBridgeExecutionStartAuthorized),
     LiveBridgeEffectAuthorityIssued(effects::LiveBridgeEffectAuthorityIssued),
     LiveBridgeEffectDispatchAuthorized(effects::LiveBridgeEffectDispatchAuthorized),
     LiveBridgeEffectOutcomeRecorded(effects::LiveBridgeEffectOutcomeRecorded),
@@ -18168,6 +18224,7 @@ pub enum EffectKind {
     LiveBridgeOperationReplayObserved,
     LiveBridgeProtocolDriftCloseAuthorized,
     LiveBridgeFinalInputAuthorized,
+    LiveBridgeExecutionStartAuthorized,
     LiveBridgeEffectAuthorityIssued,
     LiveBridgeEffectDispatchAuthorized,
     LiveBridgeEffectOutcomeRecorded,
@@ -20033,6 +20090,9 @@ pub enum TransitionId {
     ConfirmLiveBridgeFinalInputIdle,
     ConfirmLiveBridgeFinalInputAttached,
     ConfirmLiveBridgeFinalInputRunning,
+    AuthorizeLiveBridgeExecutionStartIdle,
+    AuthorizeLiveBridgeExecutionStartAttached,
+    AuthorizeLiveBridgeExecutionStartRunning,
     AuthorizeLiveBridgeEffectIdle,
     AuthorizeLiveBridgeEffectAttached,
     AuthorizeLiveBridgeEffectRunning,
@@ -20058,6 +20118,26 @@ pub enum TransitionId {
     RecordLiveBridgeExecutionTerminalExactReplayIdle,
     RecordLiveBridgeExecutionTerminalExactReplayAttached,
     RecordLiveBridgeExecutionTerminalExactReplayRunning,
+    FenceRestoredLiveBridgeOperationForRestartFreshIdle,
+    FenceRestoredLiveBridgeOperationForRestartFreshAttached,
+    FenceRestoredLiveBridgeOperationForRestartFreshRunning,
+    FenceRestoredLiveBridgeOperationForRestartFreshRetired,
+    FenceRestoredLiveBridgeOperationForRestartFreshStopped,
+    FenceRestoredLiveBridgeOperationForRestartExactReplayIdle,
+    FenceRestoredLiveBridgeOperationForRestartExactReplayAttached,
+    FenceRestoredLiveBridgeOperationForRestartExactReplayRunning,
+    FenceRestoredLiveBridgeOperationForRestartExactReplayRetired,
+    FenceRestoredLiveBridgeOperationForRestartExactReplayStopped,
+    ReconcileRevokedLiveBridgeExecutionTerminalFreshIdle,
+    ReconcileRevokedLiveBridgeExecutionTerminalFreshAttached,
+    ReconcileRevokedLiveBridgeExecutionTerminalFreshRunning,
+    ReconcileRevokedLiveBridgeExecutionTerminalFreshRetired,
+    ReconcileRevokedLiveBridgeExecutionTerminalFreshStopped,
+    ReconcileRevokedLiveBridgeExecutionTerminalExactReplayIdle,
+    ReconcileRevokedLiveBridgeExecutionTerminalExactReplayAttached,
+    ReconcileRevokedLiveBridgeExecutionTerminalExactReplayRunning,
+    ReconcileRevokedLiveBridgeExecutionTerminalExactReplayRetired,
+    ReconcileRevokedLiveBridgeExecutionTerminalExactReplayStopped,
     AuthorizeLiveBridgeSubmissionIdle,
     AuthorizeLiveBridgeSubmissionAttached,
     AuthorizeLiveBridgeSubmissionRunning,
@@ -20075,6 +20155,11 @@ pub enum TransitionId {
     RecoverLiveBridgeSubmissionRunning,
     RecoverLiveBridgeSubmissionRetired,
     RecoverLiveBridgeSubmissionStopped,
+    RecoverLiveBridgeSubmissionExactReplayIdle,
+    RecoverLiveBridgeSubmissionExactReplayAttached,
+    RecoverLiveBridgeSubmissionExactReplayRunning,
+    RecoverLiveBridgeSubmissionExactReplayRetired,
+    RecoverLiveBridgeSubmissionExactReplayStopped,
     EnqueueLiveContextRowIdle,
     EnqueueLiveContextRowAttached,
     EnqueueLiveContextRowRunning,

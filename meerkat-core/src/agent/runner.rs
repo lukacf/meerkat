@@ -43,6 +43,19 @@ use tokio::sync::mpsc;
 
 use super::{Agent, AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher};
 
+/// Owned operation-local future prepared for one noncommitting live bridge
+/// execution. Native executors retain the cross-thread `Send` guarantee;
+/// wasm32 uses the repository's single-threaded local-future convention.
+#[cfg(not(target_arch = "wasm32"))]
+pub type LiveBridgePreparedOperation = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<RunResult, AgentError>> + Send + 'static>,
+>;
+
+/// wasm32 counterpart of [`LiveBridgePreparedOperation`].
+#[cfg(target_arch = "wasm32")]
+pub type LiveBridgePreparedOperation =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<RunResult, AgentError>> + 'static>>;
+
 pub(crate) struct StagedAuthLeaseRotation {
     handle: Option<crate::handles::GeneratedAuthLeaseHandle>,
     snapshots: Vec<crate::handles::AuthLeaseRestoreSnapshot>,
@@ -2530,12 +2543,7 @@ impl Agent<dyn AgentLlmClient, dyn AgentToolDispatcher, dyn AgentSessionStore> {
         dispatch_admission: crate::LiveBridgeToolDispatchAdmission,
         run_permit: crate::LiveBridgeNoncommittingRunPermit,
         mut cancellation: tokio::sync::watch::Receiver<bool>,
-    ) -> Result<
-        std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<RunResult, AgentError>> + Send + 'static>,
-        >,
-        AgentError,
-    > {
+    ) -> Result<LiveBridgePreparedOperation, AgentError> {
         if snapshot.id() != self.session.id() {
             return Err(AgentError::ConfigError(
                 "live bridge snapshot does not belong to this durable member session".to_string(),

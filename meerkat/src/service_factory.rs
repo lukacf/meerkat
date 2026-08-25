@@ -24,9 +24,9 @@ use meerkat_session::ephemeral::{
 use std::sync::Arc;
 
 #[cfg(not(target_arch = "wasm32"))]
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 #[cfg(target_arch = "wasm32")]
-use tokio_with_wasm::alias::sync::mpsc;
+use tokio_with_wasm::alias::sync::{mpsc, watch};
 
 #[cfg(feature = "session-store")]
 use crate::PersistenceBundle;
@@ -186,7 +186,7 @@ impl SessionAgent for FactoryAgent {
     fn prepare_live_bridge_operation(
         &self,
         request: meerkat_session::LiveBridgeSessionOperationRequest,
-        cancellation: tokio::sync::watch::Receiver<bool>,
+        cancellation: watch::Receiver<bool>,
     ) -> Result<meerkat_session::LiveBridgePreparedSessionOperation, meerkat_core::error::AgentError>
     {
         self.agent.prepare_live_bridge_noncommitting(

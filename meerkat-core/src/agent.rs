@@ -60,7 +60,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 pub use builder::{AgentBuildPolicyError, AgentBuilder, DefaultSystemPromptPolicy};
-pub use runner::{AgentControlStateError, AgentRunner, SnapshotProjectionError};
+pub use runner::{
+    AgentControlStateError, AgentRunner, LiveBridgePreparedOperation, SnapshotProjectionError,
+};
 
 /// Whether one turn's accounting agrees with the request identity it answered.
 ///

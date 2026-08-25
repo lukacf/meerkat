@@ -109,10 +109,11 @@ pub use agent::{
     AgentRunner, AgentSessionStore, AgentToolDispatcher, BindOutcome, CancelAfterBoundaryCommand,
     CancelAfterBoundarySender, CommsCapabilityError, CommsRuntime, CurrentTurnContent,
     CurrentTurnImageRef, DefaultSystemPromptPolicy, DispatcherCapabilities, ExternalToolUpdate,
-    FilteredToolDispatcher, LiveBridgeNoncommittingRunPermit, LiveBridgeToolDispatchAdmission,
-    LlmStreamResult, SnapshotProjectionError, StickyModelFallbackActivationProof,
-    ToolDispatchContext, dispatch_tool_execution_plan_fenced, resolve_tool_execution_plan_fenced,
-    select_tool_catalog_mode, should_compose_tool_catalog_control_plane,
+    FilteredToolDispatcher, LiveBridgeNoncommittingRunPermit, LiveBridgePreparedOperation,
+    LiveBridgeToolDispatchAdmission, LlmStreamResult, SnapshotProjectionError,
+    StickyModelFallbackActivationProof, ToolDispatchContext, dispatch_tool_execution_plan_fenced,
+    resolve_tool_execution_plan_fenced, select_tool_catalog_mode,
+    should_compose_tool_catalog_control_plane,
 };
 pub use approval::{
     ApprovalActionKind, ApprovalDecision, ApprovalDecisionRecord, ApprovalError, ApprovalId,

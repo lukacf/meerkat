@@ -1827,13 +1827,7 @@ impl std::fmt::Debug for LiveBridgeSessionOperationRequest {
 pub type LiveBridgeSessionOperationTerminalReceiver =
     oneshot::Receiver<Result<RunResult, meerkat_core::error::AgentError>>;
 
-pub type LiveBridgePreparedSessionOperation = std::pin::Pin<
-    Box<
-        dyn std::future::Future<Output = Result<RunResult, meerkat_core::error::AgentError>>
-            + Send
-            + 'static,
-    >,
->;
+pub type LiveBridgePreparedSessionOperation = meerkat_core::LiveBridgePreparedOperation;
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]

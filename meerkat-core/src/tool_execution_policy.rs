@@ -69,7 +69,8 @@ use std::sync::Arc;
 ///
 /// The admission object does not replace [`ToolExecutionPolicy`]. Once it
 /// admits a call, the ordinary access and consequence policies still apply.
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait ToolDispatchAdmission: Send + Sync {
     async fn await_dispatch_admission(
         &self,

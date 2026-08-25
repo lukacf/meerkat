@@ -413,6 +413,7 @@ impl ExperimentalLiveAdmissionOwner {
     /// Resolve a provider-neutral execution mode from this owner's configured
     /// profile catalog. The caller names only a catalog profile id and cannot
     /// supply or downgrade the selected mode or capability atoms.
+    #[allow(clippy::needless_return)]
     pub fn qualify_execution_profile(
         &self,
         qualification: &ExperimentalLiveCapabilityQualification,

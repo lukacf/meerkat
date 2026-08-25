@@ -379,6 +379,20 @@ export interface WorkItemsResult {
 
 export type ConfigSetParams = Record<string, unknown>;
 
+export type InstructionActivationDisposition = unknown;
+
+export type InstructionActivationExpectation = unknown;
+
+export type InstructionActivationId = unknown;
+
+export type InstructionContentDigest = unknown;
+
+export type InstructionKey = unknown;
+
+export type InstructionNamespace = unknown;
+
+export type InstructionRevisionId = unknown;
+
 export interface SessionExternalEventEnvelopeGenericJson {
   blocks?: WireContentBlock[] | null;
   event_type: string;
@@ -446,6 +460,11 @@ export interface WireDeviceCompleteResultReady {
 }
 
 export type WireDeviceCompleteResult = WireDeviceCompleteResultPending | WireDeviceCompleteResultSlowDown | WireDeviceCompleteResultAccessDenied | WireDeviceCompleteResultExpired | WireDeviceCompleteResultReady;
+
+export interface ActivateInstructionParams {
+  activation: Record<string, unknown>;
+  session_id: string;
+}
 
 export interface ApprovalDecideParams {
   actor: string;
@@ -689,6 +708,48 @@ export interface InjectSystemContextResult {
   status: "applied" | "duplicate";
 }
 
+export interface InstructionActivationIdentity {
+  activation_id: string;
+  origin_session_id: string;
+  render_version: number;
+  revision: Record<string, unknown>;
+  supersedes?: string | null;
+}
+
+export interface InstructionActivationReadPage {
+  key_state?: Record<string, unknown> | null;
+  next_offset?: number | null;
+  records: Record<string, unknown>[];
+  session_id: string;
+}
+
+export interface InstructionActivationRecord {
+  activation_ordinal: number;
+  identity: InstructionActivationIdentity;
+  projection_witness: Record<string, unknown>;
+  session_id: string;
+}
+
+export interface InstructionActivationRequest {
+  activation_id: string;
+  body: string;
+  expectation: Record<string, unknown>;
+  revision: Record<string, unknown>;
+  supersedes?: string | null;
+}
+
+export interface InstructionActivationReceipt {
+  disposition: "applied" | "duplicate";
+  record: InstructionActivationRecord;
+}
+
+export interface InstructionRevisionRef {
+  content_sha256: string;
+  key: string;
+  namespace: string;
+  revision_id: string;
+}
+
 export interface InterruptParams {
   session_id: string;
 }
@@ -732,6 +793,14 @@ export interface ProvisionApiKeyParams {
   binding_id?: string | null;
   profile_id?: string | null;
   realm_id?: string | null;
+}
+
+export interface ReadInstructionActivationsParams {
+  key?: string | null;
+  limit?: number;
+  namespace?: string | null;
+  offset?: number | null;
+  session_id: string;
 }
 
 export interface ReadSessionHistoryParams {
@@ -4827,6 +4896,7 @@ export interface RealtimeImageChunk {
 }
 
 export interface LiveOpenParams {
+  execution_identity?: Record<string, unknown> | null;
   seed_max_chars?: number | null;
   session_id: string;
   transport?: LiveOpenTransport | null;
@@ -4927,8 +4997,10 @@ export interface LiveSendInputErrorData {
 export interface LiveTruncateParams {
   audio_played_ms: number;
   channel_id: string;
-  content_index: number;
-  item_id: string;
+  content_index?: number | null;
+  item_id?: string | null;
+  output_id?: string | null;
+  reported_playback_prefix?: string | null;
 }
 
 export interface WireLiveResponseModalityAudio {
@@ -5364,6 +5436,7 @@ export interface WireLiveAdapterObservationAssistantTranscriptFinal {
 
 export interface WireLiveAdapterObservationAssistantTranscriptTruncated {
   content_index?: number | null;
+  interaction_id?: string | null;
   observation: "assistant_transcript_truncated";
   previous_item_id?: string | null;
   provider_item_id?: string | null;
@@ -5475,6 +5548,7 @@ export interface WireResolvedModelCapabilities {
   image_input?: boolean;
   image_tool_results?: boolean;
   inline_video?: boolean;
+  mid_conversation_system_messages?: boolean;
   realtime?: boolean;
   vision?: boolean;
   web_search?: boolean;
@@ -5517,6 +5591,7 @@ export interface CatalogModelEntry {
   id: string;
   max_output_tokens?: number | null;
   profile?: Record<string, unknown> | null;
+  release_stage?: "stable" | "experimental" | "operator_defined";
   server_id?: string | null;
   tier: "recommended" | "supported";
 }
@@ -5541,6 +5616,8 @@ export interface WireModelProfile {
   model_family: string;
   params_schema: unknown;
   realtime?: boolean;
+  release_stage?: "stable" | "experimental" | "operator_defined";
+  supports_mid_conversation_system_messages?: boolean;
   supports_reasoning: boolean;
   supports_temperature: boolean;
   supports_thinking: boolean;
@@ -6210,6 +6287,7 @@ export interface WireSessionMessageSystem {
   content: string;
   created_at: string;
   identity?: Record<string, unknown> | null;
+  instruction_activation?: InstructionActivationIdentity | null;
   prompt_version?: SystemPromptVersionIdentity | null;
   role: "system";
 }

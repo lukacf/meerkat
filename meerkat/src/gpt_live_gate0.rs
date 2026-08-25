@@ -19,6 +19,7 @@ use crate::surface::{
 /// Candidate transport custody required by the generated semantic binder.
 /// Shipping transport/admission types do not implement or consume this trait.
 #[async_trait]
+#[allow(clippy::too_many_arguments)]
 pub trait Gate0CandidateTransportCustody: Send + Sync {
     async fn active_binding(
         &self,

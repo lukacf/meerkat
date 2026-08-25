@@ -783,6 +783,7 @@ impl From<TransportError> for Gate0CandidateError {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
     use meerkat_llm_core::provider_runtime::AdmittedExperimentalRealtimeTarget;
@@ -796,7 +797,7 @@ mod tests {
     }
 
     impl<T: ?Sized> AmbiguousIfCandidateConverts<()> for T {}
-    impl<T: ?Sized + Into<AdmittedExperimentalRealtimeTarget>> AmbiguousIfCandidateConverts<u8> for T {}
+    impl<T: Into<AdmittedExperimentalRealtimeTarget>> AmbiguousIfCandidateConverts<u8> for T {}
 
     #[test]
     fn candidate_target_has_no_conversion_into_shipping_admission() {

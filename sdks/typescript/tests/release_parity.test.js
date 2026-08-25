@@ -29,6 +29,8 @@ describe("Phase 1 release parity targets", () => {
       "readSessionTranscriptRevision",
       "rewriteSessionTranscript",
       "updateSystemPrompt",
+      "activateInstruction",
+      "instructionActivations",
       "restoreSessionTranscriptRevision",
       "sendExternalEvent",
       "injectContext",
@@ -84,6 +86,9 @@ describe("Phase 1 release parity targets", () => {
     ]) {
       assert.ok(sessionMethods.includes(method), `missing Session.${method}`);
       assert.ok(deferredMethods.includes(method), `missing DeferredSession.${method}`);
+    }
+    for (const method of ["activateInstruction", "instructionActivations"]) {
+      assert.ok(sessionMethods.includes(method), `missing Session.${method}`);
     }
     for (const method of ["spawnMany", "readEvents"]) {
       assert.ok(mobMethods.includes(method), `missing Mob.${method}`);

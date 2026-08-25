@@ -662,6 +662,7 @@ pub enum LiveTranscriptIdentityError {
     MissingItemId,
 }
 
+#[allow(clippy::too_many_arguments)]
 #[async_trait::async_trait]
 pub trait LiveProjectionSink: Send + Sync {
     /// Append a finalized user transcript fragment to canonical session history.
@@ -973,6 +974,8 @@ impl LiveProjectionError {
             | SessionError::DurableTailHeldForRecovery { .. }
             | SessionError::DurableTailRecoveryRefused { .. }
             | SessionError::DurableEvidenceQuarantined { .. }
+            | SessionError::ExternalWriteFenceConflict { .. }
+            | SessionError::ExternalWriteFenceBackoff { .. }
             | SessionError::FailedWithData { .. } => Self::Session { code, message },
         }
     }
@@ -1688,6 +1691,8 @@ impl LiveToolDispatchError {
             | SessionError::DurableTailHeldForRecovery { .. }
             | SessionError::DurableTailRecoveryRefused { .. }
             | SessionError::DurableEvidenceQuarantined { .. }
+            | SessionError::ExternalWriteFenceConflict { .. }
+            | SessionError::ExternalWriteFenceBackoff { .. }
             | SessionError::FailedWithData { .. } => Self::Session { code, message },
         }
     }

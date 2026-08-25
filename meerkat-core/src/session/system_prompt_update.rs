@@ -85,6 +85,10 @@ pub enum SystemPromptUpdateError {
     )]
     TargetHasAppendIdentity { index: usize },
     #[error(
+        "system prompt target index {index} carries instruction activation identity and cannot be adopted"
+    )]
+    TargetHasInstructionActivation { index: usize },
+    #[error(
         "system prompt key '{key}' expected version {expected:?}, but current version is {actual:?}"
     )]
     VersionConflict {
@@ -327,6 +331,11 @@ impl Session {
                 if system.identity.is_some() {
                     return Err(SystemPromptUpdateError::TargetHasAppendIdentity { index: target });
                 }
+                if system.instruction_activation.is_some() {
+                    return Err(SystemPromptUpdateError::TargetHasInstructionActivation {
+                        index: target,
+                    });
+                }
                 let lineage_high_water = self.system_prompt_lineage_high_water(&request.key)?;
                 let version = match lineage_high_water {
                     Some(high_water) => high_water.checked_next().ok_or_else(|| {
@@ -354,6 +363,7 @@ impl Session {
                 key: request.key.clone(),
                 version,
             }),
+            instruction_activation: None,
         });
         let commit = self.commit_transcript_rewrite_authorized(
             selection,
@@ -516,6 +526,7 @@ mod tests {
                 key: SystemPromptKey::new("primary")?,
                 version: SystemPromptVersion::INITIAL,
             }),
+            instruction_activation: None,
         });
 
         let error = expected_error(
@@ -573,6 +584,7 @@ mod tests {
                     key,
                     version: SystemPromptVersion::INITIAL,
                 }),
+                instruction_activation: None,
             }));
         }));
         let payload = match outcome {

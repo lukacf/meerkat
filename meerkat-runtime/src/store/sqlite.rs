@@ -4078,6 +4078,16 @@ END";
             .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))
     }
 
+    fn commit_runtime_transaction(
+        tx: Transaction<'_>,
+        write_fence: Option<&dyn RuntimeStoreWriteFence>,
+    ) -> Result<(), RuntimeStoreError> {
+        crate::store::execute_optional_runtime_store_target_write(write_fence, || {
+            tx.commit()
+                .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))
+        })
+    }
+
     fn runtime_id_text(runtime_id: &LogicalRuntimeId) -> &str {
         &runtime_id.0
     }
@@ -9678,6 +9688,7 @@ ORDER BY runtime_id";
             machine_lifecycle: Option<MachineLifecycleCommit>,
             input_updates: Vec<InputStatePersistenceRecord>,
             session_store_key: Option<meerkat_core::types::SessionId>,
+            write_fence: Option<Arc<dyn RuntimeStoreWriteFence>>,
         ) -> Result<Option<WholeBlobStoreAuthority>, RuntimeStoreError> {
             self.require_whole_blob_session_operation(
                 runtime_id,
@@ -9770,8 +9781,14 @@ ORDER BY runtime_id";
                     insert_receipt(&tx, &runtime_id, receipt)?;
                 }
                 upsert_input_states(&tx, &runtime_id, &input_updates)?;
-                tx.commit()
-                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                crate::store::execute_optional_runtime_store_target_write(
+                    write_fence.as_deref(),
+                    || {
+                        tx.commit().map_err(|error| {
+                            RuntimeStoreError::WriteFailed(error.to_string())
+                        })
+                    },
+                )?;
                 Ok(authority)
             })
             .await
@@ -10464,13 +10481,14 @@ ORDER BY runtime_id";
             .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
         }
 
-        async fn commit_prepared_session_boundary(
+        async fn commit_prepared_session_boundary_execution(
             &self,
             runtime_id: &LogicalRuntimeId,
-            request: PreparedRuntimeSessionCommit,
+            execution: crate::store::PreparedRuntimeSessionCommitExecution,
         ) -> Result<PreparedRuntimeSessionCommitResult, RuntimeStoreError> {
+            let (payload, write_fence) = execution.into_payload_and_write_fence();
             if self.session_persistence_profile == RuntimeSessionPersistenceProfile::WholeBlobV1 {
-                let authority = match request.into_payload() {
+                let authority = match payload {
                     PreparedRuntimeSessionCommitPayload::SnapshotOnly { session } => {
                         self.commit_prepared_whole_blob_boundary(
                             runtime_id,
@@ -10479,6 +10497,7 @@ ORDER BY runtime_id";
                             None,
                             Vec::new(),
                             None,
+                            write_fence,
                         )
                         .await?
                     }
@@ -10499,6 +10518,7 @@ ORDER BY runtime_id";
                             None,
                             input_updates,
                             session_store_key,
+                            None,
                         )
                         .await?
                     }
@@ -10531,6 +10551,7 @@ ORDER BY runtime_id";
                             Some(machine_lifecycle),
                             Vec::new(),
                             Some(session_store_key),
+                            None,
                         )
                         .await?,
                     PreparedRuntimeSessionCommitPayload::PromoteWholeBlobServiceTurnTerminal {
@@ -10563,6 +10584,7 @@ ORDER BY runtime_id";
                             Some(machine_lifecycle),
                             input_updates,
                             Some(session_store_key),
+                            None,
                         )
                         .await?,
                     PreparedRuntimeSessionCommitPayload::PromoteWholeBlobMachineTerminal {
@@ -10632,7 +10654,7 @@ ORDER BY runtime_id";
                 });
             }
 
-            let payload = match request.into_payload() {
+            let payload = match payload {
                 PreparedRuntimeSessionCommitPayload::PromoteHeadCanonicalSuccess {
                     promotion,
                     receipt,
@@ -11080,9 +11102,7 @@ ORDER BY runtime_id";
                             &runtime_id,
                             recovery,
                         )?;
-                        tx.commit().map_err(|error| {
-                            RuntimeStoreError::WriteFailed(error.to_string())
-                        })?;
+                        commit_runtime_transaction(tx, write_fence.as_deref())?;
                         return Ok(PreparedRuntimeSessionCommitResult::recovery(
                             successor_authority.clone(),
                             RecoveryCommitStatus::AlreadyCommittedExact,
@@ -11267,9 +11287,7 @@ ORDER BY runtime_id";
                         &runtime_id,
                         recovery,
                     )?;
-                    tx.commit().map_err(|error| {
-                        RuntimeStoreError::WriteFailed(error.to_string())
-                    })?;
+                    commit_runtime_transaction(tx, write_fence.as_deref())?;
                     return Ok(PreparedRuntimeSessionCommitResult::recovery(
                         successor_authority.clone(),
                         RecoveryCommitStatus::Committed,
@@ -11331,9 +11349,7 @@ ORDER BY runtime_id";
                             &runtime_id,
                             prepared,
                         )?;
-                        tx.commit().map_err(|error| {
-                            RuntimeStoreError::WriteFailed(error.to_string())
-                        })?;
+                        commit_runtime_transaction(tx, write_fence.as_deref())?;
                         return Ok(result.already_applied_exact());
                     }
                     if let Some(receipt) = receipt.as_ref() {
@@ -11389,9 +11405,7 @@ ORDER BY runtime_id";
                             )?;
                         }
                     }
-                    tx.commit().map_err(|error| {
-                        RuntimeStoreError::WriteFailed(error.to_string())
-                    })?;
+                    commit_runtime_transaction(tx, write_fence.as_deref())?;
                     return Ok(result.already_applied_exact());
                 }
 
@@ -11468,9 +11482,7 @@ ORDER BY runtime_id";
                                 receipt,
                                 &marker,
                             )?;
-                            tx.commit().map_err(|error| {
-                                RuntimeStoreError::WriteFailed(error.to_string())
-                            })?;
+                            commit_runtime_transaction(tx, write_fence.as_deref())?;
                             return Ok(result.already_applied_released_equivalent());
                         }
                         Some(_) => {
@@ -11547,9 +11559,7 @@ ORDER BY runtime_id";
                                 &runtime_id,
                                 witness,
                             )?;
-                            tx.commit().map_err(|error| {
-                                RuntimeStoreError::WriteFailed(error.to_string())
-                            })?;
+                            commit_runtime_transaction(tx, write_fence.as_deref())?;
                             return Ok(result.already_applied_exact());
                         }
                     }
@@ -11693,9 +11703,7 @@ ORDER BY runtime_id";
                     &runtime_id,
                     witness,
                 )?;
-                tx.commit().map_err(|error| {
-                    RuntimeStoreError::WriteFailed(error.to_string())
-                })?;
+                commit_runtime_transaction(tx, write_fence.as_deref())?;
                 if let Some(session_id) = newly_installed_head_authority {
                     tracing::info!(
                         runtime_id = %runtime_id,
@@ -12618,6 +12626,39 @@ ORDER BY runtime_id";
     impl RuntimeStore for SqliteRuntimeStore {
         fn session_authority_ops(&self) -> &dyn crate::store::RuntimeSessionAuthorityOps {
             self
+        }
+
+        async fn commit_prepared_session_boundary_with_fence(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            request: PreparedRuntimeSessionCommit,
+            write_fence: Arc<dyn RuntimeStoreWriteFence>,
+        ) -> Result<crate::store::FencedPreparedRuntimeSessionCommitOutcome, RuntimeStoreError>
+        {
+            let execution =
+                crate::store::PreparedRuntimeSessionCommitExecution::fenced(request, write_fence)?;
+            match crate::store::RuntimeSessionAuthorityOps::commit_prepared_session_boundary_execution(
+                self,
+                runtime_id,
+                execution,
+            )
+            .await
+            {
+                Ok(result) => {
+                    Ok(crate::store::FencedPreparedRuntimeSessionCommitOutcome::Applied(result))
+                }
+                Err(RuntimeStoreError::WriteFenceConflict { reason }) => Ok(
+                    crate::store::FencedPreparedRuntimeSessionCommitOutcome::FenceConflict {
+                        reason,
+                    },
+                ),
+                Err(RuntimeStoreError::WriteFenceBackoff { reason }) => Ok(
+                    crate::store::FencedPreparedRuntimeSessionCommitOutcome::FenceBackoff {
+                        reason,
+                    },
+                ),
+                Err(error) => Err(error),
+            }
         }
 
         fn input_state_batch_cas_implementation_profile(
@@ -16181,11 +16222,304 @@ ORDER BY runtime_id";
             }
         }
 
+        #[derive(Clone, Copy)]
+        enum SessionBoundaryFenceDecision {
+            Applied,
+            Conflict,
+            Backoff,
+        }
+
+        struct SqliteSessionBoundaryFence {
+            path: PathBuf,
+            runtime_id: LogicalRuntimeId,
+            visibility_table: &'static str,
+            expected_visible_rows: i64,
+            decision: SessionBoundaryFenceDecision,
+        }
+
+        impl RuntimeStoreWriteFence for SqliteSessionBoundaryFence {
+            fn execute_if_current(
+                &self,
+                operation: Box<dyn FnOnce() -> Result<(), RuntimeStoreError> + '_>,
+            ) -> Result<RuntimeStoreWriteFenceOutcome, RuntimeStoreError> {
+                let conn = Connection::open(&self.path).unwrap();
+                let visible_rows = conn
+                    .query_row(
+                        &format!(
+                            "SELECT COUNT(*) FROM {} WHERE runtime_id = ?1",
+                            self.visibility_table
+                        ),
+                        params![runtime_id_text(&self.runtime_id)],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    visible_rows, self.expected_visible_rows,
+                    "session write fence must execute before the target transaction is visible"
+                );
+                match self.decision {
+                    SessionBoundaryFenceDecision::Applied => {
+                        operation()?;
+                        Ok(RuntimeStoreWriteFenceOutcome::Applied)
+                    }
+                    SessionBoundaryFenceDecision::Conflict => {
+                        Ok(RuntimeStoreWriteFenceOutcome::Conflict {
+                            reason: "superseded identity generation".to_string(),
+                        })
+                    }
+                    SessionBoundaryFenceDecision::Backoff => {
+                        Ok(RuntimeStoreWriteFenceOutcome::Backoff {
+                            reason: "identity authority busy".to_string(),
+                        })
+                    }
+                }
+            }
+        }
+
         fn input_state() -> InputStatePersistenceRecord {
             InputStatePersistenceRecord::from_machine_snapshot(StoredInputState::new_accepted(
                 InputId::new(),
             ))
             .expect("accepted test input state seed must be machine-authorized")
+        }
+
+        #[tokio::test]
+        async fn fenced_session_boundary_is_decided_before_target_transaction_commit() {
+            let (dir, store) = temp_store();
+            let session = session_with_user("fenced activation");
+            let runtime_id = LogicalRuntimeId::for_session(session.id());
+            let request = || {
+                PreparedRuntimeSessionCommit::snapshot_only(
+                    BoundSessionCommit::sealed(Arc::new(session.clone())).unwrap(),
+                )
+            };
+            let fence = |decision| {
+                Arc::new(SqliteSessionBoundaryFence {
+                    path: dir.path().join("sessions.sqlite3"),
+                    runtime_id: runtime_id.clone(),
+                    visibility_table: "runtime_whole_blob_authority",
+                    expected_visible_rows: 0,
+                    decision,
+                }) as Arc<dyn RuntimeStoreWriteFence>
+            };
+
+            let conflict = RuntimeStore::commit_prepared_session_boundary_with_fence(
+                &store,
+                &runtime_id,
+                request(),
+                fence(SessionBoundaryFenceDecision::Conflict),
+            )
+            .await
+            .unwrap();
+            assert!(matches!(
+                conflict,
+                crate::store::FencedPreparedRuntimeSessionCommitOutcome::FenceConflict { .. }
+            ));
+            assert!(
+                store
+                    .load_session_snapshot(&runtime_id)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+
+            let backoff = RuntimeStore::commit_prepared_session_boundary_with_fence(
+                &store,
+                &runtime_id,
+                request(),
+                fence(SessionBoundaryFenceDecision::Backoff),
+            )
+            .await
+            .unwrap();
+            assert!(matches!(
+                backoff,
+                crate::store::FencedPreparedRuntimeSessionCommitOutcome::FenceBackoff { .. }
+            ));
+            assert!(
+                store
+                    .load_session_snapshot(&runtime_id)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+
+            let applied = RuntimeStore::commit_prepared_session_boundary_with_fence(
+                &store,
+                &runtime_id,
+                request(),
+                fence(SessionBoundaryFenceDecision::Applied),
+            )
+            .await
+            .unwrap();
+            assert!(matches!(
+                applied,
+                crate::store::FencedPreparedRuntimeSessionCommitOutcome::Applied(_)
+            ));
+            let committed = store
+                .load_session_snapshot(&runtime_id)
+                .await
+                .unwrap()
+                .expect("applied fence commits target snapshot");
+            let committed: Session = serde_json::from_slice(committed.as_ref().as_slice()).unwrap();
+            assert_eq!(committed.messages(), session.messages());
+
+            for decision in [
+                SessionBoundaryFenceDecision::Conflict,
+                SessionBoundaryFenceDecision::Backoff,
+            ] {
+                let outcome = RuntimeStore::commit_prepared_session_boundary_with_fence(
+                    &store,
+                    &runtime_id,
+                    request(),
+                    Arc::new(SqliteSessionBoundaryFence {
+                        path: dir.path().join("sessions.sqlite3"),
+                        runtime_id: runtime_id.clone(),
+                        visibility_table: "runtime_whole_blob_authority",
+                        expected_visible_rows: 1,
+                        decision,
+                    }),
+                )
+                .await
+                .unwrap();
+                assert!(matches!(
+                    (decision, outcome),
+                    (
+                        SessionBoundaryFenceDecision::Conflict,
+                        crate::store::FencedPreparedRuntimeSessionCommitOutcome::FenceConflict { .. }
+                    ) | (
+                        SessionBoundaryFenceDecision::Backoff,
+                        crate::store::FencedPreparedRuntimeSessionCommitOutcome::FenceBackoff { .. }
+                    )
+                ));
+                let current = store
+                    .load_session_snapshot(&runtime_id)
+                    .await
+                    .unwrap()
+                    .expect("refused exact retry preserves committed snapshot");
+                let current: Session = serde_json::from_slice(current.as_ref().as_slice()).unwrap();
+                assert_eq!(current.messages(), session.messages());
+            }
+        }
+
+        #[tokio::test]
+        async fn fenced_head_canonical_boundary_is_decided_before_target_transaction_commit() {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("head-canonical.sqlite3");
+            let store = SqliteRuntimeStore::new_head_canonical(&path).unwrap();
+            let session = session_with_user("fenced head activation");
+            let runtime_id = LogicalRuntimeId::for_session(session.id());
+            let request = || {
+                let mutation = PreparedHeadCanonicalMutation::prepare(&session, None).unwrap();
+                PreparedRuntimeSessionCommit::snapshot_only(
+                    BoundSessionCommit::head_canonical_from_session(&session, mutation).unwrap(),
+                )
+            };
+            let fence = |decision| {
+                Arc::new(SqliteSessionBoundaryFence {
+                    path: path.clone(),
+                    runtime_id: runtime_id.clone(),
+                    visibility_table: "runtime_session_authority",
+                    expected_visible_rows: 0,
+                    decision,
+                }) as Arc<dyn RuntimeStoreWriteFence>
+            };
+
+            let conflict = RuntimeStore::commit_prepared_session_boundary_with_fence(
+                &store,
+                &runtime_id,
+                request(),
+                fence(SessionBoundaryFenceDecision::Conflict),
+            )
+            .await
+            .unwrap();
+            assert!(matches!(
+                conflict,
+                crate::store::FencedPreparedRuntimeSessionCommitOutcome::FenceConflict { .. }
+            ));
+            assert!(
+                store
+                    .load_session_boundary_authority(&runtime_id)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+
+            let backoff = RuntimeStore::commit_prepared_session_boundary_with_fence(
+                &store,
+                &runtime_id,
+                request(),
+                fence(SessionBoundaryFenceDecision::Backoff),
+            )
+            .await
+            .unwrap();
+            assert!(matches!(
+                backoff,
+                crate::store::FencedPreparedRuntimeSessionCommitOutcome::FenceBackoff { .. }
+            ));
+            assert!(
+                store
+                    .load_session_boundary_authority(&runtime_id)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+
+            let applied = RuntimeStore::commit_prepared_session_boundary_with_fence(
+                &store,
+                &runtime_id,
+                request(),
+                fence(SessionBoundaryFenceDecision::Applied),
+            )
+            .await
+            .unwrap();
+            assert!(matches!(
+                applied,
+                crate::store::FencedPreparedRuntimeSessionCommitOutcome::Applied(_)
+            ));
+            let authority = store
+                .load_session_boundary_authority(&runtime_id)
+                .await
+                .unwrap()
+                .expect("applied fence commits head-canonical authority");
+            assert!(authority.head_canonical().is_some());
+
+            for decision in [
+                SessionBoundaryFenceDecision::Conflict,
+                SessionBoundaryFenceDecision::Backoff,
+            ] {
+                let outcome = RuntimeStore::commit_prepared_session_boundary_with_fence(
+                    &store,
+                    &runtime_id,
+                    request(),
+                    Arc::new(SqliteSessionBoundaryFence {
+                        path: path.clone(),
+                        runtime_id: runtime_id.clone(),
+                        visibility_table: "runtime_session_authority",
+                        expected_visible_rows: 1,
+                        decision,
+                    }),
+                )
+                .await
+                .unwrap();
+                assert!(matches!(
+                    (decision, outcome),
+                    (
+                        SessionBoundaryFenceDecision::Conflict,
+                        crate::store::FencedPreparedRuntimeSessionCommitOutcome::FenceConflict { .. }
+                    ) | (
+                        SessionBoundaryFenceDecision::Backoff,
+                        crate::store::FencedPreparedRuntimeSessionCommitOutcome::FenceBackoff { .. }
+                    )
+                ));
+                assert_eq!(
+                    store
+                        .load_session_boundary_authority(&runtime_id)
+                        .await
+                        .unwrap()
+                        .expect("refused exact retry preserves head authority"),
+                    authority
+                );
+            }
         }
 
         fn persistable(bundle: StoredInputState) -> InputStatePersistenceRecord {

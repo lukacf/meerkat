@@ -1231,6 +1231,166 @@ pub enum Message {
     },
 }
 
+const MAX_INSTRUCTION_IDENTIFIER_BYTES: usize = 128;
+
+fn validate_instruction_identifier(value: &str) -> Result<(), InvalidInstructionIdentifier> {
+    if value.is_empty() || value.trim() != value {
+        return Err(InvalidInstructionIdentifier::EmptyOrUntrimmed);
+    }
+    if value.len() > MAX_INSTRUCTION_IDENTIFIER_BYTES {
+        return Err(InvalidInstructionIdentifier::TooLong);
+    }
+    if value.chars().any(char::is_control) {
+        return Err(InvalidInstructionIdentifier::ControlCharacter);
+    }
+    Ok(())
+}
+
+/// Failure to construct a bounded instruction identity component.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum InvalidInstructionIdentifier {
+    #[error("instruction identifier must be non-empty and trimmed")]
+    EmptyOrUntrimmed,
+    #[error("instruction identifier exceeds 128 UTF-8 bytes")]
+    TooLong,
+    #[error("instruction identifier contains a control character")]
+    ControlCharacter,
+}
+
+macro_rules! instruction_identifier {
+    ($(#[$meta:meta])* $name:ident) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+        #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+        #[serde(transparent)]
+        pub struct $name(String);
+
+        impl $name {
+            pub fn new(value: impl Into<String>) -> Result<Self, InvalidInstructionIdentifier> {
+                let value = value.into();
+                validate_instruction_identifier(&value)?;
+                Ok(Self(value))
+            }
+
+            #[must_use]
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                let value = String::deserialize(deserializer)?;
+                Self::new(value).map_err(serde::de::Error::custom)
+            }
+        }
+    };
+}
+
+instruction_identifier!(
+    /// Application or issuer namespace for one instruction artifact family.
+    InstructionNamespace
+);
+instruction_identifier!(
+    /// Application-owned instruction key within one namespace.
+    InstructionKey
+);
+instruction_identifier!(
+    /// Immutable application-owned revision identifier.
+    InstructionRevisionId
+);
+instruction_identifier!(
+    /// Caller-stable identity for one activation or rollback event.
+    InstructionActivationId
+);
+
+/// Canonical SHA-256 digest of an exact instruction body.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(transparent)]
+pub struct InstructionContentDigest(String);
+
+impl InstructionContentDigest {
+    pub fn new(value: impl Into<String>) -> Result<Self, InvalidInstructionContentDigest> {
+        let value = value.into();
+        let Some(hex) = value.strip_prefix("sha256:") else {
+            return Err(InvalidInstructionContentDigest);
+        };
+        if hex.len() != 64
+            || !hex
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(InvalidInstructionContentDigest);
+        }
+        Ok(Self(value))
+    }
+
+    #[must_use]
+    pub fn for_body(body: &str) -> Self {
+        use sha2::{Digest as _, Sha256};
+        Self(format!("sha256:{:x}", Sha256::digest(body.as_bytes())))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for InstructionContentDigest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl<'de> Deserialize<'de> for InstructionContentDigest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("instruction content digest must be canonical sha256:<64 lowercase hex digits>")]
+pub struct InvalidInstructionContentDigest;
+
+/// Immutable application-owned instruction artifact reference.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct InstructionRevisionRef {
+    pub namespace: InstructionNamespace,
+    pub key: InstructionKey,
+    pub revision_id: InstructionRevisionId,
+    pub content_sha256: InstructionContentDigest,
+}
+
+/// Typed identity sealed onto one durable chronological activation row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct InstructionActivationIdentity {
+    pub activation_id: InstructionActivationId,
+    pub revision: InstructionRevisionRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersedes: Option<InstructionActivationId>,
+    pub origin_session_id: SessionId,
+    pub render_version: u16,
+}
+
 /// Stable host-chosen identity for one replaceable system-prompt slot.
 ///
 /// The key is domain identity, not an idempotency token. Every explicit
@@ -1615,6 +1775,13 @@ pub struct SystemMessage {
     /// infer or add it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_version: Option<SystemPromptVersionIdentity>,
+    /// Typed identity for a chronological instruction activation.
+    ///
+    /// Only the explicit instruction-activation authority may mint this
+    /// identity. It is mutually exclusive with append identity and prompt
+    /// version identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instruction_activation: Option<InstructionActivationIdentity>,
 }
 
 impl SystemMessage {
@@ -1624,6 +1791,7 @@ impl SystemMessage {
             created_at: message_timestamp_now(),
             identity: None,
             prompt_version: None,
+            instruction_activation: None,
         }
     }
 
@@ -1654,6 +1822,7 @@ impl SystemMessage {
                 idempotency_key,
             }),
             prompt_version: None,
+            instruction_activation: None,
         }
     }
 }

@@ -273,7 +273,7 @@ mod tests {
 
         let wrong_realm = AuthBindingUseRequest::new(
             allowed.principal.clone(),
-            allowed.durable_target.clone(),
+            allowed.durable_target,
             configured_binding("work", "chatgpt"),
         );
         assert_eq!(
@@ -294,7 +294,7 @@ mod tests {
         profile_binding.profile = Some(ProfileId::parse("secondary").expect("valid profile"));
         let profile_request = AuthBindingUseRequest::new(
             base.principal.clone(),
-            base.durable_target.clone(),
+            base.durable_target,
             profile_binding,
         );
 

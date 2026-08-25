@@ -330,13 +330,17 @@ mod tests {
     fn release_stage_is_projected_from_capability_authority() {
         let entries = catalog();
         for capabilities in capabilities::all_capabilities() {
-            let entry = entries
-                .iter()
-                .find(|entry| {
-                    entry.id == capabilities.id && entry.provider == capabilities.provider.as_str()
-                })
-                .expect("every capability row must project to the catalog");
-            assert_eq!(entry.release_stage, capabilities.release_stage);
+            let entry = entries.iter().find(|entry| {
+                entry.id == capabilities.id && entry.provider == capabilities.provider.as_str()
+            });
+            if let Some(entry) = entry {
+                assert_eq!(entry.release_stage, capabilities.release_stage);
+            } else {
+                assert!(
+                    entry.is_some(),
+                    "every capability row must project to the catalog"
+                );
+            }
         }
         let experimental = entries
             .iter()

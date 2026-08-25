@@ -1357,6 +1357,42 @@ mod tests {
     }
 
     #[test]
+    fn compaction_rebuild_rejects_discarding_instruction_activation() {
+        let body = "durable instruction";
+        let mut activation = crate::types::SystemMessage::new(body);
+        activation.instruction_activation = Some(crate::types::InstructionActivationIdentity {
+            activation_id: crate::types::InstructionActivationId::new("activation-1").unwrap(),
+            revision: crate::types::InstructionRevisionRef {
+                namespace: crate::types::InstructionNamespace::new("app.example").unwrap(),
+                key: crate::types::InstructionKey::new("primary").unwrap(),
+                revision_id: crate::types::InstructionRevisionId::new("revision-1").unwrap(),
+                content_sha256: crate::types::InstructionContentDigest::for_body(body),
+            },
+            supersedes: None,
+            origin_session_id: crate::types::SessionId::new(),
+            render_version: crate::INSTRUCTION_ACTIVATION_RENDER_VERSION_V1,
+        });
+        let activation = Message::System(activation);
+        let old = Message::User(UserMessage::text("old turn"));
+        let recent = Message::User(UserMessage::text("recent turn"));
+        let source = vec![old.clone(), activation.clone(), recent.clone()];
+        let (summary_message, summary) = valid_summary("summary");
+        let rebuilt = vec![summary_message, recent.clone()];
+        let retained = vec![CompactionRetained::new(2, 1, recent)];
+        let discarded = vec![
+            CompactionDiscard::new(0, old),
+            CompactionDiscard::new(1, activation),
+        ];
+
+        let error = validate_compaction_rebuild(
+            &source, &rebuilt, &summary, "summary", &retained, &discarded,
+        )
+        .expect_err("a chronological instruction activation must survive compaction");
+
+        assert!(error.to_string().contains("must be retained verbatim"));
+    }
+
+    #[test]
     fn compaction_rebuild_rejects_summary_inside_retained_system_prefix() {
         let system_a = Message::System(crate::types::SystemMessage::new("system A"));
         let system_b = Message::System(crate::types::SystemMessage::new("system B"));

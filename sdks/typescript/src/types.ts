@@ -280,6 +280,7 @@ export interface SessionMessage {
   readonly interactionId?: string;
   readonly runId?: string;
   readonly promptVersion?: SystemPromptVersionIdentity;
+  readonly instructionActivation?: InstructionActivationIdentity;
   readonly blocks: readonly SessionAssistantBlock[];
   readonly results: readonly SessionToolResult[];
   readonly raw?: Record<string, unknown>;
@@ -423,6 +424,89 @@ export interface SystemPromptUpdateResult {
   readonly status: "applied" | "duplicate";
   readonly transcriptRevision: string;
   readonly commit?: Record<string, unknown>;
+}
+
+/** Immutable application-owned instruction revision reference. */
+export interface InstructionRevisionRef {
+  readonly namespace: string;
+  readonly key: string;
+  readonly revisionId: string;
+  readonly contentSha256: string;
+}
+
+/** Closed CAS expectation for one instruction key. */
+export type InstructionActivationExpectation =
+  | { readonly kind: "absent" }
+  | { readonly kind: "effective"; readonly activationId: string };
+
+/** One immutable instruction revision transition. */
+export interface InstructionActivationRequest {
+  readonly revision: InstructionRevisionRef;
+  readonly activationId: string;
+  readonly expectation: InstructionActivationExpectation;
+  readonly supersedes?: string;
+  readonly body: string;
+}
+
+/** Typed identity sealed onto a chronological System row. */
+export interface InstructionActivationIdentity {
+  readonly activationId: string;
+  readonly revision: InstructionRevisionRef;
+  readonly supersedes?: string;
+  readonly originSessionId: string;
+  readonly renderVersion: number;
+}
+
+/** Authoritative durable activation record. */
+export interface InstructionActivationRecord {
+  readonly sessionId: string;
+  readonly identity: InstructionActivationIdentity;
+  readonly activationOrdinal: number;
+  readonly projectionWitness: InstructionActivationProjectionWitness;
+}
+
+/** Current transcript projection containing an activation row. */
+export interface InstructionActivationProjectionWitness {
+  readonly messageIndex: number;
+  readonly transcriptRevision: string;
+}
+
+/** Canonical per-key state derived by Meerkat from the ordered transcript. */
+export interface InstructionActivationKeyState {
+  readonly sessionId: string;
+  readonly namespace: string;
+  readonly key: string;
+  readonly effectiveOriginLocal?: InstructionActivationRecord;
+  readonly chronologicalHead?: InstructionActivationRecord;
+  readonly requiresExplicitChildActivation: boolean;
+  readonly nextExpectation: InstructionActivationExpectation;
+  readonly nextSupersedes?: string;
+}
+
+export type InstructionActivationDisposition =
+  | "applied"
+  | "duplicate";
+
+/** Receipt for one safe-boundary activation command. */
+export interface InstructionActivationReceipt {
+  readonly record: InstructionActivationRecord;
+  readonly disposition: InstructionActivationDisposition;
+}
+
+/** Bounded page of activation records in transcript order. */
+export interface InstructionActivationReadPage {
+  readonly sessionId: string;
+  readonly records: readonly InstructionActivationRecord[];
+  readonly keyState?: InstructionActivationKeyState;
+  readonly nextOffset?: number;
+}
+
+/** Filters for durable activation record reads. */
+export interface InstructionActivationReadOptions {
+  readonly namespace?: string;
+  readonly key?: string;
+  readonly offset?: number;
+  readonly limit?: number;
 }
 
 /** Provider identity carried by authored fork-cache evidence. */

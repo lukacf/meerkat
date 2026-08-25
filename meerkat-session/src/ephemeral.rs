@@ -1351,6 +1351,19 @@ enum SessionCommand {
             Result<meerkat_core::service::AppendSystemContextStatus, AgentError>,
         >,
     },
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    ActivateInstructionControl {
+        request: meerkat_core::InstructionActivationRequest,
+        reply_tx: oneshot::Sender<
+            Result<
+                Result<
+                    meerkat_core::InstructionActivationMutation,
+                    meerkat_core::InstructionActivationError,
+                >,
+                AgentError,
+            >,
+        >,
+    },
     PrepareHeadCanonicalRuntimeBoundary {
         request: HeadCanonicalRuntimeBoundaryPrepareRequest,
         reply_tx: oneshot::Sender<Result<PreparedHeadCanonicalRuntimeBoundary, AgentError>>,
@@ -1645,7 +1658,10 @@ impl RuntimeContextAdmissionGuard {
 struct SessionTaskControl {
     // Browser sessions retain the exact witness in the shared task-control
     // shape, but exact durable terminal publication is native-only.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    #[cfg_attr(
+        any(target_arch = "wasm32", not(feature = "session-store")),
+        allow(dead_code)
+    )]
     actor_witness: LiveSessionActorWitness,
     state_tx: watch::Sender<SessionState>,
     summary_tx: watch::Sender<SessionSummaryCache>,
@@ -2205,6 +2221,18 @@ pub trait SessionAgent: Send {
         Err(AgentError::ConfigError(
             "ordinary System-message control append is not supported by this session agent"
                 .to_string(),
+        ))
+    }
+
+    /// Append one typed chronological instruction activation to the actor-owned
+    /// canonical Session document.
+    fn activate_instruction_control(
+        &mut self,
+        _request: meerkat_core::InstructionActivationRequest,
+    ) -> Result<meerkat_core::InstructionActivationMutation, meerkat_core::InstructionActivationError>
+    {
+        Err(meerkat_core::InstructionActivationError::Unsupported(
+            "this session agent does not expose the canonical Session document".to_string(),
         ))
     }
 
@@ -4143,6 +4171,45 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 ))
             })?
             .map_err(SessionError::Agent)
+    }
+
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    pub(crate) async fn activate_instruction_control(
+        &self,
+        id: &SessionId,
+        request: meerkat_core::InstructionActivationRequest,
+    ) -> Result<meerkat_core::InstructionActivationMutation, SessionError> {
+        let command_tx = self
+            .sessions
+            .read()
+            .await
+            .get(id)
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?
+            .command_tx
+            .clone();
+        let (reply_tx, reply_rx) = oneshot::channel();
+        command_tx
+            .send(SessionCommand::ActivateInstructionControl { request, reply_tx })
+            .await
+            .map_err(|_| {
+                SessionError::Agent(AgentError::InternalError(
+                    "Session task has exited".to_string(),
+                ))
+            })?;
+        reply_rx
+            .await
+            .map_err(|_| {
+                SessionError::Agent(AgentError::InternalError(
+                    "Session task dropped the reply channel".to_string(),
+                ))
+            })?
+            .map_err(SessionError::Agent)?
+            .map_err(|error| SessionError::FailedWithData {
+                message: error.to_string(),
+                data: serde_json::json!({
+                    "instruction_activation_code": error.code(),
+                }),
+            })
     }
 
     pub async fn prepare_head_canonical_runtime_boundary(
@@ -6282,6 +6349,10 @@ async fn drain_session_task_commands<A: SessionAgent>(
             SessionCommand::AppendSystemMessageControl { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(AgentError::Cancelled));
             }
+            #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+            SessionCommand::ActivateInstructionControl { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(AgentError::Cancelled));
+            }
             SessionCommand::PrepareHeadCanonicalRuntimeBoundary { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(AgentError::Cancelled));
             }
@@ -7499,6 +7570,24 @@ async fn session_task<A: SessionAgent>(
                     Err(error) => Err(AgentError::InternalError(error.to_string())),
                 };
                 if result.is_ok() {
+                    let snap = agent.snapshot();
+                    control.publish_summary(SessionSummaryCache {
+                        updated_at: snap.updated_at,
+                        message_count: snap.message_count,
+                        total_tokens: snap.total_tokens,
+                        usage: snap.usage,
+                        last_assistant_text: snap.last_assistant_text,
+                    });
+                }
+                let _ = reply_tx.send(result);
+            }
+            #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+            SessionCommand::ActivateInstructionControl { request, reply_tx } => {
+                let result = match control.archive_snapshot_gate.enter_apply() {
+                    Ok(_gate) => Ok(agent.activate_instruction_control(request)),
+                    Err(error) => Err(AgentError::InternalError(error.to_string())),
+                };
+                if matches!(result, Ok(Ok(_))) {
                     let snap = agent.snapshot();
                     control.publish_summary(SessionSummaryCache {
                         updated_at: snap.updated_at,

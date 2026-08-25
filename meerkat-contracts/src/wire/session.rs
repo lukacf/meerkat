@@ -214,6 +214,59 @@ impl UpdateSystemPromptParams {
     }
 }
 
+/// Request payload for `session/activate_instruction`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct ActivateInstructionParams {
+    pub session_id: String,
+    pub activation: meerkat_core::InstructionActivationRequest,
+}
+
+/// Request payload for `session/instruction_activations`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct ReadInstructionActivationsParams {
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<meerkat_core::InstructionNamespace>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<meerkat_core::InstructionKey>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<usize>,
+    #[serde(default = "default_instruction_activation_read_limit")]
+    pub limit: usize,
+}
+
+const fn default_instruction_activation_read_limit() -> usize {
+    100
+}
+
+impl Default for ReadInstructionActivationsParams {
+    fn default() -> Self {
+        Self {
+            session_id: String::new(),
+            namespace: None,
+            key: None,
+            offset: None,
+            limit: default_instruction_activation_read_limit(),
+        }
+    }
+}
+
+impl ReadInstructionActivationsParams {
+    #[must_use]
+    pub fn into_core(self) -> meerkat_core::InstructionActivationReadQuery {
+        meerkat_core::InstructionActivationReadQuery {
+            namespace: self.namespace,
+            key: self.key,
+            offset: self.offset,
+            limit: self.limit,
+        }
+    }
+}
+
 /// Request payload for `session/restore_transcript_revision`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1161,6 +1214,7 @@ impl TranscriptRewriteMessage {
                 created_at: transcript_message_timestamp(created_at)?,
                 identity: None,
                 prompt_version,
+                instruction_activation: None,
             })),
             Self::SystemNotice {
                 kind,
@@ -1371,6 +1425,10 @@ pub enum WireSessionMessage {
         /// selects only the latest version for each key.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prompt_version: Option<SystemPromptVersionIdentity>,
+        /// Typed immutable instruction activation identity. The rendered
+        /// envelope in `content` is validated against this fact on ingress.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        instruction_activation: Option<meerkat_core::InstructionActivationIdentity>,
     },
     SystemNotice {
         kind: SystemNoticeKind,
@@ -1443,6 +1501,7 @@ impl From<Message> for WireSessionMessage {
                 created_at: message.created_at.to_rfc3339(),
                 identity: message.identity.map(Into::into),
                 prompt_version: message.prompt_version,
+                instruction_activation: message.instruction_activation,
             },
             Message::SystemNotice(message) => Self::SystemNotice {
                 kind: message.kind,
@@ -2138,6 +2197,7 @@ mod tests {
             inline_video: false,
             realtime: true,
             web_search: true,
+            mid_conversation_system_messages: true,
             image_generation: true,
         };
         let wire = WireSessionInfo {
@@ -2242,6 +2302,7 @@ mod tests {
                     created_at: "2026-04-27T00:00:00Z".to_string(),
                     identity: None,
                     prompt_version: None,
+                    instruction_activation: None,
                 },
                 WireSessionMessage::User {
                     content: WireContentInput::Text("hello".to_string()),

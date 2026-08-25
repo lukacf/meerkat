@@ -837,6 +837,7 @@ class SessionMessage:
     interaction_id: str | None = None
     run_id: str | None = None
     prompt_version: SystemPromptVersionIdentity | None = None
+    instruction_activation: InstructionActivationIdentity | None = None
     blocks: list[SessionAssistantBlock] = field(default_factory=list)
     results: list[SessionToolResult] = field(default_factory=list)
     raw: dict[str, Any] = field(default_factory=dict)
@@ -1112,6 +1113,113 @@ class SystemPromptUpdateResult:
     status: SystemPromptUpdateStatus = "applied"
     transcript_revision: str = ""
     commit: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class InstructionRevisionRef:
+    """Immutable application-owned instruction revision reference."""
+
+    namespace: str
+    key: str
+    revision_id: str
+    content_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class InstructionActivationAbsent:
+    """CAS expectation for the first activation of a key in this session."""
+
+    kind: Literal["absent"] = "absent"
+
+
+@dataclass(frozen=True, slots=True)
+class InstructionActivationEffective:
+    """CAS expectation naming the currently effective activation."""
+
+    activation_id: str
+    kind: Literal["effective"] = "effective"
+
+
+InstructionActivationExpectation = (
+    InstructionActivationAbsent | InstructionActivationEffective
+)
+
+
+@dataclass(frozen=True, slots=True)
+class InstructionActivationRequest:
+    """One immutable instruction revision transition."""
+
+    revision: InstructionRevisionRef
+    activation_id: str
+    expectation: InstructionActivationExpectation
+    body: str
+    supersedes: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class InstructionActivationIdentity:
+    """Typed identity sealed onto a chronological System row."""
+
+    activation_id: str
+    revision: InstructionRevisionRef
+    origin_session_id: str
+    render_version: int
+    supersedes: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class InstructionActivationRecord:
+    """Authoritative durable activation record."""
+
+    session_id: str
+    identity: InstructionActivationIdentity
+    activation_ordinal: int
+    projection_witness: "InstructionActivationProjectionWitness"
+
+
+@dataclass(frozen=True, slots=True)
+class InstructionActivationProjectionWitness:
+    """Current transcript projection containing an activation row."""
+
+    message_index: int
+    transcript_revision: str
+
+
+@dataclass(frozen=True, slots=True)
+class InstructionActivationKeyState:
+    """Canonical per-key state derived from the ordered transcript."""
+
+    session_id: str
+    namespace: str
+    key: str
+    requires_explicit_child_activation: bool
+    next_expectation: InstructionActivationExpectation
+    effective_origin_local: InstructionActivationRecord | None = None
+    chronological_head: InstructionActivationRecord | None = None
+    next_supersedes: str | None = None
+
+
+InstructionActivationDisposition = Literal[
+    "applied", "duplicate"
+]
+
+
+@dataclass(frozen=True, slots=True)
+class InstructionActivationReceipt:
+    """Receipt for a safe-boundary activation command."""
+
+    record: InstructionActivationRecord
+    disposition: InstructionActivationDisposition
+
+
+@dataclass(frozen=True, slots=True)
+class InstructionActivationReadPage:
+    """Bounded page of durable activation records in transcript order."""
+
+    session_id: str
+    records: list[InstructionActivationRecord]
+    key_state: InstructionActivationKeyState | None = None
+    next_offset: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

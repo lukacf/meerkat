@@ -25,6 +25,10 @@ import type {
   CommsCommand,
   CommsSendReceipt,
   ContentBlock,
+  InstructionActivationReadOptions,
+  InstructionActivationReadPage,
+  InstructionActivationReceipt,
+  InstructionActivationRequest,
   PeerCorrelationId,
   PeerId,
   PeerResponseTerminalOptions,
@@ -177,6 +181,18 @@ export class Session {
     options?: SystemPromptUpdateOptions,
   ): Promise<SystemPromptUpdateResult> {
     return this._client.updateSystemPrompt(this._id, key, content, options);
+  }
+
+  async activateInstruction(
+    activation: InstructionActivationRequest,
+  ): Promise<InstructionActivationReceipt> {
+    return this._client.activateInstruction(this._id, activation);
+  }
+
+  async instructionActivations(
+    options?: InstructionActivationReadOptions,
+  ): Promise<InstructionActivationReadPage> {
+    return this._client.instructionActivations(this._id, options);
   }
 
   async restoreTranscriptRevision(

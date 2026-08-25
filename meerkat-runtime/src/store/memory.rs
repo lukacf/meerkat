@@ -1683,23 +1683,35 @@ impl super::RuntimeSessionAuthorityOps for InMemoryRuntimeStore {
         )
     }
 
-    async fn commit_prepared_session_boundary(
+    async fn commit_prepared_session_boundary_execution(
         &self,
         runtime_id: &LogicalRuntimeId,
-        request: super::PreparedRuntimeSessionCommit,
+        execution: super::PreparedRuntimeSessionCommitExecution,
     ) -> Result<super::PreparedRuntimeSessionCommitResult, RuntimeStoreError> {
         use super::{
             PreparedRuntimeSessionCommitPayload, PreparedRuntimeSessionCommitResult,
             RuntimeSessionAuthority, RuntimeSessionPersistenceProfile,
         };
 
-        let authority = match request.into_payload() {
+        let (payload, write_fence) = execution.into_payload_and_write_fence();
+        let authority = match payload {
             PreparedRuntimeSessionCommitPayload::SnapshotOnly { session } => {
                 let prepared = super::prepared_whole_blob_snapshot(&session)?;
-                Some(
-                    self.commit_session_snapshot_inner(runtime_id, prepared)
-                        .await?,
-                )
+                if &LogicalRuntimeId::for_session(prepared.session().id()) != runtime_id {
+                    return Err(RuntimeStoreError::SessionPersistenceAuthorityConflict {
+                        runtime_id: runtime_id.to_string(),
+                        detail: format!(
+                            "WholeBlob payload session {} does not bind this runtime",
+                            prepared.session().id()
+                        ),
+                    });
+                }
+                let mut inner = self.inner.lock().await;
+                ensure_compaction_intents_already_outboxed(&inner, runtime_id, prepared.session())?;
+                Some(super::execute_optional_runtime_store_target_write(
+                    write_fence.as_deref(),
+                    || commit_prepared_whole_blob_snapshot_locked(&mut inner, runtime_id, prepared),
+                )?)
             }
             PreparedRuntimeSessionCommitPayload::Success {
                 session,
@@ -2223,6 +2235,31 @@ impl super::RuntimeSessionAuthorityOps for InMemoryRuntimeStore {
 impl RuntimeStore for InMemoryRuntimeStore {
     fn session_authority_ops(&self) -> &dyn super::RuntimeSessionAuthorityOps {
         self
+    }
+
+    async fn commit_prepared_session_boundary_with_fence(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        request: super::PreparedRuntimeSessionCommit,
+        write_fence: Arc<dyn super::RuntimeStoreWriteFence>,
+    ) -> Result<super::FencedPreparedRuntimeSessionCommitOutcome, RuntimeStoreError> {
+        let execution = super::PreparedRuntimeSessionCommitExecution::fenced(request, write_fence)?;
+        match super::RuntimeSessionAuthorityOps::commit_prepared_session_boundary_execution(
+            self, runtime_id, execution,
+        )
+        .await
+        {
+            Ok(result) => Ok(super::FencedPreparedRuntimeSessionCommitOutcome::Applied(
+                result,
+            )),
+            Err(RuntimeStoreError::WriteFenceConflict { reason }) => {
+                Ok(super::FencedPreparedRuntimeSessionCommitOutcome::FenceConflict { reason })
+            }
+            Err(RuntimeStoreError::WriteFenceBackoff { reason }) => {
+                Ok(super::FencedPreparedRuntimeSessionCommitOutcome::FenceBackoff { reason })
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn supports_compaction_projection_outbox(&self) -> bool {
@@ -3668,6 +3705,46 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy)]
+    enum SessionBoundaryFenceDecision {
+        Applied,
+        Conflict,
+        Backoff,
+    }
+
+    struct InMemorySessionBoundaryFence {
+        store: InMemoryRuntimeStore,
+        decision: SessionBoundaryFenceDecision,
+    }
+
+    impl RuntimeStoreWriteFence for InMemorySessionBoundaryFence {
+        fn execute_if_current(
+            &self,
+            operation: Box<dyn FnOnce() -> Result<(), RuntimeStoreError> + '_>,
+        ) -> Result<RuntimeStoreWriteFenceOutcome, RuntimeStoreError> {
+            assert!(
+                self.store.inner.try_lock().is_err(),
+                "session write fence must execute while the target store lock is held"
+            );
+            match self.decision {
+                SessionBoundaryFenceDecision::Applied => {
+                    operation()?;
+                    Ok(RuntimeStoreWriteFenceOutcome::Applied)
+                }
+                SessionBoundaryFenceDecision::Conflict => {
+                    Ok(RuntimeStoreWriteFenceOutcome::Conflict {
+                        reason: "superseded identity generation".to_string(),
+                    })
+                }
+                SessionBoundaryFenceDecision::Backoff => {
+                    Ok(RuntimeStoreWriteFenceOutcome::Backoff {
+                        reason: "identity authority busy".to_string(),
+                    })
+                }
+            }
+        }
+    }
+
     fn persistable(bundle: StoredInputState) -> InputStatePersistenceRecord {
         InputStatePersistenceRecord::from_machine_snapshot(bundle).unwrap()
     }
@@ -3678,6 +3755,88 @@ mod tests {
             meerkat_core::types::UserMessage::text(content.to_string()),
         ));
         session
+    }
+
+    #[tokio::test]
+    async fn fenced_session_boundary_is_decided_inside_target_store_lock() {
+        let store = InMemoryRuntimeStore::new();
+        let session = session_with_user("fenced activation");
+        let runtime_id = LogicalRuntimeId::for_session(session.id());
+        let request = || {
+            crate::store::PreparedRuntimeSessionCommit::snapshot_only(
+                meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(Arc::new(
+                    session.clone(),
+                ))
+                .unwrap(),
+            )
+        };
+        let fence = |decision| {
+            Arc::new(InMemorySessionBoundaryFence {
+                store: store.clone(),
+                decision,
+            }) as Arc<dyn RuntimeStoreWriteFence>
+        };
+
+        let conflict = RuntimeStore::commit_prepared_session_boundary_with_fence(
+            &store,
+            &runtime_id,
+            request(),
+            fence(SessionBoundaryFenceDecision::Conflict),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            conflict,
+            crate::store::FencedPreparedRuntimeSessionCommitOutcome::FenceConflict { .. }
+        ));
+        assert!(
+            store
+                .load_session_snapshot(&runtime_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let backoff = RuntimeStore::commit_prepared_session_boundary_with_fence(
+            &store,
+            &runtime_id,
+            request(),
+            fence(SessionBoundaryFenceDecision::Backoff),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            backoff,
+            crate::store::FencedPreparedRuntimeSessionCommitOutcome::FenceBackoff { .. }
+        ));
+        assert!(
+            store
+                .load_session_snapshot(&runtime_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let applied = RuntimeStore::commit_prepared_session_boundary_with_fence(
+            &store,
+            &runtime_id,
+            request(),
+            fence(SessionBoundaryFenceDecision::Applied),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            applied,
+            crate::store::FencedPreparedRuntimeSessionCommitOutcome::Applied(_)
+        ));
+        let committed = store
+            .load_session_snapshot(&runtime_id)
+            .await
+            .unwrap()
+            .expect("applied fence commits target snapshot");
+        let committed: meerkat_core::Session =
+            serde_json::from_slice(committed.as_ref().as_slice()).unwrap();
+        assert_eq!(committed.messages(), session.messages());
     }
 
     #[tokio::test]

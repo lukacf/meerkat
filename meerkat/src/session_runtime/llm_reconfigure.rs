@@ -66,6 +66,8 @@ pub fn profile_to_capability_surface(
         image_input: profile.image_input,
         image_tool_results: profile.image_tool_results,
         supports_web_search: profile.supports_web_search,
+        supports_mid_conversation_system_messages: profile
+            .supports_mid_conversation_system_messages,
         image_generation: profile.image_generation,
         realtime: profile.realtime,
         call_timeout_secs: profile.call_timeout_secs,
@@ -142,6 +144,13 @@ pub trait SessionRuntimeLlmReconfigureService: Send + Sync {
         &self,
         session_id: &SessionId,
     ) -> Result<SessionLlmIdentity, SessionError>;
+
+    /// Whether the live ordered transcript contains typed instruction
+    /// activation rows whose placement the target model must preserve.
+    async fn live_session_has_instruction_activations(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<bool, SessionError>;
 
     /// Return the exact realm that owned the live session's initial build.
     ///
@@ -226,6 +235,24 @@ impl SessionRuntimeLlmReconfigureService for PersistentSessionService<FactoryAge
         session_id: &SessionId,
     ) -> Result<SessionLlmIdentity, SessionError> {
         self.live_session_llm_identity(session_id).await
+    }
+
+    async fn live_session_has_instruction_activations(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<bool, SessionError> {
+        Ok(self
+            .export_live_session(session_id)
+            .await?
+            .messages()
+            .iter()
+            .any(|message| {
+                matches!(
+                    message,
+                    meerkat_core::Message::System(system)
+                        if system.instruction_activation.is_some()
+                )
+            }))
     }
 
     async fn live_realm_id(
@@ -338,6 +365,24 @@ impl SessionRuntimeLlmReconfigureService for EphemeralSessionService<FactoryAgen
         session_id: &SessionId,
     ) -> Result<SessionLlmIdentity, SessionError> {
         self.live_session_llm_identity(session_id).await
+    }
+
+    async fn live_session_has_instruction_activations(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<bool, SessionError> {
+        Ok(self
+            .export_session(session_id)
+            .await?
+            .messages()
+            .iter()
+            .any(|message| {
+                matches!(
+                    message,
+                    meerkat_core::Message::System(system)
+                        if system.instruction_activation.is_some()
+                )
+            }))
     }
 
     async fn live_realm_id(
@@ -839,7 +884,25 @@ impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
         &self,
         session_id: &SessionId,
         identity: &SessionLlmIdentity,
+        capability_surface: Option<&SessionLlmCapabilitySurface>,
     ) -> Result<(), RuntimeDriverError> {
+        if self
+            .service
+            .live_session_has_instruction_activations(session_id)
+            .await
+            .map_err(session_error_to_runtime_driver)?
+        {
+            let supports_mid_conversation_system_messages = capability_surface
+                .is_some_and(|surface| surface.supports_mid_conversation_system_messages);
+            if !supports_mid_conversation_system_messages {
+                return Err(RuntimeDriverError::ValidationFailed {
+                    reason: format!(
+                        "model '{}' cannot represent the ordered instruction activations already recorded for session {session_id}",
+                        identity.model
+                    ),
+                });
+            }
+        }
         let adapter = self
             .build_adapter_for_session_llm_identity(session_id, identity)
             .await?;
@@ -912,6 +975,13 @@ mod tests {
             _session_id: &SessionId,
         ) -> Result<SessionLlmIdentity, SessionError> {
             unreachable!("realm selection does not read the LLM identity")
+        }
+
+        async fn live_session_has_instruction_activations(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<bool, SessionError> {
+            unreachable!("realm selection does not inspect the transcript")
         }
 
         async fn live_realm_id(

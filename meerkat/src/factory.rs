@@ -8654,6 +8654,7 @@ mod tests {
             image_tool_results: false,
             realtime: false,
             supports_web_search: true,
+            supports_mid_conversation_system_messages: true,
             image_generation: false,
             params_schema: serde_json::json!({}),
             beta_headers: Vec::new(),

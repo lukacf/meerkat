@@ -195,6 +195,7 @@
                   "reference/design-philosophy",
                   "architecture/meerkat-dogma",
                   "architecture/meerkat-dogma-commentary",
+                  "architecture/durable-instruction-activation",
                   "architecture/delivery-interaction-operations"
                 ]
               },

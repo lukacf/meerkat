@@ -398,6 +398,8 @@ fn identity_session_load_error_class(
         | SessionError::Agent(_)
         | SessionError::DurableTailHeldForRecovery { .. }
         | SessionError::DurableTailRecoveryRefused { .. }
+        | SessionError::ExternalWriteFenceConflict { .. }
+        | SessionError::ExternalWriteFenceBackoff { .. }
         | SessionError::FailedWithData { .. } => IdentitySessionLoadErrorClass::Unavailable,
     }
 }

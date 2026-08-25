@@ -34844,6 +34844,7 @@ impl SessionLlmReconfigureHost for TestLlmReconfigureHost {
         &self,
         _session_id: &SessionId,
         identity: &meerkat_core::SessionLlmIdentity,
+        _capability_surface: Option<&SessionLlmCapabilitySurface>,
     ) -> Result<(), RuntimeDriverError> {
         *self
             .current_identity
@@ -34896,6 +34897,7 @@ fn test_llm_capability_surface(image_tool_results: bool) -> SessionLlmCapability
         image_input: true,
         image_tool_results,
         supports_web_search: true,
+        supports_mid_conversation_system_messages: true,
         image_generation: false,
         realtime: false,
         call_timeout_secs: Some(60),
@@ -34912,6 +34914,7 @@ fn test_llm_capability_surface_realtime() -> SessionLlmCapabilitySurface {
         image_input: false,
         image_tool_results: false,
         supports_web_search: false,
+        supports_mid_conversation_system_messages: false,
         image_generation: false,
         realtime: true,
         call_timeout_secs: None,
@@ -38429,6 +38432,7 @@ async fn reconfigure_session_llm_identity_discards_live_session_when_rollback_fa
             &self,
             _session_id: &SessionId,
             identity: &meerkat_core::SessionLlmIdentity,
+            _capability_surface: Option<&SessionLlmCapabilitySurface>,
         ) -> Result<(), RuntimeDriverError> {
             let call = self.identity_apply_calls.fetch_add(1, Ordering::SeqCst);
             if call >= 1 {

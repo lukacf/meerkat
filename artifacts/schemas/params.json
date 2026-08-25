@@ -1,4 +1,138 @@
 {
+  "ActivateInstructionParams": {
+    "$defs": {
+      "InstructionActivationExpectation": {
+        "description": "Closed compare-and-set predecessor for an instruction activation.",
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "absent",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "activation_id": {
+                "$ref": "#/$defs/InstructionActivationId"
+              },
+              "kind": {
+                "const": "effective",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "activation_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "InstructionActivationId": {
+        "description": "Caller-stable identity for one activation or rollback event.",
+        "type": "string"
+      },
+      "InstructionActivationRequest": {
+        "additionalProperties": false,
+        "description": "Explicit request to append one immutable instruction revision transition.",
+        "properties": {
+          "activation_id": {
+            "$ref": "#/$defs/InstructionActivationId"
+          },
+          "body": {
+            "type": "string"
+          },
+          "expectation": {
+            "$ref": "#/$defs/InstructionActivationExpectation"
+          },
+          "revision": {
+            "$ref": "#/$defs/InstructionRevisionRef"
+          },
+          "supersedes": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/InstructionActivationId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "revision",
+          "activation_id",
+          "expectation",
+          "body"
+        ],
+        "type": "object"
+      },
+      "InstructionContentDigest": {
+        "description": "Canonical SHA-256 digest of an exact instruction body.",
+        "type": "string"
+      },
+      "InstructionKey": {
+        "description": "Application-owned instruction key within one namespace.",
+        "type": "string"
+      },
+      "InstructionNamespace": {
+        "description": "Application or issuer namespace for one instruction artifact family.",
+        "type": "string"
+      },
+      "InstructionRevisionId": {
+        "description": "Immutable application-owned revision identifier.",
+        "type": "string"
+      },
+      "InstructionRevisionRef": {
+        "additionalProperties": false,
+        "description": "Immutable application-owned instruction artifact reference.",
+        "properties": {
+          "content_sha256": {
+            "$ref": "#/$defs/InstructionContentDigest"
+          },
+          "key": {
+            "$ref": "#/$defs/InstructionKey"
+          },
+          "namespace": {
+            "$ref": "#/$defs/InstructionNamespace"
+          },
+          "revision_id": {
+            "$ref": "#/$defs/InstructionRevisionId"
+          }
+        },
+        "required": [
+          "namespace",
+          "key",
+          "revision_id",
+          "content_sha256"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Request payload for `session/activate_instruction`.",
+    "properties": {
+      "activation": {
+        "$ref": "#/$defs/InstructionActivationRequest"
+      },
+      "session_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "session_id",
+      "activation"
+    ],
+    "title": "ActivateInstructionParams",
+    "type": "object"
+  },
   "ApprovalDecideParams": {
     "$defs": {
       "ApprovalDecision": {
@@ -7209,6 +7343,89 @@
           }
         ]
       },
+      "InstructionActivationId": {
+        "description": "Caller-stable identity for one activation or rollback event.",
+        "type": "string"
+      },
+      "InstructionActivationIdentity": {
+        "additionalProperties": false,
+        "description": "Typed identity sealed onto one durable chronological activation row.",
+        "properties": {
+          "activation_id": {
+            "$ref": "#/$defs/InstructionActivationId"
+          },
+          "origin_session_id": {
+            "$ref": "#/$defs/SessionId"
+          },
+          "render_version": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "revision": {
+            "$ref": "#/$defs/InstructionRevisionRef"
+          },
+          "supersedes": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/InstructionActivationId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "activation_id",
+          "revision",
+          "origin_session_id",
+          "render_version"
+        ],
+        "type": "object"
+      },
+      "InstructionContentDigest": {
+        "description": "Canonical SHA-256 digest of an exact instruction body.",
+        "type": "string"
+      },
+      "InstructionKey": {
+        "description": "Application-owned instruction key within one namespace.",
+        "type": "string"
+      },
+      "InstructionNamespace": {
+        "description": "Application or issuer namespace for one instruction artifact family.",
+        "type": "string"
+      },
+      "InstructionRevisionId": {
+        "description": "Immutable application-owned revision identifier.",
+        "type": "string"
+      },
+      "InstructionRevisionRef": {
+        "additionalProperties": false,
+        "description": "Immutable application-owned instruction artifact reference.",
+        "properties": {
+          "content_sha256": {
+            "$ref": "#/$defs/InstructionContentDigest"
+          },
+          "key": {
+            "$ref": "#/$defs/InstructionKey"
+          },
+          "namespace": {
+            "$ref": "#/$defs/InstructionNamespace"
+          },
+          "revision_id": {
+            "$ref": "#/$defs/InstructionRevisionId"
+          }
+        },
+        "required": [
+          "namespace",
+          "key",
+          "revision_id",
+          "content_sha256"
+        ],
+        "type": "object"
+      },
       "InteractionFailureReason": {
         "description": "Typed reason an interaction-scoped run failed (terminal event for tap\nsubscribers).\n\nMirrors [`CompactionFailureReason`]: the variant is the typed owner of the\nfailure cause; the human-readable string is a [`Display`] derivation,\nnever a separately-carried field.\n\n[`Display`]: std::fmt::Display",
         "oneOf": [
@@ -12932,6 +13149,17 @@
                   }
                 ],
                 "description": "Optional exact control-ingress identity carried by this durable\ntranscript message. Provider adapters ignore it."
+              },
+              "instruction_activation": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/InstructionActivationIdentity"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Typed immutable instruction activation identity. The rendered\nenvelope in `content` is validated against this fact on ingress."
               },
               "prompt_version": {
                 "anyOf": [
@@ -19506,6 +19734,927 @@
       "content"
     ],
     "title": "InjectSystemContextParams",
+    "type": "object"
+  },
+  "InstructionActivationDisposition": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Public result class for one safe-boundary activation command.",
+    "oneOf": [
+      {
+        "const": "applied",
+        "description": "The durable row committed and the materialized session projection was\nconverged before the command completed.",
+        "type": "string"
+      },
+      {
+        "const": "duplicate",
+        "description": "The exact activation was already the effective durable row.",
+        "type": "string"
+      }
+    ],
+    "title": "InstructionActivationDisposition"
+  },
+  "InstructionActivationExpectation": {
+    "$defs": {
+      "InstructionActivationId": {
+        "description": "Caller-stable identity for one activation or rollback event.",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Closed compare-and-set predecessor for an instruction activation.",
+    "oneOf": [
+      {
+        "properties": {
+          "kind": {
+            "const": "absent",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "activation_id": {
+            "$ref": "#/$defs/InstructionActivationId"
+          },
+          "kind": {
+            "const": "effective",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "activation_id"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "InstructionActivationExpectation"
+  },
+  "InstructionActivationId": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Caller-stable identity for one activation or rollback event.",
+    "title": "InstructionActivationId",
+    "type": "string"
+  },
+  "InstructionActivationIdentity": {
+    "$defs": {
+      "InstructionActivationId": {
+        "description": "Caller-stable identity for one activation or rollback event.",
+        "type": "string"
+      },
+      "InstructionContentDigest": {
+        "description": "Canonical SHA-256 digest of an exact instruction body.",
+        "type": "string"
+      },
+      "InstructionKey": {
+        "description": "Application-owned instruction key within one namespace.",
+        "type": "string"
+      },
+      "InstructionNamespace": {
+        "description": "Application or issuer namespace for one instruction artifact family.",
+        "type": "string"
+      },
+      "InstructionRevisionId": {
+        "description": "Immutable application-owned revision identifier.",
+        "type": "string"
+      },
+      "InstructionRevisionRef": {
+        "additionalProperties": false,
+        "description": "Immutable application-owned instruction artifact reference.",
+        "properties": {
+          "content_sha256": {
+            "$ref": "#/$defs/InstructionContentDigest"
+          },
+          "key": {
+            "$ref": "#/$defs/InstructionKey"
+          },
+          "namespace": {
+            "$ref": "#/$defs/InstructionNamespace"
+          },
+          "revision_id": {
+            "$ref": "#/$defs/InstructionRevisionId"
+          }
+        },
+        "required": [
+          "namespace",
+          "key",
+          "revision_id",
+          "content_sha256"
+        ],
+        "type": "object"
+      },
+      "SessionId": {
+        "description": "Unique identifier for a session (UUID v7 for time-ordering)",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Typed identity sealed onto one durable chronological activation row.",
+    "properties": {
+      "activation_id": {
+        "$ref": "#/$defs/InstructionActivationId"
+      },
+      "origin_session_id": {
+        "$ref": "#/$defs/SessionId"
+      },
+      "render_version": {
+        "format": "uint16",
+        "maximum": 65535,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "revision": {
+        "$ref": "#/$defs/InstructionRevisionRef"
+      },
+      "supersedes": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/InstructionActivationId"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "activation_id",
+      "revision",
+      "origin_session_id",
+      "render_version"
+    ],
+    "title": "InstructionActivationIdentity",
+    "type": "object"
+  },
+  "InstructionActivationReadPage": {
+    "$defs": {
+      "InstructionActivationExpectation": {
+        "description": "Closed compare-and-set predecessor for an instruction activation.",
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "absent",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "activation_id": {
+                "$ref": "#/$defs/InstructionActivationId"
+              },
+              "kind": {
+                "const": "effective",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "activation_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "InstructionActivationId": {
+        "description": "Caller-stable identity for one activation or rollback event.",
+        "type": "string"
+      },
+      "InstructionActivationIdentity": {
+        "additionalProperties": false,
+        "description": "Typed identity sealed onto one durable chronological activation row.",
+        "properties": {
+          "activation_id": {
+            "$ref": "#/$defs/InstructionActivationId"
+          },
+          "origin_session_id": {
+            "$ref": "#/$defs/SessionId"
+          },
+          "render_version": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "revision": {
+            "$ref": "#/$defs/InstructionRevisionRef"
+          },
+          "supersedes": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/InstructionActivationId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "activation_id",
+          "revision",
+          "origin_session_id",
+          "render_version"
+        ],
+        "type": "object"
+      },
+      "InstructionActivationKeyState": {
+        "additionalProperties": false,
+        "description": "Canonical per-key activation state derived from the ordered transcript.",
+        "properties": {
+          "chronological_head": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/InstructionActivationRecord"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "effective_origin_local": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/InstructionActivationRecord"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "key": {
+            "$ref": "#/$defs/InstructionKey"
+          },
+          "namespace": {
+            "$ref": "#/$defs/InstructionNamespace"
+          },
+          "next_expectation": {
+            "$ref": "#/$defs/InstructionActivationExpectation"
+          },
+          "next_supersedes": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/InstructionActivationId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "requires_explicit_child_activation": {
+            "type": "boolean"
+          },
+          "session_id": {
+            "$ref": "#/$defs/SessionId"
+          }
+        },
+        "required": [
+          "session_id",
+          "namespace",
+          "key",
+          "requires_explicit_child_activation",
+          "next_expectation"
+        ],
+        "type": "object"
+      },
+      "InstructionActivationProjectionWitness": {
+        "additionalProperties": false,
+        "description": "Current transcript projection witness for an activation row.",
+        "properties": {
+          "message_index": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "transcript_revision": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "message_index",
+          "transcript_revision"
+        ],
+        "type": "object"
+      },
+      "InstructionActivationRecord": {
+        "additionalProperties": false,
+        "description": "Durable transcript record for one instruction activation.",
+        "properties": {
+          "activation_ordinal": {
+            "description": "Stable zero-based position among typed activation rows in this\ntranscript lineage. Compaction preserves activation order, so this\nordinal does not change when conversational rows are summarized.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "identity": {
+            "$ref": "#/$defs/InstructionActivationIdentity"
+          },
+          "projection_witness": {
+            "$ref": "#/$defs/InstructionActivationProjectionWitness",
+            "description": "Current durable transcript projection containing this activation.\nCompaction may change this witness without changing the activation."
+          },
+          "session_id": {
+            "$ref": "#/$defs/SessionId"
+          }
+        },
+        "required": [
+          "session_id",
+          "identity",
+          "activation_ordinal",
+          "projection_witness"
+        ],
+        "type": "object"
+      },
+      "InstructionContentDigest": {
+        "description": "Canonical SHA-256 digest of an exact instruction body.",
+        "type": "string"
+      },
+      "InstructionKey": {
+        "description": "Application-owned instruction key within one namespace.",
+        "type": "string"
+      },
+      "InstructionNamespace": {
+        "description": "Application or issuer namespace for one instruction artifact family.",
+        "type": "string"
+      },
+      "InstructionRevisionId": {
+        "description": "Immutable application-owned revision identifier.",
+        "type": "string"
+      },
+      "InstructionRevisionRef": {
+        "additionalProperties": false,
+        "description": "Immutable application-owned instruction artifact reference.",
+        "properties": {
+          "content_sha256": {
+            "$ref": "#/$defs/InstructionContentDigest"
+          },
+          "key": {
+            "$ref": "#/$defs/InstructionKey"
+          },
+          "namespace": {
+            "$ref": "#/$defs/InstructionNamespace"
+          },
+          "revision_id": {
+            "$ref": "#/$defs/InstructionRevisionId"
+          }
+        },
+        "required": [
+          "namespace",
+          "key",
+          "revision_id",
+          "content_sha256"
+        ],
+        "type": "object"
+      },
+      "SessionId": {
+        "description": "Unique identifier for a session (UUID v7 for time-ordering)",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "One page of durable activation records in transcript order.",
+    "properties": {
+      "key_state": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/InstructionActivationKeyState"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Present when the query names one exact namespace and key."
+      },
+      "next_offset": {
+        "format": "uint",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "records": {
+        "items": {
+          "$ref": "#/$defs/InstructionActivationRecord"
+        },
+        "type": "array"
+      },
+      "session_id": {
+        "$ref": "#/$defs/SessionId"
+      }
+    },
+    "required": [
+      "session_id",
+      "records"
+    ],
+    "title": "InstructionActivationReadPage",
+    "type": "object"
+  },
+  "InstructionActivationReceipt": {
+    "$defs": {
+      "InstructionActivationDisposition": {
+        "description": "Public result class for one safe-boundary activation command.",
+        "oneOf": [
+          {
+            "const": "applied",
+            "description": "The durable row committed and the materialized session projection was\nconverged before the command completed.",
+            "type": "string"
+          },
+          {
+            "const": "duplicate",
+            "description": "The exact activation was already the effective durable row.",
+            "type": "string"
+          }
+        ]
+      },
+      "InstructionActivationId": {
+        "description": "Caller-stable identity for one activation or rollback event.",
+        "type": "string"
+      },
+      "InstructionActivationIdentity": {
+        "additionalProperties": false,
+        "description": "Typed identity sealed onto one durable chronological activation row.",
+        "properties": {
+          "activation_id": {
+            "$ref": "#/$defs/InstructionActivationId"
+          },
+          "origin_session_id": {
+            "$ref": "#/$defs/SessionId"
+          },
+          "render_version": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "revision": {
+            "$ref": "#/$defs/InstructionRevisionRef"
+          },
+          "supersedes": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/InstructionActivationId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "activation_id",
+          "revision",
+          "origin_session_id",
+          "render_version"
+        ],
+        "type": "object"
+      },
+      "InstructionActivationProjectionWitness": {
+        "additionalProperties": false,
+        "description": "Current transcript projection witness for an activation row.",
+        "properties": {
+          "message_index": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "transcript_revision": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "message_index",
+          "transcript_revision"
+        ],
+        "type": "object"
+      },
+      "InstructionActivationRecord": {
+        "additionalProperties": false,
+        "description": "Durable transcript record for one instruction activation.",
+        "properties": {
+          "activation_ordinal": {
+            "description": "Stable zero-based position among typed activation rows in this\ntranscript lineage. Compaction preserves activation order, so this\nordinal does not change when conversational rows are summarized.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "identity": {
+            "$ref": "#/$defs/InstructionActivationIdentity"
+          },
+          "projection_witness": {
+            "$ref": "#/$defs/InstructionActivationProjectionWitness",
+            "description": "Current durable transcript projection containing this activation.\nCompaction may change this witness without changing the activation."
+          },
+          "session_id": {
+            "$ref": "#/$defs/SessionId"
+          }
+        },
+        "required": [
+          "session_id",
+          "identity",
+          "activation_ordinal",
+          "projection_witness"
+        ],
+        "type": "object"
+      },
+      "InstructionContentDigest": {
+        "description": "Canonical SHA-256 digest of an exact instruction body.",
+        "type": "string"
+      },
+      "InstructionKey": {
+        "description": "Application-owned instruction key within one namespace.",
+        "type": "string"
+      },
+      "InstructionNamespace": {
+        "description": "Application or issuer namespace for one instruction artifact family.",
+        "type": "string"
+      },
+      "InstructionRevisionId": {
+        "description": "Immutable application-owned revision identifier.",
+        "type": "string"
+      },
+      "InstructionRevisionRef": {
+        "additionalProperties": false,
+        "description": "Immutable application-owned instruction artifact reference.",
+        "properties": {
+          "content_sha256": {
+            "$ref": "#/$defs/InstructionContentDigest"
+          },
+          "key": {
+            "$ref": "#/$defs/InstructionKey"
+          },
+          "namespace": {
+            "$ref": "#/$defs/InstructionNamespace"
+          },
+          "revision_id": {
+            "$ref": "#/$defs/InstructionRevisionId"
+          }
+        },
+        "required": [
+          "namespace",
+          "key",
+          "revision_id",
+          "content_sha256"
+        ],
+        "type": "object"
+      },
+      "SessionId": {
+        "description": "Unique identifier for a session (UUID v7 for time-ordering)",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Reproducible receipt returned by the safe-boundary activation facade.",
+    "properties": {
+      "disposition": {
+        "$ref": "#/$defs/InstructionActivationDisposition"
+      },
+      "record": {
+        "$ref": "#/$defs/InstructionActivationRecord"
+      }
+    },
+    "required": [
+      "record",
+      "disposition"
+    ],
+    "title": "InstructionActivationReceipt",
+    "type": "object"
+  },
+  "InstructionActivationRecord": {
+    "$defs": {
+      "InstructionActivationId": {
+        "description": "Caller-stable identity for one activation or rollback event.",
+        "type": "string"
+      },
+      "InstructionActivationIdentity": {
+        "additionalProperties": false,
+        "description": "Typed identity sealed onto one durable chronological activation row.",
+        "properties": {
+          "activation_id": {
+            "$ref": "#/$defs/InstructionActivationId"
+          },
+          "origin_session_id": {
+            "$ref": "#/$defs/SessionId"
+          },
+          "render_version": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "revision": {
+            "$ref": "#/$defs/InstructionRevisionRef"
+          },
+          "supersedes": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/InstructionActivationId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "activation_id",
+          "revision",
+          "origin_session_id",
+          "render_version"
+        ],
+        "type": "object"
+      },
+      "InstructionActivationProjectionWitness": {
+        "additionalProperties": false,
+        "description": "Current transcript projection witness for an activation row.",
+        "properties": {
+          "message_index": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "transcript_revision": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "message_index",
+          "transcript_revision"
+        ],
+        "type": "object"
+      },
+      "InstructionContentDigest": {
+        "description": "Canonical SHA-256 digest of an exact instruction body.",
+        "type": "string"
+      },
+      "InstructionKey": {
+        "description": "Application-owned instruction key within one namespace.",
+        "type": "string"
+      },
+      "InstructionNamespace": {
+        "description": "Application or issuer namespace for one instruction artifact family.",
+        "type": "string"
+      },
+      "InstructionRevisionId": {
+        "description": "Immutable application-owned revision identifier.",
+        "type": "string"
+      },
+      "InstructionRevisionRef": {
+        "additionalProperties": false,
+        "description": "Immutable application-owned instruction artifact reference.",
+        "properties": {
+          "content_sha256": {
+            "$ref": "#/$defs/InstructionContentDigest"
+          },
+          "key": {
+            "$ref": "#/$defs/InstructionKey"
+          },
+          "namespace": {
+            "$ref": "#/$defs/InstructionNamespace"
+          },
+          "revision_id": {
+            "$ref": "#/$defs/InstructionRevisionId"
+          }
+        },
+        "required": [
+          "namespace",
+          "key",
+          "revision_id",
+          "content_sha256"
+        ],
+        "type": "object"
+      },
+      "SessionId": {
+        "description": "Unique identifier for a session (UUID v7 for time-ordering)",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Durable transcript record for one instruction activation.",
+    "properties": {
+      "activation_ordinal": {
+        "description": "Stable zero-based position among typed activation rows in this\ntranscript lineage. Compaction preserves activation order, so this\nordinal does not change when conversational rows are summarized.",
+        "format": "uint",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "identity": {
+        "$ref": "#/$defs/InstructionActivationIdentity"
+      },
+      "projection_witness": {
+        "$ref": "#/$defs/InstructionActivationProjectionWitness",
+        "description": "Current durable transcript projection containing this activation.\nCompaction may change this witness without changing the activation."
+      },
+      "session_id": {
+        "$ref": "#/$defs/SessionId"
+      }
+    },
+    "required": [
+      "session_id",
+      "identity",
+      "activation_ordinal",
+      "projection_witness"
+    ],
+    "title": "InstructionActivationRecord",
+    "type": "object"
+  },
+  "InstructionActivationRequest": {
+    "$defs": {
+      "InstructionActivationExpectation": {
+        "description": "Closed compare-and-set predecessor for an instruction activation.",
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "absent",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "activation_id": {
+                "$ref": "#/$defs/InstructionActivationId"
+              },
+              "kind": {
+                "const": "effective",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "activation_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "InstructionActivationId": {
+        "description": "Caller-stable identity for one activation or rollback event.",
+        "type": "string"
+      },
+      "InstructionContentDigest": {
+        "description": "Canonical SHA-256 digest of an exact instruction body.",
+        "type": "string"
+      },
+      "InstructionKey": {
+        "description": "Application-owned instruction key within one namespace.",
+        "type": "string"
+      },
+      "InstructionNamespace": {
+        "description": "Application or issuer namespace for one instruction artifact family.",
+        "type": "string"
+      },
+      "InstructionRevisionId": {
+        "description": "Immutable application-owned revision identifier.",
+        "type": "string"
+      },
+      "InstructionRevisionRef": {
+        "additionalProperties": false,
+        "description": "Immutable application-owned instruction artifact reference.",
+        "properties": {
+          "content_sha256": {
+            "$ref": "#/$defs/InstructionContentDigest"
+          },
+          "key": {
+            "$ref": "#/$defs/InstructionKey"
+          },
+          "namespace": {
+            "$ref": "#/$defs/InstructionNamespace"
+          },
+          "revision_id": {
+            "$ref": "#/$defs/InstructionRevisionId"
+          }
+        },
+        "required": [
+          "namespace",
+          "key",
+          "revision_id",
+          "content_sha256"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Explicit request to append one immutable instruction revision transition.",
+    "properties": {
+      "activation_id": {
+        "$ref": "#/$defs/InstructionActivationId"
+      },
+      "body": {
+        "type": "string"
+      },
+      "expectation": {
+        "$ref": "#/$defs/InstructionActivationExpectation"
+      },
+      "revision": {
+        "$ref": "#/$defs/InstructionRevisionRef"
+      },
+      "supersedes": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/InstructionActivationId"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "revision",
+      "activation_id",
+      "expectation",
+      "body"
+    ],
+    "title": "InstructionActivationRequest",
+    "type": "object"
+  },
+  "InstructionContentDigest": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Canonical SHA-256 digest of an exact instruction body.",
+    "title": "InstructionContentDigest",
+    "type": "string"
+  },
+  "InstructionKey": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Application-owned instruction key within one namespace.",
+    "title": "InstructionKey",
+    "type": "string"
+  },
+  "InstructionNamespace": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Application or issuer namespace for one instruction artifact family.",
+    "title": "InstructionNamespace",
+    "type": "string"
+  },
+  "InstructionRevisionId": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Immutable application-owned revision identifier.",
+    "title": "InstructionRevisionId",
+    "type": "string"
+  },
+  "InstructionRevisionRef": {
+    "$defs": {
+      "InstructionContentDigest": {
+        "description": "Canonical SHA-256 digest of an exact instruction body.",
+        "type": "string"
+      },
+      "InstructionKey": {
+        "description": "Application-owned instruction key within one namespace.",
+        "type": "string"
+      },
+      "InstructionNamespace": {
+        "description": "Application or issuer namespace for one instruction artifact family.",
+        "type": "string"
+      },
+      "InstructionRevisionId": {
+        "description": "Immutable application-owned revision identifier.",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Immutable application-owned instruction artifact reference.",
+    "properties": {
+      "content_sha256": {
+        "$ref": "#/$defs/InstructionContentDigest"
+      },
+      "key": {
+        "$ref": "#/$defs/InstructionKey"
+      },
+      "namespace": {
+        "$ref": "#/$defs/InstructionNamespace"
+      },
+      "revision_id": {
+        "$ref": "#/$defs/InstructionRevisionId"
+      }
+    },
+    "required": [
+      "namespace",
+      "key",
+      "revision_id",
+      "content_sha256"
+    ],
+    "title": "InstructionRevisionRef",
     "type": "object"
   },
   "InterruptParams": {
@@ -30540,6 +31689,65 @@
       "access_token"
     ],
     "title": "ProvisionApiKeyParams",
+    "type": "object"
+  },
+  "ReadInstructionActivationsParams": {
+    "$defs": {
+      "InstructionKey": {
+        "description": "Application-owned instruction key within one namespace.",
+        "type": "string"
+      },
+      "InstructionNamespace": {
+        "description": "Application or issuer namespace for one instruction artifact family.",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Request payload for `session/instruction_activations`.",
+    "properties": {
+      "key": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/InstructionKey"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "limit": {
+        "default": 100,
+        "format": "uint",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "namespace": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/InstructionNamespace"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "offset": {
+        "format": "uint",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "session_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "session_id"
+    ],
+    "title": "ReadInstructionActivationsParams",
     "type": "object"
   },
   "ReadSessionHistoryParams": {

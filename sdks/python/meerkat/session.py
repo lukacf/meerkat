@@ -29,6 +29,9 @@ from typing import TYPE_CHECKING, Any
 from .generated.types import CommsSendResult
 from .types import (
     ContentBlock,
+    InstructionActivationReadPage,
+    InstructionActivationReceipt,
+    InstructionActivationRequest,
     PeerCorrelationId,
     PeerId,
     PublicTurnToolOverlay,
@@ -399,6 +402,30 @@ class Session:
             target_message_index=target_message_index,
             actor=actor,
             expected_parent_revision=expected_parent_revision,
+        )
+
+    async def activate_instruction(
+        self,
+        activation: InstructionActivationRequest,
+    ) -> InstructionActivationReceipt:
+        """Activate one immutable instruction revision at a safe boundary."""
+        return await self._client.activate_instruction(self._id, activation)  # noqa: SLF001
+
+    async def instruction_activations(
+        self,
+        *,
+        namespace: str | None = None,
+        key: str | None = None,
+        offset: int | None = None,
+        limit: int = 100,
+    ) -> InstructionActivationReadPage:
+        """Read authoritative durable activation records."""
+        return await self._client.instruction_activations(  # noqa: SLF001
+            self._id,
+            namespace=namespace,
+            key=key,
+            offset=offset,
+            limit=limit,
         )
 
     async def subscribe_events(self) -> EventSubscription:

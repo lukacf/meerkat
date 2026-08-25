@@ -47004,6 +47004,7 @@ fn test_session_llm_capabilities() -> meerkat_runtime::SessionLlmCapabilitySurfa
         supports_web_search: false,
         image_generation: false,
         realtime: false,
+        supports_mid_conversation_system_messages: false,
         call_timeout_secs: None,
     }
 }
@@ -47099,6 +47100,7 @@ impl meerkat_runtime::SessionLlmReconfigureHost for RecordingSessionLlmReconfigu
         &self,
         _session_id: &SessionId,
         identity: &meerkat_core::SessionLlmIdentity,
+        _capability_surface: Option<&meerkat_runtime::SessionLlmCapabilitySurface>,
     ) -> Result<(), meerkat_runtime::RuntimeDriverError> {
         if self.fail_live_apply.load(Ordering::SeqCst) {
             return Err(meerkat_runtime::RuntimeDriverError::ValidationFailed {

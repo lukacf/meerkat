@@ -2800,6 +2800,7 @@ mod member_status_capability_tests {
             inline_video: false,
             realtime: true,
             web_search: true,
+            mid_conversation_system_messages: true,
             image_generation: true,
         };
         let result = MobMemberStatusResult {

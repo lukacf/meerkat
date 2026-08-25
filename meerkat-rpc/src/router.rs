@@ -2132,6 +2132,12 @@ impl MethodRouter {
             "session/update_system_prompt" => {
                 self.handle_session_update_system_prompt(id, params).await
             }
+            "session/activate_instruction" => {
+                Box::pin(self.handle_session_activate_instruction(id, params)).await
+            }
+            "session/instruction_activations" => {
+                Box::pin(self.handle_session_instruction_activations(id, params)).await
+            }
             "session/restore_transcript_revision" => {
                 self.handle_session_restore_transcript_revision(id, params)
                     .await
@@ -3299,6 +3305,102 @@ impl MethodRouter {
         }
     }
 
+    async fn handle_session_activate_instruction(
+        &self,
+        id: Option<crate::protocol::RpcId>,
+        params: Option<&serde_json::value::RawValue>,
+    ) -> RpcResponse {
+        let params: meerkat_contracts::ActivateInstructionParams =
+            match handlers::parse_params(params) {
+                Ok(params) => params,
+                Err(response) => return response.with_id(id),
+            };
+        let session_id = match handlers::parse_session_id_for_runtime(
+            id.clone(),
+            &params.session_id,
+            &self.runtime,
+        ) {
+            Ok(session_id) => session_id,
+            Err(response) => return response,
+        };
+
+        match self.resolve_session_owner(&session_id).await {
+            Some(SessionOwner::Runtime) => {
+                let runtime = Arc::clone(&self.runtime);
+                let activation_session_id = session_id.clone();
+                match tokio::spawn(async move {
+                    runtime
+                        .activate_instruction(&activation_session_id, params.activation)
+                        .await
+                })
+                .await
+                {
+                    Ok(Ok(receipt)) => RpcResponse::success(id, receipt),
+                    Ok(Err(error)) => RpcResponse::from_error(id, error),
+                    Err(error) => RpcResponse::error(
+                        id,
+                        error::INTERNAL_ERROR,
+                        format!("instruction activation owner task failed: {error}"),
+                    ),
+                }
+            }
+            #[cfg(feature = "mob")]
+            Some(SessionOwner::Mob) => RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                "mob-owned instruction activation must be reconciled through the mob owner",
+            ),
+            None => RpcResponse::error(
+                id,
+                error::SESSION_NOT_FOUND,
+                format!("Session not found: {session_id}"),
+            ),
+        }
+    }
+
+    async fn handle_session_instruction_activations(
+        &self,
+        id: Option<crate::protocol::RpcId>,
+        params: Option<&serde_json::value::RawValue>,
+    ) -> RpcResponse {
+        let params: meerkat_contracts::ReadInstructionActivationsParams =
+            match handlers::parse_params(params) {
+                Ok(params) => params,
+                Err(response) => return response.with_id(id),
+            };
+        let session_id = match handlers::parse_session_id_for_runtime(
+            id.clone(),
+            &params.session_id,
+            &self.runtime,
+        ) {
+            Ok(session_id) => session_id,
+            Err(response) => return response,
+        };
+        let query = params.into_core();
+
+        match self.resolve_session_owner(&session_id).await {
+            Some(SessionOwner::Runtime) => match self
+                .runtime
+                .read_instruction_activation_records(&session_id, query)
+                .await
+            {
+                Ok(page) => RpcResponse::success(id, page),
+                Err(error) => RpcResponse::from_error(id, error),
+            },
+            #[cfg(feature = "mob")]
+            Some(SessionOwner::Mob) => RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                "mob-owned instruction status must be read through the mob owner",
+            ),
+            None => RpcResponse::error(
+                id,
+                error::SESSION_NOT_FOUND,
+                format!("Session not found: {session_id}"),
+            ),
+        }
+    }
+
     async fn handle_session_fork_at(
         &self,
         id: Option<crate::protocol::RpcId>,
@@ -4393,7 +4495,7 @@ mod tests {
     use super::*;
 
     use std::pin::Pin;
-    use std::sync::Arc;
+    use std::sync::{Arc, Condvar, Mutex as StdMutex};
     use std::time::Duration;
 
     use async_trait::async_trait;
@@ -4419,6 +4521,61 @@ mod tests {
     use serde_json::value::RawValue;
 
     use crate::protocol::RpcId;
+
+    struct BlockingInstructionActivationFence {
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<(StdMutex<bool>, Condvar)>,
+    }
+
+    impl meerkat_runtime::RuntimeStoreWriteFence for BlockingInstructionActivationFence {
+        fn execute_if_current(
+            &self,
+            operation: Box<dyn FnOnce() -> Result<(), meerkat_runtime::RuntimeStoreError> + '_>,
+        ) -> Result<
+            meerkat_runtime::RuntimeStoreWriteFenceOutcome,
+            meerkat_runtime::RuntimeStoreError,
+        > {
+            self.started.notify_one();
+            let (lock, wake) = &*self.release;
+            let mut released = lock.lock().expect("release lock");
+            while !*released {
+                released = wake.wait(released).expect("release wait");
+            }
+            operation()?;
+            Ok(meerkat_runtime::RuntimeStoreWriteFenceOutcome::Applied)
+        }
+    }
+
+    fn release_instruction_activation_fence(release: &Arc<(StdMutex<bool>, Condvar)>) {
+        let (lock, wake) = &**release;
+        *lock.lock().expect("release lock") = true;
+        wake.notify_one();
+    }
+
+    #[derive(Clone, Copy)]
+    enum RefusingInstructionActivationFence {
+        Conflict,
+        Backoff,
+    }
+
+    impl meerkat_runtime::RuntimeStoreWriteFence for RefusingInstructionActivationFence {
+        fn execute_if_current(
+            &self,
+            _operation: Box<dyn FnOnce() -> Result<(), meerkat_runtime::RuntimeStoreError> + '_>,
+        ) -> Result<
+            meerkat_runtime::RuntimeStoreWriteFenceOutcome,
+            meerkat_runtime::RuntimeStoreError,
+        > {
+            Ok(match self {
+                Self::Conflict => meerkat_runtime::RuntimeStoreWriteFenceOutcome::Conflict {
+                    reason: "superseded identity generation".to_string(),
+                },
+                Self::Backoff => meerkat_runtime::RuntimeStoreWriteFenceOutcome::Backoff {
+                    reason: "identity authority busy".to_string(),
+                },
+            })
+        }
+    }
 
     #[test]
     fn session_fork_request_lowering_preserves_each_tool_policy() {
@@ -6580,6 +6737,8 @@ mod tests {
         assert!(method_names.contains(&"help/ask"));
         assert!(method_names.contains(&"session/create"));
         assert!(method_names.contains(&"session/history"));
+        assert!(method_names.contains(&"session/activate_instruction"));
+        assert!(method_names.contains(&"session/instruction_activations"));
         assert!(method_names.contains(&"session/fork_at"));
         assert!(method_names.contains(&"session/fork_replace"));
         assert!(method_names.contains(&"session/external_event"));
@@ -10829,6 +10988,497 @@ mod tests {
             archived_history["messages"].as_array().unwrap().len() >= 4,
             "archived history should return the full transcript"
         );
+    }
+
+    #[tokio::test]
+    async fn instruction_activation_is_typed_durable_and_idempotent() {
+        let (router, _notif_rx) = test_router().await;
+        let create_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({
+                    "prompt": "Hello",
+                    "model": "claude-opus-5"
+                }),
+            ))
+            .await
+            .unwrap();
+        let session_id = result_value(&create_resp)["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let body = "Always report uncertainty explicitly.";
+        let activation = meerkat_core::InstructionActivationRequest {
+            revision: meerkat_core::InstructionRevisionRef {
+                namespace: meerkat_core::InstructionNamespace::new("app.example").unwrap(),
+                key: meerkat_core::InstructionKey::new("primary").unwrap(),
+                revision_id: meerkat_core::InstructionRevisionId::new("revision-1").unwrap(),
+                content_sha256: meerkat_core::InstructionContentDigest::for_body(body),
+            },
+            activation_id: meerkat_core::InstructionActivationId::new("activation-1").unwrap(),
+            expectation: meerkat_core::InstructionActivationExpectation::Absent,
+            supersedes: None,
+            body: body.to_string(),
+        };
+
+        let apply = router
+            .dispatch(make_request(
+                "session/activate_instruction",
+                serde_json::json!({
+                    "session_id": &session_id,
+                    "activation": activation.clone(),
+                }),
+            ))
+            .await
+            .unwrap();
+        assert!(apply.error.is_none(), "activation failed: {apply:?}");
+        assert_eq!(result_value(&apply)["disposition"], "applied");
+
+        let retry = router
+            .dispatch(make_request(
+                "session/activate_instruction",
+                serde_json::json!({
+                    "session_id": &session_id,
+                    "activation": activation,
+                }),
+            ))
+            .await
+            .unwrap();
+        assert!(retry.error.is_none(), "exact retry failed: {retry:?}");
+        assert_eq!(result_value(&retry)["disposition"], "duplicate");
+
+        let records = router
+            .dispatch(make_request(
+                "session/instruction_activations",
+                serde_json::json!({
+                    "session_id": &session_id,
+                    "namespace": "app.example",
+                    "key": "primary"
+                }),
+            ))
+            .await
+            .unwrap();
+        let records = result_value(&records);
+        assert_eq!(records["records"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            records["records"][0]["identity"]["activation_id"],
+            "activation-1"
+        );
+
+        let history = router
+            .dispatch(make_request(
+                "session/history",
+                serde_json::json!({ "session_id": &session_id }),
+            ))
+            .await
+            .unwrap();
+        let history_result = result_value(&history);
+        let activation_rows = history_result["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| message.get("instruction_activation").is_some())
+            .collect::<Vec<_>>();
+        assert_eq!(activation_rows.len(), 1);
+        assert_eq!(
+            activation_rows[0]["instruction_activation"]["activation_id"],
+            "activation-1"
+        );
+        assert!(
+            activation_rows[0]["content"]
+                .as_str()
+                .unwrap()
+                .starts_with("[meerkat-instruction-activation-v1]")
+        );
+    }
+
+    #[tokio::test]
+    async fn instruction_activation_rejects_unsupported_current_lowering() {
+        let (router, _notif_rx) = test_router().await;
+        let create_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({
+                    "prompt": "Hello",
+                    "model": "claude-sonnet-4-6"
+                }),
+            ))
+            .await
+            .unwrap();
+        let session_id = result_value(&create_resp)["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let body = "Policy";
+        let response = router
+            .dispatch(make_request(
+                "session/activate_instruction",
+                serde_json::json!({
+                    "session_id": &session_id,
+                    "activation": {
+                        "revision": {
+                            "namespace": "app.example",
+                            "key": "primary",
+                            "revision_id": "revision-1",
+                            "content_sha256": meerkat_core::InstructionContentDigest::for_body(body)
+                        },
+                        "activation_id": "activation-1",
+                        "expectation": { "kind": "absent" },
+                        "body": body
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        let error = response.error.expect("unsupported lowering must fail");
+        assert_eq!(
+            error.data.unwrap()["instruction_activation_code"],
+            "unsupported_current_lowering"
+        );
+    }
+
+    #[tokio::test]
+    async fn instruction_activation_waits_for_the_turn_finalization_boundary() {
+        let (router, _notif_rx) = test_router().await;
+        let create_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({
+                    "prompt": "Hello",
+                    "model": "claude-opus-5"
+                }),
+            ))
+            .await
+            .unwrap();
+        let session_id =
+            SessionId::parse(result_value(&create_resp)["session_id"].as_str().unwrap()).unwrap();
+        let boundary = router
+            .runtime
+            .acquire_instruction_activation_test_boundary(&session_id)
+            .await;
+        let body = "Policy";
+        let activation = meerkat_core::InstructionActivationRequest {
+            revision: meerkat_core::InstructionRevisionRef {
+                namespace: meerkat_core::InstructionNamespace::new("app.example").unwrap(),
+                key: meerkat_core::InstructionKey::new("primary").unwrap(),
+                revision_id: meerkat_core::InstructionRevisionId::new("revision-1").unwrap(),
+                content_sha256: meerkat_core::InstructionContentDigest::for_body(body),
+            },
+            activation_id: meerkat_core::InstructionActivationId::new("activation-1").unwrap(),
+            expectation: meerkat_core::InstructionActivationExpectation::Absent,
+            supersedes: None,
+            body: body.to_string(),
+        };
+        let runtime = Arc::clone(&router.runtime);
+        let activation_session_id = session_id.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _ = started_tx.send(());
+            runtime
+                .activate_instruction(&activation_session_id, activation)
+                .await
+        });
+
+        started_rx.await.unwrap();
+        tokio::task::yield_now().await;
+        assert!(
+            !task.is_finished(),
+            "activation must not mutate while the turn-finalization boundary is held"
+        );
+        drop(boundary);
+        let receipt = task.await.unwrap().unwrap();
+        assert_eq!(
+            receipt.disposition,
+            meerkat_core::InstructionActivationDisposition::Applied
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn instruction_activation_commit_survives_caller_cancellation() {
+        let (router, _notif_rx) = test_router().await;
+        let create_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({
+                    "prompt": "Hello",
+                    "model": "claude-opus-5"
+                }),
+            ))
+            .await
+            .unwrap();
+        let session_id =
+            SessionId::parse(result_value(&create_resp)["session_id"].as_str().unwrap()).unwrap();
+        let body = "Policy";
+        let activation = meerkat_core::InstructionActivationRequest {
+            revision: meerkat_core::InstructionRevisionRef {
+                namespace: meerkat_core::InstructionNamespace::new("app.example").unwrap(),
+                key: meerkat_core::InstructionKey::new("primary").unwrap(),
+                revision_id: meerkat_core::InstructionRevisionId::new("revision-1").unwrap(),
+                content_sha256: meerkat_core::InstructionContentDigest::for_body(body),
+            },
+            activation_id: meerkat_core::InstructionActivationId::new("activation-1").unwrap(),
+            expectation: meerkat_core::InstructionActivationExpectation::Absent,
+            supersedes: None,
+            body: body.to_string(),
+        };
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new((StdMutex::new(false), Condvar::new()));
+        let fence = Arc::new(BlockingInstructionActivationFence {
+            started: Arc::clone(&started),
+            release: Arc::clone(&release),
+        });
+        let runtime = Arc::clone(router.runtime.inner());
+        let activation_session_id = session_id.clone();
+        let caller = tokio::spawn(async move {
+            runtime
+                .activate_instruction_with_write_fence(&activation_session_id, activation, fence)
+                .await
+        });
+
+        started.notified().await;
+        caller.abort();
+        release_instruction_activation_fence(&release);
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let page = router
+                    .runtime
+                    .read_instruction_activation_records(
+                        &session_id,
+                        meerkat_core::InstructionActivationReadQuery::default(),
+                    )
+                    .await
+                    .unwrap();
+                if page.records.len() == 1 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached actor-owned activation must commit after caller cancellation");
+    }
+
+    #[tokio::test]
+    async fn refused_instruction_activation_fence_never_becomes_durable_effect() {
+        for decision in [
+            RefusingInstructionActivationFence::Conflict,
+            RefusingInstructionActivationFence::Backoff,
+        ] {
+            let (router, _notif_rx) = test_router().await;
+            let create_resp = router
+                .dispatch(make_request(
+                    "session/create",
+                    serde_json::json!({
+                        "prompt": "Hello",
+                        "model": "claude-opus-5"
+                    }),
+                ))
+                .await
+                .unwrap();
+            let session_id =
+                SessionId::parse(result_value(&create_resp)["session_id"].as_str().unwrap())
+                    .unwrap();
+            let body = "Policy";
+            let activation = meerkat_core::InstructionActivationRequest {
+                revision: meerkat_core::InstructionRevisionRef {
+                    namespace: meerkat_core::InstructionNamespace::new("app.example").unwrap(),
+                    key: meerkat_core::InstructionKey::new("primary").unwrap(),
+                    revision_id: meerkat_core::InstructionRevisionId::new("revision-1").unwrap(),
+                    content_sha256: meerkat_core::InstructionContentDigest::for_body(body),
+                },
+                activation_id: meerkat_core::InstructionActivationId::new("activation-1").unwrap(),
+                expectation: meerkat_core::InstructionActivationExpectation::Absent,
+                supersedes: None,
+                body: body.to_string(),
+            };
+
+            let error = router
+                .runtime
+                .inner()
+                .activate_instruction_with_write_fence(&session_id, activation, Arc::new(decision))
+                .await
+                .expect_err("refused fence must reject activation");
+            assert_eq!(
+                error.admission_code(),
+                Some(match decision {
+                    RefusingInstructionActivationFence::Conflict => {
+                        meerkat_core::InstructionActivationAdmissionErrorCode::ExternalWriteFenceConflict
+                    }
+                    RefusingInstructionActivationFence::Backoff => {
+                        meerkat_core::InstructionActivationAdmissionErrorCode::ExternalWriteFenceBackoff
+                    }
+                })
+            );
+            let page = router
+                .runtime
+                .read_instruction_activation_records(
+                    &session_id,
+                    meerkat_core::InstructionActivationReadQuery::default(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                page.records.is_empty(),
+                "a refused external fence must not publish an activation record"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn refused_fence_on_exact_duplicate_never_returns_success_receipt() {
+        for decision in [
+            RefusingInstructionActivationFence::Conflict,
+            RefusingInstructionActivationFence::Backoff,
+        ] {
+            let (router, _notif_rx) = test_router().await;
+            let create_resp = router
+                .dispatch(make_request(
+                    "session/create",
+                    serde_json::json!({
+                        "prompt": "Hello",
+                        "model": "claude-opus-5"
+                    }),
+                ))
+                .await
+                .unwrap();
+            let session_id =
+                SessionId::parse(result_value(&create_resp)["session_id"].as_str().unwrap())
+                    .unwrap();
+            let body = "Policy";
+            let activation = meerkat_core::InstructionActivationRequest {
+                revision: meerkat_core::InstructionRevisionRef {
+                    namespace: meerkat_core::InstructionNamespace::new("app.example").unwrap(),
+                    key: meerkat_core::InstructionKey::new("primary").unwrap(),
+                    revision_id: meerkat_core::InstructionRevisionId::new("revision-1").unwrap(),
+                    content_sha256: meerkat_core::InstructionContentDigest::for_body(body),
+                },
+                activation_id: meerkat_core::InstructionActivationId::new("activation-1").unwrap(),
+                expectation: meerkat_core::InstructionActivationExpectation::Absent,
+                supersedes: None,
+                body: body.to_string(),
+            };
+            let applied = router
+                .runtime
+                .inner()
+                .activate_instruction(&session_id, activation.clone())
+                .await
+                .unwrap();
+            assert_eq!(
+                applied.disposition,
+                meerkat_core::InstructionActivationDisposition::Applied
+            );
+
+            let error = router
+                .runtime
+                .inner()
+                .activate_instruction_with_write_fence(&session_id, activation, Arc::new(decision))
+                .await
+                .expect_err("duplicate must still revalidate external write authority");
+            assert_eq!(
+                error.admission_code(),
+                Some(match decision {
+                    RefusingInstructionActivationFence::Conflict => {
+                        meerkat_core::InstructionActivationAdmissionErrorCode::ExternalWriteFenceConflict
+                    }
+                    RefusingInstructionActivationFence::Backoff => {
+                        meerkat_core::InstructionActivationAdmissionErrorCode::ExternalWriteFenceBackoff
+                    }
+                })
+            );
+            let page = router
+                .runtime
+                .read_instruction_activation_records(
+                    &session_id,
+                    meerkat_core::InstructionActivationReadQuery::default(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(page.records.len(), 1, "duplicate must append no second row");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn instruction_activation_and_live_open_share_the_machine_lifecycle_lease() {
+        let (router, _notif_rx) = test_router().await;
+        let create_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({
+                    "prompt": "Hello",
+                    "model": "claude-opus-5"
+                }),
+            ))
+            .await
+            .unwrap();
+        let session_id =
+            SessionId::parse(result_value(&create_resp)["session_id"].as_str().unwrap()).unwrap();
+        let machine = router.runtime.runtime_adapter();
+        let open_lease = machine
+            .acquire_live_open_lifecycle_lease(&session_id)
+            .await
+            .expect("manual live/open lease");
+        let body = "Policy";
+        let activation = meerkat_core::InstructionActivationRequest {
+            revision: meerkat_core::InstructionRevisionRef {
+                namespace: meerkat_core::InstructionNamespace::new("app.example").unwrap(),
+                key: meerkat_core::InstructionKey::new("primary").unwrap(),
+                revision_id: meerkat_core::InstructionRevisionId::new("revision-1").unwrap(),
+                content_sha256: meerkat_core::InstructionContentDigest::for_body(body),
+            },
+            activation_id: meerkat_core::InstructionActivationId::new("activation-1").unwrap(),
+            expectation: meerkat_core::InstructionActivationExpectation::Absent,
+            supersedes: None,
+            body: body.to_string(),
+        };
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new((StdMutex::new(false), Condvar::new()));
+        let fence = Arc::new(BlockingInstructionActivationFence {
+            started: Arc::clone(&started),
+            release: Arc::clone(&release),
+        });
+        let runtime = Arc::clone(router.runtime.inner());
+        let activation_session_id = session_id.clone();
+        let activation_task = tokio::spawn(async move {
+            runtime
+                .activate_instruction_with_write_fence(&activation_session_id, activation, fence)
+                .await
+        });
+        let mut fence_started = Box::pin(started.notified());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), &mut fence_started)
+                .await
+                .is_err(),
+            "activation must wait behind an in-progress live/open lease"
+        );
+        drop(open_lease);
+        tokio::time::timeout(Duration::from_secs(5), &mut fence_started)
+            .await
+            .expect("activation reaches external fence after live/open lease release");
+
+        let waiting_machine = Arc::clone(&machine);
+        let waiting_session = session_id.clone();
+        let mut waiting_open = tokio::spawn(async move {
+            waiting_machine
+                .acquire_live_open_lifecycle_lease(&waiting_session)
+                .await
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), &mut waiting_open)
+                .await
+                .is_err(),
+            "live/open must wait while activation retains the shared lease through commit"
+        );
+        release_instruction_activation_fence(&release);
+        activation_task
+            .await
+            .expect("activation task joins")
+            .expect("activation commits");
+        let waiting_lease = waiting_open
+            .await
+            .expect("live/open waiter joins")
+            .expect("live/open acquires after activation commit");
+        drop(waiting_lease);
     }
 
     #[tokio::test]

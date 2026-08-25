@@ -59,6 +59,9 @@ pub struct ModelProfile {
     pub realtime: bool,
     /// Whether the model supports provider-native web search tools.
     pub supports_web_search: bool,
+    /// Whether the model accepts ordered System messages after the leading
+    /// system-prefix portion of a transcript.
+    pub supports_mid_conversation_system_messages: bool,
     /// Whether the provider/model can use Meerkat image generation.
     pub image_generation: bool,
     /// JSON Schema describing accepted provider-specific parameters.
@@ -106,6 +109,7 @@ pub fn project_to_profile(caps: &ModelCapabilities) -> ModelProfile {
         supports_thinking: caps.thinking != ThinkingSupport::None,
         supports_reasoning: caps.supports_reasoning,
         supports_web_search: caps.supports_web_search,
+        supports_mid_conversation_system_messages: caps.supports_mid_conversation_system_messages,
         inline_video: caps.inline_video,
         vision: caps.vision,
         image_input: caps.vision,

@@ -334,6 +334,7 @@ SYSTEM_NOTICE_NESTED_ALIAS_TYPES = [
 ]
 
 PUBLIC_RPC_CATALOG_OBJECT_TYPES = [
+    "ActivateInstructionParams",
     "ApprovalDecideParams",
     "ApprovalGetParams",
     "ApprovalListParams",
@@ -368,6 +369,12 @@ PUBLIC_RPC_CATALOG_OBJECT_TYPES = [
     "HelpResponse",
     "InjectSystemContextParams",
     "InjectSystemContextResult",
+    "InstructionActivationIdentity",
+    "InstructionActivationReadPage",
+    "InstructionActivationRecord",
+    "InstructionActivationRequest",
+    "InstructionActivationReceipt",
+    "InstructionRevisionRef",
     "InterruptParams",
     "ListSessionTranscriptRevisionsParams",
     "ListSessionsParams",
@@ -375,6 +382,7 @@ PUBLIC_RPC_CATALOG_OBJECT_TYPES = [
     "LoginCompleteParams",
     "LoginStartParams",
     "ProvisionApiKeyParams",
+    "ReadInstructionActivationsParams",
     "ReadSessionHistoryParams",
     "ReadSessionParams",
     "ReadSessionTranscriptRevisionParams",
@@ -402,6 +410,13 @@ PUBLIC_RPC_CATALOG_OBJECT_TYPES = [
 ]
 
 PUBLIC_RPC_CATALOG_ALIAS_TYPES = [
+    "InstructionActivationDisposition",
+    "InstructionActivationExpectation",
+    "InstructionActivationId",
+    "InstructionContentDigest",
+    "InstructionKey",
+    "InstructionNamespace",
+    "InstructionRevisionId",
     "SessionExternalEventEnvelope",
     "SessionExternalEventParams",
     "WireDeviceCompleteResult",

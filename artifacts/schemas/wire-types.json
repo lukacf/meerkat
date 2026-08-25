@@ -23531,6 +23531,89 @@
         ],
         "type": "object"
       },
+      "InstructionActivationId": {
+        "description": "Caller-stable identity for one activation or rollback event.",
+        "type": "string"
+      },
+      "InstructionActivationIdentity": {
+        "additionalProperties": false,
+        "description": "Typed identity sealed onto one durable chronological activation row.",
+        "properties": {
+          "activation_id": {
+            "$ref": "#/$defs/InstructionActivationId"
+          },
+          "origin_session_id": {
+            "$ref": "#/$defs/SessionId"
+          },
+          "render_version": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "revision": {
+            "$ref": "#/$defs/InstructionRevisionRef"
+          },
+          "supersedes": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/InstructionActivationId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "activation_id",
+          "revision",
+          "origin_session_id",
+          "render_version"
+        ],
+        "type": "object"
+      },
+      "InstructionContentDigest": {
+        "description": "Canonical SHA-256 digest of an exact instruction body.",
+        "type": "string"
+      },
+      "InstructionKey": {
+        "description": "Application-owned instruction key within one namespace.",
+        "type": "string"
+      },
+      "InstructionNamespace": {
+        "description": "Application or issuer namespace for one instruction artifact family.",
+        "type": "string"
+      },
+      "InstructionRevisionId": {
+        "description": "Immutable application-owned revision identifier.",
+        "type": "string"
+      },
+      "InstructionRevisionRef": {
+        "additionalProperties": false,
+        "description": "Immutable application-owned instruction artifact reference.",
+        "properties": {
+          "content_sha256": {
+            "$ref": "#/$defs/InstructionContentDigest"
+          },
+          "key": {
+            "$ref": "#/$defs/InstructionKey"
+          },
+          "namespace": {
+            "$ref": "#/$defs/InstructionNamespace"
+          },
+          "revision_id": {
+            "$ref": "#/$defs/InstructionRevisionId"
+          }
+        },
+        "required": [
+          "namespace",
+          "key",
+          "revision_id",
+          "content_sha256"
+        ],
+        "type": "object"
+      },
       "InteractionId": {
         "description": "Unique identifier for an interaction.",
         "type": "string"
@@ -23700,6 +23783,10 @@
             "type": "string"
           }
         ]
+      },
+      "SessionId": {
+        "description": "Unique identifier for a session (UUID v7 for time-ordering)",
+        "type": "string"
       },
       "SkillKey": {
         "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
@@ -24967,6 +25054,17 @@
                   }
                 ],
                 "description": "Optional exact control-ingress identity carried by this durable\ntranscript message. Provider adapters ignore it."
+              },
+              "instruction_activation": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/InstructionActivationIdentity"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Typed immutable instruction activation identity. The rendered\nenvelope in `content` is validated against this fact on ingress."
               },
               "prompt_version": {
                 "anyOf": [
@@ -32006,6 +32104,89 @@
         ],
         "type": "string"
       },
+      "InstructionActivationId": {
+        "description": "Caller-stable identity for one activation or rollback event.",
+        "type": "string"
+      },
+      "InstructionActivationIdentity": {
+        "additionalProperties": false,
+        "description": "Typed identity sealed onto one durable chronological activation row.",
+        "properties": {
+          "activation_id": {
+            "$ref": "#/$defs/InstructionActivationId"
+          },
+          "origin_session_id": {
+            "$ref": "#/$defs/SessionId"
+          },
+          "render_version": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "revision": {
+            "$ref": "#/$defs/InstructionRevisionRef"
+          },
+          "supersedes": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/InstructionActivationId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "activation_id",
+          "revision",
+          "origin_session_id",
+          "render_version"
+        ],
+        "type": "object"
+      },
+      "InstructionContentDigest": {
+        "description": "Canonical SHA-256 digest of an exact instruction body.",
+        "type": "string"
+      },
+      "InstructionKey": {
+        "description": "Application-owned instruction key within one namespace.",
+        "type": "string"
+      },
+      "InstructionNamespace": {
+        "description": "Application or issuer namespace for one instruction artifact family.",
+        "type": "string"
+      },
+      "InstructionRevisionId": {
+        "description": "Immutable application-owned revision identifier.",
+        "type": "string"
+      },
+      "InstructionRevisionRef": {
+        "additionalProperties": false,
+        "description": "Immutable application-owned instruction artifact reference.",
+        "properties": {
+          "content_sha256": {
+            "$ref": "#/$defs/InstructionContentDigest"
+          },
+          "key": {
+            "$ref": "#/$defs/InstructionKey"
+          },
+          "namespace": {
+            "$ref": "#/$defs/InstructionNamespace"
+          },
+          "revision_id": {
+            "$ref": "#/$defs/InstructionRevisionId"
+          }
+        },
+        "required": [
+          "namespace",
+          "key",
+          "revision_id",
+          "content_sha256"
+        ],
+        "type": "object"
+      },
       "InteractionFailureReason": {
         "description": "Typed reason an interaction-scoped run failed (terminal event for tap\nsubscribers).\n\nMirrors [`CompactionFailureReason`]: the variant is the typed owner of the\nfailure cause; the human-readable string is a [`Display`] derivation,\nnever a separately-carried field.\n\n[`Display`]: std::fmt::Display",
         "oneOf": [
@@ -35615,6 +35796,17 @@
                   }
                 ],
                 "description": "Optional exact control-ingress identity carried by this durable\ntranscript message. Provider adapters ignore it."
+              },
+              "instruction_activation": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/InstructionActivationIdentity"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Typed immutable instruction activation identity. The rendered\nenvelope in `content` is validated against this fact on ingress."
               },
               "prompt_version": {
                 "anyOf": [
@@ -45768,6 +45960,89 @@
           }
         ]
       },
+      "InstructionActivationId": {
+        "description": "Caller-stable identity for one activation or rollback event.",
+        "type": "string"
+      },
+      "InstructionActivationIdentity": {
+        "additionalProperties": false,
+        "description": "Typed identity sealed onto one durable chronological activation row.",
+        "properties": {
+          "activation_id": {
+            "$ref": "#/$defs/InstructionActivationId"
+          },
+          "origin_session_id": {
+            "$ref": "#/$defs/SessionId"
+          },
+          "render_version": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "revision": {
+            "$ref": "#/$defs/InstructionRevisionRef"
+          },
+          "supersedes": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/InstructionActivationId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "activation_id",
+          "revision",
+          "origin_session_id",
+          "render_version"
+        ],
+        "type": "object"
+      },
+      "InstructionContentDigest": {
+        "description": "Canonical SHA-256 digest of an exact instruction body.",
+        "type": "string"
+      },
+      "InstructionKey": {
+        "description": "Application-owned instruction key within one namespace.",
+        "type": "string"
+      },
+      "InstructionNamespace": {
+        "description": "Application or issuer namespace for one instruction artifact family.",
+        "type": "string"
+      },
+      "InstructionRevisionId": {
+        "description": "Immutable application-owned revision identifier.",
+        "type": "string"
+      },
+      "InstructionRevisionRef": {
+        "additionalProperties": false,
+        "description": "Immutable application-owned instruction artifact reference.",
+        "properties": {
+          "content_sha256": {
+            "$ref": "#/$defs/InstructionContentDigest"
+          },
+          "key": {
+            "$ref": "#/$defs/InstructionKey"
+          },
+          "namespace": {
+            "$ref": "#/$defs/InstructionNamespace"
+          },
+          "revision_id": {
+            "$ref": "#/$defs/InstructionRevisionId"
+          }
+        },
+        "required": [
+          "namespace",
+          "key",
+          "revision_id",
+          "content_sha256"
+        ],
+        "type": "object"
+      },
       "InteractionFailureReason": {
         "description": "Typed reason an interaction-scoped run failed (terminal event for tap\nsubscribers).\n\nMirrors [`CompactionFailureReason`]: the variant is the typed owner of the\nfailure cause; the human-readable string is a [`Display`] derivation,\nnever a separately-carried field.\n\n[`Display`]: std::fmt::Display",
         "oneOf": [
@@ -51491,6 +51766,17 @@
                   }
                 ],
                 "description": "Optional exact control-ingress identity carried by this durable\ntranscript message. Provider adapters ignore it."
+              },
+              "instruction_activation": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/InstructionActivationIdentity"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Typed immutable instruction activation identity. The rendered\nenvelope in `content` is validated against this fact on ingress."
               },
               "prompt_version": {
                 "anyOf": [
@@ -61423,6 +61709,89 @@
         ],
         "type": "string"
       },
+      "InstructionActivationId": {
+        "description": "Caller-stable identity for one activation or rollback event.",
+        "type": "string"
+      },
+      "InstructionActivationIdentity": {
+        "additionalProperties": false,
+        "description": "Typed identity sealed onto one durable chronological activation row.",
+        "properties": {
+          "activation_id": {
+            "$ref": "#/$defs/InstructionActivationId"
+          },
+          "origin_session_id": {
+            "$ref": "#/$defs/SessionId"
+          },
+          "render_version": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "revision": {
+            "$ref": "#/$defs/InstructionRevisionRef"
+          },
+          "supersedes": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/InstructionActivationId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "activation_id",
+          "revision",
+          "origin_session_id",
+          "render_version"
+        ],
+        "type": "object"
+      },
+      "InstructionContentDigest": {
+        "description": "Canonical SHA-256 digest of an exact instruction body.",
+        "type": "string"
+      },
+      "InstructionKey": {
+        "description": "Application-owned instruction key within one namespace.",
+        "type": "string"
+      },
+      "InstructionNamespace": {
+        "description": "Application or issuer namespace for one instruction artifact family.",
+        "type": "string"
+      },
+      "InstructionRevisionId": {
+        "description": "Immutable application-owned revision identifier.",
+        "type": "string"
+      },
+      "InstructionRevisionRef": {
+        "additionalProperties": false,
+        "description": "Immutable application-owned instruction artifact reference.",
+        "properties": {
+          "content_sha256": {
+            "$ref": "#/$defs/InstructionContentDigest"
+          },
+          "key": {
+            "$ref": "#/$defs/InstructionKey"
+          },
+          "namespace": {
+            "$ref": "#/$defs/InstructionNamespace"
+          },
+          "revision_id": {
+            "$ref": "#/$defs/InstructionRevisionId"
+          }
+        },
+        "required": [
+          "namespace",
+          "key",
+          "revision_id",
+          "content_sha256"
+        ],
+        "type": "object"
+      },
       "InteractionFailureReason": {
         "description": "Typed reason an interaction-scoped run failed (terminal event for tap\nsubscribers).\n\nMirrors [`CompactionFailureReason`]: the variant is the typed owner of the\nfailure cause; the human-readable string is a [`Display`] derivation,\nnever a separately-carried field.\n\n[`Display`]: std::fmt::Display",
         "oneOf": [
@@ -65032,6 +65401,17 @@
                   }
                 ],
                 "description": "Optional exact control-ingress identity carried by this durable\ntranscript message. Provider adapters ignore it."
+              },
+              "instruction_activation": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/InstructionActivationIdentity"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Typed immutable instruction activation identity. The rendered\nenvelope in `content` is validated against this fact on ingress."
               },
               "prompt_version": {
                 "anyOf": [
@@ -70867,6 +71247,11 @@
           "inline_video": {
             "default": false,
             "description": "Whether user messages may include inline video blocks.",
+            "type": "boolean"
+          },
+          "mid_conversation_system_messages": {
+            "default": false,
+            "description": "Whether ordered System messages after conversational content are\nrepresentable by this exact resolved model.",
             "type": "boolean"
           },
           "realtime": {
@@ -78175,12 +78560,24 @@
   },
   "LiveOpenParams": {
     "$defs": {
+      "BindingId": {
+        "description": "Opaque slug identifying a binding inside a realm.",
+        "type": "string"
+      },
       "LiveOpenTransport": {
         "description": "Transport requested by `live/open`.\n\nMissing means \"server default\": prefer WebSocket when configured, otherwise\nWebRTC when that is the only configured live transport. This preserves the\npre-WebRTC `live/open` shape while keeping the new branch typed.",
         "enum": [
           "websocket",
           "webrtc"
         ],
+        "type": "string"
+      },
+      "ProfileId": {
+        "description": "Opaque slug identifying an auth profile override on a connection.",
+        "type": "string"
+      },
+      "RealmId": {
+        "description": "Opaque slug identifying a realm.",
         "type": "string"
       },
       "RealtimeTurningMode": {
@@ -78190,11 +78587,157 @@
           "explicit_commit"
         ],
         "type": "string"
+      },
+      "WireLiveAuthBindingRef": {
+        "additionalProperties": false,
+        "description": "Strict live-only projection of [`crate::wire::WireAuthBindingRef`].",
+        "properties": {
+          "binding": {
+            "$ref": "#/$defs/BindingId"
+          },
+          "profile": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ProfileId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "realm": {
+            "$ref": "#/$defs/RealmId"
+          }
+        },
+        "required": [
+          "realm",
+          "binding"
+        ],
+        "type": "object"
+      },
+      "WireLiveExecutionIdentityOverrideV1": {
+        "additionalProperties": false,
+        "description": "Strict, versioned channel-scoped LLM identity override for live execution.",
+        "properties": {
+          "auth_binding": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireLiveIdentityOverride"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireProvider"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "self_hosted_server_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "version": {
+            "$ref": "#/$defs/WireLiveExecutionIdentityVersion"
+          }
+        },
+        "required": [
+          "version"
+        ],
+        "type": "object"
+      },
+      "WireLiveExecutionIdentityVersion": {
+        "description": "Version discriminator for [`WireLiveExecutionIdentityOverrideV1`].",
+        "enum": [
+          "v1"
+        ],
+        "type": "string"
+      },
+      "WireLiveIdentityOverride": {
+        "description": "Strict tri-state override used inside live execution identity.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "set",
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/$defs/WireLiveAuthBindingRef"
+              }
+            },
+            "required": [
+              "action",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "clear",
+                "type": "string"
+              }
+            },
+            "required": [
+              "action"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireProvider": {
+        "description": "Wire-safe projection of [`meerkat_core::Provider`].\n\n`WireProvider` pins each provider's canonical wire name with an explicit\n`#[serde(rename)]` (`\"openai\"`, `\"anthropic\"`, `\"gemini\"`, …). The core\n`Provider` enum now agrees (its `OpenAI` variant carries an explicit\n`#[serde(rename = \"openai\")]` so `rename_all = \"snake_case\"` can no longer\nmangle it into `\"open_a_i\"`); `WireProvider` exists as the dedicated wire\nmirror so SDK consumers get a stable, explicitly-named contract plus the\nfail-loud `Unknown` sentinel below, per the wire-mirror dogma used\nthroughout this module.",
+        "oneOf": [
+          {
+            "enum": [
+              "anthropic",
+              "openai",
+              "gemini",
+              "self_hosted",
+              "other"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Fail-loud sentinel for future core variants. When a new\n`Provider` variant is added, add an explicit arm in the `From`\nimpl rather than letting it fall through to `Unknown`.\n\nUnlike other wire-mirror `Unknown` variants, this is a unit\nvariant because `WireProvider` serializes as a flat string value\n(not an internally-tagged object). The debug payload from the\nsource variant is captured in the `WireConversionError::Provider`\nerror on the reverse path (and logged server-side in the forward\n`From<Provider>` impl via `debug_assert!`).",
+            "type": "string"
+          }
+        ]
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
     "description": "Request payload for `live/open`.\n\nR3-1 (P1): `turning_mode` lets callers pick between the provider-managed\n(server-VAD) flow and the explicit-commit flow. The G9 typed text-only\n`live/commit_input { response_modality: text }` path requires\n`ExplicitCommit` because the OpenAI realtime API rejects\n`input_audio_buffer.commit` unless the session was opened with explicit\ncommit semantics (server VAD owns commits otherwise). Pre-R3-1 the\nhandler hard-coded `ProviderManaged`, which made the typed text-only\npath unreachable on a public channel — calling it killed the channel\ninstead of producing sideband text.\n\nDefault (`None`) preserves the prior wire shape: callers that omit the\nfield get `ProviderManaged`, matching the legacy behavior.",
     "properties": {
+      "execution_identity": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireLiveExecutionIdentityOverrideV1"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Channel-scoped execution identity. This never mutates the durable\nsession identity and requires negotiated\n[`LIVE_EXECUTION_IDENTITY_V1_CAPABILITY`] support."
+      },
       "seed_max_chars": {
         "description": "Optional serialized-character budget for the history seed messages\nsent to the realtime provider when the channel opens.\n\nOmitted means full-seed compatibility: project the complete canonical\nhistory. A positive value requests a core-owned, whole-turn dialogue\nsuffix window; an existing compaction-summary head may be retained. If\nany history is omitted, the open result reports degraded continuity\nrather than pretending the bounded replay was complete.\n\nOrdered System and SystemNotice messages are excluded from this replay\nbudget and projected separately from the full active materialized\ntranscript. Optional System message identity is never provider-projected.\nCanonical multimodal identity, tombstone, and accounting state remain\noutside this dialogue window.\n`0` is valid at this serde-only wire layer so it can round-trip, but the\n`live/open` server validation rejects it; callers must send a positive\nvalue when the field is present.",
         "format": "uint",
@@ -79467,16 +80010,35 @@
       "content_index": {
         "format": "uint32",
         "minimum": 0,
-        "type": "integer"
+        "type": [
+          "integer",
+          "null"
+        ]
       },
       "item_id": {
-        "type": "string"
+        "description": "Legacy stock-realtime provider address.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "output_id": {
+        "description": "Opaque generated output address for experimental live channels.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "reported_playback_prefix": {
+        "description": "Exact transcript prefix observed by the playback path. Omission is\nexplicit `Unmeasured` coverage and never implies delivery or hearing.",
+        "type": [
+          "string",
+          "null"
+        ]
       }
     },
     "required": [
       "channel_id",
-      "item_id",
-      "content_index",
       "audio_played_ms"
     ],
     "title": "LiveTruncateParams",
@@ -89862,6 +90424,89 @@
         ],
         "type": "object"
       },
+      "InstructionActivationId": {
+        "description": "Caller-stable identity for one activation or rollback event.",
+        "type": "string"
+      },
+      "InstructionActivationIdentity": {
+        "additionalProperties": false,
+        "description": "Typed identity sealed onto one durable chronological activation row.",
+        "properties": {
+          "activation_id": {
+            "$ref": "#/$defs/InstructionActivationId"
+          },
+          "origin_session_id": {
+            "$ref": "#/$defs/SessionId"
+          },
+          "render_version": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "revision": {
+            "$ref": "#/$defs/InstructionRevisionRef"
+          },
+          "supersedes": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/InstructionActivationId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "activation_id",
+          "revision",
+          "origin_session_id",
+          "render_version"
+        ],
+        "type": "object"
+      },
+      "InstructionContentDigest": {
+        "description": "Canonical SHA-256 digest of an exact instruction body.",
+        "type": "string"
+      },
+      "InstructionKey": {
+        "description": "Application-owned instruction key within one namespace.",
+        "type": "string"
+      },
+      "InstructionNamespace": {
+        "description": "Application or issuer namespace for one instruction artifact family.",
+        "type": "string"
+      },
+      "InstructionRevisionId": {
+        "description": "Immutable application-owned revision identifier.",
+        "type": "string"
+      },
+      "InstructionRevisionRef": {
+        "additionalProperties": false,
+        "description": "Immutable application-owned instruction artifact reference.",
+        "properties": {
+          "content_sha256": {
+            "$ref": "#/$defs/InstructionContentDigest"
+          },
+          "key": {
+            "$ref": "#/$defs/InstructionKey"
+          },
+          "namespace": {
+            "$ref": "#/$defs/InstructionNamespace"
+          },
+          "revision_id": {
+            "$ref": "#/$defs/InstructionRevisionId"
+          }
+        },
+        "required": [
+          "namespace",
+          "key",
+          "revision_id",
+          "content_sha256"
+        ],
+        "type": "object"
+      },
       "InteractionId": {
         "description": "Unique identifier for an interaction.",
         "type": "string"
@@ -90031,6 +90676,10 @@
             "type": "string"
           }
         ]
+      },
+      "SessionId": {
+        "description": "Unique identifier for a session (UUID v7 for time-ordering)",
+        "type": "string"
       },
       "SkillKey": {
         "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
@@ -91311,6 +91960,17 @@
                 ],
                 "description": "Optional exact control-ingress identity carried by this durable\ntranscript message. Provider adapters ignore it."
               },
+              "instruction_activation": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/InstructionActivationIdentity"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Typed immutable instruction activation identity. The rendered\nenvelope in `content` is validated against this fact on ingress."
+              },
               "prompt_version": {
                 "anyOf": [
                   {
@@ -92197,6 +92857,11 @@
           "inline_video": {
             "default": false,
             "description": "Whether user messages may include inline video blocks.",
+            "type": "boolean"
+          },
+          "mid_conversation_system_messages": {
+            "default": false,
+            "description": "Whether ordered System messages after conversational content are\nrepresentable by this exact resolved model.",
             "type": "boolean"
           },
           "realtime": {
@@ -122851,6 +123516,89 @@
         ],
         "type": "object"
       },
+      "InstructionActivationId": {
+        "description": "Caller-stable identity for one activation or rollback event.",
+        "type": "string"
+      },
+      "InstructionActivationIdentity": {
+        "additionalProperties": false,
+        "description": "Typed identity sealed onto one durable chronological activation row.",
+        "properties": {
+          "activation_id": {
+            "$ref": "#/$defs/InstructionActivationId"
+          },
+          "origin_session_id": {
+            "$ref": "#/$defs/SessionId"
+          },
+          "render_version": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "revision": {
+            "$ref": "#/$defs/InstructionRevisionRef"
+          },
+          "supersedes": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/InstructionActivationId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "activation_id",
+          "revision",
+          "origin_session_id",
+          "render_version"
+        ],
+        "type": "object"
+      },
+      "InstructionContentDigest": {
+        "description": "Canonical SHA-256 digest of an exact instruction body.",
+        "type": "string"
+      },
+      "InstructionKey": {
+        "description": "Application-owned instruction key within one namespace.",
+        "type": "string"
+      },
+      "InstructionNamespace": {
+        "description": "Application or issuer namespace for one instruction artifact family.",
+        "type": "string"
+      },
+      "InstructionRevisionId": {
+        "description": "Immutable application-owned revision identifier.",
+        "type": "string"
+      },
+      "InstructionRevisionRef": {
+        "additionalProperties": false,
+        "description": "Immutable application-owned instruction artifact reference.",
+        "properties": {
+          "content_sha256": {
+            "$ref": "#/$defs/InstructionContentDigest"
+          },
+          "key": {
+            "$ref": "#/$defs/InstructionKey"
+          },
+          "namespace": {
+            "$ref": "#/$defs/InstructionNamespace"
+          },
+          "revision_id": {
+            "$ref": "#/$defs/InstructionRevisionId"
+          }
+        },
+        "required": [
+          "namespace",
+          "key",
+          "revision_id",
+          "content_sha256"
+        ],
+        "type": "object"
+      },
       "InteractionId": {
         "description": "Unique identifier for an interaction.",
         "type": "string"
@@ -123020,6 +123768,10 @@
             "type": "string"
           }
         ]
+      },
+      "SessionId": {
+        "description": "Unique identifier for a session (UUID v7 for time-ordering)",
+        "type": "string"
       },
       "SkillKey": {
         "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
@@ -124242,6 +124994,17 @@
                   }
                 ],
                 "description": "Optional exact control-ingress identity carried by this durable\ntranscript message. Provider adapters ignore it."
+              },
+              "instruction_activation": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/InstructionActivationIdentity"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Typed immutable instruction activation identity. The rendered\nenvelope in `content` is validated against this fact on ingress."
               },
               "prompt_version": {
                 "anyOf": [
@@ -127313,6 +128076,10 @@
   },
   "WireLiveAdapterObservation": {
     "$defs": {
+      "InteractionId": {
+        "description": "Unique identifier for an interaction.",
+        "type": "string"
+      },
       "PresentedTokenConvention": {
         "description": "Provider-native convention used to normalize tokens presented to a model.",
         "oneOf": [
@@ -128868,6 +129635,16 @@
               "null"
             ]
           },
+          "interaction_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/InteractionId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "observation": {
             "const": "assistant_transcript_truncated",
             "type": "string"
@@ -130010,6 +130787,89 @@
         ],
         "type": "object"
       },
+      "InstructionActivationId": {
+        "description": "Caller-stable identity for one activation or rollback event.",
+        "type": "string"
+      },
+      "InstructionActivationIdentity": {
+        "additionalProperties": false,
+        "description": "Typed identity sealed onto one durable chronological activation row.",
+        "properties": {
+          "activation_id": {
+            "$ref": "#/$defs/InstructionActivationId"
+          },
+          "origin_session_id": {
+            "$ref": "#/$defs/SessionId"
+          },
+          "render_version": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "revision": {
+            "$ref": "#/$defs/InstructionRevisionRef"
+          },
+          "supersedes": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/InstructionActivationId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "activation_id",
+          "revision",
+          "origin_session_id",
+          "render_version"
+        ],
+        "type": "object"
+      },
+      "InstructionContentDigest": {
+        "description": "Canonical SHA-256 digest of an exact instruction body.",
+        "type": "string"
+      },
+      "InstructionKey": {
+        "description": "Application-owned instruction key within one namespace.",
+        "type": "string"
+      },
+      "InstructionNamespace": {
+        "description": "Application or issuer namespace for one instruction artifact family.",
+        "type": "string"
+      },
+      "InstructionRevisionId": {
+        "description": "Immutable application-owned revision identifier.",
+        "type": "string"
+      },
+      "InstructionRevisionRef": {
+        "additionalProperties": false,
+        "description": "Immutable application-owned instruction artifact reference.",
+        "properties": {
+          "content_sha256": {
+            "$ref": "#/$defs/InstructionContentDigest"
+          },
+          "key": {
+            "$ref": "#/$defs/InstructionKey"
+          },
+          "namespace": {
+            "$ref": "#/$defs/InstructionNamespace"
+          },
+          "revision_id": {
+            "$ref": "#/$defs/InstructionRevisionId"
+          }
+        },
+        "required": [
+          "namespace",
+          "key",
+          "revision_id",
+          "content_sha256"
+        ],
+        "type": "object"
+      },
       "InteractionId": {
         "description": "Unique identifier for an interaction.",
         "type": "string"
@@ -130179,6 +131039,10 @@
             "type": "string"
           }
         ]
+      },
+      "SessionId": {
+        "description": "Unique identifier for a session (UUID v7 for time-ordering)",
+        "type": "string"
       },
       "SkillKey": {
         "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
@@ -131405,6 +132269,17 @@
                   }
                 ],
                 "description": "Optional exact control-ingress identity carried by this durable\ntranscript message. Provider adapters ignore it."
+              },
+              "instruction_activation": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/InstructionActivationIdentity"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Typed immutable instruction activation identity. The rendered\nenvelope in `content` is validated against this fact on ingress."
               },
               "prompt_version": {
                 "anyOf": [
@@ -136334,6 +137209,89 @@
         ],
         "type": "object"
       },
+      "InstructionActivationId": {
+        "description": "Caller-stable identity for one activation or rollback event.",
+        "type": "string"
+      },
+      "InstructionActivationIdentity": {
+        "additionalProperties": false,
+        "description": "Typed identity sealed onto one durable chronological activation row.",
+        "properties": {
+          "activation_id": {
+            "$ref": "#/$defs/InstructionActivationId"
+          },
+          "origin_session_id": {
+            "$ref": "#/$defs/SessionId"
+          },
+          "render_version": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "revision": {
+            "$ref": "#/$defs/InstructionRevisionRef"
+          },
+          "supersedes": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/InstructionActivationId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "activation_id",
+          "revision",
+          "origin_session_id",
+          "render_version"
+        ],
+        "type": "object"
+      },
+      "InstructionContentDigest": {
+        "description": "Canonical SHA-256 digest of an exact instruction body.",
+        "type": "string"
+      },
+      "InstructionKey": {
+        "description": "Application-owned instruction key within one namespace.",
+        "type": "string"
+      },
+      "InstructionNamespace": {
+        "description": "Application or issuer namespace for one instruction artifact family.",
+        "type": "string"
+      },
+      "InstructionRevisionId": {
+        "description": "Immutable application-owned revision identifier.",
+        "type": "string"
+      },
+      "InstructionRevisionRef": {
+        "additionalProperties": false,
+        "description": "Immutable application-owned instruction artifact reference.",
+        "properties": {
+          "content_sha256": {
+            "$ref": "#/$defs/InstructionContentDigest"
+          },
+          "key": {
+            "$ref": "#/$defs/InstructionKey"
+          },
+          "namespace": {
+            "$ref": "#/$defs/InstructionNamespace"
+          },
+          "revision_id": {
+            "$ref": "#/$defs/InstructionRevisionId"
+          }
+        },
+        "required": [
+          "namespace",
+          "key",
+          "revision_id",
+          "content_sha256"
+        ],
+        "type": "object"
+      },
       "InteractionId": {
         "description": "Unique identifier for an interaction.",
         "type": "string"
@@ -136503,6 +137461,10 @@
             "type": "string"
           }
         ]
+      },
+      "SessionId": {
+        "description": "Unique identifier for a session (UUID v7 for time-ordering)",
+        "type": "string"
       },
       "SkillKey": {
         "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
@@ -137726,6 +138688,17 @@
                 ],
                 "description": "Optional exact control-ingress identity carried by this durable\ntranscript message. Provider adapters ignore it."
               },
+              "instruction_activation": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/InstructionActivationIdentity"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Typed immutable instruction activation identity. The rendered\nenvelope in `content` is validated against this fact on ingress."
+              },
               "prompt_version": {
                 "anyOf": [
                   {
@@ -138069,6 +139042,11 @@
           "inline_video": {
             "default": false,
             "description": "Whether user messages may include inline video blocks.",
+            "type": "boolean"
+          },
+          "mid_conversation_system_messages": {
+            "default": false,
+            "description": "Whether ordered System messages after conversational content are\nrepresentable by this exact resolved model.",
             "type": "boolean"
           },
           "realtime": {
@@ -138434,6 +139412,89 @@
         ],
         "type": "object"
       },
+      "InstructionActivationId": {
+        "description": "Caller-stable identity for one activation or rollback event.",
+        "type": "string"
+      },
+      "InstructionActivationIdentity": {
+        "additionalProperties": false,
+        "description": "Typed identity sealed onto one durable chronological activation row.",
+        "properties": {
+          "activation_id": {
+            "$ref": "#/$defs/InstructionActivationId"
+          },
+          "origin_session_id": {
+            "$ref": "#/$defs/SessionId"
+          },
+          "render_version": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "revision": {
+            "$ref": "#/$defs/InstructionRevisionRef"
+          },
+          "supersedes": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/InstructionActivationId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "activation_id",
+          "revision",
+          "origin_session_id",
+          "render_version"
+        ],
+        "type": "object"
+      },
+      "InstructionContentDigest": {
+        "description": "Canonical SHA-256 digest of an exact instruction body.",
+        "type": "string"
+      },
+      "InstructionKey": {
+        "description": "Application-owned instruction key within one namespace.",
+        "type": "string"
+      },
+      "InstructionNamespace": {
+        "description": "Application or issuer namespace for one instruction artifact family.",
+        "type": "string"
+      },
+      "InstructionRevisionId": {
+        "description": "Immutable application-owned revision identifier.",
+        "type": "string"
+      },
+      "InstructionRevisionRef": {
+        "additionalProperties": false,
+        "description": "Immutable application-owned instruction artifact reference.",
+        "properties": {
+          "content_sha256": {
+            "$ref": "#/$defs/InstructionContentDigest"
+          },
+          "key": {
+            "$ref": "#/$defs/InstructionKey"
+          },
+          "namespace": {
+            "$ref": "#/$defs/InstructionNamespace"
+          },
+          "revision_id": {
+            "$ref": "#/$defs/InstructionRevisionId"
+          }
+        },
+        "required": [
+          "namespace",
+          "key",
+          "revision_id",
+          "content_sha256"
+        ],
+        "type": "object"
+      },
       "InteractionId": {
         "description": "Unique identifier for an interaction.",
         "type": "string"
@@ -138603,6 +139664,10 @@
             "type": "string"
           }
         ]
+      },
+      "SessionId": {
+        "description": "Unique identifier for a session (UUID v7 for time-ordering)",
+        "type": "string"
       },
       "SkillKey": {
         "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
@@ -139925,6 +140990,17 @@
             ],
             "description": "Optional exact control-ingress identity carried by this durable\ntranscript message. Provider adapters ignore it."
           },
+          "instruction_activation": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/InstructionActivationIdentity"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Typed immutable instruction activation identity. The rendered\nenvelope in `content` is validated against this fact on ingress."
+          },
           "prompt_version": {
             "anyOf": [
               {
@@ -140999,6 +142075,89 @@
         ],
         "type": "object"
       },
+      "InstructionActivationId": {
+        "description": "Caller-stable identity for one activation or rollback event.",
+        "type": "string"
+      },
+      "InstructionActivationIdentity": {
+        "additionalProperties": false,
+        "description": "Typed identity sealed onto one durable chronological activation row.",
+        "properties": {
+          "activation_id": {
+            "$ref": "#/$defs/InstructionActivationId"
+          },
+          "origin_session_id": {
+            "$ref": "#/$defs/SessionId"
+          },
+          "render_version": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "revision": {
+            "$ref": "#/$defs/InstructionRevisionRef"
+          },
+          "supersedes": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/InstructionActivationId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "activation_id",
+          "revision",
+          "origin_session_id",
+          "render_version"
+        ],
+        "type": "object"
+      },
+      "InstructionContentDigest": {
+        "description": "Canonical SHA-256 digest of an exact instruction body.",
+        "type": "string"
+      },
+      "InstructionKey": {
+        "description": "Application-owned instruction key within one namespace.",
+        "type": "string"
+      },
+      "InstructionNamespace": {
+        "description": "Application or issuer namespace for one instruction artifact family.",
+        "type": "string"
+      },
+      "InstructionRevisionId": {
+        "description": "Immutable application-owned revision identifier.",
+        "type": "string"
+      },
+      "InstructionRevisionRef": {
+        "additionalProperties": false,
+        "description": "Immutable application-owned instruction artifact reference.",
+        "properties": {
+          "content_sha256": {
+            "$ref": "#/$defs/InstructionContentDigest"
+          },
+          "key": {
+            "$ref": "#/$defs/InstructionKey"
+          },
+          "namespace": {
+            "$ref": "#/$defs/InstructionNamespace"
+          },
+          "revision_id": {
+            "$ref": "#/$defs/InstructionRevisionId"
+          }
+        },
+        "required": [
+          "namespace",
+          "key",
+          "revision_id",
+          "content_sha256"
+        ],
+        "type": "object"
+      },
       "InteractionId": {
         "description": "Unique identifier for an interaction.",
         "type": "string"
@@ -141168,6 +142327,10 @@
             "type": "string"
           }
         ]
+      },
+      "SessionId": {
+        "description": "Unique identifier for a session (UUID v7 for time-ordering)",
+        "type": "string"
       },
       "SkillKey": {
         "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
@@ -142390,6 +143553,17 @@
                   }
                 ],
                 "description": "Optional exact control-ingress identity carried by this durable\ntranscript message. Provider adapters ignore it."
+              },
+              "instruction_activation": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/InstructionActivationIdentity"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Typed immutable instruction activation identity. The rendered\nenvelope in `content` is validated against this fact on ingress."
               },
               "prompt_version": {
                 "anyOf": [

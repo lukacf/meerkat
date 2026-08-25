@@ -167,6 +167,18 @@
       "result_type": "SystemPromptUpdateResult"
     },
     {
+      "description": "Activate one immutable instruction revision at a safe materialized-session boundary",
+      "name": "session/activate_instruction",
+      "params_type": "ActivateInstructionParams",
+      "result_type": "InstructionActivationReceipt"
+    },
+    {
+      "description": "Read authoritative durable instruction activation records",
+      "name": "session/instruction_activations",
+      "params_type": "ReadInstructionActivationsParams",
+      "result_type": "InstructionActivationReadPage"
+    },
+    {
       "description": "Read a retained immutable transcript revision body",
       "name": "session/transcript_revision",
       "params_type": "ReadSessionTranscriptRevisionParams",

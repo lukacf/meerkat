@@ -233,6 +233,7 @@ export interface WireResolvedModelCapabilities {
   image_input?: boolean;
   image_tool_results?: boolean;
   inline_video?: boolean;
+  mid_conversation_system_messages?: boolean;
   realtime?: boolean;
   vision?: boolean;
   web_search?: boolean;

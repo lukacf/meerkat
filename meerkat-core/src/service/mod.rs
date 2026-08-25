@@ -132,6 +132,16 @@ pub enum SessionError {
     /// The requested operation is not supported by this session service.
     #[error("unsupported: {0}")]
     Unsupported(String),
+
+    /// An external durable write authority was superseded before the physical
+    /// session boundary committed. No target write was invoked.
+    #[error("external session write fence conflict: {reason}")]
+    ExternalWriteFenceConflict { reason: String },
+
+    /// An external durable write authority could not be checked without
+    /// waiting at the physical session boundary. No target write was invoked.
+    #[error("external session write fence backoff: {reason}")]
+    ExternalWriteFenceBackoff { reason: String },
 }
 
 /// Why a durable session refuses to serve a resume while its content stays
@@ -333,6 +343,8 @@ impl SessionError {
             Self::DurableEvidenceQuarantined { .. } => "SESSION_DURABLE_EVIDENCE_QUARANTINED",
             Self::Store(_) => "SESSION_STORE_ERROR",
             Self::Unsupported(_) => "SESSION_UNSUPPORTED",
+            Self::ExternalWriteFenceConflict { .. } => "SESSION_EXTERNAL_WRITE_FENCE_CONFLICT",
+            Self::ExternalWriteFenceBackoff { .. } => "SESSION_EXTERNAL_WRITE_FENCE_BACKOFF",
             Self::Agent(_) => "AGENT_ERROR",
             Self::FailedWithData { .. } => "SESSION_ERROR",
         }
@@ -2766,6 +2778,21 @@ pub trait SessionServiceControlExt: SessionService {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait SessionServiceHistoryExt: SessionService {
+    /// Read durable instruction activation records from authoritative session history.
+    ///
+    /// This persistence-only seam does not infer current runtime publication,
+    /// recovery, or provider compatibility.
+    async fn read_instruction_activation_records(
+        &self,
+        id: &SessionId,
+        query: crate::InstructionActivationReadQuery,
+    ) -> Result<crate::InstructionActivationReadPage, SessionError> {
+        let _ = (id, query);
+        Err(SessionError::Unsupported(
+            "read_instruction_activation_records".to_string(),
+        ))
+    }
+
     /// Read the committed transcript for a session.
     ///
     /// Implementations may return `PersistenceDisabled` if they cannot provide

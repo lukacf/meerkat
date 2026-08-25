@@ -248,6 +248,17 @@ from .types import (
     ForkCacheTtl,
     ForkPoint,
     HelpExecutionMode,
+    InstructionActivationAbsent,
+    InstructionActivationEffective,
+    InstructionActivationExpectation,
+    InstructionActivationIdentity,
+    InstructionActivationKeyState,
+    InstructionActivationProjectionWitness,
+    InstructionActivationReadPage,
+    InstructionActivationReceipt,
+    InstructionActivationRecord,
+    InstructionActivationRequest,
+    InstructionRevisionRef,
     McpLiveOpResponse,
     MobControlScope,
     MobEventsResult,
@@ -1555,6 +1566,41 @@ class MeerkatClient:
             _wire_params(params),
         )
         return self._parse_system_prompt_update_result(_wire_value(raw))
+
+    async def activate_instruction(
+        self,
+        session_id: str,
+        activation: InstructionActivationRequest,
+    ) -> InstructionActivationReceipt:
+        """Activate one immutable instruction revision at a safe boundary."""
+        raw = await self._request(
+            "session/activate_instruction",
+            {
+                "session_id": session_id,
+                "activation": _wire_value(activation),
+            },
+        )
+        return self._parse_instruction_activation_receipt(raw)
+
+    async def instruction_activations(
+        self,
+        session_id: str,
+        *,
+        namespace: str | None = None,
+        key: str | None = None,
+        offset: int | None = None,
+        limit: int = 100,
+    ) -> InstructionActivationReadPage:
+        """Read authoritative durable activation records in transcript order."""
+        params: dict[str, Any] = {"session_id": session_id, "limit": limit}
+        if namespace is not None:
+            params["namespace"] = namespace
+        if key is not None:
+            params["key"] = key
+        if offset is not None:
+            params["offset"] = offset
+        raw = await self._request("session/instruction_activations", params)
+        return self._parse_instruction_activation_read_page(raw)
 
     async def restore_session_transcript_revision(
         self,
@@ -7699,6 +7745,171 @@ class MeerkatClient:
         )
 
     @staticmethod
+    def _parse_instruction_revision_ref(data: Any, context: str) -> InstructionRevisionRef:
+        data = MeerkatClient._require_dict(data, "revision", context)
+        return InstructionRevisionRef(
+            namespace=MeerkatClient._require_string_field(data, "namespace", context),
+            key=MeerkatClient._require_string_field(data, "key", context),
+            revision_id=MeerkatClient._require_string_field(data, "revision_id", context),
+            content_sha256=MeerkatClient._require_string_field(
+                data, "content_sha256", context
+            ),
+        )
+
+    @staticmethod
+    def _parse_instruction_activation_identity(
+        data: Any, context: str
+    ) -> InstructionActivationIdentity:
+        data = MeerkatClient._require_dict(data, "identity", context)
+        supersedes = data.get("supersedes")
+        if supersedes is not None and not isinstance(supersedes, str):
+            raise MeerkatError(
+                "INVALID_RESPONSE", f"{context}: supersedes must be a string or null"
+            )
+        return InstructionActivationIdentity(
+            activation_id=MeerkatClient._require_string_field(
+                data, "activation_id", context
+            ),
+            revision=MeerkatClient._parse_instruction_revision_ref(
+                data.get("revision"), f"{context}: revision"
+            ),
+            origin_session_id=MeerkatClient._require_string_field(
+                data, "origin_session_id", context
+            ),
+            render_version=MeerkatClient._require_non_negative_integer_field(
+                data, "render_version", context
+            ),
+            supersedes=supersedes,
+        )
+
+    @staticmethod
+    def _parse_instruction_activation_record(
+        data: Any, context: str
+    ) -> InstructionActivationRecord:
+        data = MeerkatClient._require_dict(data, "record", context)
+        projection = MeerkatClient._require_dict(
+            data.get("projection_witness"), "projection_witness", context
+        )
+        return InstructionActivationRecord(
+            session_id=MeerkatClient._require_string_field(data, "session_id", context),
+            identity=MeerkatClient._parse_instruction_activation_identity(
+                data.get("identity"), f"{context}: identity"
+            ),
+            activation_ordinal=MeerkatClient._require_non_negative_integer_field(
+                data, "activation_ordinal", context
+            ),
+            projection_witness=InstructionActivationProjectionWitness(
+                message_index=MeerkatClient._require_non_negative_integer_field(
+                    projection, "message_index", context
+                ),
+                transcript_revision=MeerkatClient._require_string_field(
+                    projection, "transcript_revision", context
+                ),
+            ),
+        )
+
+    @staticmethod
+    def _parse_instruction_activation_key_state(
+        data: Any, context: str
+    ) -> InstructionActivationKeyState:
+        data = MeerkatClient._require_dict(data, "key_state", context)
+        expectation_data = MeerkatClient._require_dict(
+            data.get("next_expectation"), "next_expectation", context
+        )
+        kind = MeerkatClient._require_string_field(expectation_data, "kind", context)
+        if kind == "absent":
+            expectation: InstructionActivationExpectation = InstructionActivationAbsent()
+        elif kind == "effective":
+            expectation = InstructionActivationEffective(
+                activation_id=MeerkatClient._require_string_field(
+                    expectation_data, "activation_id", context
+                )
+            )
+        else:
+            raise MeerkatError(
+                "INVALID_RESPONSE", f"{context}: unsupported expectation kind {kind!r}"
+            )
+        next_supersedes = data.get("next_supersedes")
+        if next_supersedes is not None and not isinstance(next_supersedes, str):
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: next_supersedes must be a string or null",
+            )
+        return InstructionActivationKeyState(
+            session_id=MeerkatClient._require_string_field(data, "session_id", context),
+            namespace=MeerkatClient._require_string_field(data, "namespace", context),
+            key=MeerkatClient._require_string_field(data, "key", context),
+            requires_explicit_child_activation=MeerkatClient._require_bool_field(
+                data, "requires_explicit_child_activation", context
+            ),
+            next_expectation=expectation,
+            effective_origin_local=(
+                None
+                if data.get("effective_origin_local") is None
+                else MeerkatClient._parse_instruction_activation_record(
+                    data.get("effective_origin_local"),
+                    f"{context}: effective_origin_local",
+                )
+            ),
+            chronological_head=(
+                None
+                if data.get("chronological_head") is None
+                else MeerkatClient._parse_instruction_activation_record(
+                    data.get("chronological_head"), f"{context}: chronological_head"
+                )
+            ),
+            next_supersedes=next_supersedes,
+        )
+
+    @staticmethod
+    def _parse_instruction_activation_receipt(data: Any) -> InstructionActivationReceipt:
+        context = "Invalid instruction activation receipt"
+        data = MeerkatClient._require_dict(data, "result", context)
+        disposition = MeerkatClient._require_string_field(data, "disposition", context)
+        if disposition not in {"applied", "duplicate"}:
+            raise MeerkatError(
+                "INVALID_RESPONSE", f"{context}: unsupported disposition {disposition!r}"
+            )
+        return InstructionActivationReceipt(
+            record=MeerkatClient._parse_instruction_activation_record(
+                data.get("record"), f"{context}: record"
+            ),
+            disposition=cast(Any, disposition),
+        )
+
+    @staticmethod
+    def _parse_instruction_activation_read_page(data: Any) -> InstructionActivationReadPage:
+        context = "Invalid instruction activation read page"
+        data = MeerkatClient._require_dict(data, "result", context)
+        raw_records = data.get("records")
+        if not isinstance(raw_records, list):
+            raise MeerkatError("INVALID_RESPONSE", f"{context}: records must be a list")
+        next_offset = data.get("next_offset")
+        if next_offset is not None and (
+            not isinstance(next_offset, int) or isinstance(next_offset, bool) or next_offset < 0
+        ):
+            raise MeerkatError(
+                "INVALID_RESPONSE", f"{context}: next_offset must be a non-negative integer or null"
+            )
+        return InstructionActivationReadPage(
+            session_id=MeerkatClient._require_string_field(data, "session_id", context),
+            records=[
+                MeerkatClient._parse_instruction_activation_record(
+                    record, f"{context}: records[{index}]"
+                )
+                for index, record in enumerate(raw_records)
+            ],
+            key_state=(
+                None
+                if data.get("key_state") is None
+                else MeerkatClient._parse_instruction_activation_key_state(
+                    data.get("key_state"), f"{context}: key_state"
+                )
+            ),
+            next_offset=next_offset,
+        )
+
+    @staticmethod
     def _parse_session_message(data: dict[str, Any]) -> SessionMessage:
         # Transcript truth fails closed: a message without its identity facts
         # (role, created_at) or with malformed collections is a wire-contract
@@ -7738,6 +7949,14 @@ class MeerkatClient:
                 ),
                 version=version,
             )
+        instruction_activation = None
+        if data.get("instruction_activation") is not None:
+            instruction_activation = (
+                MeerkatClient._parse_instruction_activation_identity(
+                    data.get("instruction_activation"),
+                    f"{context}: instruction_activation",
+                )
+            )
         return SessionMessage(
             role=role,
             created_at=created_at,
@@ -7754,6 +7973,7 @@ class MeerkatClient:
             interaction_id=data.get("interaction_id"),
             run_id=data.get("run_id"),
             prompt_version=prompt_version,
+            instruction_activation=instruction_activation,
             blocks=[
                 MeerkatClient._parse_session_assistant_block(block)
                 for block in MeerkatClient._require_list_field(data, "blocks", context)

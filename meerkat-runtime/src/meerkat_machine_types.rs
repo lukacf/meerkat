@@ -94,6 +94,10 @@ pub struct SessionLlmCapabilitySurface {
     pub image_input: bool,
     pub image_tool_results: bool,
     pub supports_web_search: bool,
+    /// Whether this exact resolved session model can represent ordered System
+    /// messages after conversational content.
+    #[serde(default)]
+    pub supports_mid_conversation_system_messages: bool,
     #[serde(default)]
     pub image_generation: bool,
     /// Whether the resolved model exposes a realtime bidirectional streaming
@@ -115,6 +119,7 @@ impl SessionLlmCapabilitySurface {
             inline_video: self.inline_video,
             realtime: self.realtime,
             web_search: self.supports_web_search,
+            mid_conversation_system_messages: self.supports_mid_conversation_system_messages,
             image_generation: self.image_generation,
         }
     }
@@ -237,6 +242,7 @@ pub trait SessionLlmReconfigureHost: Send + Sync {
         &self,
         session_id: &SessionId,
         identity: &meerkat_core::SessionLlmIdentity,
+        capability_surface: Option<&SessionLlmCapabilitySurface>,
     ) -> Result<(), RuntimeDriverError>;
 
     /// Caller must hold the turn-finalization boundary.

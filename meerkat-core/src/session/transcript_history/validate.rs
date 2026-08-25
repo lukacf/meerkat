@@ -119,6 +119,48 @@ pub(super) fn validate_released_0810_transcript_rewrite_record(
     validate_released_0810_transcript_rewrite_structure(commit, parent_body, revision_body)
 }
 
+fn validate_instruction_activation_revision_transition(
+    commit: &TranscriptRewriteCommit,
+    parent_body: &TranscriptRevisionBody,
+    revision_body: &TranscriptRevisionBody,
+) -> Result<(), TranscriptEditError> {
+    for (role, body) in [("parent", parent_body), ("revision", revision_body)] {
+        crate::session::validate_instruction_activation_messages(&body.messages).map_err(
+            |error| {
+                TranscriptEditError::HistoryStateMalformed(format!(
+                    "{role} transcript revision carries malformed instruction activation history: {error}"
+                ))
+            },
+        )?;
+    }
+    let activation_rows = |messages: &[Message], preserve_offsets: bool| {
+        messages
+            .iter()
+            .enumerate()
+            .filter_map(|(index, message)| {
+                let Message::System(system) = message else {
+                    return None;
+                };
+                system.instruction_activation.as_ref().map(|_| {
+                    (
+                        preserve_offsets.then_some(index),
+                        Message::System(system.clone()),
+                    )
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    let preserve_offsets = commit.selection.semantic() != TranscriptRewriteSemantic::Compaction;
+    if activation_rows(&parent_body.messages, preserve_offsets)
+        != activation_rows(&revision_body.messages, preserve_offsets)
+    {
+        return Err(TranscriptEditError::HistoryStateMalformed(
+            "transcript rewrite changed an instruction activation boundary".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Validate the exact structure still observable after released 0.8.10
 /// metadata buffering.
 ///
@@ -133,6 +175,7 @@ fn validate_released_0810_transcript_rewrite_structure(
     parent_body: &TranscriptRevisionBody,
     revision_body: &TranscriptRevisionBody,
 ) -> Result<(), TranscriptEditError> {
+    validate_instruction_activation_revision_transition(commit, parent_body, revision_body)?;
     if parent_body.revision != commit.parent_revision {
         return Err(TranscriptEditError::HistoryStateMalformed(format!(
             "parent body revision {} does not match commit parent {}",
@@ -237,6 +280,7 @@ fn validate_transcript_rewrite_record_with_digest(
     revision_body: &TranscriptRevisionBody,
     digest: fn(&[Message]) -> Result<String, serde_json::Error>,
 ) -> Result<(), TranscriptEditError> {
+    validate_instruction_activation_revision_transition(commit, parent_body, revision_body)?;
     if parent_body.revision != commit.parent_revision {
         return Err(TranscriptEditError::HistoryStateMalformed(format!(
             "parent body revision {} does not match commit parent {}",

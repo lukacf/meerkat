@@ -226,6 +226,8 @@ pub fn standalone_session_runtime_authorities(
                 image_input: profile.image_input,
                 image_tool_results: profile.image_tool_results,
                 supports_web_search: profile.supports_web_search,
+                supports_mid_conversation_system_messages: profile
+                    .supports_mid_conversation_system_messages,
                 image_generation: profile.image_generation,
                 realtime: profile.realtime,
                 call_timeout_secs: profile.call_timeout_secs,

@@ -495,6 +495,27 @@ class WorkItemsResult:
 # config or wrapped with an optimistic-concurrency generation).
 ConfigSetParams = dict[str, Any]
 
+# Wire payload for InstructionActivationDisposition.
+InstructionActivationDisposition = Any
+
+# Wire payload for InstructionActivationExpectation.
+InstructionActivationExpectation = Any
+
+# Wire payload for InstructionActivationId.
+InstructionActivationId = Any
+
+# Wire payload for InstructionContentDigest.
+InstructionContentDigest = Any
+
+# Wire payload for InstructionKey.
+InstructionKey = Any
+
+# Wire payload for InstructionNamespace.
+InstructionNamespace = Any
+
+# Wire payload for InstructionRevisionId.
+InstructionRevisionId = Any
+
 # Typed event envelope for the generic `session/external_event` and
 # `/sessions/{id}/external-events` surfaces.
 #
@@ -567,6 +588,13 @@ class WireDeviceCompleteResultReady(TypedDict, total=False):
     state: Required[Literal['ready']]
 
 WireDeviceCompleteResult = WireDeviceCompleteResultPending | WireDeviceCompleteResultSlowDown | WireDeviceCompleteResultAccessDenied | WireDeviceCompleteResultExpired | WireDeviceCompleteResultReady
+
+@dataclass
+class ActivateInstructionParams:
+    """Request payload for `session/activate_instruction`."""
+    activation: dict[str, Any]
+    session_id: str
+
 
 @dataclass
 class ApprovalDecideParams:
@@ -898,6 +926,60 @@ class InjectSystemContextResult:
 
 
 @dataclass
+class InstructionActivationIdentity:
+    """Typed identity sealed onto one durable chronological activation row."""
+    activation_id: str
+    origin_session_id: str
+    render_version: int
+    revision: dict[str, Any]
+    supersedes: Optional[str] = None
+
+
+@dataclass
+class InstructionActivationReadPage:
+    """One page of durable activation records in transcript order."""
+    records: list[dict[str, Any]]
+    session_id: str
+    key_state: Optional[dict[str, Any]] = None
+    next_offset: Optional[int] = None
+
+
+@dataclass
+class InstructionActivationRecord:
+    """Durable transcript record for one instruction activation."""
+    activation_ordinal: int
+    identity: InstructionActivationIdentity
+    projection_witness: dict[str, Any]
+    session_id: str
+
+
+@dataclass
+class InstructionActivationRequest:
+    """Explicit request to append one immutable instruction revision transition."""
+    activation_id: str
+    body: str
+    expectation: dict[str, Any]
+    revision: dict[str, Any]
+    supersedes: Optional[str] = None
+
+
+@dataclass
+class InstructionActivationReceipt:
+    """Reproducible receipt returned by the safe-boundary activation facade."""
+    disposition: Literal['applied', 'duplicate']
+    record: InstructionActivationRecord
+
+
+@dataclass
+class InstructionRevisionRef:
+    """Immutable application-owned instruction artifact reference."""
+    content_sha256: str
+    key: str
+    namespace: str
+    revision_id: str
+
+
+@dataclass
 class InterruptParams:
     """Parameters for `turn/interrupt`."""
     session_id: str
@@ -954,6 +1036,16 @@ class ProvisionApiKeyParams:
     binding_id: Optional[str] = None
     profile_id: Optional[str] = None
     realm_id: Optional[str] = None
+
+
+@dataclass
+class ReadInstructionActivationsParams:
+    """Request payload for `session/instruction_activations`."""
+    session_id: str
+    key: Optional[str] = None
+    limit: Optional[int] = None
+    namespace: Optional[str] = None
+    offset: Optional[int] = None
 
 
 @dataclass
@@ -4460,6 +4552,7 @@ instead of producing sideband text.
 Default (`None`) preserves the prior wire shape: callers that omit the
 field get `ProviderManaged`, matching the legacy behavior."""
     session_id: str
+    execution_identity: Optional[dict[str, Any]] = None
     seed_max_chars: Optional[int] = None
     transport: Optional[LiveOpenTransport] = None
     turning_mode: Optional[RealtimeTurningMode] = None
@@ -4644,8 +4737,10 @@ playback-cursor read API — clients track playback locally and pass the
 cursor in here when they want to truncate."""
     audio_played_ms: int
     channel_id: str
-    content_index: int
-    item_id: str
+    content_index: Optional[int] = None
+    item_id: Optional[str] = None
+    output_id: Optional[str] = None
+    reported_playback_prefix: Optional[str] = None
 
 
 # Wire projection of [`meerkat_core::live_adapter::LiveResponseModality`].
@@ -5141,6 +5236,7 @@ class WireLiveAdapterObservationAssistantTranscriptFinal(TypedDict, total=False)
 
 class WireLiveAdapterObservationAssistantTranscriptTruncated(TypedDict, total=False):
     content_index: NotRequired[Optional[int]]
+    interaction_id: NotRequired[Optional[str]]
     observation: Required[Literal['assistant_transcript_truncated']]
     previous_item_id: NotRequired[Optional[str]]
     provider_item_id: NotRequired[Optional[str]]
@@ -5262,6 +5358,7 @@ runtime."""
     image_input: Optional[bool] = None
     image_tool_results: Optional[bool] = None
     inline_video: Optional[bool] = None
+    mid_conversation_system_messages: Optional[bool] = None
     realtime: Optional[bool] = None
     vision: Optional[bool] = None
     web_search: Optional[bool] = None
@@ -5317,6 +5414,7 @@ class CatalogModelEntry:
     context_window: Optional[int] = None
     max_output_tokens: Optional[int] = None
     profile: Optional[dict[str, Any]] = None
+    release_stage: Optional[Literal['stable', 'experimental', 'operator_defined']] = None
     server_id: Optional[str] = None
 
 
@@ -5362,6 +5460,8 @@ class WireModelProfile:
     image_tool_results: Optional[bool] = None
     inline_video: Optional[bool] = None
     realtime: Optional[bool] = None
+    release_stage: Optional[Literal['stable', 'experimental', 'operator_defined']] = None
+    supports_mid_conversation_system_messages: Optional[bool] = None
     supports_web_search: Optional[bool] = None
     vision: Optional[bool] = None
 
@@ -8032,6 +8132,7 @@ class WireSessionMessageSystem(TypedDict, total=False):
     content: Required[str]
     created_at: Required[str]
     identity: NotRequired[Optional[dict[str, Any]]]
+    instruction_activation: NotRequired[Optional[InstructionActivationIdentity]]
     prompt_version: NotRequired[Optional[SystemPromptVersionIdentity]]
     role: Required[Literal['system']]
 

@@ -88,6 +88,7 @@ pub use wire::supervisor_bridge::{
     supervisor_bridge_supported_protocol_versions,
 };
 pub use wire::{
+    ActivateInstructionParams,
     ApprovalActionKind,
     ApprovalDecideParams,
     ApprovalDecision,
@@ -347,6 +348,7 @@ pub use wire::{
     PrincipalRef,
     ProviderCatalog,
     ProvisionApiKeyParams,
+    ReadInstructionActivationsParams,
     ReadSessionTranscriptRevisionParams,
     RealmIdParams,
     RealtimeAudioChunk,

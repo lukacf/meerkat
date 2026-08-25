@@ -3411,8 +3411,10 @@ impl MeerkatMachine {
                     .reconfigure_session_llm_identity_inner(
                         &session_id,
                         *previous_identity,
+                        previous_capability_surface,
                         *previous_visibility_state,
                         *target_identity,
+                        *target_capability_surface,
                         *next_visibility_state,
                         authority_plan,
                     )

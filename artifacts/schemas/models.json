@@ -64,6 +64,16 @@
             "description": "Whether the model supports realtime bidirectional transport.",
             "type": "boolean"
           },
+          "release_stage": {
+            "$ref": "#/$defs/WireModelReleaseStage",
+            "default": "stable",
+            "description": "Release maturity and admission class."
+          },
+          "supports_mid_conversation_system_messages": {
+            "default": false,
+            "description": "Whether ordered System messages may occur after the leading prefix.",
+            "type": "boolean"
+          },
           "supports_reasoning": {
             "description": "Whether the model supports explicit reasoning effort control.",
             "type": "boolean"
@@ -95,6 +105,15 @@
           "params_schema"
         ],
         "type": "object"
+      },
+      "WireModelReleaseStage": {
+        "description": "Release maturity of a catalog model.",
+        "enum": [
+          "stable",
+          "experimental",
+          "operator_defined"
+        ],
+        "type": "string"
       },
       "WireModelTier": {
         "description": "Model recommendation tier.",
@@ -151,6 +170,11 @@
           }
         ],
         "description": "Model profile with capability flags and parameter schema."
+      },
+      "release_stage": {
+        "$ref": "#/$defs/WireModelReleaseStage",
+        "default": "stable",
+        "description": "Release maturity and admission class."
       },
       "server_id": {
         "description": "Backing self-hosted server ID for configured aliases.",
@@ -213,6 +237,11 @@
               }
             ],
             "description": "Model profile with capability flags and parameter schema."
+          },
+          "release_stage": {
+            "$ref": "#/$defs/WireModelReleaseStage",
+            "default": "stable",
+            "description": "Release maturity and admission class."
           },
           "server_id": {
             "description": "Backing self-hosted server ID for configured aliases.",
@@ -348,6 +377,16 @@
             "description": "Whether the model supports realtime bidirectional transport.",
             "type": "boolean"
           },
+          "release_stage": {
+            "$ref": "#/$defs/WireModelReleaseStage",
+            "default": "stable",
+            "description": "Release maturity and admission class."
+          },
+          "supports_mid_conversation_system_messages": {
+            "default": false,
+            "description": "Whether ordered System messages may occur after the leading prefix.",
+            "type": "boolean"
+          },
           "supports_reasoning": {
             "description": "Whether the model supports explicit reasoning effort control.",
             "type": "boolean"
@@ -379,6 +418,15 @@
           "params_schema"
         ],
         "type": "object"
+      },
+      "WireModelReleaseStage": {
+        "description": "Release maturity of a catalog model.",
+        "enum": [
+          "stable",
+          "experimental",
+          "operator_defined"
+        ],
+        "type": "string"
       },
       "WireModelTier": {
         "description": "Model recommendation tier.",
@@ -459,6 +507,11 @@
               }
             ],
             "description": "Model profile with capability flags and parameter schema."
+          },
+          "release_stage": {
+            "$ref": "#/$defs/WireModelReleaseStage",
+            "default": "stable",
+            "description": "Release maturity and admission class."
           },
           "server_id": {
             "description": "Backing self-hosted server ID for configured aliases.",
@@ -542,6 +595,16 @@
             "description": "Whether the model supports realtime bidirectional transport.",
             "type": "boolean"
           },
+          "release_stage": {
+            "$ref": "#/$defs/WireModelReleaseStage",
+            "default": "stable",
+            "description": "Release maturity and admission class."
+          },
+          "supports_mid_conversation_system_messages": {
+            "default": false,
+            "description": "Whether ordered System messages may occur after the leading prefix.",
+            "type": "boolean"
+          },
           "supports_reasoning": {
             "description": "Whether the model supports explicit reasoning effort control.",
             "type": "boolean"
@@ -573,6 +636,15 @@
           "params_schema"
         ],
         "type": "object"
+      },
+      "WireModelReleaseStage": {
+        "description": "Release maturity of a catalog model.",
+        "enum": [
+          "stable",
+          "experimental",
+          "operator_defined"
+        ],
+        "type": "string"
       },
       "WireModelTier": {
         "description": "Model recommendation tier.",
@@ -638,6 +710,15 @@
           "header_value"
         ],
         "type": "object"
+      },
+      "WireModelReleaseStage": {
+        "description": "Release maturity of a catalog model.",
+        "enum": [
+          "stable",
+          "experimental",
+          "operator_defined"
+        ],
+        "type": "string"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -681,6 +762,16 @@
       "realtime": {
         "default": false,
         "description": "Whether the model supports realtime bidirectional transport.",
+        "type": "boolean"
+      },
+      "release_stage": {
+        "$ref": "#/$defs/WireModelReleaseStage",
+        "default": "stable",
+        "description": "Release maturity and admission class."
+      },
+      "supports_mid_conversation_system_messages": {
+        "default": false,
+        "description": "Whether ordered System messages may occur after the leading prefix.",
         "type": "boolean"
       },
       "supports_reasoning": {
@@ -755,6 +846,11 @@
       "inline_video": {
         "default": false,
         "description": "Whether user messages may include inline video blocks.",
+        "type": "boolean"
+      },
+      "mid_conversation_system_messages": {
+        "default": false,
+        "description": "Whether ordered System messages after conversational content are\nrepresentable by this exact resolved model.",
         "type": "boolean"
       },
       "realtime": {

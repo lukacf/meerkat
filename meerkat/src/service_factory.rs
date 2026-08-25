@@ -383,6 +383,14 @@ impl SessionAgent for FactoryAgent {
             .map_err(|error| meerkat_core::error::AgentError::ConfigError(error.to_string()))
     }
 
+    fn activate_instruction_control(
+        &mut self,
+        request: meerkat_core::InstructionActivationRequest,
+    ) -> Result<meerkat_core::InstructionActivationMutation, meerkat_core::InstructionActivationError>
+    {
+        self.agent.session_mut().activate_instruction(request)
+    }
+
     fn stage_external_tool_filter(
         &mut self,
         filter: meerkat_core::ToolFilter,

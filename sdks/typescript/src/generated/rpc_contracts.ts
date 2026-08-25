@@ -1,6 +1,7 @@
 // Generated RPC method contracts for @rkat/sdk.
 // Source: artifacts/schemas/rpc-methods.json
 import type {
+  ActivateInstructionParams,
   ApprovalDecideParams,
   ApprovalGetParams,
   ApprovalListParams,
@@ -49,6 +50,8 @@ import type {
   HelpResponse,
   InjectSystemContextParams,
   InjectSystemContextResult,
+  InstructionActivationReadPage,
+  InstructionActivationReceipt,
   InterruptParams,
   InterruptResult,
   JobsArtifactsParams,
@@ -209,6 +212,7 @@ import type {
   MonitorsStartParams,
   MonitorsStartResult,
   ProvisionApiKeyParams,
+  ReadInstructionActivationsParams,
   ReadSessionHistoryParams,
   ReadSessionParams,
   ReadSessionTranscriptRevisionParams,
@@ -383,6 +387,14 @@ export interface RpcMethodContracts {
   "session/update_system_prompt": {
     params: UpdateSystemPromptParams;
     result: (SystemPromptUpdateResult) & Record<string, unknown>;
+  };
+  "session/activate_instruction": {
+    params: ActivateInstructionParams;
+    result: (InstructionActivationReceipt) & Record<string, unknown>;
+  };
+  "session/instruction_activations": {
+    params: ReadInstructionActivationsParams;
+    result: (InstructionActivationReadPage) & Record<string, unknown>;
   };
   "session/transcript_revision": {
     params: ReadSessionTranscriptRevisionParams;

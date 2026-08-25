@@ -25,6 +25,8 @@ fn capability_surface_from_profile(profile: &ModelProfile) -> mm_dsl::SessionLlm
         image_input: profile.image_input,
         image_tool_results: profile.image_tool_results,
         supports_web_search: profile.supports_web_search,
+        supports_mid_conversation_system_messages: profile
+            .supports_mid_conversation_system_messages,
         image_generation: profile.image_generation,
         realtime: profile.realtime,
         call_timeout_secs: profile.call_timeout_secs,
@@ -752,6 +754,7 @@ mod tests {
             &self,
             _session_id: &meerkat_core::SessionId,
             identity: &SessionLlmIdentity,
+            _capability_surface: Option<&crate::SessionLlmCapabilitySurface>,
         ) -> Result<(), crate::RuntimeDriverError> {
             *self
                 .identity
@@ -798,6 +801,7 @@ mod tests {
             image_input: image_tool_results,
             image_tool_results,
             supports_web_search: false,
+            supports_mid_conversation_system_messages: false,
             image_generation: false,
             realtime: false,
             call_timeout_secs: None,

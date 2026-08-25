@@ -20,6 +20,8 @@
 #[cfg(not(target_arch = "wasm32"))]
 pub mod admission;
 pub mod errors;
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+pub mod instruction_activation;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod live_orchestration;
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]

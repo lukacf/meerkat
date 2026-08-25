@@ -3911,6 +3911,7 @@ mod tests {
             &self,
             _session_id: &SessionId,
             _identity: &meerkat_core::SessionLlmIdentity,
+            _capability_surface: Option<&meerkat_runtime::SessionLlmCapabilitySurface>,
         ) -> Result<(), RuntimeDriverError> {
             Ok(())
         }

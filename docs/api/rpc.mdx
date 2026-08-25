@@ -121,6 +121,8 @@ subset.
 | `session/history` | Session | `ReadSessionHistoryParams` | `WireSessionHistory` | Get committed session transcript messages |
 | `session/export_atif` | Session | `ExportAtifParams` | `Value` | Export currently projected session replay evidence as an ATIF trajectory |
 | `session/update_system_prompt` | Session | `UpdateSystemPromptParams` | `SystemPromptUpdateResult` | Explicitly replace one durable versioned system-prompt key |
+| `session/activate_instruction` | Session | `ActivateInstructionParams` | `InstructionActivationReceipt` | Append one immutable instruction revision at an admitted idle transcript boundary |
+| `session/instruction_activations` | Session | `ReadInstructionActivationsParams` | `InstructionActivationReadPage` | Read authoritative activation records from the durable ordered transcript |
 | `session/rewrite_transcript` | Session | `RewriteSessionTranscriptParams` | `SessionTranscriptRewriteResult` | Commit a same-session transcript rewrite |
 | `session/transcript_revision` | Session | `ReadSessionTranscriptRevisionParams` | `WireSessionTranscriptRevision` | Read a transcript revision by id |
 | `session/transcript_revisions` | Session | `ListSessionTranscriptRevisionsParams` | `WireSessionTranscriptRevisionList` | List retained transcript revision commits with the current head |

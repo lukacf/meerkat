@@ -6172,6 +6172,11 @@
             ],
             "description": "Model profile with capability flags and parameter schema."
           },
+          "release_stage": {
+            "$ref": "#/components/schemas/WireModelReleaseStage",
+            "default": "stable",
+            "description": "Release maturity and admission class."
+          },
           "server_id": {
             "description": "Backing self-hosted server ID for configured aliases.",
             "type": [
@@ -8745,6 +8750,89 @@
             "type": "string"
           }
         ]
+      },
+      "InstructionActivationId": {
+        "description": "Caller-stable identity for one activation or rollback event.",
+        "type": "string"
+      },
+      "InstructionActivationIdentity": {
+        "additionalProperties": false,
+        "description": "Typed identity sealed onto one durable chronological activation row.",
+        "properties": {
+          "activation_id": {
+            "$ref": "#/components/schemas/InstructionActivationId"
+          },
+          "origin_session_id": {
+            "$ref": "#/components/schemas/SessionId"
+          },
+          "render_version": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "revision": {
+            "$ref": "#/components/schemas/InstructionRevisionRef"
+          },
+          "supersedes": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/InstructionActivationId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "activation_id",
+          "revision",
+          "origin_session_id",
+          "render_version"
+        ],
+        "type": "object"
+      },
+      "InstructionContentDigest": {
+        "description": "Canonical SHA-256 digest of an exact instruction body.",
+        "type": "string"
+      },
+      "InstructionKey": {
+        "description": "Application-owned instruction key within one namespace.",
+        "type": "string"
+      },
+      "InstructionNamespace": {
+        "description": "Application or issuer namespace for one instruction artifact family.",
+        "type": "string"
+      },
+      "InstructionRevisionId": {
+        "description": "Immutable application-owned revision identifier.",
+        "type": "string"
+      },
+      "InstructionRevisionRef": {
+        "additionalProperties": false,
+        "description": "Immutable application-owned instruction artifact reference.",
+        "properties": {
+          "content_sha256": {
+            "$ref": "#/components/schemas/InstructionContentDigest"
+          },
+          "key": {
+            "$ref": "#/components/schemas/InstructionKey"
+          },
+          "namespace": {
+            "$ref": "#/components/schemas/InstructionNamespace"
+          },
+          "revision_id": {
+            "$ref": "#/components/schemas/InstructionRevisionId"
+          }
+        },
+        "required": [
+          "namespace",
+          "key",
+          "revision_id",
+          "content_sha256"
+        ],
+        "type": "object"
       },
       "InteractionFailureReason": {
         "description": "Typed reason an interaction-scoped run failed (terminal event for tap\nsubscribers).\n\nMirrors [`CompactionFailureReason`]: the variant is the typed owner of the\nfailure cause; the human-readable string is a [`Display`] derivation,\nnever a separately-carried field.\n\n[`Display`]: std::fmt::Display",
@@ -19663,6 +19751,16 @@
             "description": "Whether the model supports realtime bidirectional transport.",
             "type": "boolean"
           },
+          "release_stage": {
+            "$ref": "#/components/schemas/WireModelReleaseStage",
+            "default": "stable",
+            "description": "Release maturity and admission class."
+          },
+          "supports_mid_conversation_system_messages": {
+            "default": false,
+            "description": "Whether ordered System messages may occur after the leading prefix.",
+            "type": "boolean"
+          },
           "supports_reasoning": {
             "description": "Whether the model supports explicit reasoning effort control.",
             "type": "boolean"
@@ -19694,6 +19792,15 @@
           "params_schema"
         ],
         "type": "object"
+      },
+      "WireModelReleaseStage": {
+        "description": "Release maturity of a catalog model.",
+        "enum": [
+          "stable",
+          "experimental",
+          "operator_defined"
+        ],
+        "type": "string"
       },
       "WireModelTier": {
         "description": "Model recommendation tier.",
@@ -20824,6 +20931,17 @@
                   }
                 ],
                 "description": "Optional exact control-ingress identity carried by this durable\ntranscript message. Provider adapters ignore it."
+              },
+              "instruction_activation": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/InstructionActivationIdentity"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Typed immutable instruction activation identity. The rendered\nenvelope in `content` is validated against this fact on ingress."
               },
               "prompt_version": {
                 "anyOf": [

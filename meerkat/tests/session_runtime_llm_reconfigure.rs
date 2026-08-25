@@ -50,6 +50,7 @@ fn empty_capability_surface() -> SessionLlmCapabilitySurface {
         image_input: false,
         image_tool_results: false,
         supports_web_search: false,
+        supports_mid_conversation_system_messages: false,
         image_generation: false,
         realtime: false,
         call_timeout_secs: None,
@@ -123,6 +124,7 @@ impl SessionLlmReconfigureHost for StubReconfigureHost {
         &self,
         _session_id: &SessionId,
         _identity: &SessionLlmIdentity,
+        _capability_surface: Option<&SessionLlmCapabilitySurface>,
     ) -> Result<(), RuntimeDriverError> {
         self.state.lock().unwrap().apply_identity_calls += 1;
         Ok(())

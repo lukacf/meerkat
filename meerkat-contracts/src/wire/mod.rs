@@ -244,14 +244,14 @@ pub use schedule::{
     ScheduleOccurrencesParams, ScheduleOccurrencesResult, UpdateScheduleParams,
 };
 pub use session::{
-    ForkSessionAtParams, ForkSessionReplaceParams, InterruptResult,
-    ListSessionTranscriptRevisionsParams, ReadSessionTranscriptRevisionParams,
-    RestoreSessionTranscriptRevisionParams, RevisionId, RevisionSelector,
-    RewriteSessionTranscriptParams, SessionStreamCloseParams, SessionStreamCloseResult,
-    SessionStreamOpenParams, SessionStreamOpenResult, TranscriptRewriteMessage,
-    UpdateSystemPromptParams, WireAssistantBlock, WireContentBlock, WireContentInput,
-    WireInterruptOutcome, WirePromptInput, WireProviderMeta, WireSessionHistory, WireSessionInfo,
-    WireSessionMessage, WireSessionSummary, WireSessionTranscriptRevision,
+    ActivateInstructionParams, ForkSessionAtParams, ForkSessionReplaceParams, InterruptResult,
+    ListSessionTranscriptRevisionsParams, ReadInstructionActivationsParams,
+    ReadSessionTranscriptRevisionParams, RestoreSessionTranscriptRevisionParams, RevisionId,
+    RevisionSelector, RewriteSessionTranscriptParams, SessionStreamCloseParams,
+    SessionStreamCloseResult, SessionStreamOpenParams, SessionStreamOpenResult,
+    TranscriptRewriteMessage, UpdateSystemPromptParams, WireAssistantBlock, WireContentBlock,
+    WireContentInput, WireInterruptOutcome, WirePromptInput, WireProviderMeta, WireSessionHistory,
+    WireSessionInfo, WireSessionMessage, WireSessionSummary, WireSessionTranscriptRevision,
     WireSessionTranscriptRevisionEntry, WireSessionTranscriptRevisionList, WireStopReason,
     WireSystemMessageIdentity, WireToolResult, WireToolResultContent, WireTranscriptSource,
 };

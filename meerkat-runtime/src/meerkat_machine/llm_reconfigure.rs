@@ -253,12 +253,17 @@ impl MeerkatMachine {
         host: &Arc<dyn SessionLlmReconfigureHost>,
         session_id: &SessionId,
         previous_identity: &meerkat_core::SessionLlmIdentity,
+        previous_capability_surface: Option<&SessionLlmCapabilitySurface>,
         previous_visibility_state: &SessionToolVisibilityState,
         original_error: RuntimeDriverError,
     ) -> Result<SessionLlmReconfigureReport, SessionLlmReconfigureApplyError> {
         let rollback_result = async {
-            host.apply_live_session_llm_identity(session_id, previous_identity)
-                .await?;
+            host.apply_live_session_llm_identity(
+                session_id,
+                previous_identity,
+                previous_capability_surface,
+            )
+            .await?;
             host.apply_live_session_tool_visibility_state(
                 session_id,
                 Some(previous_visibility_state.clone()),
@@ -383,8 +388,10 @@ impl MeerkatMachine {
         &self,
         session_id: &SessionId,
         previous_identity: meerkat_core::SessionLlmIdentity,
+        previous_capability_surface: Option<SessionLlmCapabilitySurface>,
         previous_visibility_state: SessionToolVisibilityState,
         target_identity: meerkat_core::SessionLlmIdentity,
+        target_capability_surface: SessionLlmCapabilitySurface,
         next_visibility_state: SessionToolVisibilityState,
         authority_plan: SessionLlmReconfigureAuthorityPlan,
     ) -> Result<SessionLlmReconfigureReport, SessionLlmReconfigureApplyError> {
@@ -411,8 +418,12 @@ impl MeerkatMachine {
         authorized_next_visibility_state.active_revision =
             authority_plan.next_active_visibility_revision;
 
-        host.apply_live_session_llm_identity(session_id, &target_identity)
-            .await?;
+        host.apply_live_session_llm_identity(
+            session_id,
+            &target_identity,
+            Some(&target_capability_surface),
+        )
+        .await?;
         if let Err(error) = host
             .apply_live_session_tool_visibility_state(
                 session_id,
@@ -425,6 +436,7 @@ impl MeerkatMachine {
                     &host,
                     session_id,
                     &previous_identity,
+                    previous_capability_surface.as_ref(),
                     &previous_visibility_state,
                     error,
                 )
@@ -437,6 +449,7 @@ impl MeerkatMachine {
                     &host,
                     session_id,
                     &previous_identity,
+                    previous_capability_surface.as_ref(),
                     &previous_visibility_state,
                     error,
                 )
@@ -475,6 +488,7 @@ mod tests {
             image_input: false,
             image_tool_results: false,
             supports_web_search: false,
+            supports_mid_conversation_system_messages: false,
             image_generation: false,
             realtime: false,
             call_timeout_secs: None,

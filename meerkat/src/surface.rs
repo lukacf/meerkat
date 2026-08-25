@@ -955,6 +955,8 @@ pub fn build_models_catalog_response(
                         supports_thinking: model_profile.supports_thinking,
                         supports_reasoning: model_profile.supports_reasoning,
                         supports_web_search: model_profile.supports_web_search,
+                        supports_mid_conversation_system_messages: model_profile
+                            .supports_mid_conversation_system_messages,
                         vision: model_profile.vision,
                         image_input: model_profile.image_input,
                         image_tool_results: model_profile.image_tool_results,

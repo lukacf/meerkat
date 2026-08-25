@@ -271,6 +271,7 @@ fn wire_session_history_required_fields() {
                 created_at: "2026-04-27T00:00:00Z".to_string(),
                 identity: None,
                 prompt_version: None,
+                instruction_activation: None,
             },
             WireSessionMessage::User {
                 content: meerkat_contracts::WireContentInput::Text("user".to_string()),

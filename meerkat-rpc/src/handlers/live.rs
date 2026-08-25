@@ -849,6 +849,11 @@ fn experimental_live_channel_open_error_response(
             live_open_projection_error_code(&projection_error),
             format!("failed to build session config: {projection_error}"),
         ),
+        ExperimentalLiveChannelOpenError::ExecutionProfile(message) => RpcResponse::error(
+            id,
+            meerkat_contracts::ErrorCode::CapabilityUnavailable.jsonrpc_code(),
+            message,
+        ),
         ExperimentalLiveChannelOpenError::Open(open_error) => {
             live_open_error_response(id, open_error)
         }
@@ -1168,7 +1173,7 @@ pub(crate) async fn handle_live_open_routed(
                     )
                     .await;
                 match cleanup {
-                    Ok(_) => RpcResponse::error(
+                    Ok(()) => RpcResponse::error(
                         id,
                         error::INTERNAL_ERROR,
                         format!("failed to serialize LiveOpenResult: {serialize_error}"),
@@ -1214,6 +1219,7 @@ pub(crate) async fn handle_live_open_routed(
 }
 
 #[cfg(feature = "live-webrtc")]
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_live_webrtc_answer(
     id: Option<RpcId>,
     params: Option<&serde_json::value::RawValue>,

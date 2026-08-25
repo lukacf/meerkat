@@ -1445,6 +1445,9 @@ where
         &self,
         include_turn_request_context: bool,
     ) -> Result<Vec<Message>, AgentError> {
+        self.session
+            .validate_instruction_activation_turn_readiness()
+            .map_err(|error| AgentError::ConfigError(error.to_string()))?;
         let mut messages = self.session.messages_for_model_boundary();
         if !self.active_turn_request_contexts.is_empty() {
             project_turn_request_context(

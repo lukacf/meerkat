@@ -288,6 +288,8 @@ impl From<meerkat_core::SessionError> for WireError {
             | meerkat_core::SessionError::DurableEvidenceQuarantined { .. } => {
                 ErrorCode::SessionNotRunning
             }
+            meerkat_core::SessionError::ExternalWriteFenceConflict { .. } => ErrorCode::StaleFence,
+            meerkat_core::SessionError::ExternalWriteFenceBackoff { .. } => ErrorCode::SessionBusy,
             meerkat_core::SessionError::Store(_)
             | meerkat_core::SessionError::FailedWithData { .. } => ErrorCode::InternalError,
         };

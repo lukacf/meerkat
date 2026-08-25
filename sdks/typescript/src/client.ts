@@ -385,6 +385,14 @@ import type {
   ForkCacheTtl,
   ForkPoint,
   HelpOptions,
+  InstructionActivationIdentity,
+  InstructionActivationKeyState,
+  InstructionActivationReadOptions,
+  InstructionActivationReadPage,
+  InstructionActivationReceipt,
+  InstructionActivationRecord,
+  InstructionActivationRequest,
+  InstructionRevisionRef,
   ModelProfile,
   ModelsCatalog,
   MobEventsOptions,
@@ -1566,6 +1574,36 @@ export class MeerkatClient {
       params,
     );
     return MeerkatClient.parseSystemPromptUpdateResult(raw);
+  }
+
+  async activateInstruction(
+    sessionId: string,
+    activation: InstructionActivationRequest,
+  ): Promise<InstructionActivationReceipt> {
+    const raw = await this.request("session/activate_instruction", {
+      session_id: sessionId,
+      activation: MeerkatClient.serializeInstructionActivationRequest(activation),
+    });
+    return MeerkatClient.parseInstructionActivationReceipt(raw);
+  }
+
+  async instructionActivations(
+    sessionId: string,
+    options?: InstructionActivationReadOptions,
+  ): Promise<InstructionActivationReadPage> {
+    const params: {
+      session_id: string;
+      namespace?: string;
+      key?: string;
+      offset?: number;
+      limit?: number;
+    } = { session_id: sessionId };
+    if (options?.namespace !== undefined) params.namespace = options.namespace;
+    if (options?.key !== undefined) params.key = options.key;
+    if (options?.offset !== undefined) params.offset = options.offset;
+    if (options?.limit !== undefined) params.limit = options.limit;
+    const raw = await this.request("session/instruction_activations", params);
+    return MeerkatClient.parseInstructionActivationReadPage(raw);
   }
 
   async restoreSessionTranscriptRevision(
@@ -6926,6 +6964,232 @@ export class MeerkatClient {
     };
   }
 
+  static serializeInstructionActivationRequest(
+    request: InstructionActivationRequest,
+  ): Record<string, unknown> {
+    return {
+      revision: {
+        namespace: request.revision.namespace,
+        key: request.revision.key,
+        revision_id: request.revision.revisionId,
+        content_sha256: request.revision.contentSha256,
+      },
+      activation_id: request.activationId,
+      expectation:
+        request.expectation.kind === "absent"
+          ? { kind: "absent" }
+          : {
+              kind: "effective",
+              activation_id: request.expectation.activationId,
+            },
+      ...(request.supersedes !== undefined ? { supersedes: request.supersedes } : {}),
+      body: request.body,
+    };
+  }
+
+  private static parseInstructionRevisionRef(
+    raw: unknown,
+    context: string,
+  ): InstructionRevisionRef {
+    const data = MeerkatClient.requireRecord(raw, "revision", context);
+    return {
+      namespace: MeerkatClient.requireStringField(data, "namespace", context),
+      key: MeerkatClient.requireStringField(data, "key", context),
+      revisionId: MeerkatClient.requireStringField(data, "revision_id", context),
+      contentSha256: MeerkatClient.requireStringField(data, "content_sha256", context),
+    };
+  }
+
+  private static parseInstructionActivationIdentity(
+    raw: unknown,
+    context: string,
+  ): InstructionActivationIdentity {
+    const data = MeerkatClient.requireRecord(raw, "identity", context);
+    const renderVersion = MeerkatClient.requireNumberField(data, "render_version", context);
+    if (!Number.isInteger(renderVersion) || renderVersion < 0) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        `${context}: render_version must be a non-negative integer`,
+      );
+    }
+    const supersedes = data.supersedes;
+    if (supersedes != null && typeof supersedes !== "string") {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        `${context}: supersedes must be a string or null`,
+      );
+    }
+    return {
+      activationId: MeerkatClient.requireStringField(data, "activation_id", context),
+      revision: MeerkatClient.parseInstructionRevisionRef(data.revision, `${context}: revision`),
+      originSessionId: MeerkatClient.requireStringField(data, "origin_session_id", context),
+      renderVersion,
+      supersedes: supersedes ?? undefined,
+    };
+  }
+
+  private static parseInstructionActivationRecord(
+    raw: unknown,
+    context: string,
+  ): InstructionActivationRecord {
+    const data = MeerkatClient.requireRecord(raw, "record", context);
+    const activationOrdinal = MeerkatClient.requireNumberField(
+      data,
+      "activation_ordinal",
+      context,
+    );
+    if (!Number.isInteger(activationOrdinal) || activationOrdinal < 0) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        `${context}: activation_ordinal must be a non-negative integer`,
+      );
+    }
+    const projection = MeerkatClient.requireRecord(
+      data.projection_witness,
+      "projection_witness",
+      context,
+    );
+    const messageIndex = MeerkatClient.requireNumberField(projection, "message_index", context);
+    if (!Number.isInteger(messageIndex) || messageIndex < 0) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        `${context}: message_index must be a non-negative integer`,
+      );
+    }
+    return {
+      sessionId: MeerkatClient.requireStringField(data, "session_id", context),
+      identity: MeerkatClient.parseInstructionActivationIdentity(
+        data.identity,
+        `${context}: identity`,
+      ),
+      activationOrdinal,
+      projectionWitness: {
+        messageIndex,
+        transcriptRevision: MeerkatClient.requireStringField(
+          projection,
+          "transcript_revision",
+          context,
+        ),
+      },
+    };
+  }
+
+  private static parseInstructionActivationExpectation(
+    raw: unknown,
+    context: string,
+  ): import("./types.js").InstructionActivationExpectation {
+    const data = MeerkatClient.requireRecord(raw, "expectation", context);
+    const kind = MeerkatClient.requireStringField(data, "kind", context);
+    if (kind === "absent") {
+      return { kind: "absent" };
+    }
+    if (kind === "effective") {
+      return {
+        kind: "effective",
+        activationId: MeerkatClient.requireStringField(data, "activation_id", context),
+      };
+    }
+    throw new MeerkatError(
+      "INVALID_RESPONSE",
+      `${context}: unsupported expectation kind ${kind}`,
+    );
+  }
+
+  private static parseInstructionActivationKeyState(
+    raw: unknown,
+    context: string,
+  ): InstructionActivationKeyState {
+    const data = MeerkatClient.requireRecord(raw, "key_state", context);
+    const expectation = MeerkatClient.parseInstructionActivationExpectation(
+      data.next_expectation,
+      `${context}: next_expectation`,
+    );
+    const nextSupersedes = data.next_supersedes;
+    if (nextSupersedes != null && typeof nextSupersedes !== "string") {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        `${context}: next_supersedes must be a string or null`,
+      );
+    }
+    return {
+      sessionId: MeerkatClient.requireStringField(data, "session_id", context),
+      namespace: MeerkatClient.requireStringField(data, "namespace", context),
+      key: MeerkatClient.requireStringField(data, "key", context),
+      effectiveOriginLocal: data.effective_origin_local == null
+        ? undefined
+        : MeerkatClient.parseInstructionActivationRecord(
+            data.effective_origin_local,
+            `${context}: effective_origin_local`,
+          ),
+      chronologicalHead: data.chronological_head == null
+        ? undefined
+        : MeerkatClient.parseInstructionActivationRecord(
+            data.chronological_head,
+            `${context}: chronological_head`,
+          ),
+      requiresExplicitChildActivation: MeerkatClient.requireBooleanField(
+        data,
+        "requires_explicit_child_activation",
+        context,
+      ),
+      nextExpectation: expectation,
+      nextSupersedes: nextSupersedes ?? undefined,
+    };
+  }
+
+  static parseInstructionActivationReceipt(raw: unknown): InstructionActivationReceipt {
+    const context = "Invalid instruction activation receipt";
+    const data = MeerkatClient.requireRecord(raw, "result", context);
+    const disposition = MeerkatClient.requireStringField(data, "disposition", context);
+    if (
+      disposition !== "applied" &&
+      disposition !== "duplicate"
+    ) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        `${context}: unsupported disposition ${disposition}`,
+      );
+    }
+    return {
+      record: MeerkatClient.parseInstructionActivationRecord(data.record, `${context}: record`),
+      disposition,
+    };
+  }
+
+  static parseInstructionActivationReadPage(raw: unknown): InstructionActivationReadPage {
+    const context = "Invalid instruction activation read page";
+    const data = MeerkatClient.requireRecord(raw, "result", context);
+    if (!Array.isArray(data.records)) {
+      throw new MeerkatError("INVALID_RESPONSE", `${context}: records must be an array`);
+    }
+    let nextOffset: number | undefined;
+    if (data.next_offset != null) {
+      nextOffset = MeerkatClient.requireNumberField(data, "next_offset", context);
+      if (!Number.isInteger(nextOffset) || nextOffset < 0) {
+        throw new MeerkatError(
+          "INVALID_RESPONSE",
+          `${context}: next_offset must be a non-negative integer`,
+        );
+      }
+    }
+    return {
+      sessionId: MeerkatClient.requireStringField(data, "session_id", context),
+      records: data.records.map((record, index) =>
+        MeerkatClient.parseInstructionActivationRecord(
+          record,
+          `${context}: records[${index}]`,
+        ),
+      ),
+      keyState: data.key_state == null
+        ? undefined
+        : MeerkatClient.parseInstructionActivationKeyState(
+            data.key_state,
+            `${context}: key_state`,
+          ),
+      nextOffset,
+    };
+  }
+
   static serializeTranscriptReplacement(
     replacement: TranscriptReplacement,
   ): RpcWireTranscriptReplacement {
@@ -7011,6 +7275,13 @@ export class MeerkatClient {
         version,
       };
     }
+    let instructionActivation: InstructionActivationIdentity | undefined;
+    if (data.instruction_activation !== undefined && data.instruction_activation !== null) {
+      instructionActivation = MeerkatClient.parseInstructionActivationIdentity(
+        data.instruction_activation,
+        `${context}: instruction_activation`,
+      );
+    }
     return {
       role,
       createdAt,
@@ -7022,6 +7293,7 @@ export class MeerkatClient {
       interactionId: data.interaction_id != null ? String(data.interaction_id) : undefined,
       runId: data.run_id != null ? String(data.run_id) : undefined,
       promptVersion,
+      instructionActivation,
       // System-notice blocks have their own generated union and remain
       // available in `raw`; only block-assistant rows project through the
       // public assistant-block view.

@@ -9,6 +9,7 @@ from collections.abc import Awaitable
 from typing import Any, Literal, Protocol, overload
 
 from .types import (
+    ActivateInstructionParams,
     ApprovalDecideParams,
     ApprovalGetParams,
     ApprovalListParams,
@@ -57,6 +58,8 @@ from .types import (
     HelpResponse,
     InjectSystemContextParams,
     InjectSystemContextResult,
+    InstructionActivationReadPage,
+    InstructionActivationReceipt,
     InterruptParams,
     InterruptResult,
     JobsArtifactsParams,
@@ -217,6 +220,7 @@ from .types import (
     MonitorsStartParams,
     MonitorsStartResult,
     ProvisionApiKeyParams,
+    ReadInstructionActivationsParams,
     ReadSessionHistoryParams,
     ReadSessionParams,
     ReadSessionTranscriptRevisionParams,
@@ -504,6 +508,22 @@ class RpcRequest(Protocol):
         params: UpdateSystemPromptParams,
         /,
     ) -> Awaitable[SystemPromptUpdateResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["session/activate_instruction"],
+        params: ActivateInstructionParams,
+        /,
+    ) -> Awaitable[InstructionActivationReceipt]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["session/instruction_activations"],
+        params: ReadInstructionActivationsParams,
+        /,
+    ) -> Awaitable[InstructionActivationReadPage]: ...
 
     @overload
     def __call__(

@@ -870,32 +870,33 @@ impl ExperimentalLiveDelegationCoordinator {
                     let (executor_terminal, executor_output, bridge_terminal) = match result {
                         Ok(turn) => {
                             let output = turn.result().text().to_string();
-                            let bridge_terminal = match LiveBridgeOperationTerminal::completed(
+                            match LiveBridgeOperationTerminal::completed(
                                 &output,
                                 LIVE_DELEGATION_RESULT_BYTES,
                             ) {
-                                Ok(terminal) => terminal,
+                                Ok(terminal) => (
+                                    DurableExecutorTerminalKind::Completed,
+                                    Some(output),
+                                    terminal,
+                                ),
                                 Err(error) => {
-                                    return ExperimentalResponsesRestartDisposition::Broken {
-                                        reason: format!(
-                                            "recovered executor result violates bridge bound: {error}"
-                                        ),
-                                    };
+                                    tracing::warn!(
+                                        %error,
+                                        %operation_id,
+                                        "recovered completed executor has no bridge-eligible output"
+                                    );
+                                    (
+                                        DurableExecutorTerminalKind::Completed,
+                                        None,
+                                        LiveBridgeOperationTerminal::failed(),
+                                    )
                                 }
-                            };
-                            (
-                                DurableExecutorTerminalKind::Completed,
-                                Some(output),
-                                bridge_terminal,
-                            )
+                            }
                         }
                         Err(_error) => (
                             DurableExecutorTerminalKind::Failed,
                             None,
-                            LiveBridgeOperationTerminal::without_output(
-                                meerkat_core::MeerkatExecutionTerminal::Failed,
-                            )
-                            .expect("failure terminal has no output"),
+                            LiveBridgeOperationTerminal::failed(),
                         ),
                     };
                     let recovered_digest = live_bridge_execution_result_digest(&bridge_terminal);
@@ -1062,8 +1063,7 @@ impl ExperimentalLiveDelegationCoordinator {
                             .await
                             .map_err(|error| {
                                 format!(
-                                    "failed to fence stale live channel '{}' before recovery: {error}",
-                                    channel_id
+                                    "failed to fence stale live channel '{channel_id}' before recovery: {error}"
                                 )
                             })?;
                     } else if snapshot.terminal().is_none()
@@ -1272,10 +1272,7 @@ impl ExperimentalLiveDelegationCoordinator {
             Ok(delegated) => delegated,
             Err(error) => {
                 drop(prepared);
-                let terminal = LiveBridgeOperationTerminal::without_output(
-                    meerkat_core::MeerkatExecutionTerminal::Failed,
-                )
-                .map_err(|terminal_error| terminal_error.to_string())?;
+                let terminal = LiveBridgeOperationTerminal::failed();
                 let committed = record_live_bridge_terminal_across_revocation(
                     self.runtime.as_ref(),
                     admission.as_ref(),
@@ -1319,30 +1316,40 @@ impl ExperimentalLiveDelegationCoordinator {
             let terminalized = delegated.await_terminal().await;
             let (executor_terminal, executor_output, ordinary_terminal) =
                 match terminalized.terminal() {
-                    DelegationTurnTerminal::Completed(turn) => (
-                        DurableExecutorTerminalKind::Completed,
-                        Some(turn.result().result().text().to_string()),
-                        LiveBridgeOperationTerminal::completed(
-                            turn.result().result().text(),
+                    DelegationTurnTerminal::Completed(turn) => {
+                        let output = turn.result().result().text().to_string();
+                        match LiveBridgeOperationTerminal::completed(
+                            &output,
                             LIVE_DELEGATION_RESULT_BYTES,
-                        )
-                        .expect("bounded ordinary result must fit its validated receiver cap"),
-                    ),
+                        ) {
+                            Ok(terminal) => (
+                                DurableExecutorTerminalKind::Completed,
+                                Some(output),
+                                terminal,
+                            ),
+                            Err(error) => {
+                                tracing::warn!(
+                                    %error,
+                                    %task_operation_id,
+                                    "completed durable executor returned no bridge-eligible output"
+                                );
+                                (
+                                    DurableExecutorTerminalKind::Completed,
+                                    None,
+                                    LiveBridgeOperationTerminal::failed(),
+                                )
+                            }
+                        }
+                    }
                     DelegationTurnTerminal::Failed(_) => (
                         DurableExecutorTerminalKind::Failed,
                         None,
-                        LiveBridgeOperationTerminal::without_output(
-                            meerkat_core::MeerkatExecutionTerminal::Failed,
-                        )
-                        .expect("failure terminal has no output"),
+                        LiveBridgeOperationTerminal::failed(),
                     ),
                     _ => (
                         DurableExecutorTerminalKind::Failed,
                         None,
-                        LiveBridgeOperationTerminal::without_output(
-                            meerkat_core::MeerkatExecutionTerminal::Failed,
-                        )
-                        .expect("failure terminal has no output"),
+                        LiveBridgeOperationTerminal::failed(),
                     ),
                 };
             let retirement_error = service
@@ -1499,14 +1506,15 @@ impl ExperimentalLiveDelegationCoordinator {
                 tracing::warn!(%error, %operation_id, "live bridge cancellation failed closed before executor fork");
                 continue;
             }
-            let execution = prepared
-                .remove(&operation_id)
-                .expect("prepared operation remained locked during cancellation");
+            let Some(execution) = prepared.remove(&operation_id) else {
+                tracing::warn!(
+                    %operation_id,
+                    "prepared live bridge custody disappeared during cancellation"
+                );
+                continue;
+            };
             drop(prepared);
-            let terminal = LiveBridgeOperationTerminal::without_output(
-                meerkat_core::MeerkatExecutionTerminal::Cancelled,
-            )
-            .expect("cancelled terminal has no output");
+            let terminal = LiveBridgeOperationTerminal::cancelled();
             let outcome = record_live_bridge_terminal_with_typed_recovery(|| {
                 self.runtime.record_live_bridge_execution_terminal(
                     admission.as_ref(),
@@ -1798,6 +1806,10 @@ impl ExperimentalLiveDelegationCoordinator {
             .ok_or_else(|| "Gate0 final turn has no exact admitted provisional handoff".to_string())
     }
 
+    #[allow(
+        clippy::while_let_loop,
+        reason = "the select loop has explicit cancellation, stream-end, binding-mismatch, and error exits"
+    )]
     async fn run_channel(
         &self,
         binding: ProviderWebrtcBinding,
@@ -1823,8 +1835,7 @@ impl ExperimentalLiveDelegationCoordinator {
                         delegation,
                         actionable_input,
                     } = observation.kind()
-                    {
-                        if let Err(error) = self
+                        && let Err(error) = self
                             .start_client_context_delegation(
                                 &binding,
                                 Arc::clone(&control),
@@ -1833,12 +1844,8 @@ impl ExperimentalLiveDelegationCoordinator {
                                 actionable_input.clone(),
                             )
                             .await
-                        {
-                            tracing::warn!(
-                                error,
-                                "experimental live delegation start failed closed"
-                            );
-                        }
+                    {
+                        tracing::warn!(error, "experimental live delegation start failed closed");
                     }
                 }
                 ExperimentalGptLiveControlObservation::AppendResolved(resolution) => {
@@ -2159,6 +2166,10 @@ impl ExperimentalLiveDelegationCoordinator {
         .await
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "this exact delegation boundary carries independent provider, runtime, fork, and operation authorities"
+    )]
     async fn start_admitted_delegation(
         &self,
         provider_binding: &ProviderWebrtcBinding,
@@ -3153,6 +3164,10 @@ fn retain_terminal_result(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "focused invariant tests use explicit assertion messages for impossible setup and timeout failures"
+)]
 mod tests {
     use super::*;
     use meerkat_core::exact_operation::ExactOperationIdentity;

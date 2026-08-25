@@ -1488,6 +1488,10 @@ impl ExperimentalGptLivePendingChannel {
     /// private external endpoints to a deterministic local test server.
     #[cfg(feature = "test-realtime-fixtures")]
     #[doc(hidden)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the test-only constructor mirrors the exact admitted provider boundary while replacing only its two endpoints"
+    )]
     pub fn __from_admission_with_test_endpoints(
         admission_owner: &crate::AgentFactory,
         admission: crate::ExperimentalLiveAdmissionWitness,
@@ -5992,32 +5996,31 @@ mod tests {
                 }
             })
             .await;
-            if cleanup.is_err() {
-                panic!(
-                    "pump cleanup stalled ordinal={ordinal} runtime_active={} provider_active={} pending={} registered={} completion={completion_error}",
-                    runtime
-                        .live_session_for_active_channel(&channel_id)
-                        .await
-                        .is_some(),
-                    authority
-                        .transport
-                        .active_binding(&session_id)
-                        .await
-                        .is_some(),
-                    authority
-                        .transport
-                        .pending_pump_retirements
-                        .lock()
-                        .await
-                        .len(),
-                    authority
-                        .transport
-                        .registered_by_channel
-                        .lock()
-                        .await
-                        .contains_key(&channel_id),
-                );
-            }
+            assert!(
+                cleanup.is_ok(),
+                "pump cleanup stalled ordinal={ordinal} runtime_active={} provider_active={} pending={} registered={} completion={completion_error}",
+                runtime
+                    .live_session_for_active_channel(&channel_id)
+                    .await
+                    .is_some(),
+                authority
+                    .transport
+                    .active_binding(&session_id)
+                    .await
+                    .is_some(),
+                authority
+                    .transport
+                    .pending_pump_retirements
+                    .lock()
+                    .await
+                    .len(),
+                authority
+                    .transport
+                    .registered_by_channel
+                    .lock()
+                    .await
+                    .contains_key(&channel_id),
+            );
             let durable = service
                 .load_authoritative_session(&session_id)
                 .await

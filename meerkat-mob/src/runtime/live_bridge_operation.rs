@@ -338,14 +338,18 @@ pub struct LiveBridgeOperationTerminal {
 }
 
 impl LiveBridgeOperationTerminal {
-    pub(crate) const fn failed() -> Self {
+    /// Construct a failed execution terminal without provider output.
+    #[must_use]
+    pub const fn failed() -> Self {
         Self {
             terminal: MeerkatExecutionTerminal::Failed,
             output: None,
         }
     }
 
-    pub(crate) const fn cancelled() -> Self {
+    /// Construct a cancelled execution terminal without provider output.
+    #[must_use]
+    pub const fn cancelled() -> Self {
         Self {
             terminal: MeerkatExecutionTerminal::Cancelled,
             output: None,

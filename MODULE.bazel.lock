@@ -555,7 +555,7 @@
           "FILE:@@//meerkat-mob-adaptive/Cargo.toml bbd4240bb25fa71f146f579341e8dac32dc761d4524eeab894783bdef22f63e7",
           "FILE:@@//meerkat-web-runtime/Cargo.toml e33ecdd9a34f11c4c2af03cbea1b2656d3c504096025ede0413ddf1d1e8b8ffb",
           "FILE:@@//test-fixtures/mcp-test-server/Cargo.toml 490124a2939d1468deae39f12236babe58f02acd78ac8f8dcebf0d5fa1b5bb6b",
-          "FILE:@@//tests/integration/Cargo.toml 39190dfba3e0186836080baee55669572ca92223cd560cc0fa4a699aa66bf62c",
+          "FILE:@@//tests/integration/Cargo.toml 56301f918aa0c531cae2afafc2a09b2a25c75c112517ee8f74a6f90b7b9893c8",
           "FILE:@@//meerkat-machine-codegen/Cargo.toml 90a12611a5e2fb726cd2651ce08f95a9a811053933ab1fe94fcaec47c21138b9",
           "FILE:@@//test-fixtures/surface-build-fixtures/Cargo.toml 23418b98066c71e901c0610163c86d08793263275efae6e9fd37f06a6ae36d1a",
           "FILE:@@//test-fixtures/machine-dsl-tests/Cargo.toml bc9c8bd79e3d4529e12b6495c1ddf79d02020782b06e265539f7dca351438ccd",

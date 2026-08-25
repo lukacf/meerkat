@@ -2605,8 +2605,9 @@ mod tests {
     fn live_truncate_params_round_trip() {
         let v = LiveTruncateParams {
             channel_id: "live_1".into(),
-            item_id: "item_42".into(),
-            content_index: 0,
+            output_id: None,
+            item_id: Some("item_42".into()),
+            content_index: Some(0),
             audio_played_ms: 1_234,
             reported_playback_prefix: Some("partial".into()),
         };

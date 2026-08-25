@@ -5740,7 +5740,7 @@ mod tests {
                     .send_experimental_live_input(
                         &channel_id,
                         "not-an-active-receipt",
-                        meerkat_core::LiveInputChunk::Text {
+                        meerkat_core::live_adapter::LiveInputChunk::Text {
                             text: "must remain local".to_string(),
                         },
                     )

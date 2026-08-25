@@ -10075,7 +10075,8 @@ mod tests {
         use meerkat_llm_core::LlmError;
         use meerkat_llm_core::provider_runtime::{
             ProviderAuthError, ProviderClientError, ProviderRuntime, ProviderRuntimeRegistry,
-            ResolvedConnection, ResolverEnvironment, StaticLease, ValidatedBinding,
+            ResolvedConnection, ResolvedRealtimeTarget, ResolverEnvironment, StaticLease,
+            ValidatedBinding,
         };
         use meerkat_llm_core::realtime_session::{
             RealtimeExternalSessionTarget, RealtimeSession, RealtimeSessionFactory,
@@ -10139,8 +10140,9 @@ mod tests {
 
             fn build_realtime_session_factory(
                 &self,
-                connection: ResolvedConnection,
+                target: ResolvedRealtimeTarget,
             ) -> Result<Arc<dyn RealtimeSessionFactory>, ProviderClientError> {
+                let (_, _, connection) = target.into_parts();
                 let secret = connection
                     .resolved_secret()
                     .ok_or(ProviderClientError::NoCredentialMaterial)?;
